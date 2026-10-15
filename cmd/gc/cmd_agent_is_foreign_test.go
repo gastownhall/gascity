@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -229,5 +230,38 @@ func TestAgentIsForeign_TextOutput(t *testing.T) {
 	}
 	if got, want := stdout.String(), "repo/pool.worker-1 foreign: foreign_binding (pool)\n"; got != want {
 		t.Fatalf("stdout = %q, want %q", got, want)
+	}
+}
+
+// TestAgentIsForeign_LoadsCityConfigOnceOnBdCity keeps the verb's cost down on
+// a bd-backed city: orphan-sweep calls it once per unrecognized claimant every
+// sweep, so the store open must reuse the config the verb already loaded
+// rather than parse city.toml and every pack include a second time.
+//
+// Not parallel: loadCityConfigCalls is process-wide.
+func TestAgentIsForeign_LoadsCityConfigOnceOnBdCity(t *testing.T) {
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	// Skip native preflight so the open goes straight to the bd store.
+	t.Setenv("GC_BEADS_FORCE_FALLBACK", "1")
+	t.Setenv("GC_BEADS", "")
+	// No managed Dolt server: the bd stub answers every read.
+	t.Setenv("GC_DOLT", "skip")
+
+	cityDir := t.TempDir()
+	toml := "[workspace]\nname = \"t\"\nprefix = \"mc\"\n\n[beads]\nprovider = \"bd\"\n\n[[agent]]\nname = \"worker\"\n"
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte(toml), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	before := loadCityConfigCalls.Load()
+	var stdout, stderr bytes.Buffer
+	// The identity is off the roster, so answering it needs the session store.
+	doAgentIsForeign(fsys.OSFS{}, cityDir, "nobody-here", true, &stdout, &stderr)
+	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
+		t.Fatalf("gc agent is-foreign parsed city config %d times on a bd city, want exactly 1 (its own load)\nstdout: %s\nstderr: %s", grew, stdout.String(), stderr.String())
 	}
 }

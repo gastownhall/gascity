@@ -428,6 +428,19 @@ is_known_agent() {
 # The skip has to be loud: a decommissioned local agent whose session records
 # are gone is indistinguishable from a foreign one, and a silent skip would
 # turn a loud cross-city bug into a quiet local leak.
+#
+# Each gate call opens the city's store (seconds on bd/Dolt), and foreign
+# claims are never released, so they are re-asked every sweep. The gate gets
+# GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, well under the 300s exec
+# order timeout) per sweep; once it is spent no identity is asked about, and
+# every claim whose holder was not asked is protected like one the gate could
+# not answer. Identities are asked in sorted order rotated by the clock, so a
+# backlog of foreign identities cannot starve the same local dead claim of a
+# gate answer on every sweep.
+GATE_BUDGET_SECONDS="${GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS:-120}"
+case "$GATE_BUDGET_SECONDS" in '' | *[!0-9]*) GATE_BUDGET_SECONDS=120 ;; esac
+GATE_DEADLINE=""
+GATE_BUDGET_SKIPPED=0
 GATE_LOCAL=""
 GATE_FOREIGN=""
 GATE_UNKNOWN=""
@@ -457,6 +470,13 @@ claim_gate_verdict() {
     if gate_list_has "$GATE_LOCAL" "$identity"; then GATE_VERDICT=local; return 0; fi
     if gate_list_has "$GATE_FOREIGN" "$identity"; then GATE_VERDICT=foreign; return 0; fi
     if gate_list_has "$GATE_UNKNOWN" "$identity"; then GATE_VERDICT=unknown; return 0; fi
+    if [ "$SECONDS" -ge "$GATE_DEADLINE" ]; then
+        GATE_VERDICT=unknown
+        GATE_UNKNOWN="${GATE_UNKNOWN}${identity}"$'\n'
+        GATE_BUDGET_SKIPPED=$((GATE_BUDGET_SKIPPED + 1))
+        gate_record_reason "$identity" "the foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; not asked this pass"
+        return 0
+    fi
     verdict_json=$(gc agent is-foreign --json -- "$identity" 2>/dev/null) || rc=$?
     # The exit code is the verdict, and it must agree with the JSON verdict:
     # a missing verb, a crash, or unparseable output reads as "could not
@@ -479,13 +499,20 @@ claim_gate_verdict() {
             reason="the foreign-identity gate could not answer (exit $rc)${reason:+: $reason}"
             ;;
     esac
-    if [ -n "$reason" ]; then
-        # Keyed the way record_protected_claim spools the identity.
-        local key="${identity//$'\t'/ }"
-        reason="${reason//$'\t'/ }"
-        GATE_REASONS="${GATE_REASONS}${key//$'\n'/ }"$'\t'"${reason//$'\n'/ }"$'\n'
-    fi
+    gate_record_reason "$identity" "$reason"
     return 0
+}
+
+# gate_record_reason remembers why an identity was protected, when there is a
+# reason to give.
+gate_record_reason() {
+    local identity="$1"
+    local reason="$2"
+    [ -n "$reason" ] || return 0
+    # Keyed the way record_protected_claim spools the identity.
+    local key="${identity//$'\t'/ }"
+    reason="${reason//$'\t'/ }"
+    GATE_REASONS="${GATE_REASONS}${key//$'\n'/ }"$'\t'"${reason//$'\n'/ }"$'\n'
 }
 
 # record_protected_claim spools one protected claim. Identity and bead are read
@@ -511,6 +538,31 @@ protected_claims_json() {
         | map({identity: .[0].identity, beads: map(.bead), reason: ($why[.[0].identity] // "")})
     ' <<<"$PROTECTED_ROWS"
 }
+
+# The claims to consider, one "<bead>\t<assignee>" row each.
+CLAIM_ROWS=$(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null) || CLAIM_ROWS=""
+
+# Ask the gate about every distinct claimant the roster and live sessions do
+# not recognize, before any per-bead read, in sorted order rotated by the
+# clock. The sweep below reads the memo; an identity the budget did not reach
+# is protected there.
+GATE_DEADLINE=$((SECONDS + GATE_BUDGET_SECONDS))
+UNRECOGNIZED=()
+if [ -n "$CLAIM_ROWS" ]; then
+    while IFS= read -r _identity; do
+        [ -n "$_identity" ] && UNRECOGNIZED+=("$_identity")
+    done < <(while IFS=$'\t' read -r _bead _assignee; do
+        is_known_agent "$_assignee" || printf '%s\n' "$_assignee"
+    done <<<"$CLAIM_ROWS" | jq -R -s -r 'split("\n") | map(select(length > 0)) | unique | .[]' 2>/dev/null)
+fi
+if [ "${#UNRECOGNIZED[@]}" -gt 0 ]; then
+    _now=$(date +%s 2>/dev/null) || _now=0
+    case "$_now" in '' | *[!0-9]*) _now=0 ;; esac
+    _gate_offset=$((_now % ${#UNRECOGNIZED[@]}))
+    for ((_i = 0; _i < ${#UNRECOGNIZED[@]}; _i++)); do
+        claim_gate_verdict "${UNRECOGNIZED[$(((_gate_offset + _i) % ${#UNRECOGNIZED[@]}))]}"
+    done
+fi
 
 ORPHANED=0
 UNVERIFIABLE=0
@@ -552,7 +604,7 @@ while IFS=$'\t' read -r bead_id assignee; do
             fi
         fi
     fi
-done < <(echo "$IN_PROGRESS" | jq -r '.[] | select(.assignee != null and .assignee != "") | "\(.id)\t\(.assignee)"' 2>/dev/null)
+done < <([ -z "$CLAIM_ROWS" ] || printf '%s\n' "$CLAIM_ROWS")
 
 PROTECTED_DETAIL=""
 if [ "$PROTECTED" -gt 0 ]; then
@@ -562,7 +614,7 @@ if [ "$PROTECTED" -gt 0 ]; then
             "orphan-sweep: protected \(length) foreign/unknown identities this pass (\($claims) claims): "
             + (map("\(.identity | tojson) (\(.beads | length): \(.beads[:$limit] | join(", "))\(if (.beads | length) > $limit then " +\((.beads | length) - $limit) more" else "" end))") | join(", "))
         ' <<<"$PROTECTED_JSON") || PROTECTED_DETAIL=""
-        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city cannot vouch for: not in its roster, and no session record of its own answers to them"
+        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city could not vouch for; each scope names the identity and why"
         # Reason first, identity last, joined by a bare tab: the spool holds no
         # tab or newline, so the identity reads back verbatim. @tsv would
         # escape a backslash, and the scope would stop naming the identity.
@@ -576,7 +628,11 @@ if [ "$PROTECTED" -gt 0 ]; then
     fi
     if [ -z "$PROTECTED_DETAIL" ]; then
         PROTECTED_DETAIL="orphan-sweep: protected $PROTECTED claims this pass, but the per-identity summary is UNAVAILABLE"
-        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city cannot vouch for (per-identity summary unavailable)"
+        order_outcome_set partial "protected $PROTECTED claim(s) held by identities this city could not vouch for (per-identity summary unavailable)"
+    fi
+    if [ "$GATE_BUDGET_SKIPPED" -gt 0 ]; then
+        PROTECTED_DETAIL="$PROTECTED_DETAIL
+orphan-sweep: foreign-identity gate budget of ${GATE_BUDGET_SECONDS}s exhausted; $GATE_BUDGET_SKIPPED identities not asked this pass"
     fi
 fi
 

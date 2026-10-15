@@ -363,7 +363,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   foreign/unknown claims` in its summary and a line naming every kept identity
   and its claims, and declares a `partial` outcome, which the controller
   records as an `order.skipped` event with one scope per identity; the run
-  still exits 0, and a sweep that only protects sends no mail. Unlike the Go
+  still exits 0, and a sweep that only protects sends no mail. The verb is
+  asked at most once per identity per sweep, within a gate budget of
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  timeout); past it, the remaining claimants are not asked, their claims are
+  kept and named with a "gate budget … exhausted" reason, and the sweep says
+  how many identities it did not ask. Identities are asked in a rotating
+  order, so a large set of foreign claimants delays, but cannot permanently
+  block, release of a dead local claim. Unlike the Go
   pool sweep, the order has no route filter, so it gives bare identities no
   shape exemption: a dead local ephemeral or bead-ID claim stays releasable
   through its own session record. Migration notes: a person's claim, or a

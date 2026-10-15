@@ -11812,8 +11812,11 @@ exit 0
 // for identities listed in ORPHAN_SWEEP_FOREIGN_IDENTITIES, otherwise local
 // (exit 0), modeling a dead local claimant whose closed session record
 // survives. An empty identity gets the verb's usage answer (exit 2, unknown).
-// It uses echo, not printf, so it is safe inside fmt.Sprintf stubs.
+// ORPHAN_SWEEP_GATE_SLEEP makes every answer take that many seconds, modeling
+// a slow store. It uses echo, not printf, so it is safe inside fmt.Sprintf
+// stubs.
 const orphanSweepGateStubArm = `if [ "$1" = "agent" ] && [ "$2" = "is-foreign" ]; then
+  if [ -n "${ORPHAN_SWEEP_GATE_SLEEP:-}" ]; then sleep "$ORPHAN_SWEEP_GATE_SLEEP"; fi
   for identity; do :; done
   if [ -z "$identity" ] || [ "$identity" = "--" ]; then
     echo '{"schema_version":"1","ok":true,"verdict":"unknown","reason":"no_config","detail":"usage: exactly one identity is required","roster_source":""}'
@@ -12436,5 +12439,112 @@ func TestOrphanSweepNeverVouchesForAnEmptyIdentity(t *testing.T) {
 	outcome, ok := run.outcome(t)
 	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 0 {
 		t.Fatalf("outcome = %+v (written %v), want partial with no scope", outcome, ok)
+	}
+}
+
+// TestOrphanSweepProtectsUngatedClaimsWhenTheGateBudgetIsExhausted bounds the
+// gate's cost per sweep. Foreign claims are never released, so they are
+// re-checked every sweep; with enough distinct foreign identities, one gate
+// call each would overrun the order timeout and fail every sweep. Past the
+// budget the sweep asks nothing more: each claimant it did not get to ask
+// about is protected (fail-closed), named, and declared with a reason that
+// says the budget ran out rather than that the claimant is foreign.
+func TestOrphanSweepProtectsUngatedClaimsWhenTheGateBudgetIsExhausted(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{
+			inProgress("sh-local-dead", "gastown__polecat-gc-d34d1"),
+			inProgress("sh-foreign-crew", "shared/dalinar"),
+			inProgress("sh-local-roster", "shared/gastown.polecat-2"),
+		}, nil, []string{"shared/dalinar"},
+		map[string]string{"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "0"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep exited non-zero for a sweep that only protected: %v\n%s", run.err, run.context())
+	}
+	if got := run.gateCalls(); got != 0 {
+		t.Fatalf("gate consulted %d times with a zero budget, want 0\n%s", got, run.context())
+	}
+	for _, bead := range []string{"sh-local-dead", "sh-foreign-crew", "sh-local-roster"} {
+		if run.released(bead) {
+			t.Fatalf("%s was released without a gate answer\n%s", bead, run.context())
+		}
+		if strings.Contains(run.log, "bd show "+bead+" --json") {
+			t.Fatalf("%s was probed without a gate answer\n%s", bead, run.context())
+		}
+	}
+	for _, want := range []string{
+		"orphan-sweep: reset 0 orphaned beads, protected 2 foreign/unknown claims",
+		`"gastown__polecat-gc-d34d1" (1: sh-local-dead)`,
+		`"shared/dalinar" (1: sh-foreign-crew)`,
+		"orphan-sweep: foreign-identity gate budget of 0s exhausted; 2 identities not asked this pass",
+	} {
+		if !strings.Contains(run.out, want) {
+			t.Fatalf("output missing %q:\n%s", want, run.out)
+		}
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || outcome.Outcome != "partial" || len(outcome.Scopes) != 2 {
+		t.Fatalf("outcome = %+v (written %v), want partial with two scopes", outcome, ok)
+	}
+	if strings.Contains(outcome.Reason, "not in its roster") {
+		t.Fatalf("outcome reason %q claims the gate answered when it was never asked", outcome.Reason)
+	}
+	for _, scope := range outcome.Scopes {
+		if !strings.Contains(scope.Reason, "gate budget of 0s exhausted") {
+			t.Fatalf("scope %q reason %q, want the budget-exhausted reason", scope.Scope, scope.Reason)
+		}
+	}
+}
+
+// TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut asks a slow gate (3s
+// per answer) under a 2s budget: the first identity is answered, and the sweep
+// asks about no other identity once the budget is spent, protecting the rest.
+func TestOrphanSweepStopsAskingTheGateOnceTheBudgetRunsOut(t *testing.T) {
+	foreign := []string{"shared/dalinar", "shared/kaladin", "shared/shallan"}
+	var rows []orphanSweepGateRow
+	for i, identity := range foreign {
+		rows = append(rows, inProgress(fmt.Sprintf("sh-foreign-%d", i), identity))
+	}
+	run := runOrphanSweepGateFixture(t, nil, rows, nil, foreign, map[string]string{
+		"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "2",
+		"ORPHAN_SWEEP_GATE_SLEEP":             "3",
+	})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if got := run.gateCalls(); got != 1 {
+		t.Fatalf("gate consulted %d times past a 2s budget at 3s per answer, want 1\n%s", got, run.context())
+	}
+	if !strings.Contains(run.out, "orphan-sweep: protected 3 foreign/unknown identities this pass (3 claims)") {
+		t.Fatalf("output does not name all three protected identities:\n%s", run.out)
+	}
+	outcome, ok := run.outcome(t)
+	if !ok || len(outcome.Scopes) != 3 {
+		t.Fatalf("outcome = %+v (written %v), want three scopes", outcome, ok)
+	}
+	answered, budgeted := 0, 0
+	for _, scope := range outcome.Scopes {
+		switch {
+		case strings.Contains(scope.Reason, "absent_from_roster"):
+			answered++
+		case strings.Contains(scope.Reason, "gate budget of 2s exhausted"):
+			budgeted++
+		}
+	}
+	if answered != 1 || budgeted != 2 {
+		t.Fatalf("scopes %+v: %d answered and %d budget-protected, want 1 and 2", outcome.Scopes, answered, budgeted)
+	}
+}
+
+// TestOrphanSweepIgnoresAMalformedGateBudget falls back to the default budget
+// for a value that is not a whole number of seconds, rather than to no gate.
+func TestOrphanSweepIgnoresAMalformedGateBudget(t *testing.T) {
+	run := runOrphanSweepGateFixture(t, nil,
+		[]orphanSweepGateRow{inProgress("sh-local-dead", "gastown__polecat-gc-d34d1")},
+		nil, nil, map[string]string{"GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS": "-5s"})
+	if run.err != nil {
+		t.Fatalf("orphan-sweep failed: %v\n%s", run.err, run.context())
+	}
+	if !run.released("sh-local-dead") {
+		t.Fatalf("dead local claim was not released under the default budget\n%s", run.context())
 	}
 }

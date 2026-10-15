@@ -136,7 +136,9 @@ func doAgentIsForeign(fs fsys.FS, cityPath, identity string, jsonOutput bool, st
 	}
 	cityName := cfg.EffectiveCityName()
 	openSessionStore := func() (beads.Store, error) {
-		store, err := openStoreAtForCityWithConfig(cityPath, cityPath, cfg)
+		// One-shot open: reuse the config loaded above instead of reloading
+		// city.toml and every pack include on a bd-backed city.
+		store, err := openCityStoreAtWithConfig(cityPath, cfg)
 		if err != nil {
 			return nil, fmt.Errorf("opening city store: %w", err)
 		}
