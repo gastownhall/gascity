@@ -105,6 +105,7 @@ go_test(
         "compact_history_protection_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
+        "compact_rig_endpoint_test.go",
         "doctor_test.go",
         "dog_exec_scripts_test.go",
         "dog_prompt_test.go",

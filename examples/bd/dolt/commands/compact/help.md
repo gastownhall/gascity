@@ -6,6 +6,41 @@ runs in scheduled mode: it skips any database with fewer new commits than the
 threshold (default 2000, `GC_DOLT_COMPACT_THRESHOLD_COMMITS`), flattens the
 rest, verifies row preservation, and runs `CALL DOLT_GC('--full')`.
 
+## Which databases compact touches
+
+Compact works on one Dolt server, the one `GC_DOLT_HOST` and `GC_DOLT_PORT`
+name for the city: its managed server, or a loopback server the city uses as
+an external endpoint. It finds database names in the city's and each rig's
+`.beads/metadata.json` and in that server's data directory.
+
+- **A rig pinned to another Dolt endpoint is skipped.** Its database lives on
+  that endpoint, not on this server, and gc does not compact a server it does
+  not manage. This covers `gc rig set-endpoint <rig> --external`, a rig that
+  runs its own Dolt (`--self`, or `[[rigs]] dolt_host`/`dolt_port`), a rig
+  whose `.beads/config.yaml` names a Unix socket (`dolt.socket`), and a rig
+  that bd binds to a remote host. Compact logs the rig, its endpoint, and
+  `— skip`, and the run does not fail.
+- **A same-named database on this server is not that rig's store.** It is
+  usually the copy left behind when the rig moved. Compact leaves it alone,
+  `--only-db` included, and warns, unless another rig on this server uses the
+  same database name; then that rig's database is compacted as usual. Drop or
+  archive a stale copy once you no longer need it. Check first when the rig's
+  endpoint is a Unix socket, which may be this server's, or another port on
+  this server's host, which may be stale: the database here may then still be
+  the rig's live store, and compact's warning says so.
+- **A rig whose `.beads/config.yaml` cannot be read is skipped too.** Compact
+  cannot tell which endpoint the rig uses, so it warns with the file's path
+  and treats the rig like a pinned one: its database, and a same-named copy
+  on this server, wait until the file can be read. The run goes on.
+
+Compact does not yet recognize every rig that uses another Dolt server. A rig
+on a server that bd proxies, started itself, or binds through a Unix socket
+without a gc pin, and a rig whose legacy `dolt.host` or bd binding names a
+loopback address on another port, still have their databases looked up on
+this server. The reverse also happens: a rig that bd binds to this server's
+own host name on another port, which may be stale, or that names this
+server's own Unix socket is skipped, though its database may still live here.
+
 ## History protection
 
 Compact only rewrites history that this city grew.

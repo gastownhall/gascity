@@ -652,11 +652,211 @@ emit_database_name() {
   printf '%s\n' "$db"
 }
 
+# Scope endpoints. Discovery collects a database name from every scope's
+# metadata.json, but this run compacts exactly one server: $host:$GC_DOLT_PORT.
+# A rig pinned to another Dolt endpoint (`gc rig set-endpoint --external` or
+# --self, [[rigs]] dolt_host/dolt_port, or bd's own binding to a remote host)
+# keeps its database there, not here. Asking this server for it fails with
+# Error 1049, and a same-named database this server does hold is not that
+# rig's store. Such scopes are skipped, as a non-local GC_DOLT_HOST skips the
+# whole run: gc never compacts a server it does not manage. The test below is
+# compact's own approximation of the endpoint policy that `gc dolt cleanup`
+# (rigSharesResolvedDoltServer in cmd/gc) and
+# contract.ResolveDoltConnectionTarget apply, not the same rule;
+# scope_pinned_endpoint lists where it differs. See gascity#7994.
+
+# compact_unknown_endpoint stands in for the endpoint of a scope whose
+# config.yaml cannot be read.
+compact_unknown_endpoint='<unknown>'
+
+# compact_same_dolt_host A B — succeed when A and B name the same Dolt host:
+# both loopback or unspecified spellings, or equal ignoring case.
+compact_same_dolt_host() {
+  if compact_dolt_host_is_local "$1" && compact_dolt_host_is_local "$2"; then
+    return 0
+  fi
+  [ "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" = "$(printf '%s' "$2" | tr '[:upper:]' '[:lower:]')" ]
+}
+
+# scope_pinned_endpoint META — print the endpoint of the Dolt server that the
+# scope owning META is pinned to, when that server is not this run's target.
+# Print nothing when the scope follows the city endpoint. The evidence:
+#   1. gc's pin, gc.endpoint_origin=explicit in config.yaml: its dolt.socket,
+#      or dolt.host (default 127.0.0.1) and dolt.port. The pin names this
+#      target only when the port matches and the host is the same.
+#   2. No gc.endpoint_origin, so gc never claimed the scope: a legacy
+#      config.yaml dolt.socket or dolt.host, else bd's dolt_server_host
+#      binding in metadata.json. A loopback host follows the city on any port,
+#      since it may be a stale copy of gc's own server. Any other host counts
+#      unless it is the target's host with the target's port or no port.
+# A socket always counts: this run reaches its target over TCP and cannot
+# tell which server owns a socket. Every other origin follows the city
+# endpoint, and so does the city's scope.
+# A config.yaml that cannot be read leaves the endpoint unknown: warn and
+# print $compact_unknown_endpoint, so the scope is skipped like a pinned one
+# rather than risk compacting a same-named copy, and set -e does not end the
+# whole run on one rig's file.
+#
+# The Go side draws these lines differently. `gc dolt cleanup` compares only
+# the resolved port, where this also compares hosts. The resolver treats a
+# loopback legacy host on another port as an explicit pin and honors bd's
+# binding to one, where this lets both follow. It lets a legacy socket that
+# mirrors a city_canonical city's own socket follow the city, where this
+# skips every socket. It also reads dolt_mode and sends a proxied-server
+# scope to the server bd's sidecar names; compact reads neither, so such a
+# scope follows the city here unless it carries a pin (help.md lists it among
+# the shapes compact does not yet recognize). bindingNamesForeignServer
+# ignores a bd binding's port, where this also skips the target's host on
+# another port.
+scope_pinned_endpoint() {
+  _spe_scope=$(dirname "$(dirname "$1")")
+  [ "$_spe_scope" = "$GC_CITY_PATH" ] && return 0
+  _spe_cfg="$(dirname "$1")/config.yaml"
+  if ! _spe_origin=$(beads_config_value "$_spe_cfg" gc.endpoint_origin); then
+    printf 'compact: scope=%s WARN: cannot read %s, so its Dolt endpoint is unknown\n' \
+      "$_spe_scope" "$_spe_cfg" >&2
+    printf '%s\n' "$compact_unknown_endpoint"
+    return 0
+  fi
+  case "$_spe_origin" in
+    explicit|'') ;;
+    *) return 0 ;;
+  esac
+  _spe_socket=$(beads_config_value "$_spe_cfg" dolt.socket)
+  if [ -n "$_spe_socket" ]; then
+    printf 'unix:%s\n' "$_spe_socket"
+    return 0
+  fi
+  _spe_host=$(beads_config_value "$_spe_cfg" dolt.host)
+  _spe_port=$(beads_config_value "$_spe_cfg" dolt.port)
+  if [ "$_spe_origin" = explicit ]; then
+    [ -n "$_spe_host" ] || _spe_host="127.0.0.1"
+    if [ "$_spe_port" = "$GC_DOLT_PORT" ] && compact_same_dolt_host "$_spe_host" "$host"; then
+      return 0
+    fi
+  else
+    if [ -z "$_spe_host" ]; then
+      _spe_host=$(read_runtime_state_string "$1" dolt_server_host)
+      _spe_port=$(read_runtime_state_number "$1" dolt_server_port)
+    fi
+    [ -n "$_spe_host" ] || return 0
+    compact_dolt_host_is_local "$_spe_host" && return 0
+    if compact_same_dolt_host "$_spe_host" "$host"; then
+      case "$_spe_port" in
+        ''|"$GC_DOLT_PORT") return 0 ;;
+      esac
+    fi
+  fi
+  printf '%s:%s\n' "$_spe_host" "${_spe_port:-<unset>}"
+  return 0
+}
+
+# compact_endpoint_doubt ENDPOINT — print why ENDPOINT, a pinned endpoint as
+# scope_pinned_endpoint prints it, may still lead to this run's target: a
+# socket may be this server's, and another port on this run's host may be a
+# stale record of it. Print nothing when ENDPOINT names another host.
+compact_endpoint_doubt() {
+  case "$1" in
+    unix:*)
+      printf 'a Unix socket that may belong to this server\n'
+      return 0
+      ;;
+  esac
+  if compact_same_dolt_host "${1%:*}" "$host"; then
+    printf 'another port on this host and may be stale\n'
+  fi
+  return 0
+}
+
+# emit_scope_database_name META DB — emit DB unless the scope owning META is
+# pinned to another Dolt endpoint or its endpoint is unknown. Such a scope is
+# logged and its claim on the name recorded, so the server-side passes can
+# tell its same-named copy apart from a database this server owns.
+emit_scope_database_name() {
+  _esd_endpoint=$(scope_pinned_endpoint "$1")
+  if [ -z "$_esd_endpoint" ]; then
+    if valid_database_name "$2"; then
+      case "$compact_target_dbs" in
+        *" $2 "*) ;;
+        *) compact_target_dbs="$compact_target_dbs$2 " ;;
+      esac
+    fi
+    emit_database_name "$2"
+    return 0
+  fi
+  _esd_scope=$(dirname "$(dirname "$1")")
+  if [ "$_esd_endpoint" = "$compact_unknown_endpoint" ]; then
+    printf 'compact: db=%s scope=%s has an unknown Dolt endpoint, which may not be this compaction target %s:%s — skip\n' \
+      "$2" "$_esd_scope" "$host" "$GC_DOLT_PORT" >&2
+  else
+    printf 'compact: db=%s scope=%s is pinned to Dolt endpoint %s, not this compaction target %s:%s — skip\n' \
+      "$2" "$_esd_scope" "$_esd_endpoint" "$host" "$GC_DOLT_PORT" >&2
+  fi
+  valid_database_name "$2" || return 0
+  compact_pinned_dbs="$compact_pinned_dbs$2$compact_tab$_esd_scope$compact_tab$_esd_endpoint
+"
+}
+
+# emit_server_database_name DB [PATH] — emit a database this server holds (a
+# data-dir entry at PATH) or one named by --only-db, unless only pinned or
+# unknown-endpoint scopes claim its name. Then it is not, or may not be, their
+# store: warn and skip it. A scope pinned to a socket, or to another port on
+# this host, may still keep its live store here: the socket may be this
+# server's, and the port may be stale, as bd's binding is once gc's server
+# restarts on a new one. Then the warning says to check before dropping the
+# database rather than calling it a copy.
+emit_server_database_name() {
+  case "$compact_target_dbs" in
+    *" $1 "*)
+      emit_database_name "$1"
+      return 0
+      ;;
+  esac
+  _esn_claim=$(printf '%s' "$compact_pinned_dbs" | awk -F '\t' -v db="$1" '$1 == db { print $2 "\t" $3; exit }')
+  if [ -z "$_esn_claim" ]; then
+    emit_database_name "$1"
+    return 0
+  fi
+  _esn_scope=${_esn_claim%%"$compact_tab"*}
+  _esn_endpoint=${_esn_claim#*"$compact_tab"}
+  if [ "$_esn_endpoint" = "$compact_unknown_endpoint" ]; then
+    if [ -n "${2:-}" ]; then
+      printf 'compact: db=%s WARN: %s on this server may not be the store of scope=%s, whose Dolt endpoint is unknown — skip until its config.yaml can be read\n' \
+        "$1" "$2" "$_esn_scope" >&2
+    else
+      printf 'compact: db=%s WARN: requested by name, but it is the database of scope=%s, whose Dolt endpoint is unknown — skip until its config.yaml can be read\n' \
+        "$1" "$_esn_scope" >&2
+    fi
+    return 0
+  fi
+  _esn_doubt=$(compact_endpoint_doubt "$_esn_endpoint")
+  if [ -n "$_esn_doubt" ]; then
+    if [ -n "${2:-}" ]; then
+      printf 'compact: db=%s WARN: %s on this server may still be the live store of scope=%s, whose Dolt endpoint %s is %s — skip; check which server the scope uses before you drop it\n' \
+        "$1" "$2" "$_esn_scope" "$_esn_endpoint" "$_esn_doubt" >&2
+    else
+      printf 'compact: db=%s WARN: requested by name, but it is the database of scope=%s, whose Dolt endpoint %s is %s; this server, %s:%s, may still hold its live store — skip; check which server the scope uses first\n' \
+        "$1" "$_esn_scope" "$_esn_endpoint" "$_esn_doubt" "$host" "$GC_DOLT_PORT" >&2
+    fi
+    return 0
+  fi
+  if [ -n "${2:-}" ]; then
+    printf 'compact: db=%s WARN: %s on this server is not the store of scope=%s, which is pinned to Dolt endpoint %s — skip; drop or archive the copy if it is stale\n' \
+      "$1" "$2" "$_esn_scope" "$_esn_endpoint" >&2
+  else
+    printf 'compact: db=%s WARN: requested by name, but it is the database of scope=%s, which is pinned to Dolt endpoint %s; gc compacts only %s:%s — skip\n' \
+      "$1" "$_esn_scope" "$_esn_endpoint" "$host" "$GC_DOLT_PORT" >&2
+  fi
+}
+
 discover_database_names() {
+  compact_target_dbs=" "
+  compact_pinned_dbs=""
+  compact_tab=$(printf '\t')
   while IFS= read -r meta; do
     [ -n "$meta" ] || continue
     db=$(metadata_db "$meta")
-    emit_database_name "$db"
+    emit_scope_database_name "$meta" "$db"
   done < "$_meta_tmp"
 
   if [ -d "$DOLT_DATA_DIR" ]; then
@@ -665,7 +865,7 @@ discover_database_names() {
       db=${d%/}
       db=${db##*/}
       is_system_database "$db" && continue
-      emit_database_name "$db"
+      emit_server_database_name "$db" "${d%/}"
     done
   fi
 
@@ -673,7 +873,7 @@ discover_database_names() {
     printf '%s\n' "$only_dbs" | tr ',' '\n' | while IFS= read -r db; do
       db=$(printf '%s' "$db" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
       [ -n "$db" ] || continue
-      emit_database_name "$db"
+      emit_server_database_name "$db"
     done
   fi
 }
