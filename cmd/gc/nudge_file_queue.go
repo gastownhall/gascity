@@ -1249,3 +1249,82 @@ func (q *fileNudgeQueue) DispatchSkips() (map[string]int64, error) {
 func (q *fileNudgeQueue) RepinClaims(ids []string, batch string) error {
 	return pinQueuedNudgeClaims(q.cityPath, ids, batch)
 }
+
+// migrationCandidates reads the queue without the lock and returns the live
+// items the queue-mode shim may move out of it, grouped into whole delivery
+// batches: pending items and in-flight items whose lease has run out. A batch
+// any live member of which holds an unexpired lease waits. Dead letters, and
+// items past their deliver-by deadline, are not live and never move.
+func (q *fileNudgeQueue) migrationCandidates(now time.Time) (nudgeMigrationCandidates, error) {
+	state, err := nudgequeue.LoadState(q.cityPath)
+	if err != nil {
+		return nudgeMigrationCandidates{}, err
+	}
+	live := make([]nudgequeue.Item, 0, len(state.Pending)+len(state.InFlight))
+	for _, bucket := range [][]nudgequeue.Item{state.Pending, state.InFlight} {
+		for _, item := range bucket {
+			if !item.ExpiresAt.IsZero() && !item.ExpiresAt.After(now) {
+				continue
+			}
+			live = append(live, item)
+		}
+	}
+	return groupNudgeMigrationBatches(live, func(item nudgequeue.Item) bool {
+		return nudgeLeaseHeld(item, now)
+	}), nil
+}
+
+// removeMigrated removes, under the lock, exactly the items the shim moved:
+// each matched by (ID, CreatedAt), as WithdrawWaitNudges matches, in pending
+// or in flight, and only while it holds no unexpired lease. It returns the
+// items it left in place: claimed meanwhile, or already gone.
+func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) ([]nudgequeue.Item, error) {
+	want := make(map[nudgeMigrationKey]bool, len(items))
+	for _, item := range items {
+		want[nudgeMigrationKeyOf(item)] = true
+	}
+	removed := make(map[nudgeMigrationKey]bool, len(items))
+	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		take := func(bucket []queuedNudge) []queuedNudge {
+			filtered := bucket[:0]
+			for _, item := range bucket {
+				key := nudgeMigrationKeyOf(item)
+				if want[key] && !nudgeLeaseHeld(item, now) {
+					removed[key] = true
+					continue
+				}
+				filtered = append(filtered, item)
+			}
+			return filtered
+		}
+		state.Pending = take(state.Pending)
+		state.InFlight = take(state.InFlight)
+		return nil
+	})
+	if err != nil {
+		return nil, err
+	}
+	var kept []nudgequeue.Item
+	for _, item := range items {
+		if !removed[nudgeMigrationKeyOf(item)] {
+			kept = append(kept, item)
+		}
+	}
+	return kept, nil
+}
+
+// importMigrated appends, under the lock, the items the shim moves into the
+// queue, as pending with the lease cleared and every other field kept. An id
+// the queue already holds is skipped, so a re-run imports nothing twice.
+func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) error {
+	return withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		for _, item := range items {
+			if queuedNudgeExists(state, item.ID) {
+				continue
+			}
+			state.Pending = append(state.Pending, nudgeItemWithoutLease(item))
+		}
+		sortQueuedNudges(state)
+		return nil
+	})
+}
