@@ -16,7 +16,9 @@ import (
 //	       executor (.bazelrc.local's build:remote-exec, or a machine rc
 //	       such as an agent host's ~/.bazelrc): --config=remote-exec; bazel
 //	       on PATH otherwise: --config=fork-cache (read-only cache, local
-//	       misses, nothing uploaded); no bazel: make test-fast-parallel.
+//	       misses, nothing uploaded) if pinned Go and the local runtime
+//	       are usable; otherwise make test-fast-parallel. The runtime matrix
+//	       lives in githooks_pre_push_local_runtime_test.go.
 //	rbe    --config=remote-exec.     cache  --config=fork-cache.
 //	go     make test-fast-parallel (the escape hatch).
 //

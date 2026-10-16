@@ -1,6 +1,9 @@
 package runtime_test
 
 import (
+	"errors"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -54,5 +57,50 @@ func TestCompositesRouteTurnInterruptMode(t *testing.T) {
 		if got := runtime.TurnInterruptModeFor(c, "other"); got != runtime.TurnInterruptKeystroke {
 			t.Errorf("%s default session mode = %q, want keystroke", name, got)
 		}
+	}
+}
+
+// Kills a not-current error that callers cannot classify or read: it must
+// match ErrTurnNotCurrent through any wrapping, be reachable with errors.As,
+// and name the session, the turn asked for and the turn read instead.
+func TestTurnNotCurrentErrorIsAndAs(t *testing.T) {
+	var err error = &runtime.TurnNotCurrentError{Session: "sess-a", TurnID: "thread/t1", Current: runtime.TurnState{TurnID: "thread/t2"}}
+	wrapped := fmt.Errorf("interrupting: %w", err)
+	if !errors.Is(wrapped, runtime.ErrTurnNotCurrent) {
+		t.Fatalf("errors.Is(%v, ErrTurnNotCurrent) = false", wrapped)
+	}
+	if errors.Is(wrapped, runtime.ErrTurnNotEnded) {
+		t.Fatalf("a not-current error matches ErrTurnNotEnded")
+	}
+	var nc *runtime.TurnNotCurrentError
+	if !errors.As(wrapped, &nc) || nc.Current.TurnID != "thread/t2" {
+		t.Fatalf("errors.As = %+v, want the error carrying the current turn", nc)
+	}
+	for _, want := range []string{"sess-a", "thread/t1", "thread/t2"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("Error() = %q, want it to name %q", err.Error(), want)
+		}
+	}
+	idle := &runtime.TurnNotCurrentError{Session: "sess-a", TurnID: "thread/t1"}
+	if msg := idle.Error(); !strings.Contains(msg, "sess-a") || !strings.Contains(msg, "thread/t1") || !strings.Contains(msg, "no turn") {
+		t.Errorf("idle Error() = %q, want the session, the turn and that no turn runs", msg)
+	}
+}
+
+// Kills an ErrTurnNotEnded that collides with another sentinel, and an Active
+// that reads an empty turn as running.
+func TestTurnNotEndedAndActive(t *testing.T) {
+	if errors.Is(runtime.ErrTurnNotEnded, runtime.ErrTurnNotCurrent) || errors.Is(runtime.ErrTurnNotEnded, runtime.ErrRuntimeUnavailable) {
+		t.Fatal("ErrTurnNotEnded matches another sentinel")
+	}
+	joined := errors.Join(runtime.ErrTurnNotEnded, runtime.ErrRuntimeUnavailable)
+	if !errors.Is(joined, runtime.ErrTurnNotEnded) {
+		t.Fatal("a joined ErrTurnNotEnded is not matched")
+	}
+	if (runtime.TurnState{}).Active() {
+		t.Fatal("an empty turn state is active")
+	}
+	if !(runtime.TurnState{TurnID: "thread/t1"}).Active() {
+		t.Fatal("a turn state naming a turn is not active")
 	}
 }

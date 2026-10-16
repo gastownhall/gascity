@@ -2640,3 +2640,87 @@ func TestCrashedAgentStopAndKillFencesStillRefuse(t *testing.T) {
 		})
 	}
 }
+
+func TestIsGoTestExecutableForBazelRunfilesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	realBin := filepath.Join(dir, "bin", "session_test_", "session_test")
+	spyBin := filepath.Join(dir, "spy", "session_test")
+	// A real gc started by a bazel integration test runs with TEST_SRCDIR set
+	// and is exec'd through its runfiles symlink; only the _test name gate
+	// keeps it from being treated as a test binary.
+	gcBin := filepath.Join(dir, "bin", "gc_", "gc")
+	for _, p := range []string{realBin, spyBin, gcBin} {
+		if err := os.MkdirAll(filepath.Dir(p), 0o755); err != nil {
+			t.Fatalf("MkdirAll: %v", err)
+		}
+		if err := os.WriteFile(p, []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+			t.Fatalf("WriteFile: %v", err)
+		}
+	}
+	// Bazel's test-setup.sh execs the test via its runfiles path, which is a
+	// symlink to the built binary under local (non-RBE) execution, while
+	// os.Executable reports the resolved target.
+	runfilesLink := filepath.Join(dir, "runfiles", "_main", "internal", "session", "session_test")
+	if err := os.MkdirAll(filepath.Dir(runfilesLink), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(realBin, runfilesLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	gcRunfilesLink := filepath.Join(dir, "runfiles", "_main", "cmd", "gc", "gc_", "gc")
+	if err := os.MkdirAll(filepath.Dir(gcRunfilesLink), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.Symlink(gcBin, gcRunfilesLink); err != nil {
+		t.Fatalf("Symlink: %v", err)
+	}
+	resolvedReal, err := filepath.EvalSymlinks(realBin)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	resolvedGC, err := filepath.EvalSymlinks(gcBin)
+	if err != nil {
+		t.Fatalf("EvalSymlinks: %v", err)
+	}
+	const srcdir = "/runfiles"
+
+	tests := []struct {
+		name       string
+		path       string
+		argv0      string
+		testSrcdir string
+		want       bool
+	}{
+		{"go test binary", filepath.Join(dir, "session.test"), "/elsewhere/x", "", true},
+		{"bazel direct exec", realBin, realBin, srcdir, true},
+		{"bazel runfiles symlink exec", resolvedReal, runfilesLink, srcdir, true},
+		{"symlink exec outside bazel", resolvedReal, runfilesLink, "", false},
+		{"renamed spy binary", spyBin, runfilesLink, srcdir, false},
+		{"renamed spy binary direct argv0", spyBin, realBin, srcdir, false},
+		{"unresolvable argv0", resolvedReal, filepath.Join(dir, "missing", "session_test"), srcdir, false},
+		{"production gc binary", "/usr/local/bin/gc", "/usr/local/bin/gc", "", false},
+		{"gc under bazel runfiles symlink exec", resolvedGC, gcRunfilesLink, srcdir, false},
+		{"gc under bazel direct exec", resolvedGC, resolvedGC, srcdir, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isGoTestExecutableFor(tt.path, tt.argv0, tt.testSrcdir); got != tt.want {
+				t.Fatalf("isGoTestExecutableFor(%q, %q, %q) = %v, want %v", tt.path, tt.argv0, tt.testSrcdir, got, tt.want)
+			}
+		})
+	}
+}
+
+// TestIsGoTestExecutableRecognizesRunningTestBinary pins the argv0 and
+// TEST_SRCDIR wiring in isGoTestExecutable, which the table above bypasses by
+// calling isGoTestExecutableFor. Plain go test names the binary *.test, which
+// matches without that wiring, so the wiring is only exercised under bazel.
+func TestIsGoTestExecutableRecognizesRunningTestBinary(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatalf("os.Executable: %v", err)
+	}
+	if !isGoTestExecutable(exe) {
+		t.Fatalf("isGoTestExecutable(%q) = false (argv0 %q, TEST_SRCDIR %q), want true for the running test binary", exe, os.Args[0], os.Getenv("TEST_SRCDIR"))
+	}
+}

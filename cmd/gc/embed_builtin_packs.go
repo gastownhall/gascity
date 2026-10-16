@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -44,14 +45,30 @@ func ensureBuiltinPacksForConfigLoad(fs fsys.FS, tomlPath string, warningWriter 
 	if !usesOSFS(fs) {
 		return nil
 	}
-	return EnsureBuiltinRuntimeAssets(filepath.Dir(tomlPath), warningWriter)
+	cityPath := filepath.Dir(tomlPath)
+	// Inside a one-shot invocation scope, a city this process already readied
+	// (or whose readiness the gc bd passthrough deferred) is not re-validated:
+	// the same contract ensureBuiltinRuntimeAssetsForSuppliedConfig already
+	// has. Nothing in the invocation rewrites the caches between two loads.
+	// Long-lived processes never open the scope and keep the warm
+	// revalidation.
+	if currentInvocationConfigMemo() != nil &&
+		(builtinRuntimeReadied(cityPath) || builtinReadinessDeferredInInvocation(cityPath)) {
+		return nil
+	}
+	return EnsureBuiltinRuntimeAssets(cityPath, warningWriter)
 }
+
+// builtinReadinessPasses counts EnsureBuiltinRuntimeAssets calls, warm or
+// cold, from any caller (test seam).
+var builtinReadinessPasses atomic.Int64
 
 // EnsureBuiltinRuntimeAssets performs the per-city builtin readiness work
 // outside config loading (init finalization, supervisor startup and city
 // registration, beads bootstrap). Failures degrade to a once-per-city
 // warning when the required caches are already usable.
 func EnsureBuiltinRuntimeAssets(cityPath string, warningWriter io.Writer) error {
+	builtinReadinessPasses.Add(1)
 	key := normalizePathForCompare(cityPath)
 	stateAny, _ := builtinRuntimeReadyCache.LoadOrStore(key, &builtinRuntimeState{})
 	state := stateAny.(*builtinRuntimeState)
@@ -142,7 +159,10 @@ func builtinRuntimeReadied(cityPath string) bool {
 // A long-lived process (supervisor, API server) must call
 // EnsureBuiltinRuntimeAssets directly rather than adopt a WithConfig variant.
 func ensureBuiltinRuntimeAssetsForSuppliedConfig(cityPath string, warningWriter io.Writer) error {
-	if builtinRuntimeReadied(cityPath) {
+	// A gc bd passthrough that deferred the city's pass (inside its scope
+	// only) wants none here either: otherwise the write guard's store open
+	// would run the cold pass the passthrough loader skipped.
+	if builtinRuntimeReadied(cityPath) || builtinReadinessDeferredInInvocation(cityPath) {
 		return nil
 	}
 	return EnsureBuiltinRuntimeAssets(cityPath, warningWriter)

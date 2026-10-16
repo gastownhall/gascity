@@ -1576,8 +1576,13 @@ func nextWaitDeliveryAttempt(front *nudgequeue.Store, wait sessionpkg.WaitInfo) 
 	return "", nil
 }
 
+// withdrawQueuedWaitNudges withdraws the queued nudges a wait registered. It
+// closes only the work store handle it opened, never the nudges-class store
+// (see openOwnedNudgeBeadStore).
 func withdrawQueuedWaitNudges(cityPath string, nudgeIDs []string) error {
-	return nudgequeue.WithdrawWaitNudges(openNudgeBeadStore(cityPath).Store, cityPath, nudgeIDs)
+	store, opened := openOwnedNudgeBeadStore(cityPath)
+	defer func() { _ = closeBeadStoreHandle(opened) }()
+	return nudgequeue.WithdrawWaitNudges(store.Store, cityPath, nudgeIDs)
 }
 
 func waitLifecycleEnabled() error {

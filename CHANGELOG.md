@@ -219,6 +219,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gc agent is-foreign <identity>` reports whether this city can vouch for
+  a claim's assignee.** It exits 0 (`local`) when the identity resolves
+  against this city's roster, or when one of this city's own session records,
+  open or closed, answers to it under its bead ID, session name, alias,
+  configured named identity or sole alias-history entry; 1 (`foreign`) when
+  neither does; and 2 (`unknown`) when it cannot answer (no roster, a failed
+  lookup, an unresolvable city, bad usage). `--json` adds the reason
+  (`roster`, `session_record`, `foreign_binding`, `absent_from_roster`,
+  `no_config`, `lookup_failed`) and its detail. `local` is not a liveness
+  claim. Scripts and formulas that reap claims should ask it instead of
+  re-deriving identity rules, and treat anything but exit 0 as "protect"
+  (#5955).
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
@@ -339,6 +351,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Dolt compactor docs no longer claim it only rewrites history this
+  city grew.** The `gc-compact-base` watermark is a position, not an author:
+  a database several cities write to is flattened for all of them when the
+  city whose managed server holds it, or any city that reaches it over
+  loopback, compacts it. A city skips an external endpoint on a non-loopback
+  (for example cloud-hosted) Dolt host with exit 0, so it never compacts that
+  database. "Shared and non-local databases" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` covers keeping a shared
+  database out of `mol-dog-compactor` and a stop-everything `gc bd compact`
+  procedure (#7896).
+
+- **The core `orphan-sweep` order no longer releases claims it cannot vouch
+  for.** On a rig store shared with another city it used to release that
+  city's live claims as dead, in every shape they take: `<rig>/<name>` crew,
+  foreign-binding pool instances (`<rig>/<binding>.<name>-<n>`), runtime
+  session names and bare session bead IDs, with a false cause note and a mail
+  for each sweep (#5955). The order now asks `gc agent is-foreign` about every
+  claimant that is neither configured nor live, in HQ and in every rig, before
+  any revalidation or session probe, and keeps the claim unless the verb
+  answers `local`. Each sweep that keeps claims prints `protected K
+  foreign/unknown claims` in its summary and a line naming every kept identity
+  and its claims, and declares a `partial` outcome, which the controller
+  records as an `order.skipped` event with one scope per identity; the run
+  still exits 0, and a sweep that only protects sends no mail. The verb is
+  asked at most once per distinct identity per sweep, within a gate budget of
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  timeout); past it, the remaining claimants are not asked, their claims are
+  kept and named with a "gate budget … exhausted" reason, and the sweep says
+  how many identities it did not ask. Where `timeout` is installed, an ask
+  still running when the budget runs out is abandoned and its claim kept and
+  named too, so one stalled store cannot run the sweep into the order's
+  timeout. Identities are asked from a random starting point each sweep, so a
+  large set of foreign claimants delays, but does not starve, release of a
+  dead local claim. Unlike the Go
+  pool sweep, the order has no route filter, so it gives bare identities no
+  shape exemption: a dead local ephemeral or bead-ID claim stays releasable
+  through its own session record. Migration notes: a person's claim, or a
+  local agent's claim whose config and session records are both gone, is now
+  kept and named every sweep instead of released; release it by hand with
+  `gc bd release-if-current <id> <assignee>`.
 - **The pool orphan sweep treats a claim it cannot observe as unobservable,
   not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
   city's config does not mint — another city's identity, a binding this city
@@ -353,11 +405,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   identity it kept and its claims. A namepool seat whose name was trimmed
   therefore stays reapable after it closes; claims under the earlier aliases
   of a seat renamed more than once are kept and named. The orphan-close
-  release of a confirmed orphaned session is unchanged. Only this Go sweep is
-  guarded: the core pack's `orphan-sweep.sh` order still releases a foreign
-  `<rig>/<name>` claim (#5955). Migration notes: a `<rig>/<name>` identity
-  moved to another city on the shared rig store keeps being released here
-  until this city's closed session records for it are purged or re-aliased.
+  release of a confirmed orphaned session is unchanged. The core `orphan-sweep`
+  order now applies the same gate through `gc agent is-foreign`; see the entry
+  above. Migration notes: a `<rig>/<name>` identity moved to another city on
+  the shared rig store keeps being released here until this city's closed
+  session records for it are purged or re-aliased.
   The session record of a removed agent, binding or namepool name lasts until
   closed session beads are purged, which happens only after
   `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
@@ -588,6 +640,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   census can wait for the next run. Outside the city scope, workflow issue
   roots are only counted: `skipped_non_city_workflow_issue_roots` is now a
   candidate count (#6050).
+- **`gc dolt compact` no longer looks for a pinned rig's database on the
+  city's managed Dolt server.** A rig pinned to another Dolt endpoint
+  (`gc rig set-endpoint --external`, a rig-local `--self` server,
+  `[[rigs]] dolt_host`/`dolt_port`, or a bd binding to a remote host) keeps its
+  database there, but the compactor queried the managed server for it. The
+  `mol-dog-compactor` order failed every two hours with `Error 1049 (HY000):
+  database not found`, or, when the managed server still held a same-named
+  copy, flattened that copy and reported the rig's database as compacted.
+  Compact now skips such a rig with a log line naming its endpoint, and skips
+  a same-named copy on the managed server with a warning; `--only-db` cannot
+  reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
+  too, with a warning naming the file. Rigs that inherit the city endpoint are
+  compacted as before (#7994).
 
 ## [1.5.0] - 2026-10-05
 

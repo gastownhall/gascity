@@ -184,6 +184,23 @@ func (l *RuntimeLease) Expires() time.Time { return l.expires }
 // a provider call or an effect's deadline, must end by it.
 func (l *RuntimeLease) SafeUntil() time.Time { return l.expires.Add(-RuntimeLeaseSkewAllowance) }
 
+// HeldAt reports whether the lease still excludes other holders at now on
+// the holder's clock: it is not released and, when it took a record, now is
+// before SafeUntil. A flock-only lease is held until released. It reads
+// nothing, so a takeover it cannot see needs the record to have lapsed first.
+func (l *RuntimeLease) HeldAt(now time.Time) bool {
+	if l == nil {
+		return false
+	}
+	l.mu.Lock()
+	released := l.released
+	l.mu.Unlock()
+	if released {
+		return false
+	}
+	return l.expires.IsZero() || now.Before(l.SafeUntil())
+}
+
 // Fenced reports whether the record was taken by conditional write. False
 // means it is best-effort and only holders sharing the flock are excluded.
 func (l *RuntimeLease) Fenced() bool { return l.fenced }

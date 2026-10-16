@@ -348,13 +348,13 @@ func TestLeasedClosesRefuseALostLease(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(info, rollbackClosePatch(), nil, stale); closed || err != nil {
+	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(context.Background(), info, rollbackClosePatch(), nil, stale); closed || err != nil {
 		t.Fatalf("rollback under a lost lease = %v, %v; want refused", closed, err)
 	}
 	if res, err := front.CommitClose(Decide(info, FactsLegacyClose), ClosePatch(leaseT0, "drained"), leaseT0, CommitUnder(stale)); res != CommitLeaseLost || err != nil {
 		t.Fatalf("close under a lost lease = %v, %v; want lease-lost", res, err)
 	}
-	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(info, rollbackClosePatch(), nil, taker); !closed || err != nil {
+	if closed, _, err := front.RollbackPendingCreateAtomicallyUnder(context.Background(), info, rollbackClosePatch(), nil, taker); !closed || err != nil {
 		t.Fatalf("rollback under the lease = %v, %v", closed, err)
 	}
 	if b, _ := store.Get(created.ID); b.Metadata[RuntimeLeaseHolderKey] != "" {

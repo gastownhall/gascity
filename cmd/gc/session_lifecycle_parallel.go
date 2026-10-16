@@ -286,6 +286,10 @@ type preparedStart struct {
 	// manual conversation, which the caller records as
 	// session.conversation_reset (staleKeyConversationResetEvent).
 	conversationReset bool
+	// runtimeBinding is the patch recording the thread the runtime hosts
+	// the session in, read once the start succeeded (startedRuntimeBinding);
+	// the start commit applies it.
+	runtimeBinding sessionpkg.MetadataPatch
 }
 
 type startResult struct {
@@ -335,8 +339,8 @@ type startResult struct {
 	// (startResumeFailure) reads a provider's refusal of the resume.
 	diedPane string
 	// provider is the runtime provider the start ran against. commitStartFailure
-	// uses it to tear down a bead-scoped pool runtime before rolling its row
-	// back (releaseBeadScopedPoolRuntime). Nil on test-built results, which
+	// uses it to tear down a runtime whose row owns its name before rolling
+	// the row back (releaseRowOwnedRuntime). Nil on test-built results, which
 	// keeps their rollback behavior unchanged.
 	provider runtime.Provider
 	// phases captures sub-phase wall-clock so the lifecycle log can pinpoint
@@ -1940,6 +1944,7 @@ func runPreparedStartCandidate(
 		attribution = identity.attribution()
 	}
 	if attribution == pendingCreateRuntimeOurs {
+		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
 		return startResult{
 			prepared:            item,
 			err:                 nil,
@@ -1966,9 +1971,9 @@ func runPreparedStartCandidate(
 	case attribution == pendingCreateRuntimeUnknown:
 		// A runtime may be up under the name and its identity cannot be read,
 		// so neither converge on it nor roll back the create (which stops a
-		// bead-scoped pool runtime by name). The reconciler re-attributes it
-		// next tick, or rolls back once it is gone. This case stays ahead of
-		// the context arms: a timed-out start rolls back too.
+		// row-owned runtime by name, releaseRowOwnedRuntime). The reconciler
+		// re-attributes it next tick, or rolls back once it is gone. This case
+		// stays ahead of the context arms: a timed-out start rolls back too.
 		outcome = TraceOutcomeDeferred
 		unattributedErr = unattributedStartError(err, identity)
 		err = nil
@@ -2000,6 +2005,9 @@ func runPreparedStartCandidate(
 	}
 	if err == nil {
 		rateLimitScreen = false
+	}
+	if outcome == TraceOutcomeSuccess || (err == nil && outcome == TraceOutcomeSessionExists) {
+		item.runtimeBinding = startedRuntimeBinding(ctx, cityPath, sp, item.candidate.name())
 	}
 	return startResult{
 		prepared:            item,
@@ -2249,13 +2257,15 @@ func commitAsyncStartResultWithContext(
 		if refreshed.err != nil && refreshed.rollbackPending {
 			return commitStartResultTraced(refreshed, sessFront, clk, rec, wave, stdout, stderr, trace) == startCommitSucceeded
 		}
-		// A bead-scoped pool row may only close once its runtime is confirmed
-		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9): its successor gets a
-		// new name, so a box that outlives the close is never addressed
-		// again. A held row keeps its pending claim and falls through to the
-		// lease-expired rollback, which retries the teardown.
+		// A row that owns its runtime name (a bead-scoped pool row, or a
+		// manual session on a runtime that cannot vouch for identity) may
+		// only close once its runtime is confirmed gone
+		// (releaseRowOwnedRuntime, ga-vcjr9): nothing addresses a box that
+		// outlives the close again. A held row keeps its pending claim and
+		// falls through to the lease-expired rollback, which retries the
+		// teardown.
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) &&
-			releaseBeadScopedPoolRuntime(refreshed.prepared.candidate.info, sp, stderr) {
+			releaseRowOwnedRuntime(refreshed.prepared.candidate.info, sp, stderr, nil, nil) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
 			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
@@ -2440,13 +2450,19 @@ func clearPendingStartInFlightLease(handle string, sessFront *sessionpkg.Store, 
 // cannot be read: it may be that newer incarnation. The deferral is bounded by
 // the box's own GC_SESSION_ID: once it reads again and names the closed row,
 // reapRuntimesBoundToClosedBeads stops it.
+//
+// A manual session on a runtime that cannot vouch for identity
+// (manualRowTearsDownUnattributedRuntime) is the same while this start still
+// holds its runtime lease: its name was reserved to the row, nothing
+// re-creates a closed manual row, and a box with no identity under it is the
+// one this start created.
 func stopStaleAsyncStartRuntime(result startResult, sp runtime.Provider, stderr io.Writer) {
 	if sp == nil || strings.TrimSpace(result.prepared.candidate.info.ID) == "" {
 		return
 	}
 	name := result.prepared.candidate.name()
 	info := result.prepared.candidate.info
-	switch staleAsyncStartRuntimeAttribution(info, name, sp) {
+	switch staleAsyncStartRuntimeAttribution(info, name, sp, startLeaseStillHeld(result.prepared.candidate.lease, time.Now())) {
 	case pendingCreateRuntimeForeign:
 		return
 	case pendingCreateRuntimeUnknown:
@@ -2959,7 +2975,7 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	applied, err := sessFront.CommitStartedIfCurrentUnder(context.Background(), info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator's suspend landed while the start ran (CONTRACT S1
 		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
@@ -3084,6 +3100,7 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		RuntimeBinding:      prepared.runtimeBinding,
 	})
 	// The resume backstop (mc-bm1af): whether this incarnation was launched
 	// as a resume, for a later rapid crash; a fresh launch starts a new
@@ -3270,7 +3287,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 	// arm below) never reached gc.agent.starts.total at all.
 	telemetry.RecordAgentStart(context.Background(), name, tp.DisplayName(), result.err)
 	if reason := runtime.ProviderTerminalErrorReason(result.err.Error()); reason != "" {
-		if result.rollbackPending && !releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+		if result.rollbackPending && !releaseRowOwnedRuntime(info, result.provider, stderr, nil, nil) {
 			// The runtime teardown could not be confirmed, so the row must stay
 			// OPEN in its pending-create state: marking the terminal error would
 			// park it asleep with its claim cleared, where neither reconciler
@@ -3362,7 +3379,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// here: it actually launched and exited, so the stale pending-create
 			// must clear for a fresh attempt next tick, matching base's fast
 			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
-			if releaseBeadScopedPoolRuntime(info, result.provider, stderr) {
+			if releaseRowOwnedRuntime(info, result.provider, stderr, nil, nil) {
 				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
 			}
 		} else {
@@ -3551,8 +3568,11 @@ func recoverRunningPendingCreate(
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
+		// The runtime is already live: record the thread it hosts the
+		// session in, as every confirmed start does.
+		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
 	})
-	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(context.Background(), prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator suspended the row before its start committed (CONTRACT
 		// S1 v5.6, §12.2 row 65): the heal never stamps the start over the
@@ -3654,6 +3674,10 @@ const (
 	// pendingCreateRuntimeForeign: the runtime is not this create's. It
 	// positively carries another session's ID or another incarnation's token,
 	// carries no attribution at all, or is gone (runtime.ErrSessionNotFound).
+	// No attribution is evidence of another owner only on a runtime that
+	// stamps identity before the name is visible (identityReadable); a close
+	// that frees the name of a row owning it tears such a runtime down first
+	// (releaseRowOwnedRuntime).
 	pendingCreateRuntimeForeign
 	// pendingCreateRuntimeUnknown: an identity read failed, and the keys that
 	// could be read do not decide the answer without it.
@@ -3763,7 +3787,9 @@ func (r pendingCreateIdentity) attribution() pendingCreateAttribution {
 
 // unstamped reports that the runtime carries neither a session ID nor an
 // instance token (unset or unsupported), which attribution reads as foreign
-// for want of any attribution rather than on positive evidence.
+// for want of any attribution rather than on positive evidence. A row that
+// owns its runtime name treats it as its own before it closes
+// (releaseRowOwnedRuntime, staleAsyncStartRuntimeAttribution).
 func (r pendingCreateIdentity) unstamped() bool {
 	return r.id == runtimeTokenAbsent && r.token == runtimeTokenAbsent
 }
@@ -3863,14 +3889,14 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 	for k, v := range failedCreateClosePatch(info, now) {
 		closePatch[k] = v
 	}
-	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(info, closePatch, postCloseClears)
+	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(context.Background(), info, closePatch, postCloseClears)
 	if !applied && beads.IsConditionalWriteUnsupported(txErr) {
 		// No atomic close on this store (BdStore, exec, plain MemStore, a legacy
 		// sqlite layout), or it refused at call time and wrote nothing: keep the
 		// historical Tx. Tx has no read operation, so hold the same per-session
 		// lock used by start completion and preWakeCommit across the fresh read
 		// AND the transaction.
-		applied, txErr = sessFront.WithPendingCreateRollback(info, func() error {
+		applied, txErr = sessFront.WithPendingCreateRollback(context.Background(), info, func() error {
 			return store.Tx(commitMsg, func(tx beads.Tx) error {
 				if err := tx.SetMetadataBatch(info.ID, preCloseClears); err != nil {
 					return err
@@ -3988,10 +4014,33 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 	}
 }
 
-// releaseBeadScopedPoolRuntime tears down the runtime a pool row with a
-// bead-ID-scoped name (PoolSessionName(template, beadID)) may have left behind,
-// and reports whether the row may now be closed.
+// rowRuntimeHoldLog says why a row whose runtime must be torn down before it
+// closes stays open: kind names the standing condition, line is the message.
+// A tick caller logs a condition once per row per episode
+// (standingRowRuntimeHold); a commit caller logs each attempt
+// (printRowRuntimeHold).
+type rowRuntimeHoldLog func(kind, line string)
+
+// printRowRuntimeHold logs every hold to stderr.
+func printRowRuntimeHold(stderr io.Writer) rowRuntimeHoldLog {
+	return func(_, line string) {
+		fmt.Fprintln(stderr, line) //nolint:errcheck // best-effort diagnostics
+	}
+}
+
+// standingRowRuntimeHold logs a hold of row id once per episode
+// (logStandingCondition).
+func standingRowRuntimeHold(dt *drainTracker, stderr io.Writer, id string, now time.Time) rowRuntimeHoldLog {
+	return func(kind, line string) {
+		logStandingCondition(dt, stderr, id, kind, line, now)
+	}
+}
+
+// releaseRowOwnedRuntime tears down the runtime a row that owns its runtime
+// name may have left behind, and reports whether the row may now be closed.
+// Every pending-create close calls it first. Two kinds of row own their name:
 //
+// A pool row with a bead-ID-scoped name (PoolSessionName(template, beadID)).
 // This is the ga-vcjr9 leak guard for bead-scoped names. A failed pool create is
 // closed and the slot is re-minted as a NEW bead, so a NEW runtime name; any box
 // the failed attempt left behind (a provider whose own start-failure cleanup
@@ -4001,16 +4050,50 @@ func clearLegacyPoolStartupHealthEpisode(info sessionpkg.Info, name string, sess
 // be confirmed, keeps every slot at <=1 live runtime: the open row keeps the
 // slot's identity lease (ensurePoolIdentityNotHeldByOpenRow) and occupies its
 // slot, so no successor can be minted, and the level-triggered pending-create
-// rollback retries the teardown next tick.
+// rollback retries the teardown next tick. Stopping by name is unconditionally
+// safe here: the name embeds this row's bead ID, so no other session can own it.
 //
-// Stopping by name is unconditionally safe here: the name embeds this row's
-// bead ID, so no other session can own it. Rows with any other name shape
-// (named sessions, tmux_alias pools, legacy identity-derived names) re-target
-// the same name on retry and are left to the existing provider-level cleanup.
-// A nil provider (test-built results) keeps the previous close-only behavior.
-func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
-	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+// A manual session on a runtime that cannot vouch for identity
+// (manualRowTearsDownUnattributedRuntime). Its name is reserved to it while it
+// is open, and nothing re-creates it once it closes, so a box its create left
+// behind would run with no row (tearDownManualRowRuntime).
+//
+// Other rows are left to the existing provider-level cleanup: rows with any
+// other name shape (named sessions, singleton and tmux_alias pools, legacy
+// identity-derived names) re-target the same name on retry, and a manual
+// session on tmux, acp or subprocess has its box attributed by identity. A nil provider (test-built
+// results) keeps the previous close-only behavior. A nil hold prints each hold
+// to stderr.
+//
+// probes bounds the manual arm's identity reads and post-stop confirmation; a
+// nil probes leaves them unbounded. A commit caller (the shutdown arm, and
+// commitStartFailure's terminal-error and rollback arms) passes nil: its
+// reads are unbounded like the commit's other provider calls, so a read that
+// hangs holds the commit, and with it the name's flock and an async start's
+// slot, until it returns or the controller exits. Meanwhile the tick's
+// rollback (releaseRowOwnedRuntimeLeased) holds the row without waiting for
+// the flock, and settles it with bounded reads once the flock is free.
+//
+// A commit caller passes no lease gate either, unlike the stale-start stop,
+// which runs once the row has moved on (staleAsyncStartRuntimeAttribution's
+// leaseHeld). A commit decides under the name's flock, which its start holds
+// from before PreWake through the commit (I-LEASE), so no other starter on
+// this host can have put a box under the name since. A starter on another
+// host is excluded by the start's record until it lapses, and it wakes the
+// row (a new instance token) before it starts; the async commit refreshes the
+// row first and reads that as stale, leaving the box to the lease-gated stop.
+// Only a start that outlives its record leaves a window, from that refresh
+// (a synchronous commit has none) to the stop here, in which another host's
+// box under the name can be stopped.
+func releaseRowOwnedRuntime(info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog, probes *rowRuntimeProbes) bool {
+	if sp == nil {
 		return true
+	}
+	if !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+		if hold == nil {
+			hold = printRowRuntimeHold(stderr)
+		}
+		return tearDownManualRowRuntime(info, sp, hold, probes)
 	}
 	name := strings.TrimSpace(info.SessionNameMetadata)
 	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
@@ -4020,40 +4103,298 @@ func releaseBeadScopedPoolRuntime(info sessionpkg.Info, sp runtime.Provider, std
 	return true
 }
 
-// releaseBeadScopedPoolRuntimeLeased is releaseBeadScopedPoolRuntime for a
-// tick caller, which holds no start's lease: it stops under the name's flock,
-// and a busy name holds the row open for a later tick.
-func releaseBeadScopedPoolRuntimeLeased(cityPath string, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer) bool {
-	if sp == nil || !isPoolManagedSessionInfo(info) || !infoOwnsPoolSessionName(info) {
+// releaseRowOwnedRuntimeLeased is releaseRowOwnedRuntime for a tick caller,
+// which holds no start's lease: it stops under the name's flock, and a busy
+// name holds the row open for a later tick. A manual row whose name a
+// composite cannot route yet is held without taking the flock.
+//
+// For a manual row it decides again under the flock: info is the tick's
+// snapshot, and a start that committed the row (or a writer that closed or
+// re-woke it) after the snapshot and before the flock was free would have its
+// box stopped by a decision made from the older read. So it re-reads the row
+// from store and tears down only while the fresh row still matches the
+// snapshot (manualTeardownSnapshotCurrent); otherwise it holds without a stop,
+// and the next tick decides from a fresh snapshot. A read does not bump the
+// row's revision. The identity reads and the post-stop confirmation are held
+// to postStartObservationBound each, so a wedged backend costs a tick at most
+// one unbounded Stop per held row; a read that does not answer in time holds.
+func releaseRowOwnedRuntimeLeased(cityPath string, store beads.Store, info sessionpkg.Info, sp runtime.Provider, stderr io.Writer, hold rowRuntimeHoldLog) bool {
+	if sp == nil {
 		return true
 	}
-	_, release, err := tryRuntimeLease(nil, cityPath, strings.TrimSpace(info.SessionNameMetadata), "", 0)
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	pool := isPoolManagedSessionInfo(info) && infoOwnsPoolSessionName(info)
+	if hold == nil {
+		hold = printRowRuntimeHold(stderr)
+	}
+	if !pool {
+		applies, routeKnown := manualRowTearsDownUnattributedRuntime(info, sp)
+		if !applies {
+			return true
+		}
+		if !routeKnown {
+			holdManualRowRouteUnknown(info, name, hold)
+			return false
+		}
+	}
+	_, release, err := tryRuntimeLease(nil, cityPath, name, "", 0)
 	if err != nil {
-		fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: %v\n", info.ID, err) //nolint:errcheck
+		if pool {
+			fmt.Fprintf(stderr, "session reconciler: holding pool session %s open: %v\n", info.ID, err) //nolint:errcheck
+		} else {
+			hold("runtime_lease_busy.pending_create_teardown", fmt.Sprintf(
+				"session reconciler: holding pending create %s open: its runtime %q cannot be torn down yet: %v", info.ID, name, err))
+		}
 		return false
 	}
 	defer release()
-	return releaseBeadScopedPoolRuntime(info, sp, stderr)
+	if !pool && store != nil {
+		b, err := store.Get(info.ID)
+		if err != nil {
+			hold("row_reread_failed.pending_create_teardown", fmt.Sprintf(
+				"session reconciler: holding pending create %s open: re-reading it before tearing down its runtime %q: %v", info.ID, name, err))
+			return false
+		}
+		if !manualTeardownSnapshotCurrent(info, sessionInfoFromBead(b)) {
+			return false
+		}
+	}
+	return releaseRowOwnedRuntime(info, sp, stderr, hold, boundedRowRuntimeProbes(cityPath))
+}
+
+// manualTeardownSnapshotCurrent reports whether fresh, the row re-read under
+// its name's flock, is still the incarnation snapshot was decided from: open,
+// not active, with the same instance token, generation, last_woke_at and
+// claim. A commit (state active, claim cleared), a close or a re-wake changes
+// one of them. Other state changes are not compared: heal can project an
+// advisory awake onto a pending create (PendingCreateLease.CanRollback).
+func manualTeardownSnapshotCurrent(snapshot, fresh sessionpkg.Info) bool {
+	return !fresh.Closed &&
+		sessionpkg.State(strings.TrimSpace(fresh.MetadataState)) != sessionpkg.StateActive &&
+		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(snapshot.InstanceToken) &&
+		strings.TrimSpace(fresh.Generation) == strings.TrimSpace(snapshot.Generation) &&
+		strings.TrimSpace(fresh.LastWokeAt) == strings.TrimSpace(snapshot.LastWokeAt) &&
+		fresh.PendingCreateClaim == snapshot.PendingCreateClaim
+}
+
+// rowRuntimeProbes are the reads tearDownManualRowRuntime makes around its
+// stop. A nil *rowRuntimeProbes reads unbounded.
+type rowRuntimeProbes struct {
+	identity func(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateIdentity
+	stopped  func(name string, sp runtime.Provider) error
+}
+
+// boundedRowRuntimeProbes holds the identity reads, together, and the post-stop
+// confirmation, separately, to postStartObservationBound each. A read that
+// does not answer in time is unverifiable (identity unknown, or a stop that
+// cannot be confirmed), so the row is held.
+func boundedRowRuntimeProbes(cityPath string) *rowRuntimeProbes {
+	return &rowRuntimeProbes{
+		identity: func(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateIdentity {
+			ctx, cancel := context.WithTimeout(context.Background(), postStartObservationBound)
+			defer cancel()
+			return readPendingCreateIdentityBounded(ctx, cityPath, info, name, sp)
+		},
+		stopped: func(name string, sp runtime.Provider) error {
+			ctx, cancel := context.WithTimeout(context.Background(), postStartObservationBound)
+			defer cancel()
+			_, err := observeSessionBounded(ctx, cityPath, name, func() (struct{}, error) {
+				return struct{}{}, confirmRuntimeStopped(name, sp)
+			})
+			return err
+		},
+	}
+}
+
+func (p *rowRuntimeProbes) readIdentity(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateIdentity {
+	if p == nil || p.identity == nil {
+		return readPendingCreateIdentity(info, name, sp)
+	}
+	return p.identity(info, name, sp)
+}
+
+func (p *rowRuntimeProbes) confirmStopped(name string, sp runtime.Provider) error {
+	if p == nil || p.stopped == nil {
+		return confirmRuntimeStopped(name, sp)
+	}
+	return p.stopped(name, sp)
+}
+
+// manualRowTearsDownUnattributedRuntime reports whether a pending create's
+// close must first tear down the runtime under its name (applies), and
+// whether the runtime serving that name is known (routeKnown; false only when
+// a composite cannot route the name yet, which holds the row).
+//
+// It applies to a manual session (session_origin=manual or the legacy manual
+// marker) that is not a configured named session and has a session name,
+// served by a runtime that cannot vouch for identity (identityReadable). Only
+// tmux, acp and subprocess stamp GC_SESSION_ID and GC_INSTANCE_TOKEN before
+// the name is visible, so there a runtime carrying neither is another owner's.
+// Elsewhere (an exec pack, k8s, t3bridge, ssh, herdr) the row's own start can
+// list a box before its identity reads, or never stamp one, so a box with no
+// identity under a name reserved to this row is most likely the row's own.
+// The pending-create rollback reads such a box as foreign
+// (pendingCreateIdentity.attribution) and frees the name without a stop; a
+// configured or pool row re-targets the same name and finds the box again,
+// but nothing re-creates a closed manual row, and every reaper needs identity
+// or a listing to find the box.
+//
+// A composite that cannot route the name yet (an unseeded auto provider)
+// holds the row, unless every leaf it composes can vouch for identity.
+func manualRowTearsDownUnattributedRuntime(info sessionpkg.Info, sp runtime.Provider) (applies, routeKnown bool) {
+	if sp == nil || !isManualSessionInfo(info) || isNamedSessionInfo(info) {
+		return false, true
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if name == "" {
+		return false, true
+	}
+	leaf, _, known := runtime.ResolveBackend(sp, name)
+	if known {
+		return leaf != nil && !identityReadable(leaf), true
+	}
+	// A composite that cannot route the name yet may serve it from any of
+	// its leaves; only a leaf that cannot vouch for identity needs the route.
+	for _, l := range inventoryLeaves(sp, "") {
+		if !identityReadable(l.provider) {
+			return true, false
+		}
+	}
+	return false, true
+}
+
+// holdManualRowRouteUnknown says a manual row is held because the runtime
+// serving its name is not known yet.
+func holdManualRowRouteUnknown(info sessionpkg.Info, name string, hold rowRuntimeHoldLog) {
+	hold("route_unknown.pending_create_teardown", fmt.Sprintf(
+		"session reconciler: holding pending create %s open: the runtime serving %q is not known yet, so its box cannot be torn down", info.ID, name))
+}
+
+// tearDownManualRowRuntime is releaseRowOwnedRuntime's manual-session arm
+// (manualRowTearsDownUnattributedRuntime): before the row closes it stops the
+// runtime under the row's name and confirms it gone. It reports whether the
+// row may close.
+//
+// It reads the runtime's identity first. A runtime that is gone, or that
+// carries another session's GC_SESSION_ID or a gone token, is not this row's
+// and is left alone, as before. One whose identity cannot be read holds the
+// row: it may be a live start's. Any other runtime (no identity, this row's,
+// or another incarnation of this row) is stopped by name. That includes a
+// runtime that carries an instance token other than this row's and no
+// GC_SESSION_ID: the name is reserved to the row, so such a stamp is read as
+// an earlier incarnation of it. A stop that fails, or a runtime that still
+// reads running or cannot be observed after it, holds the row; its claim
+// stays, so the level-triggered rollback retries.
+func tearDownManualRowRuntime(info sessionpkg.Info, sp runtime.Provider, hold rowRuntimeHoldLog, probes *rowRuntimeProbes) bool {
+	applies, routeKnown := manualRowTearsDownUnattributedRuntime(info, sp)
+	if !applies {
+		return true
+	}
+	name := strings.TrimSpace(info.SessionNameMetadata)
+	if !routeKnown {
+		holdManualRowRouteUnknown(info, name, hold)
+		return false
+	}
+	identity := probes.readIdentity(info, name, sp)
+	switch {
+	case identity.id == runtimeTokenMismatch, identity.id == runtimeTokenGone, identity.token == runtimeTokenGone:
+		return true
+	case identity.attribution() == pendingCreateRuntimeUnknown:
+		hold("attribution_unknown.pending_create_teardown", fmt.Sprintf(
+			"session reconciler: holding pending create %s open: the identity of its runtime %q could not be read (%s)", info.ID, name, strings.Join(identity.failed, "; ")))
+		return false
+	}
+	agentName := firstNonEmptyGCString(info.AgentName, info.Template)
+	if err := sp.Stop(name); err != nil && !runtime.IsSessionGone(err) {
+		telemetry.RecordAgentStop(context.Background(), name, agentName, "pending-create-rollback", err)
+		hold("stop_failed.pending_create_teardown", fmt.Sprintf(
+			"session reconciler: holding pending create %s open: tearing down its runtime %q before rollback: %v", info.ID, name, err))
+		return false
+	}
+	telemetry.RecordAgentStop(context.Background(), name, agentName, "pending-create-rollback", nil)
+	if err := probes.confirmStopped(name, sp); err != nil {
+		hold("stop_unconfirmed.pending_create_teardown", fmt.Sprintf(
+			"session reconciler: holding pending create %s open: its runtime %q %v", info.ID, name, describeUnconfirmedStop(err)))
+		return false
+	}
+	return true
+}
+
+// errRuntimeSurvivedStop is confirmRuntimeStopped's answer for a runtime that
+// still reads running after a clean stop.
+var errRuntimeSurvivedStop = errors.New("survived its stop")
+
+// confirmRuntimeStopped checks that the runtime under name, just stopped
+// without error, is gone. nil confirms it; errRuntimeSurvivedStop says it
+// still reads running; any other error says an observation failed.
+func confirmRuntimeStopped(name string, sp runtime.Provider) error {
+	obs, err := runtime.ObserveLivenessWithError(sp, name, nil)
+	if err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+		return err
+	}
+	if err == nil && obs.Running {
+		return errRuntimeSurvivedStop
+	}
+	// A provider without the error-bearing liveness capability answers the
+	// probe above with a bare IsRunning, which cannot tell "gone" from "could
+	// not look". ListRunning reports an observation failure as an error, so
+	// consult its error too. Only the error: a stopped runtime may stay listed
+	// for a while (a terminating k8s pod keeps phase Running), and the caller
+	// already holds a clean Stop.
+	//
+	// A server-absent error is the one error accepted here. Stopping the only
+	// session on a tmux server takes the server down with it, so this stop
+	// produces that answer itself, and a session cannot outlive its server.
+	if _, err := sp.ListRunning(name); err != nil && !runtime.IsRuntimeServerAbsent(err) {
+		return err
+	}
+	return nil
+}
+
+// describeUnconfirmedStop words a confirmRuntimeStopped error for a log line.
+func describeUnconfirmedStop(err error) string {
+	if errors.Is(err, errRuntimeSurvivedStop) {
+		return "survived its stop"
+	}
+	return fmt.Sprintf("cannot be confirmed stopped: %v", err)
+}
+
+// startLeaseStillHeld reports whether a start's runtime lease still excludes
+// other starters of its name at now: it is held (not released), and a record
+// it took has not reached SafeUntil. A nil lease (no city runtime dir)
+// excludes nothing.
+func startLeaseStillHeld(l *sessionpkg.RuntimeLease, now time.Time) bool {
+	return l != nil && l.HeldAt(now)
 }
 
 // staleAsyncStartRuntimeAttribution decides whether a stale async start may
 // stop the runtime under name. It takes attributePendingCreateRuntime's answer
-// from the same read pass with one override: a bead-scoped pool row whose
-// runtime carries neither an ID nor an instance token (unset keys, or a runtime
-// without a metadata store) counts as ours, because the row owns a
-// <template>-<beadID> name and nothing would address the box again (ga-vcjr9).
+// from the same read pass with one override: a runtime that carries neither an
+// ID nor an instance token (unset keys, or a runtime without a metadata store)
+// counts as ours for a row that owns its name.
+//   - A bead-scoped pool row owns a <template>-<beadID> name, and nothing
+//     would address the box again (ga-vcjr9).
+//   - A manual row on a runtime that cannot vouch for identity
+//     (manualRowTearsDownUnattributedRuntime) owns its name while it is open,
+//     and the start that just returned created the box under it. That holds
+//     only while the start still holds its runtime lease (leaseHeld): once
+//     the lease lapsed another starter may hold the name.
+//
 // An unreadable key stays unknown: the same bead rotates its token on every
 // wake, so a runtime whose identity cannot be read may be a newer incarnation
 // under the same name.
-func staleAsyncStartRuntimeAttribution(info sessionpkg.Info, name string, sp runtime.Provider) pendingCreateAttribution {
+func staleAsyncStartRuntimeAttribution(info sessionpkg.Info, name string, sp runtime.Provider, leaseHeld bool) pendingCreateAttribution {
 	if sp == nil {
 		return pendingCreateRuntimeForeign
 	}
 	identity := readPendingCreateIdentity(info, name, sp)
-	if identity.unstamped() &&
-		isPoolManagedSessionInfo(info) && infoOwnsPoolSessionName(info) &&
-		strings.TrimSpace(info.SessionNameMetadata) == strings.TrimSpace(name) {
-		return pendingCreateRuntimeOurs
+	if identity.unstamped() && strings.TrimSpace(info.SessionNameMetadata) == strings.TrimSpace(name) {
+		if isPoolManagedSessionInfo(info) && infoOwnsPoolSessionName(info) {
+			return pendingCreateRuntimeOurs
+		}
+		if applies, routeKnown := manualRowTearsDownUnattributedRuntime(info, sp); applies && routeKnown && leaseHeld {
+			return pendingCreateRuntimeOurs
+		}
 	}
 	return identity.attribution()
 }

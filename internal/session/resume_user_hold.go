@@ -57,14 +57,16 @@ func consumeUserHoldLife(Disposition, Disposition, Info) MetadataPatch {
 
 // consumeUserHold is the confirmation of a resumed runtime whose row the
 // operator held: the Resume cell, written while the row still carries the
-// facts d read. A refused write over a row already active, with no hold that
-// blocks a consume (BlocksConsume), at the same generation and token is
-// converged; otherwise it returns an ErrStateSync error, so the caller never
+// facts d read. clears rides the same write: the stop-request clears of a
+// runtime this resume started (as PreWake) and the runtime binding of one it
+// started or converged on. A refused write over a row already active, with no
+// hold that blocks a consume (BlocksConsume), at the same generation and token
+// is converged; otherwise it returns an ErrStateSync error, so the caller never
 // stops the runtime it launched.
 func (m *Manager) consumeUserHold(d Decided, now time.Time, clears MetadataPatch) error {
 	store := m.PersistedStore()
 	life := consumeUserHoldLife
-	if len(clears) > 0 { // a runtime this resume started: as PreWake, it clears the stop request
+	if len(clears) > 0 {
 		life = func(from, to Disposition, info Info) MetadataPatch {
 			patch := consumeUserHoldLife(from, to, info)
 			maps.Copy(patch, clears)
