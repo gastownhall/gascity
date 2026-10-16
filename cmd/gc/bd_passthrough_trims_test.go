@@ -15,8 +15,10 @@ import (
 
 	"github.com/gastownhall/gascity/internal/builtinpacks"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/featureflags"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // bdTrimCounters is a snapshot of every counter the gc bd passthrough trims
@@ -70,6 +72,15 @@ func newBdTrimsTestCity(t *testing.T) (cityDir string) {
 	return cityDir
 }
 
+// registerBdTrimsCity registers the city in the supervisor registry, so the
+// registry-scan resolution steps can find it from its rig.
+func registerBdTrimsCity(t *testing.T, cityDir string) {
+	t.Helper()
+	if err := supervisor.NewRegistry(supervisor.RegistryPath()).Register(cityDir, "demo"); err != nil {
+		t.Fatalf("registering city: %v", err)
+	}
+}
+
 // writeBdTrimsCityConfig rewrites a newSingleExecTestCity city.toml into the
 // v2 shape: rig binding in .gc/site.toml, builtin imports in pack.toml.
 func writeBdTrimsCityConfig(t *testing.T, cityDir string) {
@@ -121,27 +132,43 @@ func TestGcBdPassthroughRunsNoFullConfigLoad(t *testing.T) {
 	shapes := []struct {
 		name        string
 		noFullLoads bool
+		passes      int64 // readiness passes the city-deciding step itself runs
 		setup       func(t *testing.T, cityDir string) (prefix []string)
 	}{
-		{"GC_CITY_PATH", true, func(*testing.T, string) []string { return nil }},
-		{"GC_CITY_PATH and a non-rig GC_DIR", true, func(t *testing.T, _ string) []string {
+		{"GC_CITY_PATH", true, 0, func(*testing.T, string) []string { return nil }},
+		{"GC_CITY_PATH and a non-rig GC_DIR", true, 0, func(t *testing.T, _ string) []string {
 			t.Setenv("GC_DIR", t.TempDir())
 			return nil
 		}},
-		{"GC_DIR city", true, func(t *testing.T, cityDir string) []string {
+		{"GC_DIR city", true, 0, func(t *testing.T, cityDir string) []string {
 			t.Setenv("GC_CITY_PATH", "")
 			t.Setenv("GC_DIR", cityDir)
 			return nil
 		}},
-		{"GC_CITY_PATH and GC_RIG", false, func(t *testing.T, _ string) []string {
+		{"GC_CITY_PATH and GC_RIG", false, 0, func(t *testing.T, _ string) []string {
 			t.Setenv("GC_RIG", "frontend")
 			return nil
 		}},
-		{"--city", false, func(t *testing.T, cityDir string) []string {
+		{"--city", false, 0, func(t *testing.T, cityDir string) []string {
 			t.Setenv("GC_CITY_PATH", "")
 			return []string{"--city", cityDir}
 		}},
-		{"bd-level --rig", false, func(*testing.T, string) []string { return []string{"--rig", "frontend"} }},
+		{"bd-level --rig", false, 0, func(*testing.T, string) []string { return []string{"--rig", "frontend"} }},
+		// The registry scans decide the city, so their load stays (it runs
+		// the one cold pass); it must run inside the invocation scope, so the
+		// passthrough's own load is a memo hit and nothing composes twice.
+		{"registered rig cwd", false, 1, func(t *testing.T, cityDir string) []string {
+			registerBdTrimsCity(t, cityDir)
+			t.Setenv("GC_CITY_PATH", "")
+			setCwd(t, filepath.Join(cityDir, "frontend"))
+			return nil
+		}},
+		{"GC_RIG only", false, 1, func(t *testing.T, cityDir string) []string {
+			registerBdTrimsCity(t, cityDir)
+			t.Setenv("GC_CITY_PATH", "")
+			t.Setenv("GC_RIG", "frontend")
+			return nil
+		}},
 	}
 	for _, shape := range shapes {
 		for _, argv := range argvs {
@@ -152,7 +179,7 @@ func TestGcBdPassthroughRunsNoFullConfigLoad(t *testing.T) {
 				var stdout, stderr bytes.Buffer
 				code := doBd(args, &stdout, &stderr)
 				got := snapBdTrimCounters().since(before)
-				want := bdTrimCounters{fullLoads: got.fullLoads, composes: 1}
+				want := bdTrimCounters{fullLoads: got.fullLoads, passes: shape.passes, composes: 1}
 				if shape.noFullLoads && !argv.helpersLoad {
 					want.fullLoads = 0
 				}
@@ -208,7 +235,33 @@ func TestBdPassthroughConfigFallsBackToTheFullLoadOnACacheCompositionRejects(t *
 		t.Fatalf("the fallback did not heal the cache: %v", err)
 	}
 
+	// A load that fell back ran the pass: the city is readied, and nothing is
+	// deferred, so a pass that ends degraded is retried by the next caller
+	// rather than skipped for the rest of the invocation.
+	if err := os.WriteFile(marker, corrupted, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	config.ResetRemoteCacheValidationCache()
+	resetBuiltinRuntimeReadyCacheFor(cityDir)
 	endScope := beginInvocationConfigMemo()
+	before = snapBdTrimCounters()
+	if _, err := loadCityConfigForBdPassthrough(cityDir, io.Discard); err != nil {
+		endScope()
+		t.Fatalf("passthrough load over a corrupted marker: %v", err)
+	}
+	deferred := builtinReadinessDeferredInInvocation(cityDir)
+	endScope()
+	if got := snapBdTrimCounters().since(before); got.fallbacks != 1 || got.passes != 1 {
+		t.Fatalf("second corruption: fallbacks = %d, passes = %d; want 1 and 1", got.fallbacks, got.passes)
+	}
+	if deferred {
+		t.Fatal("a passthrough load that ran the readiness pass also recorded a deferral")
+	}
+	if !builtinRuntimeReadied(cityDir) {
+		t.Fatal("the fallback pass did not leave the city readied")
+	}
+
+	endScope = beginInvocationConfigMemo()
 	viaPassthrough, err := loadCityConfigForBdPassthrough(cityDir, io.Discard)
 	endScope()
 	if err != nil {
@@ -298,8 +351,10 @@ func TestBdPassthroughReadinessDeferralIsScoped(t *testing.T) {
 			filepath.Join(cityPath, ".beads"), cityPath, cfg, gate.ModeUnset, false, false, false, nil)
 	}
 
+	// Load through the link and open through the real path (and the link):
+	// the deferral must name the city, not the spelling of its path.
 	endScope := beginInvocationConfigMemo()
-	cfg, err := loadCityConfigForBdPassthrough(cityDir, io.Discard)
+	cfg, err := loadCityConfigForBdPassthrough(link, io.Discard)
 	if err != nil {
 		endScope()
 		t.Fatal(err)
@@ -594,4 +649,23 @@ func TestCityOnlyResolutionWaitsOnABusyRepoCache(t *testing.T) {
 	if got.err != nil || got.city != cityPath {
 		t.Fatalf("after the lock was released: city %q, err %v; want %q", got.city, got.err, cityPath)
 	}
+}
+
+// TestBdPassthroughConfigAppliesFeatureFlags pins that the passthrough loader
+// keeps the full load's tail: the process feature flags follow the city's
+// [daemon] formula_v2, as they do after loadCityConfig.
+func TestBdPassthroughConfigAppliesFeatureFlags(t *testing.T) {
+	cityDir := newBdTrimsTestCity(t)
+	appendFile(t, filepath.Join(cityDir, "city.toml"), "\n[daemon]\nformula_v2 = false\n")
+	featureflags.WithScoped(featureflags.Flags{FormulaV2: true, GraphApply: true}, func() {
+		endScope := beginInvocationConfigMemo()
+		_, err := loadCityConfigForBdPassthrough(cityDir, io.Discard)
+		endScope()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := featureflags.Snapshot(); got.FormulaV2 || got.GraphApply {
+			t.Fatalf("feature flags after the passthrough load = %+v, want both off per [daemon] formula_v2 = false", got)
+		}
+	})
 }
