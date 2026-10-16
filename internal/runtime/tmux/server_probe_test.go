@@ -91,8 +91,97 @@ func TestNewSessionErrNoServerRefusesObservedLiveNamedSocket(t *testing.T) {
 			if observerCalls != 1 {
 				t.Fatalf("observer calls = %d, want 1", observerCalls)
 			}
-			if len(fe.calls) != 1 || !firstArgsContainHasSession(fe.calls[0]) {
-				t.Fatalf("calls = %#v, want exactly the preflight has-session probe", fe.calls)
+			if len(fe.calls) != 2 || !onlyHasSessionProbes(fe.calls) {
+				t.Fatalf("calls = %#v, want exactly the preflight probe and one re-probe", fe.calls)
+			}
+		})
+	}
+}
+
+// onlyHasSessionProbes reports whether every recorded call is a has-session
+// preflight probe, i.e. the guard refused before any new-session ran.
+func onlyHasSessionProbes(calls [][]string) bool {
+	for _, call := range calls {
+		if !firstArgsContainHasSession(call) {
+			return false
+		}
+	}
+	return len(calls) > 0
+}
+
+// TestNewSessionErrNoServerThenServerAnswersAllowsCreation pins the
+// concurrent-first-start race: has-session runs before a sibling
+// new-session has bound the named socket and reports no-server, then the
+// sibling's server binds before the socket observation, which sees a live
+// peer. A live server that answers a re-probe is by definition not degraded —
+// new-session connects to it rather than unlinking and rebinding — so the
+// guard must proceed instead of failing the create.
+func TestNewSessionErrNoServerThenServerAnswersAllowsCreation(t *testing.T) {
+	for _, reprobe := range []struct {
+		name string
+		err  error
+	}{
+		{name: "session-not-found", err: ErrSessionNotFound},
+		{name: "no-current-target", err: ErrNoCurrentTarget},
+	} {
+		t.Run(reprobe.name, func(t *testing.T) {
+			fe := probeAssertSet([]string{"", "", "", ""}, []error{ErrNoServer, reprobe.err, nil, nil})
+			observerCalls := 0
+			tm := &Tmux{
+				cfg:  Config{SocketName: "gc-race"},
+				exec: fe,
+				serverSocketObserver: func(_ context.Context, path string) error {
+					observerCalls++
+					return fmt.Errorf("path=%s inode=97 peer_pid=4242 reason=live-unix-socket", path)
+				},
+			}
+
+			if err := tm.NewSession("gc-race-loser", ""); err != nil {
+				t.Fatalf("NewSession: %v", err)
+			}
+			if observerCalls != 1 {
+				t.Fatalf("observer calls = %d, want 1", observerCalls)
+			}
+			if len(fe.calls) < 3 || !firstArgsContainHasSession(fe.calls[0]) || !firstArgsContainHasSession(fe.calls[1]) || fe.calls[2][3] != "new-session" {
+				t.Fatalf("calls = %#v, want probe, re-probe, then new-session", fe.calls)
+			}
+		})
+	}
+}
+
+// TestNewSessionErrNoServerReprobeStillUnansweredFailsClosed pins that the
+// re-probe only relaxes the guard on a positive server answer: a re-probe
+// that again reports no-server, or fails outright, keeps ErrServerDegraded.
+func TestNewSessionErrNoServerReprobeStillUnansweredFailsClosed(t *testing.T) {
+	for _, reprobe := range []struct {
+		name string
+		err  error
+	}{
+		{name: "no-server-again", err: ErrNoServer},
+		{name: "protocol-failure", err: errors.New("tmux protocol failure")},
+	} {
+		t.Run(reprobe.name, func(t *testing.T) {
+			fe := probeAssertSet([]string{"", ""}, []error{ErrNoServer, reprobe.err})
+			tm := &Tmux{
+				cfg:  Config{SocketName: "gc-race"},
+				exec: fe,
+				serverSocketObserver: func(_ context.Context, path string) error {
+					return fmt.Errorf("path=%s inode=97 peer_pid=4242 reason=live-unix-socket", path)
+				},
+			}
+
+			err := tm.NewSession("gc-race-loser", "")
+			if !errors.Is(err, ErrServerDegraded) {
+				t.Fatalf("err = %v, want ErrServerDegraded", err)
+			}
+			if errors.Is(err, ErrNoServer) {
+				t.Fatalf("err = %v, must not wrap ErrNoServer", err)
+			}
+			if !strings.Contains(err.Error(), "reason=live-unix-socket") {
+				t.Fatalf("err = %q, want the socket observation preserved", err)
+			}
+			if len(fe.calls) != 2 || !onlyHasSessionProbes(fe.calls) {
+				t.Fatalf("calls = %#v, want exactly the probe and one re-probe", fe.calls)
 			}
 		})
 	}
@@ -149,8 +238,8 @@ func TestNewSessionErrNoServerUnknownObservationFailsClosed(t *testing.T) {
 		if errors.Is(err, ErrNoServer) {
 			t.Fatalf("err = %v, must not wrap ErrNoServer", err)
 		}
-		if len(fe.calls) != 1 {
-			t.Fatalf("calls = %#v, want only the preflight probe", fe.calls)
+		if len(fe.calls) != 2 || !onlyHasSessionProbes(fe.calls) {
+			t.Fatalf("calls = %#v, want only the preflight probe and one re-probe", fe.calls)
 		}
 	})
 

@@ -57,11 +57,15 @@ func testTmux() *Tmux {
 	return NewTmuxWithConfig(cfg)
 }
 
-// noServerPreflightExecutor makes only the first has-session preflight report
-// ErrNoServer, then delegates every other operation to real tmux. It models a
-// stale protocol observation while retaining the real socket boundary.
+// noServerPreflightExecutor makes the has-session preflight probe report
+// ErrNoServer, then delegates every other operation to real tmux, retaining
+// the real socket boundary. By default only the first probe lies: a stale
+// protocol observation that a re-probe corrects, as in a concurrent first
+// start. With persistent set every probe lies: a live socket whose server
+// never answers the protocol.
 type noServerPreflightExecutor struct {
-	used bool
+	persistent bool
+	used       bool
 }
 
 func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
@@ -69,7 +73,7 @@ func (e *noServerPreflightExecutor) execute(args []string) (string, error) {
 }
 
 func (e *noServerPreflightExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
-	if !e.used && firstArgsContainHasSession(args) {
+	if (e.persistent || !e.used) && slices.Contains(args, "has-session") && slices.Contains(args, "="+probeSessionName) {
 		e.used = true
 		return "", ErrNoServer
 	}
@@ -352,7 +356,7 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		}
 
 		guarded := NewProviderWithConfig(tm.cfg)
-		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		guarded.Tmux().exec = &noServerPreflightExecutor{persistent: true}
 		err = guarded.Start(context.Background(), original, runtimepkg.Config{
 			Command: "sleep 600",
 			Env:     map[string]string{"GC_INSTANCE_TOKEN": instanceToken},
@@ -398,6 +402,59 @@ func TestNewSessionNoServerProbeDoesNotClobberLiveNamedSocket(t *testing.T) {
 		afterSocket, err := os.Lstat(socketPath)
 		if err != nil {
 			t.Fatalf("lstat socket after guarded refusal: %v", err)
+		}
+		if !os.SameFile(beforeSocket, afterSocket) {
+			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))
+		}
+	})
+
+	// A no-server probe contradicted by a live socket, where the re-probe then
+	// answers, is the concurrent-first-start race: the server is
+	// healthy, so the create proceeds and attaches to it without rebinding.
+	t.Run("live-server-transient-no-server-attaches", func(t *testing.T) {
+		tm := newTmux(newSocketName("race"))
+		socketPath := namedSocketPath(tm.cfg.SocketName)
+		t.Cleanup(func() {
+			_ = tm.KillServer()
+			_ = os.Remove(socketPath)
+		})
+
+		original := fmt.Sprintf("gc-race-original-%d", time.Now().UnixNano())
+		if err := tm.NewSession(original, ""); err != nil {
+			t.Fatalf("create original session: %v", err)
+		}
+		serverPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid}: %v", err)
+		}
+		beforeSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat live socket %q: %v", socketPath, err)
+		}
+
+		guarded := NewProviderWithConfig(tm.cfg)
+		guarded.Tmux().exec = &noServerPreflightExecutor{}
+		sibling := fmt.Sprintf("gc-race-sibling-%d", time.Now().UnixNano())
+		if err := guarded.Start(context.Background(), sibling, runtimepkg.Config{Command: "sleep 600"}); err != nil {
+			t.Fatalf("Provider.Start after transient no-server probe: %v", err)
+		}
+
+		for _, name := range []string{original, sibling} {
+			has, err := tm.HasSession(name)
+			if err != nil || !has {
+				t.Fatalf("session %q present = %t, err = %v", name, has, err)
+			}
+		}
+		afterPID, err := tm.run("display-message", "-p", "#{pid}")
+		if err != nil {
+			t.Fatalf("read server #{pid} after start: %v", err)
+		}
+		if afterPID != serverPID {
+			t.Fatalf("server pid after start = %q, want %q", afterPID, serverPID)
+		}
+		afterSocket, err := os.Lstat(socketPath)
+		if err != nil {
+			t.Fatalf("lstat socket after start: %v", err)
 		}
 		if !os.SameFile(beforeSocket, afterSocket) {
 			t.Fatalf("socket inode changed: before=%s after=%s", socketInode(beforeSocket), socketInode(afterSocket))

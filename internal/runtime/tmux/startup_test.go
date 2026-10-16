@@ -3317,15 +3317,18 @@ func TestRunSetupCommandActivityIdleKillsSilentHang(t *testing.T) {
 
 // TestRunSetupCommandActivityCeilingKillsRunaway proves the runaway backstop:
 // continuous output must not extend a command past the absolute ceiling.
+// The idle budget is 10x the output cadence because its clock starts before
+// bash is spawned; a tighter budget fires the idle error instead of the
+// ceiling when a loaded host delays the spawn or a loop iteration.
 func TestRunSetupCommandActivityCeilingKillsRunaway(t *testing.T) {
-	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 700 * time.Millisecond}
+	ops := &tmuxStartOps{tm: &Tmux{}, setupMaxTimeout: 2 * time.Second}
 
 	start := time.Now()
 	err := ops.runSetupCommand(
 		context.Background(),
 		"while true; do echo spinning; sleep 0.1; done",
 		map[string]string{},
-		300*time.Millisecond,
+		time.Second,
 	)
 	elapsed := time.Since(start)
 	if err == nil {

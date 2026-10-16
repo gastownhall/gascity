@@ -547,6 +547,10 @@ func wrapError(err error, stderr string, args []string) error {
 //     server answered and is alive with zero sessions, so new-session attaches
 //     rather than unlinking and rebinding.
 //   - nil when ErrNoServer is corroborated by a safely absent or stale socket.
+//   - nil when ErrNoServer is contradicted by the socket observation but a
+//     single re-probe then gets a server answer: a concurrent new-session
+//     (e.g. a sibling session's first start) bound the socket between the
+//     two observations, and that server is live, not degraded.
 //   - ErrServerDegraded when the probe times out or returns any other error,
 //     indicating the server is in a state where new-session would risk
 //     clobbering. Callers MUST surface this and refuse to proceed.
@@ -556,25 +560,21 @@ func (t *Tmux) probeServerAlive() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), newSessionProbeTimeout)
 	defer cancel()
-	_, err := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
-	if err == nil {
-		// Server is alive and (improbably) actually has a session with the
-		// probe name. Still safe — server responded.
-		return nil
-	}
-	if errors.Is(err, ErrSessionNotFound) {
-		// Healthy server, just doesn't have the probe session. Safe.
-		return nil
-	}
-	if errors.Is(err, ErrNoCurrentTarget) {
-		// The server answered: it is alive with zero sessions, so new-session
-		// attaches rather than unlinking and rebinding. Never a stale socket.
+	err := t.probeHasSession(ctx)
+	if serverAnswered(err) {
 		return nil
 	}
 	if errors.Is(err, ErrNoServer) {
 		path := namedSocketPath(t.cfg.SocketName)
 		observationErr := t.observeServerSocket(ctx, path)
 		if observationErr == nil {
+			return nil
+		}
+		// The protocol probe and the socket observation disagree. A server
+		// that bound the socket after has-session ran (a concurrent first
+		// start) answers a re-probe; a wedged or foreign socket does not, so
+		// only a positive answer relaxes the guard.
+		if serverAnswered(t.probeHasSession(ctx)) {
 			return nil
 		}
 		// Do not wrap ErrNoServer here: callers such as EnsureSessionFresh
@@ -585,6 +585,21 @@ func (t *Tmux) probeServerAlive() error {
 	// an indeterminate state. Refuse to proceed rather than let tmux silently
 	// fork into a parallel server.
 	return fmt.Errorf("%w (socket=%s): %w", ErrServerDegraded, t.cfg.SocketName, err)
+}
+
+// probeHasSession runs the preflight has-session against the unrouteable
+// probe target, bounded by ctx.
+func (t *Tmux) probeHasSession(ctx context.Context) error {
+	_, err := t.runCtx(ctx, "has-session", "-t", "="+probeSessionName)
+	return err
+}
+
+// serverAnswered reports whether a probeHasSession result proves a live,
+// responsive server: success (improbably, a session carries the probe name),
+// "session not found" for the probe target, or "no current target" (alive
+// with zero sessions, so new-session attaches rather than rebinding).
+func serverAnswered(err error) bool {
+	return err == nil || errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoCurrentTarget)
 }
 
 // NewSession creates a new detached tmux session.
