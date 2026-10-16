@@ -773,3 +773,84 @@ func TestOrderFiringCurrent_TimesOutStalledOrderHistory(t *testing.T) {
 		t.Fatalf("TimedOut = false, want true so callers (JSON output, doctor summary) can distinguish this from a confirmed failure")
 	}
 }
+
+func TestClassifyOrderFiringSubMinuteCooldownWithinPatrolTickIsOK(t *testing.T) {
+	// The orders lane runs a pass at least every patrol interval after the
+	// previous one ends, so a 30s cooldown under a 30s patrol fires about
+	// every 60s. That cadence is healthy.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	order := orders.Order{Name: "fast-cooldown", Trigger: "cooldown", Interval: "30s"}
+	status, _, detail := classifyOrderFiring(order, now, 30*time.Second, 30*time.Second, now.Add(-60*time.Second), now.Add(-time.Hour))
+	if status != StatusOK {
+		t.Fatalf("status = %v, want OK; detail = %s", status, detail)
+	}
+}
+
+func TestClassifyOrderFiringOverdueAccountsForPatrolTick(t *testing.T) {
+	// expected 1m + patrol 30s = 90s effective period; overdue at 1.5x = 2m15s.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	order := orders.Order{Name: "minute-cooldown", Trigger: "cooldown", Interval: "1m"}
+	started := now.Add(-time.Hour)
+
+	status, _, detail := classifyOrderFiring(order, now, time.Minute, 30*time.Second, now.Add(-(2*time.Minute + 15*time.Second)), started)
+	if status != StatusWarning || !strings.Contains(detail, "(overdue)") {
+		t.Fatalf("age 2m15s: status = %v, detail = %q; want overdue warning", status, detail)
+	}
+	status, _, detail = classifyOrderFiring(order, now, time.Minute, 30*time.Second, now.Add(-(2*time.Minute + 10*time.Second)), started)
+	if status != StatusOK {
+		t.Fatalf("age 2m10s: status = %v, detail = %q; want OK", status, detail)
+	}
+}
+
+func TestClassifyOrderFiringStaleAccountsForPatrolTick(t *testing.T) {
+	// expected 1m + patrol 30s = 90s effective period; stale at 3x = 4m30s.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	order := orders.Order{Name: "minute-cooldown", Trigger: "cooldown", Interval: "1m"}
+	started := now.Add(-time.Hour)
+
+	status, _, detail := classifyOrderFiring(order, now, time.Minute, 30*time.Second, now.Add(-(4*time.Minute + 30*time.Second)), started)
+	if status != StatusError || !strings.Contains(detail, "(CRITICAL: stale)") {
+		t.Fatalf("age 4m30s: status = %v, detail = %q; want stale error", status, detail)
+	}
+	status, _, detail = classifyOrderFiring(order, now, time.Minute, 30*time.Second, now.Add(-(4*time.Minute + 20*time.Second)), started)
+	if status != StatusWarning || !strings.Contains(detail, "(overdue)") {
+		t.Fatalf("age 4m20s: status = %v, detail = %q; want overdue warning", status, detail)
+	}
+}
+
+func TestFormatOrderFiringDurationShowsSecondsUnderTwoMinutes(t *testing.T) {
+	cases := []struct {
+		in   time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{30 * time.Second, "30s"},
+		{time.Minute, "60s"},
+		{75 * time.Second, "75s"},
+		{75*time.Second + 400*time.Millisecond, "75s"},
+		{119 * time.Second, "119s"},
+		{119*time.Second + 600*time.Millisecond, "2m"},
+		{2 * time.Minute, "2m"},
+		{2*time.Minute + 10*time.Second, "2m"},
+		{90 * time.Minute, "90m"},
+		{4 * time.Hour, "4h"},
+	}
+	for _, tc := range cases {
+		if got := formatOrderFiringDuration(tc.in); got != tc.want {
+			t.Errorf("formatOrderFiringDuration(%v) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestEventEvidenceSufficesMatchesOverdueLine(t *testing.T) {
+	// The event-only shortcut must never pass an order the classifier would
+	// flag: it stops sufficing at exactly the age the classifier calls overdue.
+	now := time.Date(2026, 5, 17, 12, 0, 0, 0, time.UTC)
+	expected, patrol := time.Minute, 30*time.Second
+	if !eventEvidenceSuffices(now.Add(-(2*time.Minute + 10*time.Second)), expected, patrol, now) {
+		t.Fatalf("age 2m10s: evidence should suffice below the overdue line")
+	}
+	if eventEvidenceSuffices(now.Add(-(2*time.Minute + 15*time.Second)), expected, patrol, now) {
+		t.Fatalf("age 2m15s: evidence must not suffice at the overdue line")
+	}
+}
