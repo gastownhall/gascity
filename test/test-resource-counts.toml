@@ -2197,6 +2197,12 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/runtime/process_control_unix_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/runtime/proctable/kill_unix_test.go"
 resource = "fixed_sleep"
 calls = 1

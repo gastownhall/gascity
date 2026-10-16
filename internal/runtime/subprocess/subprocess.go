@@ -62,6 +62,7 @@ const (
 // sessionConn tracks a running child process and its control socket.
 type sessionConn struct {
 	cmd      *exec.Cmd
+	pgid     int           // process group recorded at Setpgid spawn; 0 if none
 	done     chan struct{} // closed when process exits
 	reaped   chan struct{} // closed once reap has finished, after done
 	token    string        // the GC_INSTANCE_TOKEN this incarnation seeded
@@ -210,22 +211,26 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 		return fmt.Errorf("starting session %q: %w", name, err)
 	}
 	_ = nullFile.Close()
+	// Setpgid succeeded with Start, so the leader pid is the group id. Record
+	// it now: Getpgid returns ESRCH once this process is reaped, while the
+	// recorded id still names the group for any descendant that outlives it.
+	pgid := cmd.Process.Pid
 
 	// Seed the identity sidecar before the control socket exists, so no
 	// reader can see a live socket that carries no identity.
 	if err := p.persistStartMetadata(name, cfg.Env); err != nil {
-		_ = cmd.Process.Kill()
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		clearWorkDir()
 		return fmt.Errorf("storing metadata for %q: %w", name, err)
 	}
 
 	// Create control socket for cross-process discovery.
-	sc := &sessionConn{cmd: cmd, done: make(chan struct{}), reaped: make(chan struct{}), token: cfg.Env["GC_INSTANCE_TOKEN"]}
+	sc := &sessionConn{cmd: cmd, pgid: pgid, done: make(chan struct{}), reaped: make(chan struct{}), token: cfg.Env["GC_INSTANCE_TOKEN"]}
 	lis, err := p.startControlSocket(name, sc, socketDir, euid)
 	if err != nil {
-		// Socket creation failed — kill the process and bail.
-		_ = cmd.Process.Kill()
+		// Socket creation failed — kill the recorded group and bail.
+		_ = runtime.SignalProcessGroup(cmd, pgid, syscall.SIGKILL)
 		_ = cmd.Wait()
 		p.clearSessionMeta(name)
 		clearWorkDir()
@@ -309,7 +314,7 @@ func (p *Provider) Interrupt(name string) error {
 	sc, ok := p.procs[name]
 	p.mu.Unlock()
 	if ok {
-		return runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+		return runtime.SignalProcessGroup(sc.cmd, sc.pgid, syscall.SIGINT)
 	}
 
 	// Fall back to socket (cross-process case). A missing socket is the same
@@ -804,7 +809,7 @@ func handleSessionConn(conn net.Conn, sc *sessionConn) {
 		_ = terminateSessionConn(sc)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "interrupt":
-		_ = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+		_ = runtime.SignalProcessGroup(sc.cmd, sc.pgid, syscall.SIGINT)
 		conn.Write([]byte("ok\n")) //nolint:errcheck
 	case "ping":
 		conn.Write([]byte("ok\n")) //nolint:errcheck
@@ -966,7 +971,7 @@ func isUnavailableSocketError(err error) bool {
 // process and returns once reap has finished, so a stopped session's sidecar
 // is gone when Stop (or a socket "stop") returns.
 func terminateSessionConn(sc *sessionConn) error {
-	err := runtime.TerminateManagedProcess(sc.cmd, sc.done, runtime.ManagedProcessStopGrace)
+	err := runtime.TerminateManagedProcess(sc.cmd, sc.pgid, sc.done, runtime.ManagedProcessStopGrace)
 	<-sc.reaped
 	return err
 }

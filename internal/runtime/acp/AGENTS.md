@@ -62,3 +62,8 @@
   (`TestInterruptSendsNoSIGINTAfterTheTurnEnds`). Signal delivery cannot be
   atomic with that check, so the re-check narrows the window rather than
   closing it.
+- That SIGINT addresses the process group recorded at the Setpgid spawn
+  (`sessionConn.pgid`), not a group re-derived from the leader pid at signal
+  time. After the leader is reaped, Getpgid returns ESRCH while the recorded
+  id still names the group, so descendants are still signaled. A session that
+  recorded no group is signaled as a process and the signal is not widened.

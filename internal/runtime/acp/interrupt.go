@@ -130,7 +130,10 @@ func (sc *sessionConn) signalTurn(idleCh <-chan struct{}) bool {
 	default:
 	}
 	// A failure means the group is already gone; the wait observes that.
-	_ = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+	// sc.pgid is the group recorded at the Setpgid spawn. Signaling that id
+	// still reaches descendants after the leader has been reaped, which is
+	// when Getpgid(leader) returns ESRCH.
+	_ = runtime.SignalProcessGroup(sc.cmd, sc.pgid, syscall.SIGINT)
 	return true
 }
 
