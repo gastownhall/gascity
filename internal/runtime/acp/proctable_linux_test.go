@@ -434,20 +434,25 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 		t.Fatal("agent conn did not observe the process exit")
 	}
 
+	// The empty-id scan is the orphan sweep's: only reparented roots
+	// (proctable.OrphanCandidate, mc-ygved), so the live agent, still this
+	// test's child, is not in it, and the dead session's escaped tool is.
 	var found []runtime.LiveRuntime
 	scanSnapshot(t, func() { found = findOnly(t, p, "") }, liveAgent, liveTool, deadAgent, deadTool)
 	byPID := make(map[int]runtime.LiveRuntime, len(found))
 	for _, r := range found {
 		byPID[r.PID] = r
 	}
-	if len(found) != 2 {
-		t.Fatalf("found = %+v, want the live agent root and the dead session's tool root", found)
-	}
-	if r, ok := byPID[liveAgent]; !ok || !r.IsTracked || r.ProviderName != liveName {
-		t.Fatalf("live agent = %+v (present %v), want tracked as %q", r, ok, liveName)
+	if len(found) != 1 {
+		t.Fatalf("found = %+v, want the dead session's tool root alone", found)
 	}
 	if r, ok := byPID[deadTool]; !ok || r.IsTracked || r.ProviderName != "" {
 		t.Fatalf("dead session tool = %+v (present %v), want untracked", r, ok)
+	}
+	// The live session's own scan still tracks its agent.
+	scanSnapshot(t, func() { found = findOnly(t, p, "sid-"+liveName) }, liveAgent, liveTool, deadAgent, deadTool)
+	if len(found) != 1 || found[0].PID != liveAgent || !found[0].IsTracked || found[0].ProviderName != liveName {
+		t.Fatalf("live agent = %+v, want tracked as %q", found, liveName)
 	}
 }
 

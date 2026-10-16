@@ -8,9 +8,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// CloseStore releases both database handles, so every later call would
-// dereference a nil *sql.DB. These two maps record the only exported methods
-// allowed to survive that: everything else must report beads.ErrStoreClosed.
+// CloseStore closes both database handles, so every later call would reach a
+// closed *sql.DB. These two maps record the only exported methods allowed to
+// survive that: everything else must report beads.ErrStoreClosed.
 // A method added later lands in neither map and fails the test.
 var (
 	sqliteMethodsExemptFromClosedGuard = map[string]string{

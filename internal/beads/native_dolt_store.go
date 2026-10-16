@@ -2076,26 +2076,32 @@ func nativeReleaseRefused(err error) bool {
 // ordinary nativeStoreError not-found translation every other role accessor
 // in this file uses.
 //
-// A WISP ID GETS A NAMED REFUSAL, ErrWispNotClaimable, NOT A BARE ErrNotFound.
-// issueops.Claimer's CAS addresses only the issues table, so the claimer
-// reports a wisp id with the same ErrNotFound sentinel it uses for an id that
-// does not exist anywhere. The two are not the same fact for a caller: "this
-// id is a wisp, no front door serving this role can ever claim it" calls for
-// a different response (log it once and move on) than "this id does not
-// exist" (a caller bug or a stale reference worth surfacing loudly).
+// A WISP ID IS CLAIMED THROUGH THE UPDATE OPERATION WHEN THE STORE CAN, AND
+// OTHERWISE GETS A NAMED REFUSAL, ErrWispNotClaimable, NEVER A BARE
+// ErrNotFound. issueops.Claimer's CAS addresses only the issues table, so the
+// claimer reports a wisp id with the same ErrNotFound sentinel it uses for an
+// id that does not exist anywhere. The two are not the same fact for a
+// caller: "this id is a wisp" is either claimable another way or calls for a
+// different response (log it once and move on) than "this id does not exist"
+// (a caller bug or a stale reference, and the error the hook's claim-time
+// class route escalates on).
 //
 // Telling them apart takes a second read. When the claimer's error resolves
 // to issueops.ErrNotFound, nativeClaimTargetIsWisp asks the reader role for
 // id; unlike the claimer, the reader resolves the wisp table too
 // (issueops.Reader.Get: "A miss — for both the issue and the wisp table — is
-// ErrNotFound"). Claim reports ErrWispNotClaimable only when that read returns
-// a row carrying the wisp-plane marker (Ephemeral or NoHistory). The two reads
-// are not atomic, so the verdict describes the row the second read observed:
-// an ordinary issue created or promoted between them carries no marker and
-// keeps the claimer's ErrNotFound. A miss or a failed read keeps it too, so
-// the disambiguating read never manufactures a wisp refusal. Either way the
-// window is benign: the claim wrote nothing, and the caller's next attempt
-// sees the current row.
+// ErrNotFound"). Only a row carrying the wisp-plane marker (Ephemeral or
+// NoHistory) is a wisp. A miss or a failed read keeps the claimer's
+// ErrNotFound, so the disambiguating read never manufactures a wisp verdict,
+// and an ordinary issue created or promoted between the reads carries no
+// marker and keeps it too: the claim wrote nothing, and the caller's next
+// attempt sees the current row.
+//
+// For a wisp, nativeClaimWisp sends the request BdStore.Claim's `bd update
+// <id> --claim` sends, a bare Lifecycle.Update{Claim: true} (S24-G), which
+// resolves the id on both planes and applies the same eligibility CAS as the
+// claimer. A store that does not serve the lifecycle role, or one that
+// refuses the update by name (*ErrUnsupported), reports ErrWispNotClaimable.
 //
 // THE DISAMBIGUATING READ GOES THROUGH THE storage HANDLE AND ctx CLAIM
 // ALREADY HOLDS, NEVER THROUGH s.Get. Claim still holds s.mu.RLock here
@@ -2140,15 +2146,20 @@ func (s *NativeDoltStore) Claim(id, assignee string) (Bead, bool, error) {
 		}
 		if errors.Is(err, issueops.ErrNotFound) {
 			if nativeClaimTargetIsWisp(ctx, storage, id) {
-				return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
+				return nativeClaimWisp(ctx, storage, id, assignee)
 			}
 		}
 		return Bead{}, false, nativeStoreError(id, err)
 	}
-	if result.Issue == nil {
+	return nativeClaimedBead(id, result.Issue)
+}
+
+// nativeClaimedBead converts a claim's post-state row into the claimed Bead.
+func nativeClaimedBead(id string, issue *beadslib.Issue) (Bead, bool, error) {
+	if issue == nil {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: claim role returned no issue", id)
 	}
-	bead, err := beadFromNativeIssue(result.Issue)
+	bead, err := beadFromNativeIssue(issue)
 	if err != nil {
 		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, err)
 	}
@@ -2173,9 +2184,56 @@ func nativeClaimTargetIsWisp(ctx context.Context, storage beadslib.Storage, id s
 	return err == nil && details != nil && (details.Ephemeral || details.NoHistory)
 }
 
+// nativeClaimWisp claims the wisp id for assignee through the update
+// operation, Lifecycle.Update{Claim: true} (see the WISP ID note on Claim).
+//
+// The request is the bare claim, unfenced on the RowVersion Claim's
+// disambiguating read observed. The update's claim is the claimer's own
+// compare-and-set, which re-checks holder and status inside the write
+// transaction, so a fence would add no safety. It would only lose the claim
+// to a harmless concurrent write and, over http, disqualify the request from
+// the beads client's claim-only fallback for a server that predates claim on
+// updateIssue, which would turn that server's refusal into a bare error. A
+// foreign holder or an ineligible status is a lost claim, (false, nil),
+// exactly as the claimer's conflicts are, and a re-claim by the holder is the
+// claimer's idempotent success.
+//
+// A store without the lifecycle role, or an update the store refuses by name
+// (*ErrUnsupported, how the beads client reports a request the server cannot
+// serve, including that fallback's W-ClaimRequest.Wisp refusal), is
+// ErrWispNotClaimable, never a bare error and never ErrNotFound. A not-found
+// from the update (the wisp was deleted after the read) is ErrNotFound.
+//
+// Like the claimer's call in Claim, the update is not wrapped in
+// retryOnNativeDoltSerializationConflict: on a dolt server store, beads
+// replays a serialization-conflicted claim transaction itself (withRetryTx),
+// and each replay re-checks holder and status.
+func nativeClaimWisp(ctx context.Context, storage beadslib.Storage, id, assignee string) (Bead, bool, error) {
+	lifecycle, err := storage.IssueLifecycle()
+	if err != nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w (%w)", id, ErrWispNotClaimable, err)
+	}
+	if lifecycle == nil {
+		return Bead{}, false, fmt.Errorf("claiming bead %q: %w", id, ErrWispNotClaimable)
+	}
+	result, err := lifecycle.Update(ctx, issueops.UpdateRequest{Actor: assignee, IssueID: id, Claim: true})
+	if err != nil {
+		var unsupported *beadslib.ErrUnsupported
+		switch {
+		case nativeClaimConflict(err):
+			return Bead{}, false, nil
+		case errors.As(err, &unsupported):
+			return Bead{}, false, fmt.Errorf("claiming bead %q: %w (%w)", id, ErrWispNotClaimable, err)
+		}
+		return Bead{}, false, nativeStoreError(id, err)
+	}
+	return nativeClaimedBead(id, result.Issue)
+}
+
 // ErrWispNotClaimable names the refusal Claim reports for an id that exists
-// only in the wisp plane: see the WISP ID note on Claim above for why this is
-// distinguished from a bare ErrNotFound.
+// only in the wisp plane and cannot be claimed through the update operation:
+// see the WISP ID note on Claim above for why this is distinguished from a
+// bare ErrNotFound.
 var ErrWispNotClaimable = errors.New("wisp not claimable through this role")
 
 // nativeClaimConflict reports the refusals that mean "this claim was not won"

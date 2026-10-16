@@ -16,15 +16,18 @@
 #
 # GC_PREPUSH_SUITE picks the mode (default auto):
 #   auto   remote-exec when bazel is installed and its effective options name
-#          a remote executor; fork-cache when bazel is installed without one
-#          and .bazelrc's pinned test PATH has `go`; make test-fast-parallel
-#          otherwise.
+#          a remote executor; fork-cache when bazel is installed without one,
+#          .bazelrc's pinned test PATH has `go`, and this host's loader can
+#          resolve the pinned ICU runtime (lib/local-runtime.sh); make
+#          test-fast-parallel otherwise.
 #   rbe    --config=remote-exec; fails when no rc names an executor (the suite
 #          would otherwise compile and run on this machine at --jobs=64).
 #   cache  --config=fork-cache (it resets any rc's executor).
 #   go     make test-fast-parallel (plain go test, the pre-Bazel suite), with a
 #          banner saying it is not what CI enforces. auto falls back to it
-#          (with the same banner and the reason) only when bazel cannot run.
+#          (with the same banner and the reason) only when bazel cannot run
+#          locally, or when the loader probe says a local run would fail or
+#          cannot say. Only auto probes; the explicit modes are never replaced.
 #
 # Remote execution also needs a current worker-env pin (worker_env_refusal
 # below): rbe-west's workers serve only main's pin. On a stale pin, or an open
@@ -33,6 +36,8 @@ set -euo pipefail
 
 repo_root="$(git rev-parse --show-toplevel)"
 cd "$repo_root"
+# shellcheck source=local-runtime.sh
+. "$repo_root/.githooks/lib/local-runtime.sh"
 
 mode="${GC_PREPUSH_SUITE:-auto}"
 executor=""
@@ -102,32 +107,6 @@ probe_executor() {
   if ! executor="$(effective_remote_executor)"; then
     echo "pre-push: bazel info could not read this workspace's options (above); fix the rc, or set GC_PREPUSH_SUITE=go|rbe|cache" >&2
     exit 2
-  fi
-}
-
-# run_bounded SECONDS CMD...: CMD in its own process group, which is killed
-# after SECONDS (exit 124). timeout(1), else Homebrew's gtimeout, else perl
-# (stock macOS has neither timeout); unbounded only without all three.
-run_bounded() {
-  local seconds=$1
-  shift
-  if command -v timeout >/dev/null 2>&1; then
-    timeout "$seconds" "$@"
-  elif command -v gtimeout >/dev/null 2>&1; then
-    gtimeout "$seconds" "$@"
-  elif command -v perl >/dev/null 2>&1; then
-    perl -e '
-      my $seconds = shift;
-      my $pid = fork;
-      defined $pid or die "fork: $!\n";
-      if (!$pid) { setpgrp(0, 0); exec { $ARGV[0] } @ARGV; exit 127 }
-      $SIG{ALRM} = sub { kill "TERM", -$pid; kill "CONT", -$pid; exit 124 };
-      alarm $seconds;
-      waitpid $pid, 0;
-      exit($? & 127 ? 128 + ($? & 127) : $? >> 8);
-    ' "$seconds" "$@"
-  else
-    "$@"
   fi
 }
 
@@ -258,7 +237,14 @@ auto)
       go_fix="link your GOROOT to /usr/local/go: sudo ln -s \"\$(go env GOROOT)\" /usr/local/go (TESTING.md \"Bazel cache tiers\")"
       mode=go
     else
-      mode=cache
+      local_runtime_assess
+      if [ "$local_runtime_state" = ok ]; then
+        mode=cache
+      else
+        go_why="$(local_runtime_why)"
+        go_fix="use a remote executor (GC_PREPUSH_SUITE=rbe, or build:remote-exec in .bazelrc.local), or $(local_runtime_resolve_hint); GC_PREPUSH_SUITE=cache forces the local bazel suite regardless"
+        mode=go
+      fi
     fi
   fi
   ;;

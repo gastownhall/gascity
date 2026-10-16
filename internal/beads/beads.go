@@ -750,7 +750,7 @@ var readyExcludeTypes = map[string]bool{
 	"role":                   true, // agent role definitions
 	"rig":                    true, // rig identity beads
 	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
-	"op":                     true, // conversation operation journal op and fact rows; lanes execute them, never Ready (internal/opjournal)
+	"op":                     true, // conversation operation journal op, fact and runtime rows; lanes execute them, never Ready (internal/opjournal)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
@@ -855,7 +855,7 @@ func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
 		case "gc:session", "gc:order-tracking", "order-tracking",
-			"gc:op", "gc:fact": // op and fact rows; canonical: internal/opjournal
+			"gc:op", "gc:fact", "gc:rt": // op, fact and runtime rows; canonical: internal/opjournal
 			return true
 		}
 	}

@@ -2600,7 +2600,7 @@ type MailReplyInputBody struct {
 	// Body Reply body.
 	Body *string `json:"body,omitempty"`
 
-	// From Sender name.
+	// From Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
 	From *string `json:"from,omitempty"`
 
 	// Subject Reply subject.
@@ -2612,7 +2612,7 @@ type MailSendInputBody struct {
 	// Body Message body.
 	Body *string `json:"body,omitempty"`
 
-	// From Sender name.
+	// From Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).
 	From *string `json:"from,omitempty"`
 
 	// Rig Rig name.

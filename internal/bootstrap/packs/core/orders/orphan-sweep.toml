@@ -4,6 +4,15 @@
 # to non-existent agents get reset to open/unassigned so they are routable
 # again. No worktree salvage — cities that staff a work-health patrol role
 # (e.g. the gastown pack's witness) handle that separately.
+# A claim whose assignee this city cannot vouch for (`gc agent is-foreign`:
+# not in its roster and no session record of its own answers to it, e.g.
+# another city's agent on a shared rig store) is never reset; each run that
+# keeps one names it and declares a partial outcome (order.skipped).
+# The gate is asked at most once per identity per run, within
+# GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS (default 120, under the 300s exec order
+# timeout; where timeout(1) exists, an ask still running at the deadline is
+# abandoned); claimants it did not get to or did not hear back from are kept,
+# named, and retried on a later run.
 [order]
 description = "Reset beads assigned to dead agents back to the work pool"
 trigger = "cooldown"

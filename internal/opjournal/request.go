@@ -20,6 +20,7 @@ func normalizeRequest(req Request, spec Spec, now time.Time) (Op, error) {
 	op := Op{
 		Conversation: req.Conversation,
 		Kind:         req.Kind,
+		Executor:     orDefault(req.Executor, ExecutorLegacy),
 		SchemaRev:    SchemaRev,
 		ClientKey:    req.ClientKey,
 		Payload:      req.Payload,
@@ -107,6 +108,9 @@ func orDefault[T ~string](v, d T) T {
 func validateRequestShape(op Op, spec Spec) error {
 	if err := validateConversation(op.Conversation); err != nil {
 		return err
+	}
+	if !op.Executor.Valid() {
+		return invalidf("executor %q is not lane, legacy, legacy:api or legacy:cli", op.Executor)
 	}
 	if err := validateText("client key", op.ClientKey, maxClientKeyLen); err != nil {
 		return err
@@ -205,6 +209,9 @@ func validatePolicy(p Policy, spec Spec) error {
 		if !slices.Contains(fallbacks, m.OnUnsupported) {
 			return invalidf("message on_unsupported %q is not boundary or fail", m.OnUnsupported)
 		}
+		if err := validateNowTarget(m); err != nil {
+			return err
+		}
 		rest.Message = MessagePolicy{}
 	case KindInterrupt:
 		if !slices.Contains(onFailures, p.Interrupt.OnFailure) {
@@ -224,6 +231,29 @@ func validatePolicy(p Policy, spec Spec) error {
 	}
 	if rest != (Policy{}) {
 		return invalidf("%s ops carry another kind's policy: %+v", spec.Kind, rest)
+	}
+	return nil
+}
+
+// validateNowTarget checks a deliver-now target: only a when: now message
+// names one, its generation is >= 1 when set, and a turn needs a generation.
+func validateNowTarget(m MessagePolicy) error {
+	if m.NowGeneration == 0 && m.NowTurn == "" {
+		return nil
+	}
+	if m.When != WhenNow {
+		return invalidf("now_gen and now_turn are valid only with when: now, not %q", m.When)
+	}
+	if m.NowGeneration < 0 {
+		return invalidf("now_gen %d is negative", m.NowGeneration)
+	}
+	if m.NowTurn != "" {
+		if m.NowGeneration < 1 {
+			return invalidf("now_turn %q needs a now_gen >= 1", m.NowTurn)
+		}
+		if err := validateText("now turn", m.NowTurn, maxClientKeyLen); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -320,6 +350,9 @@ func validateState(op Op, spec Spec) error {
 	if spec.Lane == LaneLifecycle && op.Status == StatusExecuting {
 		return invalidf("lifecycle ops never execute")
 	}
+	if op.Executor.Legacy() && op.Status != StatusSubmitted && op.Status != StatusClosed {
+		return invalidf("a %s op is %s; a legacy op stays submitted until it closes", op.Executor, op.Status)
+	}
 	if op.Status == StatusClosed {
 		if err := validateOutcome(op.Outcome, op.Cancel); err != nil {
 			return err
@@ -333,6 +366,9 @@ func validateState(op Op, spec Spec) error {
 		}
 		if spec.Lane == LaneLifecycle {
 			return invalidf("lifecycle ops are never leased")
+		}
+		if op.Executor.Legacy() {
+			return invalidf("a %s op carries no lease; only lanes lease, and only lane ops", op.Executor)
 		}
 		if op.Lease.Lane != string(spec.Lane) || op.Lease.Conversation != op.Conversation {
 			return invalidf("lease %s is not the %s lane's lease on conversation %s", op.Lease, spec.Lane, op.Conversation)

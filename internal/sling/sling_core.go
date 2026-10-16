@@ -1917,13 +1917,15 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 		return SlingResult{}, fmt.Errorf("listing children of %s: %w", b.ID, err)
 	}
 
-	// A controller-owned child (a session row, a startup-health episode, a
-	// convergence root) is never slung: each is refused on its own, before
-	// any attachment check or formula touches it (architecture B).
+	// An owned child, controller-owned (a session row, a startup-health
+	// episode, a convergence root) or a coordination row (a mail message, a
+	// session wait, a queued nudge, an order's run record, an extmsg row), is
+	// never slung: each is refused on its own, before any attachment check or
+	// formula touches it (architecture B, the #7766 review).
 	var open, skipped, owned []beads.Bead
 	for _, c := range children {
 		switch {
-		case coordclass.ControllerOwned(c):
+		case coordclass.ControllerOwned(c), coordclass.CoordinationOwned(c):
 			owned = append(owned, c)
 		case c.Status == "open":
 			open = append(open, c)
@@ -2147,15 +2149,15 @@ func DoSlingBatch(opts SlingOpts, deps SlingDeps, querier BeadChildQuerier) (Sli
 	return batchResult, nil
 }
 
-// OwnedChildError refuses a container's controller-owned child (a session
-// row, a startup-health episode, a convergence root): no sling routes,
-// assigns or attaches a formula to one; its owner writes it (architecture B).
+// OwnedChildError refuses a container's owned child, controller-owned or a
+// coordination row: no sling routes, assigns or attaches a formula to one;
+// its owner writes it (architecture B).
 type OwnedChildError struct {
 	BeadID, Type string
 }
 
 func (e *OwnedChildError) Error() string {
-	return fmt.Sprintf("bead %s (type %q) is controller-owned (a session row, a startup-health episode or a convergence root): sling never routes one", e.BeadID, e.Type)
+	return fmt.Sprintf("bead %s (type %q) is owned (a session row, a startup-health episode, a convergence root, or a coordination row: a mail message, a session wait, a queued nudge, an order's run record, an extmsg row): sling never routes one", e.BeadID, e.Type)
 }
 
 // batchSkips counts the open children DoSlingBatch skips on their fresh

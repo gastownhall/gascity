@@ -1368,3 +1368,76 @@ func TestAwakeHealTakesADrainedRowsOwnRuntime(t *testing.T) {
 		t.Fatalf("decideRow = (%q, %q), want an operator-dormant drained row left alone", it.Kind, it.Reason)
 	}
 }
+
+// TestSatisfiedWakeClear (CONTRACT v5.7 D7 rule 2; mc-sqdv6, J21 C). Kills
+// a wake left standing on a row it has woken: a committed awake or active
+// row with a pending explicit wake, whose runtime the inventory reads alive
+// and Current, clears {wake_request, wake_requested_at} once the effect
+// reads it alive and Current again fresh; a wake that is not pending, a row
+// still creating, a runtime of another token, or a row an operator holds
+// dormant is left alone. The fresh effect refuses when the wake changed
+// since the pass (a newer request), and when the runtime is no longer the
+// row's own. The asleep-to-awake heal clears a wake in its own patch.
+func TestSatisfiedWakeClear(t *testing.T) {
+	wake := []string{"wake_request", "explicit", "wake_requested_at", rowAt(-time.Minute)}
+	for _, tc := range []struct {
+		name      string
+		inventory string
+		meta      []string
+		want      string
+	}{
+		{"awake with a wake", "tok-3", append([]string{"state", "awake"}, wake...), decideSatisfiedWake},
+		{"active with a wake", "tok-3", append([]string{"state", "active"}, wake...), decideSatisfiedWake},
+		{"no wake", "tok-3", []string{"state", "awake"}, decideNoAction},
+		{"another token", "tok-9", append([]string{"state", "awake"}, wake...), decideNoAction},
+		{"still creating", "tok-3", append([]string{"state", "creating", "pending_create_claim", "true"}, wake...), ""},
+		{"held dormant", "tok-3", append([]string{"state", "awake", "sleep_intent", "user-hold", "held_until", rowAt(time.Hour)}, wake...), ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := ownRuntimeCase(t, tc.inventory, tc.meta...)
+			it := c.decide()
+			if tc.want == "" { // the arm itself: an earlier arm may take the row first
+				if it, ok := armSatisfiedWake(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]}); ok {
+					t.Fatalf("armSatisfiedWake = %+v, want no satisfied-wake clear", it)
+				}
+			}
+			switch {
+			case tc.want == "" && it.Reason == decideSatisfiedWake:
+				t.Fatalf("decideRow = (%q, %q), want no satisfied-wake clear", it.Kind, it.Reason)
+			case tc.want != "" && it.Reason != tc.want:
+				t.Fatalf("decideRow = (%q, %q), want reason %q", it.Kind, it.Reason, tc.want)
+			case tc.want == decideSatisfiedWake && !maps.Equal(it.folded(), session.ClearWakeRequestPatch()):
+				t.Fatalf("patch %v, want the wake cleared alone", it.folded())
+			}
+		})
+	}
+	effect := func(read string, alive bool, newer bool) (settlement, map[string]string) {
+		c := ownRuntimeCase(t, "tok-3", append([]string{"state", "awake"}, wake...)...)
+		if newer {
+			c.before = func() {
+				if err := c.store.SetMetadataBatch(c.k.ID, map[string]string{"wake_requested_at": rowAt(time.Second)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}
+		sp := &freshObserver{Fake: runtime.NewFake(), l: runtime.Liveness{Running: alive, Alive: alive}, env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_INSTANCE_TOKEN": read}}
+		_, s := c.run(t, sp.tmux(), nil)
+		return s, c.meta(t)
+	}
+	if s, m := effect("tok-3", true, false); s.Outcome != settledLanded || m["wake_request"] != "" || m["wake_requested_at"] != "" {
+		t.Fatalf("own runtime: settlement %+v, row %v; want the wake cleared", s, m)
+	}
+	if s, m := effect("tok-3", true, true); s.Outcome != settledRefused || s.Cause != causePremise || m["wake_request"] != "explicit" {
+		t.Fatalf("a newer wake since the pass: settlement %+v, row %v; want refused by the premise, the wake kept", s, m)
+	}
+	if s, m := effect("tok-9", true, false); s.Cause != causeRuntimeNotOwn || m["wake_request"] != "explicit" {
+		t.Fatalf("rekeyed since the pass: settlement %+v, row %v; want refused %s, the wake kept", s, m, causeRuntimeNotOwn)
+	}
+	// The awake heal clears a wake in its own CAS.
+	c := ownRuntimeCase(t, "tok-3", append([]string{"state", "asleep", "sleep_reason", "idle"}, wake...)...)
+	if it := c.decide(); it.Reason != decideAwakeHeal || it.folded()["wake_request"] != "" || it.folded()["state"] != "awake" {
+		t.Fatalf("an asleep row with a wake: %+v, want the awake heal clearing the wake", it)
+	} else if _, set := it.folded()["wake_requested_at"]; !set {
+		t.Fatalf("awake heal patch %v, want wake_requested_at cleared too", it.folded())
+	}
+}

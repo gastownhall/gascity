@@ -210,7 +210,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			}
 			rec.keys = baseRec.keys
 		}},
-		{"waits, claim markers and the circuit breaker", "continuation_claim_nudge_at continuation_claim_nudge_count continuation_claim_nudge_generation continuation_claim_nudge_root continuation_claim_nudge_store_ref continuation_claim_nudge_work execution_claim_nudge_at execution_claim_nudge_count execution_claim_nudge_root execution_claim_nudge_store_ref execution_claim_nudge_work session_circuit_last_observed session_circuit_last_progress session_circuit_last_restart session_circuit_open_restart_count session_circuit_opened_at session_circuit_progress_signature session_circuit_reset_generation session_circuit_restarts session_circuit_state sleep_intent wait_hold wait_lookup_capped_at wait_lookup_capped_label wait_lookup_capped_limit wait_lookup_capped_source", []string{"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced", "cmd/gc/cmd_wait.go:doSessionWait", "internal/session/waits.go:StampWaitLookupCapMetadata", "cmd/gc/idle_nudge.go:writeContinuationClaimMarker", "cmd/gc/execution_backstop.go:writeExecutionClaimMarker", "cmd/gc/session_circuit_breaker.go:sessionCircuitBreaker.metadataLocked"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"waits, claim markers and the circuit breaker", "continuation_claim_nudge_at continuation_claim_nudge_count continuation_claim_nudge_generation continuation_claim_nudge_root continuation_claim_nudge_store_ref continuation_claim_nudge_work execution_claim_nudge_at execution_claim_nudge_count execution_claim_nudge_root execution_claim_nudge_store_ref execution_claim_nudge_token execution_claim_nudge_work session_circuit_last_observed session_circuit_last_progress session_circuit_last_restart session_circuit_open_restart_count session_circuit_opened_at session_circuit_progress_signature session_circuit_reset_generation session_circuit_restarts session_circuit_state sleep_intent wait_hold wait_lookup_capped_at wait_lookup_capped_label wait_lookup_capped_limit wait_lookup_capped_source", []string{"cmd/gc/reconcile_steps_waits.go:clearSessionWaitHoldFenced", "cmd/gc/cmd_wait.go:doSessionWait", "internal/session/waits.go:StampWaitLookupCapMetadata", "cmd/gc/idle_nudge.go:writeContinuationClaimMarker", "cmd/gc/execution_backstop.go:writeExecutionClaimMarker", "cmd/gc/session_circuit_breaker.go:sessionCircuitBreaker.metadataLocked"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			id := fieldRow(t, rec.MemStore, "state", "active", "wait_hold", "true", "sleep_intent", "wait-hold")
 			front := sessionFrontDoor(rec)
 			must(t, clearSessionWaitHoldFenced(front, id))
@@ -516,6 +516,20 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				it, ok := armAwakeHeal(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
 				if !ok || it.folded()["state"] != "awake" {
 					t.Fatalf("the awake heal did not fire: %+v", it)
+				}
+				if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
+					t.Fatal(err)
+				}
+				return c.meta(t)
+			},
+		},
+		"cmd/gc/reconcile_arms_heals.go:armSatisfiedWake": { // D7 rule 2
+			[]string{"state", "active", "wake_request", "explicit", "wake_requested_at", ago(time.Minute)},
+			func(t *testing.T, meta []string) map[string]string {
+				c := ownRuntimeCase(t, "tok-3", meta...)
+				it, ok := armSatisfiedWake(&rowFacts{w: c.w, k: c.k, row: c.w.Census.Rows[c.k], entry: c.a.Snapshot.Entries[c.k]})
+				if !ok || it.Reason != decideSatisfiedWake {
+					t.Fatalf("the satisfied-wake clear did not fire: %+v", it)
 				}
 				if err := c.store.SetMetadataBatch(c.k.ID, it.folded()); err != nil {
 					t.Fatal(err)

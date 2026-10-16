@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -705,6 +706,46 @@ func TestAckedRowOverATokenlessCorpseIsSignaled(t *testing.T) {
 			it := hc.decide()
 			if it.Kind != c.want || c.want == "" && it.Reason != decideLivenessUnknown {
 				t.Fatalf("decideRow = (%q, %q), want kind %q", it.Kind, it.Reason, c.want)
+			}
+		})
+	}
+}
+
+// TestFloorAckOverATokenlessCorpseIsSignaled (CONTRACT v5.10w, §12.2 row
+// 66; mc-4gyej). Kills a floor seat's bare ack over a corpse no token
+// attributes canceled by the floor check (the ack voided, A9 then holding
+// the row over the corpse for good): it is signaled, so its stop finalizes
+// the row and the floor recreates the seat. A floor seat whose own ack sits
+// over a live pane is still canceled (DRAIN-010).
+func TestFloorAckOverATokenlessCorpseIsSignaled(t *testing.T) {
+	bare := []string{"state", "awake", session.DrainAckIncarnationKey, "3", session.DrainAckAtKey, rowAt(-time.Second)}
+	for _, c := range []struct {
+		name   string
+		own    bool // the runtime carries the row's ID (no token)
+		corpse bool
+		want   string // decided reason
+	}{
+		{"a corpse with no identity", false, true, decideDrainSignal},
+		{"a corpse with the row's ID and no token", true, true, decideDrainSignal},
+		{"a live pane with the row's ID and no token", true, false, decideLivenessUnknown},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			hc := newHealCase(t, livenessUnknown, desireNone, bare...)
+			hc.w.Now, hc.w.ObsMaxAge = censusNow, observeMaxAge
+			hc.a.Snapshot.Entries[hc.k].Floor = &floorView{Rank: 0, MinActive: 1}
+			id := runtimeIdentity{Known: true}
+			if c.own {
+				id.SessionID = hc.k.ID
+			}
+			attrs := InventoryAttrs{Identity: id, DeadKnown: true, AllPanesDead: c.corpse}
+			hc.w.Obs = newObserveCache().publish(censusNow, map[string]InventoryAttrs{"s-heal": attrs}, completeBackend("tmux", "s-heal"))
+			hc.w.Observed = observeCensus(hc.w.Obs, hc.w.Census, hc.w.Now, hc.w.ObsMaxAge)
+			if l := hc.w.Observed[hc.k].Liveness; l != livenessUnknown {
+				t.Fatalf("fixture: the census reads %v, want unknown", l)
+			}
+			it := hc.decide()
+			if !strings.HasPrefix(it.Reason, c.want) || c.want == decideDrainSignal && (it.Kind != intentSignalAck || it.Patch["state"] != string(session.StateDraining)) {
+				t.Fatalf("decideRow = (%q, %q) %v, want reason %q", it.Kind, it.Reason, it.Patch, c.want)
 			}
 		})
 	}

@@ -38,12 +38,13 @@ func readStopKeys(meta map[string]string) rawStopKeys {
 }
 
 // v2SignaledUnacked reports a row whose stop request is v2's own: the
-// controller half at the row's generation, with no ack half, an agent's or an
-// operator's. Legacy's rollback guard reads it (v2SignaledStopHeldForAttach,
+// controller half at the row's generation, with no ack half at that
+// generation, an agent's or an operator's (an ack of another incarnation
+// acks nothing of this one's; mc-7i9i7). Legacy's rollback guard reads it (v2SignaledStopHeldForAttach,
 // CONTRACT v5.10v): the accessor's projection, so legacy names no key.
 func v2SignaledUnacked(meta map[string]string) bool {
 	k, gen := readStopKeys(meta), strings.TrimSpace(meta["generation"])
-	return k.rawIntentReason != "" && k.rawIntentIncarnation == gen && k.rawAckIncarnation == ""
+	return k.rawIntentReason != "" && k.rawIntentIncarnation == gen && k.rawAckIncarnation != gen
 }
 
 // stopPhase is how far a stop request has come.

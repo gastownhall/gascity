@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -239,7 +240,10 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	p.memo.refresh(e, env, now, rows, w.Mislabelled)
 	w.SleepPolicies, w.TransportRefused, w.Templates = p.memo.sleepPolicies(cfg, env, rows), p.memo.transport, p.memo.templates.Load()
 
-	laneFed := len(externalReadLegs(k1Env(e, env, w.SuspendedRigPaths, dg), io.Discard)) > 0
+	// The lane-fed check reuses the demand gather's probe stores: building
+	// the demand targets again here (k1Env) cost a whole second demand
+	// build each pass (Gate S fix 2).
+	laneFed := len(externalReadLegs(k1EnvWith(e, env, w.SuspendedRigPaths, dg, w.Demand.ProbeStores), io.Discard)) > 0
 	w.Boot.RecordingSeen = rec != nil || !laneFed
 	p.boot = w.Boot
 	return w, nil
@@ -300,12 +304,26 @@ func gatherGates(g *endpointCapacityGuard, cfg *config.City, rows []censusRow) m
 // demand gather probes.
 func k1Env(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg demandGatherEnv) externalReadsEnv {
 	targets := buildDemandTargets(e.CityName, e.CityPath, env.Cfg, dg.CityStore, dg.RigStores, suspendedRigPaths, dg.OpenSessions, noProbeEnv, io.Discard)
+	return k1EnvWith(e, env, suspendedRigPaths, dg, demandProbeStores(targets))
+}
+
+// demandProbeStores are targets' default scale-check probe stores, named
+// and pool, in target order.
+// residency:allow — the demand targets' own resolved stores, projected:
+// buildDemandTargets resolved each through the residency plan, and this only
+// collects them, as k1Env always did inline.
+func demandProbeStores(targets demandTargets) []beads.Store {
 	var probes []beads.Store
-	for _, t := range append(targets.defaultScaleTargets, targets.defaultNamedScaleTargets...) {
+	for _, t := range append(slices.Clip(targets.defaultScaleTargets), targets.defaultNamedScaleTargets...) {
 		if t.store != nil {
 			probes = append(probes, t.store)
 		}
 	}
+	return probes
+}
+
+// k1EnvWith is k1Env over probe stores already built (demandView.ProbeStores).
+func k1EnvWith(e gatherEnv, env *reconcileEnv, suspendedRigPaths map[string]bool, dg demandGatherEnv, probes []beads.Store) externalReadsEnv {
 	return externalReadsEnv{
 		CityPath: e.CityPath, CityName: e.CityName, Cfg: env.Cfg, CityStore: dg.CityStore, RigStores: dg.RigStores,
 		SuspendedRigPaths: suspendedRigPaths, ProbeStores: probes, Sessions: dg.Sessions,

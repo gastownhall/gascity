@@ -259,8 +259,14 @@ func armAck(r *rowFacts) (intent, bool) {
 	}
 	// The floor check stays after the stale-ack void: that check records
 	// the runtime rest the probing kind needs, so a cancel decided first
-	// would defer at admission (rests-missing).
-	if req.Reason == "" && !req.Operator && r.entry.Floor != nil {
+	// would defer at admission (rests-missing). A floor seat's ack over a
+	// corpse no token attributes is signaled like any other, not canceled:
+	// its stop finalizes the row and the floor recreates the seat (CONTRACT
+	// v5.10w, §12.2 row 66). Liveness unknown here is that case, since A9
+	// holds every other unknown row (ackedOverCorpse). A cancel would void
+	// the ack and A9 would then hold the row over the corpse for good, and no
+	// restart in place can attribute the corpse.
+	if req.Reason == "" && !req.Operator && r.entry.Floor != nil && r.entry.Liveness != livenessUnknown {
 		if r.entry.Liveness == livenessDead {
 			// A dead floor seat proposes nothing (§12.2 row 66): A18's
 			// recycle restarts it in place with the ack still on the row, so

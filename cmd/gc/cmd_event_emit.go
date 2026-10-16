@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -9,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/spf13/cobra"
 )
@@ -64,6 +66,10 @@ the failure object carries the code.
 - bead_payload_refused: --payload on bead.created, bead.updated, bead.closed
   or bead.deleted. Their payload is the bead row; use --bead-payload <id> so
   gc reads it from the store.
+- bead_payload_not_found: --bead-payload names a bead the store it resolves
+  to does not hold (bead.deleted excepted: the event is recorded with its
+  subject alone). Any other failure to read it is reported on stderr and the
+  event is still recorded, without the payload.
 
 --payload attaches arbitrary JSON to any other event type.`,
 		Args: cobra.ExactArgs(1),
@@ -79,7 +85,18 @@ the failure object carries the code.
 				fmt.Fprintf(stderr, "gc event emit: %s\n", refusal.reason) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			finalPayload := eventPayloadForEmit(payload, beadPayload, stderr)
+			finalPayload, missing := eventPayloadForEmit(payload, beadPayload, stderr)
+			if missing != nil && args[0] == events.BeadDeleted {
+				missing = nil // a deleted bead is gone by design: recorded with its subject alone
+			}
+			if missing != nil {
+				reason := fmt.Sprintf("--bead-payload %s: %v; nothing recorded", strings.TrimSpace(beadPayload), missing)
+				if jsonOut {
+					return exitForCode(writeJSONError(stdout, stderr, eventEmitBeadNotFoundCode, reason, 1))
+				}
+				fmt.Fprintf(stderr, "gc event emit: %s\n", reason) //nolint:errcheck // best-effort stderr
+				return errExit
+			}
 			submitted := false
 			if jsonOut {
 				submitted = cmdEventEmitSubmitted(args[0], subject, message, effectiveActor, finalPayload, stderr)
@@ -117,6 +134,7 @@ const cacheActorPrefix = "cache-"
 const (
 	eventEmitReservedActorCode = "reserved_actor"
 	eventEmitBeadPayloadCode   = "bead_payload_refused"
+	eventEmitBeadNotFoundCode  = "bead_payload_not_found"
 )
 
 // beadSnapshotEventTypes are the bead lifecycle types whose payload is a row
@@ -157,41 +175,56 @@ func eventEmitRefusal(eventType, explicitActor, effectiveActor, payload string) 
 	return nil
 }
 
-func eventPayloadForEmit(payload, beadID string, stderr io.Writer) string {
+// eventPayloadForEmit is the event's payload: --payload, or the --bead-payload
+// bead's row. missing is set when no store of the city holds that bead
+// (mc-zg8te): the caller refuses rather than record the event without it.
+// Any other failure to read it is reported and the event goes without it.
+func eventPayloadForEmit(payload, beadID string, stderr io.Writer) (string, error) {
 	if payload == "" || !json.Valid([]byte(payload)) {
 		beadID = strings.TrimSpace(beadID)
 		if beadID == "" {
-			return payload
+			return payload, nil
 		}
 		beadPayload, err := loadEventBeadPayload(beadID)
+		if errors.Is(err, beads.ErrNotFound) {
+			return "", err
+		}
 		if err != nil {
 			fmt.Fprintf(stderr, "gc event emit: bead payload %s: %v\n", beadID, err) //nolint:errcheck // best-effort stderr
 			if payload != "" && !json.Valid([]byte(payload)) {
-				return ""
+				return "", nil
 			}
-			return payload
+			return payload, nil
 		}
-		return string(beadPayload)
+		return string(beadPayload), nil
 	}
-	return payload
+	return payload, nil
 }
 
 func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
-	cityPath, err := resolveCity()
+	ctx, err := resolveContext()
 	if err != nil {
 		return nil, err
 	}
-	scopeRoot, err := eventBeadPayloadScopeRoot()
+	scopeRoot, err := eventBeadPayloadScopeRoot(ctx, cityFlag != "", beadID)
 	if err != nil {
 		return nil, fmt.Errorf("resolving current scope: %w", err)
 	}
-	store, err := openStoreAtForCity(scopeRoot, cityPath)
+	work, err := openStoreAtForCity(scopeRoot, ctx.CityPath)
 	if err != nil {
 		return nil, fmt.Errorf("opening bead store: %w", err)
 	}
-	bead, err := store.Get(beadID)
+	// The bead may live in a relocated class's binding (a session row, a
+	// molecule), not the work store: resolve it across the city's stores.
+	owner, err := cliByIDOwner(ctx.CityPath, beadID, work)
 	if err != nil {
-		return nil, fmt.Errorf("loading bead: %w", err)
+		return nil, fmt.Errorf("resolving bead: %w", err)
+	}
+	bead := owner.Bead
+	if !owner.Read {
+		if bead, err = owner.Store.Get(beadID); err != nil {
+			return nil, fmt.Errorf("loading bead: %w", err)
+		}
 	}
 	payload, err := beads.EncodeBeadEventPayload(bead)
 	if err != nil {
@@ -200,7 +233,49 @@ func loadEventBeadPayload(beadID string) (json.RawMessage, error) {
 	return payload, nil
 }
 
-func eventBeadPayloadScopeRoot() (string, error) {
+// eventBeadPayloadScopeRoot is the work store's scope for --bead-payload.
+// Without --city it is the bead's rig from BEADS_DIR or GC_RIG_ROOT (a hook's
+// environment), else the working directory. With --city it never reaches
+// outside that city (mc-zg8te): the --rig's root; else an inherited
+// BEADS_DIR or GC_RIG_ROOT only when it names the city's root or one of its
+// rig roots (a rig agent's environment names its own city's rig); else the
+// rig the bead's prefix names; else the city itself.
+func eventBeadPayloadScopeRoot(ctx resolvedContext, explicitCity bool, beadID string) (string, error) {
+	inherited, err := inheritedBeadPayloadScopeRoot()
+	if err != nil {
+		return "", err
+	}
+	if !explicitCity {
+		if inherited != "" {
+			return inherited, nil
+		}
+		return os.Getwd()
+	}
+	cfg, cfgErr := loadCityConfig(ctx.CityPath, io.Discard)
+	if ctx.RigName != "" {
+		if cfgErr != nil {
+			return "", cfgErr
+		}
+		if root := rigRootForName(ctx.RigName, cfg.Rigs); root != "" {
+			return cleanAbsPath(resolveStoreScopeRoot(ctx.CityPath, root))
+		}
+		return "", fmt.Errorf("rig %q is not bound in %s", ctx.RigName, ctx.CityPath)
+	}
+	if cfgErr != nil {
+		return cleanAbsPath(ctx.CityPath) // no rig to match: the city itself
+	}
+	if inherited != "" && cityScopeRoots(ctx.CityPath, cfg)[normalizePathForCompare(inherited)] {
+		return inherited, nil
+	}
+	if dir := rigDirForBead(cfg, beadID); dir != "" {
+		return cleanAbsPath(resolveStoreScopeRoot(ctx.CityPath, dir))
+	}
+	return cleanAbsPath(ctx.CityPath)
+}
+
+// inheritedBeadPayloadScopeRoot is the scope a hook's environment names:
+// BEADS_DIR's parent, else GC_RIG_ROOT; empty when neither is set.
+func inheritedBeadPayloadScopeRoot() (string, error) {
 	if beadsDir := strings.TrimSpace(os.Getenv("BEADS_DIR")); beadsDir != "" {
 		// filepath.Clean beadsDir before Dir: a trailing-slash BEADS_DIR
 		// (e.g. "/root/.beads/") makes filepath.Dir return beadsDir itself
@@ -212,7 +287,24 @@ func eventBeadPayloadScopeRoot() (string, error) {
 	if rigRoot := strings.TrimSpace(os.Getenv("GC_RIG_ROOT")); rigRoot != "" {
 		return cleanAbsPath(rigRoot)
 	}
-	return os.Getwd()
+	return "", nil
+}
+
+// cityScopeRoots is the city's root and its bound rigs' roots, compared
+// normalized.
+func cityScopeRoots(cityPath string, cfg *config.City) map[string]bool {
+	roots := map[string]bool{normalizePathForCompare(cityPath): true}
+	for _, rig := range cfg.Rigs {
+		if strings.TrimSpace(rig.Path) == "" {
+			continue
+		}
+		root := resolveStoreScopeRoot(cityPath, rig.Path)
+		if !filepath.IsAbs(root) {
+			root = filepath.Join(cityPath, root)
+		}
+		roots[normalizePathForCompare(root)] = true
+	}
+	return roots
 }
 
 func cleanAbsPath(path string) (string, error) {

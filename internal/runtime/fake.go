@@ -29,16 +29,19 @@ type Fake struct {
 	// IsTracked=true, because the tmux scanner keys tracked-ness by session id,
 	// so they cannot be modeled through OrphanedRuntimes, whose contract is that
 	// its entries are untracked orphans.
-	ExtraRuntimes           []LiveRuntime
-	Zombies                 map[string]bool      // sessions with dead agent processes
-	Attached                map[string]bool      // sessions with attached terminals
-	AttachedSequence        map[string][]bool    // scripted IsAttached results by session
-	AttachedErrors          map[string]error     // per-session IsAttachedWithError errors for testing
-	PeekOutput              map[string]string    // session → canned peek output
-	Activity                map[string]time.Time // session → last activity time
-	StartErrors             map[string]error     // per-session Start errors for testing
-	StopErrors              map[string]error     // per-session Stop errors for testing
-	StopLeavesRunning       map[string]bool      // per-session Stop returns nil without deleting the session
+	ExtraRuntimes    []LiveRuntime
+	Zombies          map[string]bool      // sessions with dead agent processes
+	Attached         map[string]bool      // sessions with attached terminals
+	AttachedSequence map[string][]bool    // scripted IsAttached results by session
+	AttachedErrors   map[string]error     // per-session IsAttachedWithError errors for testing
+	PeekOutput       map[string]string    // session → canned peek output
+	Activity         map[string]time.Time // session → last activity time
+	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
+	// session name.
+	Bindings                map[string]SessionBinding
+	StartErrors             map[string]error // per-session Start errors for testing
+	StopErrors              map[string]error // per-session Stop errors for testing
+	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
 	PendingErrors           map[string]error // per-session Pending errors for testing
 	Responses               map[string][]InteractionResponse
@@ -74,6 +77,18 @@ type Fake struct {
 	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
 	// a provider whose ListRunning may omit live sessions.
 	ListingUnattested bool
+	// TurnScripts script a FullFake's TurnFenceProvider by session name. Every
+	// turn read (ObserveTurn, InterruptTurn's fence read, each WaitTurnEnded
+	// read) takes the next entry, and the last entry repeats; "" means no turn.
+	// A session with no script has no turn in progress.
+	TurnScripts map[string][]string
+	// TurnReadErrors fail turn reads by session name, in order. A nil entry
+	// reads the script.
+	TurnReadErrors map[string][]error
+	// InterruptTurnErrors fail InterruptTurn after a matching fence read.
+	InterruptTurnErrors map[string]error
+	// FencedTurnInterrupts makes InterruptTurn answer Fenced: true.
+	FencedTurnInterrupts bool
 }
 
 var (
@@ -87,17 +102,24 @@ var (
 
 // Call records a single method invocation on [Fake].
 type Call struct {
-	Method    string         // method name (e.g. "Start", "Stop", "SetMeta")
-	Name      string         // session name argument
-	Config    Config         // only set for Start calls
-	Message   string         // only set for Nudge/SendKeys calls (flattened text)
-	Content   []ContentBlock // only set for Nudge calls (structured content)
-	Key       string         // only set for meta calls
-	Value     string         // only set for SetMeta calls
-	Src       string         // only set for CopyTo calls
-	Dst       string         // only set for CopyTo calls
-	RequestID string         // only set for Respond calls
-	Action    string         // only set for Respond calls
+	Method  string         // method name (e.g. "Start", "Stop", "SetMeta")
+	Name    string         // session name argument
+	Config  Config         // only set for Start calls
+	Message string         // only set for Nudge/SendKeys calls (flattened text)
+	Content []ContentBlock // only set for Nudge calls (structured content)
+	// DeliveryKey is set for a Nudge delivered through
+	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
+	DeliveryKey string
+	// Key is set for meta calls, and for a [FullFake]'s turn-fence calls to
+	// the turn they name (empty for ObserveTurn).
+	Key string
+	// Value is set for SetMeta calls, and for a [FullFake]'s InterruptTurn to
+	// what it did: sent, not_current or error.
+	Value     string
+	Src       string // only set for CopyTo calls
+	Dst       string // only set for CopyTo calls
+	RequestID string // only set for Respond calls
+	Action    string // only set for Respond calls
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.

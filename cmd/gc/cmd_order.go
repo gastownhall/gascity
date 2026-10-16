@@ -2045,7 +2045,10 @@ const bdCursorRecentRunsLimit = 256
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
-		Label:         "order:" + orderName,
+		// Keyed on the owned order-run:<name> label (coordclass.CoordinationOwned):
+		// only order dispatch writes it, so no plain bead can crowd the run
+		// records out of this bounded window (the #7766 review).
+		Label:         orders.RunLabel(orderName),
 		IncludeClosed: true,
 		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
@@ -2064,9 +2067,14 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		}
 		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
 	}
-	labelSets := make([][]string, len(beadList))
-	for i, b := range beadList {
-		labelSets[i] = b.Labels
+	// Only a run record's seq is the order's cursor (orders.IsRunRecord): a
+	// plain bead carrying the order:<name> and seq:<n> labels moves nothing
+	// (architecture B v2, the #7766 review).
+	labelSets := make([][]string, 0, len(beadList))
+	for _, b := range beadList {
+		if orders.IsRunRecord(b) {
+			labelSets = append(labelSets, b.Labels)
+		}
 	}
 	return orders.MaxSeqFromLabels(labelSets), nil
 }
