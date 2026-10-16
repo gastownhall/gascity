@@ -64,9 +64,11 @@
 # History protection (#5958). The compactor protects history that may be
 # shared through a Dolt remote and history from before it first saw the
 # database. The watermark is a position, not an author: every commit after it
-# is squashed, whichever city wrote it, so a database several cities reach over
-# loopback is flattened for all of them. Non-loopback hosts are skipped before
-# connecting (no flatten, no GC, no watermark); see #7896.
+# is squashed, whichever city wrote it, so a database several cities write to
+# is flattened for all of them when this city's managed runtime holds it or
+# this city reaches it over loopback. An external endpoint on a non-loopback
+# host is skipped before connecting (no flatten, no GC, no watermark); the
+# managed runtime is compacted whatever GC_DOLT_HOST names it. See #7896.
 #   * Shared-history guard: a database with ANY configured Dolt remote may share
 #     its history with other clones (a team remote, bd's refs/dolt/data, a
 #     federated city), so it is never flattened or force-pushed. It gets a bare

@@ -322,9 +322,11 @@ compact: db=<database> REFUSING flatten: gc-compact-base=<hash> is not an ancest
   gc dolt sql -q "USE <database>; CALL DOLT_TAG('-d', 'gc-compact-base')"
   ```
 
-- If the whole history was grown by this city and should be fully compactable,
-  run `touch <cityPath>/.beads/dolt/<database>/.compact-full-history` before
-  deleting the tag. The next run then sets the tag at root.
+- To make the whole history compactable, run
+  `touch <cityPath>/.beads/dolt/<database>/.compact-full-history` before
+  deleting the tag. The next run then sets the tag at root. Do this only if no
+  other city, clone, or client outside this city has ever written to the
+  database, including before this city started using it.
 
 A database adopted from **another** Gas City city whose compactor already
 flattened it has a flatten commit right after root. Compact treats that
@@ -335,26 +337,61 @@ keep it, create the tag at HEAD before the first compact run:
 
 ## Shared and non-local databases
 
-The compactor only acts on a Dolt server it reaches over loopback
-(`localhost`, `127.x.x.x`, `::1`). What it does to a database therefore depends
-on how each city reaches that database:
+What the compactor does to a database depends on how each city reaches that
+database. A city's own Gas City–managed server is compacted however
+`GC_DOLT_HOST` addresses it, a non-loopback name such as `host.docker.internal`
+included. An external endpoint, meaning a Dolt server the city is configured
+to reach but does not run, is compacted only when its host is loopback: empty,
+`localhost`, `127.x.x.x`, `::1`, or `[::1]`, or the wildcard `0.0.0.0`, `::`,
+or `[::]`. Compact skips an external endpoint on any other host before it
+connects.
 
 | How a city reaches the database | What its compactor does |
 |---|---|
 | Its own bd-owned proxied store (the default for cities created by Gas City 1.5 and later) | Nothing: `gc dolt compact` prints `dolt lifecycle is owned by bd for proxied scopes; nothing to do` |
 | Its own Gas City–managed server, written only by this city | Flattens commits after the watermark, then runs a full GC |
-| Loopback, but other cities write to the same database (shared host, SSH tunnel, port forward) | Flattens **every** city's commits after the watermark into one commit |
-| A non-loopback host (a remote or cloud-hosted Dolt server) | Nothing: no flatten, no GC, no watermark |
-| Loopback, and the database has any Dolt remote | Bare `CALL DOLT_GC()` only, unless `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` |
+| Its own managed server or a loopback external endpoint, and other cities write to the same database (shared host, SSH tunnel, port forward) | Flattens **every** city's commits after the watermark into one commit |
+| An external endpoint on a non-loopback host (a remote or cloud-hosted Dolt server) | Nothing: no flatten, no GC, no watermark |
+| Either flattening row above, when the database has any Dolt remote | Bare `CALL DOLT_GC()` only, unless `GC_DOLT_COMPACT_ALLOW_FEDERATED=1`. A `compact-pending-gc/<database>` marker left by an earlier run still gets its local full GC (see [Databases with remotes](#databases-with-remotes)) |
 
-bd writes commits under the same default author (`beads`) in every city, so
-nothing in the history says which city wrote a commit. The compactor cannot
-leave another city's commits alone.
+Both flattening rows wait for the commit-count threshold. A run flattens only
+once at least `GC_DOLT_COMPACT_THRESHOLD_COMMITS` (default 2000) commits
+follow the watermark; below that it logs `below_threshold` and does not
+flatten (see [Reclaiming a database stranded below the compaction
+threshold](#reclaiming-a-database-stranded-below-the-compaction-threshold)).
 
-### A database several cities share over loopback
+The compactor never filters by author: every commit after the watermark is
+squashed, whoever wrote it. Authorship would not tell the cities apart anyway.
+Gas City sets no per-city commit author on the databases the compactor
+flattens, so bd commits as `beads` unless the writer's environment sets
+`GIT_AUTHOR_NAME`, and the history does not reliably say which city wrote a
+commit.
 
-If you don't want one city to squash the others' history, disable the
-compactor on every city that reaches the shared database over loopback:
+### A database several cities write to
+
+If you don't want one city to squash the others' history, keep the shared
+database out of the compactor in every city that would flatten it: the city
+whose own managed server holds it, and every city that reaches it as a
+loopback external endpoint.
+
+The narrow fix lists the databases the compactor may touch and leaves the
+shared one out. The city's other databases are still compacted:
+
+```toml
+# city.toml
+[[orders.overrides]]
+name = "mol-dog-compactor"
+env = { GC_DOLT_COMPACT_ONLY_DBS = "<database>,<database>" }
+```
+
+The list is an allowlist. A database left off it is never compacted, so add
+each new rig's database when you add the rig. `gc dolt compact --dry-run`
+prints a `compact: db=<database> ...` line for every database it finds. The
+override applies only to the scheduled order. A `gc dolt compact` you run by
+hand does not see it, so pass `--only-db` there.
+
+To stop compaction in a city altogether, disable the order. This stops the
+flatten and the GC for every database in that city, not only the shared one:
 
 ```toml
 # city.toml
@@ -363,22 +400,26 @@ name = "mol-dog-compactor"
 enabled = false
 ```
 
-Cities that reach the database only over a non-loopback host need no change;
-their compactor already skips it.
+A city that reaches the database only as an external endpoint on a
+non-loopback host needs no change; its compactor already skips it. This does
+not cover the city whose own managed server holds the database, which compacts
+it whatever host name the others use.
 
 ### A non-loopback endpoint grows without bound
 
-For a non-loopback host, `gc dolt compact` logs a
+For an external endpoint on a non-loopback host, `gc dolt compact` logs a
 `compact: GC_DOLT_HOST=<host> is not a local ... — skip` line and exits 0
 without connecting, so the order run reports success. `gc doctor`'s
 `dolt-noms-size` check also skips external endpoints. Nothing warns you while
 the history grows.
 
 Every bd write is a Dolt commit, and garbage collection cannot reclaim history
-that is still reachable. In a 2,000-commit test, the database was over 70
-times larger after `dolt gc --full` than after a flatten plus GC. Turning on
-`[maintenance.dolt]` does not shorten history either. Automatic compaction for
-shared and cloud-hosted databases is tracked in
+that is still reachable. In a 2,002-commit replay of the `bd compact` squash,
+recorded in [#7993](https://github.com/gastownhall/gascity/pull/7993), a full
+GC left the database at 4,952 KB while the old history was still reachable,
+and at 548 KB once that history was squashed. Turning on `[maintenance.dolt]`
+does not shorten history either. Automatic compaction for shared and
+cloud-hosted databases is tracked in
 [#7896](https://github.com/gastownhall/gascity/issues/7896).
 
 ### Bound history on a shared or non-local database by hand
@@ -389,14 +430,28 @@ and then hard-resets `main` to the result, with no protection against
 concurrent writers. A write that lands while it runs is lost, so every writer
 must be stopped first.
 
+This needs bd 1.3.0 or newer; check with `gc bd version`. Older bd follows the
+squash with a generational GC only, which reclaims little or no disk space.
+
 1. Agree on a retention window (`<N>` days) with every city that writes to the
    database.
 2. Run `gc stop` in every city that shares the database, and close any other
    `bd` or `dolt sql` client connected to it.
 3. Work from the city whose own Dolt server holds the database, or from any of
-   them if no city manages that server. `gc stop` also stopped that city's
-   server; if the commands below cannot connect, run `gc dolt start` there
-   first.
+   them if no city manages that server. Make sure the server is up before
+   step 4. How depends on who runs it:
+
+   - **That city's Gas City–managed server**: `gc stop` stopped it, and
+     `gc bd` does not start it. Run `gc dolt restart` in that city;
+     `gc dolt start` cannot find a stopped server's port. Do not run
+     `gc start` before step 6: it also restarts the city's agents and orders.
+   - **That city's bd-owned proxied store**: start nothing. bd starts the
+     proxy and its Dolt server on the first `gc bd` command in step 4. Do not
+     run `gc dolt start`, which only prints the proxied no-op line, or
+     `bd dolt start`, which bd 1.3.1 and later refuse in proxied mode.
+   - **A server no city manages** (a shared host or a cloud-hosted Dolt
+     server): `gc stop` did not stop it. If it is down, start it with whatever
+     runs it. Do not run `gc dolt start`; it does not start that server.
 4. Preview, delete the `gc-compact-base` tag if the database has one, then
    compact. Name the store explicitly so `gc bd` does not pick one from your
    working directory: `--rig <rig>` for a rig's store, or `--city <city-path>`
@@ -409,7 +464,21 @@ must be stopped first.
    gc bd --rig <rig> compact --days <N> --force
    ```
 
-5. Restart every city with `gc start`.
+5. Check that the space came back. The `--force` run should print
+   `Running full Dolt GC` and no `dolt gc after compact failed` warning. When
+   bd measures the store, it also prints `Store: <before> → <after>`; the size
+   should have dropped. If the GC failed, run it again:
+
+   ```bash
+   gc bd --rig <rig> sql "CALL DOLT_GC('--full')"
+   ```
+
+   The server's read timeout can cancel this GC too (see
+   [A full GC canceled at the read timeout](#a-full-gc-canceled-at-the-read-timeout)).
+   If it does and you can reach the database's files, follow the
+   [Recovery Procedure](#recovery-procedure) with
+   `dolt gc --full --archive-level=1` as step 3.
+6. Restart every city with `gc start`.
 
 `bd compact` squashes everything older than the window, including history from
 before the `gc-compact-base` watermark. A tag left on a squashed commit keeps
@@ -454,9 +523,9 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   fetches again and compares the remote head immediately before its force
   push. That check catches known drift, but a remote write can still land in
   the short window between fetch and push. The order does nothing for a
-  bd-owned proxied store or a database on a non-loopback host, and a database
-  that several cities share needs care (see **Shared and non-local databases**
-  above).
+  bd-owned proxied store or an external endpoint on a non-loopback host, and a
+  database that several cities share needs care (see **Shared and non-local
+  databases** above).
 - **Mind `orders.max_timeout` if you set one.** The compactor order asks
   for a 24-hour timeout to accommodate serialized full-GC runs on large
   stores. A city-level `orders.max_timeout` below 24h will cap the
