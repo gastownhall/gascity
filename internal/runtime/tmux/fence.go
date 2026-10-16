@@ -580,8 +580,8 @@ func parseInputCommand(args []string) (pasteInput, error) {
 			i++
 		case cmd == "send-keys" && a == "-l":
 			// Everything after -l is text, even an argument that looks
-			// like a flag, read as tmux reads it (literalTextFromArgs).
-			text, err := literalTextFromArgs(args[i+1:])
+			// like a flag, read as tmux reads it (runtime.TmuxLiteralText).
+			text, err := runtime.TmuxLiteralText(args[i+1:])
 			if err != nil {
 				return in, fmt.Errorf("fenced %w", err)
 			}
@@ -605,7 +605,7 @@ func parseInputCommand(args []string) (pasteInput, error) {
 	case cmd == "paste-buffer" && (in.buffer == "" || len(in.keys) > 0):
 		return in, fmt.Errorf("fenced paste-buffer: needs exactly a buffer")
 	case in.literal && in.copy:
-		return in, fmt.Errorf("fenced send-keys -l: needs exactly one text argument")
+		return in, fmt.Errorf("fenced send-keys: -l with -X is not supported")
 	}
 	return in, nil
 }

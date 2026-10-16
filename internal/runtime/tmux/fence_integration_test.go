@@ -211,7 +211,7 @@ const fenceTextE4 = "it's \"q\" a;b c\\;d #{pane_id} $HOME ~ {} %if \tTAB\nLF ü
 func TestFencedNudgeRealTmuxTextIsByteExact(t *testing.T) {
 	p := fenceTestProvider(t, "fx")
 	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-x"}
-	texts := []string{fenceTextE4, fenceTextE4 + ";", "x;", "x;;", `x\;`, "-x", "-l"}
+	texts := []string{fenceTextE4, fenceTextE4 + ";", ";", "x;", "x;;", `x\;`, "-x", "-l", "- item"}
 	deliveries := []struct {
 		name string
 		send func(name, text string) error
@@ -223,14 +223,28 @@ func TestFencedNudgeRealTmuxTextIsByteExact(t *testing.T) {
 		{"debounced", func(name, text string) error { return p.tm.SendKeysDebounced(name, text, 0) }},
 	}
 	for _, d := range deliveries {
-		for i, text := range texts {
-			name := "gc-fence-exact-" + d.name + "-" + strconv.Itoa(i)
-			file := startRawCat(t, p, name, f, nil)
+		// One session per delivery: each text ends the segment its Enter
+		// ends (a nudge clears the input line with C-u before it types).
+		name := "gc-fence-exact-" + d.name
+		file := startRawCat(t, p, name, f, nil)
+		var sent []string
+		for _, text := range texts {
 			if err := d.send(name, text); err != nil {
-				t.Fatalf("%s(%q) = %v", d.name, text, err)
+				t.Errorf("%s(%q) = %v", d.name, text, err)
+				continue
 			}
-			if got := waitTyped(t, file, containsFn("\r")); !strings.HasSuffix(got, text+"\r") {
-				t.Errorf("%s(%q) typed %q", d.name, text, got)
+			sent = append(sent, text)
+			n := len(sent)
+			waitTyped(t, file, func(got string) bool { return strings.Count(got, "\r") >= n })
+		}
+		got := strings.Split(strings.TrimSuffix(typedSoFar(file), "\r"), "\r")
+		if len(got) != len(sent) {
+			t.Errorf("%s typed %q, want %d lines ending in %q", d.name, got, len(sent), sent)
+			continue
+		}
+		for i, text := range sent {
+			if !strings.HasSuffix(got[i], text) {
+				t.Errorf("%s(%q) typed %q", d.name, text, got[i])
 			}
 		}
 	}
