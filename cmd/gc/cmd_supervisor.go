@@ -2500,6 +2500,7 @@ func startOneCity(
 	_ = runPostPrepareStep("starting_bead_event_watcher", func() error {
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
+		cs.startOpSweep(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})

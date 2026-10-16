@@ -1588,6 +1588,7 @@ func runController(
 
 	cs.startBeadEventWatcher(ctx)
 	cs.startAutocloseSweep(ctx)
+	cs.startOpSweep(ctx)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 
