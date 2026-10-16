@@ -160,7 +160,11 @@ func (w *conversationLaneWorker) nextDelay(out lanePassOutcome) (time.Duration, 
 	ws.errors = 0
 	res := out.res
 	// A pass that took something planned its waits and Next before the
-	// Take moved the conversation: pass again at once to re-plan.
+	// Take moved the conversation: pass again at once to re-plan. A take
+	// also ends the busy stretch, so the next turn's backoff starts over.
+	if res.Took != opjournal.TakeNone {
+		ws.busySince = time.Time{}
+	}
 	if res.More || res.Took != opjournal.TakeNone {
 		return 0, false
 	}
