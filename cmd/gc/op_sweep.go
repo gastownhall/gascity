@@ -14,16 +14,27 @@ package main
 //
 // It runs one pass at boot whatever the gates say, which catches ops left
 // open after a gate was turned off, and then a pass every interval while any
-// of the three ops gates the controller latched at boot is not off. A boot
-// pass skipped because the city is quiescent is retried on the ticker until
-// it runs.
+// of the three ops gates the controller latched at boot is not off, or while
+// the last pass left work: an op still within its finish_by, a retryable
+// read, open or close failure, or a truncated read. So with every gate off
+// (the rollback path, DES-O0API §12) the ops in flight at the restart are
+// still closed once their finish_by passes, and the loop then stops. A store
+// that cannot record ops at all (no conditional writes, no namespace) is not
+// left work with every gate off, or it would tick forever. A boot pass
+// skipped because the city is quiescent is retried on the ticker until it
+// runs.
+//
+// With every gate off a pass first asks the sessions store whether any op
+// row is submitted (opjournal.HasSubmittedOps, one keyed read of one row),
+// and only then opens the op store, so a city that never recorded an op does
+// not pay NewStore's capability probe at every controller start.
 
 import (
 	"context"
-	"errors"
+	"fmt"
 	"log"
-	"reflect"
 	"runtime/debug"
+	"strings"
 	"sync"
 	"time"
 
@@ -42,6 +53,8 @@ const (
 	opSweepLimit = 200
 	// opSweepActor stamps the closes the sweeper writes.
 	opSweepActor = "controller:op-sweep"
+	// opSweepLogIDs caps the undecodable ids one summary line prints.
+	opSweepLogIDs = 5
 )
 
 // opSweeper is one controller's op sweeper. Its store is opened lazily and
@@ -54,18 +67,26 @@ type opSweeper struct {
 	interval time.Duration
 	// newTicker starts the pass ticker; tests drive it by hand.
 	newTicker func(time.Duration) (<-chan time.Time, func())
-	// degraded hears every store failure the sweeper degrades past. OJ-2b
-	// wires it to the ops.recording_degraded event; the default logs.
+	// degraded hears every store failure the sweeper degrades past while a
+	// gate is on; it never receives Mode off (with every gate off a failure
+	// is only logged, so recording that is off never reads as degraded).
+	// OJ-2b wires it to the ops.recording_degraded event; the default logs.
 	degraded func(legacyop.Degrade)
+	// logf writes the sweeper's log lines; tests capture them.
+	logf func(format string, args ...any)
 
-	mu      sync.Mutex
-	st      *opjournal.Store
-	stOver  beads.Store
-	booted  bool
-	degLogs map[opSweepDegradeKey]time.Time
+	mu     sync.Mutex
+	st     *opjournal.Store
+	stOver beads.Store
+	booted bool
+	// leftWork reports that the last pass left something a later pass can
+	// finish; with every gate off it keeps the ticker running.
+	leftWork bool
+	logs     map[opSweepLogKey]time.Time
 }
 
-type opSweepDegradeKey struct{ stage, reason string }
+// opSweepLogKey keys the sweeper's rate-limited log lines.
+type opSweepLogKey struct{ stage, reason string }
 
 // newOpSweeper builds the controller's sweeper over its boot-latched gates.
 func (cs *controllerState) newOpSweeper() *opSweeper {
@@ -78,6 +99,7 @@ func (cs *controllerState) newOpSweeper() *opSweeper {
 			t := time.NewTicker(d)
 			return t.C, t.Stop
 		},
+		logf: log.Printf,
 	}
 	s.degraded = s.logDegrade
 	return s
@@ -90,8 +112,8 @@ func (cs *controllerState) startOpSweep(ctx context.Context) {
 	go s.run(ctx)
 }
 
-// run is the sweeper's loop. It returns once the boot pass has run with every
-// gate off, or when ctx ends.
+// run is the sweeper's loop. With every gate off it returns once a pass has
+// run and left no work; it always returns when ctx ends.
 func (s *opSweeper) run(ctx context.Context) {
 	s.safePass()
 	if !s.wantsTicker() {
@@ -113,12 +135,12 @@ func (s *opSweeper) run(ctx context.Context) {
 }
 
 // wantsTicker reports whether another pass is due: the boot pass has not run
-// yet, or a gate is on.
+// yet, the last pass left work, or a gate is on.
 func (s *opSweeper) wantsTicker() bool {
 	s.mu.Lock()
-	booted := s.booted
+	booted, leftWork := s.booted, s.leftWork
 	s.mu.Unlock()
-	return !booted || s.strongestMode() != rollout.Off
+	return !booted || leftWork || s.strongestMode() != rollout.Off
 }
 
 // strongestMode is the strongest of the three ops gates: require over auto
@@ -150,41 +172,119 @@ func (s *opSweeper) safePass() (panicked bool) {
 	return false
 }
 
-// pass opens the op store if it is not open and sweeps it once. A quiescent
-// city is not read; the pass does not count as the boot pass.
+// pass sweeps the op store once and records whether it left work. A
+// quiescent city is not read; the pass does not count as the boot pass. A
+// panicking pass leaves no work, so a bug cannot keep a gates-off ticker
+// alive.
 func (s *opSweeper) pass() {
 	if s.cs.storesQuiescent() {
 		return
 	}
 	s.mu.Lock()
-	s.booted = true
+	s.booted, s.leftWork = true, false
 	s.mu.Unlock()
+	left := s.sweep(s.strongestMode())
+	s.mu.Lock()
+	s.leftWork = left
+	s.mu.Unlock()
+}
+
+// sweep runs one pass under mode, the strongest gate, and reports whether it
+// left work a later pass can finish.
+func (s *opSweeper) sweep(mode rollout.Mode) bool {
+	if mode == rollout.Off && !s.hasStore() {
+		has, err := opjournal.HasSubmittedOps(s.cs.SessionsBeadStore())
+		if err != nil {
+			reason := legacyop.DegradeReason(err)
+			s.fail(mode, legacyop.StageSweep, reason, err)
+			return opSweepRetryable(reason)
+		}
+		if !has {
+			return false
+		}
+	}
 	st, err := s.store()
 	if err != nil {
-		if mode := s.strongestMode(); mode != rollout.Off {
-			countOpSweepFailure()
-			s.degrade(legacyop.Degrade{
-				Mode: mode, Surface: legacyop.SurfaceController, Stage: legacyop.StageOpen,
-				Reason: opStoreOpenReason(err), Err: err,
-			})
-		}
-		return
+		reason := legacyop.DegradeReason(err)
+		s.fail(mode, legacyop.StageOpen, reason, err)
+		return opSweepRetryable(reason)
 	}
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
-	if stats.Closed > 0 || stats.Raced > 0 || stats.Failed > 0 || stats.Truncated || len(stats.Undecodable) > 0 {
-		log.Printf("op-sweep: listed=%d closed=%d pending=%d raced=%d failed=%d truncated=%t undecodable=%v",
-			stats.Listed, stats.Closed, stats.Pending, stats.Raced, stats.Failed, stats.Truncated, stats.Undecodable)
-	}
+	s.logSweep(stats)
+	left := stats.Pending > 0 || stats.Truncated
 	if err != nil {
+		reason := legacyop.DegradeReason(err)
 		if stats.Failed == 0 {
 			// A read failure; Sweep counts each failed close itself.
-			countOpSweepFailure()
+			countOpSweepFailure(legacyop.StageSweep, reason)
 		}
-		s.degrade(legacyop.Degrade{
-			Mode: s.strongestMode(), Surface: legacyop.SurfaceController, Stage: legacyop.StageSweep,
-			Reason: legacyop.DegradeStoreError, Err: err,
-		})
+		s.report(mode, legacyop.StageSweep, reason, err)
+		left = left || opSweepRetryable(reason)
 	}
+	return left
+}
+
+// opSweepRetryable reports whether a failure of reason may clear by itself,
+// so a later pass is worth running: a store error or contention, not a store
+// that lacks conditional writes, a namespace or the op bead type.
+func opSweepRetryable(reason string) bool {
+	return reason == legacyop.DegradeStoreError || reason == legacyop.DegradeContention
+}
+
+// fail counts a pass that could not sweep at all and reports it.
+func (s *opSweeper) fail(mode rollout.Mode, stage, reason string, err error) {
+	countOpSweepFailure(stage, reason)
+	s.report(mode, stage, reason, err)
+}
+
+// report hands a store failure to the degrade hook while a gate is on, and
+// only logs it, rate-limited, with every gate off.
+func (s *opSweeper) report(mode rollout.Mode, stage, reason string, err error) {
+	d := legacyop.Degrade{Mode: mode, Surface: legacyop.SurfaceController, Stage: stage, Reason: reason, Err: err}
+	if mode == rollout.Off {
+		s.logDegrade(d)
+		return
+	}
+	s.degrade(d)
+}
+
+// logSweep logs a pass's summary: at once when it closed, raced or failed
+// something, and once per legacyop.DegradeLogInterval when it only saw a
+// truncated read or rows it cannot decode, which persist from pass to pass.
+func (s *opSweeper) logSweep(stats legacyop.SweepStats) {
+	acted := stats.Closed > 0 || stats.Raced > 0 || stats.Failed > 0
+	if !acted {
+		if !stats.Truncated && len(stats.Undecodable) == 0 {
+			return
+		}
+		condition := fmt.Sprintf("truncated=%t,undecodable=%t", stats.Truncated, len(stats.Undecodable) > 0)
+		if !s.logDue(opSweepLogKey{stage: "summary", reason: condition}) {
+			return
+		}
+	}
+	s.logf("op-sweep: listed=%d closed=%d pending=%d raced=%d failed=%d truncated=%t undecodable=%d%s",
+		stats.Listed, stats.Closed, stats.Pending, stats.Raced, stats.Failed, stats.Truncated,
+		len(stats.Undecodable), opSweepIDs(stats.Undecodable))
+}
+
+// opSweepIDs renders the first opSweepLogIDs ids, and how many it left out.
+func opSweepIDs(ids []string) string {
+	if len(ids) == 0 {
+		return ""
+	}
+	shown := ids[:min(len(ids), opSweepLogIDs)]
+	out := " [" + strings.Join(shown, " ") + "]"
+	if more := len(ids) - len(shown); more > 0 {
+		out += fmt.Sprintf(" (+%d more)", more)
+	}
+	return out
+}
+
+// hasStore reports whether an op store is cached.
+func (s *opSweeper) hasStore() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.st != nil
 }
 
 // store returns the cached op store, opening it over the current
@@ -205,36 +305,24 @@ func (s *opSweeper) store() (*opjournal.Store, error) {
 	return st, nil
 }
 
-// sameBeadStore reports whether a and b are the same store value, without
-// panicking on a store type that is not comparable.
-func sameBeadStore(a, b beads.Store) bool {
-	if a == nil || b == nil {
-		return a == nil && b == nil
-	}
-	ta, tb := reflect.TypeOf(a), reflect.TypeOf(b)
-	if ta != tb || !ta.Comparable() {
-		return false
-	}
+// sameBeadStore reports whether a and b are the same store value. Stores are
+// comparable by convention (the codebase keys maps by beads.Store); one that
+// is not, which would make == panic, reads as a different store, so the op
+// store is reopened over it rather than the pass failing.
+func sameBeadStore(a, b beads.Store) (same bool) {
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
 	return a == b
 }
 
-// opStoreOpenReason classifies an opjournal.NewStore failure as a degrade
-// reason.
-func opStoreOpenReason(err error) string {
-	switch {
-	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
-		return legacyop.DegradeConditionalWritesUnsupported
-	case errors.Is(err, opjournal.ErrNoNamespace):
-		return legacyop.DegradeNoNamespace
-	default:
-		return legacyop.DegradeStoreError
-	}
-}
-
 // countOpSweepFailure counts a pass that could not sweep at all, beside the
-// per-op counts legacyop.Sweep records.
-func countOpSweepFailure() {
-	telemetry.RecordOpRecord(context.Background(), "", legacyop.SurfaceController, legacyop.StageSweep, legacyop.ResultFailed, "")
+// per-op counts legacyop.Sweep records, with the failure's degrade reason
+// class in unrecorded_reason so the metric says why the sweeper fails.
+func countOpSweepFailure(stage, reason string) {
+	telemetry.RecordOpRecord(context.Background(), "", legacyop.SurfaceController, stage, legacyop.ResultFailed, reason)
 }
 
 // degrade hands d to the degrade hook.
@@ -244,22 +332,27 @@ func (s *opSweeper) degrade(d legacyop.Degrade) {
 	}
 }
 
-// logDegrade is the default degrade hook: one log line per (stage, reason)
-// per legacyop.DegradeLogInterval.
+// logDegrade is the default degrade hook, and the only report of a failure
+// with every gate off: one log line per (stage, reason) per
+// legacyop.DegradeLogInterval.
 func (s *opSweeper) logDegrade(d legacyop.Degrade) {
-	key := opSweepDegradeKey{stage: d.Stage, reason: d.Reason}
+	if s.logDue(opSweepLogKey{stage: d.Stage, reason: d.Reason}) {
+		s.logf("op-sweep: op journal degraded: mode=%s stage=%s reason=%s: %v", d.Mode, d.Stage, d.Reason, d.Err)
+	}
+}
+
+// logDue reports whether the line keyed by key is due, at most once per
+// legacyop.DegradeLogInterval, and marks it logged when it is.
+func (s *opSweeper) logDue(key opSweepLogKey) bool {
 	now := s.clk.Now()
 	s.mu.Lock()
-	last, seen := s.degLogs[key]
-	due := !seen || !now.Before(last.Add(legacyop.DegradeLogInterval))
-	if due {
-		if s.degLogs == nil {
-			s.degLogs = map[opSweepDegradeKey]time.Time{}
-		}
-		s.degLogs[key] = now
+	defer s.mu.Unlock()
+	if last, seen := s.logs[key]; seen && now.Before(last.Add(legacyop.DegradeLogInterval)) {
+		return false
 	}
-	s.mu.Unlock()
-	if due {
-		log.Printf("op-sweep: op journal degraded: mode=%s stage=%s reason=%s: %v", d.Mode, d.Stage, d.Reason, d.Err)
+	if s.logs == nil {
+		s.logs = map[opSweepLogKey]time.Time{}
 	}
+	s.logs[key] = now
+	return true
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
 
@@ -73,12 +74,12 @@ func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 	gates := strings.Join(on, ", ")
 	store, err := c.open()
 	if err != nil {
-		return c.cannotRecord(r, gates, require, "store_error", fmt.Errorf("opening the city store: %w", err))
+		return c.cannotRecord(r, gates, require, legacyop.DegradeStoreError, fmt.Errorf("opening the city store: %w", err))
 	}
 	defer func() { _ = closeBeadStoreHandle(store) }()
 	st, err := opjournal.NewStore(beads.SessionStore{Store: c.sessions(store)}, c.clk)
 	if err != nil {
-		return c.cannotRecord(r, gates, require, opStoreOpenReason(err), err)
+		return c.cannotRecord(r, gates, require, legacyop.DegradeReason(err), err)
 	}
 	ops, _, _, err := st.ListOpenLegacy(opSweepLimit)
 	if err != nil {
@@ -104,7 +105,9 @@ func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("ops recording on (%s); %d open legacy op(s) expired more than %s ago (oldest finish_by %s): the controller's op sweeper is not closing them",
 			gates, stale, opsRecordingStaleAfter, oldest.UTC().Format(time.RFC3339))
-		r.FixHint = "check that the controller is running and look for op-sweep lines in its log"
+		r.FixHint = "check that the controller is running and look for op-sweep lines in its log; " +
+			"restart the controller if the [ops] gates changed since it started (it latches them at boot, " +
+			"while each CLI reads them per process)"
 		return r
 	}
 	r.Message = fmt.Sprintf("ops recording on (%s): the sessions store can record ops", gates)
@@ -142,6 +145,19 @@ func (c *opsRecordingDoctorCheck) cannotRecord(r *doctor.CheckResult, gates stri
 	}
 	r.Message = fmt.Sprintf("ops recording on (%s) but the sessions store cannot record ops (%s): %s", gates, reason, effect)
 	r.Details = append(r.Details, err.Error())
-	r.FixHint = "use a bd with conditional writes (--if-revision) and an id prefix for the sessions store, or set the ops gates to off"
+	r.FixHint = opsRecordingRemedy(reason)
 	return r
+}
+
+// opsRecordingRemedy is the remedy for a sessions store that cannot record
+// ops for reason.
+func opsRecordingRemedy(reason string) string {
+	switch reason {
+	case legacyop.DegradeConditionalWritesUnsupported:
+		return "use a sessions store with conditional writes (for example a bd that supports --if-revision), or set the ops gates to off"
+	case legacyop.DegradeNoNamespace:
+		return "configure an id prefix for the sessions store, or set the ops gates to off"
+	default:
+		return "check that the sessions store is reachable"
+	}
 }
