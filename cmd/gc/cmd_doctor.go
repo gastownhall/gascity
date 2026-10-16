@@ -310,6 +310,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		// expired legacy ops only once that read finds one; during a store
 		// outage it reports the outage too, beside the preflight's line.
 		registerCityStoreCheck(newOpsRecordingDoctorCheck(cityPath, cfg, opts.RolloutFlags, opts.RolloutResolveErr))
+		registerCityStoreCheck(newConversationLanesDoctorCheck(cityPath, cfg))
 		register(doctor.NewConfigRefsCheck(cfg, cityPath))
 		register(doctor.NewStaleLocalPackDirCheck(cfg.Packs, cfg.Imports, cfg.DefaultRigImports, cityPath, cfg.Rigs...))
 		register(doctor.NewPreStartScriptsCheck(cfg))
