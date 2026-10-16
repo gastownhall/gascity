@@ -473,3 +473,25 @@ func TestControlPlaneGateThroughRun(t *testing.T) {
 		t.Fatal("run() left the gate exemption set")
 	}
 }
+
+// TestControlPlaneGateExemptsDoctorThroughRun is D12's exemption wired through
+// run(): gc doctor resolves the city, so it reaches the gate, and on a
+// malformed descriptor it still runs its checks. The exempt invocation is
+// still marked a worker site, so it can neither act nor dial.
+func TestControlPlaneGateExemptsDoctorThroughRun(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := newDoctorSelectorCity(t)
+	prependDoctorJSONStubBinaries(t, "tmux", "git", "jq", "pgrep", "lsof")
+	writeControlPlaneBytes(t, cityDir, []byte("schema = ["))
+
+	code, payload, stderr := runDoctorJSON(t, cityDir, "--check", "city-structure")
+	if payload.Error != nil {
+		t.Fatalf("gc doctor refused on a malformed descriptor: code=%d err=%+v stderr=%s", code, payload.Error, stderr)
+	}
+	if len(payload.Results) != 1 || payload.Results[0].Name != "city-structure" {
+		t.Fatalf("gc doctor did not run its check: code=%d payload=%+v stderr=%s", code, payload, stderr)
+	}
+	if !workerSiteProcess.Load() {
+		t.Fatal("the exempt invocation was not marked a worker site")
+	}
+}

@@ -605,7 +605,13 @@ type resolvedContext struct {
 	CityPath string        // absolute path to city root (empty when Remote is set)
 	RigName  string        // rig name (empty if not in a rig context)
 	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
-	Plane    controlPlane  // the city's plane: Local, or Worker when it holds .gc/control-plane.toml
+	// Plane is the city's plane: Local, or Worker when it holds
+	// .gc/control-plane.toml. It is authoritative only when the resolution
+	// succeeded without the gate exemption: for an exempt command on a
+	// descriptor gc cannot use it stays the zero value (Local) while every
+	// seam treats the city as a worker site. Readers that decide behavior
+	// use onWorkerSite(CityPath).
+	Plane controlPlane
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an

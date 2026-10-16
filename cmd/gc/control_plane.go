@@ -367,6 +367,15 @@ func refuseControllerOnWorkerSite(cityPath string) error {
 	return nil
 }
 
+// refuseCityStartOnWorkerSite is refuseControllerOnWorkerSite for one start
+// attempt of a long-lived host (the supervisor's per-city start). It drops
+// cityPath's cached plane first, so a descriptor an operator has since added
+// or removed decides this attempt instead of the plane cached at the first.
+func refuseCityStartOnWorkerSite(cityPath string) error {
+	forgetControlPlane(cityPath)
+	return refuseControllerOnWorkerSite(cityPath)
+}
+
 // refuseSupervisorOnWorkerSite refuses `gc supervisor run`, `start` and
 // `install` in a box. The supervisor is machine-wide, so the city it is
 // judged by is the one this invocation's --city flag, city environment,

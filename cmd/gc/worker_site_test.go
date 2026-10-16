@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -814,12 +815,26 @@ func TestWorkerSiteSupervisorStartAndInstallRefuse(t *testing.T) {
 
 // TestWorkerSiteSupervisorRefusesToStartAWorkerSiteCity is the supervisor's
 // per-city start: a registered city holding a descriptor is refused before
-// any of its init runs, whatever city the supervisor was started in.
+// any of its init runs, whatever city the supervisor was started in. The
+// process cached the city as Local before the descriptor was written, so the
+// start attempt must read the file as it is now.
 func TestWorkerSiteSupervisorRefusesToStartAWorkerSiteCity(t *testing.T) {
 	resetControlPlaneForTest(t)
 	t.Setenv("GC_HOME", t.TempDir())
 	cityDir := newWorkerSiteCity(t)
 	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
+	// Cache the city as Local with the descriptor moved aside, then put it
+	// back without telling the cache.
+	descriptorPath := filepath.Join(cityDir, citylayout.ControlPlaneDescriptorPath)
+	if err := os.Rename(descriptorPath, descriptorPath+".aside"); err != nil {
+		t.Fatal(err)
+	}
+	if plane, err := controlPlaneFor(cityDir); err != nil || plane.Worker() {
+		t.Fatalf("controlPlaneFor without the descriptor = (%+v, %v), want Local", plane, err)
+	}
+	if err := os.Rename(descriptorPath+".aside", descriptorPath); err != nil {
+		t.Fatal(err)
+	}
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
 	if err := reg.Register(cityDir, "box-city"); err != nil {
 		t.Fatal(err)
@@ -900,5 +915,56 @@ func TestWorkerSiteV2DrainAckSucceedsOnItsRowAck(t *testing.T) {
 				t.Fatalf("stderr = %q, want the not-applicable warning", stderr.String())
 			}
 		})
+	}
+}
+
+// TestWorkerSiteStorageFunnelFailsClosedOnAMalformedDescriptor: the storage
+// funnel fails closed on a descriptor that does not decode. It opens and
+// creates no binding in the box, and the relocated class refuses with the
+// descriptor error as a standing refusal.
+func TestWorkerSiteStorageFunnelFailsClosedOnAMalformedDescriptor(t *testing.T) {
+	resetControlPlaneForTest(t)
+	bindingRoot := filepath.Join(t.TempDir(), "store")
+	cityPath := oneShotCLICity(t, bindingRoot)
+	stubInfraControllerPing(t, 0)
+	captureCLIStorageStderr(t)
+	writeControlPlaneBytes(t, cityPath, []byte("schema = ["))
+
+	routes := cliStorageRoutes(cityPath)
+	if _, err := os.Stat(bindingRoot); err == nil {
+		t.Fatal("the funnel created the binding root on a malformed descriptor")
+	}
+	store, relocated := routes.storeFor(coordclassFor(config.BeadClassSessions))
+	if !relocated {
+		t.Fatal("sessions resolved to the work store")
+	}
+	_, err := store.Get("any-1")
+	var descErr *errControlPlaneDescriptor
+	if !errors.As(err, &descErr) || !storeref.IsStandingRefusal(err) {
+		t.Fatalf("sessions Get = %v, want a standing descriptor refusal", err)
+	}
+	if !strings.Contains(err.Error(), "control-plane descriptor") {
+		t.Fatalf("err = %v", err)
+	}
+}
+
+// TestWorkerSiteCityStartRereadsTheDescriptor is the supervisor's per-city
+// start after an operator removes a stray descriptor: the refusal is decided
+// from the file as it is now, not from the plane the process cached.
+func TestWorkerSiteCityStartRereadsTheDescriptor(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := newWorkerSiteCity(t)
+	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
+	if err := refuseCityStartOnWorkerSite(cityDir); !errors.Is(err, errWorkerSiteRefusesController) {
+		t.Fatalf("refuseCityStartOnWorkerSite with the descriptor = %v, want the refusal", err)
+	}
+	if err := os.Remove(filepath.Join(cityDir, citylayout.ControlPlaneDescriptorPath)); err != nil {
+		t.Fatal(err)
+	}
+	if err := refuseCityStartOnWorkerSite(cityDir); err != nil {
+		t.Fatalf("refuseCityStartOnWorkerSite after the descriptor was removed = %v, want nil", err)
+	}
+	if workerSiteProcess.Load() {
+		t.Fatal("the per-city start check marked the process a worker site")
 	}
 }
