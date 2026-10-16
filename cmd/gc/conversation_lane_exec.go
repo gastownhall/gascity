@@ -76,8 +76,9 @@ type conversationLaneExec struct {
 	idle    func(nudgeTarget, worker.LiveObservation) bool
 	// live is the handle the last probe resolved; Deliver types through it.
 	live worker.Handle
-	// lastCaps and capsRead are the last Probe's capabilities, which
-	// Reprobe reuses instead of reading the runtime row again.
+	// lastCaps and capsRead are the capabilities the first Probe read,
+	// which later probes of the pass and its re-probes reuse instead of
+	// reading the runtime row again.
 	lastCaps opjournal.Caps
 	capsRead bool
 }
@@ -88,10 +89,18 @@ var _ opjournal.Executor = (*conversationLaneExec)(nil)
 func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversationLaneExec {
 	e := &conversationLaneExec{deps: deps, info: info, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, info), budget: laneProbeBudget}
 	e.observe = func(t nudgeTarget) (worker.LiveObservation, error) {
-		if t.sessionName == "" {
+		switch {
+		case e.info.ID != "":
+			// By the row's bead id, which the controller's cache holds, so
+			// a busy re-probe reads no row from the backing store. The
+			// session name is no bead id: resolving it as one misses the
+			// cache.
+			return workerObserveSessionTargetWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg, e.info.ID)
+		case t.sessionName == "":
 			return workerObserveNudgeTarget(t, e.deps.sessions, e.deps.sp)
+		default:
+			return workerObserveSessionTargetWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg, t.sessionName)
 		}
-		return workerObserveSessionTargetWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg, t.sessionName)
 	}
 	e.matches = func(t nudgeTarget, obs worker.LiveObservation) (bool, error) {
 		return nudgeTargetLiveGenerationMatches(t, obs, e.deps.sp)
@@ -112,25 +121,25 @@ func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversation
 	return e
 }
 
-// Probe implements opjournal.Executor: the runtime's caps, then one bounded
-// look at the runtime (laneLook).
+// Probe implements opjournal.Executor: the runtime's caps, read once per
+// executor (one pass), then one bounded look at the runtime (laneLook).
 func (e *conversationLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
-	caps, err := e.caps(conv)
-	if err != nil {
-		return opjournal.Probe{}, err
-	}
-	e.lastCaps, e.capsRead = caps, true
-	return e.probe(ctx, conv, caps)
-}
-
-// Reprobe is Probe without reading any row: it reuses the last Probe's caps,
-// so a host re-probing a busy runtime on its backoff costs no store read
-// (DES-O1 §4.3). Before any Probe it is Probe.
-func (e *conversationLaneExec) Reprobe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
 	if !e.capsRead {
-		return e.Probe(ctx, conv)
+		caps, err := e.caps(conv)
+		if err != nil {
+			return opjournal.Probe{}, err
+		}
+		e.lastCaps, e.capsRead = caps, true
 	}
 	return e.probe(ctx, conv, e.lastCaps)
+}
+
+// Reprobe is Probe for a host re-probing a busy runtime on its backoff
+// (DES-O1 §4.3): it reuses the caps the pass's Probe read and observes the
+// runtime by the row's bead id through the cached sessions store, so over
+// the controller's cache it reads nothing from the backing store.
+func (e *conversationLaneExec) Reprobe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
+	return e.Probe(ctx, conv)
 }
 
 // probe is one look at the runtime under caps, the whole look bounded by

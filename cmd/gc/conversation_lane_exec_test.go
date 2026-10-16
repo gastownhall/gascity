@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1081,5 +1082,99 @@ func TestLaneExecReprobeReadsNoRow(t *testing.T) {
 		if q.Label == opjournal.LabelOp {
 			t.Fatalf("the re-probe listed op rows: %+v", q)
 		}
+	}
+}
+
+// laneCachedFixture is a fixture whose sessions store is a primed cache over
+// a backing that logs every read, the executor wired as the host wires it:
+// lookups through the cache, the view and the op rows live.
+type laneCachedFixture struct {
+	*laneFixture
+	cache *beads.CachingStore
+	mu    *sync.Mutex
+	gets  *[]string
+	lists *[]beads.ListQuery
+}
+
+func newLaneCachedFixture(t *testing.T) *laneCachedFixture {
+	t.Helper()
+	cf := &laneCachedFixture{mu: &sync.Mutex{}, gets: &[]string{}, lists: &[]beads.ListQuery{}}
+	backing := laneReadLog{laneTestStore: newLaneTestStore(), mu: cf.mu, gets: cf.gets, lists: cf.lists}
+	cf.cache = beads.NewCachingStore(backing, nil)
+	if err := cf.cache.Prime(context.Background()); err != nil {
+		t.Fatalf("priming the cache: %v", err)
+	}
+	cf.laneFixture = newLaneFixtureOver(t, cf.cache)
+	return cf
+}
+
+// deps are the executor's dependencies as the host builds them.
+func (cf *laneCachedFixture) deps(st *opjournal.Store) laneExecDeps {
+	d := cf.laneFixture.deps(st)
+	d.sessions = cf.cache
+	return d
+}
+
+// backingReads drains and returns the reads that reached the backing.
+func (cf *laneCachedFixture) backingReads() (gets []string, lists []beads.ListQuery) {
+	cf.mu.Lock()
+	defer cf.mu.Unlock()
+	gets, lists = *cf.gets, *cf.lists
+	*cf.gets, *cf.lists = nil, nil
+	return gets, lists
+}
+
+// TestLaneExecReprobeOverCacheReadsNoBacking proves a re-probe of a busy
+// runtime, with the production executor over the controller's primed cache,
+// reads nothing from the backing store (DES-O1 §4.3).
+func TestLaneExecReprobeOverCacheReadsNoBacking(t *testing.T) {
+	cf := newLaneCachedFixture(t)
+	st := cf.laneStore(t)
+	v, info := cf.view(t)
+	e := newConversationLaneExec(cf.deps(st), info)
+	e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
+	if p, err := e.Probe(context.Background(), v); err != nil || !p.Running || p.Boundary != opjournal.TriNo {
+		t.Fatalf("Probe = %+v, %v; want running and busy", p, err)
+	}
+	cf.backingReads()
+	for range 3 {
+		p, err := e.Reprobe(context.Background(), v)
+		if err != nil || !laneProbeStillBusy(p) {
+			t.Fatalf("Reprobe = %+v, %v; want the runtime still busy", p, err)
+		}
+	}
+	if gets, lists := cf.backingReads(); len(gets) != 0 || len(lists) != 0 {
+		t.Fatalf("re-probes reached the backing: gets %q, lists %+v", gets, lists)
+	}
+}
+
+// TestLaneExecBusyPassOverCacheReads proves a busy full pass over the
+// controller's primed cache reads the backing only for what it reads live:
+// the view's session row, the op list, the lane's runtime row, and the
+// runtime row's host stamp once for the executor's caps. Resolving the
+// runtime goes through the cache.
+func TestLaneExecBusyPassOverCacheReads(t *testing.T) {
+	cf := newLaneCachedFixture(t)
+	st := cf.laneStore(t)
+	l := cf.lane(t, st)
+	cf.propose(t, st, cf.msg("k1", opjournal.RolePrompt, "hi"))
+	runtimeRow, err := opjournal.RuntimeRowID(st.Prefix(), cf.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cf.backingReads()
+	v, info := cf.view(t)
+	e := newConversationLaneExec(cf.deps(st), info)
+	e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
+	res, err := l.Pass(context.Background(), v, e)
+	if err != nil || !res.Busy {
+		t.Fatalf("Pass = %+v, %v; want a busy pass", res, err)
+	}
+	gets, lists := cf.backingReads()
+	if want := []string{cf.id, runtimeRow, runtimeRow}; !slices.Equal(gets, want) {
+		t.Fatalf("backing gets = %q, want %q", gets, want)
+	}
+	if len(lists) != 1 || lists[0].Metadata["gc.op.open"] != cf.id {
+		t.Fatalf("backing lists = %+v, want the conversation's op list once", lists)
 	}
 }
