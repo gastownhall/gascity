@@ -380,6 +380,8 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 // escalatesNext reports whether the engine's next action on s, given its
 // pacing, is the terminal escalation (exhausted): the attempts are spent, or a
 // nudge is due with no content to deliver, which the engine escalates at once.
+// The second mirrors runNudgeBackstop's empty-content shortcut; change the two
+// in lockstep.
 func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
 	switch decideBackstopAction(attempts, last, p.now) {
 	case backstopActionExhausted:
@@ -480,7 +482,9 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 // configured (stalledPoolClaimNudgeFor, the claim backstop's fallback): its
 // escalation is vetoed, so with nothing to send it would wait at its prompt
 // forever. A seat seen started on a pass whose stamp write failed gets no
-// default; escalatesNext holds it until the stamp lands.
+// default; escalatesNext holds it until the stamp lands. A started seat whose
+// template names no configured agent gets no default either, and is held as
+// executing, as in the stamp-failure case.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
 	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
 		return stalledPoolClaimNudgeFor(p.cfg, s)

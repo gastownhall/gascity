@@ -1115,7 +1115,8 @@ func TestExecutionBackstopKeepsTheStampAcrossAOnePassClaimGap(t *testing.T) {
 // TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp (mc-muv2x).
 // Kills a stamp outliving the incarnation or claim it names: a stamp of the
 // previous incarnation, or of this incarnation's earlier claim, with no step
-// started for the current one, is no evidence, and the seat escalates.
+// started for the current one, is no evidence. It earns no pool default nudge,
+// and the seat escalates.
 func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
 	for name, stamp := range map[string]func(f *executionBackstopFixture) string{
 		"another incarnation": func(f *executionBackstopFixture) string { return "incarnation-1|" + f.work.ID },
@@ -1131,6 +1132,9 @@ func TestExecutionBackstopIgnoresAnotherIncarnationsStartedStamp(t *testing.T) {
 			f.tickStale(t)
 			if len(f.drained) != 1 {
 				t.Fatalf("with only a stamp of %s: drains %v, want one escalation", name, f.drained)
+			}
+			if got := f.nudgesDelivered(); len(got) != 0 {
+				t.Fatalf("with only a stamp of %s: nudges %q, want none", name, got)
 			}
 		})
 	}
