@@ -68,6 +68,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
 	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),
 	"TurnInterruptCapabilityProvider": reflect.TypeFor[runtime.TurnInterruptCapabilityProvider](),
+	"TurnObservationProvider":         reflect.TypeFor[runtime.TurnObservationProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
 }
 

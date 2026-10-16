@@ -72,6 +72,50 @@ func (sc *sessionConn) interrupt(name string, cancelTimeout time.Duration) error
 		return nil
 	}
 
+	return sc.cancelAndSettle(name, sessionID, idleCh, replies, cancelTimeout)
+}
+
+// interruptTurn is interrupt aimed at turn turnID. In one critical section of
+// mu it checks that turnID is the running turn and takes that turn's idle
+// channel and outstanding permission requests, so nothing it does afterwards
+// can reach another turn. When turnID is not running it sends nothing, not
+// even permission replies, and returns a *runtime.TurnNotCurrentError. When
+// it is, the cancel, settle and SIGINT fallback run on a goroutine the
+// connection owns, and interruptTurn returns at once. A turn that does not
+// settle is logged there.
+func (sc *sessionConn) interruptTurn(name, turnID string, cancelTimeout time.Duration) error {
+	sc.mu.Lock()
+	if sc.drained {
+		sc.mu.Unlock()
+		return errACPConnClosed(name)
+	}
+	if sc.currentTurn == nil || sc.currentTurn.ID != turnID {
+		current := sc.turnStateLocked()
+		sc.mu.Unlock()
+		return &runtime.TurnNotCurrentError{Session: name, TurnID: turnID, Current: current}
+	}
+	sc.ensureIdleChannelLocked()
+	// The running turn owns this channel and every held permission request:
+	// the turn's end closes the channel and cancels the requests under mu.
+	idleCh := sc.idleCh
+	sessionID := sc.sessionID
+	outstanding := sc.takePermissionsLocked()
+	sc.mu.Unlock()
+
+	replies := encodeCanceledReplies(outstanding)
+	go func() {
+		if err := sc.cancelAndSettle(name, sessionID, idleCh, replies, cancelTimeout); err != nil {
+			fmt.Fprintf(os.Stderr, "acp: interrupt of turn %q: %v\n", turnID, err)
+		}
+	}()
+	return nil
+}
+
+// cancelAndSettle sends the canceled permission replies and session/cancel
+// for the turn behind idleCh, then waits up to cancelTimeout for it to end and
+// falls back to SIGINT, as interrupt documents. Every step is keyed to idleCh,
+// so none reaches a later turn.
+func (sc *sessionConn) cancelAndSettle(name, sessionID string, idleCh <-chan struct{}, replies [][]byte, cancelTimeout time.Duration) error {
 	// A goroutine writes the replies and the cancel, so the wait below stays
 	// bounded even if the agent has stopped reading its stdin.
 	go sc.cancelTurn(name, sessionID, idleCh, replies)

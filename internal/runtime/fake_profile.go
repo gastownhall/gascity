@@ -69,6 +69,7 @@ type ProfileBackend interface {
 	SessionRosterProvider
 	TurnEventProvider
 	TurnFenceProvider
+	TurnObservationProvider
 	UnattendedSessionStopper
 }
 
@@ -81,7 +82,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileTmux:
 		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
 	case ProfileSubprocess:
 		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
 	case ProfileHerdr:
@@ -180,6 +181,8 @@ type (
 		ProcessTableScanner
 		SessionEventProvider
 		TurnEventProvider
+		TurnFenceProvider
+		TurnObservationProvider
 		freshTrait
 		sidecarTrait
 		sleepTrait
@@ -518,6 +521,54 @@ func (f FullFake) readTurnLocked(name string) (st TurnState, exhausted bool, err
 		f.TurnScripts[name] = script[1:]
 	}
 	return TurnState{TurnID: script[0]}, len(script) == 1, nil
+}
+
+// TurnCapabilities implements [TurnObservationProvider] from the fake's
+// TurnCapabilityScripts.
+func (f FullFake) TurnCapabilities(name string) TurnCapabilities {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return popScript(f.TurnCapabilityScripts, name)
+}
+
+// TurnHistory implements [TurnObservationProvider]: the next TurnHistoryErrors
+// entry, else the next TurnHistoryScripts entry, stamped now when it carries
+// no ObservedAt. A broken fake's read fails.
+func (f FullFake) TurnHistory(ctx context.Context, name string) (TurnHistory, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TurnHistory", Name: name})
+	if err := ctx.Err(); err != nil {
+		return TurnHistory{}, err
+	}
+	if f.broken {
+		return TurnHistory{}, ErrRuntimeUnavailable
+	}
+	if errs := f.TurnHistoryErrors[name]; len(errs) > 0 {
+		f.TurnHistoryErrors[name] = errs[1:]
+		if errs[0] != nil {
+			return TurnHistory{}, errs[0]
+		}
+	}
+	h := popScript(f.TurnHistoryScripts, name)
+	if h.ObservedAt.IsZero() {
+		h.ObservedAt = time.Now()
+	}
+	return h, nil
+}
+
+// popScript returns name's next scripted entry, the zero value when it has
+// none, and keeps the last entry to repeat. The caller holds the fake's lock.
+func popScript[T any](scripts map[string][]T, name string) T {
+	script := scripts[name]
+	if len(script) == 0 {
+		var zero T
+		return zero
+	}
+	if len(script) > 1 {
+		scripts[name] = script[1:]
+	}
+	return script[0]
 }
 
 func (f FullFake) record(method, name string) {

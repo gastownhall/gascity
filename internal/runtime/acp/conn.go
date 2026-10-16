@@ -33,11 +33,11 @@ type sessionConn struct {
 
 	mu             sync.Mutex
 	sessionID      string
-	activePromptID int64       // non-zero when a prompt response is pending
-	currentTurn    *turnRecord // the running turn; nil when idle
-	lastTurn       *turnRecord // the most recently finished turn
-	drained        bool        // stdout reader exited; no turn can finish again
-	usageWarned    bool        // an undecodable usage object was logged
+	activePromptID int64         // non-zero when a prompt response is pending
+	currentTurn    *turnRecord   // the running turn; nil when idle
+	recentTurns    []*turnRecord // the last turnHistoryLen finished turns, oldest first
+	drained        bool          // stdout reader exited; no turn can finish again
+	usageWarned    bool          // an undecodable usage object was logged
 	outputBuf      []string
 	outputBufMax   int
 	lastActivity   time.Time

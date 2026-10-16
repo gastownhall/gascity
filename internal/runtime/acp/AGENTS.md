@@ -62,3 +62,23 @@
   (`TestInterruptSendsNoSIGINTAfterTheTurnEnds`). Signal delivery cannot be
   atomic with that check, so the re-check narrows the window rather than
   closing it.
+- `InterruptTurn` is the turn-scoped path (`turn_identity.go`). In one
+  critical section of `sc.mu` it checks that the named turn is
+  `currentTurn` and takes that turn's idle channel and held permission
+  requests; on a mismatch it returns `*runtime.TurnNotCurrentError` and
+  sends nothing, not even permission replies. The cancel, settle and SIGINT
+  fallback then run on a goroutine through `cancelAndSettle`, the loop
+  `Interrupt` shares, keyed to that channel. A check and a channel taken in
+  separate critical sections can cancel the next turn;
+  `TestInterruptTurnNeverCancelsTheNextTurn` interleaves the two 1,000 times.
+- ACP still reports `keystroke` mode, so `internal/session` never consults
+  this fence: `StopTurn` and `interrupt_now` keep using `Interrupt`.
+- Another process asks the owner over the control socket: `turn` answers
+  `idle`, `running <id>`, `starting` or `gone`; `interrupt-turn <id>`
+  answers `ok`, `stale <id>`, `idle`, `starting` or `gone`. An owner that
+  predates them closes the connection unanswered; the caller reports
+  `runtime.ErrTurnFenceUnavailable` and never falls back to the untargeted
+  `interrupt` command. A turn read that fails is an error, never idle.
+- The connection keeps the last `turnHistoryLen` (8) finished turns for
+  `TurnHistory`; only the owner has them, so another process's
+  `TurnCapabilities` are not lossless.

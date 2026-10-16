@@ -90,6 +90,17 @@ type Fake struct {
 	InterruptTurnErrors map[string]error
 	// FencedTurnInterrupts makes InterruptTurn answer Fenced: true.
 	FencedTurnInterrupts bool
+	// TurnCapabilityScripts script a FullFake's TurnCapabilities by session
+	// name. Each call takes the next entry, and the last entry repeats. A
+	// session with no script reports nothing on every axis.
+	TurnCapabilityScripts map[string][]TurnCapabilities
+	// TurnHistoryScripts script a FullFake's TurnHistory by session name. Each
+	// read takes the next entry, and the last entry repeats. A session with no
+	// script has no current or recent turn.
+	TurnHistoryScripts map[string][]TurnHistory
+	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
+	// nil entry reads the script.
+	TurnHistoryErrors map[string][]error
 }
 
 var (
@@ -113,7 +124,7 @@ type Call struct {
 	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
 	DeliveryKey string
 	// Key is set for meta calls, and for a [FullFake]'s turn-fence calls to
-	// the turn they name (empty for ObserveTurn).
+	// the turn they name (empty for ObserveTurn and TurnHistory).
 	Key string
 	// Value is set for SetMeta calls, and for a [FullFake]'s InterruptTurn to
 	// what it did: sent, not_current or error.
