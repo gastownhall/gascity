@@ -78,6 +78,7 @@ go_test(
         "holder_token_test.go",
         "interaction_codex_test.go",
         "interaction_test.go",
+        "kill_server_settle_test.go",
         "kimi_process_test.go",
         "lifecycle_test.go",
         "liveness_present_test.go",

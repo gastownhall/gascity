@@ -281,6 +281,16 @@ var tmuxSubprocessTimeout = 30 * time.Second
 // healthy-but-slow server still responds. Test-overridable.
 var newSessionProbeTimeout = 2 * time.Second
 
+// killServerSettleTimeout bounds how long KillServer waits, after tmux
+// acknowledges kill-server, for the server's socket to stop answering. tmux
+// replies before the dying server closes and unlinks its listener, so a
+// restart in that window would dial a still-live socket. Test-overridable.
+var killServerSettleTimeout = 5 * time.Second
+
+// killServerSettlePoll is the interval between socket observations while
+// KillServer waits for the socket to settle. Test-overridable.
+var killServerSettlePoll = 10 * time.Millisecond
+
 // probeSessionName is the bogus target used by probeServerAlive's has-session
 // call. A healthy server replies "session not found"; a dead server replies
 // "no server running" / "error connecting to"; a degraded server hangs or
@@ -1408,13 +1418,39 @@ func (t *Tmux) KillPaneProcessesExcluding(pane string, excludePIDs []string) err
 	return terminateProcessKillPlan(plan)
 }
 
-// KillServer terminates the entire tmux server and all sessions.
+// KillServer terminates the entire tmux server and all sessions. It returns
+// once the server's socket has stopped answering, so a following new-session
+// preflight does not mistake the dying server for a live one.
 func (t *Tmux) KillServer() error {
 	_, err := t.run("kill-server")
 	if errors.Is(err, ErrNoServer) {
 		return nil // Already dead
 	}
-	return err
+	if err != nil {
+		return err
+	}
+	return t.waitServerSocketSettled()
+}
+
+// waitServerSocketSettled polls the server socket until it is safely absent or
+// stale (the same observation the new-session preflight acts on), or until
+// killServerSettleTimeout passes. A socket that is still live at the deadline
+// is reported as ErrServerDegraded with the last observation.
+func (t *Tmux) waitServerSocketSettled() error {
+	ctx, cancel := context.WithTimeout(context.Background(), killServerSettleTimeout)
+	defer cancel()
+	path := t.serverSocketPath()
+	for {
+		obsErr := t.observeServerSocket(ctx, path)
+		if obsErr == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("%w: kill-server acknowledged but socket still answered after %s: %w", ErrServerDegraded, killServerSettleTimeout, obsErr)
+		case <-time.After(killServerSettlePoll):
+		}
+	}
 }
 
 // ConfigureServer sets tmux server options required for Gas City lifecycle

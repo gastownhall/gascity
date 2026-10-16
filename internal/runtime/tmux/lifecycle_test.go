@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"testing"
 
@@ -129,11 +130,15 @@ func TestProviderStopDistinguishesMissingSessionFromMissingServer(t *testing.T) 
 	}
 }
 
+// socketAbsentObserver reports the server socket as safely absent, so teardown
+// tests with a fake executor never dial the host's real tmux socket.
+func socketAbsentObserver(context.Context, string) error { return nil }
+
 // TestTeardownServerCallsKillServer verifies that TeardownServer delegates to
 // tmux kill-server via the executor.
 func TestTeardownServerCallsKillServer(t *testing.T) {
 	fe := &fakeExecutor{}
-	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
+	tm := &Tmux{cfg: DefaultConfig(), exec: fe, serverSocketObserver: socketAbsentObserver}
 
 	if err := tm.TeardownServer(); err != nil {
 		t.Fatalf("TeardownServer() error = %v", err)
@@ -154,7 +159,7 @@ func TestTeardownServerCallsKillServer(t *testing.T) {
 // KillServer's existing semantics.
 func TestTeardownServerTreatsAlreadyGoneServerAsSuccess(t *testing.T) {
 	fe := &fakeExecutor{err: ErrNoServer}
-	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
+	tm := &Tmux{cfg: DefaultConfig(), exec: fe, serverSocketObserver: socketAbsentObserver}
 
 	if err := tm.TeardownServer(); err != nil {
 		t.Fatalf("TeardownServer() = %v, want nil for already-gone server", err)
