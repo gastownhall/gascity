@@ -296,7 +296,7 @@ var registry = slices.Concat([]Field{
 	// Lifecycle.
 	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "armSoftSuspendHeal"), v2(srcHeals, "asleepHealPatch"))},
 	{Key: "state_reason", Class: ClassLifecycle, Writers: sites(legacyCommit, op("internal/session/kill_fence.go", "KillPendingPatch"))},
-	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual), Clears: sites(waitHold)},
+	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual, op("internal/session/startup_crash.go", "Manager.commitStartupCrashReason")), Clears: sites(waitHold)},
 	{Key: "slept_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"),
 		op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake)},
