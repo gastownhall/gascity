@@ -446,9 +446,10 @@ func TestOpSweepTicksWhileAGateIsOn(t *testing.T) {
 // incapableStore hides the conditional-write family, as an old bd does.
 type incapableStore struct{ beads.Store }
 
-// TestOpSweepOpenFailure proves a NewStore failure is silent with every gate
-// off, and with a gate on is one classified degrade per pass at the strongest
-// gate's mode, retried next pass.
+// TestOpSweepOpenFailure proves an open failure with a gate on is one
+// classified degrade per pass at the strongest gate's mode, retried next
+// pass. Its gates-off half proves an empty store is never opened: the
+// submitted-op probe finds nothing, so nothing is reported.
 func TestOpSweepOpenFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -463,6 +464,9 @@ func TestOpSweepOpenFailure(t *testing.T) {
 			off.s.safePass()
 			if d := off.degraded(); len(d) != 0 {
 				t.Fatalf("gates off: degrades = %+v, want none", d)
+			}
+			if l := off.logLines("op journal degraded"); len(l) != 0 {
+				t.Fatalf("gates off: an empty store was opened: %q", l)
 			}
 
 			cs := newOpSweepCS(tc.store, rollout.WithOpsContent(rollout.Auto), rollout.WithOpsLifecycle(rollout.Require))
@@ -642,6 +646,132 @@ func TestOpSweepGatesOffIncapableStoreStops(t *testing.T) {
 	}
 	if l := h.logLines("reason=conditional_writes_unsupported"); len(l) != 1 {
 		t.Fatalf("degrade log lines = %q, want one", l)
+	}
+}
+
+// TestOpSweepGatesOffNilStoreRetries is the boot whose best-effort city-store
+// open failed (cityBeadStore nil): with every gate off the boot pass neither
+// panics nor ends the loop, and once a reload installs the store the next
+// pass closes the expired op and the loop returns.
+func TestOpSweepGatesOffNilStoreRetries(t *testing.T) {
+	cs := newOpSweepCS(nil)
+	h := newOpSweepHarness(cs)
+	if h.s.safePass() {
+		t.Fatal("a gates-off pass over a nil sessions store panicked")
+	}
+	if !h.s.wantsTicker() {
+		t.Fatal("a nil-store pass left no work with every gate off")
+	}
+	if l := h.logLines("reason=store_error"); len(l) != 1 || !strings.Contains(l[0], "mode=off") {
+		t.Fatalf("degrade log lines = %q, want one mode=off store_error line", l)
+	}
+	store := newOpSweepStore()
+	op := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "late-store")
+	h.clk.Set(op.FinishBy.Add(time.Second))
+	done := runOpSweep(context.Background(), h)
+	h.tick(t) // the store is still nil: the loop keeps going
+	cs.mu.Lock()
+	cs.cityBeadStore = store
+	cs.mu.Unlock()
+	select {
+	case h.ticks <- h.clk.Now():
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweeper loop neither took the tick nor returned")
+	}
+	waitOpSweep(t, done)
+	if got := getOp(t, store, op.ID); got.Status != opjournal.StatusClosed {
+		t.Fatalf("the op = %s, want closed once the store is installed", got.Status)
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("gates off: degrade hook heard %+v, want nothing", d)
+	}
+}
+
+// opSweepLegacyReadFailStore fails its first sorted List (ListOpenLegacy's
+// read), not the unsorted HasSubmittedOps probe before it.
+type opSweepLegacyReadFailStore struct {
+	opSweepStore
+	failed atomic.Bool
+}
+
+func (f *opSweepLegacyReadFailStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Sort == beads.SortCreatedAsc && f.failed.CompareAndSwap(false, true) {
+		return nil, errors.New("dolt down")
+	}
+	return f.opSweepStore.List(q)
+}
+
+// opSweepCloseFailStore fails its first conditional write with a store error.
+type opSweepCloseFailStore struct {
+	opSweepStore
+	failed atomic.Bool
+}
+
+func (f *opSweepCloseFailStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if f.failed.CompareAndSwap(false, true) {
+		return errors.New("dolt down")
+	}
+	return f.opSweepStore.UpdateIfMatch(id, rev, opts)
+}
+
+// TestOpSweepGatesOffRetriesAFailedSweep proves a retryable failure inside
+// legacyop.Sweep after the probe found ops (a failed legacy read, a failed
+// close), with every gate off, keeps the ticker until a pass closes the op.
+func TestOpSweepGatesOffRetriesAFailedSweep(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(opSweepStore) beads.Store
+	}{
+		{"legacy read", func(s opSweepStore) beads.Store { return &opSweepLegacyReadFailStore{opSweepStore: s} }},
+		{"close", func(s opSweepStore) beads.Store { return &opSweepCloseFailStore{opSweepStore: s} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inner := newOpSweepStore()
+			op := seedOp(t, inner, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "retry")
+			h := newOpSweepHarness(newOpSweepCS(tc.wrap(inner)))
+			h.clk.Set(op.FinishBy.Add(time.Second))
+			done := runOpSweep(context.Background(), h)
+			select {
+			case h.ticks <- h.clk.Now():
+			case <-done:
+				t.Fatal("the loop returned after a retryable sweep failure with every gate off")
+			case <-time.After(10 * time.Second):
+				t.Fatal("the sweeper loop is not taking ticks")
+			}
+			waitOpSweep(t, done)
+			if got := getOp(t, inner, op.ID); got.Status != opjournal.StatusClosed {
+				t.Fatalf("the retried pass did not close %s: %s", op.ID, got.Status)
+			}
+		})
+	}
+}
+
+// TestOpSweepGatesOffTruncatedReadKeepsTicking proves a gates-off pass whose
+// read stopped at its page cap leaves work: the legacy op behind a head of
+// unsweepable rows longer than the cap may still be open.
+func TestOpSweepGatesOffTruncatedReadKeepsTicking(t *testing.T) {
+	store := newOpSweepStore()
+	head := 8 * opSweepLimit // more rows than legacyScanPages pages of opSweepLimit
+	for i := range head {
+		if _, err := store.Create(beads.Bead{
+			ID: fmt.Sprintf("gc-op-newer%05d", i), Type: opjournal.BeadType,
+			CreatedAt: opSweepT0.Add(-time.Hour).Add(time.Duration(i) * time.Millisecond),
+			Labels:    []string{opjournal.LabelOp, opjournal.ConversationLabel("gc-1")},
+			Metadata:  map[string]string{"gc.op.schema": "99", "gc.op.status": string(opjournal.StatusSubmitted)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	op := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "behind")
+	h := newOpSweepHarness(newOpSweepCS(store))
+	h.clk.Set(op.FinishBy.Add(time.Second))
+	h.s.safePass()
+	if lines := h.logLines("op-sweep: listed="); len(lines) != 1 || !strings.Contains(lines[0], "truncated=true") {
+		t.Fatalf("summary = %q, want one truncated pass", lines)
+	}
+	if !h.s.wantsTicker() {
+		t.Fatal("a truncated gates-off pass left no work")
 	}
 }
 
