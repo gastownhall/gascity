@@ -9,28 +9,40 @@ package main
 //
 // What moves is live work, in whole delivery batches. Dead letters stay where
 // they died and age out there. A batch moves only when no live member holds an
-// unexpired lease, and then every live member moves together: moving part of a
-// pinned batch could send a strict subset under its delivery key on the new
-// side, and a later send of the rest under the same key would replay the
-// subset's receipt and ack the rest unseen.
+// unexpired lease, and then every live member moves together.
+//
+// A moved copy keeps every field but its claim and its delivery batch: the
+// destination pins it under a key of its own when it next claims it. A send
+// under a key is the same delivery to a runtime that deduplicates by key, so a
+// part of a batch sent under the batch's key, followed by a send of the rest
+// under that key, would replay the part's receipt and ack the rest unseen
+// (DES-NQ invariant 5). The source keeps the key and only ever loses members,
+// so every later send under it is a subset of an earlier one, which a replay
+// answers truthfully; the destination never sees the key, so a move that
+// lands only part of a batch (a failure part way through it, or a member the
+// destination already retired) cannot send that part under it. The cost is a
+// duplicate turn when a send under the old key had already committed with an
+// unknown outcome, never a loss.
 //
 // Every step is idempotent, so a crash between the two steps of a move re-runs
 // as a no-op on the destination:
 //
 //   - file → beads: EnqueueDeferred into beads (idempotent by the id-derived
 //     bead id), then Lookup the ids and remove from the file only the batches
-//     whose every member is live in beads. An id the beads queue already
-//     retired inside its retired-id memory (a quick flip back) does not come
-//     back to life there, so its batch stays in the file queue and is
-//     reported, never dropped.
-//   - beads → file: append to the file queue unless the id is already there,
-//     then Ack the records "migrated".
+//     whose every member is live in beads, whole or not at all. An id the
+//     beads queue already retired inside its retired-id memory (a quick flip
+//     back) does not come back to life there, so its batch stays in the file
+//     queue and is reported, never dropped.
+//   - beads → file: one indexed read of the live records, then append to the
+//     file queue unless the id is already there, then Ack the records
+//     "migrated". An id the file queue holds as a dead letter is not
+//     imported; its record is retired with a reason saying so, and reported.
 //
 // A process still writing the old mode can claim an item between the shim's
 // read and its write. Both queues are at least once (DES-NQ §9), and the
 // result is at most a duplicate delivery, never a loss: file → beads leaves
-// the claimed item in the file queue (Raced), and beads → file retires a
-// record whose claimant still delivers it.
+// the claimed item's whole batch in the file queue (Raced), and beads → file
+// retires a record whose claimant still delivers it.
 
 import (
 	"context"
@@ -38,6 +50,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
@@ -66,12 +79,25 @@ func (d nudgeQueueShimDirection) String() string {
 	}
 }
 
-// Ack vocabulary for a beads record the shim imported into the file queue.
+// Ack vocabulary for a beads record the shim moved to the file queue.
 const (
-	nudgeQueueMigratedOutcome  = "migrated"
-	nudgeQueueMigratedReason   = "imported into the file queue"
-	nudgeQueueMigratedBoundary = "queue-mode-switch"
+	nudgeQueueMigratedOutcome = "migrated"
+	nudgeQueueMigratedReason  = "imported into the file queue"
+	// nudgeQueueMigratedDeadReason retires a record whose id the file queue
+	// already holds as a dead letter, so it was not imported.
+	nudgeQueueMigratedDeadReason = "already a dead letter in the file queue"
+	nudgeQueueMigratedBoundary   = "queue-mode-switch"
 )
+
+// nudgeQueueShimBeads is the beads queue's side of the shim: the queue, plus
+// the one indexed read of its live records that the beads → file direction
+// moves from. The beads queue NewBeadsNudgeQueue builds implements it.
+type nudgeQueueShimBeads interface {
+	storebinding.NudgeQueue
+	// ListLive returns the live items, pending and in flight, skipping an
+	// undecodable record and reporting it as a partial result.
+	ListLive(now time.Time) (pending, inFlight []nudgequeue.Item, err error)
+}
 
 // nudgeQueueShimFile is the file queue's side of the shim. Its writes run
 // under the file queue's lock; *fileNudgeQueue implements it.
@@ -79,12 +105,14 @@ type nudgeQueueShimFile interface {
 	// migrationCandidates reads, without the lock, the live items that may
 	// move out of the file queue, grouped into whole batches.
 	migrationCandidates(now time.Time) (nudgeMigrationCandidates, error)
-	// removeMigrated removes exactly the moved items that still hold no
-	// unexpired lease, and returns the ones it left in place.
+	// removeMigrated removes one moved batch's items, all or none: none
+	// when any of them holds an unexpired lease. It returns the ones it left
+	// in place.
 	removeMigrated(items []nudgequeue.Item, now time.Time) ([]nudgequeue.Item, error)
-	// importMigrated appends the moved items as pending unless their id is
-	// already queued.
-	importMigrated(items []nudgequeue.Item) error
+	// importMigrated appends the moved items as pending, unpinned and
+	// unclaimed, unless their id is already queued, and returns the ids it skipped because the queue holds
+	// them as dead letters.
+	importMigrated(items []nudgequeue.Item) (dead []string, err error)
 }
 
 var _ nudgeQueueShimFile = (*fileNudgeQueue)(nil)
@@ -114,9 +142,9 @@ type nudgeQueueShimReport struct {
 	// LeaseHeld batches wait for a member's unexpired lease to end.
 	LeaseHeld int
 	// Raced batches reached the beads queue, but a process still writing the
-	// file queue claimed a member between the shim's read and its removal.
-	// The claimed member stays in the file queue too, so it may be delivered
-	// twice; it is never lost.
+	// file queue claimed a member, or replaced or removed one, between the
+	// shim's read and its removal. The batch stays whole in the file queue
+	// too, so it may be delivered twice; it is never lost.
 	Raced int
 	// Retired batches stay in the file queue because the beads queue does
 	// not serve every member: it already retired the id (a quick flip back
@@ -124,16 +152,24 @@ type nudgeQueueShimReport struct {
 	Retired int
 	// RetiredIDs lists the ids that kept their batches in the file queue.
 	RetiredIDs []string
+	// AlreadyDead batches reached the file queue only in part: the file
+	// queue holds a member's id as a dead letter, so that member was not
+	// imported, and its beads record is retired as such.
+	AlreadyDead int
+	// AlreadyDeadIDs lists the ids the file queue already held dead.
+	AlreadyDeadIDs []string
 	// Failed batches hit an error; each is in the pass's returned error, and
 	// the next pass retries them.
 	Failed int
 }
 
 // shimNudgeQueue runs one shim pass at now in direction. A read that fails
-// before any batch moves fails the pass. A batch that fails is counted and
-// joined into the returned error, and the pass goes on to the next batch; ctx
-// is checked between batches.
-func shimNudgeQueue(ctx context.Context, direction nudgeQueueShimDirection, file nudgeQueueShimFile, beadsQueue storebinding.NudgeQueue, now time.Time) (nudgeQueueShimReport, error) {
+// before any batch moves fails the pass; a read of the beads queue that skips
+// undecodable records moves the rest and joins the partial result into the
+// returned error. A batch that fails is counted and joined into the returned
+// error, and the pass goes on to the next batch; ctx is checked between
+// batches.
+func shimNudgeQueue(ctx context.Context, direction nudgeQueueShimDirection, file nudgeQueueShimFile, beadsQueue nudgeQueueShimBeads, now time.Time) (nudgeQueueShimReport, error) {
 	report := nudgeQueueShimReport{Direction: direction}
 	if file == nil || beadsQueue == nil {
 		return report, fmt.Errorf("nudge queue shim %s: both queues are required", direction)
@@ -148,7 +184,7 @@ func shimNudgeQueue(ctx context.Context, direction nudgeQueueShimDirection, file
 	}
 }
 
-func shimNudgeQueueToBeads(ctx context.Context, report nudgeQueueShimReport, file nudgeQueueShimFile, beadsQueue storebinding.NudgeQueue, now time.Time) (nudgeQueueShimReport, error) {
+func shimNudgeQueueToBeads(ctx context.Context, report nudgeQueueShimReport, file nudgeQueueShimFile, beadsQueue nudgeQueueShimBeads, now time.Time) (nudgeQueueShimReport, error) {
 	candidates, err := file.migrationCandidates(now)
 	if err != nil {
 		return report, fmt.Errorf("nudge queue shim %s: reading the file queue: %w", report.Direction, err)
@@ -169,10 +205,10 @@ func shimNudgeQueueToBeads(ctx context.Context, report nudgeQueueShimReport, fil
 
 // moveNudgeBatchToBeads moves one batch from the file queue into beads and
 // counts it. An error leaves the batch's count to the caller.
-func moveNudgeBatchToBeads(report *nudgeQueueShimReport, batch nudgeMigrationBatch, file nudgeQueueShimFile, beadsQueue storebinding.NudgeQueue, now time.Time) error {
+func moveNudgeBatchToBeads(report *nudgeQueueShimReport, batch nudgeMigrationBatch, file nudgeQueueShimFile, beadsQueue nudgeQueueShimBeads, now time.Time) error {
 	ids := make([]string, 0, len(batch.Items))
 	for _, item := range batch.Items {
-		if err := beadsQueue.EnqueueDeferred(nudgeItemWithoutLease(item)); err != nil {
+		if err := beadsQueue.EnqueueDeferred(nudgeItemForMove(item)); err != nil {
 			return fmt.Errorf("enqueueing %q into the beads queue: %w", item.ID, err)
 		}
 		ids = append(ids, item.ID)
@@ -208,50 +244,68 @@ func moveNudgeBatchToBeads(report *nudgeQueueShimReport, batch nudgeMigrationBat
 	return nil
 }
 
-func shimNudgeQueueToFile(ctx context.Context, report nudgeQueueShimReport, file nudgeQueueShimFile, beadsQueue storebinding.NudgeQueue, _ time.Time) (nudgeQueueShimReport, error) {
-	snapshot, err := beadsQueue.Snapshot()
-	if err != nil {
-		return report, fmt.Errorf("nudge queue shim %s: reading the beads queue: %w", report.Direction, err)
-	}
-	live := make([]nudgequeue.Item, 0, len(snapshot.Pending)+len(snapshot.InFlight))
-	live = append(live, snapshot.Pending...)
-	live = append(live, snapshot.InFlight...)
-	// A record the snapshot reads as in flight holds an unexpired lease by
-	// construction; an expired lease reads as pending.
-	inFlight := make(map[string]bool, len(snapshot.InFlight))
-	for _, item := range snapshot.InFlight {
-		inFlight[item.ID] = true
-	}
-	candidates := groupNudgeMigrationBatches(live, func(item nudgequeue.Item) bool { return inFlight[item.ID] })
-	report.LeaseHeld = len(candidates.LeaseHeld)
+func shimNudgeQueueToFile(ctx context.Context, report nudgeQueueShimReport, file nudgeQueueShimFile, beadsQueue nudgeQueueShimBeads, now time.Time) (nudgeQueueShimReport, error) {
+	pending, inFlight, err := beadsQueue.ListLive(now)
 	var failures []error
+	if err != nil {
+		if !beads.IsPartialResult(err) {
+			return report, fmt.Errorf("nudge queue shim %s: reading the beads queue: %w", report.Direction, err)
+		}
+		failures = append(failures, fmt.Errorf("nudge queue shim %s: reading the beads queue: %w", report.Direction, err))
+	}
+	live := make([]nudgequeue.Item, 0, len(pending)+len(inFlight))
+	live = append(live, pending...)
+	live = append(live, inFlight...)
+	// A record the read returns as in flight holds an unexpired lease by
+	// construction; an expired lease reads as pending.
+	leased := make(map[string]bool, len(inFlight))
+	for _, item := range inFlight {
+		leased[item.ID] = true
+	}
+	candidates := groupNudgeMigrationBatches(live, func(item nudgequeue.Item) bool { return leased[item.ID] })
+	report.LeaseHeld = len(candidates.LeaseHeld)
 	for _, batch := range candidates.Movable {
 		if err := ctx.Err(); err != nil {
 			return report, errors.Join(append(failures, err)...)
 		}
-		if err := moveNudgeBatchToFile(batch, file, beadsQueue); err != nil {
+		if err := moveNudgeBatchToFile(&report, batch, file, beadsQueue); err != nil {
 			report.Failed++
 			failures = append(failures, fmt.Errorf("nudge queue shim %s: batch %s: %w", report.Direction, nudgeMigrationBatchName(batch), err))
-			continue
 		}
-		report.Moved++
 	}
 	return report, errors.Join(failures...)
 }
 
 // moveNudgeBatchToFile imports one batch into the file queue, then retires
-// its beads records as migrated.
-func moveNudgeBatchToFile(batch nudgeMigrationBatch, file nudgeQueueShimFile, beadsQueue storebinding.NudgeQueue) error {
-	if err := file.importMigrated(batch.Items); err != nil {
+// its beads records as migrated, and counts it. An error leaves the batch's
+// count to the caller.
+func moveNudgeBatchToFile(report *nudgeQueueShimReport, batch nudgeMigrationBatch, file nudgeQueueShimFile, beadsQueue storebinding.NudgeQueue) error {
+	dead, err := file.importMigrated(batch.Items)
+	if err != nil {
 		return fmt.Errorf("importing into the file queue: %w", err)
 	}
-	ids := make([]string, 0, len(batch.Items))
-	for _, item := range batch.Items {
-		ids = append(ids, item.ID)
+	skipped := make(map[string]bool, len(dead))
+	for _, id := range dead {
+		skipped[id] = true
 	}
-	if err := beadsQueue.Ack(ids, nudgeQueueMigratedOutcome, nudgeQueueMigratedReason, nudgeQueueMigratedBoundary); err != nil {
+	imported := make([]string, 0, len(batch.Items))
+	for _, item := range batch.Items {
+		if !skipped[item.ID] {
+			imported = append(imported, item.ID)
+		}
+	}
+	if err := beadsQueue.Ack(imported, nudgeQueueMigratedOutcome, nudgeQueueMigratedReason, nudgeQueueMigratedBoundary); err != nil {
 		return fmt.Errorf("retiring the imported records as migrated: %w", err)
 	}
+	if len(dead) == 0 {
+		report.Moved++
+		return nil
+	}
+	if err := beadsQueue.Ack(dead, nudgeQueueMigratedOutcome, nudgeQueueMigratedDeadReason, nudgeQueueMigratedBoundary); err != nil {
+		return fmt.Errorf("retiring the records the file queue holds dead: %w", err)
+	}
+	report.AlreadyDead++
+	report.AlreadyDeadIDs = append(report.AlreadyDeadIDs, dead...)
 	return nil
 }
 
@@ -293,11 +347,13 @@ func nudgeLeaseHeld(item nudgequeue.Item, now time.Time) bool {
 	return !item.LeaseUntil.IsZero() && item.LeaseUntil.After(now)
 }
 
-// nudgeItemWithoutLease is item with its claim cleared and every other field
-// kept.
-func nudgeItemWithoutLease(item nudgequeue.Item) nudgequeue.Item {
+// nudgeItemForMove is the copy of item the shim writes to the destination
+// queue: its claim and its delivery batch cleared, every other field kept.
+// The destination pins it under a key of its own.
+func nudgeItemForMove(item nudgequeue.Item) nudgequeue.Item {
 	item.ClaimedAt = time.Time{}
 	item.LeaseUntil = time.Time{}
+	item.DeliveryBatch = ""
 	return item
 }
 

@@ -1539,6 +1539,7 @@ go_test(
         "nudge_queue_bounded_maintenance_test.go",
         "nudge_queue_seam_test.go",
         "nudge_queue_shim_test.go",
+        "nudge_shadow_view_wait_test.go",
         "nudge_store_ownership_test.go",
         "nudge_target_info_equiv_test.go",
         "oneshot_by_id_routes_test.go",

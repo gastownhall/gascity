@@ -29,7 +29,8 @@ func openShimTestBeadsStore(t *testing.T) beads.Store {
 type shimFixture struct {
 	city  string
 	file  *fileNudgeQueue
-	beads storebinding.NudgeQueue
+	beads nudgeQueueShimBeads
+	store beads.Store
 }
 
 func newShimFixture(t *testing.T) shimFixture {
@@ -39,11 +40,16 @@ func newShimFixture(t *testing.T) shimFixture {
 	if !ok {
 		t.Fatal("openNudgeQueue did not build the file queue")
 	}
-	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: openShimTestBeadsStore(t)})
+	store := openShimTestBeadsStore(t)
+	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
 	if err != nil {
 		t.Fatalf("NewBeadsNudgeQueue: %v", err)
 	}
-	return shimFixture{city: city, file: file, beads: queue}
+	shimBeads, ok := queue.(nudgeQueueShimBeads)
+	if !ok {
+		t.Fatalf("the beads queue %T does not serve the shim's live read", queue)
+	}
+	return shimFixture{city: city, file: file, beads: shimBeads, store: store}
 }
 
 // writeFileState replaces the file queue's state, as a process still writing
@@ -141,10 +147,14 @@ func TestNudgeQueueShimRoundTripPreservesEveryItemField(t *testing.T) {
 		state.Pending = []nudgequeue.Item{pending, pinned}
 		state.InFlight = []nudgequeue.Item{stale}
 	})
+	// A moved item keeps every field but its claim and its delivery batch:
+	// the destination pins it under a key of its own.
+	unpinned := pinned
+	unpinned.DeliveryBatch = ""
 	want := map[string]nudgequeue.Item{
 		pending.ID: pending,
-		pinned.ID:  pinned,
-		stale.ID:   nudgeItemWithoutLease(stale),
+		pinned.ID:  unpinned,
+		stale.ID:   nudgeItemForMove(stale),
 	}
 	assertItems := func(stage string, got []nudgequeue.Item) {
 		t.Helper()
@@ -191,7 +201,7 @@ func TestNudgeQueueShimRetiresImportedRecordsAsMigrated(t *testing.T) {
 	if err := fronts.Queue.Enqueue(shimItem("n-migrate", now)); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	if _, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, file, fronts.Queue, now); err != nil {
+	if _, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, file, fronts.Queue.(nudgeQueueShimBeads), now); err != nil {
 		t.Fatalf("shim: %v", err)
 	}
 	shadow, ok, err := fronts.Shadows.FindIncludingTerminal("n-migrate")
@@ -316,20 +326,20 @@ func (f *failingShimFile) removeMigrated(items []nudgequeue.Item, now time.Time)
 	return f.nudgeQueueShimFile.removeMigrated(items, now)
 }
 
-func (f *failingShimFile) importMigrated(items []nudgequeue.Item) error {
+func (f *failingShimFile) importMigrated(items []nudgequeue.Item) ([]string, error) {
 	if f.failImport {
 		f.failImport = false
-		if err := f.nudgeQueueShimFile.importMigrated(items); err != nil {
-			return err
+		if _, err := f.nudgeQueueShimFile.importMigrated(items); err != nil {
+			return nil, err
 		}
-		return errShimCrash
+		return nil, errShimCrash
 	}
 	return f.nudgeQueueShimFile.importMigrated(items)
 }
 
 // shimBeadsQueue intercepts the beads queue's Ack.
 type shimBeadsQueue struct {
-	storebinding.NudgeQueue
+	nudgeQueueShimBeads
 	beforeAck func()
 }
 
@@ -339,15 +349,18 @@ func (q *shimBeadsQueue) Ack(ids []string, outcome, reason, commitBoundary strin
 		q.beforeAck = nil
 		hook()
 	}
-	return q.NudgeQueue.Ack(ids, outcome, reason, commitBoundary)
+	return q.nudgeQueueShimBeads.Ack(ids, outcome, reason, commitBoundary)
 }
 
 func TestNudgeQueueShimRerunAfterACrashBetweenStepsIsANoOp(t *testing.T) {
 	t.Run("file-to-beads", func(t *testing.T) {
 		f := newShimFixture(t)
 		now := time.Now().UTC()
-		item := shimItem("n-crash", now)
-		f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{item} })
+		first := shimItem("n-crash-a", now)
+		first.DeliveryBatch = "nudge-batch-k"
+		second := shimItem("n-crash-b", now)
+		second.DeliveryBatch = "nudge-batch-k"
+		f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{first, second} })
 		crashing := &failingShimFile{nudgeQueueShimFile: f.file, failRemove: true}
 
 		report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, crashing, f.beads, now)
@@ -355,8 +368,8 @@ func TestNudgeQueueShimRerunAfterACrashBetweenStepsIsANoOp(t *testing.T) {
 			t.Fatalf("crashed pass error = %v, want the crash", err)
 		}
 		assertShimReport(t, report, nudgeQueueShimReport{Failed: 1})
-		if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-crash"}) {
-			t.Fatalf("file pending after the crash = %v, want the item still there", got)
+		if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-crash-a", "n-crash-b"}) {
+			t.Fatalf("file pending after the crash = %v, want the batch still there whole", got)
 		}
 
 		report, err = shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, crashing, f.beads, now)
@@ -364,8 +377,8 @@ func TestNudgeQueueShimRerunAfterACrashBetweenStepsIsANoOp(t *testing.T) {
 			t.Fatalf("re-run: %v", err)
 		}
 		assertShimReport(t, report, nudgeQueueShimReport{Moved: 1})
-		if got := shimIDs(f.beadsState(t).Pending); !reflect.DeepEqual(got, []string{"n-crash"}) {
-			t.Fatalf("beads pending after the re-run = %v, want exactly one record", got)
+		if got := shimIDs(f.beadsState(t).Pending); !reflect.DeepEqual(got, []string{"n-crash-a", "n-crash-b"}) {
+			t.Fatalf("beads pending after the re-run = %v, want exactly one record per member", got)
 		}
 		if state := f.fileState(t); len(state.Pending) != 0 {
 			t.Fatalf("file pending after the re-run = %v, want empty", shimIDs(state.Pending))
@@ -549,7 +562,7 @@ func TestNudgeQueueShimClaimRacingTheReadLeavesAtMostADuplicate(t *testing.T) {
 			t.Fatalf("EnqueueDeferred: %v", err)
 		}
 		var staleClaim []nudgequeue.Item
-		racing := &shimBeadsQueue{NudgeQueue: f.beads}
+		racing := &shimBeadsQueue{nudgeQueueShimBeads: f.beads}
 		racing.beforeAck = func() {
 			var err error
 			if staleClaim, err = f.beads.ClaimDue(target, time.Now().UTC()); err != nil {
@@ -605,4 +618,332 @@ func TestNudgeQueueShimStopsBetweenBatchesWhenCanceled(t *testing.T) {
 	if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
 		t.Fatalf("file pending = %v, want nothing moved", got)
 	}
+}
+
+// shimPinnedBatchKey is the delivery key pinnedShimBatch's members carry.
+const shimPinnedBatchKey = "nudge-batch-k"
+
+// pinnedShimBatch is two members of one delivery batch that a file-mode
+// delivery already claimed under shimPinnedBatchKey and released with the pin
+// kept.
+func pinnedShimBatch(now time.Time) (nudgequeue.Item, nudgequeue.Item) {
+	first := shimItem("n-a", now)
+	first.DeliveryBatch = shimPinnedBatchKey
+	second := shimItem("n-b", now)
+	second.DeliveryBatch = shimPinnedBatchKey
+	return first, second
+}
+
+// assertNoClaimUnderKey fails when the beads queue hands out any item under
+// the file batch's key: the moved copy is unpinned, so the beads queue pins it
+// under a key of its own, and a part of the file batch can never be sent under
+// the file batch's key.
+func assertNoClaimUnderKey(t *testing.T, stage string, claimed []nudgequeue.Item, key string) {
+	t.Helper()
+	for _, item := range claimed {
+		if item.DeliveryBatch == key {
+			t.Fatalf("%s: beads ClaimBatch handed out %s under the file batch's key %q", stage, item.ID, key)
+		}
+	}
+}
+
+// failingEnqueueBeads fails EnqueueDeferred for one id, once, as a transient
+// store error would.
+type failingEnqueueBeads struct {
+	nudgeQueueShimBeads
+	failID string
+}
+
+func (q *failingEnqueueBeads) EnqueueDeferred(item nudgequeue.Item) error {
+	if item.ID == q.failID {
+		q.failID = ""
+		return errShimCrash
+	}
+	return q.nudgeQueueShimBeads.EnqueueDeferred(item)
+}
+
+// A transient failure part way through a pinned batch leaves the members
+// already enqueued live in beads. They are unpinned there, so beads sends them
+// under a fresh key: a part of the batch never goes out under the batch's own
+// key, where a key-deduplicating runtime would later replay that part's
+// receipt for the rest of the batch and ack it unseen.
+func TestNudgeQueueShimMidBatchEnqueueFailureNeverSendsPartUnderTheBatchKey(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	const key = shimPinnedBatchKey
+	first, second := pinnedShimBatch(now)
+	f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{first, second} })
+	target := shimTarget("alpha/worker")
+
+	failing := &failingEnqueueBeads{nudgeQueueShimBeads: f.beads, failID: "n-b"}
+	report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, f.file, failing, now)
+	if !errors.Is(err, errShimCrash) {
+		t.Fatalf("pass 1 error = %v, want the enqueue failure", err)
+	}
+	assertShimReport(t, report, nudgeQueueShimReport{Failed: 1})
+	claimed, err := f.beads.ClaimBatch(target, now)
+	if err != nil {
+		t.Fatalf("ClaimBatch: %v", err)
+	}
+	if got := shimIDs(claimed); !reflect.DeepEqual(got, []string{"n-a"}) {
+		t.Fatalf("pass 1 beads claim = %v, want the one member that reached beads", got)
+	}
+	assertNoClaimUnderKey(t, "pass 1", claimed, key)
+	if err := f.beads.Ack(shimIDs(claimed), "injected", "", ""); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+
+	// The next pass enqueues the rest; n-a is retired in beads now, so the
+	// batch stays whole in the file queue and is reported.
+	assertShimReport(t, f.shim(t, nudgeQueueShimToBeads, now), nudgeQueueShimReport{Retired: 1, RetiredIDs: []string{"n-a"}})
+	claimed2, err := f.beads.ClaimBatch(target, now)
+	if err != nil {
+		t.Fatalf("ClaimBatch 2: %v", err)
+	}
+	if got := shimIDs(claimed2); !reflect.DeepEqual(got, []string{"n-b"}) {
+		t.Fatalf("pass 2 beads claim = %v, want the rest of the batch", got)
+	}
+	assertNoClaimUnderKey(t, "pass 2", claimed2, key)
+	if claimed2[0].DeliveryBatch == claimed[0].DeliveryBatch {
+		t.Fatalf("pass 2 reused pass 1's key %q; a deduplicating runtime would ack n-b unseen", claimed[0].DeliveryBatch)
+	}
+	if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
+		t.Fatalf("file pending = %v, want the batch kept whole", got)
+	}
+}
+
+// A pinned batch one member of which the beads queue already retired stays
+// whole in the file queue, and the member that did reach beads is served
+// there under a fresh key, never under the file batch's key.
+func TestNudgeQueueShimRetiredMemberKeepsThePinnedBatchWholeInTheFile(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	const key = shimPinnedBatchKey
+	first, second := pinnedShimBatch(now)
+	if err := f.beads.EnqueueDeferred(nudgeItemForMove(first)); err != nil {
+		t.Fatalf("EnqueueDeferred: %v", err)
+	}
+	if err := f.beads.Ack([]string{first.ID}, nudgeQueueMigratedOutcome, nudgeQueueMigratedReason, nudgeQueueMigratedBoundary); err != nil {
+		t.Fatalf("Ack: %v", err)
+	}
+	f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{first, second} })
+
+	assertShimReport(t, f.shim(t, nudgeQueueShimToBeads, now), nudgeQueueShimReport{Retired: 1, RetiredIDs: []string{"n-a"}})
+	file := f.fileState(t)
+	if got := shimIDs(file.Pending); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
+		t.Fatalf("file pending = %v, want both members kept", got)
+	}
+	for _, item := range file.Pending {
+		if item.DeliveryBatch != key {
+			t.Fatalf("file member %s batch = %q, want the pin kept on the file side", item.ID, item.DeliveryBatch)
+		}
+	}
+	claimed, err := f.beads.ClaimBatch(shimTarget("alpha/worker"), now)
+	if err != nil {
+		t.Fatalf("ClaimBatch: %v", err)
+	}
+	if got := shimIDs(claimed); !reflect.DeepEqual(got, []string{"n-b"}) {
+		t.Fatalf("beads claim = %v, want the member that reached beads", got)
+	}
+	assertNoClaimUnderKey(t, "retired batch", claimed, key)
+}
+
+// A process still writing the file queue claims only the due member of a
+// pinned batch between the shim's read and its removal. The removal takes the
+// batch whole or not at all, so the file queue keeps the whole batch under its
+// key, and the beads copy is unpinned: at most a duplicate, never a part of
+// the batch sent under its key.
+func TestNudgeQueueShimPartlyClaimedPinnedBatchStaysWholeInTheFile(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	const key = shimPinnedBatchKey
+	first, second := pinnedShimBatch(now)
+	second.DeliverAfter = now.Add(5 * time.Minute)
+	f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{first, second} })
+	target := shimTarget("alpha/worker")
+	var staleClaim []nudgequeue.Item
+	racing := &racingShimFile{nudgeQueueShimFile: f.file, race: func() {
+		var err error
+		if staleClaim, err = f.file.ClaimDue(target, now); err != nil {
+			t.Fatalf("stale-mode ClaimDue: %v", err)
+		}
+	}}
+	report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, racing, f.beads, now)
+	if err != nil {
+		t.Fatalf("shim: %v", err)
+	}
+	assertShimReport(t, report, nudgeQueueShimReport{Raced: 1})
+	if got := shimIDs(staleClaim); !reflect.DeepEqual(got, []string{"n-a"}) {
+		t.Fatalf("stale-mode claim = %v, want the due member", got)
+	}
+	file := f.fileState(t)
+	if got := shimIDs(file.InFlight); !reflect.DeepEqual(got, []string{"n-a"}) {
+		t.Fatalf("file in flight = %v, want the claimed member kept for its claimant", got)
+	}
+	if got := shimIDs(file.Pending); !reflect.DeepEqual(got, []string{"n-b"}) {
+		t.Fatalf("file pending = %v, want the unclaimed member kept with its batch", got)
+	}
+	for _, item := range append(append([]nudgequeue.Item{}, file.InFlight...), file.Pending...) {
+		if item.DeliveryBatch != key {
+			t.Fatalf("file member %s batch = %q, want the pin kept on the file side", item.ID, item.DeliveryBatch)
+		}
+	}
+	beadsLive := f.beadsState(t)
+	if got := shimIDs(beadsLive.Pending); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
+		t.Fatalf("beads pending = %v, want the moved copy deliverable: a duplicate, not a loss", got)
+	}
+	for _, item := range beadsLive.Pending {
+		if item.DeliveryBatch != "" {
+			t.Fatalf("beads member %s batch = %q, want the moved copy unpinned", item.ID, item.DeliveryBatch)
+		}
+	}
+	// Once the stale claim's lease ends, the next pass removes the batch whole.
+	later := now.Add(10 * time.Minute)
+	assertShimReport(t, f.shim(t, nudgeQueueShimToBeads, later), nudgeQueueShimReport{Moved: 1})
+	if state := f.fileState(t); len(state.Pending)+len(state.InFlight) != 0 {
+		t.Fatalf("file queue after the lease = %+v, want the batch removed whole", state)
+	}
+}
+
+// An old binary re-adds an id with a new creation time between the shim's
+// read and its removal (DES-NQ D12: removal matches (id, created_at)). The new
+// item is a different item, so it stays for the next pass.
+func TestNudgeQueueShimRemovalKeepsAnIDReaddedWithANewCreationTime(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	original := shimItem("n-readd", now)
+	f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{original} })
+	readded := original
+	readded.CreatedAt = now
+	readded.Message = "a newer nudge under the same id"
+	racing := &racingShimFile{nudgeQueueShimFile: f.file, race: func() {
+		f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{readded} })
+	}}
+	report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, racing, f.beads, now)
+	if err != nil {
+		t.Fatalf("shim: %v", err)
+	}
+	assertShimReport(t, report, nudgeQueueShimReport{Raced: 1})
+	pending := f.fileState(t).Pending
+	if len(pending) != 1 || !pending[0].CreatedAt.Equal(readded.CreatedAt) || pending[0].Message != readded.Message {
+		t.Fatalf("file pending = %+v, want the re-added item kept", pending)
+	}
+}
+
+// partialLookupBeads reports one id of every Lookup as an undecodable record.
+type partialLookupBeads struct {
+	nudgeQueueShimBeads
+	skipID string
+}
+
+func (q *partialLookupBeads) Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error) {
+	buckets, err := q.nudgeQueueShimBeads.Lookup(ids, now)
+	if err != nil {
+		return buckets, err
+	}
+	delete(buckets, q.skipID)
+	return buckets, &beads.PartialResultError{Op: "nudge queue Lookup", Err: storebinding.ErrBeadsNudgeQueueCorrupt}
+}
+
+// A partial Lookup fails the batch: the record it skipped is one of the
+// batch's own, so nothing is removed from the file queue.
+func TestNudgeQueueShimPartialLookupFailsTheBatch(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	first, second := pinnedShimBatch(now)
+	f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{first, second} })
+	partial := &partialLookupBeads{nudgeQueueShimBeads: f.beads, skipID: "n-b"}
+	report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, f.file, partial, now)
+	if !beads.IsPartialResult(err) {
+		t.Fatalf("shim error = %v, want the partial Lookup reported", err)
+	}
+	assertShimReport(t, report, nudgeQueueShimReport{Failed: 1})
+	if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
+		t.Fatalf("file pending = %v, want the batch kept whole", got)
+	}
+}
+
+// One undecodable beads record does not strand the rest: beads → file moves
+// every record that decodes and reports the corrupt one as a partial result.
+func TestNudgeQueueShimToFileMovesPastACorruptRecord(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	for _, id := range []string{"n-good-1", "n-good-2", "n-bad"} {
+		if err := f.beads.EnqueueDeferred(shimItem(id, now)); err != nil {
+			t.Fatalf("EnqueueDeferred(%s): %v", id, err)
+		}
+	}
+	records, err := f.store.List(beads.ListQuery{Label: "gc:nudge-queue", AllowScan: true})
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	for _, record := range records {
+		if record.Metadata["nudge_id"] == "n-bad" {
+			if err := f.store.SetMetadata(record.ID, "deliver_after", "not-a-time"); err != nil {
+				t.Fatalf("SetMetadata: %v", err)
+			}
+		}
+	}
+	report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, f.file, f.beads, now)
+	if !beads.IsPartialResult(err) || !errors.Is(err, storebinding.ErrBeadsNudgeQueueCorrupt) {
+		t.Fatalf("shim error = %v, want the corrupt record reported as a partial result", err)
+	}
+	assertShimReport(t, report, nudgeQueueShimReport{Moved: 2})
+	if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-good-1", "n-good-2"}) {
+		t.Fatalf("file pending = %v, want every record that decodes moved", got)
+	}
+}
+
+// A beads record whose id the file queue already holds as a dead letter is
+// not imported. Its record is retired with a reason saying so, and its batch
+// is reported apart from the moved ones.
+func TestNudgeQueueShimToFileReportsAnIDTheFileHoldsDead(t *testing.T) {
+	store := openShimTestBeadsStore(t)
+	fronts, err := storebinding.NewBeadsNudgeFrontDoors(beads.NudgesStore{Store: store})
+	if err != nil {
+		t.Fatalf("NewBeadsNudgeFrontDoors: %v", err)
+	}
+	queue := fronts.Queue.(nudgeQueueShimBeads)
+	city := t.TempDir()
+	file := openNudgeQueue(city, beads.NudgesStore{}).Queue.(*fileNudgeQueue)
+	f := shimFixture{city: city, file: file, beads: queue, store: store}
+	now := time.Now().UTC()
+	dead := shimItem("n-dead-in-file", now)
+	dead.DeadAt = now.Add(-time.Minute)
+	f.writeFileState(t, func(state *nudgequeue.State) { state.Dead = []nudgequeue.Item{dead} })
+	for _, id := range []string{"n-dead-in-file", "n-fresh"} {
+		if err := queue.EnqueueDeferred(shimItem(id, now)); err != nil {
+			t.Fatalf("EnqueueDeferred(%s): %v", id, err)
+		}
+	}
+
+	assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{
+		Moved:          1,
+		AlreadyDead:    1,
+		AlreadyDeadIDs: []string{"n-dead-in-file"},
+	})
+	state := f.fileState(t)
+	if got := shimIDs(state.Pending); !reflect.DeepEqual(got, []string{"n-fresh"}) {
+		t.Fatalf("file pending = %v, want only the fresh record imported", got)
+	}
+	if got := shimIDs(state.Dead); !reflect.DeepEqual(got, []string{"n-dead-in-file"}) {
+		t.Fatalf("file dead = %v, want the dead letter untouched", got)
+	}
+	skipped := mustFindShimShadow(t, fronts.Shadows, "n-dead-in-file")
+	if skipped.State != nudgeQueueMigratedOutcome || skipped.TerminalReason != nudgeQueueMigratedDeadReason {
+		t.Fatalf("skipped record projected %+v, want it retired with reason %q", skipped, nudgeQueueMigratedDeadReason)
+	}
+	moved := mustFindShimShadow(t, fronts.Shadows, "n-fresh")
+	if moved.State != nudgeQueueMigratedOutcome || moved.TerminalReason != nudgeQueueMigratedReason {
+		t.Fatalf("moved record projected %+v, want it retired as imported", moved)
+	}
+}
+
+func mustFindShimShadow(t *testing.T, shadows storebinding.NudgeShadows, id string) nudgequeue.NudgeShadow {
+	t.Helper()
+	shadow, ok, err := shadows.FindIncludingTerminal(id)
+	if err != nil || !ok {
+		t.Fatalf("FindIncludingTerminal(%s) = %v, %v", id, ok, err)
+	}
+	return shadow
 }

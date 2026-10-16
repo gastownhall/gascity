@@ -1274,10 +1274,14 @@ func (q *fileNudgeQueue) migrationCandidates(now time.Time) (nudgeMigrationCandi
 	}), nil
 }
 
-// removeMigrated removes, under the lock, exactly the items the shim moved:
-// each matched by (ID, CreatedAt), as WithdrawWaitNudges matches, in pending
-// or in flight, and only while it holds no unexpired lease. It returns the
-// items it left in place: claimed meanwhile, or already gone.
+// removeMigrated removes, under the lock, one batch the shim moved, whole or
+// not at all. Each item is matched by (ID, CreatedAt), as WithdrawWaitNudges
+// matches, in pending or in flight; an item an old binary re-added meanwhile
+// under the same id with a new creation time is a different item and stays.
+// If any matched item holds an unexpired lease (a process still writing this
+// queue claimed it meanwhile), nothing is removed, so the queue never keeps
+// only part of a pinned batch. It returns the items it left in place: all of
+// them when one was claimed, or else the ones already gone.
 func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) ([]nudgequeue.Item, error) {
 	want := make(map[nudgeMigrationKey]bool, len(items))
 	for _, item := range items {
@@ -1285,11 +1289,18 @@ func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) 
 	}
 	removed := make(map[nudgeMigrationKey]bool, len(items))
 	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+			for _, item := range bucket {
+				if want[nudgeMigrationKeyOf(item)] && nudgeLeaseHeld(item, now) {
+					return nil
+				}
+			}
+		}
 		take := func(bucket []queuedNudge) []queuedNudge {
 			filtered := bucket[:0]
 			for _, item := range bucket {
 				key := nudgeMigrationKeyOf(item)
-				if want[key] && !nudgeLeaseHeld(item, now) {
+				if want[key] {
 					removed[key] = true
 					continue
 				}
@@ -1314,17 +1325,32 @@ func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) 
 }
 
 // importMigrated appends, under the lock, the items the shim moves into the
-// queue, as pending with the lease cleared and every other field kept. An id
-// the queue already holds is skipped, so a re-run imports nothing twice.
-func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) error {
-	return withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+// queue, as pending, with the claim and the delivery batch cleared and every
+// other field kept (nudgeItemForMove). An id the queue already holds is
+// skipped, so a re-run imports nothing twice; it returns the skipped ids the
+// queue holds as dead letters, which were therefore not imported.
+func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) ([]string, error) {
+	var dead []string
+	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		dead = dead[:0]
+		deadIDs := make(map[string]bool, len(state.Dead))
+		for _, item := range state.Dead {
+			deadIDs[item.ID] = true
+		}
 		for _, item := range items {
 			if queuedNudgeExists(state, item.ID) {
+				if deadIDs[item.ID] {
+					dead = append(dead, item.ID)
+				}
 				continue
 			}
-			state.Pending = append(state.Pending, nudgeItemWithoutLease(item))
+			state.Pending = append(state.Pending, nudgeItemForMove(item))
 		}
 		sortQueuedNudges(state)
 		return nil
 	})
+	if err != nil {
+		return nil, err
+	}
+	return dead, nil
 }
