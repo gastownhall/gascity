@@ -54,16 +54,19 @@ func cityScopedFanOutProbes(cityPath string, cfg *config.City, a *config.Agent, 
 }
 
 // customScaleCheckFanOutProbes returns the fan-out probes for agent a's custom
-// scale_check, or nil when the check runs once against ownDir: a rig-scoped
-// agent (rigName non-empty) and an agent with no custom scale_check keep the
-// single-store path. The demand pass (both pool shapes in buildDemandTargets)
+// scale_check, or nil when the check runs once against ownDir. Only a
+// cross-store-eligible (scope = "city") agent fans out -- the same predicate,
+// agentIsCrossStoreEligible, that hookWorkQueryStores uses to federate its
+// claims -- so an agent wakes only on demand it can claim. A rig-scoped agent
+// (rigName non-empty), an agent that is not city-scoped, and an agent with no
+// custom scale_check keep the single-store path. The demand pass (both pool shapes in buildDemandTargets)
 // and the allocator lane's customScaleCheckWork both build their pools through
 // this one helper, so the count the lane publishes cannot drift from the one
 // the demand pass sums (POOL-005). ownEnv is the env the pool's own city probe
 // runs with: the probe env for a generic pool, nil for one backing a named
 // session.
 func customScaleCheckFanOutProbes(cityPath string, cfg *config.City, a *config.Agent, rigName, ownDir string, ownEnv map[string]string, suspendedRigPaths map[string]bool) []poolStoreProbe {
-	if rigName != "" || strings.TrimSpace(a.ScaleCheck) == "" {
+	if rigName != "" || !agentIsCrossStoreEligible(a) || strings.TrimSpace(a.ScaleCheck) == "" {
 		return nil
 	}
 	return cityScopedFanOutProbes(cityPath, cfg, a, ownDir, ownEnv, suspendedRigPaths)

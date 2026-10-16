@@ -246,6 +246,15 @@ their probes through. Sharing one helper is what makes the store sets match
 by construction rather than by convention: a rig suspension becomes
 invisible to a city-scoped agent's `scale_check` demand the same tick it
 becomes invisible to that agent's `work_query` claims, and vice versa.
+Eligibility is shared the same way: `customScaleCheckFanOutProbes` fans out
+only when `agentIsCrossStoreEligible` (`scope = "city"`) holds, the predicate
+`hookWorkQueryStores` uses to federate claims, so an agent that is not
+city-scoped neither sums rig demand nor claims rig work.
+
+On a federated city with a default `work_query`, `scopeFederatedHookStores`
+collapses the hook's store list to one federated leg whose reader spans the
+same non-suspended rigs. What matches the `scale_check` probe set is then the
+coverage of that reader, not the leg list itself.
 
 Diverging the two store sets — for example, filtering suspended rigs on
 one side but not the other — reintroduces the same class of bug the

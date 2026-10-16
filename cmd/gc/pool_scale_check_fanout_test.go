@@ -313,7 +313,7 @@ func TestCityScopedFanOutProbesIncludesCityAndNonSuspendedRigsOnly(t *testing.T)
 			{Name: "rigb", Path: rigBPath, SuspendedOnStart: true},
 		},
 	}
-	agentCfg := &config.Agent{Name: "worker"}
+	agentCfg := &config.Agent{Name: "worker", Scope: "city"}
 	ownEnv := map[string]string{"OWN": "1"}
 	suspended := map[string]bool{rigBPath: true}
 
@@ -400,6 +400,7 @@ func newFanOutStoreFixture(t *testing.T) fanOutStoreFixture {
 		Workspace: config.Workspace{Name: "test-city"},
 		Agents: []config.Agent{{
 			Name:              "worker",
+			Scope:             "city",
 			StartCommand:      "true",
 			MinActiveSessions: intPtr(0),
 			MaxActiveSessions: intPtr(20),
@@ -761,5 +762,38 @@ func TestRunCustomScaleChecks_CityScopedRigEnvFailureIsPartial(t *testing.T) {
 		if dir == brokenDir {
 			t.Fatalf("the check ran in the broken rig's directory %q; a probe whose store env is unresolvable must not run at all", dir)
 		}
+	}
+}
+
+// TestCustomScaleCheckFanOutProbesSkipsUnscopedAgent pins that only a
+// cross-store-eligible (scope = "city") agent fans its custom scale_check out.
+// An agent with no Dir and no Scope is not federated by gc hook
+// (hookWorkQueryStores keys on agentIsCrossStoreEligible), so summing rig
+// demand for it would wake sessions for work they can never claim.
+func TestCustomScaleCheckFanOutProbesSkipsUnscopedAgent(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "riga", Path: filepath.Join(cityPath, "riga")}}}
+	a := &config.Agent{Name: "worker", ScaleCheck: "check"}
+
+	if got := customScaleCheckFanOutProbes(cityPath, cfg, a, "", cityPath, nil, nil); got != nil {
+		t.Fatalf("customScaleCheckFanOutProbes(unscoped agent) = %+v, want nil: only a scope = \"city\" agent fans out", got)
+	}
+}
+
+// TestRunCustomScaleChecks_UnscopedAgentReadsOwnStoreOnly is the lane twin of
+// the test above: with Scope cleared, the fixture's agent must publish only
+// the city store's own count, not the sum across its rigs.
+func TestRunCustomScaleChecks_UnscopedAgentReadsOwnStoreOnly(t *testing.T) {
+	fx := newFanOutStoreFixture(t)
+	fx.cfg.Agents[0].Scope = ""
+	fx.cfg.Agents[0].ScaleCheck = fanOutRigBoundCheck
+	env := externalReadsEnv{CityName: "test-city", CityPath: fx.cityPath, Cfg: fx.cfg, SuspendedRigPaths: fx.suspended}
+
+	var stderr strings.Builder
+	result := runCustomScaleChecks(env, shellScaleCheck, controllerQueryRuntimeEnv, &stderr)
+
+	if result.Counts["worker"] != fanOutCityCount {
+		t.Fatalf("lane count for unscoped worker = %d, want %d (the city store alone; an agent that is not "+
+			"scope = \"city\" must not fan out); stderr = %q", result.Counts["worker"], fanOutCityCount, stderr.String())
 	}
 }

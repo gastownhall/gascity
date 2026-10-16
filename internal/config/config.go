@@ -811,7 +811,9 @@ type AgentOverride struct {
 	// MinActiveSessions overrides the minimum number of sessions to keep alive.
 	MinActiveSessions *int `toml:"min_active_sessions,omitempty"`
 	// ScaleCheck overrides the shell command whose output reports new
-	// unassigned session demand for bead-backed reconciliation.
+	// unassigned session demand for bead-backed reconciliation. For an agent
+	// with scope = "city" it runs once per active store and the counts are
+	// summed, as for the agent-level scale_check.
 	ScaleCheck *string `toml:"scale_check,omitempty"`
 	// OptionDefaults adds or overrides provider option defaults for this agent.
 	// Keys are option keys, values are choice values. Merges additively
@@ -3535,7 +3537,11 @@ type Agent struct {
 	// the desired session count. If it contains Go template placeholders, gc
 	// expands them using the same PathContext fields as work_dir and
 	// session_setup (Agent, AgentBase, Rig, RigRoot, CityRoot, CityName,
-	// DefaultBranch) before running the command.
+	// DefaultBranch) before running the command. For an agent with
+	// scope = "city", the command runs once per active store (the city plus
+	// each non-suspended rig) with that store's BEADS_DIR and Dolt endpoint,
+	// and the per-store counts are summed, so it should count only the store
+	// it is given.
 	ScaleCheck string `toml:"scale_check,omitempty"`
 	// DrainTimeout is the maximum time to wait for a session to finish its
 	// current work before force-killing it during scale-down. Duration string
