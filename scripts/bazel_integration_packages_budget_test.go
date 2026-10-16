@@ -3,6 +3,7 @@ package scripts_test
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -15,7 +16,7 @@ import (
 
 // integrationPackagesShards: //test:integration_packages' test targets and
 // each one's shard_count (1 when unsharded), i.e. the integration-packages
-// lane's test actions, one per target shard. aquery-verified (80 TestRunner
+// lane's test actions, one per target shard. aquery-verified (81 TestRunner
 // actions) at 2d2b85656c with beads_test at 13 shards; recompute with
 //
 //	T=$(bazel query 'tests(//test:integration_packages)' | paste -sd+ | sed 's/+/ + /g')
@@ -206,8 +207,81 @@ func TestIntegrationPackagesFitsTheJobsBudget(t *testing.T) {
 		}
 		total += shards
 	}
-	if total > budget {
-		t.Errorf("integration-packages (%s): %d test actions, more than the effective --jobs=%d: a second wave would add its tail test's full duration to the critical path instead of overlapping it (closed PR #7542 measured up to +575s from exactly this)", cmd, total, budget)
+	if err := checkIntegrationPackagesJobsBudget(total, budget); err != nil {
+		t.Error(err)
+	}
+}
+
+// integrationPackagesTwoWaveExceptionPinned: the integration-packages lane
+// used to get its own --jobs=128 (#7795) so its test actions fit Bazel's
+// first scheduling wave. Farm owner maintainer-city-c3's before/after found
+// no lane gain and a farm guard regression (OSS queue-wait p95 8.9s->22.9s),
+// so #7795 was reverted and the lane is back to running in two waves under
+// the inherited --jobs=64. 81 test actions (aquery-verified, see
+// integrationPackagesShards above) is accepted as a known, pinned exception
+// so the budget check still catches further growth. If the count grows
+// above this pin, that is this lane asking for a bigger second-wave tail,
+// not a smaller one; split it instead of raising --jobs again (e.g. shard
+// out //cmd/gc:gc_test's long tail) — see beads closed PR #7542 and gascity
+// #7795's before/after for what that tail costs.
+const integrationPackagesTwoWaveExceptionPinned = 81
+
+// checkIntegrationPackagesJobsBudget reports whether total (the lane's test
+// action count) is acceptable against effective (its --jobs). total may
+// exceed effective only up to integrationPackagesTwoWaveExceptionPinned,
+// a documented, known two-wave exception; growing past that pin must fail
+// loudly rather than quietly tolerate a longer tail, and if total ever
+// drops back to effective or below, the exception should be removed.
+func checkIntegrationPackagesJobsBudget(total, effective int) error {
+	if total <= effective {
+		if integrationPackagesTwoWaveExceptionPinned > effective {
+			return fmt.Errorf("integration-packages: %d test actions now fit the effective --jobs=%d: remove the integrationPackagesTwoWaveExceptionPinned (%d) exception, it is no longer needed", total, effective, integrationPackagesTwoWaveExceptionPinned)
+		}
+		return nil
+	}
+	if total > integrationPackagesTwoWaveExceptionPinned {
+		return fmt.Errorf("integration-packages: %d test actions, more than the pinned two-wave exception (%d) at effective --jobs=%d: the lane is already two waves (second-wave tail, see beads closed PR #7542 and gascity #7795's before/after) and should be split (e.g. shard out //cmd/gc:gc_test's long tail), not given more concurrency", total, integrationPackagesTwoWaveExceptionPinned, effective)
+	}
+	return nil
+}
+
+// TestIntegrationPackagesJobsBudgetException mutation-proves
+// checkIntegrationPackagesJobsBudget: growth past the pinned exception must
+// fail loudly, and the exception must be flagged for removal once the lane
+// no longer needs it.
+func TestIntegrationPackagesJobsBudgetException(t *testing.T) {
+	const pinned = integrationPackagesTwoWaveExceptionPinned
+	for _, tc := range []struct {
+		name    string
+		total   int
+		wantErr bool
+	}{
+		{"within effective jobs: exception is stale, must say so", 64, true},
+		{"within the pinned two-wave exception", pinned, false},
+		{"one past the pin: must fail loudly", pinned + 1, true},
+		{"far past the pin: must fail loudly", pinned + 20, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := checkIntegrationPackagesJobsBudget(tc.total, 64)
+			if tc.wantErr && err == nil {
+				t.Errorf("checkIntegrationPackagesJobsBudget(%d, 64) = nil, want an error (growth past the pin must fail loudly)", tc.total)
+			}
+			if !tc.wantErr && err != nil {
+				t.Errorf("checkIntegrationPackagesJobsBudget(%d, 64) = %v, want nil", tc.total, err)
+			}
+		})
+	}
+
+	// If the lane's total ever drops to the effective jobs or below while
+	// the exception is still pinned above it, the check must say so instead
+	// of silently passing.
+	if err := checkIntegrationPackagesJobsBudget(64, 64); err == nil {
+		t.Error("checkIntegrationPackagesJobsBudget(64, 64) = nil, want an error telling us to remove the now-unneeded exception")
+	}
+	// Once effective jobs catches up to (or passes) the pin, there is
+	// nothing left to flag.
+	if err := checkIntegrationPackagesJobsBudget(pinned, pinned); err != nil {
+		t.Errorf("checkIntegrationPackagesJobsBudget(%d, %d) = %v, want nil", pinned, pinned, err)
 	}
 }
 
