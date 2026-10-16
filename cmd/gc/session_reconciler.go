@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -7165,15 +7166,18 @@ func assignedTaskOptionOverrides(store beads.Store, rp *config.ResolvedProvider,
 	return nil, holdsAssignedWork, err
 }
 
-// claimedWorkProbe reports whether a session holds claimed (in-progress) work.
-type claimedWorkProbe func(info sessionpkg.Info) (bool, error)
+// claimedWorkProbe returns the claimed (in-progress) work beads assigned to a
+// session. A probe that found claims returns them even when another leg could
+// not be read; with no claim found, an unreadable leg is the error.
+type claimedWorkProbe func(info sessionpkg.Info) ([]beads.Bead, error)
 
-// dispatchOptionSources are the reads a launch's trigger-bead opt_* fallback
-// needs beyond the session store. trigger resolves the trigger bead by id
-// through the city's residency contract; claimedWork answers whether the session
-// already holds claimed work on any serving leg it can claim from, which beats
-// the trigger. A nil trigger reads the session store only for a same-store stamp; a
-// nil claimedWork leaves the session-store claim check as the only one.
+// dispatchOptionSources are the reads a launch's dispatch options need beyond
+// the session store. trigger resolves the trigger bead by id through the city's
+// residency contract; claimedWork returns the work the session already claimed
+// on any serving leg it can claim from, which beats the trigger and supplies
+// the pins of a claim held outside the session store. A nil trigger reads the
+// session store only for a same-store stamp; a nil claimedWork leaves the
+// session-store claim check as the only one.
 type dispatchOptionSources struct {
 	trigger     warmClaimTriggerResolver
 	claimedWork claimedWorkProbe
@@ -7194,20 +7198,30 @@ func reconcileDispatchOptionSources(opts startExecutionOptions, sw *SeatWork) di
 }
 
 // reachableClaimedWorkProbe returns the claimedWorkProbe a reconcile pass hands
-// its launches: whether in-progress work is assigned to the session on any of
-// sw's legs, the ones the drain gates read. A leg that cannot be read is an
-// error, not "holds nothing".
+// its launches: the in-progress work assigned to the session on any of sw's
+// legs, the ones the drain gates read. A leg that cannot be read is an error,
+// not "holds nothing".
 func reachableClaimedWorkProbe(sw *SeatWork) claimedWorkProbe {
-	return func(info sessionpkg.Info) (bool, error) {
-		return sessionHasInProgressAssignedWorkForConfig(sw, info)
+	return func(info sessionpkg.Info) ([]beads.Bead, error) {
+		hits, err := sw.match(seatWorkQuery{scope: releaseScope(info, sw.Legs().cfg), statuses: []string{"in_progress"}}, false)
+		claimed := make([]beads.Bead, 0, len(hits))
+		for _, hit := range hits {
+			claimed = append(claimed, hit.bead)
+		}
+		if len(claimed) > 0 {
+			return claimed, nil
+		}
+		return nil, err
 	}
 }
 
 // resolveDispatchOptionOverrides returns the one-shot provider option choices a
 // launch applies from work-bead opt_<OptionsSchema key> metadata. An in-progress
-// work bead assigned to the candidate is the source when the session holds one;
-// otherwise the session's trigger bead (the routed demand it was spawned for) is,
-// so a pool session spawned on unassigned demand launches with that step's pins.
+// work bead assigned to the candidate is the source when the session holds one,
+// whether it lives in the session store or on another leg the session claims
+// from (a rig-routed bead lives in its rig store); otherwise the session's
+// trigger bead (the routed demand it was spawned for) is, so a pool session
+// spawned on unassigned demand launches with that step's pins.
 // A claimed-work read that fails is not "holds nothing": it is logged and the
 // launch keeps the provider defaults. It never influences what the session
 // claims. Values are validated per key against the provider OptionsSchema;
@@ -7228,24 +7242,47 @@ func resolveDispatchOptionOverrides(candidate startCandidate, cityPath string, c
 	if holdsAssignedWork || err != nil {
 		return overrides
 	}
-	return triggerBeadOptionOverrides(candidate, cityPath, cfg, store, rp, sources, assignees)
+	return triggerOrClaimedWorkOptionOverrides(candidate, cityPath, cfg, store, rp, sources, assignees)
 }
 
-// triggerBeadOptionOverrides reads opt_* pins off the candidate's trigger bead.
-// The bead is read through sources.trigger (the city's residency contract) when
-// one is supplied; a miss there does not fall back to store. Without a resolver
-// the session store is read only when the gc.trigger_bead_store_ref stamp names
-// that same store, so a foreign rig stamp fails closed rather than reading a
-// same-id bead from the wrong store. Unless the session has claimed the trigger
-// itself, sources.claimedWork must find no claimed work on any leg: a claim
-// elsewhere beats a stale trigger. A self-claimed trigger skips the probe, so a
-// session holding several claims launches with one claimed bead's pins (the
-// trigger's, over claims on other legs) rather than with the provider defaults,
-// which would drop the pins of a bead it genuinely claimed.
-func triggerBeadOptionOverrides(candidate startCandidate, cityPath string, cfg *config.City, store beads.Store, rp *config.ResolvedProvider, sources dispatchOptionSources, assignees []string) map[string]string {
+// triggerOrClaimedWorkOptionOverrides picks the dispatch options for a session
+// that holds no claimed work in the session store. A trigger the session has
+// claimed itself supplies its pins, over claims on other legs. Otherwise claimed
+// work on any leg sources.claimedWork reads beats the trigger as a whole bead:
+// the newest claim's pins apply, and a claim without pins keeps the provider
+// defaults rather than reviving a stale trigger's. With no claim anywhere the
+// trigger's pins apply.
+func triggerOrClaimedWorkOptionOverrides(candidate startCandidate, cityPath string, cfg *config.City, store beads.Store, rp *config.ResolvedProvider, sources dispatchOptionSources, assignees []string) map[string]string {
+	trigger, haveTrigger := launchStepTriggerBead(candidate, cityPath, cfg, store, sources, assignees)
+	if haveTrigger && triggerBeadIsClaimed(trigger) {
+		overrides, _ := workBeadOptionOverrides(trigger, rp)
+		return overrides
+	}
+	claimed, err := sessionClaimedWork(candidate.info, sources.claimedWork)
+	if err != nil {
+		log.Printf("session %s: reading claimed work for dispatch options: %v", candidate.info.ID, err)
+		return nil
+	}
+	if len(claimed) > 0 {
+		return claimedWorkOptionOverrides(claimed, rp)
+	}
+	if !haveTrigger {
+		return nil
+	}
+	overrides, _ := workBeadOptionOverrides(trigger, rp)
+	return overrides
+}
+
+// launchStepTriggerBead reads the candidate's trigger bead when it is still
+// this session's launch step. The bead is read through sources.trigger (the
+// city's residency contract) when one is supplied; a miss there does not fall
+// back to store. Without a resolver the session store is read only when the
+// gc.trigger_bead_store_ref stamp names that same store, so a foreign rig stamp
+// fails closed rather than reading a same-id bead from the wrong store.
+func launchStepTriggerBead(candidate startCandidate, cityPath string, cfg *config.City, store beads.Store, sources dispatchOptionSources, assignees []string) (beads.Bead, bool) {
 	triggerID := strings.TrimSpace(candidate.info.TriggerBeadID)
 	if triggerID == "" {
-		return nil
+		return beads.Bead{}, false
 	}
 	var (
 		trigger beads.Bead
@@ -7257,22 +7294,18 @@ func triggerBeadOptionOverrides(candidate startCandidate, cityPath string, cfg *
 	case store != nil && namedTriggerRefIsSameStore(candidate.info.TriggerBeadStoreRef, loadedCityName(cfg, cityPath)):
 		trigger, err = store.Get(triggerID)
 	default:
-		return nil
+		return beads.Bead{}, false
 	}
 	if err != nil {
 		if !errors.Is(err, beads.ErrNotFound) {
 			log.Printf("session %s: reading trigger bead %s for dispatch options: %v", candidate.info.ID, triggerID, err)
 		}
-		return nil
+		return beads.Bead{}, false
 	}
 	if !triggerBeadIsLaunchStep(trigger, assignees) {
-		return nil
+		return beads.Bead{}, false
 	}
-	if !triggerBeadIsClaimed(trigger) && sessionHoldsClaimedWork(candidate.info, sources.claimedWork) {
-		return nil
-	}
-	overrides, _ := workBeadOptionOverrides(trigger, rp)
-	return overrides
+	return trigger, true
 }
 
 // triggerBeadIsClaimed reports whether a launch-step trigger bead is already
@@ -7282,19 +7315,27 @@ func triggerBeadIsClaimed(b beads.Bead) bool {
 	return strings.EqualFold(strings.TrimSpace(b.Status), "in_progress") && strings.TrimSpace(b.Assignee) != ""
 }
 
-// sessionHoldsClaimedWork reports whether probe finds claimed work for the
-// session. A nil probe finds none. A probe error is logged and counts as held,
-// so the trigger fallback fails closed to the provider defaults.
-func sessionHoldsClaimedWork(info sessionpkg.Info, probe claimedWorkProbe) bool {
+// sessionClaimedWork returns the claimed work probe finds for the session. A
+// nil probe finds none.
+func sessionClaimedWork(info sessionpkg.Info, probe claimedWorkProbe) ([]beads.Bead, error) {
 	if probe == nil {
-		return false
+		return nil, nil
 	}
-	claimed, err := probe(info)
-	if err != nil {
-		log.Printf("session %s: reading claimed work for dispatch options: %v", info.ID, err)
-		return true
+	return probe(info)
+}
+
+// claimedWorkOptionOverrides returns the pins of the newest claimed bead that
+// carries any opt_* metadata, matching the session-store read's newest-first
+// order.
+func claimedWorkOptionOverrides(claimed []beads.Bead, rp *config.ResolvedProvider) map[string]string {
+	ordered := append([]beads.Bead(nil), claimed...)
+	sort.SliceStable(ordered, func(i, j int) bool { return ordered[i].CreatedAt.After(ordered[j].CreatedAt) })
+	for _, b := range ordered {
+		if overrides, sawOptions := workBeadOptionOverrides(b, rp); sawOptions {
+			return overrides
+		}
 	}
-	return claimed
+	return nil
 }
 
 // triggerBeadIsLaunchStep reports whether a trigger bead is still this session's
