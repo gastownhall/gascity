@@ -30,6 +30,7 @@ rollout:ops.content
 rollout:ops.control
 rollout:ops.lifecycle
 ops-recording
+conversation-lanes
 config-refs
 stale-local-pack-dirs
 pre-start-scripts
