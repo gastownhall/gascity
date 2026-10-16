@@ -38,6 +38,8 @@ import (
 //   - the reconcile planner's patrol pass, observation max age, boot-gate
 //     alert and pass-record dedupe window
 //   - the external-reads lane's pace and its sources' freshness
+//   - the host-resume threshold, twice the patrol interval
+//     (CityRuntime.observeResume), so a resume is detected N times sooner
 //
 // Durations that go through neither keep their real periods; among them are
 // the supervisor's patrol, the proxied guard tick, the managed Dolt scope
