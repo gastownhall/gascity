@@ -73,13 +73,8 @@ func (s *NativeDoltStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (Gua
 	if err := validateGuardedBatch(b); err != nil {
 		return GuardedResult{}, err
 	}
-	for _, it := range b.Items {
-		if it.Create == nil {
-			continue
-		}
-		if err := checkPinnedIDNamespace("native dolt guarded batch", it.Create.ID, s.reservedPrefixes); err != nil {
-			return GuardedResult{}, err
-		}
+	if err := checkGuardedCreateNamespaces("native dolt guarded batch", b, s.reservedPrefixes); err != nil {
+		return GuardedResult{}, err
 	}
 	for _, it := range b.Items {
 		if it.Create != nil {

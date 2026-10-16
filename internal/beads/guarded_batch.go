@@ -113,7 +113,9 @@ var ErrGuardedBatchUnsupported = errors.New("beads: store cannot apply guarded b
 // ErrInvalidGuardedBatch reports a batch refused by validation, before any
 // write: an empty or oversized batch, an item with not exactly one member, a
 // create without an id, with edges or both Ephemeral and NoHistory, an update
-// without an id, or a row named twice. Update options the guarded write cannot
+// without an id, or a row named twice. A namespace-fenced store refuses a
+// create pinned outside its namespaces the same way, and that refusal also
+// matches ErrPinnedIDOutsideNamespace. Update options the guarded write cannot
 // carry also match the conditional-update error they raise
 // (ConditionalUpdateFieldUnsupportedError, ErrEmptyConditionalUpdate).
 var ErrInvalidGuardedBatch = errors.New("beads: invalid guarded batch")
@@ -212,6 +214,23 @@ func validateGuardedBatch(b GuardedBatch) error {
 			return fmt.Errorf("%w: items %d and %d both write %q", ErrInvalidGuardedBatch, first, i, id)
 		}
 		seen[id] = i
+	}
+	return nil
+}
+
+// checkGuardedCreateNamespaces applies the pinned-id fence to every create in
+// b, before the store reads or writes anything. A refusal is a validation
+// refusal: it matches ErrInvalidGuardedBatch, so the caller knows the batch
+// wrote nothing, and ErrPinnedIDOutsideNamespace, so it can route the id to a
+// sibling binding.
+func checkGuardedCreateNamespaces(op string, b GuardedBatch, namespaces []string) error {
+	for i, it := range b.Items {
+		if it.Create == nil {
+			continue
+		}
+		if err := checkPinnedIDNamespace(op, it.Create.ID, namespaces); err != nil {
+			return fmt.Errorf("guarded batch item %d: %w: %w", i, ErrInvalidGuardedBatch, err)
+		}
 	}
 	return nil
 }

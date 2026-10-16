@@ -352,6 +352,8 @@ func guardedInvalidBatchesRefused(t *testing.T, f *guardedFixture) {
 		}},
 		{"create_ephemeral_and_no_history", []beads.GuardedItem{{Create: &beads.Bead{ID: f.pin("tiers"), Title: "both tiers", Ephemeral: true, NoHistory: true}}}},
 		{"create_with_parent", []beads.GuardedItem{{Create: &beads.Bead{ID: f.pin("child"), Title: "child", ParentID: parent}}}},
+		{"create_with_needs", []beads.GuardedItem{{Create: &beads.Bead{ID: f.pin("needs"), Title: "needs", Needs: []string{row.ID}}}}},
+		{"create_with_dependencies", []beads.GuardedItem{{Create: &beads.Bead{ID: f.pin("deps"), Title: "deps", Dependencies: []beads.Dep{{IssueID: f.pin("deps"), DependsOnID: row.ID, Type: "blocks"}}}}}},
 		{"update_with_parent", []beads.GuardedItem{{Update: &beads.GuardedUpdate{ID: row.ID, Opts: beads.UpdateOpts{ParentID: &parent}}}}},
 		{"empty_update", []beads.GuardedItem{{Update: &beads.GuardedUpdate{ID: row.ID, ExpectedRevision: &row.Revision}}}},
 	} {
@@ -361,7 +363,7 @@ func guardedInvalidBatchesRefused(t *testing.T, f *guardedFixture) {
 		}
 	}
 	f.wantUnchanged(row)
-	f.wantAbsent(f.pin("over0"), f.pin(fmt.Sprintf("over%d", beads.MaxGuardedItems)), f.pin("twice"), f.pin("both"), f.pin("child"), f.pin("tiers"))
+	f.wantAbsent(f.pin("over0"), f.pin(fmt.Sprintf("over%d", beads.MaxGuardedItems)), f.pin("twice"), f.pin("both"), f.pin("child"), f.pin("needs"), f.pin("deps"), f.pin("tiers"))
 }
 
 // guardedFixture is one fresh store plus its resolved batcher.

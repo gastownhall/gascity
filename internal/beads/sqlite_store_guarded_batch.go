@@ -45,14 +45,13 @@ func (s *SQLiteStore) ApplyGuarded(ctx context.Context, b GuardedBatch) (Guarded
 	if !s.hasRevisionColumn {
 		return GuardedResult{}, fmt.Errorf("sqlite schema lacks the revision column: %w", ErrGuardedBatchUnsupported)
 	}
+	if err := checkGuardedCreateNamespaces("sqlite guarded batch", b, s.reservedPrefixes); err != nil {
+		return GuardedResult{}, err
+	}
 	for _, it := range b.Items {
-		if it.Create == nil {
-			continue
+		if it.Create != nil {
+			noteSessionCreate(*it.Create)
 		}
-		if err := s.checkPinnedIDNamespace(it.Create.ID); err != nil {
-			return GuardedResult{}, err
-		}
-		noteSessionCreate(*it.Create)
 	}
 	var res GuardedResult
 	err := retryOnBusy(func() error {
