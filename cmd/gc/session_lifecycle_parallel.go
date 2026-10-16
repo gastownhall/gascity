@@ -4263,6 +4263,9 @@ func executePlannedStartsTraced(
 		// refused least this episode go first, so a poisoned oldest session
 		// cannot monopolize the half-open probe.
 		sortCandidatesByProbeRotation(ready, capacityGuard)
+		// The fleet breaker's probe rotates the same way across all sessions:
+		// the ones that failed fewest starts this episode go first.
+		sortCandidatesByFleetProbeRotation(ready, fleetGuard)
 		for offset := 0; offset < len(ready); {
 			if wakeCount >= maxWakes {
 				for _, candidate := range ready[offset:] {

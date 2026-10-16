@@ -1400,6 +1400,7 @@ go_test(
         "fast_loop_helpers_test.go",
         "fleet_breaker_control_test.go",
         "fleet_probe_rotation_test.go",
+        "fleet_probe_rotation_unit_test.go",
         "fleet_reconciler_wiring_test.go",
         "fleet_start_breaker_test.go",
         "formula_cook_attach_class_test.go",

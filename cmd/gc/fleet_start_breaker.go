@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"sort"
 	"sync"
 	"time"
 
@@ -243,8 +244,12 @@ type fleetStartGuard struct {
 	// emitted in the order the breaker made them.
 	flushMu sync.Mutex
 
-	mu          sync.Mutex
-	failures    []fleetFailure
+	mu       sync.Mutex
+	failures []fleetFailure
+	// attempts counts, per session, the start failures of the current episode
+	// (the failures that tripped the breaker and every failed probe). It is
+	// what the probe rotation reads, and it ends with the episode.
+	attempts    map[string]int
 	starts      map[string]fleetStart
 	reason      string
 	openSince   time.Time
@@ -266,6 +271,7 @@ func newFleetStartGuard(now func() time.Time, startupTimeout time.Duration) *fle
 		halfOpenInterval: settings.HalfOpenInterval,
 		confirm:          newStartConfirmTracker(now, stabilityThreshold),
 		starts:           make(map[string]fleetStart),
+		attempts:         make(map[string]int),
 	}
 	g.registry.SetOnStateChange(g.onTransition)
 	return g
@@ -286,7 +292,37 @@ func (g *fleetStartGuard) onTransition(t resilience.Transition) {
 		g.openSince = t.At
 	case t.To == resilience.StateClosed:
 		g.openSince = time.Time{}
+		clear(g.attempts)
 	}
+}
+
+// episodeFailures reports how many start failures sessionID has had in the
+// current episode.
+func (g *fleetStartGuard) episodeFailures(sessionID string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.attempts[sessionID]
+}
+
+// sortCandidatesByFleetProbeRotation stably reorders candidates while the fleet
+// breaker is not closed, so sessions that failed fewer starts this episode go
+// first. A failed wake restores the session's durable wake order, so without
+// this the oldest failing session would take every half-open probe and a
+// healthy template behind it would never be probed. A nil or closed guard
+// leaves the order alone.
+func sortCandidatesByFleetProbeRotation(candidates []startCandidate, g *fleetStartGuard) {
+	if g == nil || g.breaker().State() == resilience.StateClosed {
+		return
+	}
+	g.mu.Lock()
+	ranks := make(map[string]int, len(candidates))
+	for _, c := range candidates {
+		ranks[c.info.ID] = g.attempts[c.info.ID]
+	}
+	g.mu.Unlock()
+	sort.SliceStable(candidates, func(a, b int) bool {
+		return ranks[candidates[a].info.ID] < ranks[candidates[b].info.ID]
+	})
 }
 
 // Eligible reports whether a start could be admitted now: closed, or a probe
@@ -366,6 +402,7 @@ func (g *fleetStartGuard) resolve(t *fleetTicket, o fleetOutcome) {
 	case fleetStartFailed:
 		if t.probe {
 			g.dropProbe(t)
+			g.countAttempt(t.sessionID)
 			g.breaker().RecordFailure()
 			return
 		}
@@ -376,6 +413,13 @@ func (g *fleetStartGuard) resolve(t *fleetTicket, o fleetOutcome) {
 	default:
 		g.releaseProbe(t)
 	}
+}
+
+// countAttempt adds one failed start to sessionID's count for the episode.
+func (g *fleetStartGuard) countAttempt(sessionID string) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.attempts[sessionID]++
 }
 
 // beginConfirm starts watching a started session for stabilityThreshold.
@@ -411,7 +455,12 @@ func (g *fleetStartGuard) noteFailure(sessionID, template string) {
 			kept = append(kept, f)
 		}
 	}
+	if len(kept) == 0 {
+		// No failure is left in the window: this one begins a new episode.
+		clear(g.attempts)
+	}
 	kept = append(kept, fleetFailure{at: now, session: sessionID, template: template})
+	g.attempts[sessionID]++
 	g.failures = kept
 	sessions, templates := make(map[string]struct{}), make(map[string]struct{})
 	for _, f := range g.failures {
@@ -493,6 +542,7 @@ func (g *fleetStartGuard) ObserveLiveness(sessionID string, alive bool) {
 	case verdict == confirmAlive && start.probe:
 		b.RecordSuccess()
 	case verdict == confirmDied && start.probe:
+		g.countAttempt(sessionID)
 		if b.State() == resilience.StateHalfOpen {
 			b.RecordFailure()
 		}
@@ -513,6 +563,7 @@ func (g *fleetStartGuard) ForgetSession(sessionID string) {
 	g.confirm.Forget(sessionID)
 	g.mu.Lock()
 	delete(g.starts, sessionID)
+	delete(g.attempts, sessionID)
 	g.mu.Unlock()
 }
 
@@ -551,6 +602,7 @@ func (g *fleetStartGuard) Reset() bool {
 	defer g.mu.Unlock()
 	g.failures = nil
 	clear(g.starts)
+	clear(g.attempts)
 	g.openSince = time.Time{}
 	if prev == resilience.StateClosed {
 		return false
