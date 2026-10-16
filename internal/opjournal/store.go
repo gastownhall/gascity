@@ -285,8 +285,12 @@ func (s *Store) ListOpenTolerant(conversation string) ([]Op, []QuarantinedRow, e
 // legacy, with one keyed read of at most one row. Unlike NewStore it needs no
 // conditional-write capability or namespace, so a caller with nothing to
 // write (the op sweeper with every ops gate off) can learn there is nothing
-// to sweep without paying NewStore's capability probe.
-func HasSubmittedOps(store beads.Store) (bool, error) {
+// to sweep without paying NewStore's capability probe. Like NewStore it
+// refuses a nil store with an error rather than panicking.
+func HasSubmittedOps(store beads.SessionStore) (bool, error) {
+	if isNilStore(store.Store) {
+		return false, errors.New("probing for submitted ops: store is required")
+	}
 	rows, err := store.List(beads.ListQuery{
 		Label:    LabelOp,
 		Metadata: map[string]string{keyStatus: string(StatusSubmitted)},

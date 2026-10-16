@@ -1830,7 +1830,7 @@ func TestHasSubmittedOps(t *testing.T) {
 	h := newHarness(t)
 	probe := func() bool {
 		t.Helper()
-		got, err := HasSubmittedOps(h.rec)
+		got, err := HasSubmittedOps(beads.SessionStore{Store: h.rec})
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -1860,8 +1860,20 @@ func TestHasSubmittedOps(t *testing.T) {
 // TestHasSubmittedOpsReadError proves a failed read is returned, never read
 // as "no ops".
 func TestHasSubmittedOpsReadError(t *testing.T) {
-	if _, err := HasSubmittedOps(failingListStore{beads.NewMemStore()}); err == nil {
+	if _, err := HasSubmittedOps(beads.SessionStore{Store: failingListStore{beads.NewMemStore()}}); err == nil {
 		t.Fatal("a failed read reported no error")
+	}
+}
+
+// TestHasSubmittedOpsNilStore proves a nil or typed-nil store is an error,
+// never a panic or "no ops".
+func TestHasSubmittedOpsNilStore(t *testing.T) {
+	if _, err := HasSubmittedOps(beads.SessionStore{}); err == nil {
+		t.Fatal("a nil store reported no error")
+	}
+	var nilMem *beads.MemStore
+	if _, err := HasSubmittedOps(beads.SessionStore{Store: nilMem}); err == nil {
+		t.Fatal("a typed nil store reported no error")
 	}
 }
 

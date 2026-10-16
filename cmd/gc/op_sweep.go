@@ -47,7 +47,8 @@ import (
 )
 
 const (
-	// opSweepInterval is the pass cadence while any ops gate is on.
+	// opSweepInterval is the pass cadence while a gate is on or the last pass
+	// left work.
 	opSweepInterval = time.Minute
 	// opSweepLimit caps the legacy ops one pass reads (and closes).
 	opSweepLimit = 200
@@ -106,7 +107,7 @@ func (cs *controllerState) newOpSweeper() *opSweeper {
 }
 
 // startOpSweep runs the op sweeper until ctx ends: a boot pass, then a pass
-// every interval while any ops gate is on.
+// every interval while a gate is on or the last pass left work.
 func (cs *controllerState) startOpSweep(ctx context.Context) {
 	s := cs.newOpSweeper()
 	go s.run(ctx)
