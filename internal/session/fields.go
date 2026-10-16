@@ -308,6 +308,9 @@ var registry = slices.Concat([]Field{
 	{Key: "continuity_eligible", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "RetireNamedSessionPatch"), op(srcWaitStore, "Store.wakeSessionFromBead"))},
 	{Key: "close_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
+	// transcript_path is pinned at retirement, while the bead is still open,
+	// so a short-lived pool worker stays diagnosable after its slot is recycled.
+	{Key: PinnedTranscriptMetadataKey, Class: ClassAdvisory, Writers: sites(legacy(srcBeads, "closeSessionBead")), Readers: sites(op("internal/session/transcript_pin.go", "PinnedTranscriptPath"))},
 
 	// Operator intent.
 	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), op("internal/session/kill_fence.go", "KillSleepPatch"))},

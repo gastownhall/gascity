@@ -15,9 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/promptsafe"
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/sessionlog"
 	"github.com/gastownhall/gascity/internal/telemetry"
-	workertranscript "github.com/gastownhall/gascity/internal/worker/transcript"
 )
 
 // staleKeyDetectDelay is the immutable production window between a keyed
@@ -1639,76 +1637,24 @@ func (m *Manager) TranscriptPathClassified(id string, searchPaths []string) (str
 	if err != nil {
 		return "", TranscriptAbsent, err
 	}
-	workDir := b.Metadata["work_dir"]
-	if workDir == "" {
-		if path := m.acpCaptureTranscriptPath(b); path != "" {
-			return path, TranscriptFound, nil
+	info := infoFromPersistedBead(b)
+	// A transcript pinned before retirement wins outright: it was resolved
+	// while the session was still attributable, which is the only window a
+	// short-lived pooled worker ever has.
+	if path := PinnedTranscriptPath(info); path != "" {
+		return path, TranscriptFound, nil
+	}
+	return transcriptLadder(info, func() ([]Info, error) {
+		sameWorkDirSessions, listErr := m.sameWorkDirSessionBeads(b, transcriptProvider(info), info.WorkDir)
+		if listErr != nil {
+			return nil, listErr
 		}
-		return "", TranscriptNoWorkDir, nil
-	}
-	provider := strings.TrimSpace(b.Metadata["provider_kind"])
-	if provider == "" {
-		provider = strings.TrimSpace(b.Metadata["provider"])
-	}
-	if len(searchPaths) == 0 {
-		searchPaths = sessionlog.DefaultSearchPaths()
-	}
-	if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
-		return path, TranscriptFound, nil
-	}
-	// An ACP session's transcript is the capture gc wrote itself. A keyed
-	// native transcript (above) still wins; the workdir fallbacks below could
-	// return an unrelated provider's file.
-	if path := m.acpCaptureTranscriptPath(b); path != "" {
-		return path, TranscriptFound, nil
-	}
-	// zcode carries no session_key — no session-id flag, no hook plugin — so
-	// the keyed lookup above can never hit for it and the ambiguity guard below
-	// would leave every pooled worker transcript-dark. Its mirror is keyed by
-	// the identity the bead does hold: its name, its own id (the seat — two
-	// seats can share a name and epoch), and its continuation epoch.
-	if path := workertranscript.DiscoverScopedPath(
-		searchPaths,
-		provider,
-		workDir,
-		b.Metadata["session_name"],
-		b.ID,
-		b.Metadata["continuation_epoch"],
-	); path != "" {
-		return path, TranscriptFound, nil
-	}
-	// A provider with a session-id flag runs each new conversation under a new
-	// key. A creating row of such a provider without a key is a start whose
-	// conversation has no key yet, and the work-directory fallback cannot tell
-	// its transcript from the one that start replaces. Other sessions in the
-	// work directory leave nothing to disambiguate before that key exists, so
-	// the window is absent, not ambiguous.
-	if strings.TrimSpace(b.Metadata["session_key"]) == "" &&
-		strings.TrimSpace(b.Metadata["session_id_flag"]) != "" &&
-		State(strings.TrimSpace(b.Metadata["state"])) == StateCreating {
-		return "", TranscriptAbsent, nil
-	}
-
-	sameWorkDirSessions, err := m.sameWorkDirSessionBeads(b, provider, workDir)
-	if err != nil {
-		return "", TranscriptAbsent, err
-	}
-	if len(sameWorkDirSessions) > 1 {
 		sameWorkDirInfos := make([]Info, 0, len(sameWorkDirSessions))
 		for _, s := range sameWorkDirSessions {
 			sameWorkDirInfos = append(sameWorkDirInfos, infoFromPersistedBead(s))
 		}
-		if path := ResolveCodexTranscriptBySessionOrder(searchPaths, provider, workDir, b.ID, sameWorkDirInfos); path != "" {
-			return path, TranscriptFound, nil
-		}
-		// Without a stable session key, multiple sessions sharing the same
-		// workdir cannot be mapped safely to a single transcript.
-		return "", TranscriptAmbiguous, nil
-	}
-	if path := workertranscript.DiscoverPath(searchPaths, provider, workDir, b.Metadata["session_key"]); path != "" {
-		return path, TranscriptFound, nil
-	}
-	return "", TranscriptAbsent, nil
+		return sameWorkDirInfos, nil
+	}, searchPaths, func() string { return m.acpCaptureTranscriptPath(b) })
 }
 
 // sameWorkDirSessionBeads returns the session beads that share workDir with the

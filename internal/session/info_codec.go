@@ -49,6 +49,7 @@ var infoKeyCodec = []infoKeySpec{
 	{"resume_flag", func(i *Info, v string) { i.ResumeFlag = v }},
 	{"resume_style", func(i *Info, v string) { i.ResumeStyle = v }},
 	{"resume_command", func(i *Info, v string) { i.ResumeCommand = v }},
+	{PinnedTranscriptMetadataKey, func(i *Info, v string) { i.TranscriptPath = v }},
 	{"continuation_epoch", func(i *Info, v string) { i.ContinuationEpoch = v }},
 	{"sleep_reason", func(i *Info, v string) { i.SleepReason = v }},
 

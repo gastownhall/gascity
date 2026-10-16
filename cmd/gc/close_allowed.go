@@ -59,10 +59,11 @@ const causeKeepsSlot = "keeps-slot"
 // work filter (the drain finalize excludes the seat's own drain step), and
 // the assignees its cascade keeps (closeBeadPreservingAssignees).
 type closeWhy struct {
-	reason   string
-	gate     closeGate
-	keep     func(beads.Store, beads.Bead) (bool, error)
-	preserve []string
+	reason                string
+	gate                  closeGate
+	keep                  func(beads.Store, beads.Bead) (bool, error)
+	preserve              []string
+	transcriptSearchPaths []string
 }
 
 // closePermitted is the pure part of the precondition, which v2's close
@@ -124,7 +125,7 @@ func closeSeatFor(store beads.Store, sw *SeatWork, info sessionpkg.Info, why clo
 	case why.gate == closeRollback, why.gate != closeReleasing && isFailedCreateSessionInfo(info):
 		return closeFailedCreateBead(sessionFrontDoor(store), info, now, stderr), ""
 	}
-	return closeBeadPreservingAssignees(store, sw, info, why.reason, why.preserve, now, stderr), ""
+	return closeSessionBead(store, sw, info, why.reason, why.preserve, why.transcriptSearchPaths, now, stderr), ""
 }
 
 // closeRefusalLog is each row's last logged close refusal, so a refusal is

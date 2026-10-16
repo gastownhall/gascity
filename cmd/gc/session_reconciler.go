@@ -34,6 +34,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const maxIdleSleepProbesPerTick = 3
@@ -5028,7 +5029,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if closeReason == "" {
 				closeReason = "drained"
 			}
-			if closeSeat(store, sw, infoByID[target.info.ID], closeWhy{reason: closeReason, gate: closeGated}, clk.Now().UTC(), stderr) {
+			// Pool retirement is the path that strands diagnosis: the slot's
+			// transcript stops being attributable the moment the bead closes,
+			// so pass the configured observe paths through to the pin.
+			if closeSeat(store, sw, infoByID[target.info.ID], closeWhy{
+				reason:                closeReason,
+				gate:                  closeGated,
+				transcriptSearchPaths: worker.MergeSearchPaths(cfg.Daemon.ObservePaths),
+			}, clk.Now().UTC(), stderr) {
 				// Store-only close family: mirror the close onto the snapshot
 				// (write-returns-Info) so a later reader sees Closed=true.
 				tick.markClosed(target.info.ID)

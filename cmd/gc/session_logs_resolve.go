@@ -23,6 +23,12 @@ func resolveStoredSessionLogSource(cityPath string, cfg *config.City, sessFront 
 	if !ok {
 		return "", "", false, ""
 	}
+	// A pinned transcript is authoritative: it was resolved while the session
+	// was still attributable, which is the only window a worker that died
+	// before capturing a session key ever had.
+	if logCtx.pinnedPath != "" {
+		return logCtx.pinnedPath, logCtx.provider, true, ""
+	}
 	if logCtx.sessionID != "" {
 		sp, err := newSessionProvider()
 		if err != nil {
@@ -97,6 +103,7 @@ func resolveSessionLogContext(cityPath string, cfg *config.City, sessFront *sess
 		sessionKey: strings.TrimSpace(info.SessionKey),
 		provider:   provider,
 		createdAt:  info.CreatedAt,
+		pinnedPath: sessionpkg.PinnedTranscriptPath(info),
 	}, true
 }
 
