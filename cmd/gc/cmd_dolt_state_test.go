@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -1132,6 +1133,62 @@ func TestDoltStateProbeManagedCmdReportsRunningOwnedHolder(t *testing.T) {
 	}
 }
 
+// TestDoltStateProbeManagedCmdKeepsOwnedHolderRunningWhenDialFailsLocally pins
+// that a dial which never left this host leaves the city's own listener
+// counted as running, while a refused dial still counts it as down.
+func TestDoltStateProbeManagedCmdKeepsOwnedHolderRunningWhenDialFailsLocally(t *testing.T) {
+	cases := []struct {
+		name             string
+		dialErr          error
+		wantRunning      string
+		wantInconclusive string
+	}{
+		{name: "dial never leaves this host", dialErr: dialErrorFor("connect", syscall.EADDRNOTAVAIL), wantRunning: "true", wantInconclusive: "true"},
+		{name: "server refuses", dialErr: dialErrorFor("connect", syscall.ECONNREFUSED), wantRunning: "false", wantInconclusive: "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipWithoutProcessInspection(t)
+			cityPath := t.TempDir()
+			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+			}
+			port := reserveRandomTCPPort(t)
+			listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+			if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      port,
+				DataDir:   layout.DataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}); err != nil {
+				t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+			}
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, tc.dialErr
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "probe-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port)}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			for key, want := range map[string]string{
+				"port_holder_owned": "true",
+				"tcp_reachable":     "false",
+				"tcp_inconclusive":  tc.wantInconclusive,
+				"running":           tc.wantRunning,
+			} {
+				if got[key] != want {
+					t.Fatalf("%s = %q, want %q; output=%q", key, got[key], want, stdout.String())
+				}
+			}
+		})
+	}
+}
+
 func TestDoltStateProbeManagedCmdReportsImposterHolder(t *testing.T) {
 	skipWithoutProcessInspection(t)
 	cityPath := t.TempDir()
@@ -1328,6 +1385,62 @@ esac
 	}
 	if got["deleted_inodes"] != "false" {
 		t.Fatalf("deleted_inodes = %q, want false", got["deleted_inodes"])
+	}
+}
+
+// TestDoltStateExistingManagedCmdKeepsOwnedServerWhenDialsFailLocally pins
+// that a readiness wait whose dials never left this host keeps the city's own
+// live server, while a refused dial still marks it for replacement.
+func TestDoltStateExistingManagedCmdKeepsOwnedServerWhenDialsFailLocally(t *testing.T) {
+	cases := []struct {
+		name             string
+		dialErr          error
+		wantInconclusive string
+		wantReusable     string
+	}{
+		{name: "dials never leave this host", dialErr: dialErrorFor("connect", syscall.EADDRNOTAVAIL), wantInconclusive: "true", wantReusable: "true"},
+		{name: "server refuses", dialErr: dialErrorFor("connect", syscall.ECONNREFUSED), wantInconclusive: "false", wantReusable: "false"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			skipWithoutProcessInspection(t)
+			cityPath := t.TempDir()
+			layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+			if err != nil {
+				t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+			}
+			port := reserveRandomTCPPort(t)
+			listener := startTCPListenerProcessInDir(t, port, layout.DataDir)
+			if err := writeDoltRuntimeStateFile(layout.StateFile, doltRuntimeState{
+				Running:   true,
+				PID:       listener.Process.Pid,
+				Port:      port,
+				DataDir:   layout.DataDir,
+				StartedAt: time.Now().UTC().Format(time.RFC3339),
+			}); err != nil {
+				t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+			}
+			stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+				return nil, tc.dialErr
+			})
+
+			var stdout, stderr bytes.Buffer
+			code := run([]string{"dolt-state", "existing-managed", "--city", cityPath, "--host", "127.0.0.1", "--port", strconv.Itoa(port), "--user", "root", "--timeout-ms", "100"}, &stdout, &stderr)
+			if code != 0 {
+				t.Fatalf("run() = %d, stderr = %s", code, stderr.String())
+			}
+			got := parseDoltStateOutput(t, stdout.String())
+			for key, want := range map[string]string{
+				"managed_owned":      "true",
+				"ready":              "false",
+				"ready_inconclusive": tc.wantInconclusive,
+				"reusable":           tc.wantReusable,
+			} {
+				if got[key] != want {
+					t.Fatalf("%s = %q, want %q; output=%q", key, got[key], want, stdout.String())
+				}
+			}
+		})
 	}
 }
 
