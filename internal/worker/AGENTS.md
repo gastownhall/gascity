@@ -44,11 +44,15 @@ when the context ends. Take the bound from the caller's own context.
 - At most one observation per key is in flight. While an earlier one has not
   returned, a new call gets `ErrObservationOutstanding` (also
   `runtime.ErrRuntimeUnavailable`) and starts nothing, so a wedged session
-  costs one goroutine, not one per call.
-- The key names what is observed: one session in one city. Every caller that
-  observes the same session must derive the key the same way, or the
-  one-in-flight limit no longer holds. `cmd/gc` derives it in
-  `postStartObservationKey`.
+  costs one goroutine per key, not one per call.
+- The key names what is observed, one session in one city, within a caller
+  namespace. Every caller in a namespace must derive the key the same way, or
+  the one-in-flight limit no longer holds. `cmd/gc` has two namespaces, so a
+  wedged session can hold one goroutine in each: session lifecycle keys by
+  session name (`postStartObservationKey`), and the conversation lane's
+  executor keys by session bead ID under the `lane` prefix
+  (`laneObservationKey`), so a wedged lane probe never blocks a lifecycle
+  observation.
 - `worker.ObserveShared` is the form for reads several callers make of one key
   at once (turn reads: `CurrentTurn`, `WatchTurns` and its session reload, the
   idle overlay). A call

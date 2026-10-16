@@ -28,17 +28,23 @@ package main
 // reports. A sessions store that is missing (the city store did not open) is
 // not a refusal: the host waits for it, re-checking on the scan cadence.
 //
-// The view and the op rows are read live (laneLiveSessions); the executor
-// resolves the runtime through the controller's cached sessions store. Writes
-// and guarded batches go through the sessions store, so the controller's
-// cache and its event bridge see them. Every pass runs as store work and is
-// skipped while the city is quiescent. Failures are logged, rate-limited, and
-// counted in lane-status. The host emits no events of its own.
+// Only the standalone controller (runController) starts the host. A
+// supervisor-hosted city runs none until OJ-12b; startOneCity logs a listed
+// kind as unserved instead (warnSupervisorLaneHostGap).
+//
+// The view, the op rows and the wake decision read live (laneLiveSessions);
+// the executor resolves the runtime through the controller's cached sessions
+// store. Writes and guarded batches go through the sessions store, so the
+// controller's cache and its event bridge see them. Every pass runs as store
+// work and is skipped while the city is quiescent. Failures are logged,
+// rate-limited, and counted in lane-status. The host emits no events of its
+// own.
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"maps"
 	"reflect"
@@ -83,8 +89,9 @@ const (
 	// laneQuiescentRetry is how long a worker waits for a quiescent city.
 	laneQuiescentRetry = 30 * time.Second
 	// laneWakeRecheck is how long a worker waits after recording a wake
-	// before it passes again; laneWakeHeldRecheck after a wake the row held,
-	// or refused because the row is not dormant.
+	// before it passes again, and between passes that find the woken
+	// session still starting; laneWakeHeldRecheck after a wake the row
+	// held, or refused because the row is not dormant.
 	laneWakeRecheck     = 5 * time.Second
 	laneWakeHeldRecheck = time.Minute
 	// laneParkAfter is the longest a worker holds its slot waiting for its
@@ -195,9 +202,10 @@ func isNilBeadStore(s beads.Store) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
-// laneLiveSessions is the sessions store as the lane host reads the view
-// and the op rows: Get and List read live, past any cache, and every write and guarded batch goes
-// through the wrapped store, so the cache and its event bridge see them.
+// laneLiveSessions is the sessions store as the lane host reads the view,
+// the op rows and the row a wake is decided on: Get and List read live, past
+// any cache, and every write and guarded batch goes through the wrapped
+// store, so the cache and its event bridge see them.
 // ConditionalWritesResolveTarget returns the wrapped store, so the op store
 // still finds its conditional writes and id prefix.
 type laneLiveSessions struct {
@@ -286,7 +294,6 @@ type conversationLaneHost struct {
 	lastErr      string
 	quarantined  map[string][]string
 	waits        map[string]laneConversationWaits
-	tickers      int
 }
 
 // laneWorker is one conversation's slot; poke wakes its worker.
@@ -341,6 +348,25 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 	return h
 }
 
+// warnSupervisorLaneHostGap logs that a supervisor-hosted city starting with
+// a kind listed in [ops] authoritative leaves it unserved: startOneCity starts
+// no lane host until OJ-12b. Nothing is logged when no kind is listed.
+func warnSupervisorLaneHostGap(stderr io.Writer, cityName, cityPath string, cfg *config.City) {
+	if cfg == nil || len(cfg.Ops.Authoritative) == 0 {
+		return
+	}
+	fmt.Fprintf(stderr, "gc supervisor: city '%s': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [%s] goes unserved; to serve it, %s, or empty the list\n", //nolint:errcheck // best-effort stderr
+		cityName, strings.Join(cfg.Ops.Authoritative, ", "), laneHostStandaloneRemedy(cityPath))
+}
+
+// laneHostStandaloneRemedy is how the operator of the supervisor-hosted city
+// at cityPath runs it under the standalone controller, the one that starts a
+// lane host. gc start refuses --foreground for a registered city, so the
+// city leaves the supervisor first.
+func laneHostStandaloneRemedy(cityPath string) string {
+	return fmt.Sprintf("run `gc unregister %s`, then `gc start --foreground %s` (hidden from --help)", cityPath, cityPath)
+}
+
 // start decides whether the host runs, publishes it for the city's socket
 // verbs, and starts the scan loop unless the host is off or refused.
 func (h *conversationLaneHost) start(ctx context.Context) {
@@ -386,9 +412,6 @@ func (h *conversationLaneHost) run() {
 		return
 	}
 	ticks, stop := h.newTicker(h.scanInterval)
-	h.mu.Lock()
-	h.tickers++
-	h.mu.Unlock()
 	defer stop()
 	for {
 		select {
@@ -565,7 +588,7 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 		defer h.onWorkerExit(conv)
 	}
 	cw := &conversationLaneWorker{
-		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state,
+		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
 			pass:    func() lanePassOutcome { return h.pass(conv) },
 			yield:   h.yield,
@@ -584,6 +607,15 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 		},
 	}
 	cw.run()
+}
+
+// wakeStartFor is how long a woken session may take to start: the city's
+// [session] startup_timeout.
+func (h *conversationLaneHost) wakeStartFor() time.Duration {
+	if cfg := h.env.Config(); cfg != nil {
+		return cfg.Session.StartupTimeoutDuration()
+	}
+	return (&config.SessionConfig{}).StartupTimeoutDuration()
 }
 
 // laneReprober is an executor that can look at the runtime again without
@@ -612,7 +644,8 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		return lanePassOutcome{err: err}
 	}
 	sessions := h.env.SessionsBeadStore().Store
-	view, info, absent, err := readConversationLaneView(sessionFrontDoor(laneLiveSessions{Store: sessions}), conv)
+	live := sessionFrontDoor(laneLiveSessions{Store: sessions})
+	view, info, absent, err := readConversationLaneView(live, conv)
 	if err != nil {
 		err = fmt.Errorf("reading conversation %s: %w", conv, err)
 		h.notePass(conv, opjournal.PassResult{}, err)
@@ -633,7 +666,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 	h.notePass(conv, res, err)
 	out = lanePassOutcome{res: res, err: err}
 	if err == nil && res.Wake && !view.Closed {
-		out.wake, out.wakeErr = h.requestWake(sessions, conv)
+		out.wake, out.wakeErr = h.requestWake(live, conv)
 		h.noteWake(conv, out.wake)
 	}
 	if rp, ok := exec.(laneReprober); ok && err == nil && res.Busy && !res.Wake {
@@ -669,9 +702,10 @@ func (h *conversationLaneHost) reprobe(conv string, view opjournal.ConversationV
 
 // requestWake asks for conv's wake (DES-O1 §7.4) and, when one is recorded,
 // asks the controller to reconcile the session now. A held row keeps its op
-// waiting.
-func (h *conversationLaneHost) requestWake(sessions beads.Store, conv string) (session.WakeRequestOutcome, error) {
-	outcome, err := sessionFrontDoor(sessions).RequestWakeUnlessHeld(conv, false, h.clk.Now().UTC())
+// waiting. live reads the row as the view did, so a cache that still holds
+// it awake does not refuse the wake as not dormant.
+func (h *conversationLaneHost) requestWake(live *session.Store, conv string) (session.WakeRequestOutcome, error) {
+	outcome, err := live.RequestWakeUnlessHeld(conv, false, h.clk.Now().UTC())
 	if err != nil {
 		err = fmt.Errorf("requesting a wake of %s: %w", conv, err)
 		h.noteError("wake", err)
