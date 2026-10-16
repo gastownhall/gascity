@@ -114,3 +114,92 @@ func ObserveBounded[T any](ctx context.Context, key string, observe func(context
 func observationUnanswered(cause error) error {
 	return fmt.Errorf("worker: observation unanswered: %w: %w", runtime.ErrRuntimeUnavailable, cause)
 }
+
+// sharedObservations holds the keys with an ObserveShared observation that
+// has not returned, each with the flight its joiners wait on. It is a map
+// apart from boundedObservations: a key is observed through one of the two,
+// never both.
+var sharedObservations sync.Map // key string -> *sharedFlight
+
+// sharedFlight is one ObserveShared observation: closed done publishes res.
+type sharedFlight struct {
+	done chan struct{}
+	res  any // a boundedResult of the observation's type
+	// ctx is the context of the call that started the observation, which
+	// the observation runs under.
+	ctx context.Context
+}
+
+// ObserveShared is ObserveBounded for an observation several callers make of
+// one key at once, such as reads of one session's turns. A call made while an
+// observation of key is outstanding waits for that observation's answer,
+// within its own ctx, instead of failing with ErrObservationOutstanding; so
+// concurrent healthy reads all get the answer, and a wedged session still
+// leaks one goroutine, not one per call. The observation runs under the
+// context of the call that started it. A joiner whose answer is an error
+// that call's context ending caused, while its own ctx still allows, starts a
+// fresh observation rather than take someone else's deadline as its own.
+//
+// As with ObserveBounded, giving up is an error wrapping both
+// runtime.ErrRuntimeUnavailable and the context error, an answer that lands
+// as ctx ends is honored, and a blank key is a caller bug. A panic in observe
+// is re-raised on the call that started it; joiners get an error wrapping
+// runtime.ErrRuntimeUnavailable.
+func ObserveShared[T any](ctx context.Context, key string, observe func(context.Context) (T, error)) (T, error) {
+	var zero T
+	if strings.TrimSpace(key) == "" {
+		return zero, errors.New("worker: shared observation needs a non-blank key")
+	}
+	for {
+		if err := ctx.Err(); err != nil {
+			return zero, observationUnanswered(err)
+		}
+		mine := &sharedFlight{done: make(chan struct{}), ctx: ctx}
+		got, joined := sharedObservations.LoadOrStore(key, mine)
+		flight := got.(*sharedFlight)
+		if !joined {
+			go runSharedObservation(key, flight, observe)
+		}
+		var res boundedResult[T]
+		select {
+		case <-flight.done:
+			res = flight.res.(boundedResult[T])
+		case <-ctx.Done():
+			select {
+			case <-flight.done:
+				res = flight.res.(boundedResult[T])
+			default:
+				return zero, observationUnanswered(ctx.Err())
+			}
+		}
+		if !joined {
+			return res.take()
+		}
+		if res.panicked {
+			return zero, fmt.Errorf("worker: shared observation panicked: %w", runtime.ErrRuntimeUnavailable)
+		}
+		if res.err != nil && flight.ctx.Err() != nil && ctx.Err() == nil {
+			continue // the starter's context ended the read, not ours
+		}
+		return res.value, res.err
+	}
+}
+
+// runSharedObservation runs one ObserveShared observation and publishes its
+// answer to everyone waiting on flight. The key is released before the answer
+// is published, so a caller that observes again the moment it has an answer
+// starts a fresh observation.
+func runSharedObservation[T any](key string, flight *sharedFlight, observe func(context.Context) (T, error)) {
+	res := boundedResult[T]{err: errObservationEnded}
+	defer func() {
+		if r := recover(); r != nil {
+			res = boundedResult[T]{panicked: true, panicVal: r}
+			slog.Error("worker: shared observation panicked",
+				slog.String("key", key), slog.Any("panic", r), slog.String("stack", string(debug.Stack())))
+		}
+		sharedObservations.CompareAndDelete(key, flight)
+		flight.res = res
+		close(flight.done)
+	}()
+	res.value, res.err = observe(flight.ctx)
+}

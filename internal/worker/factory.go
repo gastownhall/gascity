@@ -277,14 +277,20 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
-	return NewRuntimeHandle(RuntimeHandleConfig{
+	cfg := RuntimeHandleConfig{
 		Provider:     f.provider,
 		SessionName:  sessionName,
 		ProviderName: providerName,
 		Transport:    transport,
 		ProcessNames: append([]string(nil), processNames...),
 		Recorder:     f.recorder,
-	})
+	}
+	if f.manager != nil {
+		if city, err := f.manager.CityDir(); err == nil {
+			cfg.CityPath = city.Path()
+		}
+	}
+	return NewRuntimeHandle(cfg)
 }
 
 // Adapter returns a transcript adapter configured with the factory's search

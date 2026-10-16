@@ -5,6 +5,7 @@ import (
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 // A RuntimeHandle has no session row and so no transcript: its turns come from
@@ -54,16 +55,22 @@ func (h *RuntimeHandle) noTurnSource() error {
 }
 
 // protocolTurnHistory reads the provider's history of the session, bounded by
-// ctx. A runtime handle knows no city, so its key is scoped to runtime
-// handles: two cities' handles of one session name share the one-in-flight
-// limit, which costs a retry, never a wrong answer.
+// ctx and shared with concurrent reads of it. Its key is scoped to the city
+// the handle was built for, as a SessionHandle's is, so both handles of one
+// city's session share one read; a handle built without a city is scoped to
+// its provider, which a city does not share with another.
 func (h *RuntimeHandle) protocolTurnHistory(ctx context.Context) (runtime.TurnHistory, error) {
 	tp, ok := h.provider.(runtime.TurnObservationProvider)
 	if !ok {
 		return runtime.TurnHistory{}, h.noTurnSource()
 	}
-	key := turnObservationKey("history", "runtime-handle", h.sessionName)
-	return ObserveBounded(ctx, key, func(ctx context.Context) (runtime.TurnHistory, error) {
-		return tp.TurnHistory(ctx, h.sessionName)
+	city, err := sessionpkg.NewCityDir(h.cityPath)
+	key := turnObservationKey("history", turnCityScope(city, err, h.provider), h.sessionName)
+	return ObserveShared(ctx, key, func(ctx context.Context) (runtime.TurnHistory, error) {
+		hist, err := tp.TurnHistory(ctx, h.sessionName)
+		if err != nil {
+			return runtime.TurnHistory{}, err
+		}
+		return hist, nil
 	})
 }

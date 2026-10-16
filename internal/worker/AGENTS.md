@@ -49,6 +49,27 @@ when the context ends. Take the bound from the caller's own context.
   observes the same session must derive the key the same way, or the
   one-in-flight limit no longer holds. `cmd/gc` derives it in
   `postStartObservationKey`.
+- `worker.ObserveShared` is the form for reads several callers make of one key
+  at once (turn reads: `CurrentTurn`, `WatchTurns`, the idle overlay). A call
+  made while an observation of the key is outstanding waits for that answer
+  within its own context instead of getting `ErrObservationOutstanding`, so
+  concurrent healthy readers all get the answer and a wedged session still
+  leaks one goroutine. A key is observed through one form, never both. Turn
+  keys (`turnObservationKey`) name the city directory and the session, for a
+  `SessionHandle` and a `RuntimeHandle` alike (`RuntimeHandleConfig.CityPath`).
+
+## Turn sources
+
+A session's turns come from the routed runtime's protocol, else from the
+transcript of its current conversation, else nowhere (`TurnCapabilities`).
+The transcript tier is composed from fixed traits only: the routed backend
+runs the agent on this host (`runtime.LocalTranscriptProvider`), the session
+has a work directory, and the family has an exact by-key transcript lookup
+(`session.HasKeyedTranscriptLookup`). The read resolves only the file the
+session key finds and that records that conversation, never the work-directory
+fallback `Manager.TranscriptPath` serves for history. A session without a key
+yet, or whose transcript is not written yet, reads as
+`runtime.ErrRuntimeUnavailable`, not as a different capability.
 
 ## Codex activity
 

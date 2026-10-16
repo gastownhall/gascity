@@ -2,6 +2,7 @@ package workertest
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -16,9 +17,16 @@ import (
 
 var conformanceFullTurnCaps = runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact, Lossless: true}
 
-// turnConformanceSession is a started session handle on sp; transcript, when
-// set, writes the session's Claude transcript under its search path.
+// turnConformanceSession is a started session handle on sp, keyed as a
+// production Claude session is; transcript, when set, writes its
+// conversation's transcript under its search path.
 func turnConformanceSession(t *testing.T, sp runtime.Provider, script func(name string), transcript []string) *worker.SessionHandle {
+	t.Helper()
+	h, _ := turnConformanceSessionWithStore(t, sp, script, transcript)
+	return h
+}
+
+func turnConformanceSessionWithStore(t *testing.T, sp runtime.Provider, script func(name string), transcript []string) (*worker.SessionHandle, beads.Store) {
 	t.Helper()
 	searchBase, workDir := t.TempDir(), t.TempDir()
 	store := beads.NewMemStore()
@@ -33,6 +41,7 @@ func turnConformanceSession(t *testing.T, sp runtime.Provider, script func(name 
 			Command:  "claude",
 			WorkDir:  workDir,
 			Provider: "claude",
+			Resume:   sessionpkg.ProviderResume{SessionIDFlag: "--session-id"},
 		},
 	})
 	if err != nil {
@@ -61,11 +70,11 @@ func turnConformanceSession(t *testing.T, sp runtime.Provider, script func(name 
 		for _, line := range transcript {
 			body += line + "\n"
 		}
-		if err := os.WriteFile(filepath.Join(slugDir, info.SessionKey+"turns.jsonl"), []byte(body), 0o644); err != nil {
+		if err := os.WriteFile(filepath.Join(slugDir, info.SessionKey+".jsonl"), []byte(body), 0o644); err != nil {
 			t.Fatalf("WriteFile: %v", err)
 		}
 	}
-	return handle
+	return handle, store
 }
 
 func turnConformanceRuntimeHandle(t *testing.T, sp runtime.Provider) *worker.RuntimeHandle {
@@ -136,5 +145,29 @@ func TestTurnHandleConformance(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// A closed session's reads fail with a turn-read sentinel the contract names
+// (runtime.ErrSessionNotFound), never an unclassified lookup error.
+func TestTurnHandleConformanceClosedSession(t *testing.T) {
+	h, store := turnConformanceSessionWithStore(t, runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), nil, nil)
+	sessions, err := store.List(beads.ListQuery{Label: sessionpkg.LabelSession})
+	if err != nil || len(sessions) != 1 {
+		t.Fatalf("session beads = %d, %v; want 1", len(sessions), err)
+	}
+	if err := store.Close(sessions[0].ID); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	ctx := context.Background()
+	hist, err := h.CurrentTurn(ctx)
+	if err == nil {
+		t.Fatal("CurrentTurn of a closed session succeeded")
+	}
+	if err := checkTurnRead(hist, err); err != nil {
+		t.Fatalf("CurrentTurn of a closed session: %v", err)
+	}
+	if _, err := h.WatchTurns(ctx); !errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("WatchTurns of a closed session = %v, want ErrSessionNotFound", err)
 	}
 }

@@ -1,0 +1,385 @@
+package worker
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
+
+func TestWatchTurnsTranscript(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: false})
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, runtime.NewFakeProfile(runtime.ProfileTmux, idle), "claude", "")
+	s.handle.turns.timing = clock.timing()
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:00:00.123Z"), claudeTurnDuration("2026-10-13T05:00:05.456Z"))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+
+	// Resync first: the full history, idle.
+	first := receiveTurnUpdate(t, ch)
+	if first.Err != nil || first.History.Current.Active() || len(first.History.Recent) != 1 || first.History.Recent[0].TurnID != claudeTurn1 {
+		t.Fatalf("first update = %+v, want the history with %s ended", first, claudeTurn1)
+	}
+	if ask := clock.nextAsk(t); ask.d != turnPollIdle {
+		t.Fatalf("idle wait = %s, want %s", ask.d, turnPollIdle)
+	} else {
+		// A poll with nothing new sends nothing.
+		ask.fire <- clock.now()
+	}
+	ask := clock.nextAsk(t)
+	assertNoPendingUpdate(t, ch)
+
+	// Coalescing: two changes the reader has not taken yet arrive as the
+	// latest one.
+	appendTranscript(t, path, claudePrompt(claudeTurn2, "2026-10-13T05:01:00.789Z")+"\n")
+	ask.fire <- clock.now()
+	ask = clock.nextAsk(t)
+	if ask.d != turnOverlayEvery {
+		t.Fatalf("open-turn wait = %s, want the overlay's %s", ask.d, turnOverlayEvery)
+	}
+	appendTranscript(t, path, claudeTurnDuration("2026-10-13T05:01:03.001Z")+"\n")
+	ask.fire <- clock.now()
+	ask = clock.nextAsk(t)
+	latest := receiveTurnUpdate(t, ch)
+	if latest.Err != nil || latest.History.Current.Active() || len(latest.History.Recent) != 2 || latest.History.Recent[0].TurnID != claudeTurn2 {
+		t.Fatalf("coalesced update = %+v, want %s ended", latest, claudeTurn2)
+	}
+	assertNoPendingUpdate(t, ch)
+
+	// A torn tail is an error update, never an idle history.
+	appendTranscript(t, path, `{"type":"user","timestamp":"2026-10-13T05:02`)
+	ask.fire <- clock.now()
+	ask = clock.nextAsk(t)
+	torn := receiveTurnUpdate(t, ch)
+	if !errors.Is(torn.Err, runtime.ErrRuntimeUnavailable) || torn.History.Current.Active() || len(torn.History.Recent) != 0 {
+		t.Fatalf("torn update = %+v, want an ErrRuntimeUnavailable update with no history", torn)
+	}
+	if ask.d != turnPollOpen {
+		t.Fatalf("wait while failing = %s, want %s", ask.d, turnPollOpen)
+	}
+	// Completing the record recovers with a full history.
+	appendTranscript(t, path, `:00.000Z","message":{"role":"user","content":"a prompt"},"promptId":"`+claudeTurn1+`x","origin":"user","promptSource":"prompt","isSidechain":false}`+"\n")
+	ask.fire <- clock.now()
+	ask = clock.nextAsk(t)
+	recovered := receiveTurnUpdate(t, ch)
+	if recovered.Err != nil || recovered.History.Current.TurnID != claudeTurn1+"x" {
+		t.Fatalf("recovered update = %+v, want the new open turn", recovered)
+	}
+
+	// Rotation: the file is replaced by a shorter one; the follower rescans.
+	replacement := path + ".new"
+	writeTranscriptLines(t, replacement, claudePrompt(claudeTurn2, "2026-10-13T07:00:00.000Z"), claudeTurnDuration("2026-10-13T07:00:01.000Z"))
+	if err := os.Rename(replacement, path); err != nil {
+		t.Fatalf("Rename: %v", err)
+	}
+	ask.fire <- clock.now()
+	clock.nextAsk(t)
+	rotated := receiveTurnUpdate(t, ch)
+	if rotated.Err != nil || rotated.History.Current.Active() || len(rotated.History.Recent) != 1 || rotated.History.Recent[0].TurnID != claudeTurn2 ||
+		!rotated.History.Recent[0].StartedAt.Equal(mustTurnTime(t, "2026-10-13T07:00:00.000Z")) {
+		t.Fatalf("rotated update = %+v, want only the replacement's turn", rotated)
+	}
+
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+func TestWatchTurnsTranscriptOverlayEndsAQuietTurn(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: true})
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, runtime.NewFakeProfile(runtime.ProfileTmux, idle), "claude", "")
+	timing := clock.timing()
+	s.handle.turns.timing = timing
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:59.000Z"))
+	ageTranscript(t, path, clock.now())
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); first.History.Current.TurnID != claudeTurn1 {
+		t.Fatalf("first update = %+v, want the open turn", first)
+	}
+	ask := clock.nextAsk(t)
+	clock.advance(3 * time.Second)
+	ask.fire <- clock.now()
+	clock.nextAsk(t)
+	ended := receiveTurnUpdate(t, ch)
+	if ended.Err != nil || ended.History.Current.Active() || len(ended.History.Recent) != 1 || !ended.History.Recent[0].Inferred {
+		t.Fatalf("update = %+v, want the quiet turn ended, inferred", ended)
+	}
+}
+
+// turnScriptBackend is a FullFake whose TurnHistory and turn events the test
+// drives.
+type turnScriptBackend struct {
+	runtime.FullFake
+	state *turnScriptState
+}
+
+type turnScriptState struct {
+	mu     sync.Mutex
+	hist   runtime.TurnHistory
+	err    error
+	reads  int
+	events chan runtime.TurnEvent // nil: no turn events
+}
+
+func newTurnScriptBackend(events bool) turnScriptBackend {
+	b := turnScriptBackend{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, state: &turnScriptState{}}
+	if events {
+		b.state.events = make(chan runtime.TurnEvent, 8)
+	}
+	return b
+}
+
+func (b turnScriptBackend) TurnCapabilities(string) runtime.TurnCapabilities { return fullTurnCaps }
+
+func (b turnScriptBackend) TurnHistory(context.Context, string) (runtime.TurnHistory, error) {
+	b.state.mu.Lock()
+	defer b.state.mu.Unlock()
+	b.state.reads++
+	if b.state.err != nil {
+		return runtime.TurnHistory{}, b.state.err
+	}
+	h := b.state.hist
+	h.ObservedAt = time.Now()
+	return h, nil
+}
+
+func (b turnScriptBackend) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
+	if b.state.events == nil {
+		return nil, runtime.ErrInteractionUnsupported
+	}
+	out := make(chan runtime.TurnEvent)
+	go func() {
+		defer close(out)
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case ev := <-b.state.events:
+				select {
+				case out <- ev:
+				case <-ctx.Done():
+					return
+				}
+			}
+		}
+	}()
+	return out, nil
+}
+
+func (b turnScriptBackend) set(h runtime.TurnHistory, err error) {
+	b.state.mu.Lock()
+	defer b.state.mu.Unlock()
+	b.state.hist, b.state.err = h, err
+}
+
+func TestWatchTurnsProtocolHintTriggersARead(t *testing.T) {
+	backend := newTurnScriptBackend(true)
+	clock := newManualTurnClock(time.Now())
+	s := newTurnSession(t, runtime.NewFakeProfile(runtime.ProfileACP, backend), "claude", "")
+	s.handle.turns.timing = clock.timing()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); first.Err != nil || first.History.Current.Active() {
+		t.Fatalf("first update = %+v, want the idle history", first)
+	}
+	if ask := clock.nextAsk(t); ask.d != turnPollIdle {
+		t.Fatalf("idle wait with hints = %s, want %s", ask.d, turnPollIdle)
+	}
+	backend.set(runtime.TurnHistory{Current: runtime.TurnState{TurnID: "acp-1"}}, nil)
+	backend.state.events <- runtime.TurnEvent{Kind: runtime.TurnEventStarted, Session: s.info.SessionName, TurnID: "acp-1"}
+	if got := receiveTurnUpdate(t, ch); got.History.Current.TurnID != "acp-1" {
+		t.Fatalf("update after the hint = %+v, want acp-1 running", got)
+	}
+	if ask := clock.nextAsk(t); ask.d != turnPollOpen {
+		t.Fatalf("open-turn wait = %s, want %s", ask.d, turnPollOpen)
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+func TestWatchTurnsProtocolPollAloneDeliversEveryChange(t *testing.T) {
+	backend := newTurnScriptBackend(false)
+	clock := newManualTurnClock(time.Now())
+	s := newTurnSession(t, runtime.NewFakeProfile(runtime.ProfileACP, backend), "claude", "")
+	s.handle.turns.timing = clock.timing()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	receiveTurnUpdate(t, ch)
+	at := time.Date(2026, 10, 13, 5, 0, 0, 0, time.UTC)
+	steps := []struct {
+		hist runtime.TurnHistory
+		err  error
+	}{
+		{hist: runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t1"}, CurrentStart: at}},
+		{err: fmt.Errorf("owner gone: %w", runtime.ErrRuntimeUnavailable)},
+		{hist: runtime.TurnHistory{Recent: []runtime.EndedTurn{{TurnID: "t1", StartedAt: at, EndedAt: at.Add(time.Second), Status: runtime.TurnStatusCompleted}}}},
+		{hist: runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t2"}, Recent: []runtime.EndedTurn{{TurnID: "t1", StartedAt: at, EndedAt: at.Add(time.Second), Status: runtime.TurnStatusCompleted}}}},
+	}
+	for i, step := range steps {
+		ask := clock.nextAsk(t)
+		if ask.d != turnPollOpen {
+			t.Fatalf("step %d: wait without hints = %s, want %s", i, ask.d, turnPollOpen)
+		}
+		backend.set(step.hist, step.err)
+		ask.fire <- clock.now()
+		got := receiveTurnUpdate(t, ch)
+		if step.err != nil {
+			if !errors.Is(got.Err, runtime.ErrRuntimeUnavailable) || got.History.Current.Active() {
+				t.Fatalf("step %d: update = %+v, want the error, never idle", i, got)
+			}
+			continue
+		}
+		if got.Err != nil || got.History.Current != step.hist.Current || len(got.History.Recent) != len(step.hist.Recent) {
+			t.Fatalf("step %d: update = %+v, want %+v", i, got, step.hist)
+		}
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+func TestPublishTurnUpdateLatestWins(t *testing.T) {
+	out := make(chan TurnUpdate, 1)
+	publishTurnUpdate(out, TurnUpdate{History: runtime.TurnHistory{Current: runtime.TurnState{TurnID: "a"}}})
+	publishTurnUpdate(out, TurnUpdate{History: runtime.TurnHistory{Current: runtime.TurnState{TurnID: "b"}}})
+	if got := <-out; got.History.Current.TurnID != "b" {
+		t.Fatalf("published = %+v, want the latest", got)
+	}
+	assertNoPendingUpdate(t, out)
+}
+
+// With fsnotify on, a write wakes the watcher before any poll fires.
+func TestWatchTurnsTranscriptWakesOnWrite(t *testing.T) {
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "codex", "")
+	timing := clock.timing()
+	timing.noNotify = false
+	s.handle.turns.timing = timing
+	path := s.writeCompletedTurn(t, "codex")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); first.Err != nil || first.History.Current.Active() {
+		t.Fatalf("first update = %+v, want the idle history", first)
+	}
+	clock.nextAsk(t) // the poll is never fired
+	appendTranscript(t, path, codexStarted(codexTurn2, "2026-10-08T02:23:01.007Z", 1791426181)+"\n")
+	if got := receiveTurnUpdate(t, ch); got.History.Current.TurnID != codexTurn2 {
+		t.Fatalf("update after the write = %+v, want %s running", got, codexTurn2)
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+// A session watched before its transcript exists is watched, not refused:
+// unavailable updates until the transcript appears, then its history.
+func TestWatchTurnsStartsBeforeTheTranscript(t *testing.T) {
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "codex", "")
+	s.handle.turns.timing = clock.timing()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns before the transcript: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); !errors.Is(first.Err, runtime.ErrRuntimeUnavailable) || first.History.Current.Active() {
+		t.Fatalf("first update = %+v, want unavailable, never idle", first)
+	}
+	ask := clock.nextAsk(t)
+	if ask.d != turnPollOpen {
+		t.Fatalf("wait while unavailable = %s, want %s", ask.d, turnPollOpen)
+	}
+	s.writeCompletedTurn(t, "codex")
+	clock.advance(ask.d)
+	ask.fire <- clock.now()
+	clock.nextAsk(t)
+	if got := receiveTurnUpdate(t, ch); got.Err != nil || len(got.History.Recent) != 1 || got.History.Recent[0].TurnID != codexTurn1 {
+		t.Fatalf("update once written = %+v, want the transcript's history", got)
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+// The backstop poll follows a session to its new conversation's transcript,
+// and never keeps reading the old conversation's once the key moved.
+func TestWatchTurnsFollowsANewConversation(t *testing.T) {
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "codex", "")
+	s.handle.turns.timing = clock.timing()
+	s.writeCompletedTurn(t, "codex")
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); first.Err != nil || first.History.Recent[0].TurnID != codexTurn1 {
+		t.Fatalf("first update = %+v, want the first conversation", first)
+	}
+	// A fresh restart: a new conversation key, its rollout not written yet.
+	s.setKey(t, otherConversation)
+	ask := clock.nextAsk(t)
+	clock.advance(ask.d)
+	ask.fire <- clock.now()
+	if got := receiveTurnUpdate(t, ch); !errors.Is(got.Err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("update after the key moved = %+v, want unavailable, not the old conversation", got)
+	}
+	ask = clock.nextAsk(t)
+	s.writeTranscript(t, "codex", codexStarted(codexTurn2, "2026-10-08T03:00:00.000Z", 1791429600))
+	clock.advance(ask.d)
+	ask.fire <- clock.now()
+	clock.nextAsk(t)
+	if got := receiveTurnUpdate(t, ch); got.Err != nil || got.History.Current.TurnID != codexTurn2 || len(got.History.Recent) != 0 {
+		t.Fatalf("update in the new conversation = %+v, want only its open turn", got)
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+// A transcript whose turns carry no ids watches as unsupported, never as an
+// idle history.
+func TestWatchTurnsTranscriptWithoutIDs(t *testing.T) {
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
+	s.handle.turns.timing = clock.timing()
+	s.writeTranscript(t, "claude", claudePromptWithoutID("2026-10-13T05:00:00.123Z"), claudeTurnDuration("2026-10-13T05:00:05.456Z"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if got := receiveTurnUpdate(t, ch); !errors.Is(got.Err, runtime.ErrTurnIdentityUnsupported) || got.History.Current.Active() || len(got.History.Recent) != 0 {
+		t.Fatalf("update = %+v, want ErrTurnIdentityUnsupported with no history", got)
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}

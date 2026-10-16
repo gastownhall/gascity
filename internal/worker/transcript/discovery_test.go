@@ -846,3 +846,20 @@ func TestDiscoverScopedPathZCodeKeysBySeat(t *testing.T) {
 		t.Fatalf("DiscoverScopedPath(claude) = %q, want empty for a non-zcode family", got)
 	}
 }
+
+// Kills a keyed-lookup predicate that disagrees with DiscoverKeyedPath: a
+// family it resolves by key reported as keyless, or a keyless one as keyed.
+func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "gemini": true, "kimi": true, "pi": true,
+		"opencode": false, "mimocode": false,
+	} {
+		if got := HasKeyedLookup(provider); got != want {
+			t.Errorf("HasKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+	// A keyless family resolves nothing by key, however the key is spelled.
+	if got := DiscoverKeyedPath([]string{t.TempDir()}, "opencode", t.TempDir(), "key"); got != "" {
+		t.Fatalf("DiscoverKeyedPath(opencode) = %q, want none", got)
+	}
+}

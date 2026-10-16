@@ -25,6 +25,25 @@ func ResolveKeyedTranscriptPath(info Info, searchPaths []string) string {
 	return ResolveKeyedTranscriptPaths([]Info{info}, searchPaths, "")[info.ID]
 }
 
+// HasKeyedTranscriptLookup reports whether ResolveKeyedTranscriptPath can
+// ever resolve a transcript for info's provider family, once info carries a
+// session key and the transcript exists. It is a trait of the family, so it
+// does not change while a session waits for its key or its first write.
+// fallbackProvider is consulted as ResolveKeyedTranscriptPaths consults it.
+func HasKeyedTranscriptLookup(info Info, fallbackProvider string) bool {
+	return hasKeyedTranscriptLookup(ProviderFamilyFromInfo(info, fallbackProvider))
+}
+
+func hasKeyedTranscriptLookup(provider string) bool {
+	switch sessionlog.ProviderFamily(provider) {
+	case "codex":
+		return true
+	case "gemini":
+		return false
+	}
+	return workertranscript.HasKeyedLookup(provider)
+}
+
 // ResolveKeyedTranscriptPaths is the page-oriented form of
 // ResolveKeyedTranscriptPath. Codex targets share one batched date-directory
 // scan, while providers with cheap direct keyed layouts resolve individually.
@@ -65,9 +84,10 @@ func ResolveKeyedTranscriptPaths(infos []Info, searchPaths []string, fallbackPro
 				NotAfter:  anchor,
 			})
 			codexInfoIDs[key] = info.ID
-		case "gemini":
-			continue
 		default:
+			if !hasKeyedTranscriptLookup(provider) {
+				continue
+			}
 			if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey); path != "" {
 				paths[info.ID] = path
 			}

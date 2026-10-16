@@ -19,6 +19,23 @@ func SupportsIDLookup(provider string) bool {
 	}
 }
 
+// keyedLookupFamilies are the families DiscoverKeyedPath resolves with a
+// family-specific by-id lookup.
+var keyedLookupFamilies = []string{"auggie", "amp", "copilot", "codex", "cursor", "grok", "kiro", "gemini", "kimi", "pi", "antigravity", "zcode"}
+
+// HasKeyedLookup reports whether DiscoverKeyedPath can resolve a transcript
+// of provider's family by a session key at all: a family-specific by-id
+// lookup, or the generic one SupportsIDLookup allows.
+func HasKeyedLookup(provider string) bool {
+	family := sessionlog.ProviderFamily(provider)
+	for _, f := range keyedLookupFamilies {
+		if f == family {
+			return true
+		}
+	}
+	return SupportsIDLookup(provider)
+}
+
 // DiscoverPath resolves the best available transcript for a worker session.
 func DiscoverPath(searchPaths []string, provider, workDir, gcSessionID string) string {
 	if path := DiscoverKeyedPath(searchPaths, provider, workDir, gcSessionID); path != "" {

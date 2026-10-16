@@ -23,3 +23,10 @@ func (a SessionLogAdapter) ScanTurns(provider, path string) (sessionlog.TurnScan
 func (a SessionLogAdapter) NewTurnFollower(provider, path string) (*sessionlog.TurnFollower, error) {
 	return sessionlog.NewTurnFollower(provider, path)
 }
+
+// TurnTranscriptOwnedBy reports whether provider's transcript at path records
+// the conversation of provider session key key
+// (sessionlog.TurnTranscriptOwnedBy).
+func (a SessionLogAdapter) TurnTranscriptOwnedBy(provider, path, key string) (bool, error) {
+	return sessionlog.TurnTranscriptOwnedBy(provider, path, key)
+}

@@ -14,55 +14,75 @@ import (
 // provider. They change no session state and send nothing to the session.
 // Format and provider knowledge stays out of this package (X11 I9): the
 // runtime answers for itself, and transcripts are read in internal/sessionlog.
+//
+// Each takes the Info the caller already loaded with Get, which also routes
+// the session on a composite runtime, so a read costs no further store load.
 
-// RuntimeTurnCapabilities reports what the runtime serving session id can tell
-// about its turns, normalized as runtime.TurnCapabilitiesFor reports it, and
-// how it interrupts the session's turn (runtime.TurnInterruptModeFor).
-func (m *Manager) RuntimeTurnCapabilities(id string) (runtime.TurnCapabilities, runtime.TurnInterruptMode, error) {
-	_, sessName, err := m.sessionBead(id)
-	if err != nil {
-		return runtime.TurnCapabilities{}, "", err
-	}
-	return runtime.TurnCapabilitiesFor(m.sp, sessName), runtime.TurnInterruptModeFor(m.sp, sessName), nil
+// RuntimeTurnTraits is what the runtime serving a session reports about
+// observing its turns. Every field is a fixed trait of the routed backend,
+// read without calling it, so composing them costs no runtime call and gives
+// the same answer for as long as the session's route stands.
+type RuntimeTurnTraits struct {
+	// Capabilities is what the runtime itself can tell about the session's
+	// turns, normalized as runtime.TurnCapabilitiesFor reports it.
+	Capabilities runtime.TurnCapabilities
+	// Interrupt is how the runtime interrupts the session's turn
+	// (runtime.TurnInterruptModeFor).
+	Interrupt runtime.TurnInterruptMode
+	// IdleSnapshots reports that the routed backend takes idle snapshots
+	// (runtime.IdleSnapshotsFor).
+	IdleSnapshots bool
+	// LocalTranscripts reports that the routed backend runs the agent on
+	// this host, so its transcript can be read here
+	// (runtime.LocalTranscriptsFor).
+	LocalTranscripts bool
 }
 
-// RuntimeTurnHistory reads session id's turns from its runtime now. It returns
-// an error wrapping runtime.ErrTurnIdentityUnsupported when the runtime does
-// not observe turns, including a composite whose backend for the session
-// does not (runtime.ErrInteractionUnsupported). Any other failed read is the
-// runtime's error; it never reports idle instead.
-func (m *Manager) RuntimeTurnHistory(ctx context.Context, id string) (runtime.TurnHistory, error) {
-	_, sessName, err := m.sessionBead(id)
-	if err != nil {
-		return runtime.TurnHistory{}, err
+// RuntimeTurnTraits reports the turn-observation traits of the runtime
+// serving the session info describes.
+func (m *Manager) RuntimeTurnTraits(info Info) RuntimeTurnTraits {
+	name := info.SessionName
+	return RuntimeTurnTraits{
+		Capabilities:     runtime.TurnCapabilitiesFor(m.sp, name),
+		Interrupt:        runtime.TurnInterruptModeFor(m.sp, name),
+		IdleSnapshots:    runtime.IdleSnapshotsFor(m.sp, name),
+		LocalTranscripts: runtime.LocalTranscriptsFor(m.sp, name),
 	}
+}
+
+// RuntimeTurnHistory reads the turns of the session info describes from its
+// runtime now. It returns an error wrapping runtime.ErrTurnIdentityUnsupported
+// when the runtime does not observe turns, including a composite whose backend
+// for the session does not (runtime.ErrInteractionUnsupported). Any other
+// failed read is the runtime's error, with the zero history: it never reports
+// idle, nor a partial history, instead.
+func (m *Manager) RuntimeTurnHistory(ctx context.Context, info Info) (runtime.TurnHistory, error) {
 	tp, ok := m.sp.(runtime.TurnObservationProvider)
 	if !ok {
-		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w", id, runtime.ErrTurnIdentityUnsupported)
+		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w", info.ID, runtime.ErrTurnIdentityUnsupported)
 	}
-	h, err := tp.TurnHistory(ctx, sessName)
-	if errors.Is(err, runtime.ErrInteractionUnsupported) {
-		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w: %w", id, runtime.ErrTurnIdentityUnsupported, err)
+	h, err := tp.TurnHistory(ctx, info.SessionName)
+	switch {
+	case errors.Is(err, runtime.ErrInteractionUnsupported):
+		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w: %w", info.ID, runtime.ErrTurnIdentityUnsupported, err)
+	case err != nil:
+		return runtime.TurnHistory{}, err
 	}
-	return h, err
+	return h, nil
 }
 
-// RuntimeIdleSnapshot takes one idle observation of session id from its
-// runtime (runtime.IdleSnapshotProvider). supported is false, with a nil
-// error, when the runtime cannot take one for the session: it does not
-// implement the snapshot, or it is a composite whose backend for the session
-// does not. Otherwise idle and err are the runtime's answer, and an error is
-// never idle.
-func (m *Manager) RuntimeIdleSnapshot(id string) (idle, supported bool, err error) {
-	_, sessName, err := m.sessionBead(id)
-	if err != nil {
-		return false, false, err
-	}
+// RuntimeIdleSnapshot takes one idle observation of the session info
+// describes from its runtime (runtime.IdleSnapshotProvider). supported is
+// false, with a nil error, when the runtime cannot take one for the session:
+// it does not implement the snapshot, or it is a composite whose backend for
+// the session does not. Otherwise idle and err are the runtime's answer, and
+// an error is never idle.
+func (m *Manager) RuntimeIdleSnapshot(info Info) (idle, supported bool, err error) {
 	sp, ok := m.sp.(runtime.IdleSnapshotProvider)
 	if !ok {
 		return false, false, nil
 	}
-	idle, err = sp.SnapshotIdle(sessName)
+	idle, err = sp.SnapshotIdle(info.SessionName)
 	if errors.Is(err, runtime.ErrInteractionUnsupported) {
 		return false, false, nil
 	}

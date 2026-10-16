@@ -162,7 +162,7 @@ func protocolTurnWatch(timing turnTiming, read func(context.Context) (runtime.Tu
 
 // WatchTurns watches the session's turns from its source.
 func (h *SessionHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, error) {
-	plan, err := h.planTurns(ctx)
+	plan, err := h.planTurns()
 	if err != nil {
 		return nil, err
 	}
@@ -174,7 +174,7 @@ func (h *SessionHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, erro
 			events = nil // no hints: the backstop poll alone
 		}
 		read := func(ctx context.Context) (runtime.TurnHistory, error) { return h.protocolTurnHistory(ctx, plan) }
-		return startTurnWatch(ctx, protocolTurnWatch(timing, read, events, plan.sessionName)), nil
+		return startTurnWatch(ctx, protocolTurnWatch(timing, read, events, plan.info.SessionName)), nil
 	case TurnSourceTranscript:
 		return startTurnWatch(ctx, h.transcriptTurnWatch(plan, timing)), nil
 	default:
@@ -186,14 +186,19 @@ func (h *SessionHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, erro
 // the transcript plus the backstop poll, every 5 s while a turn is open and
 // every 60 s while idle, with the idle overlay probing at most every 2 s while
 // an open turn looks quiet. A TurnFollower folds only appended bytes and
-// rescans after rotation or truncation. The poll also re-resolves the
-// transcript, so a session that moved to a new file is followed there.
+// rescans after rotation or truncation. Until the conversation's transcript
+// resolves (no key yet, not written yet) every read is an Err update and the
+// watcher retries on the 5 s poll. The backstop poll, and only it, re-resolves
+// the transcript from the session as it stands, so a session that moved to a
+// new conversation's file is followed there; a resolution that fails drops
+// the file it was following, which may be the previous conversation's.
 func (h *SessionHandle) transcriptTurnWatch(plan turnPlan, timing turnTiming) turnWatchLoop {
 	wake := make(chan struct{}, 1)
 	var (
-		follower  *sessionlog.TurnFollower
-		notify    *transcriptNotifier
-		lastProbe time.Time
+		follower    *sessionlog.TurnFollower
+		notify      *transcriptNotifier
+		lastProbe   time.Time
+		lastResolve time.Time
 	)
 	stopNotify := func() {
 		if notify != nil {
@@ -213,21 +218,37 @@ func (h *SessionHandle) transcriptTurnWatch(plan turnPlan, timing turnTiming) tu
 		}
 		return nil
 	}
+	resolve := func() error {
+		lastResolve = timing.now()
+		info, err := h.turnSession(plan.info.ID)
+		if err != nil {
+			return err
+		}
+		path, err := h.conversationTranscript(info, plan.provider)
+		if err != nil {
+			return err
+		}
+		plan.info = info
+		if follower != nil && path == plan.path {
+			return nil
+		}
+		if err := follow(path); err != nil {
+			return transcriptTurnsUnavailable(plan, err)
+		}
+		return nil
+	}
 	loop := turnWatchLoop{
 		timing: timing,
 		hints:  wake,
 		stop:   stopNotify,
 	}
 	loop.read = func(ctx context.Context, why turnWake) (runtime.TurnHistory, error) {
-		if why == turnWakePoll || follower == nil {
-			path, err := h.TranscriptPath(ctx)
-			if err != nil && follower == nil {
-				return runtime.TurnHistory{}, transcriptTurnsUnavailable(plan, err)
-			}
-			if err == nil && (follower == nil || path != plan.path) {
-				if err := follow(path); err != nil {
-					return runtime.TurnHistory{}, transcriptTurnsUnavailable(plan, err)
-				}
+		backstop := why == turnWakePoll && timing.now().Sub(lastResolve) >= turnPollOpen
+		if follower == nil || backstop {
+			if err := resolve(); err != nil {
+				stopNotify()
+				follower = nil
+				return runtime.TurnHistory{}, err
 			}
 		}
 		probe := timing.now().Sub(lastProbe) >= turnOverlayEvery
@@ -262,12 +283,14 @@ type transcriptNotifier struct {
 func newTranscriptNotifier(path string, wake chan<- struct{}) *transcriptNotifier {
 	w, err := fsnotify.NewWatcher()
 	if err != nil {
-		slog.Debug("worker: transcript turn watch falls back to polling", slog.String("path", path), slog.Any("err", err))
+		// Each watch holds its own inotify instance; a host out of them
+		// (fs.inotify.max_user_instances) leaves every new watch on the poll.
+		slog.Warn("worker: transcript turn watch falls back to polling", slog.String("path", path), slog.Any("err", err))
 		return nil
 	}
 	if err := w.Add(filepath.Dir(path)); err != nil {
 		w.Close() //nolint:errcheck // nothing was watched
-		slog.Debug("worker: transcript turn watch falls back to polling", slog.String("path", path), slog.Any("err", err))
+		slog.Warn("worker: transcript turn watch falls back to polling", slog.String("path", path), slog.Any("err", err))
 		return nil
 	}
 	target := filepath.Clean(path)

@@ -6,19 +6,24 @@ import (
 	"fmt"
 	"os"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
 // Turn identity at the worker boundary (engdocs/design/x11-turn-identity-coverage.md
 // §5.2, slice TI-2b). A session's turns come from one source: the runtime's
-// protocol when it observes turns itself, else the provider family's transcript
-// when it records turn ids and lives on this host, else nothing. The worker
-// composes that choice per session and reads turns through it. No turn source
-// reads an id out of delivered text (X11 D13).
+// protocol when it observes turns itself, else the transcript of its current
+// conversation when the family records turn ids, finds that transcript by the
+// session's key and the agent runs on this host, else nothing. The worker
+// composes that choice per session from fixed traits, so it holds for the
+// session's generation, and reads turns through it. No turn source reads an
+// id out of delivered text (X11 D13).
 
 // TurnHandle exposes a worker's turn identity.
 type TurnHandle interface {
@@ -26,9 +31,12 @@ type TurnHandle interface {
 	// turns, composed from the routed runtime and the transcript family.
 	TurnCapabilities(context.Context) (TurnCapabilities, error)
 	// CurrentTurn reads the session's current and recent turns now. A source
-	// that cannot be read is an error wrapping runtime.ErrRuntimeUnavailable,
-	// never an idle history; a session with no source is
-	// runtime.ErrTurnIdentityUnsupported.
+	// that cannot be read (a transcript not written yet included) is an error
+	// wrapping runtime.ErrRuntimeUnavailable, never an idle history; a session
+	// with no source, or a transcript that records turns without ids, is
+	// runtime.ErrTurnIdentityUnsupported; a session that is gone or closed is
+	// runtime.ErrSessionNotFound. Concurrent reads of one session share one
+	// runtime read.
 	CurrentTurn(context.Context) (runtime.TurnHistory, error)
 	// WatchTurns sends a history first, then a history whenever the current or
 	// newest ended turn changes (coalesced: latest wins), and an update with
@@ -130,9 +138,6 @@ type turnObservation struct {
 	mu sync.Mutex
 	// timing overrides defaultTurnTiming in tests.
 	timing *turnTiming
-	// idleSnapshots memoizes, by runtime session name, whether the routed
-	// runtime takes idle snapshots: a trait of the backend, read once.
-	idleSnapshots map[string]bool
 	// inferred is the last end the idle overlay inferred. It holds while the
 	// transcript is unchanged, so repeated reads report one end.
 	inferred inferredTurnEnd
@@ -158,16 +163,18 @@ func (o *turnObservation) clock() turnTiming {
 
 // composeTurnCapabilities composes a session's turn capabilities (X11 §5.2):
 // protocol when the runtime reports any capability; else the transcript when
-// it resolves on this host (transcript), the family records turn starts and the
-// runtime interrupts by keystroke; else none. An inferred end needs idle
-// snapshots, or nobody can see it, so without them End is none. Interrupt mode
-// unsupported forces Fence none.
+// one can be read for the session here (transcript: the runtime runs the
+// agent on this host and the family finds the conversation's own transcript
+// by its key), the family records turn starts and the runtime interrupts by
+// keystroke; else none. An inferred end needs idle snapshots, or nobody can
+// see it, so without them End is none. Interrupt mode unsupported forces
+// Fence none. Every input is a fixed trait, never whether a file exists yet,
+// so the capabilities do not move while a session waits for its transcript.
 func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnInterruptMode, support sessionlog.TurnSupport, transcript, idleSnapshots bool) TurnCapabilities {
 	caps := TurnCapabilities{
 		TurnCapabilities: noTurnCapabilities,
 		Source:           TurnSourceNone,
 		Interrupt:        mode,
-		Replace:          TurnReplace(support.Replace),
 		HookTurnID:       support.HookTurnID,
 	}
 	rcaps = rcaps.Normalized()
@@ -191,82 +198,106 @@ func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnIn
 	if mode == runtime.TurnInterruptUnsupported {
 		caps.Fence = runtime.TurnFenceNone
 	}
+	caps.Replace = turnReplaceFor(TurnReplace(support.Replace), caps.Source, mode)
 	return caps
+}
+
+// turnReplaceFor is the replacement deliver-now performs for a family whose
+// own sequence is family, on a session with the given source and interrupt
+// mode, as internal/session/submit.go runs it (X11 D11). A runtime that cannot
+// interrupt refuses the replacement unless the family restarts, and a
+// protocol source (ACP) never restarts. A protocol runtime replaces a turn by
+// interrupting it, never by the family's reset or restart: those steps are
+// off for ACP transport, and the restart for protocol mode.
+func turnReplaceFor(family TurnReplace, source TurnSource, mode runtime.TurnInterruptMode) TurnReplace {
+	switch {
+	case mode == runtime.TurnInterruptUnsupported:
+		if family == TurnReplaceRestart && source != TurnSourceProtocol {
+			return TurnReplaceRestart
+		}
+		return TurnReplaceNone
+	case source == TurnSourceProtocol || mode == runtime.TurnInterruptProtocol:
+		return TurnReplaceInterrupt
+	default:
+		return family
+	}
 }
 
 // turnPlan is one composition of a session's turn source.
 type turnPlan struct {
-	caps        TurnCapabilities
-	sessionID   string
-	sessionName string // the runtime session name
-	provider    string // the transcript family's provider string
-	path        string // the transcript, for a transcript source
+	caps     TurnCapabilities
+	info     sessionpkg.Info // the session as the plan read it
+	provider string          // the transcript family's provider string
+	path     string          // the transcript being read, for a transcript source
 }
 
-// planTurns composes the session's turn source now.
-func (h *SessionHandle) planTurns(ctx context.Context) (turnPlan, error) {
+// planTurns composes the session's turn source now, from the session and the
+// fixed traits of its routed runtime.
+func (h *SessionHandle) planTurns() (turnPlan, error) {
 	id := h.currentSessionID()
 	if id == "" {
 		support := h.adapter.TurnSupportFor(h.session.Provider)
 		return turnPlan{caps: composeTurnCapabilities(noTurnCapabilities, runtime.TurnInterruptKeystroke, support, false, false)}, nil
 	}
-	rcaps, mode, err := h.manager.RuntimeTurnCapabilities(id)
+	info, err := h.turnSession(id)
 	if err != nil {
-		return turnPlan{}, fmt.Errorf("turn capabilities of session %s: %w", id, err)
+		return turnPlan{}, err
 	}
-	info, err := h.manager.Get(id)
-	if err != nil {
-		return turnPlan{}, fmt.Errorf("turn capabilities of session %s: %w", id, err)
-	}
-	plan := turnPlan{sessionID: id, sessionName: info.SessionName, provider: h.historyProvider(info)}
+	traits := h.manager.RuntimeTurnTraits(info)
+	plan := turnPlan{info: info, provider: h.historyProvider(info)}
 	support := h.adapter.TurnSupportFor(plan.provider)
-	transcriptEligible := rcaps.Normalized() == noTurnCapabilities &&
-		support.Start == sessionlog.TurnStartRecorded && mode == runtime.TurnInterruptKeystroke
-	idleSnapshots := false
-	if transcriptEligible {
-		path, err := h.TranscriptPath(ctx)
-		switch {
-		case errors.Is(err, ErrHistoryUnavailable):
-		case err != nil:
-			return turnPlan{}, fmt.Errorf("turn capabilities of session %s: %w: %w", id, runtime.ErrRuntimeUnavailable, err)
-		default:
-			plan.path = path
-		}
-		if plan.path != "" && support.End == sessionlog.TurnEndInferred {
-			if idleSnapshots, err = h.takesIdleSnapshots(id, info.SessionName); err != nil {
-				return turnPlan{}, fmt.Errorf("turn capabilities of session %s: %w", id, err)
-			}
-		}
-	}
-	plan.caps = composeTurnCapabilities(rcaps, mode, support, plan.path != "", idleSnapshots)
+	transcript := traits.LocalTranscripts &&
+		strings.TrimSpace(info.WorkDir) != "" &&
+		sessionpkg.HasKeyedTranscriptLookup(info, plan.provider)
+	plan.caps = composeTurnCapabilities(traits.Capabilities, traits.Interrupt, support, transcript, traits.IdleSnapshots)
 	return plan, nil
 }
 
-// takesIdleSnapshots reports whether the runtime serving the session takes idle
-// snapshots, reading it once per runtime session name.
-func (h *SessionHandle) takesIdleSnapshots(id, sessionName string) (bool, error) {
-	h.turns.mu.Lock()
-	known, ok := h.turns.idleSnapshots[sessionName]
-	h.turns.mu.Unlock()
-	if ok {
-		return known, nil
+// turnSession loads session id for a turn read. A session that is gone,
+// closed or not a session is runtime.ErrSessionNotFound; any other failed
+// load is runtime.ErrRuntimeUnavailable, the read's answer unknown.
+func (h *SessionHandle) turnSession(id string) (sessionpkg.Info, error) {
+	info, err := h.manager.Get(id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound), errors.Is(err, sessionpkg.ErrSessionNotFound),
+		errors.Is(err, sessionpkg.ErrNotSession), errors.Is(err, sessionpkg.ErrSessionClosed):
+		return sessionpkg.Info{}, fmt.Errorf("turns of session %s: %w: %w", id, runtime.ErrSessionNotFound, err)
+	case err != nil:
+		return sessionpkg.Info{}, fmt.Errorf("turns of session %s: %w: %w", id, runtime.ErrRuntimeUnavailable, err)
+	case info.Closed:
+		return sessionpkg.Info{}, fmt.Errorf("turns of session %s: %w: %w", id, runtime.ErrSessionNotFound, sessionpkg.ErrSessionClosed)
 	}
-	_, supported, err := h.manager.RuntimeIdleSnapshot(id)
-	if err != nil && !supported {
-		return false, err
+	return info, nil
+}
+
+// conversationTranscript resolves the transcript of info's current
+// conversation: only a file its provider session key finds, and that records
+// that conversation, never a work-directory or newest-file fallback, which
+// can return another conversation's file (KeyedTranscriptPath's rule). A
+// session without a key yet, or whose transcript is not written yet, is
+// runtime.ErrRuntimeUnavailable: its source exists, its turns are unknown.
+func (h *SessionHandle) conversationTranscript(info sessionpkg.Info, provider string) (string, error) {
+	key := strings.TrimSpace(info.SessionKey)
+	if key == "" {
+		return "", fmt.Errorf("turns of session %s: its conversation has no session key yet: %w", info.ID, runtime.ErrRuntimeUnavailable)
 	}
-	h.turns.mu.Lock()
-	if h.turns.idleSnapshots == nil {
-		h.turns.idleSnapshots = map[string]bool{}
+	path := sessionpkg.ResolveKeyedTranscriptPaths([]sessionpkg.Info{info}, h.adapter.SearchPaths, provider)[info.ID]
+	if path == "" {
+		return "", fmt.Errorf("turns of session %s: no single transcript of conversation %s found: %w", info.ID, key, runtime.ErrRuntimeUnavailable)
 	}
-	h.turns.idleSnapshots[sessionName] = supported
-	h.turns.mu.Unlock()
-	return supported, nil
+	owned, err := h.adapter.TurnTranscriptOwnedBy(provider, path, key)
+	if err != nil {
+		return "", fmt.Errorf("turns of session %s: %w: %w", info.ID, runtime.ErrRuntimeUnavailable, err)
+	}
+	if !owned {
+		return "", fmt.Errorf("turns of session %s: transcript %s does not record conversation %s: %w", info.ID, path, key, runtime.ErrRuntimeUnavailable)
+	}
+	return path, nil
 }
 
 // TurnCapabilities reports what the worker can tell about its session's turns.
-func (h *SessionHandle) TurnCapabilities(ctx context.Context) (TurnCapabilities, error) {
-	plan, err := h.planTurns(ctx)
+func (h *SessionHandle) TurnCapabilities(context.Context) (TurnCapabilities, error) {
+	plan, err := h.planTurns()
 	if err != nil {
 		return TurnCapabilities{}, err
 	}
@@ -275,7 +306,7 @@ func (h *SessionHandle) TurnCapabilities(ctx context.Context) (TurnCapabilities,
 
 // CurrentTurn reads the session's current and recent turns from its source.
 func (h *SessionHandle) CurrentTurn(ctx context.Context) (runtime.TurnHistory, error) {
-	plan, err := h.planTurns(ctx)
+	plan, err := h.planTurns()
 	if err != nil {
 		return runtime.TurnHistory{}, err
 	}
@@ -283,6 +314,9 @@ func (h *SessionHandle) CurrentTurn(ctx context.Context) (runtime.TurnHistory, e
 	case TurnSourceProtocol:
 		return h.protocolTurnHistory(ctx, plan)
 	case TurnSourceTranscript:
+		if plan.path, err = h.conversationTranscript(plan.info, plan.provider); err != nil {
+			return runtime.TurnHistory{}, err
+		}
 		return h.transcriptTurnHistory(ctx, plan, func() (sessionlog.TurnScan, error) {
 			return h.adapter.ScanTurns(plan.provider, plan.path)
 		}, true)
@@ -292,30 +326,40 @@ func (h *SessionHandle) CurrentTurn(ctx context.Context) (runtime.TurnHistory, e
 }
 
 func (h *SessionHandle) noTurnSource(plan turnPlan) error {
-	return fmt.Errorf("turns of session %s: %w", plan.sessionID, runtime.ErrTurnIdentityUnsupported)
+	return fmt.Errorf("turns of session %s: %w", plan.info.ID, runtime.ErrTurnIdentityUnsupported)
 }
 
 // turnObservationScope names the city in a turn observation key, so two
 // cities' sessions of one name never share an in-flight read.
 func (h *SessionHandle) turnObservationScope() string {
-	if city, err := h.manager.CityDir(); err == nil {
+	city, err := h.manager.CityDir()
+	return turnCityScope(city, err, h.manager)
+}
+
+// turnCityScope is the scope of a city's turn observation keys: the city's
+// directory, so every handle of one city's session derives one key; or, with
+// no city, a name unique to owner, the object the reads go through.
+func turnCityScope(city sessionpkg.CityDir, err error, owner any) string {
+	if err == nil && !city.IsZero() {
 		return city.String()
 	}
-	return fmt.Sprintf("manager:%p", h.manager)
+	return fmt.Sprintf("unscoped:%p", owner)
 }
 
 // turnObservationKey is the ObserveBounded key of a turn read of one session.
 // It is a namespace apart from liveness observation (postStartObservationKey
 // in cmd/gc), so a wedged turn read never blocks a liveness read, nor the
 // other way round. kind separates the history read from the idle snapshot.
+// Turn reads go through ObserveShared: concurrent readers of one session
+// share one read.
 func turnObservationKey(kind, scope, sessionName string) string {
 	return "worker.turns." + kind + "\x00" + scope + "\x00" + sessionName
 }
 
 func (h *SessionHandle) protocolTurnHistory(ctx context.Context, plan turnPlan) (runtime.TurnHistory, error) {
-	key := turnObservationKey("history", h.turnObservationScope(), plan.sessionName)
-	return ObserveBounded(ctx, key, func(ctx context.Context) (runtime.TurnHistory, error) {
-		return h.manager.RuntimeTurnHistory(ctx, plan.sessionID)
+	key := turnObservationKey("history", h.turnObservationScope(), plan.info.SessionName)
+	return ObserveShared(ctx, key, func(ctx context.Context) (runtime.TurnHistory, error) {
+		return h.manager.RuntimeTurnHistory(ctx, plan.info)
 	})
 }
 
@@ -335,7 +379,7 @@ func (h *SessionHandle) transcriptTurnHistory(ctx context.Context, plan turnPlan
 	}
 	hist, err := turnHistoryFromScan(scan, timing.now())
 	if err != nil {
-		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w", plan.sessionID, err)
+		return runtime.TurnHistory{}, fmt.Errorf("turns of session %s: %w", plan.info.ID, err)
 	}
 	if plan.caps.End == runtime.TurnEndInferred && hist.Current.Active() {
 		h.applyIdleOverlay(ctx, plan, timing, &hist, before, probe)
@@ -347,9 +391,9 @@ func (h *SessionHandle) transcriptTurnHistory(ctx context.Context, plan turnPlan
 // read for turns: unknown, never idle (X11 I8).
 func transcriptTurnsUnavailable(plan turnPlan, err error) error {
 	if errors.Is(err, sessionlog.ErrTurnsUnsupported) {
-		return fmt.Errorf("turns of session %s: %w: %w", plan.sessionID, runtime.ErrTurnIdentityUnsupported, err)
+		return fmt.Errorf("turns of session %s: %w: %w", plan.info.ID, runtime.ErrTurnIdentityUnsupported, err)
 	}
-	return fmt.Errorf("turns of session %s: %w: %w", plan.sessionID, runtime.ErrRuntimeUnavailable, err)
+	return fmt.Errorf("turns of session %s: %w: %w", plan.info.ID, runtime.ErrRuntimeUnavailable, err)
 }
 
 // applyIdleOverlay infers the end of hist's open turn (X11 §5.2): once the
@@ -391,15 +435,18 @@ func (h *SessionHandle) applyIdleOverlay(ctx context.Context, plan turnPlan, tim
 	h.turns.inferred = inferredTurnEnd{path: plan.path, turnID: turnID, info: after, endedAt: endedAt}
 	h.turns.mu.Unlock()
 	endCurrentTurn(hist, endedAt)
+	if hist.ObservedAt.Before(endedAt) {
+		hist.ObservedAt = endedAt
+	}
 }
 
 // readsIdle takes one idle snapshot of the session, bounded by ctx. Only a
 // successful idle reading counts; busy, unsupported or failed is not idle.
 func (h *SessionHandle) readsIdle(ctx context.Context, plan turnPlan) bool {
 	type snapshot struct{ idle, supported bool }
-	key := turnObservationKey("idle", h.turnObservationScope(), plan.sessionName)
-	got, err := ObserveBounded(ctx, key, func(context.Context) (snapshot, error) {
-		idle, supported, err := h.manager.RuntimeIdleSnapshot(plan.sessionID)
+	key := turnObservationKey("idle", h.turnObservationScope(), plan.info.SessionName)
+	got, err := ObserveShared(ctx, key, func(context.Context) (snapshot, error) {
+		idle, supported, err := h.manager.RuntimeIdleSnapshot(plan.info)
 		return snapshot{idle, supported}, err
 	})
 	return err == nil && got.supported && got.idle
@@ -429,10 +476,15 @@ func endCurrentTurn(hist *runtime.TurnHistory, endedAt time.Time) {
 
 // turnHistoryFromScan converts a transcript scan to a runtime turn history:
 // ids verbatim, times at the source's millisecond precision, statuses mapped
-// and ObservedAt the observer's clock. An ended turn recorded without a usable
-// id is left out: it cannot be told from any other. An open turn without one
-// is an error wrapping runtime.ErrTurnIdentityUnsupported, never idle.
+// and ObservedAt the observer's clock. A transcript that records any turn
+// without a usable id (an older CLI) gives boundaries, not identity, so its
+// read is an error wrapping runtime.ErrTurnIdentityUnsupported, whether or
+// not a turn is open: never an idle history that hides the turns it could not
+// name (X11 §8, D1: the observer downgrades the generation to boundary).
 func turnHistoryFromScan(scan sessionlog.TurnScan, observedAt time.Time) (runtime.TurnHistory, error) {
+	if scan.MissingIDs {
+		return runtime.TurnHistory{}, fmt.Errorf("transcript records turns without an id: %w", runtime.ErrTurnIdentityUnsupported)
+	}
 	hist := runtime.TurnHistory{ObservedAt: observedAt}
 	if scan.Open {
 		if !runtime.IsTurnIdentity(scan.Current.ID) {
