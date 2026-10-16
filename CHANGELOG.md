@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Exec adapters and setup commands are now cancelled with SIGTERM, not
+  SIGINT.** When gc cancels an exec session adapter, a `setup`/`pre_start`
+  command or a herdr setup command, it sends SIGTERM, then SIGKILL after the
+  same 2s grace period (#7018, backported in #7953). SIGINT is ignored by
+  processes started in the background (for example `gc start &` from a script
+  or under some supervisors), so a rollback `trap ... INT` never ran and the
+  adapter was SIGKILLed, leaving what it created behind. If your adapter only
+  traps `INT`, add `TERM` (e.g. `trap rollback INT TERM`); the bundled
+  `scripts/gc-session-docker` already does.
+
 - **Upgrade Beads (`bd`) to v1.3.2-rc.2 for this release candidate.** This
   build pins and is tested against bd v1.3.2-rc.2 (`deps.env` `BD_VERSION`
   and the go.mod library): v1.3.1 plus the `bd purge` live-dependent fix
