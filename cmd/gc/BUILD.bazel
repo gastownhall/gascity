@@ -81,6 +81,7 @@ go_library(
         "bd_env_proxied_native.go",
         "bd_mistyped_metadata.go",
         "bd_relocated_classes.go",
+        "bd_subject_route.go",
         "bd_wisp_tier.go",
         "bead_format.go",
         "bead_policy_store.go",

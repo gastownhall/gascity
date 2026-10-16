@@ -1026,6 +1026,12 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 		return cityTarget, nil
 	}
 
+	// A by-id read or write routes by its subjects' prefix: the verb's flag
+	// manifest says which tokens are ids, and an id's prefix names its store.
+	if target, ok := bdSubjectPrefixTarget(cfg, cityTarget, cityPath, args); ok {
+		return target, nil
+	}
+
 	// Bead-ID auto-detect accepts a candidate store only when the id actually
 	// exists there, which costs a full bd round trip per probe. A probe can only
 	// matter when some outcome differs from another, so when every candidate
