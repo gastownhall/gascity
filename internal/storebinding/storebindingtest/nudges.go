@@ -1241,7 +1241,13 @@ func runNudgeBatchTests(r Runner, suite NudgesSuite) {
 
 	r.Run("ReleaseClaimsLeavesALapsedLeaseAlone", func(r Runner) {
 		queue := mustQueue(r, suite)
-		now := time.Now().UTC()
+		// The case claims at an instant a minute behind the wall clock. A
+		// queue whose verbs maintain re-dues the lapsed lease inside
+		// ReleaseClaims at its own wall-clock reading, which then lands a
+		// minute after that instant rather than within the wall clock's
+		// resolution of it, so the case discriminates the same on every
+		// platform without depending on elapsed time.
+		now := time.Now().UTC().Add(-time.Minute)
 		claimedAt := now.Add(-time.Hour)
 		lapsed := nudgeItem("n-lapsed", "", claimedAt)
 		if err := queue.Enqueue(lapsed); err != nil {
