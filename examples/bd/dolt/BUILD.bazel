@@ -108,6 +108,8 @@ go_test(
         "compact_notify_cadence_test.go",
         "compact_real_dolt_callbound_test.go",
         "compact_real_dolt_test.go",
+        "compact_rig_endpoint_real_dolt_test.go",
+        "compact_rig_endpoint_test.go",
         "doctor_test.go",
         "dog_exec_scripts_test.go",
         "dog_prompt_test.go",

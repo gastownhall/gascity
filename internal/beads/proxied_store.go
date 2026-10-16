@@ -89,11 +89,14 @@ import (
 //     SetLocalString, which writes only the clone-local sidecar file, is
 //     deliberately outside; see its doc); every write capability this wrapper
 //     implements as a method (ReleaseIfCurrent, DeleteBatch,
-//     CreateWithForeignID, CreateWithStorage); and ONE
-//     capability handle, ConditionalWriterHandle — but only when it is reached
-//     by beads.ConditionalWriterFor on the *ProxiedStore itself, through which
-//     UpdateIfMatch, CloseIfMatch, DeleteIfMatch and CompareAndSetMetadataKey
-//     are bracketed.
+//     CreateWithForeignID, CreateWithStorage, ApplyGuarded); and TWO
+//     capability handles: ConditionalWriterHandle — but only when it is
+//     reached by beads.ConditionalWriterFor on the *ProxiedStore itself,
+//     through which UpdateIfMatch, CloseIfMatch, DeleteIfMatch and
+//     CompareAndSetMetadataKey are bracketed — and GuardedBatcherHandle,
+//     which hands out the wrapper itself, so every guarded batch reached
+//     through beads.GuardedBatcherFor is bracketed (that resolver never
+//     follows ConditionalWritesResolveTarget).
 //
 //     OUTSIDE it, deliberately: every conditional write reached through a
 //     resolver that follows ConditionalWritesResolveTarget first. That is

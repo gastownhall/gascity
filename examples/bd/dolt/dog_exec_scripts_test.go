@@ -1,10 +1,12 @@
 package dolt_test
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -189,6 +191,7 @@ func newCompactScriptFixture(t *testing.T) compactScriptFixture {
 	binDir := t.TempDir()
 	gcLog, mailFailFile := writeCompactFakeGC(t, binDir)
 	doltLog := writeCompactFakeDolt(t, binDir)
+	writeCompactFakeDf(t, binDir)
 	stateFile := filepath.Join(binDir, "head-state")
 	if err := os.WriteFile(stateFile, []byte("headcommit\n"), 0o644); err != nil {
 		t.Fatalf("write fake dolt state: %v", err)
@@ -253,8 +256,11 @@ func (f compactScriptFixture) runWithArgs(t *testing.T, mode string, args []stri
 		"GC_FAKE_DOLT_STATE_FILE",
 		"GC_FAKE_DOLT_HASH_STATE_FILE",
 		"GC_FAKE_DOLT_TAG_STATE_FILE",
+		"GC_FAKE_PENDING_GC_MARKER",
 		"GC_PACK_STATE_DIR",
 		"GC_CITY_RUNTIME_DIR",
+		"GC_DOLT_COMPACT_MIN_FREE_BYTES",
+		"GC_FAKE_DF_MODE",
 	),
 		"PATH="+f.binDir+":"+os.Getenv("PATH"),
 		"GC_CITY_PATH="+f.cityPath,
@@ -404,6 +410,9 @@ func writeCompactFakeGC(t *testing.T, binDir string) (logPath, mailFailPath stri
 	writeExecutable(t, filepath.Join(binDir, "gc"), fmt.Sprintf(`#!/bin/sh
 printf 'gc %%s\n' "$*" >> %s
 if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
+  if [ -n "${GC_FAKE_RIG_LIST_REMOVES:-}" ]; then
+    rm -f "$GC_FAKE_RIG_LIST_REMOVES"
+  fi
   printf '{"rigs":[]}\n'
   exit 0
 fi
@@ -418,6 +427,56 @@ fi
 exit 0
 `, shellQuote(logPath), shellQuote(mailFailPath)))
 	return logPath, mailFailPath
+}
+
+func writeCompactFakeDf(t *testing.T, binDir string) {
+	t.Helper()
+	writeExecutable(t, filepath.Join(binDir, "df"), `#!/bin/sh
+case "${GC_FAKE_DF_MODE:-}" in
+  df_critical)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t103809024\t1048576\t99%%\t/\n'
+    exit 0
+    ;;
+  df_critical_spaced_names)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+    printf 'server:/volume name 104857600 103809024 1048576 99%% /mnt/dolt data\n'
+    exit 0
+    ;;
+  df_ambiguous)
+    printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\n'
+    printf 'tmpfs 104857600 84457472 20971520 - /\n'
+    exit 0
+    ;;
+  df_overcommitted)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf '/dev/sda1\t104857600\t104980480\t-122880\t101%%\t/\n'
+    exit 0
+    ;;
+  df_probe_failure)
+    printf 'df: stat failed\n' >&2
+    exit 1
+    ;;
+  df_malformed)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t84457472\tunknown\t81%%\t/\n'
+    exit 0
+    ;;
+  df_reject_option)
+    case "${2:-}" in
+      -*) printf 'df: option-like path received\n' >&2; exit 64 ;;
+    esac
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t84457472\t20971520\t81%%\t/\n'
+    exit 0
+    ;;
+  *)
+    printf 'Filesystem\t1024-blocks\tUsed\tAvailable\tCapacity\tMounted on\n'
+    printf 'tmpfs\t104857600\t84457472\t20971520\t81%%\t/\n'
+    exit 0
+    ;;
+esac
+`)
 }
 
 func readCompactGCLog(t *testing.T, fixture compactScriptFixture) string {
@@ -481,6 +540,7 @@ count_file="${GC_FAKE_DOLT_COUNT_FILE:-}"
 state_file="${GC_FAKE_DOLT_STATE_FILE:-}"
 hash_state_file="${GC_FAKE_DOLT_HASH_STATE_FILE:-}"
 tag_state_file="${GC_FAKE_DOLT_TAG_STATE_FILE:-}"
+pending_gc_marker="${GC_FAKE_PENDING_GC_MARKER:-}"
 query=""
 db=""
 while [ "$#" -gt 0 ]; do
@@ -671,7 +731,7 @@ case "$query" in
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes WHERE name = 'origin'"*)
     case "$mode" in
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote|multiple_remotes_with_origin|backup_remote_reconcile|backup_remote_push_failure|backup_remote_filters_non_file_and_authoritative)
         print_cell 1
         ;;
       *)
@@ -692,6 +752,9 @@ case "$query" in
     exit 0
     ;;
   *"SELECT COUNT(*) FROM dolt_remotes"*)
+    if [ "$mode" = "pending_gc_marker_disappears_at_remote_probe" ] && [ -n "$pending_gc_marker" ]; then
+      rm -f "$pending_gc_marker"
+    fi
     case "$mode" in
       remote_count_failure)
         printf 'dolt_remotes unavailable\n' >&2
@@ -700,7 +763,7 @@ case "$query" in
       remote_count_invalid)
         print_cell many
         ;;
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote)
         print_cell 1
         ;;
       multiple_remotes_with_origin|multiple_remotes_no_origin)
@@ -727,7 +790,7 @@ case "$query" in
         # Real Dolt always names the first remote when any exist.
         print_cell backup
         ;;
-      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|multiple_remotes_with_origin)
+      remote_success|remote_active_branch|remote_invalid_active_branch|remote_ahead|remote_ahead_reconciled|remote_fetch_failure|remote_fetch_failure_once|remote_push_failure|remote_advances_before_push|remote_gc_failure_once|remote_empty_head_push_failure|remote_ancestry_probe_failure|remote_writer_race_before_flatten|pending_gc_marker_disappears_remote|multiple_remotes_with_origin)
         print_cell origin
         ;;
       explicit_backup_remote)
@@ -860,6 +923,9 @@ case "$query" in
     exit 0
     ;;
   *"SELECT HASHOF('HEAD')"*)
+    if { [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; } && [ -n "$pending_gc_marker" ]; then
+      rm -f "$pending_gc_marker"
+    fi
     if [ "$mode" = "second_db_post_flatten_head_empty" ] && [ "$db" = "zed" ]; then
       calls_file="$state_file.$db-head-calls"
       calls=0
@@ -1327,7 +1393,7 @@ case "$query" in
         exit 0
         ;;
     esac
-    if [ "$mode" = "quarantine_autoclear_confined" ]; then
+    if [ "$mode" = "quarantine_autoclear_confined" ] || [ "$mode" = "pending_gc_marker_disappears" ] || [ "$mode" = "pending_gc_marker_disappears_remote" ]; then
       case "$query" in
         *"rows_deleted"*|*"rows_modified"*)
           print_cell 0
@@ -5501,13 +5567,26 @@ func TestCompactScriptRejectsUnknownFlag(t *testing.T) {
 }
 
 func TestCompactScriptOnlyDBFlagRequiresValue(t *testing.T) {
-	fixture := newCompactScriptFixture(t)
-	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only", "--only-db"})
-	if err == nil {
-		t.Fatalf("compact must reject --only-db without a value:\n%s", out)
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "missing value", args: []string{"--gc-only", "--only-db"}},
+		{name: "empty separate value", args: []string{"--gc-only", "--only-db", ""}},
+		{name: "empty inline value", args: []string{"--gc-only", "--only-db="}},
 	}
-	if !strings.Contains(out, "--only-db requires a database name") {
-		t.Fatalf("output missing --only-db value diagnostic:\n%s", out)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			out, err := fixture.runWithArgs(t, "success", tt.args)
+			var exitErr *exec.ExitError
+			if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+				t.Fatalf("compact must reject --only-db without a database name with exit 2: got err=%v\nout=%s", err, out)
+			}
+			if !strings.Contains(out, "--only-db requires a database name") {
+				t.Fatalf("output missing --only-db value diagnostic:\n%s", out)
+			}
+		})
 	}
 }
 
@@ -6760,4 +6839,681 @@ if [ "$#" -ge 2 ] && { [ "$1" = "-vi" ] || [ "$1" = "-i" ]; } && [[ "$2" == *"$b
 fi
 exec %s "$@"
 `, shellQuote(realGrep)))
+}
+
+// writeCompactPendingGCMarker leaves the pending-GC marker a flatten whose
+// full GC failed would leave for db, and returns its path.
+func writeCompactPendingGCMarker(t *testing.T, fixture compactScriptFixture, db string) string {
+	t.Helper()
+	marker := filepath.Join(fixture.cityPath, ".gc", "runtime", "packs", "dolt", "compact-pending-gc", db)
+	if err := os.MkdirAll(filepath.Dir(marker), 0o700); err != nil {
+		t.Fatalf("mkdir pending-GC marker directory: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("db="+db+"\nreason=flatten succeeded but full GC failed\n"), 0o600); err != nil {
+		t.Fatalf("write pending-GC marker: %v", err)
+	}
+	return marker
+}
+
+// newCompactOutcomeFile creates the empty per-run outcome file the order
+// runner hands an exec order, and returns the env entry that names it.
+func newCompactOutcomeFile(t *testing.T) (path, env string) {
+	t.Helper()
+	path = filepath.Join(t.TempDir(), "outcome.json")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("create outcome file: %v", err)
+	}
+	return path, orders.ExecOutcomeFileEnv + "=" + path
+}
+
+// readCompactOutcome decodes the run's declaration with the order runner's
+// strict decoder; ok is false when the run declared nothing.
+func readCompactOutcome(t *testing.T, path string) (outcome orders.ExecOutcome, ok bool) {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read outcome file: %v", err)
+	}
+	outcome, ok, err = orders.DecodeExecOutcome(data)
+	if err != nil {
+		t.Fatalf("outcome file is not a valid declaration: %v\n%s", err, data)
+	}
+	return outcome, ok
+}
+
+// assertCompactDiskHoldOutcome requires a df_critical run to declare wantKind
+// with the disk-floor reason and exactly wantScopes held.
+func assertCompactDiskHoldOutcome(t *testing.T, path string, wantKind orders.ExecOutcomeKind, wantScopes ...orders.ExecOutcomeScope) {
+	t.Helper()
+	outcome, ok := readCompactOutcome(t, path)
+	if !ok {
+		t.Fatal("critical-disk hold wrote no order outcome declaration")
+	}
+	if outcome.Outcome != wantKind {
+		t.Fatalf("outcome = %q, want %q: %+v", outcome.Outcome, wantKind, outcome)
+	}
+	const wantReason = "free disk below GC_DOLT_COMPACT_MIN_FREE_BYTES: free_bytes=1073741824 floor=5368709120"
+	if outcome.Reason != wantReason {
+		t.Fatalf("outcome reason = %q, want %q", outcome.Reason, wantReason)
+	}
+	if !slices.Equal(outcome.Scopes, wantScopes) {
+		t.Fatalf("outcome scopes = %+v, want %+v", outcome.Scopes, wantScopes)
+	}
+}
+
+func assertNoCompactOutcome(t *testing.T, path string) {
+	t.Helper()
+	if outcome, ok := readCompactOutcome(t, path); ok {
+		t.Fatalf("run that held nothing declared an outcome: %+v", outcome)
+	}
+}
+
+func TestCompactScriptDiskPreflightSufficientProceedsNormally(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+	out, err := fixture.run(t, "success", outcomeEnv)
+	if err != nil {
+		t.Fatalf("compact exited with error on sufficient disk: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk CRITICAL") || strings.Contains(out, "pre-flight probe failed") {
+		t.Fatalf("unexpected disk preflight output on sufficient disk:\n%s", out)
+	}
+	assertNoCompactOutcome(t, outcomeFile)
+}
+
+func TestCompactScriptDiskPreflightCriticalExitsZero(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", outcomeEnv)
+	if err != nil {
+		t.Fatalf("compact should exit 0 on critical disk: %v\nout=%s", err, out)
+	}
+	for _, want := range []string{"disk CRITICAL", "free_bytes=", "floor=", fixture.dataDir} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("critical output missing %q:\n%s", want, out)
+		}
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("critical disk must skip flatten and GC:\n%s", logData)
+	}
+	assertCompactDiskHoldOutcome(t, outcomeFile, orders.ExecOutcomeSkipped,
+		orders.ExecOutcomeScope{Scope: "beads", Reason: "compaction held below the disk floor"})
+}
+
+func TestCompactScriptDiskPreflightOutcomeWriteFailureFailsRun(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	outcomeFile := filepath.Join(t.TempDir(), "missing", "outcome.json")
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500",
+		orders.ExecOutcomeFileEnv+"="+outcomeFile)
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("an unwritable outcome file must fail the run rather than hide the hold: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "unable to write order outcome declaration") {
+		t.Fatalf("expected outcome write failure output:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightDoesNotBlockReclaimModes(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		env  []string
+	}{
+		{name: "gc-only", args: []string{"--gc-only"}},
+		{name: "bare-gc", env: []string{"GC_DOLT_COMPACT_BARE_GC=1"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			env := append([]string{"GC_FAKE_DF_MODE=df_critical"}, tt.env...)
+			out, err := fixture.runWithArgs(t, "success", tt.args, env...)
+			if err != nil {
+				t.Fatalf("reclaim mode failed under low disk: %v\nout=%s", err, out)
+			}
+			if strings.Contains(out, "disk CRITICAL") {
+				t.Fatalf("reclaim mode was blocked by disk preflight:\n%s", out)
+			}
+			logData, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			if !strings.Contains(string(logData), "DOLT_GC") {
+				t.Fatalf("reclaim mode did not issue DOLT_GC:\n%s", logData)
+			}
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightAllowsScheduledSharedHistoryGC(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+	out, err := fixture.run(t, "remote_success", "GC_FAKE_DF_MODE=df_critical", outcomeEnv)
+	if err != nil {
+		t.Fatalf("shared-history GC failed under low disk: %v\nout=%s", err, out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("shared-history path did not issue DOLT_GC:\n%s", logData)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("shared-history path must not flatten under low disk:\n%s", logData)
+	}
+	assertNoCompactOutcome(t, outcomeFile)
+}
+
+func TestCompactScriptDiskPreflightHoldsSharedHistoryPendingGCWithoutSelection(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "scheduled run", args: nil},
+		{name: "multiple databases", args: []string{"--only-db", "beads", "--only-db", "zed"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := writeCompactPendingGCMarker(t, fixture, "beads")
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := fixture.runWithArgs(t, "remote_success", tt.args, "GC_FAKE_DF_MODE=df_critical", outcomeEnv)
+			if err != nil {
+				t.Fatalf("unselected shared-history pending GC should stop safely: %v\nout=%s", err, out)
+			}
+			if !strings.Contains(out, "skipping full GC under critical disk") {
+				t.Fatalf("shared-history pending GC did not report the critical-disk hold:\n%s", out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "DOLT_GC('--full')") || strings.Contains(string(logData), "DOLT_RESET") {
+				t.Fatalf("unselected shared-history pending GC must not run full GC or flatten:\n%s", logData)
+			}
+			if !strings.Contains(string(logData), "db=beads query=CALL DOLT_GC()") {
+				t.Fatalf("held shared-history database must still get its working-set GC:\n%s", logData)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("pending-GC marker must survive a held run: %v", err)
+			}
+			assertCompactDiskHoldOutcome(t, outcomeFile, orders.ExecOutcomePartial,
+				orders.ExecOutcomeScope{Scope: "beads", Reason: "pending-GC full GC held below the disk floor, working-set GC only"})
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightAllowsSelectedSharedHistoryPendingGCRecovery(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+	out, err := fixture.runWithArgs(t, "remote_success", []string{"--only-db", "beads"}, "GC_FAKE_DF_MODE=df_critical", outcomeEnv)
+	if err != nil {
+		t.Fatalf("selected shared-history pending-GC recovery failed under low disk: %v\nout=%s", err, out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if !strings.Contains(string(logData), "DOLT_GC('--full')") {
+		t.Fatalf("selected shared-history pending-GC recovery did not run full GC:\n%s", logData)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") {
+		t.Fatalf("shared-history recovery must not flatten:\n%s", logData)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("successful shared-history pending-GC recovery did not clear marker: %v", err)
+	}
+	assertNoCompactOutcome(t, outcomeFile)
+}
+
+func TestCompactScriptDiskPreflightParsesSpacedFilesystemNames(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_critical_spaced_names", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("critical disk with spaced filesystem names should skip safely: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL: free_bytes=1073741824 ") {
+		t.Fatalf("spaced filesystem name was not parsed as critical disk:\n%s", out)
+	}
+	logData, readErr := os.ReadFile(fixture.doltLog)
+	if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+		t.Fatalf("read dolt log: %v", readErr)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("spaced filesystem name must not bypass the disk guard:\n%s", logData)
+	}
+}
+
+func TestCompactScriptDiskPreflightAmbiguousOutputExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_ambiguous")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("df output without a capacity column should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("expected disk pre-flight failure output:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightOvercommittedFilesystemIsCritical(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+
+	out, err := fixture.runWithArgs(t, "success", []string{"--only-db", "beads"}, "GC_FAKE_DF_MODE=df_overcommitted")
+	if err != nil {
+		t.Fatalf("negative available space should be critical, not a probe failure: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL: free_bytes=0 ") {
+		t.Fatalf("negative available space was not reported as zero free bytes:\n%s", out)
+	}
+	if !strings.Contains(out, "retrying DOLT_GC --full") {
+		t.Fatalf("pending-GC recovery did not run on an overcommitted filesystem:\n%s", out)
+	}
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("successful pending-GC recovery did not clear marker: %v", err)
+	}
+}
+
+func TestCompactScriptDiskPreflightAllowsOnlySelectedPendingGCRecovery(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "single flag", args: []string{"--only-db", "beads"}},
+		{name: "repeated flag", args: []string{"--only-db", "beads", "--only-db", "beads"}},
+		{name: "repeated mixed flag forms", args: []string{"--only-db=beads", "--only-db", "beads"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := writeCompactPendingGCMarker(t, fixture, "beads")
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := fixture.runWithArgs(t, "success", tt.args, "GC_FAKE_DF_MODE=df_critical", outcomeEnv)
+			if err != nil {
+				t.Fatalf("pending-GC recovery failed under low disk: %v\nout=%s", err, out)
+			}
+			if !strings.Contains(out, "proceeding with recovery only under critical disk") || !strings.Contains(out, "retrying DOLT_GC --full") {
+				t.Fatalf("pending-GC recovery did not execute:\n%s", out)
+			}
+			logData, err := os.ReadFile(fixture.doltLog)
+			if err != nil {
+				t.Fatalf("read dolt log: %v", err)
+			}
+			if !strings.Contains(string(logData), "DOLT_GC('--full')") {
+				t.Fatalf("pending-GC recovery did not issue DOLT_GC --full:\n%s", logData)
+			}
+			if strings.Contains(string(logData), "DOLT_RESET") {
+				t.Fatalf("low-disk recovery must not start a new flatten:\n%s", logData)
+			}
+			if _, err := os.Stat(marker); !os.IsNotExist(err) {
+				t.Fatalf("successful pending-GC recovery did not clear marker: %v", err)
+			}
+			assertNoCompactOutcome(t, outcomeFile)
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightOnlyDBsEnvDoesNotGrantPendingGCRecovery(t *testing.T) {
+	tests := []struct {
+		name        string
+		mode        string
+		args        []string
+		wantKind    orders.ExecOutcomeKind
+		wantReason  string
+		wantWorkSet bool
+	}{
+		{
+			name:       "local database",
+			mode:       "success",
+			wantKind:   orders.ExecOutcomeSkipped,
+			wantReason: "pending-GC full GC held below the disk floor",
+		},
+		{
+			name:       "env scope repeated by flag",
+			mode:       "success",
+			args:       []string{"--only-db", "beads"},
+			wantKind:   orders.ExecOutcomeSkipped,
+			wantReason: "pending-GC full GC held below the disk floor",
+		},
+		{
+			name:        "remote-backed database",
+			mode:        "remote_success",
+			wantKind:    orders.ExecOutcomePartial,
+			wantReason:  "pending-GC full GC held below the disk floor, working-set GC only",
+			wantWorkSet: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := writeCompactPendingGCMarker(t, fixture, "beads")
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := fixture.runWithArgs(t, tt.mode, tt.args,
+				"GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_ONLY_DBS=beads", outcomeEnv)
+			if err != nil {
+				t.Fatalf("env-scoped run should hold pending-GC recovery safely: %v\nout=%s", err, out)
+			}
+			for _, want := range []string{
+				"GC_DOLT_COMPACT_ONLY_DBS does not grant recovery under critical disk; run gc dolt compact --only-db beads without it set",
+				"select it alone with --only-db beads to recover",
+			} {
+				if !strings.Contains(out, want) {
+					t.Fatalf("env-scoped hold output missing %q:\n%s", want, out)
+				}
+			}
+			if strings.Contains(out, "proceeding with recovery only") {
+				t.Fatalf("env scope must not grant pending-GC recovery:\n%s", out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "DOLT_GC('--full')") || strings.Contains(string(logData), "DOLT_RESET") {
+				t.Fatalf("env scope must not run full GC or flatten under critical disk:\n%s", logData)
+			}
+			if got := strings.Contains(string(logData), "db=beads query=CALL DOLT_GC()"); got != tt.wantWorkSet {
+				t.Fatalf("working-set GC issued = %v, want %v:\n%s", got, tt.wantWorkSet, logData)
+			}
+			if _, err := os.Stat(marker); err != nil {
+				t.Fatalf("pending-GC marker must survive a held run: %v", err)
+			}
+			assertCompactDiskHoldOutcome(t, outcomeFile, tt.wantKind,
+				orders.ExecOutcomeScope{Scope: "beads", Reason: tt.wantReason})
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightRejectsMismatchedPendingGCRecovery(t *testing.T) {
+	tests := []struct {
+		name       string
+		markerName string
+		args       []string
+		wantScopes []orders.ExecOutcomeScope
+	}{
+		{
+			name:       "different database",
+			markerName: "zed",
+			args:       []string{"--only-db", "beads"},
+			wantScopes: []orders.ExecOutcomeScope{
+				{Scope: "beads", Reason: "compaction held below the disk floor"},
+			},
+		},
+		{
+			name:       "multiple databases",
+			markerName: "beads",
+			args:       []string{"--only-db", "beads", "--only-db", "zed"},
+			wantScopes: []orders.ExecOutcomeScope{
+				{Scope: "beads", Reason: "pending-GC full GC held below the disk floor"},
+				{Scope: "zed", Reason: "compaction held below the disk floor"},
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			writeCompactPendingGCMarker(t, fixture, tt.markerName)
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := fixture.runWithArgs(t, "success", tt.args, "GC_FAKE_DF_MODE=df_critical", outcomeEnv)
+			if err != nil {
+				t.Fatalf("mismatched recovery selection should stop safely: %v\nout=%s", err, out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+				t.Fatalf("mismatched recovery selection must not start work:\n%s", logData)
+			}
+			assertCompactDiskHoldOutcome(t, outcomeFile, orders.ExecOutcomeSkipped, tt.wantScopes...)
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightDoesNotFlattenAfterPendingGCMarkerDisappears(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("setup run should create a quarantine marker:\n%s", firstOut)
+	}
+	if err := os.Truncate(fixture.doltLog, 0); err != nil {
+		t.Fatalf("truncate dolt log after setup: %v", err)
+	}
+	for path, value := range map[string]string{
+		fixture.stateFile:     "headcommit\n",
+		fixture.hashStateFile: "hash-before\n",
+		fixture.tagStateFile:  "rootcommit\n",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			t.Fatalf("reset fixture state %s: %v", path, err)
+		}
+	}
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+	out, err := fixture.runWithArgs(t, "pending_gc_marker_disappears", []string{"--only-db", "beads"},
+		"GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_PENDING_GC_MARKER="+marker, outcomeEnv)
+	if err != nil {
+		t.Fatalf("critical-disk recovery should stop safely after marker removal: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "quarantine marker auto-cleared") {
+		t.Fatalf("test did not reach post-preflight marker removal window:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing non-recovery work under critical disk") {
+		t.Fatalf("critical-disk recovery did not stop after marker removal:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("critical-disk recovery must not start work after marker removal:\n%s", logData)
+	}
+	assertCompactDiskHoldOutcome(t, outcomeFile, orders.ExecOutcomeSkipped,
+		orders.ExecOutcomeScope{Scope: "beads", Reason: "pending-GC marker disappeared, recovery-only run held other work"})
+}
+
+func TestCompactScriptDiskPreflightDoesNotGCRemoteBackedDBAfterPendingGCMarkerDisappears(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	firstOut, err := fixture.run(t, "same_count_db_hash_drift", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err == nil {
+		t.Fatalf("setup run should create a quarantine marker:\n%s", firstOut)
+	}
+	if err := os.Truncate(fixture.doltLog, 0); err != nil {
+		t.Fatalf("truncate dolt log after setup: %v", err)
+	}
+	for path, value := range map[string]string{
+		fixture.stateFile:     "headcommit\n",
+		fixture.hashStateFile: "hash-before\n",
+		fixture.tagStateFile:  "rootcommit\n",
+	} {
+		if err := os.WriteFile(path, []byte(value), 0o644); err != nil {
+			t.Fatalf("reset fixture state %s: %v", path, err)
+		}
+	}
+	marker := writeCompactPendingGCMarker(t, fixture, "beads")
+	outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+	out, err := fixture.runWithArgs(t, "pending_gc_marker_disappears_remote", []string{"--only-db", "beads"},
+		"GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_FAKE_PENDING_GC_MARKER="+marker, outcomeEnv)
+	if err != nil {
+		t.Fatalf("critical-disk recovery should stop safely after marker removal: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "quarantine marker auto-cleared") {
+		t.Fatalf("test did not reach post-preflight marker removal window:\n%s", out)
+	}
+	if !strings.Contains(out, "refusing non-recovery work under critical disk") {
+		t.Fatalf("critical-disk recovery did not stop after marker removal:\n%s", out)
+	}
+	logData, err := os.ReadFile(fixture.doltLog)
+	if err != nil {
+		t.Fatalf("read dolt log: %v", err)
+	}
+	if strings.Contains(string(logData), "DOLT_GC") {
+		t.Fatalf("critical-disk recovery must not GC a remote-backed db after marker removal:\n%s", logData)
+	}
+	assertCompactDiskHoldOutcome(t, outcomeFile, orders.ExecOutcomeSkipped,
+		orders.ExecOutcomeScope{Scope: "beads", Reason: "pending-GC marker disappeared, recovery-only run held other work"})
+}
+
+// The quarantine auto-clear tests above remove the pending-GC marker before the
+// post-quarantine re-check. These rows remove it in the other two windows a
+// granted recovery re-checks: after preflight but before flatten starts, and at
+// the shared-history remote probe that follows the post-quarantine re-check.
+// The fixture database has no remote, so the second row covers only the
+// re-check after that probe; a remote-backed database whose marker vanishes
+// there gets the working-set GC a scheduled run would give it, with no hold.
+func TestCompactScriptDiskPreflightDeclaresHoldWhenPendingGCMarkerDisappears(t *testing.T) {
+	tests := []struct {
+		name       string
+		mode       string
+		removalEnv string
+		windowLog  func(compactScriptFixture) string
+		windowLine string
+		wantOut    string
+	}{
+		{
+			name:       "before flatten starts",
+			mode:       "success",
+			removalEnv: "GC_FAKE_RIG_LIST_REMOVES",
+			windowLog:  func(f compactScriptFixture) string { return f.gcLog },
+			windowLine: "gc rig list --json\n",
+			wantOut:    "pending_gc marker disappeared — skipping under critical disk",
+		},
+		{
+			name:       "at the shared-history remote probe",
+			mode:       "pending_gc_marker_disappears_at_remote_probe",
+			removalEnv: "GC_FAKE_PENDING_GC_MARKER",
+			windowLog:  func(f compactScriptFixture) string { return f.doltLog },
+			windowLine: "db=beads query=SELECT COUNT(*) FROM dolt_remotes\n",
+			wantOut:    "pending_gc marker disappeared — refusing non-recovery work under critical disk",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			marker := writeCompactPendingGCMarker(t, fixture, "beads")
+			outcomeFile, outcomeEnv := newCompactOutcomeFile(t)
+
+			out, err := fixture.runWithArgs(t, tt.mode, []string{"--only-db", "beads"},
+				"GC_FAKE_DF_MODE=df_critical", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", tt.removalEnv+"="+marker, outcomeEnv)
+			if err != nil {
+				t.Fatalf("critical-disk recovery should stop safely after marker removal: %v\nout=%s", err, out)
+			}
+			if !strings.Contains(out, "proceeding with recovery only under critical disk") {
+				t.Fatalf("preflight did not grant recovery before the marker was removed:\n%s", out)
+			}
+			windowData, err := os.ReadFile(tt.windowLog(fixture))
+			if err != nil {
+				t.Fatalf("read marker removal window log: %v", err)
+			}
+			if !strings.Contains(string(windowData), tt.windowLine) {
+				t.Fatalf("run never reached the marker removal window %q:\n%s", tt.windowLine, windowData)
+			}
+			if !strings.Contains(out, tt.wantOut) {
+				t.Fatalf("critical-disk recovery did not stop after marker removal:\n%s", out)
+			}
+			logData, readErr := os.ReadFile(fixture.doltLog)
+			if readErr != nil && !errors.Is(readErr, os.ErrNotExist) {
+				t.Fatalf("read dolt log: %v", readErr)
+			}
+			if strings.Contains(string(logData), "DOLT_RESET") || strings.Contains(string(logData), "DOLT_GC") {
+				t.Fatalf("critical-disk recovery must not start work after marker removal:\n%s", logData)
+			}
+			assertCompactDiskHoldOutcome(t, outcomeFile, orders.ExecOutcomeSkipped,
+				orders.ExecOutcomeScope{Scope: "beads", Reason: "pending-GC marker disappeared, recovery-only run held other work"})
+		})
+	}
+}
+
+func TestCompactScriptDiskPreflightOversizedFloorSkipsCompaction(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_MIN_FREE_BYTES=18446744073709551616", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+	if err != nil {
+		t.Fatalf("oversized disk floor should safely skip compaction: %v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk CRITICAL") {
+		t.Fatalf("expected disk CRITICAL output:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightProbeFailureExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_probe_failure")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("disk preflight probe failure should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("expected disk pre-flight failure output:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightMalformedOutputExitsOne(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_FAKE_DF_MODE=df_malformed")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 1 {
+		t.Fatalf("malformed disk preflight output should exit 1: got err=%v\nout=%s", err, out)
+	}
+	if !strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("expected disk pre-flight failure output:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightOptionLikePathIsNotAFlag(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_DATA_DIR=--help", "GC_FAKE_DF_MODE=df_reject_option", "GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("option-like data directory reached df as a flag: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "option-like path received") {
+		t.Fatalf("option-like data directory reached df as a flag:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightSkipsExternalDataDirectory(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	externalRoot := filepath.Join(fixture.cityPath, "external-target")
+	if err := os.MkdirAll(filepath.Join(externalRoot, "beads", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir external target: %v", err)
+	}
+	out, err := fixture.run(t, "success", "GC_DOLT_MANAGED_LOCAL=0", "GC_DOLT_HOST=127.0.0.2", "GC_DOLT_DATA_DIR="+externalRoot, "GC_DOLT_STATE_FILE="+filepath.Join(externalRoot, "dolt-state.json"), "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1", "GC_FAKE_DF_MODE=df_probe_failure")
+	if err != nil {
+		t.Fatalf("external compact should skip local disk preflight: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk pre-flight probe failed") {
+		t.Fatalf("external data directory must not run disk preflight:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightZeroThresholdDisablesCheck(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_MIN_FREE_BYTES=0")
+	if err != nil {
+		t.Fatalf("compact should proceed normally with zero threshold: %v\nout=%s", err, out)
+	}
+	if strings.Contains(out, "disk CRITICAL") || strings.Contains(out, "pre-flight probe failed") {
+		t.Fatalf("zero threshold must disable disk preflight:\n%s", out)
+	}
+}
+
+func TestCompactScriptDiskPreflightInvalidEnvExitsTwo(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_MIN_FREE_BYTES=notanumber")
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("invalid minimum free bytes should exit 2: got err=%v\nout=%s", err, out)
+	}
 }

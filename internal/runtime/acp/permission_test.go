@@ -688,7 +688,7 @@ func TestNudgeWaitingForIdleRechecksWhenTurnEnds(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			sc := newSessionConn(nil, nil, nil, 10, nil)
-			if !sc.setActivePrompt(1) {
+			if _, ok := sc.setActivePrompt(1); !ok {
 				t.Fatal("setActivePrompt on a live connection = false")
 			}
 			result := make(chan error, 1)

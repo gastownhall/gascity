@@ -83,7 +83,7 @@ func agreementRows() []agreementRow {
 			// is the #2763 shape the fallback exists for — a root-only molecule
 			// whose root IS the unit of work. This one was compiled with real
 			// child steps, so gc.workflow_expanded is stamped and the root is
-			// only ever claimable via gc.routed_to (#5900). Counting it would
+			// no longer executable itself (#5900). Counting it would
 			// be permanent demand for a row every worker's claim matcher
 			// refuses: seat spawns, hook reads empty, drains, counted again.
 			name: "fully-expanded workflow root with only run_target",
@@ -91,6 +91,31 @@ func agreementRows() []agreementRow {
 				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
 				beadmeta.RunTargetMetadataKey:        agreementTemplate,
 				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "fully-expanded workflow root with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-root", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:             beadmeta.KindWorkflow,
+				beadmeta.RoutedToMetadataKey:         agreementTemplate,
+				beadmeta.WorkflowExpandedMetadataKey: "true",
+			}},
+			wantServable: false,
+		},
+		{
+			name: "scope latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-scope", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindScope,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
+			}},
+			wantServable: false,
+		},
+		{
+			name: "spec latch with explicit worker route",
+			bead: beads.Bead{ID: "a-topology-spec", Status: "open", Type: "task", Metadata: map[string]string{
+				beadmeta.KindMetadataKey:     beadmeta.KindSpec,
+				beadmeta.RoutedToMetadataKey: agreementTemplate,
 			}},
 			wantServable: false,
 		},

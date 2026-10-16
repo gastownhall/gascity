@@ -241,6 +241,10 @@ func runNudgeBackstop(
 				// agent a chance to ANSWER a nudge; with no nudge to send there
 				// is nothing to wait for, so go straight to the terminal action
 				// after the same grace window.
+				//
+				// poolExecutionBackstop.escalatesNext mirrors this shortcut;
+				// change the two in lockstep, or a started seat is drained or
+				// held with nothing sent.
 				pred.exhausted(store, s, stdout)
 				continue
 			}

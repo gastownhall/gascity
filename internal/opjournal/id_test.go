@@ -2,6 +2,11 @@ package opjournal
 
 import (
 	"errors"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -122,4 +127,132 @@ func TestTargetKeys(t *testing.T) {
 			t.Errorf("%s: err = %v, want ErrInvalidRequest", c.name, err)
 		}
 	}
+}
+
+// PinnedID is the scheme DeriveID uses: the same tag and fields give the same
+// hash under another family.
+func TestPinnedIDIsTheDeriveIDScheme(t *testing.T) {
+	op, err := DeriveID("gc", "gc-1", "operator:alice", "k1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := PinnedID("gc", "x", opIDTag, "gc-1", "operator:alice", "k1")
+	if err != nil {
+		t.Fatalf("PinnedID: %v", err)
+	}
+	if strings.TrimPrefix(got, "gc-x-") != strings.TrimPrefix(op, "gc-op-") {
+		t.Fatalf("PinnedID hash %s differs from DeriveID's %s", got, op)
+	}
+}
+
+// Golden vectors, computed independently (Python hashlib + base64).
+func TestPinnedIDGoldenVectors(t *testing.T) {
+	const origin = "proc:0123456789abcdef0123456789abcdef"
+	cases := []struct {
+		prefix, family, tag string
+		fields              []string
+		want                string
+	}{
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e", "3", origin, "1"}, "gc-ev-e6o7rior5skvdx2d5w33iaddaq"},
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e", "3", origin, "2"}, "gc-ev-snridtrzpplc2mrpfenmqu4iyy"},
+		// Boundary pair: the same bytes split differently across fields.
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e", "31", "proc:x", "1"}, "gc-ev-e5ce2jdzkx5x4awsgn66mbab3q"},
+		{"gc", "ev", "gascity/event-fact/v1", []string{"gc-a3f8e3", "1", "proc:x", "1"}, "gc-ev-ox7e57t77drwu6iphld4bgguuq"},
+		{"my-city", "evproj", "gascity/event-projector/v1", []string{"my-city"}, "my-city-evproj-zrmdzquvb6wyt462o74fvejjda"},
+	}
+	for _, c := range cases {
+		got, err := PinnedID(c.prefix, c.family, c.tag, c.fields...)
+		if err != nil {
+			t.Fatalf("PinnedID(%q, %q, %q, %q): %v", c.prefix, c.family, c.tag, c.fields, err)
+		}
+		if got != c.want {
+			t.Errorf("PinnedID(%q, %q, %q, %q) = %s, want %s", c.prefix, c.family, c.tag, c.fields, got, c.want)
+		}
+	}
+}
+
+func TestPinnedIDRefuses(t *testing.T) {
+	cases := []struct{ name, prefix, family, tag string }{
+		{"empty prefix", "", "ev", "t"},
+		{"prefix trailing dash", "gc-", "ev", "t"},
+		{"prefix dot", "g.c", "ev", "t"},
+		{"empty family", "gc", "", "t"},
+		{"family with dash", "gc", "e-v", "t"},
+		{"family upper", "gc", "Ev", "t"},
+		{"family digit first", "gc", "1ev", "t"},
+		{"family too long", "gc", strings.Repeat("e", 17), "t"},
+		{"op family", "gc", "op", "t"},
+		{"fact family", "gc", "fact", "t"},
+		{"rt family", "gc", "rt", "t"},
+		{"empty tag", "gc", "ev", ""},
+	}
+	for _, c := range cases {
+		if _, err := PinnedID(c.prefix, c.family, c.tag, "f"); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s: PinnedID = %v, want ErrInvalidRequest", c.name, err)
+		}
+	}
+}
+
+// Every id infix this package mints is one of ownIDFamilies, so PinnedID
+// refuses it to every other package. A new <name>IDInfix constant fails here
+// until it is listed below, and listing it requires its family to be reserved.
+func TestOwnIDFamiliesCoverEveryInfix(t *testing.T) {
+	infixes := map[string]string{
+		"opIDInfix":      opIDInfix,
+		"factIDInfix":    factIDInfix,
+		"runtimeIDInfix": runtimeIDInfix,
+	}
+	for name, infix := range infixes {
+		family := strings.TrimSuffix(strings.TrimPrefix(infix, "-"), "-")
+		if "-"+family+"-" != infix || !slices.Contains(ownIDFamilies, family) {
+			t.Errorf("%s = %q is not -<family>- for a family in ownIDFamilies %v", name, infix, ownIDFamilies)
+		}
+		if _, err := PinnedID("gc", family, "t", "f"); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("PinnedID mints in %s's family %q: %v", name, family, err)
+		}
+	}
+	for _, name := range declaredIDInfixConstants(t) {
+		if _, ok := infixes[name]; !ok {
+			t.Errorf("constant %s is not listed in this test: reserve its family in ownIDFamilies and list it", name)
+		}
+	}
+}
+
+// declaredIDInfixConstants returns the name of every package-level constant
+// in this package's non-test files that ends in IDInfix.
+func declaredIDInfixConstants(t *testing.T) []string {
+	t.Helper()
+	files, err := filepath.Glob("*.go")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	parsed := 0
+	for _, path := range files {
+		if strings.HasSuffix(path, "_test.go") {
+			continue
+		}
+		file, err := parser.ParseFile(token.NewFileSet(), path, nil, 0)
+		if err != nil {
+			t.Fatalf("parsing %s: %v", path, err)
+		}
+		parsed++
+		for _, decl := range file.Decls {
+			gen, ok := decl.(*ast.GenDecl)
+			if !ok || gen.Tok != token.CONST {
+				continue
+			}
+			for _, spec := range gen.Specs {
+				for _, name := range spec.(*ast.ValueSpec).Names {
+					if strings.HasSuffix(name.Name, "IDInfix") {
+						names = append(names, name.Name)
+					}
+				}
+			}
+		}
+	}
+	if len(names) < 3 {
+		t.Fatalf("found %d IDInfix constants in %d files; the scan is broken (are the package sources in the test's data?)", len(names), parsed)
+	}
+	return names
 }

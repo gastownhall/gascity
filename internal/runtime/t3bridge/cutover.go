@@ -1,6 +1,7 @@
 package t3bridge
 
 import (
+	"context"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -20,6 +21,9 @@ var (
 	_ runtime.SleepCapabilityProvider         = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError       = (*seamBackedProvider)(nil)
 	_ runtime.TurnInterruptCapabilityProvider = (*seamBackedProvider)(nil)
+	_ runtime.KeyedNudgeProvider              = (*seamBackedProvider)(nil)
+	_ runtime.SessionBindingProvider          = (*seamBackedProvider)(nil)
+	_ runtime.TurnFenceProvider               = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -51,4 +55,45 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 // surface cannot distinguish a bridge outage from absence.
 func (s *seamBackedProvider) GetLastActivity(name string) (time.Time, error) {
 	return s.raw.GetLastActivity(name)
+}
+
+// Nudge delivers through the raw bridge rather than the generic seam adapter,
+// which answers nil for a session it cannot attach to. The bridge reports
+// runtime.ErrRuntimeUnavailable when T3 cannot be read and
+// runtime.ErrSessionNotFound when no thread is bound, so the nudge queue
+// retries instead of acknowledging a nudge that never arrived.
+func (s *seamBackedProvider) Nudge(name string, content []runtime.ContentBlock) error {
+	return s.raw.Nudge(name, content)
+}
+
+// Interrupt reports the same typed errors as Nudge instead of the seam
+// adapter's silent nil for a session it cannot attach to.
+func (s *seamBackedProvider) Interrupt(name string) error {
+	return s.raw.Interrupt(name)
+}
+
+// NudgeKeyed passes the caller's delivery key through to the raw bridge,
+// which derives T3's idempotency ids from it.
+func (s *seamBackedProvider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+	return s.raw.NudgeKeyed(name, content, key)
+}
+
+// SessionBinding reports the T3 thread and project bound to name.
+func (s *seamBackedProvider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	return s.raw.SessionBinding(name)
+}
+
+// ObserveTurn passes through to the raw bridge.
+func (s *seamBackedProvider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	return s.raw.ObserveTurn(ctx, name)
+}
+
+// InterruptTurn passes through to the raw bridge.
+func (s *seamBackedProvider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	return s.raw.InterruptTurn(ctx, name, turnID)
+}
+
+// WaitTurnEnded passes through to the raw bridge.
+func (s *seamBackedProvider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	return s.raw.WaitTurnEnded(ctx, name, turnID, timeout)
 }

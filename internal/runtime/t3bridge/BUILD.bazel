@@ -8,6 +8,7 @@ go_library(
         "provider.go",
         "reuse.go",
         "seams.go",
+        "turn_fence.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/t3bridge",
     visibility = ["//:__subpackages__"],
@@ -24,11 +25,15 @@ go_library(
 go_test(
     name = "t3bridge_test",
     srcs = [
+        "delivery_ids_test.go",
         "envelope_test.go",
         "provider_test.go",
         "reuse_test.go",
         "seams_test.go",
+        "session_binding_test.go",
         "testenv_import_test.go",
+        "truthful_errors_test.go",
+        "turn_fence_test.go",
         "watch_latest_seq_test.go",
         "watched_bead_event_test.go",
     ],

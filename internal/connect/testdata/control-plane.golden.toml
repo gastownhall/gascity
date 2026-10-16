@@ -8,8 +8,17 @@ credential = "file:/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/
 
 [[ledger]]
 scope = "city"
+classes = ["work"]
 url = "https://ctl.example.ts.net:7491"
 project_id = "proj-7d2e"
 ca_file = "/home/agent/.config/gascity/connect/maintainer-city/mc-abc12/ca-city.pem"
 allow_plaintext = false
 workspaces = ["/data/cities/mc", "/data/cities/mc/rigs/app"]
+
+[[ledger]]
+scope = "binding:infra"
+classes = ["graph", "sessions", "messaging", "orders", "nudges"]
+url = "https://infra.example.ts.net:7492"
+project_id = "proj-91c0"
+allow_plaintext = false
+workspaces = ["/data/cities/mc/.gc/storage/infra"]

@@ -83,7 +83,7 @@ func TestValidateAgainstPolicyWiresReviewedHermeticPolicyAndSourceChecks(t *test
 	t.Parallel()
 
 	row := validReviewedHermeticBody("TestOwned")
-	policy := Ledger{Version: 2, ReviewedHermeticBody: []ReviewedHermeticBody{row}}
+	policy := Ledger{Version: 3, ReviewedHermeticBody: []ReviewedHermeticBody{row}}
 	clean := scanHermeticFixture(t, fstest.MapFS{
 		"sample/owned_test.go": &fstest.MapFile{Data: []byte(`package sample
 import "testing"

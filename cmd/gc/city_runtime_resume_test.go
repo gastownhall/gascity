@@ -41,7 +41,7 @@ func newResumeTickRuntime(t *testing.T, fc *fakeResumeClock, stderr *bytes.Buffe
 		logPrefix:         "gc test",
 		stdout:            &bytes.Buffer{},
 		stderr:            stderr,
-		managedDoltHealth: func(string) error { return nil },
+		managedDoltHealth: func(context.Context, string) error { return nil },
 		managedDoltOwned:  func(string) (bool, error) { return true, nil },
 		managedDoltPort:   func(string) string { return "" },
 		resume:            newResumeDetector(fc.read),

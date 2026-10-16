@@ -325,7 +325,16 @@ func (nudgeQueueFake) ListFor(ClaimTarget, time.Time) ([]nudgequeue.Item, []nudg
 }
 func (nudgeQueueFake) Snapshot() (nudgequeue.State, error)        { return nudgequeue.State{}, nil }
 func (nudgeQueueFake) Ack([]string, string, string, string) error { return nil }
-func (nudgeQueueFake) ReleaseClaims([]string) error               { return nil }
+func (nudgeQueueFake) ReleaseClaims([]string, time.Time) error    { return nil }
+func (nudgeQueueFake) ClaimBatch(ClaimTarget, time.Time) ([]nudgequeue.Item, error) {
+	return nil, nil
+}
+
+func (nudgeQueueFake) Lookup([]string, time.Time) (map[string]nudgequeue.Bucket, error) {
+	return nil, nil
+}
+func (nudgeQueueFake) DueKeys(time.Time) ([]string, error) { return nil, nil }
+func (nudgeQueueFake) Empty() (bool, error)                { return true, nil }
 func (nudgeQueueFake) RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error) {
 	return nil, nil
 }

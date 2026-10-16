@@ -1098,9 +1098,10 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 			running, pidSource = true, "api"
 		}
 	}
-	// Unit ownership only makes sense when we have a real live PID to compare
-	// against the unit's MainPID (ga-9pjtoy) -- the service_manager/api
-	// fallback paths above confirm liveness without ever learning a PID.
+	// Unit ownership only makes sense when we have a real live PID to match
+	// against the unit's MainPID and its descendants (ga-9pjtoy) -- the
+	// service_manager/api fallback paths above confirm liveness without ever
+	// learning a PID.
 	var ownership supervisorUnitOwnershipStatus
 	if pid > 0 {
 		ownership = supervisorDetermineUnitOwnership(pid)
@@ -1150,9 +1151,12 @@ func supervisorStatusWithOptions(stdout, stderr io.Writer, asJSON bool) int {
 		case "owned":
 			fmt.Fprintf(stdout, "Owned by systemd unit %s\n", ownership.Unit) //nolint:errcheck
 		case "outside_unit":
-			if ownership.UnitActive {
+			switch {
+			case ownership.ProbeErr != nil:
+				fmt.Fprintf(stdout, "Warning: could not verify that systemd unit %s owns the supervisor: %v\n", ownership.Unit, ownership.ProbeErr) //nolint:errcheck
+			case ownership.UnitActive:
 				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is active but tracking a different process)\n", ownership.Unit) //nolint:errcheck
-			} else {
+			default:
 				fmt.Fprintf(stdout, "Warning: running outside systemd unit %s (unit is installed but inactive)\n", ownership.Unit) //nolint:errcheck
 			}
 		}

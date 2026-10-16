@@ -279,14 +279,14 @@ func (t *Tmux) isClaudeTarget(target string) bool {
 // runtime.ErrInputClearSkipped, and the nudge must not paste onto what is left
 // of the draft (#5192). When the input box cannot be read, and for other
 // providers, it sends the single Ctrl-U it always has.
-func (t *Tmux) clearInputBeforePaste(session, target string) error {
+func (t *Tmux) clearInputBeforePaste(ctx context.Context, session, target string) error {
 	if t.isClaudeTarget(target) {
 		in, ok, err := t.readInput(target)
 		if err == nil && ok {
-			return t.emptyInput(target, in, func() error { return t.noClientAttached(session) })
+			return t.emptyInput(ctx, target, in, func() error { return t.noClientAttached(session) })
 		}
 	}
-	if _, err := t.run("send-keys", "-t", paneTarget(target), "C-u"); err != nil {
+	if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "C-u"); err != nil {
 		return err
 	}
 	time.Sleep(50 * time.Millisecond)
@@ -295,7 +295,7 @@ func (t *Tmux) clearInputBeforePaste(session, target string) error {
 
 // emptyInput clears in from target's input box. mayType, when set, runs
 // before every press and stops the clear with its error.
-func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) error {
+func (t *Tmux) emptyInput(ctx context.Context, target string, in claudeInput, mayType func() error) error {
 	read := func() (claudeInput, bool, error) { return t.readInput(target) }
 	press := func() error {
 		if mayType != nil {
@@ -304,7 +304,7 @@ func (t *Tmux) emptyInput(target string, in claudeInput, mayType func() error) e
 			}
 		}
 		args := append([]string{"send-keys", "-t", paneTarget(target)}, inputClearKeys...)
-		_, err := t.run(args...)
+		_, err := t.runCtx(ctx, args...)
 		return err
 	}
 	return emptyClaudeInput(in, read, press, time.Sleep)
@@ -358,7 +358,7 @@ func (t *Tmux) ClearInput(ctx context.Context, session string, restoreWindow tim
 			return fmt.Errorf("reading input box: %w", err)
 		}
 		if ok && !in.empty() {
-			return t.emptyInput(target, in, mayType)
+			return t.emptyInput(ctx, target, in, mayType)
 		}
 		remaining := time.Until(deadline)
 		if remaining <= 0 {

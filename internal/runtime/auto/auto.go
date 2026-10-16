@@ -57,6 +57,7 @@ var (
 	_ runtime.ServerLifecycleProvider         = (*Provider)(nil)
 	_ runtime.SessionRosterProvider           = (*Provider)(nil)
 	_ runtime.TurnEventProvider               = (*Provider)(nil)
+	_ runtime.TurnFenceProvider               = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -439,6 +440,24 @@ func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
 	return p.route(name).Nudge(name, content)
 }
 
+// SessionBinding reports the routed backend's thread binding for name when
+// that backend hosts sessions in threads of its own, and no binding otherwise.
+func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
+	if bp, ok := p.route(name).(runtime.SessionBindingProvider); ok {
+		return bp.SessionBinding(name)
+	}
+	return runtime.SessionBinding{}, nil
+}
+
+// NudgeKeyed delegates to the routed backend with its delivery key when that
+// backend deduplicates keyed deliveries, and to its Nudge otherwise.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
+		return kp.NudgeKeyed(name, content, key)
+	}
+	return p.route(name).Nudge(name, content)
+}
+
 // WaitForIdle delegates to the routed backend when it supports explicit
 // idle-boundary waiting.
 func (p *Provider) WaitForIdle(ctx context.Context, name string, timeout time.Duration) error {
@@ -472,6 +491,9 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 // ResetInterruptedTurn delegates to the routed backend when it supports
 // provider-native interrupted-turn discard semantics.
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
 		return rp.ResetInterruptedTurn(ctx, name)
 	}
@@ -481,6 +503,9 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 // ClearInput delegates to the routed backend when it can empty a session's
 // input box and confirm it is empty.
 func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
 		return cp.ClearInput(ctx, name, restoreWindow)
 	}
@@ -501,6 +526,33 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 // in-flight turn.
 func (p *Provider) TurnInterruptMode(name string) runtime.TurnInterruptMode {
 	return runtime.TurnInterruptModeFor(p.route(name), name)
+}
+
+// ObserveTurn delegates to the routed backend when it reports which turn is
+// in progress.
+func (p *Provider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.ObserveTurn(ctx, name)
+	}
+	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
+}
+
+// InterruptTurn delegates to the routed backend when it can interrupt a named
+// turn.
+func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.InterruptTurn(ctx, name, turnID)
+	}
+	return runtime.TurnInterrupt{}, runtime.ErrInteractionUnsupported
+}
+
+// WaitTurnEnded delegates to the routed backend when it can report that a
+// named turn ended.
+func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.WaitTurnEnded(ctx, name, turnID, timeout)
+	}
+	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm
@@ -533,6 +585,9 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 // DismissKnownDialogs delegates to the routed backend when it can dismiss
 // startup dialogs.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
 		return dp.DismissKnownDialogs(ctx, name, timeout)
 	}

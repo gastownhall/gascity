@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "events",
     srcs = [
+        "authorship.go",
         "backend_payloads.go",
         "control_payloads.go",
         "events.go",
@@ -47,6 +48,7 @@ go_library(
 go_test(
     name = "events_test",
     srcs = [
+        "authorship_test.go",
         "backend_payloads_test.go",
         "conformance_test.go",
         "control_payloads_test.go",
@@ -80,6 +82,8 @@ go_test(
         "type_naming_test.go",
         "watch_backfill_test.go",
     ],
+    # The authorship test parses events.go.
+    data = ["events.go"],
     embed = [":events"],
     deps = [
         "//internal/events/eventstest",

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -176,9 +177,9 @@ func TestNudgeSessionReportsARefusedReSendUnconfirmed(t *testing.T) {
 	}
 	// The text never reaches the input box, so Enter submits nothing, the pane
 	// never turns busy, and the submit is re-sent.
-	dropText := func(string, string, time.Duration) error { return nil }
+	dropText := func(context.Context, string, string, time.Duration) error { return nil }
 
-	err := tm.nudgeSession(pane.sessionName, "run the tests", dropText,
+	err := tm.nudgeSession(context.Background(), pane.sessionName, "run the tests", dropText,
 		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look)
 	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
 		t.Fatalf("nudgeSession = %v, want ErrNudgeSubmitUnconfirmed", err)

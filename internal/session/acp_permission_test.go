@@ -276,11 +276,7 @@ func sessionMutationLockHeld(id string) bool {
 	if lock == nil {
 		return false
 	}
-	if lock.mu.TryLock() {
-		lock.mu.Unlock()
-		return false
-	}
-	return true
+	return sessionMutationLockEntryHeld(lock)
 }
 
 // TestACPSubmitWaitingForIdleRefusedWhenPermissionArrives composes the
