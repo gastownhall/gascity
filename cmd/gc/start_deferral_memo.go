@@ -13,7 +13,8 @@ import (
 // never-started create past its pending-create lease. The memo is a hint the
 // reconciler cannot re-derive from the bead, so it never extends the lease
 // without limit: a create still not started this long after its lease began
-// is rolled back as before.
+// is rolled back as before. Sixty minutes is six times the 10-minute
+// never-started lease: a fixed multiple of it, not a measured drain time.
 const startDeferralHoldCeiling = 60 * time.Minute
 
 // startDeferralMemo remembers which never-started pending creates the last
@@ -24,7 +25,9 @@ const startDeferralHoldCeiling = 60 * time.Minute
 // in-memory by design: it holds no bead state, and a restart forgets it, which
 // restores the lease's ordinary rollback.
 //
-// A nil memo records and holds nothing.
+// A nil memo records and holds nothing. One memo serves one start population:
+// every completed run replaces its record, so only the main reconcile tick
+// records into it (see CityRuntime.ensureStartDeferralMemo).
 type startDeferralMemo struct {
 	mu            sync.Mutex
 	committed     map[string]struct{}

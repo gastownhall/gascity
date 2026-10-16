@@ -299,6 +299,36 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 			info: deferralInfo(after, after), now: after.Add(11 * time.Minute), want: true,
 		},
 		{
+			name:      "committed, exactly at the ceiling: the hold ends only after it",
+			committed: []string{"x"}, lastPass: passStart,
+			info: deferralInfo(before, before), now: before.Add(startDeferralHoldCeiling), want: true,
+		},
+		{
+			name:      "a row that is not a claimed pending create is never held",
+			committed: []string{"x"}, lastPass: passStart,
+			info: func() sessionpkg.Info {
+				i := deferralInfo(before, before)
+				i.PendingCreateClaim = false
+				return i
+			}(),
+			now: before.Add(11 * time.Minute), want: false,
+		},
+		{
+			name:      "born exactly when the last pass began: that pass had it, so no first chance",
+			committed: nil, lastPass: passStart,
+			info: deferralInfo(passStart, passStart), now: passStart.Add(11 * time.Minute), want: false,
+		},
+		{
+			name:      "a pass that deferred nothing still ends the first-chance window",
+			committed: nil, lastPass: passStart,
+			info: deferralInfo(before, before), now: before.Add(11 * time.Minute), want: false,
+		},
+		{
+			name:      "a claim time before creation does not make the row older than the pass",
+			committed: nil, lastPass: passStart,
+			info: deferralInfo(after, before), now: before.Add(11 * time.Minute), want: true,
+		},
+		{
 			name:      "first chance still honors the ceiling",
 			committed: []string{"other"}, lastPass: passStart,
 			info: deferralInfo(after, after), now: after.Add(startDeferralHoldCeiling + time.Second), want: false,
@@ -354,6 +384,16 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("an empty session id is never recorded", func(t *testing.T) {
+		memo := newStartDeferralMemo()
+		pass := memo.beginPass(passStart)
+		pass.noteGateDeferred("")
+		pass.finish(false)
+		if got := committedDeferrals(memo); len(got) != 0 {
+			t.Fatalf("committed = %v, want none", got)
+		}
+	})
 
 	t.Run("a nil memo holds nothing", func(t *testing.T) {
 		var memo *startDeferralMemo
@@ -674,5 +714,63 @@ func TestStartGateDeferredTraceReasonIsDistinct(t *testing.T) {
 	}
 	if TraceReasonStartGateDeferred == TraceReasonEndpointCapacityOpen {
 		t.Fatal("the start-gate hold must not reuse the endpoint-capacity reason")
+	}
+}
+
+// The hold writes one decision record naming the start gate and how long the
+// lease has been running, measured from the lease anchor (the claim time), not
+// from the bead's creation.
+func TestStartGateDeferredHoldTraceDecision(t *testing.T) {
+	e := newCapacityEnv(t, false, "a", "b")
+	e.limitToOneWake()
+	memo := newStartDeferralMemo()
+	e.startOptions = append(e.startOptions, withStartDeferralMemo(memo))
+	// The store stamps CreatedAt from wall time, so run the fake clock on wall
+	// time too, and claim the creates a known five minutes before pass 1.
+	e.clk.Time = time.Now().UTC()
+	claimed := e.clk.Now().Add(-5 * time.Minute).UTC().Format(time.RFC3339)
+	a := e.pendingCreate(t, "a", "", map[string]string{"pending_create_started_at": claimed})
+	b := e.pendingCreate(t, "b", "", map[string]string{"pending_create_started_at": claimed})
+	e.clk.Advance(time.Minute)
+
+	rows := func() []beads.Bead { return []beads.Bead{e.bead(t, a.info.ID), e.bead(t, b.info.ID)} }
+	if woken := e.reconcileTraced(rows()...); woken != 1 {
+		t.Fatalf("pass 1 woke %d, want 1 under a budget of 1", woken)
+	}
+	var waiting startCandidate
+	for _, c := range []startCandidate{a, b} {
+		if !e.sp.IsRunning(c.tp.SessionName) {
+			waiting = c
+		}
+	}
+	if waiting.tp.SessionName == "" {
+		t.Fatal("premise: no create is waiting after pass 1")
+	}
+	e.clk.Advance(pendingCreateNeverStartedTimeout + time.Minute)
+	e.reconcileTraced(rows()...)
+
+	var held []SessionReconcilerTraceRecord
+	for _, r := range e.records(TraceSiteReconcilerPendingCreate) {
+		if r.ReasonCode == TraceReasonStartGateDeferred {
+			held = append(held, r)
+		}
+	}
+	if len(held) != 1 {
+		t.Fatalf("%d start-gate hold records, want 1", len(held))
+	}
+	r := held[0]
+	if r.OutcomeCode != TraceOutcomeDeferred {
+		t.Errorf("outcome = %q, want %q", r.OutcomeCode, TraceOutcomeDeferred)
+	}
+	if r.Template != waiting.tp.TemplateName {
+		t.Errorf("template = %q, want %q", r.Template, waiting.tp.TemplateName)
+	}
+	if got := r.Fields["hold"]; got != "start_gate" {
+		t.Errorf("fields[hold] = %v, want start_gate", got)
+	}
+	// Pass 2 reads the clock 12 minutes after the creates were made and 17
+	// after the claim time they were stamped with.
+	if got, want := r.Fields["anchor_age"], "17m0s"; got != want {
+		t.Errorf("fields[anchor_age] = %v, want %s (measured from the claim time)", got, want)
 	}
 }
