@@ -3309,8 +3309,21 @@ func (t *Tmux) nudgeSession(
 			// evidence the Enter reached the pane and the agent consumed it —
 			// only the busy-state OBSERVATION missed it — so that case must be
 			// reported as proven delivery, not requeued as a failure.
-			if lines, capErr := t.captureInputLines(target); capErr == nil && paneShowsDrainedComposer(lines) {
-				return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+			//
+			// A pane that stayed busy the whole window was running a turn
+			// that began before this nudge, such as a session's first turn
+			// started from its launch prompt. Claude Code queues a message
+			// submitted into a running turn and says so in its input box
+			// (paneShowsClaudeQueuedInput). That is Claude acknowledging the
+			// submit, so it confirms delivery as fully as the idle->busy
+			// transition does.
+			if raw, capErr := t.captureEscapedInputLines(target); capErr == nil {
+				if paneShowsClaudeQueuedInput(raw) {
+					return nil
+				}
+				if paneShowsDrainedComposer(stripDimLines(raw)) {
+					return fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, session)
+				}
 			}
 			return fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, session)
 		}

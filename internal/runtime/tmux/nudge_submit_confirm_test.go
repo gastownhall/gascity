@@ -756,8 +756,11 @@ func TestNudgeSessionClaudeStagedDraftStaysUnconfirmed(t *testing.T) {
 // submit is re-sent into the running turn, and staged-draft recovery does not
 // credit it either. The composer decides: while it still holds the nudge
 // (typed or as a staged paste) the submit is unconfirmed and the nudge
-// requeues; once Claude has queued the nudge (a plain-space "❯ " row above a
-// composer showing its dim queued-message hint) the Enter reached the pane.
+// requeues. Once Claude has queued the nudge for the next turn (a plain-space
+// "❯ " row above an empty composer showing its dim queued-messages hint),
+// Claude itself acknowledges the submit, so the nudge is confirmed. The hint
+// counts only when Claude drew it dim: the same words typed into the composer
+// are a draft.
 func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 	const message = "reminder: please respond to the review"
 	turn := []string{"* Incubating… (48s · ↓ 707 tokens)", "  ⎿ \u00a0Tip: Use /btw to ask a quick side question", ""}
@@ -772,7 +775,9 @@ func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 		{"detached, nudge typed in the composer", "busy-claude-typed-detached", "0", []string{"────", "❯\u00a0" + message}, ErrNudgeSubmitUnconfirmed},
 		{"attached, nudge typed in the composer", "busy-claude-typed-attached", "1", []string{"────", "❯\u00a0" + message}, ErrNudgeSubmitUnconfirmed},
 		{"detached, nudge staged as a paste", "busy-claude-staged-detached", "0", []string{"────", "❯\u00a0[Pasted text #1 +42 lines]"}, ErrNudgeSubmitUnconfirmed},
-		{"detached, nudge queued by Claude", "busy-claude-queued-detached", "0", []string{"❯ " + message, "────", "❯\u00a0\x1b[2mPress up to edit queued messages\x1b[0m"}, ErrNudgeSubmitDeliveredUnobserved},
+		{"detached, nudge queued by Claude", "busy-claude-queued-detached", "0", []string{"❯ " + message, "────", "❯\u00a0\x1b[2mPress up to edit queued messages\x1b[0m"}, nil},
+		{"attached, nudge queued by Claude", "busy-claude-queued-attached", "1", []string{"❯ " + message, "────", "❯\u00a0\x1b[2mPress up to edit queued messages\x1b[0m"}, nil},
+		{"attached, hint words typed in the composer", "busy-claude-hint-typed-attached", "1", []string{"────", "❯\u00a0Press up to edit queued messages"}, ErrNudgeSubmitUnconfirmed},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

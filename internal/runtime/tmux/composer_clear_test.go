@@ -668,6 +668,56 @@ func TestClaudeInputIgnoresDimPlaceholder(t *testing.T) {
 	}
 }
 
+// claudeQueuedNudgePane is Claude Code 2.1.299 mid-turn, captured with -e -J
+// after a nudge was submitted into the running turn: Claude moved the message
+// above the spinner as a queued row and left its input box empty, showing the
+// dim queued-messages hint.
+var claudeQueuedNudgePane = []string{
+	"\x1b[38;5;246m\x1b[48;5;237m❯ Run the claim command now; if it returns work, execute it \x1b[39m      ",
+	"  \x1b[38;5;246mimmediately.\x1b[39m                                                          ",
+	"\x1b[49m  \x1b[38;5;246mctrl+x ctrl+s to send now\x1b[39m                                                     ",
+	"",
+	"\x1b[38;5;174m✻\x1b[39m \x1b[38;5;174mIncubating… \x1b[38;5;246m(2m 41s · ↓\x1b[39m \x1b[38;5;246m12.3k tokens)\x1b[39m     ",
+	"\x1b[38;5;246m  ⎿  Tip: Use /btw to ask a quick side question without interrupting Claude's ",
+	"\x1b[39m     \x1b[38;5;246mcurrent work\x1b[39m                                                             ",
+	"                                                                                ",
+	"\x1b[38;5;244m" + strings.Repeat("─", 80),
+	"\x1b[38;5;246m❯ \x1b[2m\x1b[39mPress up to edit queued messages",
+	"\x1b[0m\x1b[38;5;244m" + strings.Repeat("─", 80),
+	"\x1b[39m  \x1b[38;5;211m⏵⏵ bypass permissions on\x1b[38;5;246m (shift+tab to cycle) · esc to interrupt",
+	"",
+}
+
+// Claude Code acknowledges a message submitted into a running turn by queueing
+// it: the input box empties and shows a dim hint. Only that dim hint in the
+// live input box counts. The same words typed as a draft, a box holding other
+// text, or a pane with no input box do not.
+func TestPaneShowsClaudeQueuedInput(t *testing.T) {
+	rule := "\x1b[38;5;244m" + strings.Repeat("─", 80) + "\x1b[39m"
+	tests := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"captured queued nudge", claudeQueuedNudgePane, true},
+		{"hint words typed, not dim", []string{rule, "\x1b[39m❯ Press up to edit queued messages", rule}, false},
+		{"draft beside the dim hint", []string{rule, "\x1b[39m❯ more text \x1b[2mPress up to edit queued messages\x1b[0m", rule}, false},
+		{"startup placeholder", []string{rule, "\x1b[39m❯ \x1b[2mTry \"write a test for <filepath>\"\x1b[0m", rule}, false},
+		{"empty input box", []string{rule, "\x1b[39m❯ ", rule}, false},
+		{"hint above the live input box", []string{rule, "\x1b[39m❯ \x1b[2mPress up to edit queued messages\x1b[0m", rule, "", rule, "\x1b[39m❯ ", rule}, false},
+		{"unframed dim hint", []string{"\x1b[39m❯ \x1b[2mPress up to edit queued messages\x1b[0m"}, true},
+		{"unframed hint words typed", []string{"\x1b[39m❯ Press up to edit queued messages"}, false},
+		{"no prompt row", []string{"\x1b[2mPress up to edit queued messages\x1b[0m"}, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := paneShowsClaudeQueuedInput(tt.lines); got != tt.want {
+				t.Fatalf("paneShowsClaudeQueuedInput = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
 // Before Claude's placeholder is the input box, the nudge must not mistake it
 // for a draft: no Ctrl-U at all, and the message goes out alone.
 func TestNudgeSessionSendsNoCtrlUOverClaudePlaceholder(t *testing.T) {
