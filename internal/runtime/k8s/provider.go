@@ -646,6 +646,10 @@ func (p *Provider) ListRunning(prefix string) ([]string, error) {
 // is listed too and can mask this city's session dying.
 func (p *Provider) ListRunningComplete() bool { return true }
 
+// ListRunningShared implements [runtime.SharedListing]: the listing is every
+// Running gc-agent pod in the namespace, which other cities may share.
+func (p *Provider) ListRunningShared() bool { return true }
+
 // GetLastActivity returns the time of the last I/O in the tmux session.
 func (p *Provider) GetLastActivity(name string) (time.Time, error) {
 	ctx := context.Background()

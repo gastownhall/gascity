@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"io"
@@ -46,8 +47,11 @@ gc stop reports "City stopped." only when it could confirm that every
 session stopped. If it could not list the runtime's sessions completely,
 or could not check whether a session is still running, it names what it
 could not verify, still stops every session it did see, and exits
-non-zero; a supervisor registration is restored. Resolve the reported
-error and run gc stop again.
+non-zero; a supervisor registration is restored. When a controller
+handled the stop, gc stop lists the runtime afterwards: a session still
+running, or a runtime that does not answer the listing in time (a wedged
+server), is reported the same way. Resolve the reported error and run gc
+stop again.
 
 Use --timeout=DURATION to cap the wall-clock time gc stop will spend
 before giving up; the default budgets configured session interrupt and
@@ -150,6 +154,9 @@ func cmdStopJSONSequence(args []string, stdout, stderr io.Writer, force bool, js
 		// supervisor could fall through to the standalone stop while this
 		// process still holds the lock that path waits on.
 		if ownership != nil || supervisorAliveHook() != 0 {
+			if cfg, err := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard); err == nil && !confirmControllerStopForStop(cfg, cityPath, stderr) {
+				return stopCommandOutcome{code: 1, cityPath: cityPath}
+			}
 			if !stopCityManagedBeadsProviderAfterSuccessfulStop(cityPath, stderr) {
 				return stopCommandOutcome{code: 1, cityPath: cityPath}
 			}
@@ -431,6 +438,9 @@ func cmdStopBodyWithoutSuccessExtendingCap(cityPath string, cfg *config.City, fo
 			return 1
 		}
 		defer ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+		if !confirmControllerStopForStop(cfg, cityPath, stderr) {
+			return 1
+		}
 		// Controller handled the shutdown — still stop the bead store, and
 		// only after waiting for the controller to be gone: a live reader
 		// restarts a provider-owned proxy the moment it is retired. The
@@ -1062,6 +1072,75 @@ func stopOrphans(sp runtime.Provider, desired map[string]bool, recorded []string
 	}
 	gracefulStopAllWithForceSignal(orphans, known, sp, timeout, rec, cfg, sessFront.Store(), stdout, stderr, nil)
 	return complete
+}
+
+// stopVerifyListTimeout bounds the confirmation of a controller-handled
+// stop: a wedged runtime server (a SIGSTOPped tmux) never answers a listing,
+// and a stopped session can take a few seconds to leave it (a deleted k8s
+// pod lists Running through its grace period).
+var stopVerifyListTimeout = 10 * time.Second
+
+// stopVerifyPollInterval spaces the confirming listings.
+var stopVerifyPollInterval = 250 * time.Millisecond
+
+// confirmControllerStopForStop reports whether a stop the controller handled
+// (the supervisor's, or a standalone controller's) left no session of the
+// city running (mc-3low3). The controller's shutdown is bounded, so a
+// runtime it could not stop, or a server that never answered it (a wedged
+// tmux), outlives it, and gc stop must say so and fail rather than report
+// "City stopped.". It lists the city's runtime until a complete listing is
+// empty, for up to stopVerifyListTimeout: a session still listed, an
+// incomplete listing, or a listing that does not answer by then fails the
+// stop, each reported. A runtime that does not attest its listing proves
+// nothing either way, nor does one whose listing is shared with other cities
+// (k8s's namespace), and a provider that cannot be opened is reported; none
+// of these changes the outcome the controller reported, as before.
+func confirmControllerStopForStop(cfg *config.City, cityPath string, stderr io.Writer) bool {
+	sp, err := sessionProviderForStopProbe(cfg, cityPath)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc stop: could not open the runtime to confirm the stop: %v\n", err) //nolint:errcheck // best-effort stderr
+		return true
+	}
+	if !runtime.ListRunningAttested(sp) || runtime.ListRunningShared(sp) {
+		return true
+	}
+	type listed struct {
+		names    []string
+		complete bool
+		report   bytes.Buffer
+	}
+	deadline := time.Now().Add(stopVerifyListTimeout)
+	for {
+		done := make(chan *listed, 1)
+		go func() {
+			l := &listed{}
+			l.names, l.complete = listRunningForStop(sp, &l.report)
+			done <- l
+		}()
+		var l *listed
+		select {
+		case l = <-done:
+		case <-time.After(time.Until(deadline)):
+			fmt.Fprintf(stderr, "gc stop: stop not confirmed: the runtime did not answer a listing within %s after the controller stopped (a wedged runtime server?), so sessions may still be running; resolve it and run gc stop again\n", stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
+			return false
+		}
+		if l.complete && len(l.names) == 0 {
+			return true
+		}
+		if time.Until(deadline) > stopVerifyPollInterval {
+			<-time.After(stopVerifyPollInterval)
+			continue
+		}
+		_, _ = io.Copy(stderr, &l.report)
+		if !l.complete {
+			fmt.Fprintln(stderr, "gc stop: stop not confirmed: the runtime inventory was incomplete after the controller stopped, so sessions may still be running; resolve the runtime error and run gc stop again") //nolint:errcheck // best-effort stderr
+			return false
+		}
+		names := slices.Clone(l.names)
+		slices.Sort(names)
+		fmt.Fprintf(stderr, "gc stop: stop not confirmed: session(s) %s still running %s after the controller stopped; resolve the runtime and run gc stop again\n", strings.Join(names, ", "), stopVerifyListTimeout) //nolint:errcheck // best-effort stderr
+		return false
+	}
 }
 
 // listRunningForStop lists the provider's running sessions for gc stop and

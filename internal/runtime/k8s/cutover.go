@@ -22,6 +22,7 @@ var (
 	_ runtime.SleepCapabilityProvider = (*seamBackedProvider)(nil)
 	_ runtime.RelaunchProvider        = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation      = (*seamBackedProvider)(nil)
+	_ runtime.SharedListing           = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a k8s provider served through the seams.
@@ -49,4 +50,9 @@ func (s *seamBackedProvider) Relaunch(ctx context.Context, name string, cfg runt
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
+}
+
+// ListRunningShared passes the underlying provider's shared listing through.
+func (s *seamBackedProvider) ListRunningShared() bool {
+	return s.raw.ListRunningShared()
 }
