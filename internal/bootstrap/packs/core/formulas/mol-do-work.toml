@@ -138,13 +138,24 @@ For `blocked` / `abandoned`, use that value for `gc.work_outcome`, close with a
 
 **4. Close this formula step:**
 
-If `GC_BEAD_ID` is set and is different from `$WORK_BEAD_ID`, close it too. This
+`GC_BEAD_ID` only exists in the controller's dispatch condition environment,
+never in a session shell, so it is never set here. Resolve and verify this
+step's own bead the way `gc hook current` names it instead, the same pattern
+the `drain` step below and `mol-polecat-commit` use, then close it. This
 prevents `mol-do-work` wrapper beads from remaining ready after the real work
-is complete.
+is complete, and fails loudly rather than silently leaving the step open if
+the claim cannot be identified.
 ```bash
-if [ -n "${GC_BEAD_ID:-}" ] && [ "$GC_BEAD_ID" != "$WORK_BEAD_ID" ]; then
-  gc bd update "$GC_BEAD_ID" --set-metadata gc.outcome=pass --status=closed
+STEP_BEAD_ID=$(gc hook current --id-only) || exit 1
+if [ -z "$STEP_BEAD_ID" ]; then
+  echo "mol-do-work do-work: gc hook current named no claimed step; cannot close it" >&2
+  exit 1
 fi
+STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
+printf '%s' "$STEP_BEAD" | jq -e --arg work "$WORK_BEAD_ID" \
+  '(if type == "array" then .[0] else . end) | .status == "in_progress" and (.metadata["gc.step_ref"] == "mol-do-work.do-work") and (.id != $work)' \
+  >/dev/null || { echo "mol-do-work do-work: current claim $STEP_BEAD_ID is not this in-progress step (or is the work item itself); not closing" >&2; exit 1; }
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}." || exit 1
 ```
 This step bead is workflow infrastructure, not work: do not add `--notes` or
 `--append-notes` to it. On a city that keeps its coordination classes in a
@@ -158,7 +169,7 @@ gc mail inbox
 
 **Exit criteria:** The work described in the bead is complete, relevant changes
 are committed, the target bead is closed, and the claimed formula step is
-closed when `GC_BEAD_ID` is available."""
+closed."""
 
 [[steps]]
 id = "drain"
