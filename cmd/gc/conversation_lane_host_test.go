@@ -669,6 +669,9 @@ func TestLaneHostQuiescentReadsNothing(t *testing.T) {
 	if tm := hh.nextTimer(t); tm.d != laneQuiescentRetry {
 		t.Fatalf("retry = %s, want %s", tm.d, laneQuiescentRetry)
 	}
+	// The quiescent boot scan owes another step, so the scan ticker starts
+	// only once the scan, and its store work, have ended.
+	hh.waitTicker(t)
 	if n := reads.Load(); n != 0 {
 		t.Fatalf("store reads while quiescent = %d, want 0", n)
 	}
