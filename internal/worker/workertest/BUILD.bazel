@@ -12,6 +12,7 @@ go_library(
         "reporter.go",
         "results.go",
         "structured_conformance.go",
+        "turn_conformance.go",
     ],
     embedsrcs = [
         "testdata/phase2/catalog.json",
@@ -21,6 +22,7 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/pricing",
+        "//internal/runtime",
         "//internal/worker",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
@@ -46,6 +48,7 @@ go_test(
         "structured_corpus_test.go",
         "telemetry_handle_conformance_test.go",
         "testenv_import_test.go",
+        "turn_conformance_test.go",
     ],
     data = glob(
         ["**"],
