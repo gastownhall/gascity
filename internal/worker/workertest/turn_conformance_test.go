@@ -30,7 +30,9 @@ func turnConformanceSessionWithStore(t *testing.T, sp runtime.Provider, script f
 	t.Helper()
 	searchBase, workDir := t.TempDir(), t.TempDir()
 	store := beads.NewMemStore()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()),
+		// A keyed start would otherwise wait out the stale-key detection delay.
+		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	handle, err := worker.NewSessionHandle(worker.SessionHandleConfig{
 		Manager:     manager,
 		SearchPaths: []string{searchBase},

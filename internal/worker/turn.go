@@ -40,7 +40,9 @@ type TurnHandle interface {
 	CurrentTurn(context.Context) (runtime.TurnHistory, error)
 	// WatchTurns sends a history first, then a history whenever the current or
 	// newest ended turn changes (coalesced: latest wins), and an update with
-	// Err set while its source cannot be read (never an idle history instead).
+	// Err set when its source stops being readable and whenever the error
+	// changes class (unavailable, initializing, unsupported, not found),
+	// never an idle history instead.
 	// It closes when ctx is done. A session with no source is
 	// runtime.ErrTurnIdentityUnsupported, returned at once.
 	WatchTurns(context.Context) (<-chan TurnUpdate, error)
@@ -209,6 +211,12 @@ func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnIn
 // protocol source (ACP) never restarts. A protocol runtime replaces a turn by
 // interrupting it, never by the family's reset or restart: those steps are
 // off for ACP transport, and the restart for protocol mode.
+//
+// A protocol source stands in for submit.go's ACP-transport test. They differ
+// for a session on a protocol runtime whose bead records no ACP transport (a
+// city-wide ACP provider without session = "acp") and whose runtime reports
+// keystroke interrupts: deliver-now restarts a family that restarts there
+// (requiresHardRestartInterrupt), while this reports interrupt.
 func turnReplaceFor(family TurnReplace, source TurnSource, mode runtime.TurnInterruptMode) TurnReplace {
 	switch {
 	case mode == runtime.TurnInterruptUnsupported:
@@ -476,18 +484,42 @@ func endCurrentTurn(hist *runtime.TurnHistory, endedAt time.Time) {
 
 // turnHistoryFromScan converts a transcript scan to a runtime turn history:
 // ids verbatim, times at the source's millisecond precision, statuses mapped
-// and ObservedAt the observer's clock. A transcript that records any turn
-// without a usable id (an older CLI) gives boundaries, not identity, so its
-// read is an error wrapping runtime.ErrTurnIdentityUnsupported, whether or
-// not a turn is open: never an idle history that hides the turns it could not
-// name (X11 §8, D1: the observer downgrades the generation to boundary).
+// and ObservedAt the observer's clock.
+//
+// A turn the transcript records without a usable id, from a start inside the
+// scan (an older CLI, an id over sessionlog.MaxTurnIDLen), gives boundaries,
+// not identity, so the read is an error wrapping
+// runtime.ErrTurnIdentityUnsupported, whether or not a turn is open: never an
+// idle history that hides the turns it could not name (X11 §8, D1: the
+// observer downgrades the generation to boundary).
+//
+// A scan that begins inside a turn reads that turn without its start or id:
+// a scan window cut in the turn's tail, or a Claude conversation that opens
+// with a turn run from queued input, which has no user entry. That is the
+// window, not the family, so it never reads as unsupported. Ended, such a
+// turn is the oldest in the scan with no start, and is dropped, as a turn
+// before the window is. Open, the session's turn is unknown until it ends:
+// an error wrapping runtime.ErrRuntimeUnavailable, never idle.
+//
+// sessionlog's MissingIDs is not consulted: it is also set by such a head
+// end, and by an id-less entry that continues a turn already named, neither
+// of which loses an identity this history reports.
 func turnHistoryFromScan(scan sessionlog.TurnScan, observedAt time.Time) (runtime.TurnHistory, error) {
-	if scan.MissingIDs {
-		return runtime.TurnHistory{}, fmt.Errorf("transcript records turns without an id: %w", runtime.ErrTurnIdentityUnsupported)
-	}
 	hist := runtime.TurnHistory{ObservedAt: observedAt}
+	for i, t := range scan.Recent {
+		if runtime.IsTurnIdentity(t.ID) {
+			continue
+		}
+		if i != len(scan.Recent)-1 || !t.StartedAt.IsZero() {
+			return runtime.TurnHistory{}, fmt.Errorf("transcript records turns without an id: %w", runtime.ErrTurnIdentityUnsupported)
+		}
+	}
 	if scan.Open {
-		if !runtime.IsTurnIdentity(scan.Current.ID) {
+		switch {
+		case runtime.IsTurnIdentity(scan.Current.ID):
+		case scan.Current.StartedAt.IsZero():
+			return runtime.TurnHistory{}, fmt.Errorf("transcript scan begins inside the open turn, before its id: %w", runtime.ErrRuntimeUnavailable)
+		default:
 			return runtime.TurnHistory{}, fmt.Errorf("transcript records the open turn without an id: %w", runtime.ErrTurnIdentityUnsupported)
 		}
 		hist.Current = runtime.TurnState{TurnID: scan.Current.ID}
@@ -495,7 +527,7 @@ func turnHistoryFromScan(scan sessionlog.TurnScan, observedAt time.Time) (runtim
 	}
 	for _, t := range scan.Recent {
 		if !runtime.IsTurnIdentity(t.ID) {
-			continue
+			continue // the head end
 		}
 		hist.Recent = append(hist.Recent, runtime.EndedTurn{
 			TurnID:    t.ID,

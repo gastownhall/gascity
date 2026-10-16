@@ -3,10 +3,14 @@ package worker
 import (
 	"context"
 	"errors"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func newTurnRuntimeHandle(t *testing.T, sp runtime.Provider) *RuntimeHandle {
@@ -101,4 +105,113 @@ func TestRuntimeHandleWatchTurns(t *testing.T) {
 	}
 	cancel()
 	assertWatchCloses(t, ch)
+}
+
+func newGatedHistoryBackend() (gatedHistoryBackend, func() int) {
+	calls, mu := 0, &sync.Mutex{}
+	b := gatedHistoryBackend{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, armed: &atomic.Bool{}, entered: make(chan struct{}, 4), release: make(chan struct{}), mu: mu, calls: &calls}
+	return b, func() int {
+		mu.Lock()
+		defer mu.Unlock()
+		return calls
+	}
+}
+
+// assertReadersShareOneRead runs first's read until the gated backend holds
+// it, then second's beside it, and asserts second joins first's read rather
+// than answering early, and that both read the shared history.
+func assertReadersShareOneRead(t *testing.T, backend gatedHistoryBackend, calls func() int, first, second TurnHandle) {
+	t.Helper()
+	type answer struct {
+		hist runtime.TurnHistory
+		err  error
+	}
+	answers := make(chan answer, 2)
+	read := func(h TurnHandle) {
+		hist, err := h.CurrentTurn(context.Background())
+		answers <- answer{hist, err}
+	}
+	backend.armed.Store(true)
+	go read(first)
+	<-backend.entered // the first read is in flight
+	go read(second)
+	select {
+	case a := <-answers:
+		t.Fatalf("a reader answered before the shared read returned: %+v, %v", a.hist, a.err)
+	case <-time.After(200 * time.Millisecond):
+	}
+	close(backend.release)
+	for range 2 {
+		a := <-answers
+		if a.err != nil || a.hist.Current.TurnID != "acp-1" {
+			t.Fatalf("concurrent reader = %+v, %v; want the shared history", a.hist, a.err)
+		}
+	}
+	if n := calls(); n != 1 {
+		t.Fatalf("TurnHistory calls = %d, want the readers to share one", n)
+	}
+}
+
+// Kills a RuntimeHandle read that fails a concurrent reader of its session:
+// readers of one key share the outstanding read.
+func TestRuntimeHandleConcurrentReadersShareOneRead(t *testing.T) {
+	backend, calls := newGatedHistoryBackend()
+	h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, backend))
+	assertReadersShareOneRead(t, backend, calls, h, h)
+}
+
+// Kills turn keys that differ between a SessionHandle and a Factory's
+// RuntimeHandle of one city's session: both scope their key to the city, so
+// they share one read.
+func TestSessionAndRuntimeHandlesOfOneCitySessionShareOneRead(t *testing.T) {
+	backend, calls := newGatedHistoryBackend()
+	sp := runtime.NewFakeProfile(runtime.ProfileACP, backend)
+	factory, err := NewFactory(FactoryConfig{
+		Store:                   beads.NewMemStore(),
+		Provider:                sp,
+		CityPath:                t.TempDir(),
+		StaleKeyDetectionWaiter: func(context.Context, string) error { return nil },
+	})
+	if err != nil {
+		t.Fatalf("NewFactory: %v", err)
+	}
+	session, err := factory.Session(SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	if err != nil {
+		t.Fatalf("Session: %v", err)
+	}
+	if err := session.Start(context.Background(), handleActor(t, session, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	info, err := session.manager.Get(session.currentSessionID())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	rh, err := factory.RuntimeHandle(info.SessionName, "claude", "", nil)
+	if err != nil {
+		t.Fatalf("RuntimeHandle: %v", err)
+	}
+	assertReadersShareOneRead(t, backend, calls, session, rh)
+}
+
+// partialHistoryBackend is a protocol backend whose TurnHistory fails with a
+// partial history beside its error.
+type partialHistoryBackend struct {
+	runtime.FullFake
+	err error
+}
+
+func (b partialHistoryBackend) TurnCapabilities(string) runtime.TurnCapabilities { return fullTurnCaps }
+
+func (b partialHistoryBackend) TurnHistory(context.Context, string) (runtime.TurnHistory, error) {
+	return runtime.TurnHistory{Current: runtime.TurnState{TurnID: "partial"}, ObservedAt: time.Now()}, b.err
+}
+
+// Kills a RuntimeHandle read that returns the provider's partial history
+// beside its error: a failed read is the zero history, never a turn.
+func TestRuntimeHandleFailedReadIsTheZeroHistory(t *testing.T) {
+	for _, readErr := range []error{runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound, errors.New("provider failed")} {
+		h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, partialHistoryBackend{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, err: readErr}))
+		got, err := h.CurrentTurn(context.Background())
+		assertNoHistory(t, got, err, readErr)
+	}
 }

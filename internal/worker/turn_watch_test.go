@@ -383,3 +383,115 @@ func TestWatchTurnsTranscriptWithoutIDs(t *testing.T) {
 	cancel()
 	assertWatchCloses(t, ch)
 }
+
+// A conversation that opens with a turn run from queued input watches as
+// identity from the first update, and the next identified prompt is sent.
+func TestWatchTurnsClaudeQueuedHeadFollowsTheNextPrompt(t *testing.T) {
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
+	s.handle.turns.timing = clock.timing()
+	path := s.writeTranscript(t, "claude",
+		claudeQueueOp("enqueue", "2026-10-13T05:00:00.010Z"),
+		claudeQueueOp("dequeue", "2026-10-13T05:00:00.020Z"),
+		claudeReply("2026-10-13T05:00:01.000Z"),
+		claudeTurnDuration("2026-10-13T05:00:02.000Z"),
+	)
+	ageTranscript(t, path, clock.now())
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch, err := s.handle.WatchTurns(ctx)
+	if err != nil {
+		t.Fatalf("WatchTurns: %v", err)
+	}
+	if first := receiveTurnUpdate(t, ch); first.Err != nil || first.History.Current.Active() || len(first.History.Recent) != 0 {
+		t.Fatalf("first update = %+v, want the idle history", first)
+	}
+	ask := clock.nextAsk(t)
+	appendTranscript(t, path, claudePrompt(claudeTurn1, "2026-10-13T05:00:03.123Z")+"\n")
+	ageTranscript(t, path, clock.now())
+	ask.fire <- clock.now()
+	if got := receiveTurnUpdate(t, ch); got.Err != nil || got.History.Current.TurnID != claudeTurn1 {
+		t.Fatalf("update after the prompt = %+v, want %s running", got, claudeTurn1)
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+// A failure streak whose error changes class publishes the new class: a
+// consumer that downgrades on unsupported, or drops a session that is gone,
+// hears of it though the streak never succeeded.
+func TestWatchTurnsPublishesAChangeOfErrorClass(t *testing.T) {
+	cases := []struct {
+		name   string
+		change func(t *testing.T, s turnSession)
+		want   error
+	}{
+		{
+			name: "unavailable, then unsupported",
+			change: func(t *testing.T, s turnSession) {
+				s.writeTranscript(t, "claude", claudePromptWithoutID("2026-10-13T05:00:00.123Z"), claudeTurnDuration("2026-10-13T05:00:05.456Z"))
+			},
+			want: runtime.ErrTurnIdentityUnsupported,
+		},
+		{
+			name: "unavailable, then not found",
+			change: func(t *testing.T, s turnSession) {
+				if err := s.store.Close(s.info.ID); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+			},
+			want: runtime.ErrSessionNotFound,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
+			s.handle.turns.timing = clock.timing()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ch, err := s.handle.WatchTurns(ctx)
+			if err != nil {
+				t.Fatalf("WatchTurns: %v", err)
+			}
+			if first := receiveTurnUpdate(t, ch); !errors.Is(first.Err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("first update = %+v, want unavailable", first)
+			}
+			// A second unavailable read publishes nothing.
+			ask := clock.nextAsk(t)
+			clock.advance(ask.d)
+			ask.fire <- clock.now()
+			ask = clock.nextAsk(t)
+			assertNoPendingUpdate(t, ch)
+
+			tc.change(t, s)
+			clock.advance(ask.d)
+			ask.fire <- clock.now()
+			clock.nextAsk(t)
+			if got := receiveTurnUpdate(t, ch); !errors.Is(got.Err, tc.want) || errors.Is(got.Err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("update after the change = %+v, want %v", got, tc.want)
+			}
+			cancel()
+			assertWatchCloses(t, ch)
+		})
+	}
+}
+
+func TestTurnErrorClass(t *testing.T) {
+	cases := []struct {
+		err  error
+		want turnErrClass
+	}{
+		{fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), turnErrUnavailable},
+		{fmt.Errorf("x: %w", runtime.ErrTurnIdentityUnsupported), turnErrUnsupported},
+		{fmt.Errorf("x: %w", runtime.ErrSessionInitializing), turnErrInitializing},
+		{fmt.Errorf("x: %w: %w", runtime.ErrSessionNotFound, runtime.ErrRuntimeUnavailable), turnErrNotFound},
+		{fmt.Errorf("x: %w: %w", runtime.ErrTurnIdentityUnsupported, runtime.ErrRuntimeUnavailable), turnErrUnsupported},
+		{errors.New("other"), turnErrOther},
+	}
+	for _, tc := range cases {
+		if got := turnErrorClass(tc.err); got != tc.want {
+			t.Errorf("turnErrorClass(%v) = %v, want %v", tc.err, got, tc.want)
+		}
+	}
+}

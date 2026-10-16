@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -181,17 +182,134 @@ func TestTurnHistoryFromScan(t *testing.T) {
 		}
 	})
 	t.Run("turns recorded without ids are not identity, even with none open", func(t *testing.T) {
-		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{{EndedAt: at}, {ID: "kept", EndedAt: at}}, MissingIDs: true}, observed)
+		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{{EndedAt: at}, {ID: "kept", StartedAt: at, EndedAt: at}}, MissingIDs: true}, observed)
 		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) || len(got.Recent) != 0 {
 			t.Fatalf("turnHistoryFromScan = %+v, %v; want ErrTurnIdentityUnsupported and no history", got, err)
 		}
 	})
-	t.Run("an open turn without an id is not idle", func(t *testing.T) {
-		_, err := turnHistoryFromScan(sessionlog.TurnScan{Open: true, MissingIDs: true}, observed)
+	t.Run("the oldest turn without an id, started inside the scan, is not identity", func(t *testing.T) {
+		_, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{{ID: "kept", StartedAt: at, EndedAt: at}, {StartedAt: at, EndedAt: at}}, MissingIDs: true}, observed)
 		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
 			t.Fatalf("turnHistoryFromScan error = %v, want ErrTurnIdentityUnsupported", err)
 		}
 	})
+	t.Run("an open turn without an id, started inside the scan, is not identity", func(t *testing.T) {
+		_, err := turnHistoryFromScan(sessionlog.TurnScan{Open: true, Current: sessionlog.ScannedTurn{StartedAt: at}, MissingIDs: true}, observed)
+		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+			t.Fatalf("turnHistoryFromScan error = %v, want ErrTurnIdentityUnsupported", err)
+		}
+	})
+	// The scan begins inside a turn: its end, read before any start, records
+	// neither the turn's start nor its id. That is the window, not the family:
+	// the head end is dropped, and the turns after it keep their ids.
+	t.Run("a head end read before any start is dropped", func(t *testing.T) {
+		scan := sessionlog.TurnScan{
+			Open:       true,
+			Current:    sessionlog.ScannedTurn{ID: "open", StartedAt: at},
+			Recent:     []sessionlog.ScannedTurn{{ID: "kept", StartedAt: at, EndedAt: at}, {EndedAt: at}},
+			MissingIDs: true,
+		}
+		got, err := turnHistoryFromScan(scan, observed)
+		if err != nil {
+			t.Fatalf("turnHistoryFromScan: %v", err)
+		}
+		if got.Current.TurnID != "open" || len(got.Recent) != 1 || got.Recent[0].TurnID != "kept" {
+			t.Fatalf("history = %+v, want the open turn and the identified ended one", got)
+		}
+	})
+	// An open turn the scan began inside of has no id yet, and no start: its
+	// turn is unknown until it ends, not unsupported, and never idle.
+	t.Run("an open head turn without an id is unavailable", func(t *testing.T) {
+		_, err := turnHistoryFromScan(sessionlog.TurnScan{Open: true, MissingIDs: true}, observed)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+			t.Fatalf("turnHistoryFromScan error = %v, want ErrRuntimeUnavailable", err)
+		}
+	})
+}
+
+// Fully identified Claude transcripts whose scan begins with a turn's end read
+// as identity: Claude Code 2.1.299 to 2.1.301 can open a conversation with a
+// turn run from queued input, which has no user entry, and a scan window can
+// begin in an older turn's tail.
+func TestCurrentTurnClaudeHeadEndIsIdentity(t *testing.T) {
+	queuedHead := []string{
+		claudeQueueOp("enqueue", "2026-10-13T05:00:00.010Z"),
+		claudeQueueOp("dequeue", "2026-10-13T05:00:00.020Z"),
+		claudeReply("2026-10-13T05:00:01.000Z"),
+		claudeTurnDuration("2026-10-13T05:00:02.000Z"),
+	}
+	cases := []struct {
+		name  string
+		lines func() []string
+		want  func(t *testing.T) runtime.TurnHistory
+	}{
+		{
+			name:  "queued head alone",
+			lines: func() []string { return queuedHead },
+			want:  func(*testing.T) runtime.TurnHistory { return runtime.TurnHistory{} },
+		},
+		{
+			name: "queued head, then identified turns",
+			lines: func() []string {
+				return append(slices.Clone(queuedHead),
+					claudePrompt(claudeTurn1, "2026-10-13T05:00:03.123Z"), claudeReply("2026-10-13T05:00:04.000Z"), claudeTurnDuration("2026-10-13T05:00:05.456Z"),
+					claudePrompt(claudeTurn2, "2026-10-13T05:01:00.789Z"),
+				)
+			},
+			want: func(t *testing.T) runtime.TurnHistory {
+				return runtime.TurnHistory{
+					Current:      runtime.TurnState{TurnID: claudeTurn2},
+					CurrentStart: mustTurnTime(t, "2026-10-13T05:01:00.789Z"),
+					Recent: []runtime.EndedTurn{
+						{TurnID: claudeTurn1, StartedAt: mustTurnTime(t, "2026-10-13T05:00:03.123Z"), EndedAt: mustTurnTime(t, "2026-10-13T05:00:05.456Z"), Status: runtime.TurnStatusCompleted},
+					},
+				}
+			},
+		},
+		{
+			// The 16 MiB scan window begins in the first turn's replies.
+			name: "window starts in a turn's tail",
+			lines: func() []string {
+				lines := []string{claudePrompt(claudeTurn1, "2026-10-13T05:00:00.123Z")}
+				for range 17 {
+					lines = append(lines, claudeLongReply("2026-10-13T05:00:01.000Z", 1<<20))
+				}
+				return append(lines, claudeTurnDuration("2026-10-13T05:00:05.456Z"), claudePrompt(claudeTurn2, "2026-10-13T05:01:00.789Z"))
+			},
+			want: func(t *testing.T) runtime.TurnHistory {
+				return runtime.TurnHistory{
+					Current:      runtime.TurnState{TurnID: claudeTurn2},
+					CurrentStart: mustTurnTime(t, "2026-10-13T05:01:00.789Z"),
+				}
+			},
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
+			s.handle.turns.timing = clock.timing()
+			path := s.writeTranscript(t, "claude", tc.lines()...)
+			ageTranscript(t, path, clock.now()) // not quiet: the overlay stays out of it
+			assertCurrentTurn(t, s.handle, clock.now(), tc.want, nil)
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ch, err := s.handle.WatchTurns(ctx)
+			if err != nil {
+				t.Fatalf("WatchTurns: %v", err)
+			}
+			first := receiveTurnUpdate(t, ch)
+			if first.Err != nil {
+				t.Fatalf("first update error = %v, want the history", first.Err)
+			}
+			w := tc.want(t)
+			w.ObservedAt = clock.now()
+			assertTurnHistory(t, first.History, w)
+			cancel()
+			assertWatchCloses(t, ch)
+		})
+	}
 }
 
 // A transcript source whose transcript is not there (not written yet, or
@@ -277,40 +395,87 @@ func (b gatedHistoryBackend) TurnHistory(ctx context.Context, _ string) (runtime
 // Kills a second concurrent reader of one session failing as unavailable:
 // readers of a key share the outstanding read.
 func TestCurrentTurnConcurrentReadersShareOneRead(t *testing.T) {
-	calls, mu := 0, &sync.Mutex{}
-	backend := gatedHistoryBackend{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, armed: &atomic.Bool{}, entered: make(chan struct{}, 4), release: make(chan struct{}), mu: mu, calls: &calls}
+	backend, calls := newGatedHistoryBackend()
 	s := newTurnSession(t, profiled(runtime.ProfileACP, backend), "claude", "")
-	backend.armed.Store(true)
+	assertReadersShareOneRead(t, backend, calls, s.handle, s.handle)
+}
+
+// quietOpenClaudeTurn is a session on idle whose transcript holds one open
+// Claude turn, quiet long enough for the idle overlay to probe.
+func quietOpenClaudeTurn(t *testing.T, idle idleScript) turnSession {
+	t.Helper()
+	clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+	s.handle.turns.timing = clock.timing() // no gap between the two readings
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+	ageTranscript(t, path, clock.now().Add(-time.Minute))
+	return s
+}
+
+// Kills an idle reading that fails a concurrent overlay of the same session:
+// a second reader joins the outstanding snapshot, and both infer the end.
+func TestCurrentTurnConcurrentOverlaysShareOneSnapshot(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: true})
+	entered, release := make(chan struct{}), make(chan struct{})
+	idle.state.before = func(call int) {
+		if call == 1 {
+			close(entered)
+			<-release
+		}
+	}
+	s := quietOpenClaudeTurn(t, idle)
 	type answer struct {
 		hist runtime.TurnHistory
 		err  error
 	}
 	answers := make(chan answer, 2)
 	read := func() {
-		h, err := s.handle.CurrentTurn(context.Background())
-		answers <- answer{h, err}
+		hist, err := s.handle.CurrentTurn(context.Background())
+		answers <- answer{hist, err}
 	}
 	go read()
-	<-backend.entered // the first read is in flight
+	<-entered // the first snapshot is in flight
 	go read()
-	// The second reader joins the outstanding read rather than fail: no
-	// answer before the read returns.
 	select {
 	case a := <-answers:
-		t.Fatalf("a reader answered before the shared read returned: %+v, %v", a.hist, a.err)
+		t.Fatalf("a reader answered before the shared snapshot returned: %+v, %v", a.hist, a.err)
 	case <-time.After(200 * time.Millisecond):
 	}
-	close(backend.release)
+	close(release)
 	for range 2 {
 		a := <-answers
-		if a.err != nil || a.hist.Current.TurnID != "acp-1" {
-			t.Fatalf("concurrent reader = %+v, %v; want the shared history", a.hist, a.err)
+		if a.err != nil || a.hist.Current.Active() || len(a.hist.Recent) != 1 || !a.hist.Recent[0].Inferred {
+			t.Fatalf("concurrent reader = %+v, %v; want the inferred end", a.hist, a.err)
 		}
 	}
-	mu.Lock()
-	defer mu.Unlock()
-	if calls != 1 {
-		t.Fatalf("TurnHistory calls = %d, want the readers to share", calls)
+}
+
+// Kills an idle reading that outlives its caller: a wedged SnapshotIdle
+// returns the read at the caller's deadline, the turn left open.
+func TestCurrentTurnWedgedSnapshotReturnsAtTheDeadline(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: true})
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	idle.state.before = func(int) { <-release }
+	s := quietOpenClaudeTurn(t, idle)
+	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+	defer cancel()
+	type answer struct {
+		hist runtime.TurnHistory
+		err  error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		hist, err := s.handle.CurrentTurn(ctx)
+		done <- answer{hist, err}
+	}()
+	select {
+	case a := <-done:
+		if a.err != nil || a.hist.Current.TurnID != claudeTurn1 || len(a.hist.Recent) != 0 {
+			t.Fatalf("CurrentTurn past a wedged snapshot = %+v, %v; want the turn open", a.hist, a.err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("CurrentTurn did not return at its deadline past a wedged SnapshotIdle")
 	}
 }
 

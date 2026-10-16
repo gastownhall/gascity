@@ -137,6 +137,9 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 // families whose transcripts record turns, with each session's own transcript
 // written on this host for every profile. Rows that differ from X11 §3.2's
 // literal text (TI-2b corrections):
+//   - herdr runs the agent on this host and declares local transcripts, so
+//     Claude and Codex on herdr compose to the transcript tier, where X11
+//     §3.2's herdr row reads "none for ids";
 //   - subprocess and herdr take no idle snapshot, so Claude's inferred end
 //     composes to none there;
 //   - Gemini is none everywhere but protocol runtimes: no lookup finds one

@@ -67,6 +67,19 @@ func claudeTurnDuration(ts string) string {
 	return fmt.Sprintf(`{"type":"system","subtype":"turn_duration","isSidechain":false,"timestamp":%q,"durationMs":1000}`, ts)
 }
 
+// claudeQueueOp is a queue-operation record: Claude Code 2.1.299 and later
+// write an enqueue and a dequeue around input it runs from its queue, and can
+// open a conversation with a turn that ran from queued input, with no user
+// entry before its reply and turn_duration.
+func claudeQueueOp(op, ts string) string {
+	return fmt.Sprintf(`{"type":"queue-operation","operation":%q,"timestamp":%q,"sessionId":"5b1c0d2e-0000-4000-8000-000000000001","content":"queued text"}`, op, ts)
+}
+
+// claudeLongReply is a reply of about size bytes.
+func claudeLongReply(ts string, size int) string {
+	return fmt.Sprintf(`{"type":"assistant","isSidechain":false,"timestamp":%q,"message":{"role":"assistant","content":[{"type":"text","text":%q}]}}`, ts, strings.Repeat("x", size))
+}
+
 func claudeInterrupt(id, ts string) string {
 	return fmt.Sprintf(`{"type":"user","isSidechain":false,"timestamp":%q,"message":{"role":"user","content":[{"type":"text","text":"[Request interrupted by user for tool use]"}]},"promptId":%q}`, ts, id)
 }
@@ -153,7 +166,9 @@ func newTurnSessionWith(t *testing.T, sp runtime.Provider, provider string, opts
 	t.Helper()
 	root := t.TempDir()
 	store := beads.NewMemStore()
-	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()),
+		// A keyed start would otherwise wait out the stale-key detection delay.
+		sessionpkg.WithStaleKeyDetectionWaiter(func(context.Context, string) error { return nil }))
 	spec := SessionSpec{
 		Template:  "probe",
 		Title:     "Probe",

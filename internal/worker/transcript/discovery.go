@@ -2,6 +2,7 @@
 package transcript
 
 import (
+	"slices"
 	"strings"
 	"time"
 
@@ -28,12 +29,20 @@ var keyedLookupFamilies = []string{"auggie", "amp", "copilot", "codex", "cursor"
 // lookup, or the generic one SupportsIDLookup allows.
 func HasKeyedLookup(provider string) bool {
 	family := sessionlog.ProviderFamily(provider)
-	for _, f := range keyedLookupFamilies {
-		if f == family {
-			return true
-		}
-	}
-	return SupportsIDLookup(provider)
+	return slices.Contains(keyedLookupFamilies, family) || SupportsIDLookup(provider)
+}
+
+// inexactKeyedLookupFamilies are the keyed-lookup families whose lookup can
+// return a file of another conversation than the key names: Gemini's matches
+// a chat by its project directory, not by the recorded sessionId.
+var inexactKeyedLookupFamilies = []string{"gemini"}
+
+// HasExactKeyedLookup reports whether a session key finds exactly the
+// transcript of the conversation it names for provider's family: a keyed
+// lookup (HasKeyedLookup) whose match is that conversation's own file, so a
+// caller may attribute what it reads to the session.
+func HasExactKeyedLookup(provider string) bool {
+	return HasKeyedLookup(provider) && !slices.Contains(inexactKeyedLookupFamilies, sessionlog.ProviderFamily(provider))
 }
 
 // DiscoverPath resolves the best available transcript for a worker session.

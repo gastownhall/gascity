@@ -31,17 +31,7 @@ func ResolveKeyedTranscriptPath(info Info, searchPaths []string) string {
 // does not change while a session waits for its key or its first write.
 // fallbackProvider is consulted as ResolveKeyedTranscriptPaths consults it.
 func HasKeyedTranscriptLookup(info Info, fallbackProvider string) bool {
-	return hasKeyedTranscriptLookup(ProviderFamilyFromInfo(info, fallbackProvider))
-}
-
-func hasKeyedTranscriptLookup(provider string) bool {
-	switch sessionlog.ProviderFamily(provider) {
-	case "codex":
-		return true
-	case "gemini":
-		return false
-	}
-	return workertranscript.HasKeyedLookup(provider)
+	return workertranscript.HasExactKeyedLookup(ProviderFamilyFromInfo(info, fallbackProvider))
 }
 
 // ResolveKeyedTranscriptPaths is the page-oriented form of
@@ -85,7 +75,7 @@ func ResolveKeyedTranscriptPaths(infos []Info, searchPaths []string, fallbackPro
 			})
 			codexInfoIDs[key] = info.ID
 		default:
-			if !hasKeyedTranscriptLookup(provider) {
+			if !workertranscript.HasExactKeyedLookup(provider) {
 				continue
 			}
 			if path := workertranscript.DiscoverKeyedPath(searchPaths, provider, workDir, sessionKey); path != "" {

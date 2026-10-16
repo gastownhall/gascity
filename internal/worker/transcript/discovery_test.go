@@ -863,3 +863,16 @@ func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
 		t.Fatalf("DiscoverKeyedPath(opencode) = %q, want none", got)
 	}
 }
+
+// Kills an exact keyed-lookup predicate that admits a family whose by-key
+// lookup can return another conversation's file, or refuses an exact one.
+func TestHasExactKeyedLookup(t *testing.T) {
+	for provider, want := range map[string]bool{
+		"claude": true, "claude/tmux-cli": true, "codex": true, "kimi": true, "pi": true,
+		"gemini": false, "opencode": false, "mimocode": false,
+	} {
+		if got := HasExactKeyedLookup(provider); got != want {
+			t.Errorf("HasExactKeyedLookup(%q) = %v, want %v", provider, got, want)
+		}
+	}
+}

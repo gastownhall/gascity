@@ -71,6 +71,14 @@ fallback `Manager.TranscriptPath` serves for history. A session without a key
 yet, or whose transcript is not written yet, reads as
 `runtime.ErrRuntimeUnavailable`, not as a different capability.
 
+Identity is judged per turn, not from sessionlog's `MissingIDs`
+(`turnHistoryFromScan`). A turn without an id whose start lies inside the scan
+is `runtime.ErrTurnIdentityUnsupported`. A scan that begins inside a turn (a
+window cut in its tail, or a Claude conversation opening with a turn run from
+queued input) is the window, not the family: the head end is dropped, and an
+open head turn reads as unavailable. `WatchTurns` republishes an error when its
+class changes, so a consumer hears unsupported or not found mid-streak.
+
 ## Codex activity
 
 Codex activity comes from matching native turn lifecycle events, not assistant

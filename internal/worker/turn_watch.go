@@ -64,32 +64,67 @@ func startTurnWatch(ctx context.Context, loop turnWatchLoop) <-chan TurnUpdate {
 	return out
 }
 
+// turnErrClass is the class of a failed turn read, which is what a consumer
+// acts on: wait while unavailable or initializing, downgrade on unsupported,
+// drop the session when it is not found.
+type turnErrClass int
+
+const (
+	turnErrNone turnErrClass = iota
+	turnErrOther
+	turnErrUnavailable
+	turnErrInitializing
+	turnErrUnsupported
+	turnErrNotFound
+)
+
+// turnErrorClass classifies err. An error that wraps several sentinels takes
+// the most final: not found, then unsupported, then initializing, then
+// unavailable.
+func turnErrorClass(err error) turnErrClass {
+	switch {
+	case err == nil:
+		return turnErrNone
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return turnErrNotFound
+	case errors.Is(err, runtime.ErrTurnIdentityUnsupported):
+		return turnErrUnsupported
+	case errors.Is(err, runtime.ErrSessionInitializing):
+		return turnErrInitializing
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		return turnErrUnavailable
+	default:
+		return turnErrOther
+	}
+}
+
 // runTurnWatch reads, publishes what changed and waits for a hint or the
 // backstop poll, until ctx ends. The first successful read is always sent,
 // as is the first after a failure. A failed read is sent as an Err update
-// once per failure streak, never as an idle history.
+// when the failure streak begins and whenever its error changes class, never
+// as an idle history.
 func runTurnWatch(ctx context.Context, out chan TurnUpdate, loop turnWatchLoop) {
 	defer close(out)
 	if loop.stop != nil {
 		defer loop.stop()
 	}
 	var last turnMark
-	sent, failing := false, false
+	sent, failing := false, turnErrNone
 	why := turnWakeStart
 	for {
 		hist, err := loop.read(ctx, why)
 		if ctx.Err() != nil {
 			return
 		}
-		switch {
+		switch class := turnErrorClass(err); {
 		case err != nil:
-			if !failing {
+			if class != failing {
 				publishTurnUpdate(out, TurnUpdate{Err: err})
 			}
-			failing = true
-		case !sent || failing || markOf(hist) != last:
+			failing = class
+		case !sent || failing != turnErrNone || markOf(hist) != last:
 			publishTurnUpdate(out, TurnUpdate{History: hist})
-			last, sent, failing = markOf(hist), true, false
+			last, sent, failing = markOf(hist), true, turnErrNone
 		}
 		select {
 		case <-ctx.Done():
