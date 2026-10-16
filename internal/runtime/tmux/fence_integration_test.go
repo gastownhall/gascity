@@ -239,11 +239,13 @@ func TestFencedNudgeRealTmuxTextIsByteExact(t *testing.T) {
 		}
 		got := strings.Split(strings.TrimSuffix(typedSoFar(file), "\r"), "\r")
 		if len(got) != len(sent) {
-			t.Errorf("%s typed %q, want %d lines ending in %q", d.name, got, len(sent), sent)
+			t.Errorf("%s typed %q, want %d lines %q", d.name, got, len(sent), sent)
 			continue
 		}
 		for i, text := range sent {
-			if !strings.HasSuffix(got[i], text) {
+			// Exact: only a nudge's C-u (\x15) may precede the text, so a
+			// stray "\" or "--" typed in front of it fails.
+			if strings.TrimLeft(got[i], "\x15") != text {
 				t.Errorf("%s(%q) typed %q", d.name, text, got[i])
 			}
 		}

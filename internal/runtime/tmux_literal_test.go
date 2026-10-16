@@ -21,6 +21,7 @@ func TestTmuxLiteralArgs(t *testing.T) {
 			{"x;", []string{`x\;`}},
 			{`x\;`, []string{`x\\;`}},
 			{"x;;", []string{`x;\;`}},
+			{`x\;;`, []string{`x\;\;`}},
 			{"a;b", []string{"a;b"}},
 			{`\`, []string{`\`}},
 			{"x;\n", []string{"x;\n"}},
@@ -30,6 +31,7 @@ func TestTmuxLiteralArgs(t *testing.T) {
 			{"-l", []string{"--", "-l"}},
 			{"--", []string{"--", "--"}},
 			{"-x;", []string{"--", `-x\;`}},
+			{`-\;`, []string{"--", `-\\;`}},
 			{"x-", []string{"x-"}},
 		} {
 			got := TmuxLiteralArgs(tc.text)
