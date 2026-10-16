@@ -1225,6 +1225,10 @@
           "$ref": "#/$defs/BeadsConfig",
           "description": "Beads configures the bead store backend."
         },
+        "ops": {
+          "$ref": "#/$defs/OpsConfig",
+          "description": "Ops holds the operation-journal rollout gates (ops.content,\nops.control, ops.lifecycle)."
+        },
         "session": {
           "$ref": "#/$defs/SessionConfig",
           "description": "Session configures the session provider backend."
@@ -2105,6 +2109,43 @@
       "additionalProperties": false,
       "type": "object",
       "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
+    },
+    "OpsConfig": {
+      "properties": {
+        "content": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "ContentMode records message deliveries (session submit and messages, nudge,\nmail notify) as message ops. \"off\" (the shipped default; all three gates\nship off), \"auto\" records where the store can and degrades loudly where\nit cannot, and \"require\" refuses a request it cannot record before any\neffect (experimental until the X12 harness passes). A change takes\neffect at the next process start.",
+          "default": "off"
+        },
+        "control": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "ControlMode records interrupt (stop) and respond requests as ops. \"off\"\n(the shipped default), \"auto\" records where the store can and degrades\nloudly where it cannot, and \"require\" refuses a request it cannot record\nbefore any effect (experimental until the X12 harness passes). A change\ntakes effect at the next process start.",
+          "default": "off"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "LifecycleMode records wake, suspend, reset (restart), kill and close\nrequests as ops. \"off\" (the shipped default), \"auto\" records where the\nstore can and degrades loudly where it cannot, and \"require\" refuses a\nrequest it cannot record before any effect (experimental until the X12\nharness passes). A change takes effect at the next process start.",
+          "default": "off"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution."
     },
     "OptionChoice": {
       "properties": {
