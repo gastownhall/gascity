@@ -196,3 +196,26 @@ func TestOpsAuthoritativeFragmentReplaces(t *testing.T) {
 		t.Fatalf("a fragment's list did not reach the root: %#v", cfg.Ops.Authoritative)
 	}
 }
+
+// TestOpsAuthoritativeSchemaEnumMatchesLoad pins the schema's enum on [ops]
+// authoritative to the kinds config load accepts, so an editor validates
+// exactly what load does.
+func TestOpsAuthoritativeSchemaEnumMatchesLoad(t *testing.T) {
+	field, ok := reflect.TypeOf(OpsConfig{}).FieldByName("Authoritative")
+	if !ok {
+		t.Fatal("OpsConfig has no Authoritative field")
+	}
+	var enum []string
+	for _, opt := range strings.Split(field.Tag.Get("jsonschema"), ",") {
+		if v, found := strings.CutPrefix(opt, "enum="); found {
+			enum = append(enum, v)
+		}
+	}
+	var want []string
+	for _, k := range laneAuthoritativeKinds {
+		want = append(want, string(k))
+	}
+	if !reflect.DeepEqual(enum, want) {
+		t.Fatalf("schema enum = %v, want the accepted kinds %v", enum, want)
+	}
+}
