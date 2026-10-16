@@ -9,6 +9,7 @@ import (
 	"io"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -589,6 +590,10 @@ type fakeProbeConnector struct {
 	// here exists, which keeps a healthy fixture a zero value.
 	absentTables  map[string]bool
 	absentColumns map[string]bool
+	// likeDecoys are columns a SHOW COLUMNS ... LIKE lists beside (or instead
+	// of) the one asked for, keyed like absentColumns: the pattern's '_'
+	// matches any one character.
+	likeDecoys map[string][]string
 	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
 	// statement; "" means the fixture default, fakeProbeHead.
 	head string
@@ -687,7 +692,23 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		}
 		return &fakeProbeRows{value: exists, extra: []driver.Value{head}}, nil
 	}
-	if query == columnExistsQuery {
+	if strings.HasPrefix(strings.ToUpper(query), "SHOW COLUMNS FROM ") {
+		// SHOW COLUMNS names its table in the statement and fails on an absent
+		// one, as MySQL and Dolt do; a session that issued it against an absent
+		// table would pin itself to its pre-statement catalog.
+		table, column := showColumnsTarget(query)
+		if c.connector.absentTables[table] {
+			return nil, errors.New("Error 1146 (42S02): table not found: " + table)
+		}
+		// A LIKE pattern's '_' matches any one character, so the server may
+		// list a column the pattern only resembles.
+		decoys := c.connector.likeDecoys[table+"."+column]
+		if c.connector.absentColumns[table+"."+column] {
+			return &fakeShowColumnsRows{fields: decoys}, nil
+		}
+		return &fakeShowColumnsRows{fields: append(decoys, column)}, nil
+	}
+	if strings.Contains(strings.ToLower(query), "information_schema.columns") {
 		key := namedArg(args, 0) + "." + namedArg(args, 1)
 		if c.connector.absentColumns[key] {
 			return &fakeProbeRows{value: 0}, nil
@@ -707,6 +728,44 @@ func namedArg(args []driver.NamedValue, n int) string {
 		return ""
 	}
 	return fmt.Sprint(args[n].Value)
+}
+
+// showColumnsTarget parses "SHOW COLUMNS FROM <table> LIKE '<column>'".
+func showColumnsTarget(query string) (table, column string) {
+	rest := strings.TrimSpace(query[len("SHOW COLUMNS FROM "):])
+	table, like, _ := strings.Cut(rest, " ")
+	table = strings.Trim(table, "`")
+	if _, pattern, ok := strings.Cut(like, "LIKE "); ok {
+		column = strings.Trim(strings.TrimSpace(pattern), "'")
+	}
+	return table, column
+}
+
+// fakeShowColumnsRows is SHOW COLUMNS' result shape: one row per column, with
+// the column name in the first field.
+type fakeShowColumnsRows struct {
+	fields []string
+	next   int
+}
+
+func (r *fakeShowColumnsRows) Columns() []string {
+	return []string{"Field", "Type", "Null", "Key", "Default", "Extra"}
+}
+
+func (r *fakeShowColumnsRows) Close() error { return nil }
+
+func (r *fakeShowColumnsRows) Next(dest []driver.Value) error {
+	if r.next >= len(r.fields) {
+		return io.EOF
+	}
+	dest[0] = []byte(r.fields[r.next])
+	dest[1] = []byte("varchar(255)")
+	dest[2] = []byte("YES")
+	dest[3] = []byte("")
+	dest[4] = nil
+	dest[5] = []byte("")
+	r.next++
+	return nil
 }
 
 // fakeProbeHead is the HEAD hash the fixture answers when a test names none.
