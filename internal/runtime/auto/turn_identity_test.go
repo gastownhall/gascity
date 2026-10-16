@@ -7,7 +7,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// Kills a auto that answers turn observation for itself, swallows a failed
+// Kills an auto that answers turn observation for itself, swallows a failed
 // read, or falls through to the other backend: a session routed to the ACP
 // profile reads its capabilities and history there, a failed read stays an
 // error, and a session routed to tmux reads nothing on every axis and

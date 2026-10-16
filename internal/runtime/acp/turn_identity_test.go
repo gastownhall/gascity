@@ -5,12 +5,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"net"
 	"os/exec"
 	"path/filepath"
 	goruntime "runtime"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -344,15 +346,22 @@ func TestInterruptTurnCancelsTheRunningTurn(t *testing.T) {
 // Kills a turn-scoped interrupt that can cancel the next turn. Each seed
 // interleaves turn T ending, the next turn U starting through Nudge, and
 // InterruptTurn(T). U's prompt is written only after T's idle channel closes,
-// so a session/cancel written after it, or a SIGINT attempt while U runs,
-// cancels U.
+// so a session/cancel written after it, or a SIGINT sent while U is the
+// running turn, cancels U. The cancel wait is a nanosecond, so the agent,
+// which never answers a cancel, always reaches the SIGINT fallback.
+//
+// An interleaving property: the deterministic seam tests
+// (TestInterruptTurnCancelNeverFollowsTheNextPrompt,
+// TestInterruptTurnSIGINTNeverReachesTheNextTurn,
+// TestInterruptTurnCancelFollowsItsOwnPrompt) pin each window without -race;
+// this test catches a split critical section reliably only under -race.
 func TestInterruptTurnNeverCancelsTheNextTurn(t *testing.T) {
 	p := NewProviderWithDir(filepath.Join(shortTempDir(t), "acp"), Config{
 		NudgeBusyTimeout: protocolUnitWait,
-		CancelTimeout:    protocolUnitWait,
+		CancelTimeout:    time.Nanosecond,
 	})
 	const seeds = 1000
-	var lateCancels, signalsInU, fenced, stale atomic.Int32
+	var lateCancels, signalsInU, signals, fenced, stale atomic.Int32
 	for seed := uint64(0); seed < seeds; seed++ {
 		rec := &stdinRecorder{}
 		var uWritten bool
@@ -365,16 +374,18 @@ func TestInterruptTurnNeverCancelsTheNextTurn(t *testing.T) {
 			}
 		}
 		name, sc := recordedConn(t, p, rec)
-		sc.beforeTurnSignal = func() {
-			if cur, _ := sc.turns(); cur != nil && cur.PromptID != 1 {
-				signalsInU.Add(1)
-			}
-		}
 		if err := p.Nudge(name, runtime.TextContent("T")); err != nil {
 			t.Fatalf("seed %d: Nudge(T): %v", seed, err)
 		}
 		cur, _ := sc.turns()
 		turnT, promptT := cur.ID, cur.PromptID
+		sc.onTurnSignal = func() {
+			// mu is held here, as it is for the signal itself.
+			signals.Add(1)
+			if sc.currentTurn == nil || sc.currentTurn.PromptID != promptT {
+				signalsInU.Add(1)
+			}
+		}
 
 		r := rand.New(rand.NewPCG(seed, 0x7e11))
 		ops := []func(){
@@ -422,7 +433,10 @@ func TestInterruptTurnNeverCancelsTheNextTurn(t *testing.T) {
 		t.Fatalf("session/cancel written after U's prompt in %d of %d interleavings", n, seeds)
 	}
 	if n := signalsInU.Load(); n != 0 {
-		t.Fatalf("SIGINT attempted while U ran in %d of %d interleavings", n, seeds)
+		t.Fatalf("SIGINT sent outside T's turn in %d of %d interleavings", n, seeds)
+	}
+	if signals.Load() == 0 {
+		t.Fatal("no interleaving reached the SIGINT fallback")
 	}
 	if fenced.Load() == 0 || stale.Load() == 0 {
 		t.Fatalf("interleavings covered %d fenced and %d stale interrupts, want both", fenced.Load(), stale.Load())
@@ -593,5 +607,307 @@ func TestInterruptTurnAgainstTheAgent(t *testing.T) {
 	h, err := f.p.TurnHistory(ctx, f.name)
 	if err != nil || len(h.Recent) != 1 || h.Recent[0].TurnID != st.TurnID || h.Recent[0].Status != runtime.TurnStatusCancelled {
 		t.Fatalf("history = %+v, %v; want the held turn canceled", h, err)
+	}
+}
+
+// promptTexts are the texts of the recorded session/prompt lines, in order,
+// with "cancel" for each session/cancel.
+func (r *stdinRecorder) promptTexts() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	var out []string
+	for _, line := range r.lines {
+		var msg struct {
+			Method string `json:"method"`
+			Params struct {
+				Prompt []ContentBlock `json:"prompt"`
+			} `json:"params"`
+		}
+		_ = json.Unmarshal([]byte(line), &msg)
+		switch msg.Method {
+		case methodSessionCancel:
+			out = append(out, "cancel")
+		case "session/prompt":
+			var text string
+			for _, block := range msg.Params.Prompt {
+				text += block.Text
+			}
+			out = append(out, text)
+		}
+	}
+	return out
+}
+
+// staysFalse reports whether cond stays false for d. It is the bounded
+// negative wait the ordering tests use to give a broken ordering time to
+// show itself.
+func staysFalse(d time.Duration, cond func() bool) bool {
+	deadline := time.NewTimer(d)
+	defer deadline.Stop()
+	tick := time.NewTicker(time.Millisecond)
+	defer tick.Stop()
+	for !cond() {
+		select {
+		case <-deadline.C:
+			return !cond()
+		case <-tick.C:
+		}
+	}
+	return false
+}
+
+// Kills a turn-scoped interrupt whose session/cancel can follow the next
+// turn's prompt: T ends and Nudge writes U's prompt after InterruptTurn(T)
+// has returned but before its cancel is written. The cancel must then not be
+// written at all. Deterministic, so it holds without -race.
+func TestInterruptTurnCancelNeverFollowsTheNextPrompt(t *testing.T) {
+	p := newTestProvider(t)
+	rec := &stdinRecorder{}
+	name, sc := recordedConn(t, p, rec)
+	if err := p.Nudge(name, runtime.TextContent("T")); err != nil {
+		t.Fatalf("Nudge(T): %v", err)
+	}
+	cur, _ := sc.turns()
+	turnT, promptT := cur.ID, cur.PromptID
+	seamRan := make(chan struct{})
+	sc.beforeTurnCancel = func() {
+		defer close(seamRan)
+		respondTo(sc, promptT, `{"stopReason":"end_turn"}`)
+		if err := p.Nudge(name, runtime.TextContent("U")); err != nil {
+			t.Errorf("Nudge(U): %v", err)
+		}
+	}
+	if ack, err := p.InterruptTurn(t.Context(), name, turnT); err != nil || !ack.Fenced {
+		t.Fatalf("InterruptTurn(T) = %+v, %v; want fenced", ack, err)
+	}
+	<-seamRan
+	if !staysFalse(100*time.Millisecond, func() bool { return slices.Contains(rec.methods(), methodSessionCancel) }) {
+		t.Fatalf("stdin = %q, want T's cancel dropped once U's prompt is written", rec.promptTexts())
+	}
+	if got := rec.promptTexts(); !slices.Equal(got, []string{"T", "U"}) {
+		t.Fatalf("stdin = %q, want T then U and no cancel", got)
+	}
+}
+
+// Kills a fallback SIGINT whose turn check is not atomic with the signal:
+// once the cancel wait gives up on T, T ends and Nudge starts U while the
+// SIGINT is being sent. The signal must reach the agent while T is still its
+// turn, before U's prompt, so it can never interrupt U. Deterministic, so it
+// holds without -race.
+func TestInterruptTurnSIGINTNeverReachesTheNextTurn(t *testing.T) {
+	p := NewProviderWithDir(filepath.Join(shortTempDir(t), "acp"), Config{
+		NudgeBusyTimeout: protocolUnitWait,
+		CancelTimeout:    10 * time.Millisecond,
+	})
+	rec := &stdinRecorder{}
+	name, sc := recordedConn(t, p, rec)
+	if err := p.Nudge(name, runtime.TextContent("T")); err != nil {
+		t.Fatalf("Nudge(T): %v", err)
+	}
+	cur, _ := sc.turns()
+	turnT, promptT := cur.ID, cur.PromptID
+
+	type signalSeen struct {
+		promptID int64
+		stdin    []string
+	}
+	seen := make(chan signalSeen, interruptSIGINTAttempts)
+	next := make(chan struct{})
+	var once sync.Once
+	sc.onTurnSignal = func() {
+		// mu is held here, as it is for the signal itself.
+		var id int64
+		if sc.currentTurn != nil {
+			id = sc.currentTurn.PromptID
+		}
+		once.Do(func() {
+			go func() {
+				defer close(next)
+				respondTo(sc, promptT, `{"stopReason":"end_turn"}`)
+				if err := p.Nudge(name, runtime.TextContent("U")); err != nil {
+					t.Errorf("Nudge(U): %v", err)
+				}
+			}()
+			// Give T's end and U's prompt the chance to overtake the signal.
+			staysFalse(100*time.Millisecond, func() bool { return slices.Contains(rec.promptTexts(), "U") })
+		})
+		seen <- signalSeen{promptID: id, stdin: rec.promptTexts()}
+	}
+	if ack, err := p.InterruptTurn(t.Context(), name, turnT); err != nil || !ack.Fenced {
+		t.Fatalf("InterruptTurn(T) = %+v, %v; want fenced", ack, err)
+	}
+	var first signalSeen
+	select {
+	case first = <-seen:
+	case <-time.After(protocolUnitWait):
+		t.Fatal("no SIGINT after the cancel wait gave up on T")
+	}
+	<-next
+	if first.promptID != promptT || slices.Contains(first.stdin, "U") {
+		t.Fatalf("SIGINT sent in prompt %d's turn with stdin %q, want T's turn (prompt %d) before U's prompt", first.promptID, first.stdin, promptT)
+	}
+	// T has ended, so the settle loop must stop rather than signal U.
+	select {
+	case again := <-seen:
+		t.Fatalf("second SIGINT sent in prompt %d's turn, want none once T ended", again.promptID)
+	case <-time.After(2 * interruptSIGINTWait):
+	}
+}
+
+// Kills a turn record published before its prompt is written whose
+// turn-scoped cancel can overtake that prompt: InterruptTurn(U) issued after
+// U's record opens but before U's prompt is written must still put
+// session/cancel after the prompt, or the agent drops the cancel and U runs
+// on although the interrupt was fenced.
+func TestInterruptTurnCancelFollowsItsOwnPrompt(t *testing.T) {
+	p := newTestProvider(t)
+	rec := &stdinRecorder{}
+	name, sc := recordedConn(t, p, rec)
+	var once sync.Once
+	sc.afterPromptOpened = func() {
+		once.Do(func() {
+			cur, _ := sc.turns()
+			if ack, err := p.InterruptTurn(t.Context(), name, cur.ID); err != nil || !ack.Fenced {
+				t.Errorf("InterruptTurn(U) = %+v, %v; want fenced", ack, err)
+			}
+			// Give the cancel the chance to overtake the prompt.
+			staysFalse(100*time.Millisecond, func() bool { return slices.Contains(rec.methods(), methodSessionCancel) })
+		})
+	}
+	if err := p.Nudge(name, runtime.TextContent("U")); err != nil {
+		t.Fatalf("Nudge(U): %v", err)
+	}
+	waitUntil(t, "session/cancel", func() bool { return slices.Contains(rec.methods(), methodSessionCancel) })
+	if got := rec.promptTexts(); !slices.Equal(got, []string{"U", "cancel"}) {
+		t.Fatalf("stdin = %q, want U's prompt before its cancel", got)
+	}
+}
+
+// Kills a cross-process wait that reports its own time limit as the caller's
+// deadline, or that waits out its whole timeout against an owner that cannot
+// answer the turn commands.
+func TestCrossProcessWaitTurnEndedErrors(t *testing.T) {
+	withTurnPoll(t, time.Millisecond, 5*time.Millisecond)
+	t.Run("silent owner", func(t *testing.T) {
+		p := newTestProvider(t)
+		p.dial = func(_, _ string, _ time.Duration) (net.Conn, error) {
+			client, owner := net.Pipe()
+			go func() {
+				// Read the command and never answer.
+				_, _ = bufio.NewReader(owner).ReadString('\n')
+				<-time.After(protocolUnitWait)
+				_ = owner.Close()
+			}()
+			return client, nil
+		}
+		_, err := p.WaitTurnEnded(t.Context(), testName(), "t1", 50*time.Millisecond)
+		if !errors.Is(err, runtime.ErrTurnNotEnded) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("WaitTurnEnded = %v, want ErrTurnNotEnded carrying the unavailable read", err)
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("WaitTurnEnded = %v, reads as the caller's deadline while the caller's ctx is live", err)
+		}
+	})
+	t.Run("old owner", func(t *testing.T) {
+		p := newTestProvider(t)
+		p.dial = func(_, _ string, _ time.Duration) (net.Conn, error) {
+			client, owner := net.Pipe()
+			go func() {
+				_, _ = bufio.NewReader(owner).ReadString('\n')
+				_ = owner.Close()
+			}()
+			return client, nil
+		}
+		start := time.Now()
+		_, err := p.WaitTurnEnded(t.Context(), testName(), "t1", protocolUnitWait)
+		if !errors.Is(err, runtime.ErrTurnFenceUnavailable) {
+			t.Fatalf("WaitTurnEnded = %v, want ErrTurnFenceUnavailable", err)
+		}
+		if elapsed := time.Since(start); elapsed > protocolUnitWait/2 {
+			t.Fatalf("WaitTurnEnded took %s against an owner that cannot answer, want an early return", elapsed)
+		}
+	})
+}
+
+// Kills an owner whose turn command reports any failed read as gone, which a
+// caller reads as the turn having ended, and a caller that does not read the
+// unavailable reply as unavailable.
+func TestTurnErrorReplies(t *testing.T) {
+	cases := []struct {
+		err  error
+		want string
+	}{
+		{fmt.Errorf("%w: x", runtime.ErrSessionInitializing), replyStarting},
+		{fmt.Errorf("%w: %w: x", runtime.ErrRuntimeUnavailable, runtime.ErrSessionInitializing), replyStarting},
+		{errACPConnClosed("s"), replyGone},
+		{fmt.Errorf("%w: x", runtime.ErrRuntimeUnavailable), replyUnavailable},
+		{errors.New("something new"), replyUnavailable},
+	}
+	for _, tc := range cases {
+		if got := turnErrorReply(tc.err); got != tc.want {
+			t.Errorf("turnErrorReply(%v) = %q, want %q", tc.err, got, tc.want)
+		}
+	}
+	if _, err := parseTurnReply("s", replyUnavailable); !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("parseTurnReply(unavailable) = %v, want ErrRuntimeUnavailable, not gone", err)
+	}
+	if _, err := parseTurnReply("s", replyStarting); !errors.Is(err, runtime.ErrSessionInitializing) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("parseTurnReply(starting) = %v, want ErrSessionInitializing wrapping ErrRuntimeUnavailable", err)
+	}
+}
+
+// Kills a turn read during the handshake that a consumer following the
+// TurnFenceProvider contract would read as terminal: it must wrap both
+// ErrSessionInitializing and ErrRuntimeUnavailable.
+func TestTurnReadsDuringTheHandshakeAreUnavailable(t *testing.T) {
+	p := newTestProvider(t)
+	name := testName()
+	sc := newSessionConn(&exec.Cmd{}, &stdinRecorder{}, nil, 10, nil)
+	sc.cancel = func() {}
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+	ctx := t.Context()
+	_, observeErr := p.ObserveTurn(ctx, name)
+	_, interruptErr := p.InterruptTurn(ctx, name, "t1")
+	_, historyErr := p.TurnHistory(ctx, name)
+	for what, err := range map[string]error{"ObserveTurn": observeErr, "InterruptTurn": interruptErr, "TurnHistory": historyErr} {
+		if !errors.Is(err, runtime.ErrSessionInitializing) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Errorf("%s = %v, want ErrSessionInitializing wrapping ErrRuntimeUnavailable", what, err)
+		}
+	}
+}
+
+// Kills an InterruptTurn that sends an id no ACP turn can carry to the
+// owner: an id over the bound, or with a control character, reads as not
+// current without the interrupt-turn command.
+func TestInterruptTurnRefusesANonIdentityLocally(t *testing.T) {
+	p := newTestProvider(t)
+	var mu sync.Mutex
+	var commands []string
+	p.dial = func(_, _ string, _ time.Duration) (net.Conn, error) {
+		client, owner := net.Pipe()
+		go func() {
+			line, _ := bufio.NewReader(owner).ReadString('\n')
+			mu.Lock()
+			commands = append(commands, strings.TrimSuffix(line, "\n"))
+			mu.Unlock()
+			_, _ = owner.Write([]byte(replyIdle + "\n"))
+			_ = owner.Close()
+		}()
+		return client, nil
+	}
+	name := testName()
+	for _, id := range []string{strings.Repeat("a", runtime.MaxTurnIDLen+1), strings.Repeat("a", 70*1024), "a\tb", "a b", "a\nb", "\xff"} {
+		if _, err := p.InterruptTurn(t.Context(), name, id); !errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Errorf("InterruptTurn(%d bytes) = %v, want ErrTurnNotCurrent", len(id), err)
+		}
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, c := range commands {
+		if strings.HasPrefix(c, controlInterruptTurn) {
+			t.Fatalf("owner received %q, want no interrupt-turn for a non-identity", c)
+		}
 	}
 }

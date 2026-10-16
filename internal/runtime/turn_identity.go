@@ -4,7 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // TurnStart is how a runtime knows a session's turn starts. A value this build
@@ -174,10 +177,14 @@ type TurnHistory struct {
 // truncate or hash the id, which would break the match between observers.
 const MaxTurnIDLen = 128
 
-// IsTurnIdentity reports whether id can identify a turn: non-empty and at most
-// [MaxTurnIDLen] bytes. Turn ids are compared only for equality.
+// IsTurnIdentity reports whether id can identify a turn: non-empty, at most
+// [MaxTurnIDLen] bytes, valid UTF-8 and free of control characters. Turn ids
+// are compared only for equality.
 func IsTurnIdentity(id string) bool {
-	return id != "" && len(id) <= MaxTurnIDLen
+	if id == "" || len(id) > MaxTurnIDLen || !utf8.ValidString(id) {
+		return false
+	}
+	return !strings.ContainsFunc(id, unicode.IsControl)
 }
 
 var (
@@ -193,7 +200,7 @@ var (
 
 // TurnObservationProvider is an optional extension for runtimes that know
 // their sessions' turns natively. Composites answer for the session's routed
-// backend: zero capabilities, and ErrInteractionUnsupported from TurnHistory,
+// backend: no capabilities, and ErrInteractionUnsupported from TurnHistory,
 // for a backend that lacks it.
 type TurnObservationProvider interface {
 	// TurnCapabilities reports what the runtime can tell about name's turns.
@@ -206,7 +213,9 @@ type TurnObservationProvider interface {
 
 // TurnCapabilitiesFor reports p's capabilities for session name, normalized:
 // nothing on every axis when p is not a [TurnObservationProvider], and an
-// unknown axis value as that axis's none.
+// unknown or empty axis value as that axis's none. Its result is the
+// canonical form: "no capabilities" is TurnCapabilities{}.Normalized(), not
+// the zero value, so compare capabilities only after normalizing them.
 func TurnCapabilitiesFor(p Provider, name string) TurnCapabilities {
 	tp, ok := p.(TurnObservationProvider)
 	if !ok {

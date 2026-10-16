@@ -58,10 +58,20 @@
 - Interrupt must stay bounded when the agent stops reading stdin, so it
   never takes `stdinMu` itself: its writes run on a goroutine, and
   session/cancel checks the channel under `stdinMu` together with its write.
-  The SIGINT re-check runs without it
-  (`TestInterruptSendsNoSIGINTAfterTheTurnEnds`). Signal delivery cannot be
-  atomic with that check, so the re-check narrows the window rather than
-  closing it.
+  The SIGINT re-check and the signal run together under `sc.mu`
+  (`TestInterruptSendsNoSIGINTAfterTheTurnEnds`,
+  `TestInterruptTurnSIGINTNeverReachesTheNextTurn`): a turn ends and the next
+  opens only under `sc.mu`, so the signal goes out while the turn is still
+  the agent's and before the next prompt is written. `kill(2)` does not
+  block, so holding `sc.mu` across it is bounded; never hold `sc.mu` across
+  stdin I/O. The residual is the agent's own: how long it takes to act on a
+  SIGINT it received during the turn.
+- Nudge holds `stdinMu` from `setActivePrompt` through the prompt write
+  (lock order `stdinMu` before `sc.mu`; nothing takes `stdinMu` under
+  `sc.mu`). A turn's record is published from the moment it opens, so a
+  session/cancel aimed at it waits for its prompt instead of reaching the
+  agent first and being ignored
+  (`TestInterruptTurnCancelFollowsItsOwnPrompt`).
 - `InterruptTurn` is the turn-scoped path (`turn_identity.go`). In one
   critical section of `sc.mu` it checks that the named turn is
   `currentTurn` and takes that turn's idle channel and held permission
@@ -70,12 +80,20 @@
   fallback then run on a goroutine through `cancelAndSettle`, the loop
   `Interrupt` shares, keyed to that channel. A check and a channel taken in
   separate critical sections can cancel the next turn;
-  `TestInterruptTurnNeverCancelsTheNextTurn` interleaves the two 1,000 times.
+  `TestInterruptTurnNeverCancelsTheNextTurn` interleaves the two 1,000 times
+  (reliable only under `-race`), and
+  `TestInterruptTurnCancelNeverFollowsTheNextPrompt` pins the window after
+  the critical section deterministically.
 - ACP still reports `keystroke` mode, so `internal/session` never consults
   this fence: `StopTurn` and `interrupt_now` keep using `Interrupt`.
 - Another process asks the owner over the control socket: `turn` answers
-  `idle`, `running <id>`, `starting` or `gone`; `interrupt-turn <id>`
-  answers `ok`, `stale <id>`, `idle`, `starting` or `gone`. An owner that
+  `idle`, `running <id>`, `starting`, `gone` or `unavailable`;
+  `interrupt-turn <id>` answers `ok`, `stale <id>`, `idle`, `starting`,
+  `gone` or `unavailable`. Only a session that is gone answers `gone` (a
+  caller reads it as the turn having ended); any other failed read answers
+  `unavailable`. `starting` reads as `ErrSessionInitializing` wrapping
+  `ErrRuntimeUnavailable`. An id that is not `runtime.IsTurnIdentity`, or
+  holds a space, reads as not current without the `interrupt-turn` command. An owner that
   predates them closes the connection unanswered; the caller reports
   `runtime.ErrTurnFenceUnavailable` and never falls back to the untargeted
   `interrupt` command. A turn read that fails is an error, never idle.

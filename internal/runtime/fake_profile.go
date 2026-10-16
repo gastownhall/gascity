@@ -524,11 +524,12 @@ func (f FullFake) readTurnLocked(name string) (st TurnState, exhausted bool, err
 }
 
 // TurnCapabilities implements [TurnObservationProvider] from the fake's
-// TurnCapabilityScripts.
+// TurnCapabilityScripts, normalized as [TurnCapabilitiesFor] reports them, so
+// an unscripted session reads as the canonical nothing.
 func (f FullFake) TurnCapabilities(name string) TurnCapabilities {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	return popScript(f.TurnCapabilityScripts, name)
+	return popScript(f.TurnCapabilityScripts, name).Normalized()
 }
 
 // TurnHistory implements [TurnObservationProvider]: the next TurnHistoryErrors

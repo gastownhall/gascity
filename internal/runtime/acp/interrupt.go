@@ -77,12 +77,13 @@ func (sc *sessionConn) interrupt(name string, cancelTimeout time.Duration) error
 
 // interruptTurn is interrupt aimed at turn turnID. In one critical section of
 // mu it checks that turnID is the running turn and takes that turn's idle
-// channel and outstanding permission requests, so nothing it does afterwards
-// can reach another turn. When turnID is not running it sends nothing, not
-// even permission replies, and returns a *runtime.TurnNotCurrentError. When
-// it is, the cancel, settle and SIGINT fallback run on a goroutine the
-// connection owns, and interruptTurn returns at once. A turn that does not
-// settle is logged there.
+// channel and outstanding permission requests. Everything it sends afterwards
+// is checked against that channel atomically with the send (see cancelTurn
+// and signalTurn), so none of it reaches the agent once the turn has ended.
+// When turnID is not running it sends nothing, not even permission replies,
+// and returns a *runtime.TurnNotCurrentError. When it is, the cancel, settle
+// and SIGINT fallback run on a goroutine the connection owns, and
+// interruptTurn returns at once. A turn that does not settle is logged there.
 func (sc *sessionConn) interruptTurn(name, turnID string, cancelTimeout time.Duration) error {
 	sc.mu.Lock()
 	if sc.drained {
@@ -113,8 +114,10 @@ func (sc *sessionConn) interruptTurn(name, turnID string, cancelTimeout time.Dur
 
 // cancelAndSettle sends the canceled permission replies and session/cancel
 // for the turn behind idleCh, then waits up to cancelTimeout for it to end and
-// falls back to SIGINT, as interrupt documents. Every step is keyed to idleCh,
-// so none reaches a later turn.
+// falls back to SIGINT, as interrupt documents. Every send is keyed to idleCh
+// and made only while that channel is open, checked atomically with the send,
+// so none reaches the agent after that turn has ended. What the agent does
+// with a SIGINT it received during the turn is up to the agent.
 func (sc *sessionConn) cancelAndSettle(name, sessionID string, idleCh <-chan struct{}, replies [][]byte, cancelTimeout time.Duration) error {
 	// A goroutine writes the replies and the cancel, so the wait below stays
 	// bounded even if the agent has stopped reading its stdin.
@@ -141,7 +144,10 @@ func (sc *sessionConn) cancelAndSettle(name, sessionID string, idleCh <-chan str
 // stdinMu, together with the write. Nudge writes the next turn's prompt
 // through the same lock, and only after idleCh has closed. So session/cancel
 // either reaches the agent ahead of the next prompt or is not sent at all; it
-// can never follow that prompt and cancel the next turn instead.
+// can never follow that prompt and cancel the next turn instead. Nudge also
+// holds stdinMu from opening a turn's record through writing its prompt, so a
+// cancel for a turn whose prompt is still unwritten waits for that prompt
+// rather than overtaking it.
 func (sc *sessionConn) cancelTurn(name, sessionID string, idleCh <-chan struct{}, replies [][]byte) {
 	if !sc.writePermissionReplies(replies) {
 		return
@@ -161,17 +167,26 @@ func (sc *sessionConn) cancelTurn(name, sessionID string, idleCh <-chan struct{}
 // signalTurn sends SIGINT to the agent's process group for the turn behind
 // idleCh and reports whether it did. Once that turn has ended it sends
 // nothing: the turn can end after a wait has given up on it, and Nudge can
-// then start the next one, which the SIGINT would interrupt instead. Signal
-// delivery cannot be made atomic with that check, so it narrows the window
-// rather than closing it.
+// then start the next one, which the SIGINT would interrupt instead. The
+// check and the signal are made under mu. The turn ends, and the next one
+// opens, only under mu, and Nudge writes the next prompt only after that, so
+// the signal is sent while this turn is the agent's turn and before the next
+// prompt is written. kill(2) does not block, so holding mu across it keeps
+// dispatch and Interrupt bounded. What remains is the agent's own latency in
+// handling a signal it received during the turn.
 func (sc *sessionConn) signalTurn(idleCh <-chan struct{}) bool {
 	if sc.beforeTurnSignal != nil {
 		sc.beforeTurnSignal()
 	}
+	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	select {
 	case <-idleCh:
 		return false
 	default:
+	}
+	if sc.onTurnSignal != nil {
+		sc.onTurnSignal()
 	}
 	// A failure means the group is already gone; the wait observes that.
 	_ = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)

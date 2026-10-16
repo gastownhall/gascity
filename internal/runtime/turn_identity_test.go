@@ -99,7 +99,7 @@ func TestTurnAxesOrderLowestFirst(t *testing.T) {
 }
 
 // Kills an id bound that truncates rather than refuses, is off by one, or
-// accepts an empty id as an identity.
+// accepts an empty id, invalid UTF-8 or a control character as an identity.
 func TestTurnIDOverTheBoundIsNoIdentity(t *testing.T) {
 	cases := []struct {
 		id   string
@@ -109,6 +109,13 @@ func TestTurnIDOverTheBoundIsNoIdentity(t *testing.T) {
 		{"t", true},
 		{strings.Repeat("a", runtime.MaxTurnIDLen), true},
 		{strings.Repeat("a", runtime.MaxTurnIDLen+1), false},
+		{"7c9e6679-7425-40de-944b-e07fc1f90ae7", true},
+		{"tür-1", true},
+		{"a\xffb", false},
+		{"a\nb", false},
+		{"a\tb", false},
+		{"a\x00b", false},
+		{"a\u0085b", false},
 	}
 	for _, tc := range cases {
 		if got := runtime.IsTurnIdentity(tc.id); got != tc.want {
@@ -136,7 +143,8 @@ func TestTurnFenceUnavailableIsRuntimeUnavailable(t *testing.T) {
 // Kills a FullFake whose turn observation does not follow its scripts: a
 // script that does not pop or repeat its last entry, an error that applies
 // out of order or consumes an entry, an unrecorded read, or an unscripted
-// session that reads as anything but nothing.
+// session that reads as anything but the canonical nothing
+// TurnCapabilitiesFor reports for a non-provider.
 func TestFullFakeTurnObservationScripts(t *testing.T) {
 	f := runtime.NewFake()
 	var tp runtime.TurnObservationProvider = runtime.FullFake{Fake: f}
@@ -147,6 +155,7 @@ func TestFullFakeTurnObservationScripts(t *testing.T) {
 	f.TurnHistoryScripts = map[string][]runtime.TurnHistory{"s": {
 		{Current: runtime.TurnState{TurnID: "t1"}, ObservedAt: stamp},
 		{Recent: []runtime.EndedTurn{{TurnID: "t1", Status: runtime.TurnStatusCompleted}}},
+		{Current: runtime.TurnState{TurnID: "t2"}, Recent: []runtime.EndedTurn{{TurnID: "t1", Status: runtime.TurnStatusCompleted}}},
 	}}
 	f.TurnHistoryErrors = map[string][]error{"s": {nil, runtime.ErrRuntimeUnavailable}}
 	ctx := t.Context()
@@ -158,8 +167,8 @@ func TestFullFakeTurnObservationScripts(t *testing.T) {
 	if want := []runtime.TurnFence{runtime.TurnFenceAtomic, runtime.TurnFenceChecked, runtime.TurnFenceChecked}; !slices.Equal(caps, want) {
 		t.Fatalf("capabilities = %v, want %v", caps, want)
 	}
-	if got := tp.TurnCapabilities("unscripted"); got != (runtime.TurnCapabilities{}) {
-		t.Fatalf("unscripted capabilities = %+v, want zero", got)
+	if got := tp.TurnCapabilities("unscripted"); got != noTurnCapabilities {
+		t.Fatalf("unscripted capabilities = %+v, want %+v", got, noTurnCapabilities)
 	}
 
 	if h, err := tp.TurnHistory(ctx, "s"); err != nil || h.Current.TurnID != "t1" || !h.ObservedAt.Equal(stamp) {
@@ -168,17 +177,22 @@ func TestFullFakeTurnObservationScripts(t *testing.T) {
 	if _, err := tp.TurnHistory(ctx, "s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 		t.Fatalf("second read = %v, want the scripted error", err)
 	}
+	// The error consumed no entry, so the idle read the second entry
+	// scripts comes next, then the last entry, repeated.
+	if h, err := tp.TurnHistory(ctx, "s"); err != nil || h.Current.Active() || len(h.Recent) != 1 || h.ObservedAt.IsZero() {
+		t.Fatalf("third read = %+v, %v; want idle after t1, stamped", h, err)
+	}
 	for range 2 {
 		h, err := tp.TurnHistory(ctx, "s")
-		if err != nil || h.Current.Active() || len(h.Recent) != 1 || h.ObservedAt.IsZero() {
-			t.Fatalf("later read = %+v, %v; want idle after t1, stamped", h, err)
+		if err != nil || h.Current.TurnID != "t2" || len(h.Recent) != 1 || h.ObservedAt.IsZero() {
+			t.Fatalf("later read = %+v, %v; want t2 after t1, stamped", h, err)
 		}
 	}
 	if h, err := tp.TurnHistory(ctx, "unscripted"); err != nil || h.Current.Active() || len(h.Recent) != 0 {
 		t.Fatalf("unscripted read = %+v, %v; want no turns", h, err)
 	}
-	if n := f.CountCalls("TurnHistory", "s"); n != 4 {
-		t.Fatalf("recorded TurnHistory calls = %d, want 4", n)
+	if n := f.CountCalls("TurnHistory", "s"); n != 5 {
+		t.Fatalf("recorded TurnHistory calls = %d, want 5", n)
 	}
 	broken := runtime.FullFake{Fake: runtime.NewFailFake()}
 	if _, err := broken.TurnHistory(ctx, "s"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {

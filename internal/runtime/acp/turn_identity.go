@@ -20,8 +20,8 @@ import (
 // The process that started a session answers from memory. Any other process
 // asks it over the control socket, with one line per command:
 //
-//	turn                -> idle | running <id> | starting | gone
-//	interrupt-turn <id> -> ok | stale <id> | idle | starting | gone
+//	turn                -> idle | running <id> | starting | gone | unavailable
+//	interrupt-turn <id> -> ok | stale <id> | idle | starting | gone | unavailable
 //
 // An owner that predates these commands closes the connection without a
 // reply; the caller then reports [runtime.ErrTurnFenceUnavailable] and never
@@ -40,6 +40,7 @@ const (
 	replyRunning         = "running "
 	replyStarting        = "starting"
 	replyGone            = "gone"
+	replyUnavailable     = "unavailable"
 	replyStale           = "stale "
 	replyOK              = "ok"
 )
@@ -82,7 +83,7 @@ func (p *Provider) TurnCapabilities(name string) runtime.TurnCapabilities {
 // turnConn returns the in-process connection that answers name's turn
 // reads. inProcess is false, with no error, when this provider does not track
 // name, so another process may own it. A session still in its handshake is
-// [runtime.ErrSessionInitializing]; one whose agent has exited is
+// errSessionStarting; one whose agent has exited is
 // [runtime.ErrSessionNotFound].
 func (p *Provider) turnConn(name string) (sc *sessionConn, inProcess bool, err error) {
 	p.mu.Lock()
@@ -92,12 +93,21 @@ func (p *Provider) turnConn(name string) (sc *sessionConn, inProcess bool, err e
 		return nil, false, nil
 	}
 	if sc.cancel != nil {
-		return nil, true, fmt.Errorf("%w: ACP session %q is still in its handshake", runtime.ErrSessionInitializing, name)
+		return nil, true, errSessionStarting(name)
 	}
 	if !sc.alive() {
 		return nil, true, errACPConnClosed(name)
 	}
 	return sc, true, nil
+}
+
+// errSessionStarting reports a turn read of a session still in its handshake.
+// It wraps both [runtime.ErrSessionInitializing] and
+// [runtime.ErrRuntimeUnavailable], the error [runtime.TurnFenceProvider]
+// documents for a read that cannot be made, so a caller that knows only the
+// latter retries rather than treating a starting session as failed.
+func errSessionStarting(name string) error {
+	return fmt.Errorf("%w: %w: ACP session %q is still in its handshake", runtime.ErrRuntimeUnavailable, runtime.ErrSessionInitializing, name)
 }
 
 // turnStateLocked is the running turn as a TurnState. Caller must hold mu.
@@ -234,7 +244,9 @@ func (p *Provider) TurnHistory(ctx context.Context, name string) (runtime.TurnHi
 // InterruptTurn implements [runtime.TurnFenceProvider] with an atomic fence:
 // the owner checks that turnID is running and takes that turn's idle channel
 // in one critical section, then cancels it as Interrupt does on a goroutine
-// it owns. Another process asks the owner to do the same.
+// it owns. Another process asks the owner to do the same. An id that is no
+// turn identity ([runtime.IsTurnIdentity]) names no turn the session can be
+// running, so it reads as not current without the interrupt-turn command.
 func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
 	if turnID == "" {
 		return runtime.TurnInterrupt{}, fmt.Errorf("%w: interrupting a turn of %q", runtime.ErrTurnUnnamed, name)
@@ -246,20 +258,21 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 	if err != nil {
 		return runtime.TurnInterrupt{}, err
 	}
-	if inProcess {
-		if err := sc.interruptTurn(name, turnID, p.cfg.cancelTimeout()); err != nil {
-			return runtime.TurnInterrupt{}, err
-		}
-		return runtime.TurnInterrupt{Fenced: true}, nil
-	}
-	if strings.ContainsAny(turnID, " \r\n") {
-		// No ACP turn id contains these, and the line protocol cannot carry
-		// them: the id names no turn the owner can be running.
+	if !runtime.IsTurnIdentity(turnID) || strings.Contains(turnID, " ") {
+		// Every ACP turn id is a UUID, and the control socket's line
+		// protocol cannot carry a space, a control character or an id past
+		// the owner's line limit.
 		st, err := p.ObserveTurn(ctx, name)
 		if err != nil {
 			return runtime.TurnInterrupt{}, err
 		}
 		return runtime.TurnInterrupt{}, &runtime.TurnNotCurrentError{Session: name, TurnID: turnID, Current: st}
+	}
+	if inProcess {
+		if err := sc.interruptTurn(name, turnID, p.cfg.cancelTimeout()); err != nil {
+			return runtime.TurnInterrupt{}, err
+		}
+		return runtime.TurnInterrupt{Fenced: true}, nil
 	}
 	reply, err := p.askOwner(ctx, name, controlInterruptTurn+turnID)
 	if err != nil {
@@ -284,8 +297,10 @@ func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runt
 // WaitTurnEnded implements [runtime.TurnFenceProvider]. The owner waits on the
 // turn's own idle channel. Another process polls the owner, first after
 // turnPollInitial and then at doubling intervals up to turnPollMax; a failed
-// read is remembered and the poll goes on. A session that is gone has ended
-// its turn.
+// read is remembered and the poll goes on, except that an owner that predates
+// the turn commands ends the wait at once with
+// [runtime.ErrTurnFenceUnavailable]. A session that is gone has ended its
+// turn.
 func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
 	if turnID == "" {
 		return runtime.TurnState{}, fmt.Errorf("%w: waiting on a turn of %q", runtime.ErrTurnUnnamed, name)
@@ -331,8 +346,17 @@ func (p *Provider) pollTurnEnded(ctx context.Context, name, turnID string, timeo
 		switch {
 		case errors.Is(err, runtime.ErrSessionNotFound):
 			return runtime.TurnState{}, nil
+		case errors.Is(err, runtime.ErrTurnFenceUnavailable):
+			// No later poll can do better against this owner.
+			return last, err
 		case err != nil:
 			lastErr = err
+			if waitCtx.Err() != nil && ctx.Err() == nil {
+				// The wait's own bound cut this read; its deadline is not
+				// the caller's, so only the read's text is kept.
+				detail := strings.TrimPrefix(err.Error(), runtime.ErrRuntimeUnavailable.Error()+": ")
+				lastErr = fmt.Errorf("%w: %s", runtime.ErrRuntimeUnavailable, detail)
+			}
 		case st.TurnID != turnID:
 			return st, nil
 		default:
@@ -349,9 +373,11 @@ func parseTurnReply(name, reply string) (runtime.TurnState, error) {
 	case strings.HasPrefix(reply, replyRunning) && len(reply) > len(replyRunning):
 		return runtime.TurnState{TurnID: strings.TrimPrefix(reply, replyRunning)}, nil
 	case reply == replyStarting:
-		return runtime.TurnState{}, fmt.Errorf("%w: ACP session %q is still in its handshake", runtime.ErrSessionInitializing, name)
+		return runtime.TurnState{}, errSessionStarting(name)
 	case reply == replyGone:
 		return runtime.TurnState{}, errACPConnClosed(name)
+	case reply == replyUnavailable:
+		return runtime.TurnState{}, fmt.Errorf("%w: the owner of ACP session %q could not read its turn", runtime.ErrRuntimeUnavailable, name)
 	}
 	return runtime.TurnState{}, fmt.Errorf("%w: ACP session %q owner answered %q", runtime.ErrRuntimeUnavailable, name, reply)
 }
@@ -430,7 +456,7 @@ func (p *Provider) ownedControlCommands(name string, owned *atomic.Pointer[sessi
 	conn := func() (*sessionConn, error) {
 		sc := owned.Load()
 		if sc == nil {
-			return nil, fmt.Errorf("%w: %q", runtime.ErrSessionInitializing, name)
+			return nil, errSessionStarting(name)
 		}
 		committed, inProcess, err := p.turnConn(name)
 		switch {
@@ -477,11 +503,16 @@ func (p *Provider) ownedControlCommands(name string, owned *atomic.Pointer[sessi
 	}
 }
 
-// turnErrorReply is the reply for a turn read the owner could not make: starting
-// during the handshake, gone otherwise.
+// turnErrorReply is the reply for a turn read the owner could not make:
+// starting during the handshake, gone once the session is, and unavailable
+// for anything else. Only a session that is gone may read as gone: a caller
+// takes that as the turn having ended.
 func turnErrorReply(err error) string {
-	if errors.Is(err, runtime.ErrSessionInitializing) {
+	switch {
+	case errors.Is(err, runtime.ErrSessionInitializing):
 		return replyStarting
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return replyGone
 	}
-	return replyGone
+	return replyUnavailable
 }

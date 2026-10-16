@@ -803,7 +803,13 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	// Set busy state BEFORE sendRequest so that dispatch can match the
 	// response ID and clear it. If we set it after, a fast agent could
 	// respond before setActivePrompt runs, leaving busy set permanently.
+	// stdinMu is held from opening the turn's record through writing its
+	// prompt: the record is published (ObserveTurn, TurnHistory, the turn
+	// event) from the moment it opens, and a session/cancel aimed at the
+	// turn must not reach the agent ahead of the prompt it cancels.
+	sc.stdinMu.Lock()
 	if !sc.setActivePrompt(id) {
+		sc.stdinMu.Unlock()
 		// The stdout reader has drained, so no response could settle this
 		// turn. An exiting agent keeps the best-effort nil contract. The bound
 		// is stopGrace() for the same reason the pipe-write branch below uses
@@ -820,7 +826,11 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 		}
 	}
 
-	ch, err := sc.sendRequest(msg)
+	if sc.afterPromptOpened != nil {
+		sc.afterPromptOpened()
+	}
+	ch, err := sc.sendRequestStdinLocked(msg)
+	sc.stdinMu.Unlock()
 	if err != nil {
 		sc.abandonPrompt(id, err)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with
