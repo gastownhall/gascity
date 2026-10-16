@@ -366,6 +366,39 @@ func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
 	}
 }
 
+// A rig config.yaml that cannot be read is no evidence of a pin. The run warns,
+// naming the file, and compacts the rig's database as it did before scopes were
+// classified: one unreadable file must not stop compaction of every database in
+// the city, the city's own included.
+func TestCompactScriptUnreadableRigConfigDoesNotAbortRun(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file mode")
+	}
+	fixture := newCompactScriptFixture(t)
+	rig := writeCompactRigScope(t, t.TempDir(), "rigdb", compactInheritedConfig("rg"))
+	configPath := filepath.Join(rig, ".beads", "config.yaml")
+	if err := os.Chmod(configPath, 0); err != nil {
+		t.Fatalf("make rig config unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0o644) })
+	installCompactRigListGC(t, fixture, rig)
+	serveOnlyCompactDatabases(t, fixture, "beads", "rigdb")
+
+	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+	if err != nil {
+		t.Fatalf("an unreadable rig config.yaml must not abort the run: %v\n%s", err, out)
+	}
+	if !strings.Contains(out, "db=beads commits=600") {
+		t.Fatalf("the city's own database was not reached:\n%s", out)
+	}
+	if log := readCompactDoltLog(t, fixture); !strings.Contains(log, "db=rigdb ") || strings.Contains(out, "db=rigdb scope=") {
+		t.Fatalf("with no readable endpoint evidence the rig's database is compacted as before:\n%s", out)
+	}
+	if !strings.Contains(out, "scope="+rig+" WARN: cannot read "+configPath) {
+		t.Fatalf("output must name the rig and the config.yaml it cannot read:\n%s", out)
+	}
+}
+
 // --only-db cannot reach a pinned rig's database through this server, with or
 // without a same-named copy here: the request is refused with a warning, and
 // the run still succeeds.

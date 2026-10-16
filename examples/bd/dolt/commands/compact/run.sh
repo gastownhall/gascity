@@ -685,11 +685,19 @@ compact_same_dolt_host() {
 #      loopback value there may be a stale copy of gc's own server, the rule
 #      bindingNamesForeignServer applies in Go.
 # Every other origin follows the city endpoint, and so does the city's scope.
+# A config.yaml that cannot be read is no evidence of a pin: warn and treat
+# the scope as following the city endpoint, rather than let set -e end the
+# whole run on one rig's file.
 scope_pinned_endpoint() {
   _spe_scope=$(dirname "$(dirname "$1")")
   [ "$_spe_scope" = "$GC_CITY_PATH" ] && return 0
   _spe_cfg="$(dirname "$1")/config.yaml"
-  case "$(beads_config_value "$_spe_cfg" gc.endpoint_origin)" in
+  if ! _spe_origin=$(beads_config_value "$_spe_cfg" gc.endpoint_origin); then
+    printf 'compact: scope=%s WARN: cannot read %s; its Dolt endpoint is unknown, so it is treated as following the city endpoint\n' \
+      "$_spe_scope" "$_spe_cfg" >&2
+    return 0
+  fi
+  case "$_spe_origin" in
     explicit)
       _spe_socket=$(beads_config_value "$_spe_cfg" dolt.socket)
       if [ -n "$_spe_socket" ]; then
