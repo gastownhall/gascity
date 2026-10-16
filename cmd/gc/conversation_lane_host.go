@@ -2,39 +2,49 @@ package main
 
 // The controller's conversation-lane host (DES-O1 §7): it runs
 // opjournal.ConversationLane passes for every conversation with open lane
-// ops, one worker goroutine per conversation (at most
-// laneHostMaxWorkers), each calling Pass serially with the live executor
+// ops, one worker per conversation (conversation_lane_worker.go) in at most
+// laneHostMaxWorkers slots, each calling Pass serially with the live executor
 // (conversation_lane_exec.go).
 //
 // Doorbells (DES-O1 §7.3) start or wake a conversation's worker: Poke for
 // in-process producers, the controller-socket verb lane:<conversation>[:<op>],
 // each worker's own timer at its PassResult.Next, and the anti-entropy scan
-// (opjournal.Store.OpenLaneConversations). With [ops] authoritative empty the
-// host runs one boot scan and starts no ticker, and no worker unless that
-// scan finds an open lane op; afterwards only a poke wakes it, so an idle city
-// pays one keyed scan per controller start. With a kind listed the scan runs
-// every laneHostScanInterval. The list is latched at controller start.
+// (opjournal.Store.OpenLaneConversations). The scan runs at boot, and then
+// every laneHostScanInterval while a kind is listed in [ops] authoritative or
+// the last scan found an open lane op, so with the list empty an idle city
+// pays one keyed scan per controller start, and lane ops already open after a
+// rollback still drain once whatever gate they wait on clears (DES-O1 §7.1,
+// §12). The list is latched at controller start.
+//
+// A worker holds its slot only while no other conversation waits for one and
+// its next pass is at most laneParkAfter away; otherwise it parks the
+// conversation on a timer, so neither long waits nor busy runtimes starve the
+// queue.
 //
 // The host runs whenever the sessions store can apply guarded batches,
-// whatever [ops] authoritative says, so lane ops already open drain after a
-// rollback (DES-O1 §12). A store that cannot keeps the host off: silently
-// with the list empty, and with a kind listed with one logged refusal
-// (errLaneStoreIncapable) that the conversation-lanes doctor check reports.
+// whatever [ops] authoritative says. A store that cannot keeps the host off:
+// silently with the list empty, and with a kind listed with one logged
+// refusal (errLaneStoreIncapable) that the conversation-lanes doctor check
+// reports. A sessions store that is missing (the city store did not open) is
+// not a refusal: the host waits for it, re-checking on the scan cadence.
 //
-// Reads go live (laneLiveSessions), writes and guarded batches go through the
-// sessions store, so the controller's cache and its event bridge see them.
-// Every pass runs as store work and is skipped while the city is quiescent.
-// The host emits no events of its own.
+// The view and the op rows are read live (laneLiveSessions); the executor
+// resolves the runtime through the controller's cached sessions store. Writes
+// and guarded batches go through the sessions store, so the controller's
+// cache and its event bridge see them. Every pass runs as store work and is
+// skipped while the city is quiescent. Failures are logged, rate-limited, and
+// counted in lane-status. The host emits no events of its own.
 
 import (
 	"context"
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"reflect"
 	"regexp"
 	"runtime/debug"
-	"sort"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -72,17 +82,25 @@ const (
 	laneErrBackoffCap   = time.Minute
 	// laneQuiescentRetry is how long a worker waits for a quiescent city.
 	laneQuiescentRetry = 30 * time.Second
-	// laneWakeRecheck and laneWakeHeldRecheck are how long a worker waits
-	// after asking for a wake before it passes again, recorded or held.
+	// laneWakeRecheck is how long a worker waits after recording a wake
+	// before it passes again; laneWakeHeldRecheck after a wake the row held,
+	// or refused because the row is not dormant.
 	laneWakeRecheck     = 5 * time.Second
 	laneWakeHeldRecheck = time.Minute
 	// laneParkAfter is the longest a worker holds its slot waiting for its
 	// next pass; a longer wait parks the conversation on a timer instead, so
 	// conversations whose ops wait for hours (not_live, a far not_before)
-	// cannot fill every slot.
+	// cannot fill every slot. With a conversation queued for a slot, any
+	// wait parks.
 	laneParkAfter = time.Minute
-	// laneStatusIDs caps the quarantined ids the status lists.
+	// laneStatusIDs caps the quarantined ids, and the waiting conversations,
+	// the status lists.
 	laneStatusIDs = 8
+	// laneStatusWaits caps the waits the status lists per conversation.
+	laneStatusWaits = 4
+	// laneErrorLogInterval is how often one kind of failure is logged, as
+	// the op sweeper's degrade lines are.
+	laneErrorLogInterval = 10 * time.Minute
 )
 
 // Lane host states, as lane-status reports them.
@@ -90,6 +108,9 @@ const (
 	laneHostStateRunning = "running"
 	laneHostStateOff     = "off"
 	laneHostStateRefused = "refused"
+	// laneHostStateUnavailable is a host whose controller has no sessions
+	// store yet; it re-checks on the scan cadence.
+	laneHostStateUnavailable = "unavailable"
 	// laneHostStateNone is lane-status's answer when this controller holds
 	// no lane host for the city.
 	laneHostStateNone = "no_host"
@@ -120,11 +141,16 @@ func (e *laneStoreIncapableError) Error() string {
 // Is matches errLaneStoreIncapable.
 func (e *laneStoreIncapableError) Is(target error) bool { return target == errLaneStoreIncapable }
 
-// laneStoreCapability reports whether store can host conversation lanes,
-// and the typed refusal when it cannot.
+// errLaneStoreMissing is a controller with no sessions store: the city store
+// did not open. It is not a refusal; the host waits for the store.
+var errLaneStoreMissing = errors.New("the controller has no sessions store yet (the city store did not open); the lane host starts once it does")
+
+// laneStoreCapability reports whether store can host conversation lanes:
+// errLaneStoreMissing with no store, and the typed refusal for a store that
+// cannot apply guarded batches.
 func laneStoreCapability(store beads.Store) error {
 	if isNilBeadStore(store) {
-		return &laneStoreIncapableError{binding: "no store"}
+		return errLaneStoreMissing
 	}
 	if _, ok := beads.GuardedBatcherFor(beads.SessionStore{Store: store}); ok {
 		return nil
@@ -139,17 +165,25 @@ func laneStoreBinding(store beads.Store) string {
 		if _, ok := cur.(*beads.BdStore); ok {
 			return "the bd CLI (BdStore)"
 		}
-		t, ok := cur.(beads.ConditionalWritesResolveTargeter)
-		if !ok {
-			break
-		}
-		next := t.ConditionalWritesResolveTarget()
+		next := laneUnwrapStore(cur)
 		if isNilBeadStore(next) {
 			break
 		}
 		cur = next
 	}
 	return fmt.Sprintf("a store without guarded batches (%T)", cur)
+}
+
+// laneUnwrapStore is the store store wraps, nil when it wraps none: a
+// cache's backing, or a wrapper's conditional-writes target.
+func laneUnwrapStore(store beads.Store) beads.Store {
+	switch s := store.(type) {
+	case *beads.CachingStore:
+		return s.Backing()
+	case beads.ConditionalWritesResolveTargeter:
+		return s.ConditionalWritesResolveTarget()
+	}
+	return nil
 }
 
 // isNilBeadStore reports a nil store, or a nil pointer in a store interface.
@@ -161,8 +195,8 @@ func isNilBeadStore(s beads.Store) bool {
 	return v.Kind() == reflect.Pointer && v.IsNil()
 }
 
-// laneLiveSessions is the sessions store as the lane host reads it: Get and
-// List read live, past any cache, and every write and guarded batch goes
+// laneLiveSessions is the sessions store as the lane host reads the view
+// and the op rows: Get and List read live, past any cache, and every write and guarded batch goes
 // through the wrapped store, so the cache and its event bridge see them.
 // ConditionalWritesResolveTarget returns the wrapped store, so the op store
 // still finds its conditional writes and id prefix.
@@ -216,9 +250,10 @@ type conversationLaneHost struct {
 	// newExec builds a pass's executor; production is the live executor.
 	newExec func(laneExecDeps, session.Info) opjournal.Executor
 	logf    func(format string, args ...any)
-	// onPass and onWorkerExit are test seams: each pass's outcome, and each
-	// worker's exit. Nil in production.
+	// onPass, onReprobe and onWorkerExit are test seams: each pass's
+	// outcome, each re-probe, and each worker's exit. Nil in production.
 	onPass       func(conv string, out lanePassOutcome)
+	onReprobe    func(conv string, stillBusy bool)
 	onWorkerExit func(conv string)
 
 	ctx context.Context
@@ -233,20 +268,36 @@ type conversationLaneHost struct {
 	workers map[string]*laneWorker
 	queued  []string
 	inQueue map[string]bool
-	// parked holds the stop of each parked conversation's timer.
-	parked map[string]chan struct{}
+	// parked holds each parked conversation's timer stop and the state its
+	// next worker starts from.
+	parked map[string]*laneParked
+	// logged is when each kind of failure was last logged.
+	logged map[string]time.Time
 	// status counters
-	passes      int64
-	passErrors  int64
-	lastPass    time.Time
-	lastErr     string
-	quarantined map[string][]string
-	tickers     int
+	passes   int64
+	reprobes int64
+	// passErrors counts every failure; sinceSuccess those since the last
+	// pass that succeeded, and lastFailed whether the last pass failed.
+	passErrors   int64
+	sinceSuccess int64
+	lastFailed   bool
+	lastPass     time.Time
+	lastSuccess  time.Time
+	lastErr      string
+	quarantined  map[string][]string
+	waits        map[string]laneConversationWaits
+	tickers      int
 }
 
-// laneWorker is one conversation's worker; poke wakes it.
+// laneWorker is one conversation's slot; poke wakes its worker.
 type laneWorker struct {
 	poke chan struct{}
+}
+
+// laneParked is one parked conversation.
+type laneParked struct {
+	stop  chan struct{}
+	state laneWorkerState
 }
 
 // newConversationLaneHost builds the host over env, latching kinds.
@@ -271,8 +322,10 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 		logf:        log.Printf,
 		workers:     map[string]*laneWorker{},
 		inQueue:     map[string]bool{},
-		parked:      map[string]chan struct{}{},
+		parked:      map[string]*laneParked{},
+		logged:      map[string]time.Time{},
 		quarantined: map[string][]string{},
+		waits:       map[string]laneConversationWaits{},
 	}
 }
 
@@ -289,13 +342,29 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 }
 
 // start decides whether the host runs, publishes it for the city's socket
-// verbs, and starts the scan loop when it runs.
+// verbs, and starts the scan loop unless the host is off or refused.
 func (h *conversationLaneHost) start(ctx context.Context) {
 	h.mu.Lock()
 	h.ctx = ctx
-	switch err := laneStoreCapability(h.env.SessionsBeadStore().Store); {
+	h.mu.Unlock()
+	state := h.decide()
+	registerLaneHost(ctx, h.env.CityPath(), h)
+	if state == laneHostStateRunning || state == laneHostStateUnavailable {
+		h.wg.Add(1)
+		go h.run()
+	}
+}
+
+// decide sets the host's state from the current sessions store, logging a
+// refusal, and returns it.
+func (h *conversationLaneHost) decide() string {
+	err := laneStoreCapability(h.env.SessionsBeadStore().Store)
+	h.mu.Lock()
+	switch {
 	case err == nil:
-		h.state = laneHostStateRunning
+		h.state, h.reason = laneHostStateRunning, ""
+	case errors.Is(err, errLaneStoreMissing):
+		h.state, h.reason = laneHostStateUnavailable, err.Error()
 	case len(h.kinds) > 0:
 		h.state, h.reason = laneHostStateRefused, err.Error()
 	default:
@@ -303,21 +372,17 @@ func (h *conversationLaneHost) start(ctx context.Context) {
 	}
 	state, reason := h.state, h.reason
 	h.mu.Unlock()
-	registerLaneHost(ctx, h.env.CityPath(), h)
-	switch state {
-	case laneHostStateRefused:
+	if state == laneHostStateRefused {
 		h.logf("conversation-lanes: not started: %s", reason)
-	case laneHostStateRunning:
-		h.wg.Add(1)
-		go h.run()
 	}
+	return state
 }
 
-// run is the anti-entropy loop: a boot scan, then a scan every scanInterval
-// while a kind is listed or the last scan left work.
+// run is the anti-entropy loop: a boot step, then one step every
+// scanInterval while a step says another is owed.
 func (h *conversationLaneHost) run() {
 	defer h.wg.Done()
-	if !h.scan() && len(h.kinds) == 0 {
+	if !h.step() {
 		return
 	}
 	ticks, stop := h.newTicker(h.scanInterval)
@@ -330,16 +395,35 @@ func (h *conversationLaneHost) run() {
 		case <-h.ctx.Done():
 			return
 		case <-ticks:
-			if !h.scan() && len(h.kinds) == 0 {
+			if !h.step() {
 				return
 			}
 		}
 	}
 }
 
+// step is one turn of the loop: an unavailable host re-checks its store, a
+// running one scans. It reports whether another turn is owed: the host is
+// still waiting for its store, a kind is listed, or the scan left work.
+func (h *conversationLaneHost) step() bool {
+	state, _ := h.stateReason()
+	if state == laneHostStateUnavailable {
+		state = h.decide()
+	}
+	switch state {
+	case laneHostStateUnavailable:
+		return true
+	case laneHostStateRunning:
+		return h.scan() || len(h.kinds) > 0
+	default:
+		return false
+	}
+}
+
 // scan pokes every conversation with an open lane op, and reports whether a
-// later scan is owed: the city was quiescent, the read failed, or it was
-// truncated.
+// later scan is owed: it found an open lane op (one whose gate clears with no
+// doorbell of its own still drains), the city was quiescent, or the read
+// failed or was truncated.
 func (h *conversationLaneHost) scan() (left bool) {
 	defer h.env.beginStoreWork()()
 	defer func() {
@@ -353,18 +437,18 @@ func (h *conversationLaneHost) scan() (left bool) {
 	}
 	st, _, err := h.store()
 	if err != nil {
-		h.noteError(err)
+		h.noteError("store", err)
 		return true
 	}
 	convs, truncated, err := st.OpenLaneConversations(laneHostScanLimit)
 	if err != nil {
-		h.noteError(err)
+		h.noteError("scan", err)
 		return true
 	}
 	for _, conv := range convs {
 		h.Poke(conv)
 	}
-	return truncated
+	return truncated || len(convs) > 0
 }
 
 // Poke asks for a pass over conversation conv, starting its worker when it
@@ -393,17 +477,24 @@ func (h *conversationLaneHost) Poke(conv string) bool {
 	return true
 }
 
-// startWorkerLocked starts conv's worker. The caller holds h.mu.
+// startWorkerLocked starts conv's worker, from its parked state when it is
+// parked, whose timer it stops. The caller holds h.mu.
 func (h *conversationLaneHost) startWorkerLocked(conv string) {
+	var state laneWorkerState
+	if p := h.parked[conv]; p != nil {
+		close(p.stop)
+		delete(h.parked, conv)
+		state = p.state
+	}
 	w := &laneWorker{poke: make(chan struct{}, 1)}
 	h.workers[conv] = w
 	h.wg.Add(1)
-	go h.runWorker(conv, w)
+	go h.runWorker(conv, w, state)
 }
 
-// retire removes conv's worker unless a poke arrived since its last pass,
-// and starts the next queued conversation in its slot. It reports whether
-// the worker must exit.
+// retire removes conv's worker unless force is false and a poke arrived
+// since its last pass, and starts the next queued conversation in its slot.
+// It reports whether the worker must exit.
 func (h *conversationLaneHost) retire(conv string, w *laneWorker, force bool) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -428,15 +519,28 @@ func (h *conversationLaneHost) retire(conv string, w *laneWorker, force bool) bo
 	return true
 }
 
-// park pokes conv again after d without holding a worker slot. A newer park
-// of conv replaces an older one.
-func (h *conversationLaneHost) park(conv string, d time.Duration) {
-	stop := make(chan struct{})
+// yield is the host's slot policy: a worker gives up its slot for a wait
+// longer than laneParkAfter, and for any wait while another conversation is
+// queued for a slot.
+func (h *conversationLaneHost) yield(d time.Duration) bool {
+	if d > laneParkAfter {
+		return true
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return d > 0 && len(h.queued) > 0
+}
+
+// park pokes conv again after d without holding a worker slot, keeping st
+// for its next worker. A newer park of conv replaces an older one, and a
+// worker started for conv first stops it.
+func (h *conversationLaneHost) park(conv string, d time.Duration, st laneWorkerState) {
+	p := &laneParked{stop: make(chan struct{}), state: st}
 	h.mu.Lock()
 	if old := h.parked[conv]; old != nil {
-		close(old)
+		close(old.stop)
 	}
-	h.parked[conv] = stop
+	h.parked[conv] = p
 	h.wg.Add(1)
 	h.mu.Unlock()
 	fire, stopTimer := h.newTimer(d)
@@ -446,82 +550,46 @@ func (h *conversationLaneHost) park(conv string, d time.Duration) {
 		select {
 		case <-h.ctx.Done():
 			return
-		case <-stop:
+		case <-p.stop:
 			return
 		case <-fire:
 		}
-		h.mu.Lock()
-		if h.parked[conv] == stop {
-			delete(h.parked, conv)
-		}
-		h.mu.Unlock()
 		h.Poke(conv)
 	}()
 }
 
-// laneWorkerState is what a worker carries from pass to pass.
-type laneWorkerState struct {
-	busySince time.Time
-	errors    int
-}
-
-// runWorker passes over conv until nothing is left to do, then exits.
-func (h *conversationLaneHost) runWorker(conv string, w *laneWorker) {
+// runWorker serves conv in its slot until the worker exits.
+func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneWorkerState) {
 	defer h.wg.Done()
 	if h.onWorkerExit != nil {
 		defer h.onWorkerExit(conv)
 	}
-	var ws laneWorkerState
-	for {
-		out := h.pass(conv)
-		if h.onPass != nil {
-			h.onPass(conv, out)
-		}
-		delay, idle := h.nextDelay(out, &ws)
-		if idle || delay > laneParkAfter {
-			if h.retire(conv, w, false) {
-				if !idle {
-					h.park(conv, delay)
+	cw := &conversationLaneWorker{
+		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state,
+		hooks: laneWorkerHooks{
+			pass:    func() lanePassOutcome { return h.pass(conv) },
+			yield:   h.yield,
+			release: func(force bool) bool { return h.retire(conv, w, force) },
+			park:    func(d time.Duration, st laneWorkerState) { h.park(conv, d, st) },
+			onPass: func(out lanePassOutcome) {
+				if h.onPass != nil {
+					h.onPass(conv, out)
 				}
-				return
-			}
-			continue
-		}
-		if !h.wait(w, delay) {
-			h.retire(conv, w, true)
-			return
-		}
+			},
+			onReprobe: func(still bool) {
+				if h.onReprobe != nil {
+					h.onReprobe(conv, still)
+				}
+			},
+		},
 	}
+	cw.run()
 }
 
-// wait sleeps for d, or until a poke; it reports false when the host ends.
-func (h *conversationLaneHost) wait(w *laneWorker, d time.Duration) bool {
-	if d <= 0 {
-		select {
-		case <-h.ctx.Done():
-			return false
-		default:
-			return true
-		}
-	}
-	fire, stop := h.newTimer(d)
-	defer stop()
-	select {
-	case <-h.ctx.Done():
-		return false
-	case <-w.poke:
-		return true
-	case <-fire:
-		return true
-	}
-}
-
-// lanePassOutcome is one worker pass.
-type lanePassOutcome struct {
-	res     opjournal.PassResult
-	err     error
-	skipped bool
-	wake    session.WakeRequestOutcome
+// laneReprober is an executor that can look at the runtime again without
+// reading any row (conversationLaneExec.Reprobe).
+type laneReprober interface {
+	Reprobe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error)
 }
 
 // pass runs one pass over conv as store work, recovering a panic; a
@@ -532,7 +600,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		if r := recover(); r != nil {
 			out = lanePassOutcome{err: fmt.Errorf("pass over %s panicked: %v", conv, r)}
 			h.logf("conversation-lanes: pass over %s panicked: %v\n%s", conv, r, debug.Stack())
-			h.noteError(out.err)
+			h.notePass(conv, opjournal.PassResult{}, out.err)
 		}
 	}()
 	if h.env.storesQuiescent() {
@@ -540,20 +608,23 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 	}
 	st, lane, err := h.store()
 	if err != nil {
-		h.noteError(err)
+		h.noteError("store", err)
 		return lanePassOutcome{err: err}
 	}
 	sessions := h.env.SessionsBeadStore().Store
-	view, info, err := readConversationLaneView(sessionFrontDoor(laneLiveSessions{Store: sessions}), conv)
+	view, info, absent, err := readConversationLaneView(sessionFrontDoor(laneLiveSessions{Store: sessions}), conv)
 	if err != nil {
 		err = fmt.Errorf("reading conversation %s: %w", conv, err)
-		h.noteError(err)
+		h.notePass(conv, opjournal.PassResult{}, err)
 		return lanePassOutcome{err: err}
+	}
+	if absent {
+		h.logf("conversation-lanes: conversation %s has no session row on two reads; its open ops close as skipped{conversation_closed}", conv)
 	}
 	exec := h.newExec(laneExecDeps{
 		cityPath: h.env.CityPath(),
 		cfg:      h.env.Config(),
-		sessions: laneLiveSessions{Store: sessions},
+		sessions: sessions,
 		sp:       h.env.SessionProvider(),
 		lane:     st,
 		clk:      h.clk,
@@ -562,87 +633,54 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 	h.notePass(conv, res, err)
 	out = lanePassOutcome{res: res, err: err}
 	if err == nil && res.Wake && !view.Closed {
-		out.wake = h.requestWake(sessions, conv)
+		out.wake, out.wakeErr = h.requestWake(sessions, conv)
+		h.noteWake(conv, out.wake)
+	}
+	if rp, ok := exec.(laneReprober); ok && err == nil && res.Busy && !res.Wake {
+		out.reprobe = func() bool { return h.reprobe(conv, view, rp) }
 	}
 	return out
+}
+
+// reprobe looks at conv's busy runtime again through rp as store work, and
+// reports whether it is still busy. A quiescent city, a failure or a panic
+// is not still busy: the worker's next full pass sees what changed.
+func (h *conversationLaneHost) reprobe(conv string, view opjournal.ConversationView, rp laneReprober) (still bool) {
+	defer h.env.beginStoreWork()()
+	defer func() {
+		if r := recover(); r != nil {
+			h.logf("conversation-lanes: re-probe of %s panicked: %v\n%s", conv, r, debug.Stack())
+			still = false
+		}
+	}()
+	if h.env.storesQuiescent() {
+		return false
+	}
+	h.mu.Lock()
+	h.reprobes++
+	h.mu.Unlock()
+	p, err := rp.Reprobe(h.ctx, view)
+	if err != nil {
+		h.noteError("reprobe", fmt.Errorf("re-probing conversation %s: %w", conv, err))
+		return false
+	}
+	return laneProbeStillBusy(p)
 }
 
 // requestWake asks for conv's wake (DES-O1 §7.4) and, when one is recorded,
 // asks the controller to reconcile the session now. A held row keeps its op
 // waiting.
-func (h *conversationLaneHost) requestWake(sessions beads.Store, conv string) session.WakeRequestOutcome {
+func (h *conversationLaneHost) requestWake(sessions beads.Store, conv string) (session.WakeRequestOutcome, error) {
 	outcome, err := sessionFrontDoor(sessions).RequestWakeUnlessHeld(conv, false, h.clk.Now().UTC())
 	if err != nil {
-		h.noteError(fmt.Errorf("requesting a wake of %s: %w", conv, err))
-		return 0
+		err = fmt.Errorf("requesting a wake of %s: %w", conv, err)
+		h.noteError("wake", err)
+		return 0, err
 	}
 	if outcome == session.WakeRecorded {
 		h.env.Enqueue(reconcilekey.Allocator(), reconcilekey.Session(conv))
 	}
-	return outcome
-}
-
-// nextDelay is how long a worker waits after out, or idle when nothing it
-// can see will change by itself.
-func (h *conversationLaneHost) nextDelay(out lanePassOutcome, ws *laneWorkerState) (time.Duration, bool) {
-	now := h.clk.Now()
-	switch {
-	case out.skipped:
-		return laneQuiescentRetry, false
-	case out.err != nil:
-		ws.errors++
-		d := laneErrBackoffStart << min(ws.errors-1, 10)
-		return min(d, laneErrBackoffCap), false
-	}
-	ws.errors = 0
-	res := out.res
-	// A pass that took something planned its waits and Next before the
-	// Take moved the conversation: pass again at once to re-plan.
-	if res.More || res.Took != opjournal.TakeNone {
-		return 0, false
-	}
-	var delay time.Duration
-	have := false
-	take := func(d time.Duration) {
-		if !have || d < delay {
-			delay, have = max(d, 0), true
-		}
-	}
-	if res.Busy || laneWaitsFor(res, opjournal.WaitUnavailable) {
-		if ws.busySince.IsZero() {
-			ws.busySince = now
-		}
-		switch since := now.Sub(ws.busySince); {
-		case since < laneBusyFirstFor:
-			take(laneBusyFirst)
-		case since < laneBusyNextFor:
-			take(laneBusyNext)
-		default:
-			take(laneBusyMax)
-		}
-	} else {
-		ws.busySince = time.Time{}
-	}
-	switch {
-	case out.wake == session.WakeHeld:
-		take(laneWakeHeldRecheck)
-	case res.Wake:
-		take(laneWakeRecheck)
-	}
-	if !res.Next.IsZero() {
-		take(res.Next.Sub(now))
-	}
-	return delay, !have
-}
-
-// laneWaitsFor reports whether any op of res waits for reason r.
-func laneWaitsFor(res opjournal.PassResult, r opjournal.WaitReason) bool {
-	for _, w := range res.Waits {
-		if w.Reason == r {
-			return true
-		}
-	}
-	return false
+	return outcome, nil
 }
 
 // store returns the cached op store and lane, opening them over the current
@@ -667,12 +705,12 @@ func (h *conversationLaneHost) store() (*opjournal.Store, *opjournal.Conversatio
 	return st, lane, nil
 }
 
-// notePass records a pass in the status.
+// notePass records a pass in the status, and logs a failed one.
 func (h *conversationLaneHost) notePass(conv string, res opjournal.PassResult, err error) {
+	now := h.clk.Now()
 	h.mu.Lock()
-	defer h.mu.Unlock()
 	h.passes++
-	h.lastPass = h.clk.Now()
+	h.lastPass = now
 	if len(res.Quarantined) > 0 {
 		ids := make([]string, len(res.Quarantined))
 		for i, q := range res.Quarantined {
@@ -682,18 +720,100 @@ func (h *conversationLaneHost) notePass(conv string, res opjournal.PassResult, e
 	} else if err == nil {
 		delete(h.quarantined, conv)
 	}
+	if err == nil {
+		h.lastSuccess, h.lastFailed, h.sinceSuccess = now, false, 0
+		if len(res.Waits) > 0 {
+			h.waits[conv] = laneWaitsStatus(conv, res.Waits)
+		} else {
+			delete(h.waits, conv)
+		}
+	}
+	h.mu.Unlock()
 	if err != nil {
-		h.passErrors++
-		h.lastErr = err.Error()
+		h.noteFailure("pass", err, true)
 	}
 }
 
-// noteError records a failure outside a pass.
-func (h *conversationLaneHost) noteError(err error) {
+// noteWake records the answer to conv's wake request beside its waits.
+func (h *conversationLaneHost) noteWake(conv string, outcome session.WakeRequestOutcome) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if w, ok := h.waits[conv]; ok {
+		w.Wake = laneWakeName(outcome)
+		h.waits[conv] = w
+	}
+}
+
+// noteError records and logs a failure outside a pass.
+func (h *conversationLaneHost) noteError(stage string, err error) {
+	h.noteFailure(stage, err, false)
+}
+
+// noteFailure records a failure in the status, and logs it at most once per
+// laneErrorLogInterval per stage.
+func (h *conversationLaneHost) noteFailure(stage string, err error, pass bool) {
+	now := h.clk.Now()
+	h.mu.Lock()
 	h.passErrors++
+	h.sinceSuccess++
 	h.lastErr = err.Error()
+	if pass {
+		h.lastFailed = true
+	}
+	due := true
+	if last, seen := h.logged[stage]; seen && now.Before(last.Add(laneErrorLogInterval)) {
+		due = false
+	} else {
+		h.logged[stage] = now
+	}
+	h.mu.Unlock()
+	if due {
+		h.logf("conversation-lanes: %s failed: %v", stage, err)
+	}
+}
+
+// laneConversationWaits is one conversation's waits in the status: why its
+// ops wait after its last pass, and the answer to the wake it asked for.
+type laneConversationWaits struct {
+	Conversation string           `json:"conversation"`
+	Waits        []laneOpWaitNote `json:"waits"`
+	// Wake is recorded, held or not_dormant, "" when the pass asked none.
+	Wake string `json:"wake,omitempty"`
+}
+
+// laneOpWaitNote is one op's wait.
+type laneOpWaitNote struct {
+	Op     string `json:"op"`
+	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
+	Until  string `json:"until,omitempty"`
+}
+
+// laneWaitsStatus is conv's waits as the status lists them, at most
+// laneStatusWaits.
+func laneWaitsStatus(conv string, waits []opjournal.OpWait) laneConversationWaits {
+	out := laneConversationWaits{Conversation: conv}
+	for _, w := range waits[:min(len(waits), laneStatusWaits)] {
+		n := laneOpWaitNote{Op: w.ID, Reason: string(w.Reason), Detail: w.Detail}
+		if !w.Until.IsZero() {
+			n.Until = w.Until.UTC().Format(time.RFC3339)
+		}
+		out.Waits = append(out.Waits, n)
+	}
+	return out
+}
+
+// laneWakeName names a wake request's answer.
+func laneWakeName(o session.WakeRequestOutcome) string {
+	switch o {
+	case session.WakeRecorded:
+		return "recorded"
+	case session.WakeHeld:
+		return "held"
+	case session.WakeNotDormant:
+		return "not_dormant"
+	}
+	return ""
 }
 
 // conversationLaneStatus is the lane host's status, the lane-status verb's
@@ -703,20 +823,32 @@ type conversationLaneStatus struct {
 	Reason string   `json:"reason,omitempty"`
 	Kinds  []string `json:"kinds,omitempty"`
 	// Workers are the conversations being served; Queued wait for a slot;
-	// Parked wait on a timer longer than a worker holds its slot.
-	Workers int   `json:"workers"`
-	Queued  int   `json:"queued"`
-	Parked  int   `json:"parked"`
-	Passes  int64 `json:"passes"`
-	// LastPassAt is the last pass's time, "" before the first.
-	LastPassAt    string `json:"last_pass_at,omitempty"`
-	LastPassAgeMS int64  `json:"last_pass_age_ms,omitempty"`
-	Errors        int64  `json:"errors"`
-	LastError     string `json:"last_error,omitempty"`
+	// Parked wait on a timer without one.
+	Workers  int   `json:"workers"`
+	Queued   int   `json:"queued"`
+	Parked   int   `json:"parked"`
+	Passes   int64 `json:"passes"`
+	Reprobes int64 `json:"reprobes"`
+	// LastPassAt is the last pass's time, "" before the first;
+	// LastSuccessAt the last pass that succeeded.
+	LastPassAt       string `json:"last_pass_at,omitempty"`
+	LastPassAgeMS    int64  `json:"last_pass_age_ms,omitempty"`
+	LastSuccessAt    string `json:"last_success_at,omitempty"`
+	LastSuccessAgeMS int64  `json:"last_success_age_ms,omitempty"`
+	// LastPassFailed reports that the last pass failed; ErrorsSinceSuccess
+	// counts the failures, of passes and of scans, wake requests and row
+	// refreshes, since the last pass that succeeded.
+	LastPassFailed     bool   `json:"last_pass_failed,omitempty"`
+	Errors             int64  `json:"errors"`
+	ErrorsSinceSuccess int64  `json:"errors_since_success"`
+	LastError          string `json:"last_error,omitempty"`
 	// Quarantined counts the op rows the last pass of each conversation
 	// could not decode; QuarantinedIDs lists the first few.
 	Quarantined    int      `json:"quarantined"`
 	QuarantinedIDs []string `json:"quarantined_ids,omitempty"`
+	// Waiting lists, for the first few conversations in id order, why
+	// their ops wait after their last pass.
+	Waiting []laneConversationWaits `json:"waiting,omitempty"`
 }
 
 // status reads the host's status at now.
@@ -725,19 +857,18 @@ func (h *conversationLaneHost) status(now time.Time) conversationLaneStatus {
 	defer h.mu.Unlock()
 	st := conversationLaneStatus{
 		State: h.state, Reason: h.reason, Kinds: append([]string(nil), h.kinds...),
-		Workers: len(h.workers), Queued: len(h.queued), Parked: len(h.parked), Passes: h.passes,
-		Errors: h.passErrors, LastError: h.lastErr,
+		Workers: len(h.workers), Queued: len(h.queued), Parked: len(h.parked), Passes: h.passes, Reprobes: h.reprobes,
+		LastPassFailed: h.lastFailed, Errors: h.passErrors, ErrorsSinceSuccess: h.sinceSuccess, LastError: h.lastErr,
 	}
 	if !h.lastPass.IsZero() {
 		st.LastPassAt = h.lastPass.UTC().Format(time.RFC3339Nano)
 		st.LastPassAgeMS = max(now.Sub(h.lastPass).Milliseconds(), 0)
 	}
-	convs := make([]string, 0, len(h.quarantined))
-	for conv := range h.quarantined {
-		convs = append(convs, conv)
+	if !h.lastSuccess.IsZero() {
+		st.LastSuccessAt = h.lastSuccess.UTC().Format(time.RFC3339Nano)
+		st.LastSuccessAgeMS = max(now.Sub(h.lastSuccess).Milliseconds(), 0)
 	}
-	sort.Strings(convs)
-	for _, conv := range convs {
+	for _, conv := range slices.Sorted(maps.Keys(h.quarantined)) {
 		ids := h.quarantined[conv]
 		st.Quarantined += len(ids)
 		for _, id := range ids {
@@ -745,6 +876,12 @@ func (h *conversationLaneHost) status(now time.Time) conversationLaneStatus {
 				st.QuarantinedIDs = append(st.QuarantinedIDs, id)
 			}
 		}
+	}
+	for _, conv := range slices.Sorted(maps.Keys(h.waits)) {
+		if len(st.Waiting) == laneStatusIDs {
+			break
+		}
+		st.Waiting = append(st.Waiting, h.waits[conv])
 	}
 	return st
 }
@@ -837,7 +974,7 @@ func (h *conversationLaneHost) refreshRow(id string) {
 		return
 	}
 	if _, err := cache.RefreshRow(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-		h.noteError(fmt.Errorf("refreshing op %s: %w", id, err))
+		h.noteError("refresh", fmt.Errorf("refreshing op %s: %w", id, err))
 	}
 }
 

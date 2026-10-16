@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -37,6 +38,11 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 	quarantined.Quarantined, quarantined.QuarantinedIDs = 2, []string{"gc-op-a", "gc-op-b"}
 	stale := running
 	stale.Kinds = nil
+	failing := running
+	failing.LastPassFailed, failing.ErrorsSinceSuccess, failing.LastError = true, 3, "probing conversation gc-1: runtime exploded"
+	failing.LastSuccessAt, failing.LastSuccessAgeMS = "2026-10-16T11:00:00Z", 3600000
+	scanFailing := running
+	scanFailing.ErrorsSinceSuccess = 2
 	for _, tc := range []struct {
 		name     string
 		kinds    []string
@@ -58,6 +64,9 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 		{name: "running", kinds: []string{"message"}, store: mem, st: running, status: doctor.StatusOK, want: "last pass 4s ago", opens: 1},
 		{name: "quarantined", kinds: []string{"message"}, store: mem, st: quarantined, status: doctor.StatusWarning, want: "2 op row(s) this gc cannot decode", opens: 1},
 		{name: "list changed since start", kinds: []string{"message"}, store: mem, st: stale, status: doctor.StatusWarning, want: "until its next start", opens: 1},
+		{name: "last pass failed", kinds: []string{"message"}, store: mem, st: failing, status: doctor.StatusWarning, want: "last pass 4s ago, last success 1h0m0s ago: the last pass failed", opens: 1},
+		{name: "failures since success", kinds: []string{"message"}, store: mem, st: scanFailing, status: doctor.StatusWarning, want: "2 failure(s) since the last pass that succeeded", opens: 1},
+		{name: "store missing", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateUnavailable, Reason: errLaneStoreMissing.Error()}, status: doctor.StatusWarning, want: "waits for the controller's sessions store", opens: 1},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, opened := newConversationLanesCheckForTest(tc.kinds, tc.store, tc.st, tc.queryErr)
@@ -72,6 +81,24 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 				t.Fatal("an error carries no remedy")
 			}
 		})
+	}
+}
+
+// TestConversationLanesDoctorHints pins the no-host remedy to the standalone
+// controller's start, and the waits a running host reports to its details.
+func TestConversationLanesDoctorHints(t *testing.T) {
+	c, _ := newConversationLanesCheckForTest([]string{"message"}, newLaneTestStore(), conversationLaneStatus{State: laneHostStateNone}, nil)
+	if r := c.Run(&doctor.CheckContext{CityPath: "/city"}); !strings.Contains(r.FixHint, "`gc start --foreground`") {
+		t.Fatalf("no-host hint = %q, want the standalone controller's start", r.FixHint)
+	}
+	st := conversationLaneStatus{State: laneHostStateRunning, Kinds: []string{"message"}, Waiting: []laneConversationWaits{{
+		Conversation: "gc-1", Wake: "held",
+		Waits: []laneOpWaitNote{{Op: "gc-op-1", Reason: "content_block", Detail: "held"}},
+	}}}
+	c, _ = newConversationLanesCheckForTest([]string{"message"}, newLaneTestStore(), st, nil)
+	r := c.Run(&doctor.CheckContext{CityPath: "/city"})
+	if r.Status != doctor.StatusOK || !slices.Contains(r.Details, "conversation gc-1 waits: gc-op-1 content_block (held); wake held") {
+		t.Fatalf("Run = %v details %q, want OK with the wait detail", r.Status, r.Details)
 	}
 }
 
