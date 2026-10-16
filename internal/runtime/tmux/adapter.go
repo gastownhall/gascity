@@ -2069,10 +2069,24 @@ func launchOrchestration(ctx context.Context, ops startOps, name string, cfg run
 	}
 
 	// Step 6.5: Run session_live commands (idempotent, re-applicable).
+	//
+	// The nudge above is warning-only, but each confirm poll is a tmux
+	// capture that does not watch ctx. Under load those polls consume the
+	// parent deadline after the nudge was already classified unconfirmed.
+	// Returning that deadline fails Start, and Provider.Start then tears
+	// down a session that is still alive. Treat it like a ready-probe
+	// deadline: keep going when the session survived. A real cancel, or a
+	// deadline whose session has already died, still fails the start.
+	// The kept session still gets its session_live commands: they run
+	// detached from the lapsed deadline, each bounded by setupTimeout.
+	liveCtx := ctx
 	if err := ctx.Err(); err != nil {
-		return err
+		if err := ignoreDeadlineIfSessionAlive(ops, name, err); err != nil {
+			return err
+		}
+		liveCtx = context.WithoutCancel(ctx)
 	}
-	runSessionLive(ctx, ops, name, cfg, os.Stderr, setupTimeout)
+	runSessionLive(liveCtx, ops, name, cfg, os.Stderr, setupTimeout)
 
 	return nil
 }
