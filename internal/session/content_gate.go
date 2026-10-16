@@ -40,7 +40,7 @@ const (
 // field for them. In that window content can start a turn in a session v2 is
 // about to drain, so I7 holds here only from state=draining on, until the
 // session package owns a "stop requested at generation g" predicate this
-// gate can call.
+// gate can call (ga-f35wnp, due before a lane producer lands).
 func ContentGate(info Info, running bool, now time.Time) string {
 	state := State(strings.TrimSpace(info.MetadataState))
 	switch {

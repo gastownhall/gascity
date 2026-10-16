@@ -2492,6 +2492,7 @@ func startOneCity(
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
 		cs.startOpSweep(cityCtx)
+		warnSupervisorLaneHostGap(stderr, cityName, path, cfg)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})

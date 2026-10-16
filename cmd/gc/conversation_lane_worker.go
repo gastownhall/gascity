@@ -34,6 +34,10 @@ type lanePassOutcome struct {
 type laneWorkerState struct {
 	busySince time.Time
 	errors    int
+	// wokeAt is when a pass last recorded a wake. A take, a pass that
+	// waits on anything but the woken session's start, or startFor passing
+	// clears it.
+	wokeAt time.Time
 }
 
 // laneWorkerHooks are what a host supplies to a conversation's worker.
@@ -63,6 +67,9 @@ type conversationLaneWorker struct {
 	poke     <-chan struct{}
 	hooks    laneWorkerHooks
 	state    laneWorkerState
+	// startFor is how long a woken session may take to start: the city's
+	// [session] startup_timeout.
+	startFor time.Duration
 }
 
 // laneWaitEnd is how a worker's wait ended.
@@ -163,7 +170,7 @@ func (w *conversationLaneWorker) nextDelay(out lanePassOutcome) (time.Duration, 
 	// Take moved the conversation: pass again at once to re-plan. A take
 	// also ends the busy stretch, so the next turn's backoff starts over.
 	if res.Took != opjournal.TakeNone {
-		ws.busySince = time.Time{}
+		ws.busySince, ws.wokeAt = time.Time{}, time.Time{}
 	}
 	if res.More || res.Took != opjournal.TakeNone {
 		return 0, false
@@ -191,13 +198,21 @@ func (w *conversationLaneWorker) nextDelay(out lanePassOutcome) (time.Duration, 
 		ws.busySince = time.Time{}
 	}
 	// Only a recorded wake is worth a quick look: the reconciler is about
-	// to start the session. A held row, or one that is not dormant (a crash
-	// not yet healed, a failed create), changes on no schedule of ours.
-	switch out.wake {
-	case session.WakeRecorded:
+	// to start the session, and a look that finds it still starting asks
+	// for no wake, so the looks stay quick until startFor after the wake.
+	// A held row, or one that is not dormant (a crash not yet healed, a
+	// failed create), changes on no schedule of ours.
+	switch {
+	case out.wake == session.WakeRecorded:
+		ws.wokeAt = now
 		take(laneWakeRecheck)
-	case session.WakeHeld, session.WakeNotDormant:
+	case out.wake == session.WakeHeld, out.wake == session.WakeNotDormant:
+		ws.wokeAt = time.Time{}
 		take(laneWakeHeldRecheck)
+	case !ws.wokeAt.IsZero() && now.Sub(ws.wokeAt) < w.startFor && laneWaitsForStart(res):
+		take(laneWakeRecheck)
+	default:
+		ws.wokeAt = time.Time{}
 	}
 	if !res.Next.IsZero() {
 		take(res.Next.Sub(now))
@@ -209,6 +224,17 @@ func (w *conversationLaneWorker) nextDelay(out lanePassOutcome) (time.Duration, 
 func laneWaitsFor(res opjournal.PassResult, r opjournal.WaitReason) bool {
 	for _, w := range res.Waits {
 		if w.Reason == r {
+			return true
+		}
+	}
+	return false
+}
+
+// laneWaitsForStart reports whether an op of res waits for its session to
+// finish starting (a content_block wait for session.ContentGateStarting).
+func laneWaitsForStart(res opjournal.PassResult) bool {
+	for _, w := range res.Waits {
+		if w.Reason == opjournal.WaitContentBlock && w.Detail == session.ContentGateStarting {
 			return true
 		}
 	}

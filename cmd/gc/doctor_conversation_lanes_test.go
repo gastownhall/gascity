@@ -84,12 +84,14 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 	}
 }
 
-// TestConversationLanesDoctorHints pins the no-host remedy to the standalone
-// controller's start, and the waits a running host reports to its details.
+// TestConversationLanesDoctorHints pins the no-host remedy to unregistering
+// the city and starting its standalone controller, and the waits a running
+// host reports to its details.
 func TestConversationLanesDoctorHints(t *testing.T) {
 	c, _ := newConversationLanesCheckForTest([]string{"message"}, newLaneTestStore(), conversationLaneStatus{State: laneHostStateNone}, nil)
-	if r := c.Run(&doctor.CheckContext{CityPath: "/city"}); !strings.Contains(r.FixHint, "`gc start --foreground`") {
-		t.Fatalf("no-host hint = %q, want the standalone controller's start", r.FixHint)
+	const want = "a supervisor-hosted city (`gc start`) does not start the lane host yet; to serve the list, run `gc unregister /city`, then `gc start --foreground /city` (hidden from --help), or empty [ops] authoritative"
+	if r := c.Run(&doctor.CheckContext{CityPath: "/city"}); r.FixHint != want {
+		t.Fatalf("no-host hint = %q, want %q", r.FixHint, want)
 	}
 	st := conversationLaneStatus{State: laneHostStateRunning, Kinds: []string{"message"}, Waiting: []laneConversationWaits{{
 		Conversation: "gc-1", Wake: "held",

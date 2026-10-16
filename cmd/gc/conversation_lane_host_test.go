@@ -757,12 +757,13 @@ func TestLaneHostRefusesIncapableStore(t *testing.T) {
 
 // TestLaneHostRequestsWake proves a due if_needed op for a dormant
 // conversation records a wake and asks the controller to reconcile the
-// session, and a held row records none.
+// session, rechecks quickly while the woken session starts, and delivers once
+// it has; a held row records none.
 func TestLaneHostRequestsWake(t *testing.T) {
 	t.Run("recorded", func(t *testing.T) {
 		f := newLaneFixture(t, func(meta map[string]string) { meta["state"] = string(session.StateAsleep) })
 		st := f.laneStore(t)
-		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "wake up", func(r *opjournal.Request) {
+		op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "wake up", func(r *opjournal.Request) {
 			r.Policy.Message.Wake = opjournal.WakeIfNeeded
 		}))
 		hh := newLaneHostHarness(t, f)
@@ -779,8 +780,36 @@ func TestLaneHostRequestsWake(t *testing.T) {
 		if err != nil || row.Metadata["wake_request"] == "" {
 			t.Fatalf("row = %v, %v; want a wake request", row.Metadata, err)
 		}
-		if tm := hh.nextTimer(t); tm.d != laneWakeRecheck {
+		tm := hh.nextTimer(t)
+		if tm.d != laneWakeRecheck {
 			t.Fatalf("recheck = %s, want %s", tm.d, laneWakeRecheck)
+		}
+		// The reconciler is starting the session: the recheck finds the
+		// row creating, which asks for no wake, and looks again as soon,
+		// not at the op's start_by.
+		if err := f.store.SetMetadata(f.id, "state", string(session.StateCreating)); err != nil {
+			t.Fatalf("marking the row creating: %v", err)
+		}
+		tm.c <- f.clk.Now()
+		p = hh.nextPass(t)
+		if p.out.res.Wake || len(p.out.res.Waits) != 1 || p.out.res.Waits[0].Reason != opjournal.WaitContentBlock ||
+			p.out.res.Waits[0].Detail != session.ContentGateStarting {
+			t.Fatalf("pass while starting = %+v, want one content_block starting wait and no wake", p.out.res)
+		}
+		tm = hh.nextTimer(t)
+		if tm.d != laneWakeRecheck {
+			t.Fatalf("recheck while starting = %s, want %s", tm.d, laneWakeRecheck)
+		}
+		// The start commits: the next recheck delivers.
+		if err := f.store.SetMetadata(f.id, "state", string(session.StateAwake)); err != nil {
+			t.Fatalf("marking the row awake: %v", err)
+		}
+		tm.c <- f.clk.Now()
+		if p = hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+			t.Fatalf("pass after the start = %+v, want the delivery", p.out.res)
+		}
+		if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded || len(f.nudges()) != 1 {
+			t.Fatalf("op = %+v nudges %d, want one succeeded delivery", got.Outcome, len(f.nudges()))
 		}
 	})
 	t.Run("held", func(t *testing.T) {
@@ -803,6 +832,43 @@ func TestLaneHostRequestsWake(t *testing.T) {
 		}
 		if tm := hh.nextTimer(t); tm.d != laneWakeHeldRecheck {
 			t.Fatalf("recheck = %s, want %s", tm.d, laneWakeHeldRecheck)
+		}
+	})
+	t.Run("past a stale cache", func(t *testing.T) {
+		// The controller's cache still holds the row active after it went
+		// dormant: the wake is decided on the live row the view was read
+		// from, not on the cached one.
+		f := newLaneFixture(t)
+		cache := beads.NewCachingStoreForTestWithPrefix(f.store, "gc", nil)
+		if err := cache.Prime(context.Background()); err != nil {
+			t.Fatalf("Prime: %v", err)
+		}
+		if err := f.store.SetMetadata(f.id, "state", string(session.StateAsleep)); err != nil {
+			t.Fatalf("marking the row asleep: %v", err)
+		}
+		if row, err := cache.Get(f.id); err != nil || row.Metadata["state"] != string(session.StateActive) {
+			t.Fatalf("cached row = %v, %v; want the stale active row", row.Metadata, err)
+		}
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "wake up", func(r *opjournal.Request) {
+			r.Policy.Message.Wake = opjournal.WakeIfNeeded
+		}))
+		hh := newLaneHostHarness(t, f)
+		hh.env.setStore(cache)
+		hh.start()
+		if p := hh.nextPass(t); !p.out.res.Wake || p.out.wake != session.WakeRecorded {
+			t.Fatalf("pass = %+v, want a recorded wake", p.out)
+		}
+		keys := hh.env.keys()
+		if len(keys) != 2 || keys[0] != reconcilekey.Allocator() || keys[1] != reconcilekey.Session(f.id) {
+			t.Fatalf("enqueued = %+v, want the allocator and the session", keys)
+		}
+		if row, err := f.store.Get(f.id); err != nil || row.Metadata["wake_request"] == "" {
+			t.Fatalf("row = %v, %v; want a wake request", row.Metadata, err)
+		}
+		// The wake was written through the cache, which now holds it.
+		if row, err := cache.Get(f.id); err != nil || row.Metadata["wake_request"] == "" {
+			t.Fatalf("cached row = %v, %v; want the wake request", row.Metadata, err)
 		}
 	})
 }
@@ -902,18 +968,123 @@ func TestLaneWorkerNextDelay(t *testing.T) {
 	}
 }
 
+// TestLaneWorkerRechecksAStartingWake pins the quick recheck through a woken
+// session's start: a pass that finds the session starting rechecks at
+// laneWakeRecheck up to startFor after the recorded wake, and otherwise waits
+// for the op's own Next. A take, or any other wait, ends it.
+func TestLaneWorkerRechecksAStartingWake(t *testing.T) {
+	next := laneT0.Add(24 * time.Hour)
+	blocked := func(detail string) lanePassOutcome {
+		return lanePassOutcome{res: opjournal.PassResult{Next: next, Waits: []opjournal.OpWait{
+			{ID: "op-1", Reason: opjournal.WaitContentBlock, Detail: detail},
+		}}}
+	}
+	starting, held := blocked(session.ContentGateStarting), blocked(session.ContentGateHeld)
+	woke := lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeRecorded}
+	took := lanePassOutcome{res: opjournal.PassResult{Took: opjournal.TakeContent}}
+	for _, tc := range []struct {
+		name    string
+		before  []lanePassOutcome
+		advance time.Duration
+		quick   bool
+	}{
+		{name: "no wake recorded"},
+		{name: "after a recorded wake", before: []lanePassOutcome{woke}, quick: true},
+		{name: "still starting inside startFor", before: []lanePassOutcome{woke, starting}, advance: time.Minute - time.Second, quick: true},
+		{name: "startFor passed", before: []lanePassOutcome{woke, starting}, advance: time.Minute},
+		{name: "another wait ended it", before: []lanePassOutcome{woke, held}},
+		{name: "a take ended it", before: []lanePassOutcome{woke, took}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			clk := &laneTestClock{now: laneT0}
+			w := &conversationLaneWorker{clk: clk, startFor: time.Minute}
+			for _, out := range tc.before {
+				w.nextDelay(out)
+			}
+			clk.Advance(tc.advance)
+			want := next.Sub(clk.Now())
+			if tc.quick {
+				want = laneWakeRecheck
+			}
+			if d, idle := w.nextDelay(starting); d != want || idle {
+				t.Errorf("delay %s idle %v, want %s", d, idle, want)
+			}
+		})
+	}
+}
+
 // TestConversationLaneHostStartedAfterOpSweep pins runController's start
 // line: the statement right after cs.startOpSweep(ctx).
 func TestConversationLaneHostStartedAfterOpSweep(t *testing.T) {
-	file, err := parser.ParseFile(token.NewFileSet(), "controller.go", nil, 0)
+	fn := parseFuncDecl(t, "controller.go", "runController")
+	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "startConversationLaneHost" {
+		t.Fatalf("runController: the statements after its startOpSweep calls call %q, want one cs.startConversationLaneHost", next)
+	}
+}
+
+// TestSupervisorWarnsItRunsNoLaneHost pins startOneCity's half: it starts no
+// lane host (OJ-12b), so where runController starts one, right after
+// startOpSweep, it logs that a listed kind goes unserved.
+func TestSupervisorWarnsItRunsNoLaneHost(t *testing.T) {
+	fn := parseFuncDecl(t, "cmd_supervisor.go", "startOneCity")
+	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "warnSupervisorLaneHostGap" {
+		t.Fatalf("startOneCity: the statements after its startOpSweep calls call %q, want one warnSupervisorLaneHostGap", next)
+	}
+	ast.Inspect(fn, func(n ast.Node) bool {
+		if call, ok := n.(*ast.CallExpr); ok && laneCallName(call) == "startConversationLaneHost" {
+			t.Error("startOneCity starts a lane host: replace warnSupervisorLaneHostGap with the start and pin it here")
+		}
+		return true
+	})
+}
+
+// TestWarnSupervisorLaneHostGap pins the supervisor's start line: a listed
+// kind is named with the remedy for the city's path, and nothing is logged
+// without one.
+func TestWarnSupervisorLaneHostGap(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		cfg  *config.City
+		want string
+	}{
+		{name: "no config"},
+		{name: "list empty", cfg: &config.City{}},
+		{
+			name: "kind listed",
+			cfg:  &config.City{Ops: config.OpsConfig{Authoritative: []string{"message"}}},
+			want: "gc supervisor: city 'alpha': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [message] goes unserved; to serve it, run `gc unregister /srv/alpha`, then `gc start --foreground /srv/alpha` (hidden from --help), or empty the list\n",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var out strings.Builder
+			warnSupervisorLaneHostGap(&out, "alpha", "/srv/alpha", tc.cfg)
+			if got := out.String(); got != tc.want {
+				t.Errorf("logged %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// parseFuncDecl parses file, a source file of this package, and returns its
+// func name.
+func parseFuncDecl(t *testing.T, file, name string) *ast.FuncDecl {
+	t.Helper()
+	f, err := parser.ParseFile(token.NewFileSet(), file, nil, 0)
 	if err != nil {
-		t.Fatalf("parse controller.go: %v", err)
+		t.Fatalf("parse %s: %v", file, err)
 	}
-	fn := findFuncDecl(file, "runController")
+	fn := findFuncDecl(f, name)
 	if fn == nil {
-		t.Fatal("controller.go: no func runController")
+		t.Fatalf("%s: no func %s", file, name)
 	}
-	found := 0
+	return fn
+}
+
+// calleesAfterOpSweep returns, for each statement of fn that calls
+// startOpSweep, what the statement right after it calls ("" when that is
+// not a call, or there is none).
+func calleesAfterOpSweep(fn *ast.FuncDecl) []string {
+	var next []string
 	ast.Inspect(fn, func(n ast.Node) bool {
 		block, ok := n.(*ast.BlockStmt)
 		if !ok {
@@ -923,16 +1094,30 @@ func TestConversationLaneHostStartedAfterOpSweep(t *testing.T) {
 			if opSweepCallee(stmt) != "startOpSweep" {
 				continue
 			}
-			if i+1 >= len(block.List) || opSweepCallee(block.List[i+1]) != "startConversationLaneHost" {
-				t.Error("runController: the statement after startOpSweep is not cs.startConversationLaneHost")
+			name := ""
+			if i+1 < len(block.List) {
+				if expr, ok := block.List[i+1].(*ast.ExprStmt); ok {
+					if call, ok := expr.X.(*ast.CallExpr); ok {
+						name = laneCallName(call)
+					}
+				}
 			}
-			found++
+			next = append(next, name)
 		}
 		return true
 	})
-	if found != 1 {
-		t.Fatalf("runController: found %d startOpSweep calls, want 1", found)
+	return next
+}
+
+// laneCallName is the name call calls: a method's or a function's.
+func laneCallName(call *ast.CallExpr) string {
+	switch fun := call.Fun.(type) {
+	case *ast.SelectorExpr:
+		return fun.Sel.Name
+	case *ast.Ident:
+		return fun.Name
 	}
+	return ""
 }
 
 // TestStartConversationLaneHostDelivers drives startConversationLaneHost on
