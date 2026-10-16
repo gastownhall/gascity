@@ -93,6 +93,20 @@ const (
 	keyResultEpoch         = "gc.op.result_epoch"
 	keyResultVia           = "gc.op.result_via"
 	keyResultCoalescedInto = "gc.op.result_coalesced_into"
+
+	keyRetryAt        = "gc.op.retry_at"
+	keyFailures       = "gc.op.failures"
+	keyMaybeDelivered = "gc.op.maybe_delivered"
+	keyDeliveryKey    = "gc.op.delivery_key"
+	keyLastError      = "gc.op.last_error"
+
+	keyResultDeliverySeq = "gc.op.result_delivery_seq"
+	keyResultDeliveredAt = "gc.op.result_delivered_at"
+	keyResultAck         = "gc.op.result_ack"
+	keyResultMessageID   = "gc.op.result_message_id"
+	keyResultMessageAt   = "gc.op.result_message_at"
+	keyResultTurnLink    = "gc.op.result_turn_link"
+	keyResultTurnBasis   = "gc.op.result_turn_basis"
 )
 
 // requestFields returns the digest-covered metadata of op: kind, policy,
@@ -163,26 +177,31 @@ func EncodeOp(op Op) (beads.Bead, error) {
 		open = ""
 	}
 	fields := map[string]string{
-		keySchema:        strconv.Itoa(SchemaRev),
-		keyExecutor:      string(op.Executor),
-		keyOpen:          open,
-		keyConversation:  op.Conversation,
-		keyPrincipal:     op.Producer.Principal,
-		keyActor:         op.Producer.Actor,
-		keyOwnerEpoch:    formatInt(op.Producer.OwnerEpoch),
-		keyClientKey:     op.ClientKey,
-		keyClientSeq:     formatUint(op.ClientSeq),
-		keyPayloadDigest: op.PayloadDigest,
-		keyNotBefore:     formatOptionalTime(op.NotBefore),
-		keyStartBy:       formatOptionalTime(op.StartBy),
-		keyFinishBy:      formatOptionalTime(op.FinishBy),
-		keyCausation:     op.Causation,
-		keyCorrelation:   op.Correlation,
-		keyCreatedAt:     formatOptionalTime(op.CreatedAt),
-		keyStatus:        string(op.Status),
-		keyTransitions:   transitions,
-		keyLaneSeq:       formatUint(op.LaneSeq),
-		keyAttempt:       formatInt(int64(op.Attempt)),
+		keySchema:         strconv.Itoa(SchemaRev),
+		keyExecutor:       string(op.Executor),
+		keyOpen:           open,
+		keyConversation:   op.Conversation,
+		keyPrincipal:      op.Producer.Principal,
+		keyActor:          op.Producer.Actor,
+		keyOwnerEpoch:     formatInt(op.Producer.OwnerEpoch),
+		keyClientKey:      op.ClientKey,
+		keyClientSeq:      formatUint(op.ClientSeq),
+		keyPayloadDigest:  op.PayloadDigest,
+		keyNotBefore:      formatOptionalTime(op.NotBefore),
+		keyStartBy:        formatOptionalTime(op.StartBy),
+		keyFinishBy:       formatOptionalTime(op.FinishBy),
+		keyCausation:      op.Causation,
+		keyCorrelation:    op.Correlation,
+		keyCreatedAt:      formatOptionalTime(op.CreatedAt),
+		keyStatus:         string(op.Status),
+		keyTransitions:    transitions,
+		keyLaneSeq:        formatUint(op.LaneSeq),
+		keyAttempt:        formatInt(int64(op.Attempt)),
+		keyRetryAt:        formatOptionalTime(op.RetryAt),
+		keyFailures:       formatInt(int64(op.Failures)),
+		keyMaybeDelivered: formatInt(int64(op.MaybeDelivered)),
+		keyDeliveryKey:    op.DeliveryKey,
+		keyLastError:      op.LastError,
 	}
 	for k, v := range fields {
 		meta[k] = v
@@ -232,6 +251,13 @@ func outcomeFields(o Outcome) map[string]string {
 		keyResultEpoch:         formatInt(o.Result.ContextEpoch),
 		keyResultVia:           o.Result.Via,
 		keyResultCoalescedInto: o.Result.CoalescedInto,
+		keyResultDeliverySeq:   formatUint(o.Result.Delivery.Seq),
+		keyResultDeliveredAt:   formatOptionalTime(o.Result.Delivery.At),
+		keyResultAck:           string(o.Result.Delivery.Ack),
+		keyResultMessageID:     o.Result.Delivery.MessageID,
+		keyResultMessageAt:     formatOptionalTime(o.Result.Delivery.MessageAt),
+		keyResultTurnLink:      string(o.Result.TurnLink),
+		keyResultTurnBasis:     string(o.Result.TurnBasis),
 	}
 }
 
@@ -339,9 +365,23 @@ func DecodeOp(b beads.Bead) (Op, error) {
 				ContextEpoch:  d.int64(keyResultEpoch),
 				Via:           d.meta[keyResultVia],
 				CoalescedInto: d.meta[keyResultCoalescedInto],
+				Delivery: RecordedDelivery{
+					Seq:       d.uint64(keyResultDeliverySeq),
+					At:        d.time(keyResultDeliveredAt),
+					Ack:       AckKind(d.meta[keyResultAck]),
+					MessageID: d.meta[keyResultMessageID],
+					MessageAt: d.time(keyResultMessageAt),
+				},
+				TurnLink:  LinkConfidence(d.meta[keyResultTurnLink]),
+				TurnBasis: LinkBasis(d.meta[keyResultTurnBasis]),
 			},
 		},
-		Transitions: d.transitions(keyTransitions),
+		Transitions:    d.transitions(keyTransitions),
+		RetryAt:        d.time(keyRetryAt),
+		Failures:       d.int(keyFailures),
+		MaybeDelivered: d.int(keyMaybeDelivered),
+		DeliveryKey:    d.meta[keyDeliveryKey],
+		LastError:      d.meta[keyLastError],
 	}
 	if d.err != nil {
 		return Op{}, d.err
@@ -405,6 +445,8 @@ func checkVocabulary(id string, op Op) error {
 		{keyGuarantee, string(p.Guarantee), slices.Contains(guarantees, p.Guarantee)},
 		{keyScope, string(op.Scope.Kind), slices.Contains(scopeKinds, op.Scope.Kind)},
 		{keyExecutor, string(op.Executor), op.Executor.Valid()},
+		{keyResultAck, string(op.Outcome.Result.Delivery.Ack), slices.Contains(ackKinds, op.Outcome.Result.Delivery.Ack)},
+		{keyResultTurnLink, string(op.Outcome.Result.TurnLink), slices.Contains(linkConfidences, op.Outcome.Result.TurnLink)},
 	} {
 		if f.value != "" && !f.known {
 			return fmt.Errorf("%w: row %s has %s %q", ErrUnsupportedValue, id, f.key, f.value)

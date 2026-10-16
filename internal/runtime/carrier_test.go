@@ -165,3 +165,22 @@ func TestTmuxCarrier_PeekPropagatesTransportError(t *testing.T) {
 		t.Errorf("Peek output = %q, want empty on error", out)
 	}
 }
+
+// Nudge text reaches the in-box pane byte for byte (E5): the carrier escapes a
+// final ";" and puts "--" before a leading "-", as every send-keys -l does.
+func TestTmuxCarrier_NudgeTextIsTmuxLiteral(t *testing.T) {
+	for text, want := range map[string][]string{
+		"x;":     {"tmux", "send-keys", "-t", "main", "-l", `x\;`},
+		"-x":     {"tmux", "send-keys", "-t", "main", "-l", "--", "-x"},
+		"- item": {"tmux", "send-keys", "-t", "main", "-l", "--", "- item"},
+		"a;b":    {"tmux", "send-keys", "-t", "main", "-l", "a;b"},
+	} {
+		r := &recordingExec{}
+		if err := NewTmuxCarrier(r, "main").Nudge(context.Background(), "s", TextContent(text)); err != nil {
+			t.Fatalf("Nudge(%q): %v", text, err)
+		}
+		if len(r.calls) != 2 || !slices.Equal(r.calls[0], want) {
+			t.Errorf("Nudge(%q) argv = %q, want %q then Enter", text, r.calls, want)
+		}
+	}
+}

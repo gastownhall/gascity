@@ -22,7 +22,9 @@ const (
 
 // Field limits.
 const (
-	maxConversationLen = 200
+	// maxConversationLen leaves room in bd's assignee limit for the longest
+	// lane lease around the id; a byte count bounds the rune count.
+	maxConversationLen = maxLeaseLen - maxLaneLeaseOverhead
 	maxPrincipalLen    = 256
 	maxClientKeyLen    = 512
 	maxActorLen        = 64

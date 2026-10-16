@@ -85,7 +85,9 @@ type TurnFenceProvider interface {
 	// progress; another turn may be. A session the runtime no longer hosts
 	// has ended its turn. When timeout elapses first it returns
 	// ErrTurnNotEnded with the last state read; when ctx ends first, ctx's
-	// error. timeout is a hard upper bound. An empty turnID returns
-	// ErrTurnUnnamed before any read.
+	// error. A read showing the runtime cannot answer the wait at all
+	// (an error wrapping ErrRuntimeUnavailable, such as
+	// ErrTurnFenceUnavailable) may end it before timeout. timeout is a hard
+	// upper bound. An empty turnID returns ErrTurnUnnamed before any read.
 	WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (TurnState, error)
 }

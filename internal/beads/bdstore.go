@@ -653,8 +653,13 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	}
 
 	dir := filepath.Dir(beadsDir)
-	env := envWithout(processEnvSnapshotExcludingNativeDoltOpen(), "BEADS_DIR")
-	env = append(env, "BEADS_DIR="+beadsDir)
+	// Route through the shared bd exec env policy (auto-backup opt-out and
+	// any other bd-only env normalization) like every other bd exec; the
+	// BEADS_DIR override replaces any inherited value. execPurge runs the bd
+	// on PATH, so that is the binary the OTEL env translation probes.
+	env := execEnvFor("bd", processEnvSnapshotExcludingNativeDoltOpen(), map[string]string{"BEADS_DIR": beadsDir}, func() bool {
+		return bdReadsStandardOTELEnv(context.Background(), "bd")
+	})
 
 	var out []byte
 	var err error
@@ -684,6 +689,7 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 }
 
 // execPurge runs bd purge via exec.CommandContext with a 60-second timeout.
+// env must already be the final child env built by execEnvFor (see Purge).
 func execPurge(dir string, env, args []string) ([]byte, error) {
 	start := time.Now()
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)

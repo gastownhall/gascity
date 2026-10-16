@@ -597,3 +597,78 @@ func TestExecCommandRunnerWithEnv_SkipsBdVersionProbeWithoutLegacyOTEL(t *testin
 		t.Fatalf("bd version probes = %d, want 0 without legacy OTEL names", got)
 	}
 }
+
+func TestBdStorePurgeEnvUsesBdExecEnvPolicy(t *testing.T) {
+	// bd purge used to build its child env by hand, bypassing execEnvFor, so
+	// it missed the auto-backup opt-out (and any later bd env policy such as
+	// legacy OTEL name translation). It must get exactly the env every other
+	// bd exec gets, plus its BEADS_DIR selection.
+	clearAmbientBdOTELEnv(t)
+	t.Setenv("BD_BACKUP_ENABLED", "true")
+	t.Setenv("BEADS_DIR", "/ambient/.beads")
+
+	const beadsDir = "/city/rigs/fe/.beads"
+	var gotEnv []string
+	s := NewBdStore("/city", nil)
+	s.SetPurgeRunner(func(_ string, env []string, _ ...string) ([]byte, error) {
+		gotEnv = env
+		return []byte(`{"purged_count": 0}`), nil
+	})
+	if _, err := s.Purge(beadsDir, true); err != nil {
+		t.Fatalf("Purge: %v", err)
+	}
+
+	if vals := envValues(gotEnv, "BD_BACKUP_ENABLED"); len(vals) != 1 || vals[0] != "false" {
+		t.Errorf("purge BD_BACKUP_ENABLED values = %v, want exactly [false]", vals)
+	}
+	if vals := envValues(gotEnv, "BEADS_DIR"); len(vals) != 1 || vals[0] != beadsDir {
+		t.Errorf("purge BEADS_DIR values = %v, want exactly [%s]", vals, beadsDir)
+	}
+	want := execEnvFor("bd", processEnvSnapshotExcludingNativeDoltOpen(), map[string]string{"BEADS_DIR": beadsDir}, otelProbeUnused(t))
+	if strings.Join(gotEnv, "\n") != strings.Join(want, "\n") {
+		t.Errorf("purge env diverges from execEnvFor(bd) policy: got %d entries, want %d (BD_BACKUP_ENABLED got %v)",
+			len(gotEnv), len(want), envValues(gotEnv, "BD_BACKUP_ENABLED"))
+	}
+}
+
+func TestBdStorePurgeEnvGatesLegacyOTELOnPathBd(t *testing.T) {
+	// execPurge runs the bd on PATH, so Purge probes that binary: the legacy
+	// BD_OTEL_* names are translated for a bd that reads the standard OTEL
+	// names and kept for one that reads only the legacy names.
+	const url = "http://collector:4318/v1/metrics"
+	for _, tc := range []struct {
+		version string
+		want    string
+	}{
+		{"1.3.1", `metrics_url="" enabled="true" metrics_endpoint="` + url + `"`},
+		{"1.2.2", `metrics_url="` + url + `" enabled="" metrics_endpoint=""`},
+	} {
+		t.Run(tc.version, func(t *testing.T) {
+			clearAmbientBdOTELEnv(t)
+			t.Setenv("BD_OTEL_METRICS_URL", url)
+			bin, probeLog := writeOTELEnvFakeBd(t, tc.version)
+			t.Setenv("PATH", filepath.Dir(bin))
+
+			var gotEnv []string
+			s := NewBdStore("/city", nil)
+			s.SetPurgeRunner(func(_ string, env []string, _ ...string) ([]byte, error) {
+				gotEnv = env
+				return []byte(`{"purged_count": 0}`), nil
+			})
+			if _, err := s.Purge("/city/.beads", true); err != nil {
+				t.Fatalf("Purge: %v", err)
+			}
+
+			got := fmt.Sprintf("metrics_url=%q enabled=%q metrics_endpoint=%q",
+				lastEnvValue(gotEnv, "BD_OTEL_METRICS_URL"),
+				lastEnvValue(gotEnv, "BD_OTEL_ENABLED"),
+				lastEnvValue(gotEnv, "OTEL_EXPORTER_OTLP_METRICS_ENDPOINT"))
+			if got != tc.want {
+				t.Errorf("purge OTEL env = %s, want %s", got, tc.want)
+			}
+			if got := versionProbeCount(t, probeLog); got != 1 {
+				t.Errorf("bd version probes = %d, want 1 of the PATH bd", got)
+			}
+		})
+	}
+}

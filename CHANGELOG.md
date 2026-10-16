@@ -351,6 +351,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Dolt compactor docs no longer claim it only rewrites history this
+  city grew.** The `gc-compact-base` watermark is a position, not an author:
+  a database several cities write to is flattened for all of them when the
+  city whose managed server holds it, or any city that reaches it over
+  loopback, compacts it. A city skips an external endpoint on a non-loopback
+  (for example cloud-hosted) Dolt host with exit 0, so it never compacts that
+  database. "Shared and non-local databases" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` covers keeping a shared
+  database out of `mol-dog-compactor` and a stop-everything `gc bd compact`
+  procedure (#7896).
+
 - **The core `orphan-sweep` order no longer releases claims it cannot vouch
   for.** On a rig store shared with another city it used to release that
   city's live claims as dead, in every shape they take: `<rig>/<name>` crew,
@@ -629,6 +640,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   census can wait for the next run. Outside the city scope, workflow issue
   roots are only counted: `skipped_non_city_workflow_issue_roots` is now a
   candidate count (#6050).
+- **`gc dolt compact` no longer looks for a pinned rig's database on the
+  city's managed Dolt server.** A rig pinned to another Dolt endpoint
+  (`gc rig set-endpoint --external`, a rig-local `--self` server,
+  `[[rigs]] dolt_host`/`dolt_port`, or a bd binding to a remote host) keeps its
+  database there, but the compactor queried the managed server for it. The
+  `mol-dog-compactor` order failed every two hours with `Error 1049 (HY000):
+  database not found`, or, when the managed server still held a same-named
+  copy, flattened that copy and reported the rig's database as compacted.
+  Compact now skips such a rig with a log line naming its endpoint, and skips
+  a same-named copy on the managed server with a warning; `--only-db` cannot
+  reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
+  too, with a warning naming the file. Rigs that inherit the city endpoint are
+  compacted as before (#7994).
 
 ## [1.5.0] - 2026-10-05
 

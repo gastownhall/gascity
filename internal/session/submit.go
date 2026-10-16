@@ -277,7 +277,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 		return false, m.restartAndSendLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 	}
 	interruptStartedAt := time.Now()
-	if err := m.stopTurnLocked(b, sessName, mode); err != nil {
+	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 		return false, err
 	}
 	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
@@ -355,13 +355,17 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // [runtime.TurnInterruptModeFor]. Only keystroke mode sends the
 // provider-specific keys (soft Escape, Ctrl-C fallback, input clear): a
 // protocol runtime drops keys and is interrupted through Interrupt alone.
-func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
-	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-		return nil
+// Every input goes under the fence ctx carries, if any. A session with no
+// turn to interrupt (stopFindsNoTurn) is sent nothing: under a fence its
+// fresh read decides the miss, as it may have stopped since its caller read
+// it running.
+func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
+	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
+		return err
 	}
 	switch mode {
 	case runtime.TurnInterruptProtocol:
-		if err := m.sp.Interrupt(sessName); err != nil {
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
 		}
 		return nil
@@ -369,12 +373,12 @@ func (m *Manager) stopTurnLocked(b beads.Bead, sessName string, mode runtime.Tur
 		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
-		if err := m.sp.SendKeys(sessName, "Escape"); err != nil {
+		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
 			return fmt.Errorf("interrupting session: %w", err)
 		}
 		return nil
 	}
-	if err := m.sp.Interrupt(sessName); err != nil {
+	if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 		return fmt.Errorf("interrupting session: %w", err)
 	}
 	return nil
@@ -397,7 +401,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 	}
 	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
-			if err := m.sp.Interrupt(sessName); err != nil {
+			if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
 			}
 			return waitForIdle(15 * time.Second)
@@ -405,7 +409,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		if err := waitForIdle(softInterruptFallbackWait); err == nil {
 			return nil
 		}
-		if err := m.sp.Interrupt(sessName); err != nil {
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
 			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
 		}
 	}
@@ -588,7 +592,7 @@ func (m *Manager) clearInterruptedInputLocked(ctx context.Context, b beads.Bead,
 			return err
 		}
 	}
-	if err := m.sp.SendKeys(sessName, "C-u"); err != nil {
+	if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "C-u"); err != nil {
 		return fmt.Errorf("clearing interrupted input: %w", err)
 	}
 	if err := sleepWithContext(ctx, interruptClearDelay); err != nil {

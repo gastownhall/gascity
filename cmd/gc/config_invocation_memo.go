@@ -49,6 +49,11 @@ import (
 // the helpers' loads, which the uncached path never guaranteed either (each
 // load already reads its sources one by one).
 //
+// The scope also carries the builtin readiness deferral: the cities whose
+// readiness pass the gc bd passthrough loader skipped
+// (deferBuiltinReadinessForInvocation). It lives here so it dies with the
+// scope and can never leak into a long-lived process.
+//
 // The scope also answers the city.toml [beads] peek (peekCityTOMLBeads): the
 // first peek of a file decodes it and later peeks in the scope get that answer.
 // A peek that could not read or parse the file, or decode one of its fields, is
@@ -56,9 +61,42 @@ import (
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
+	// readinessDeferred holds normalized city paths whose builtin readiness
+	// pass the passthrough loader deferred in this invocation.
+	readinessDeferred map[string]struct{}
 	// beadsPeeks are the decoded [beads] tables of the city.toml files this
 	// scope peeked (peekCityTOMLBeads), by normalized path.
 	beadsPeeks map[string]cityTOMLBeadsPeek
+}
+
+// deferBuiltinReadinessForInvocation records that this invocation composed
+// cityPath's config without the builtin readiness pass and does not want one
+// for the rest of the scope. It is a no-op outside a scope.
+func deferBuiltinReadinessForInvocation(cityPath string) {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	if memo.readinessDeferred == nil {
+		memo.readinessDeferred = map[string]struct{}{}
+	}
+	memo.readinessDeferred[normalizePathForCompare(cityPath)] = struct{}{}
+}
+
+// builtinReadinessDeferredInInvocation reports whether the open invocation
+// scope deferred cityPath's builtin readiness pass. It is false outside a
+// scope.
+func builtinReadinessDeferredInInvocation(cityPath string) bool {
+	memo := currentInvocationConfigMemo()
+	if memo == nil {
+		return false
+	}
+	memo.mu.Lock()
+	defer memo.mu.Unlock()
+	_, ok := memo.readinessDeferred[normalizePathForCompare(cityPath)]
+	return ok
 }
 
 type invocationConfigMemoEntry struct {

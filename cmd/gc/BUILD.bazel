@@ -80,11 +80,14 @@ go_library(
         "bd_env_proxied.go",
         "bd_env_proxied_native.go",
         "bd_mistyped_metadata.go",
+        "bd_passthrough_config.go",
         "bd_relocated_classes.go",
+        "bd_subject_route.go",
         "bd_wisp_tier.go",
         "bead_format.go",
         "bead_policy_store.go",
         "bead_policy_store_graph_ready.go",
+        "bead_policy_store_guarded_batch.go",
         "bead_worktree_liveness.go",
         "bead_worktree_liveness_fallback.go",
         "bead_worktree_reaper.go",
@@ -125,6 +128,7 @@ go_library(
         "class_store_cache.go",
         "class_store_emit.go",
         "class_store_emit_events_journal.go",
+        "class_store_emit_guarded_batch.go",
         "cli_class_stores.go",
         "cli_session_store.go",
         "cli_storage_routes.go",
@@ -943,6 +947,10 @@ go_test(
         "bd_env_test.go",
         "bd_gc_binary_pin_test.go",
         "bd_mistyped_metadata_test.go",
+        "bd_passthrough_bench_test.go",
+        "bd_passthrough_parity_extra_test.go",
+        "bd_passthrough_parity_test.go",
+        "bd_passthrough_trims_test.go",
         "bd_relocated_classes_test.go",
         "bd_testscript_test.go",
         "bd_wisp_tier_test.go",
@@ -1052,6 +1060,7 @@ go_test(
         "class_store_cache_test.go",
         "class_store_emit_claim_test.go",
         "class_store_emit_events_journal_test.go",
+        "class_store_emit_guarded_batch_test.go",
         "class_store_emit_test.go",
         "class_store_test.go",
         "cli_class_stores_test.go",
@@ -1434,6 +1443,7 @@ go_test(
         "github_repair_workflow_class_route_test.go",
         "gitignore_test.go",
         "graph_dispatch_mem_test.go",
+        "guarded_batch_discovery_test.go",
         "hangbudget_helpers_test.go",
         "hangbudget_test.go",
         "hook_budget_test.go",
@@ -1592,6 +1602,7 @@ go_test(
         "pool_test.go",
         "pool_trigger_workdir_purity_test.go",
         "pool_trigger_worktree_owner_test.go",
+        "prepared_start_input_fence_test.go",
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
         "prime_inbox_test.go",
@@ -2222,11 +2233,52 @@ go_test(
         "@net_pgregory_rapid//:rapid",
         "@org_golang_x_mod//semver",
     ] + select({
+        "@rules_go//go/platform:aix": [
+            "//internal/featureflags",
+        ],
         "@rules_go//go/platform:android": [
+            "//internal/featureflags",
             "//internal/pathdurability",
         ],
+        "@rules_go//go/platform:darwin": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:dragonfly": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:freebsd": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:illumos": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:ios": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:js": [
+            "//internal/featureflags",
+        ],
         "@rules_go//go/platform:linux": [
+            "//internal/featureflags",
             "//internal/pathdurability",
+        ],
+        "@rules_go//go/platform:netbsd": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:openbsd": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:osx": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:plan9": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:qnx": [
+            "//internal/featureflags",
+        ],
+        "@rules_go//go/platform:solaris": [
+            "//internal/featureflags",
         ],
         "//conditions:default": [],
     }),

@@ -81,7 +81,8 @@ func (c *tmuxCarrier) Nudge(ctx context.Context, name string, content []ContentB
 	// provider uses (a single send-keys would interpret the text as key names).
 	// If typing fails, the error surfaces and Enter is skipped: the caller
 	// learns delivery failed (the pane may hold a half-typed, unsubmitted line).
-	if _, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "-l", message); err != nil {
+	// [TmuxLiteralArgs] keeps the text byte-exact (E5).
+	if _, err := c.tmux(ctx, name, append([]string{"send-keys", "-t", c.target, "-l"}, TmuxLiteralArgs(message)...)...); err != nil {
 		return err
 	}
 	_, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "Enter")

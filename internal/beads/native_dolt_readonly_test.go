@@ -82,6 +82,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"TransferIfCurrent":           nativeStoreMutation,
 	"Claim":                       nativeStoreMutation,
 	"UpdateIfMatch":               nativeStoreMutation,
+	"ApplyGuarded":                nativeStoreMutation,
 	"WaitForParentProjection":     nativeStoreRead,
 	"Count":                       nativeStoreRead,
 	"ReadEventsJournalPage":       nativeStoreRead,
@@ -93,6 +94,8 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"SupportsEphemeralGraphApply": nativeStoreLifecycle,
 	"CloseStore":                  nativeStoreLifecycle,
 	"ReadOnly":                    nativeStoreLifecycle,
+	// Reports the capability; answers false on a read-only handle.
+	"GuardedBatcherHandle": nativeStoreLifecycle,
 }
 
 // countingStorageSpy fails the test if the store reaches storage at all.

@@ -567,6 +567,29 @@ type contextResolutionMode struct {
 	// pack-command closures the user later runs, so a cheaper-but-different
 	// answer would end up executing pack code against the wrong city.
 	advisory bool
+	// cityOnly marks an authoritative resolution whose caller reads only
+	// CityPath. It skips the rig decoration (rigFromCwdDir) and nothing else:
+	// every step that decides WHICH city — flags, env, GC_DIR, the registry
+	// scans, walk-up, the remote and sticky tiers — runs exactly as it does
+	// under authoritativeResolution, including blocking on the repo-cache
+	// lock. That last part is why this is not advisory: a command the user
+	// typed must wait for the lock rather than fail on a busy cache.
+	cityOnly bool
+}
+
+// cityOnlyResolution is the mode for a caller that discards RigName.
+var cityOnlyResolution = contextResolutionMode{cityOnly: true}
+
+// resolveCityPathOnly is resolveCity for a caller that never reads the rig.
+// It names the same city resolveCity names, or fails with the same error,
+// including the refusal of a remote target; it only skips the full config
+// load rigFromCwdDir spends on a rig name nobody reads.
+func resolveCityPathOnly() (string, error) {
+	ctx, err := resolveContextMode(cityOnlyResolution)
+	if err != nil {
+		return "", err
+	}
+	return ctx.CityPath, nil
 }
 
 // authoritativeResolution is the mode for anything the user actually typed: it
@@ -1135,11 +1158,13 @@ func rigFromCwd(cityPath string, mode contextResolutionMode) string {
 // rigFromCwdDir matches cwd against registered rigs in a city's config.
 //
 // This is pure decoration: it loads the whole city config to produce a rig
-// name, and an advisory resolution's caller only wants the city path. Skipping
-// it there is what keeps discovery off the repo-cache lock entirely, rather
-// than merely making its acquisition non-blocking.
+// name, and an advisory or city-only resolution's caller only wants the city
+// path. Skipping it for advisory is what keeps discovery off the repo-cache
+// lock entirely, rather than merely making its acquisition non-blocking; for
+// city-only it is the full load (and builtin readiness pass) gc bd used to
+// pay for a rig name it then threw away.
 func rigFromCwdDir(cityPath, cwd string, mode contextResolutionMode) string {
-	if mode.advisory {
+	if mode.advisory || mode.cityOnly {
 		return ""
 	}
 	cfg, err := loadCityConfig(cityPath, io.Discard)
