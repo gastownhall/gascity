@@ -1127,7 +1127,11 @@ func (q *fileNudgeQueue) ClaimDue(ct storebinding.ClaimTarget, now time.Time) ([
 	return claimDueQueuedNudgesMatching(q.cityPath, now, fileClaimMatcher(ct))
 }
 
-// ClaimBatch claims ct's next delivery batch.
+// ClaimBatch claims ct's next delivery batch. It keeps the file queue's batch
+// rule (claimDueQueuedNudgeBatchForTarget, wholePinnedBatch), not the
+// contract's "every live member due": a pinned batch with a due member is
+// claimed whole whatever its other members' deliver_after, so ct's census may
+// be asked about a member that is not yet due.
 func (q *fileNudgeQueue) ClaimBatch(ct storebinding.ClaimTarget, now time.Time) ([]nudgequeue.Item, error) {
 	target := fileClaimTarget(ct)
 	return claimDueQueuedNudges(q.cityPath, now, fileClaimMatcher(ct), &target)
