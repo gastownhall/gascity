@@ -46,12 +46,11 @@ type OpsConfig struct {
 	// Authoritative lists the op kinds the conversation lane executes instead
 	// of their legacy path: a listed kind's requests are written as lane ops
 	// only, and the controller's lane host delivers them. The default is
-	// empty. This build accepts message only. Experimental: it takes effect
-	// as each producer surface gains lane delivery (OJ-2b, OJ-5). message
-	// joins the default list nowhere before X12 and the A8 amendment. A
-	// listed kind needs a sessions store with guarded batches. A change takes
-	// effect at the next controller start.
-	Authoritative []string `toml:"authoritative,omitempty"`
+	// empty, and message is not on by default anywhere yet. This build
+	// accepts message only. Experimental: it takes effect as each request
+	// surface gains lane delivery. A listed kind needs a sessions store with
+	// guarded batches. A change takes effect at the next controller start.
+	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message"`
 }
 
 // laneAuthoritativeKinds are the op kinds this build's conversation lane can
