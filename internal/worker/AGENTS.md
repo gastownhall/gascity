@@ -80,3 +80,32 @@ hook must not make an unchanged transcript appear to be a different stream.
 The one exception is a provider with a session-id flag whose start the Manager
 launched without its key: its identity takes the key once one is written,
 normally by the provider's hook.
+
+## Worker sites
+
+A city directory holding `.gc/control-plane.toml` is a worker site: a box
+`gc connect` attached to a remote controller's ledgers (DES-CN D12, §5 item
+6). On a worker site no `gc` process constructs a provider that can start,
+stop, type into or annotate a runtime; dials a controller, supervisor or wake
+socket; or reads controller-local state as a fallback. `cmd/gc/control_plane.go`
+resolves the plane once per city path per process (`controlPlaneFor`), and the
+seams consult it:
+
+- `resolveWorkerSpec` returns `guard.New()`, so the runtime under every
+  handle a box builds refuses each operation with
+  `guard.ErrControllerOwnedRuntime`.
+- Unix-socket dials go through `dialGCSocket`, which refuses on a worker site
+  with `errWorkerSiteNoController`; `pokeController`,
+  `reloadControllerConfig` and `cityUsesManagedReconciler` short-circuit
+  before reaching a sender.
+- Fallback reads of controller-local state (the local events log, a class
+  store whose binding no descriptor ledger serves) refuse with
+  `errWorkerSiteLocalState`; `gc start` and `gc supervisor run` refuse with
+  `errWorkerSiteRefusesController`.
+
+New code on a worker-reachable path must take these seams, not dial or
+construct a provider directly. Two senders still dial directly and are
+converted by CN-1b2: `sendControllerCommandWithTimeouts` (`cmd/gc/controller.go`)
+and `supervisorAliveAtPathUntil` (`cmd/gc/cmd_supervisor.go`). Worker sites
+exist in production only once the sidecar is written (CN-2), which waits for
+CN-1b2.

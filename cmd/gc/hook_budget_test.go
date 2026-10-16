@@ -556,3 +556,66 @@ func assertHookBudgetGolden(t *testing.T, goldenDir, scenario string, f hookBudg
 		t.Errorf("hook output differs from %s:\n--- got ---\n%s\n--- want ---\n%s", path, got, want)
 	}
 }
+
+// TestHookRequestBudgetOnAWorkerSite runs every hook scenario, and the hook
+// claim's continuation nudge, in a city a worker-site descriptor attached to a
+// remote controller. Each sends its ledger exactly what it sends in the same
+// city on the Local plane, and none dials a gc socket: the hook verbs reach the
+// controller only through pokeController (the claim continuation) and the
+// nudge wake ping (every queue write), and both short-circuit in a box.
+func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
+	model := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: hookBudgetLedgerRows}
+	type siteScenario struct {
+		name string
+		seed func(t *testing.T, f hookBudgetFixture)
+		run  func(t *testing.T, f hookBudgetFixture, stdout, stderr io.Writer) int
+		// dialsLocally marks a scenario that dials on the Local plane, which
+		// proves the counter is wired to the dials it reaches.
+		dialsLocally bool
+	}
+	var scenarios []siteScenario
+	for _, sc := range hookBudgetScenarios() {
+		scenarios = append(scenarios, siteScenario{name: sc.name, seed: sc.seed, run: sc.run})
+	}
+	scenarios = append(scenarios, siteScenario{
+		name: "hook --claim continuation nudge",
+		seed: func(*testing.T, hookBudgetFixture) {},
+		run: func(_ *testing.T, _ hookBudgetFixture, _, _ io.Writer) int {
+			hookContinuationNudgeEnqueue(hookBudgetIdentity)
+			return 0
+		},
+		dialsLocally: true,
+	})
+
+	measure := func(t *testing.T, sc siteScenario, workerSite bool) (beadstest.WireCost, int32) {
+		t.Helper()
+		resetControlPlaneForTest(t)
+		f := newHookBudgetFixture(t)
+		sc.seed(t, f)
+		if workerSite {
+			makeWorkerSite(t, f.cityDir)
+		}
+		dials := countSocketDials(t)
+		run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return sc.run(t, f, stdout, stderr) })
+		if run.code != 0 {
+			t.Fatalf("worker site %v: exit %d; stderr=%s", workerSite, run.code, run.stderr)
+		}
+		return model.Price(run.opens, run.ops), dials.Load()
+	}
+
+	for _, sc := range scenarios {
+		t.Run(sc.name, func(t *testing.T) {
+			local, localDials := measure(t, sc, false)
+			if sc.dialsLocally && localDials == 0 {
+				t.Fatal("the Local plane dialed nothing; the counter is not wired to this scenario's dials")
+			}
+			site, dials := measure(t, sc, true)
+			if site.Requests != local.Requests || site.Opens != local.Opens {
+				t.Errorf("worker site: %d requests over %d opens, local: %d over %d; want the same", site.Requests, site.Opens, local.Requests, local.Opens)
+			}
+			if dials != 0 {
+				t.Errorf("worker site dialed a gc socket %d times, want 0", dials)
+			}
+		})
+	}
+}
