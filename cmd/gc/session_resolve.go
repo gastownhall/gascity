@@ -137,7 +137,9 @@ func resolveSessionIDWithOptions(
 	} else if matched || !errors.Is(err, session.ErrSessionNotFound) {
 		return "", fmt.Errorf("resolving configured named session %q: %w", identifier, err)
 	}
-	if id, err := session.ResolveSessionID(store, identifier); err == nil {
+	// The bead-id lookup has been made by now, above or by a skipExactID
+	// caller, so only the live identifiers are left to try.
+	if id, err := session.ResolveSessionIDByLiveIdentifier(store, identifier); err == nil {
 		if cfg != nil {
 			if info, getErr := sessionFrontDoor(store).Get(id); getErr == nil {
 				if isNamedSessionInfo(info) {

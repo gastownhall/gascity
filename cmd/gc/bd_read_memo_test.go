@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"slices"
 	"strings"
 	"sync"
@@ -63,6 +64,8 @@ func (f *fixtureBd) run(_ string, name string, args ...string) ([]byte, error) {
 		return f.match(true, args[3:], strings.Split(args[2], " AND "))
 	case "ready":
 		return []byte("[]"), nil
+	case "show":
+		return f.show(args[1:])
 	case "update":
 		return nil, f.update(args[1:])
 	}
@@ -87,6 +90,21 @@ func (f *fixtureBd) update(args []string) error {
 		}
 	}
 	return fmt.Errorf("fixture bd: unsupported update %v", args)
+}
+
+func (f *fixtureBd) show(args []string) ([]byte, error) {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, "-") {
+			continue
+		}
+		for _, row := range f.rows {
+			if row.ID == arg {
+				return json.Marshal([]fixtureBdRow{row})
+			}
+		}
+		return nil, fmt.Errorf("fixture bd: no issue found matching %q", arg)
+	}
+	return nil, fmt.Errorf("fixture bd: show without an id")
 }
 
 func (f *fixtureBd) match(ephemeral bool, flags, clauses []string) ([]byte, error) {
@@ -719,5 +737,151 @@ func TestDoctorRoutedToForksDoNotScaleWithRoutes(t *testing.T) {
 	// store; the fixture's bare BdStore reads the issues tier.)
 	if few != 2 {
 		t.Fatalf("bd forks = %d, want 2 (one listing per store)", few)
+	}
+}
+
+func TestInvocationBdReadMemoCoversTheReadOnlyHookVerbs(t *testing.T) {
+	root := newRootCmdWithOptions(io.Discard, io.Discard, rootCommandOptions{})
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"mail", "inbox", "--json"}, true},
+		{[]string{"mail", "check", "--inject"}, true},
+		{[]string{"nudge", "drain", "--inject"}, true},
+		// gc hook --claim backs off and re-reads the ledger while racing other
+		// claimers, so a memoized read would hide the state it waits on.
+		{[]string{"hook", "--claim"}, false},
+		{[]string{"mail", "send", "human", "-s", "x"}, false},
+		{[]string{"nudge", "poll"}, false},
+		{[]string{"supervisor", "run"}, false},
+		{[]string{"doctor"}, false},
+		{[]string{"hook", "run", "--", "nudge", "drain"}, false},
+	} {
+		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
+			cmd, _, err := root.Find(tc.args)
+			if err != nil {
+				t.Fatalf("Find(%v): %v", tc.args, err)
+			}
+			if got := invocationBdReadMemoEligible(cmd); got != tc.want {
+				t.Fatalf("invocationBdReadMemoEligible(%q) = %v, want %v", cmd.CommandPath(), got, tc.want)
+			}
+		})
+	}
+	for path := range invocationBdReadMemoCommands {
+		args := strings.Fields(strings.TrimPrefix(path, "gc "))
+		cmd, _, err := root.Find(args)
+		if err != nil || cmd.CommandPath() != path {
+			t.Errorf("memo command %q does not name a command (found %v, err %v)", path, cmd, err)
+		}
+	}
+}
+
+// invocationFixture is one scope served by a fixture bd, with a session bead
+// and a work bead, for driving real BdStores through the invocation memo.
+func invocationFixture(t *testing.T) (dir string, bd *fixtureBd) {
+	t.Helper()
+	created := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	return t.TempDir(), &fixtureBd{rows: []fixtureBdRow{
+		{ID: "GA-1", Title: "work", Status: "open", IssueType: "task", Metadata: map[string]string{"gc.routed_to": "rig/worker"}, CreatedAt: created},
+		{ID: "GA-S1", Title: "worker", Status: "open", IssueType: "session", Labels: []string{"gc:session"}, Metadata: map[string]string{"session_name": "worker-1"}, CreatedAt: created},
+	}}
+}
+
+func listRoutedTo(t *testing.T, store beads.Store, identity string) []beads.Bead {
+	t.Helper()
+	found, err := store.List(beads.ListQuery{Status: "open", Metadata: map[string]string{"gc.routed_to": identity}})
+	if err != nil {
+		t.Fatalf("List(routed_to=%s): %v", identity, err)
+	}
+	return found
+}
+
+func TestInvocationBdReadMemoServesRepeatedReadsUntilItEnds(t *testing.T) {
+	dir, bd := invocationFixture(t)
+
+	plain := newBdStoreWithReadMemo(dir, dir, bd.run, "", nil)
+	listRoutedTo(t, plain, "rig/worker")
+	listRoutedTo(t, plain, "rig/worker")
+	if got := bd.calls.Load(); got != 2 {
+		t.Fatalf("bd forked %d times without an invocation memo, want 2", got)
+	}
+
+	restore := installInvocationBdReadMemo()
+	store := newBdStoreWithReadMemo(dir, dir, bd.run, "", nil)
+	for i := 0; i < 3; i++ {
+		if found := listRoutedTo(t, store, "rig/worker"); len(found) != 1 || found[0].ID != "GA-1" {
+			t.Fatalf("read %d = %v, want [GA-1]", i, found)
+		}
+	}
+	if got := bd.calls.Load(); got != 3 {
+		t.Fatalf("bd forked %d times, want 3: one fork for three identical reads in the invocation", got)
+	}
+
+	restore()
+	after := newBdStoreWithReadMemo(dir, dir, bd.run, "", nil)
+	listRoutedTo(t, after, "rig/worker")
+	listRoutedTo(t, after, "rig/worker")
+	if got := bd.calls.Load(); got != 5 {
+		t.Fatalf("bd forked %d times, want 5: a store opened after the invocation ends reads plainly", got)
+	}
+}
+
+// TestInvocationBdReadMemoReadsYourWritesAcrossStores: a write through one
+// store drops what another store over the same ledger memoized, so the
+// invocation's next read sees it.
+func TestInvocationBdReadMemoReadsYourWritesAcrossStores(t *testing.T) {
+	dir, bd := invocationFixture(t)
+	defer installInvocationBdReadMemo()()
+	reader := newBdStoreWithReadMemo(dir, dir, bd.run, "", nil)
+	writer := newBdStoreWithReadMemo(dir, dir, bd.run, "", nil)
+
+	if found := listRoutedTo(t, reader, "rig/other"); len(found) != 0 {
+		t.Fatalf("before the write: %v, want none", found)
+	}
+	if err := writer.SetMetadata("GA-1", "gc.routed_to", "rig/other"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	before := bd.calls.Load()
+	if found := listRoutedTo(t, reader, "rig/other"); len(found) != 1 || found[0].ID != "GA-1" {
+		t.Fatalf("after the write: %v, want [GA-1]", found)
+	}
+	if got := bd.calls.Load() - before; got != 1 {
+		t.Fatalf("the read after the write forked bd %d times, want 1 (a fresh read)", got)
+	}
+}
+
+// TestInvocationBdReadMemoTxReadsFresh: a transaction stages its writes against
+// the bead as the ledger holds it when the transaction begins, never against a
+// read the invocation memoized earlier.
+func TestInvocationBdReadMemoTxReadsFresh(t *testing.T) {
+	dir, bd := invocationFixture(t)
+	defer installInvocationBdReadMemo()()
+	store := newBdStoreWithReadMemo(dir, dir, bd.run, "", nil)
+
+	for i := 0; i < 2; i++ {
+		if _, err := store.Get("GA-1"); err != nil {
+			t.Fatalf("Get: %v", err)
+		}
+	}
+	if got := bd.calls.Load(); got != 1 {
+		t.Fatalf("bd forked %d times for two identical Gets, want 1", got)
+	}
+
+	// The callback's first touch of GA-1 reads the bead; returning an error
+	// afterwards keeps the staged write from being applied.
+	errAbort := errors.New("abort")
+	title := "staged"
+	err := store.Tx("test", func(tx beads.Tx) error {
+		if err := tx.Update("GA-1", beads.UpdateOpts{Title: &title}); err != nil {
+			return err
+		}
+		return errAbort
+	})
+	if !errors.Is(err, errAbort) {
+		t.Fatalf("Tx = %v, want the callback's error", err)
+	}
+	if got := bd.calls.Load(); got != 2 {
+		t.Fatalf("bd forked %d times, want 2: the transaction's read must fork bd, not reuse the memoized Get", got)
 	}
 }

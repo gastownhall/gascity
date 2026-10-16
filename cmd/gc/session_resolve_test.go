@@ -1234,3 +1234,51 @@ func TestResolveSessionIDMaterializingNamed_NilStderrDoesNotPanic(t *testing.T) 
 		t.Fatalf("got %q, want canonical %q", id, canonical.ID)
 	}
 }
+
+type exactGetCountingStore struct {
+	*beads.MemStore
+	gets map[string]int
+}
+
+func (s *exactGetCountingStore) Get(id string) (beads.Bead, error) {
+	if s.gets == nil {
+		s.gets = map[string]int{}
+	}
+	s.gets[id]++
+	return s.MemStore.Get(id)
+}
+
+// TestResolveSessionIDWithOptions_LooksUpANameAsBeadIDOnce: a name that is not
+// a bead id costs one failed bead-id lookup, whether this resolver makes it or
+// its caller already did (skipExactID). On a bd-backed store each lookup is a
+// bd fork, so a repeat is a fork that can only fail the same way.
+func TestResolveSessionIDWithOptions_LooksUpANameAsBeadIDOnce(t *testing.T) {
+	for _, skipExactID := range []bool{false, true} {
+		t.Run(fmt.Sprintf("skipExactID=%v", skipExactID), func(t *testing.T) {
+			store := &exactGetCountingStore{MemStore: beads.NewMemStore()}
+			b, err := store.Create(beads.Bead{
+				Type:     session.BeadType,
+				Labels:   []string{session.LabelSession},
+				Metadata: map[string]string{"alias": "rig/pool.worker"},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+			id, err := resolveSessionIDWithOptions(t.TempDir(), cfg, store, "rig/pool.worker", namedSessionResolveOptions{skipExactID: skipExactID})
+			if err != nil {
+				t.Fatalf("resolveSessionIDWithOptions: %v", err)
+			}
+			if id != b.ID {
+				t.Fatalf("got %q, want %q", id, b.ID)
+			}
+			want := 1
+			if skipExactID {
+				want = 0
+			}
+			if got := store.gets["rig/pool.worker"]; got != want {
+				t.Fatalf("bead-id lookups of the name = %d, want %d", got, want)
+			}
+		})
+	}
+}

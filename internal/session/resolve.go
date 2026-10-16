@@ -39,6 +39,18 @@ func ResolveSessionIDAllowClosed(store beads.Store, identifier string) (string, 
 	return resolveSessionID(store, identifier, true)
 }
 
+// ResolveSessionIDByLiveIdentifier is ResolveSessionID without its first step,
+// the direct bead ID lookup: it resolves only open exact session_name matches,
+// then open exact current alias matches. It is for a caller that has already
+// looked the identifier up as a bead ID and found no session there, so the
+// lookup is not repeated.
+func ResolveSessionIDByLiveIdentifier(store beads.Store, identifier string) (string, error) {
+	if store == nil {
+		return "", fmt.Errorf("session store unavailable")
+	}
+	return resolveSessionIDByIdentifier(store, identifier, false)
+}
+
 // ResolveSessionIDByExactID resolves only direct bead ID matches.
 func ResolveSessionIDByExactID(store beads.Store, identifier string) (string, error) {
 	_, id, err := ResolveSessionBeadByExactID(store, identifier)
@@ -93,7 +105,12 @@ func resolveSessionID(store beads.Store, identifier string, allowClosed bool) (s
 	} else if !errors.Is(err, ErrSessionNotFound) {
 		return "", err
 	}
+	return resolveSessionIDByIdentifier(store, identifier, allowClosed)
+}
 
+// resolveSessionIDByIdentifier resolves identifier against session_name and
+// alias metadata, live matches first; see ResolveSessionID.
+func resolveSessionIDByIdentifier(store beads.Store, identifier string, allowClosed bool) (string, error) {
 	lookupIdentifier := strings.TrimSpace(identifier)
 	if lookupIdentifier == "" {
 		return "", fmt.Errorf("%w: %q", ErrSessionNotFound, identifier)

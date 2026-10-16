@@ -1232,6 +1232,33 @@ func TestBdStoreUpdatePassesPriority(t *testing.T) {
 	}
 }
 
+// TestBdStoreTxRunsBeforeTxHookFirst: the WithBdStoreBeforeTx hook runs once
+// per transaction, before the callback reads anything.
+func TestBdStoreTxRunsBeforeTxHookFirst(t *testing.T) {
+	var events []string
+	runner := func(_, _ string, args ...string) ([]byte, error) {
+		events = append(events, strings.Join(args, " "))
+		return []byte(`[{"id":"bd-42","title":"before","status":"open","issue_type":"task","priority":2,"created_at":"2025-01-15T10:30:00Z"}]`), nil
+	}
+	store := beads.NewBdStore(t.TempDir(), runner, beads.WithBdStoreBeforeTx(func() {
+		events = append(events, "before-tx")
+	}))
+	errAbort := errors.New("abort")
+	title := "after"
+	err := store.Tx("test", func(tx beads.Tx) error {
+		if err := tx.Update("bd-42", beads.UpdateOpts{Title: &title}); err != nil {
+			return err
+		}
+		return errAbort
+	})
+	if !errors.Is(err, errAbort) {
+		t.Fatalf("Tx = %v, want the callback's error", err)
+	}
+	if got, want := strings.Join(events, " | "), "before-tx | show --json bd-42"; got != want {
+		t.Fatalf("events = %q, want %q", got, want)
+	}
+}
+
 func TestBdStoreTxCombinesWritesForSameBead(t *testing.T) {
 	var commands []string
 	closed := false

@@ -429,6 +429,9 @@ type BdStore struct {
 
 	listSkipLabelsEnabled bool // whether bd list may receive --skip-labels
 
+	// beforeTx runs as each Tx begins; see WithBdStoreBeforeTx.
+	beforeTx func()
+
 	// relocatedClasses names the coordination classes this ledger does not
 	// serve. Empty on every city that keeps all classes on one store, which is
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
@@ -514,6 +517,16 @@ type BdStoreOption func(*BdStore)
 func WithBdStoreListSkipLabels(enabled bool) BdStoreOption {
 	return func(s *BdStore) {
 		s.listSkipLabelsEnabled = enabled
+	}
+}
+
+// WithBdStoreBeforeTx registers fn to run each time Tx begins, before the
+// callback reads anything. A caller whose runner answers repeated bd reads from
+// a memo drops that memo here, so a transaction stages its writes against the
+// beads as the ledger holds them now rather than as an earlier read saw them.
+func WithBdStoreBeforeTx(fn func()) BdStoreOption {
+	return func(s *BdStore) {
+		s.beforeTx = fn
 	}
 }
 
@@ -2331,6 +2344,9 @@ func (s *BdStore) GetLocalString(id, key string) (string, error) {
 func (s *BdStore) Tx(_ string, fn func(Tx) error) error {
 	if fn == nil {
 		return errors.New("beads tx: nil callback")
+	}
+	if s.beforeTx != nil {
+		s.beforeTx()
 	}
 	tx := newBdStoreTx(s)
 	if err := fn(tx); err != nil {

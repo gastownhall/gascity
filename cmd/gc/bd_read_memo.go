@@ -3,13 +3,17 @@ package main
 import (
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
+	"github.com/spf13/cobra"
 )
 
 // bdReadMemo shares identical read-only bd subprocess results across one
-// `gc doctor` run.
+// `gc doctor` run, or across one invocation of a read-only hook verb (see
+// invocationBdReadMemoCommands).
 //
 // Doctor's store-backed checks each ask their own questions, and many of them
 // ask the same ones: every per-template session lookup lists the whole
@@ -18,10 +22,14 @@ import (
 // open beads. On a bd-backed scope each
 // of those is two bd forks (the issues list plus the wisp query), and each bd
 // fork costs two git forks of its own, so a healthy one-rig city paid hundreds
-// of identical subprocesses per doctor run.
+// of identical subprocesses per doctor run. The hook verbs repeat themselves
+// on a smaller scale: resolving a session by session_name and then by alias
+// lists the same open wisps twice, the routed-work lookup for each of a
+// session's identities lists them again, and a resolved session's bead is read
+// once to resolve it and once more for its mailbox.
 //
 // The memo answers a repeated read with the bytes the first one returned, so
-// every check parses exactly the output it would have parsed had it forked bd
+// every caller parses exactly the output it would have parsed had it forked bd
 // itself against the same state. It is deliberately narrow:
 //
 //   - only successful `bd list|query|ready|show` reads are kept; a failure is
@@ -29,16 +37,19 @@ import (
 //   - entries are per runner (that is, per opened store), because two runners
 //     for the same directory may carry different environments;
 //   - any other command through a memoized runner — a write, or anything this
-//     file does not recognize as read-only — drops every entry, as does
-//     invalidate(), which the doctor runner calls before each --fix
-//     remediation and before the re-run that verifies it.
+//     file does not recognize as read-only — drops every entry, whichever
+//     store it went through, as does invalidate(), which the doctor runner
+//     calls before each --fix remediation and before the re-run that verifies
+//     it, and which every memoized store calls as a Tx begins.
 //
 // Within one run the memo is a snapshot: once a question has been answered,
-// every later check asking it gets that answer, even if the controller, an
+// every later caller asking it gets that answer, even if the controller, an
 // agent or another process has written to the ledger since. Only this
-// process's own writes through a memoized runner, and invalidate(), refresh
-// it. A doctor report has never been an atomic snapshot, and every answer
-// here is still from within this run: each run starts with an empty memo.
+// process's own writes through a memoized runner, a Tx, and invalidate()
+// refresh it. A doctor report has never been an atomic snapshot, and every
+// answer here is still from within this run: each run starts with an empty
+// memo. That is also why a verb that waits on the ledger to change — a claim
+// loop backing off and re-reading — must never run under one.
 type bdReadMemo struct {
 	// cityPath is the city this doctor run inspects (normalized); stores
 	// opened for any other city get plain runners.
@@ -66,9 +77,64 @@ type bdReadMemoKey struct {
 }
 
 // activeBdReadMemos holds the memo of each doctor run in progress, keyed by
-// the city it inspects. Only doDoctor installs one; every other gc command
-// opens stores with plain runners.
+// the city it inspects. Only doDoctor installs one.
 var activeBdReadMemos sync.Map // normalized city path -> *bdReadMemo
+
+// invocationBdReadMemo is the memo of the one-shot invocation in progress, for
+// stores of any city it opens. run() installs it for the verbs in
+// invocationBdReadMemoCommands; every other gc command, and every long-lived
+// one, opens stores with plain runners.
+var invocationBdReadMemo atomic.Pointer[bdReadMemo]
+
+// invocationBdReadMemoCommands are the command paths run() installs the
+// invocation memo for. Each is a session-side hook or read that resolves its
+// session, reads its ledger state once and exits; none waits for the ledger to
+// change, which a memoized read would never show it. `gc hook` is not one:
+// its claim loop backs off and re-reads while racing other claimers.
+var invocationBdReadMemoCommands = map[string]bool{
+	"gc mail check":  true,
+	"gc mail inbox":  true,
+	"gc nudge drain": true,
+}
+
+// invocationBdReadMemoEligible reports whether run() installs the invocation
+// memo for cmd.
+func invocationBdReadMemoEligible(cmd *cobra.Command) bool {
+	if cmd == nil {
+		return false
+	}
+	return invocationBdReadMemoCommands[cmd.CommandPath()]
+}
+
+// installInvocationBdReadMemo makes a fresh memo the one every bd store opened
+// from now on uses, unless a doctor run has one for that store's city, and
+// returns a function that removes it again.
+func installInvocationBdReadMemo() (restore func()) {
+	m := newBdReadMemo("")
+	invocationBdReadMemo.Store(m)
+	return func() { invocationBdReadMemo.CompareAndSwap(m, nil) }
+}
+
+// activeBdReadMemo returns the memo a bd store opened now for cityPath reads
+// through — the doctor run's for that city, else the invocation's — or nil.
+func activeBdReadMemo(cityPath string) *bdReadMemo {
+	if m, ok := activeBdReadMemos.Load(normalizePathForCompare(cityPath)); ok {
+		return m.(*bdReadMemo)
+	}
+	return invocationBdReadMemo.Load()
+}
+
+// newBdStoreWithReadMemo opens a BdStore over run for a scope of cityPath. While
+// a memo is active its reads go through the memo, and each Tx it begins drops
+// the memo first.
+func newBdStoreWithReadMemo(dir, cityPath string, run beads.CommandRunner, prefix string, cfg *config.City) *beads.BdStore {
+	opts := bdStoreOptionsForConfig(cfg)
+	if m := activeBdReadMemo(cityPath); m != nil && run != nil {
+		run = m.wrap(run)
+		opts = append(opts, beads.WithBdStoreBeforeTx(m.invalidate))
+	}
+	return beads.NewBdStoreWithPrefix(dir, run, prefix, opts...)
+}
 
 func newBdReadMemo(cityPath string) *bdReadMemo {
 	return &bdReadMemo{cityPath: normalizePathForCompare(cityPath), entries: map[bdReadMemoKey]*bdReadMemoEntry{}}
@@ -105,17 +171,13 @@ func (m *bdReadMemo) invalidate() {
 }
 
 // withBdReadMemo wraps run, a runner for a store of cityPath, with the active
-// doctor memo. It returns run unchanged when no doctor run is in progress or
-// the run in progress inspects a different city.
+// memo (see activeBdReadMemo). It returns run unchanged when none is active.
 func withBdReadMemo(cityPath string, run beads.CommandRunner) beads.CommandRunner {
-	if run == nil {
+	m := activeBdReadMemo(cityPath)
+	if run == nil || m == nil {
 		return run
 	}
-	m, ok := activeBdReadMemos.Load(normalizePathForCompare(cityPath))
-	if !ok {
-		return run
-	}
-	return m.(*bdReadMemo).wrap(run)
+	return m.wrap(run)
 }
 
 func (m *bdReadMemo) wrap(run beads.CommandRunner) beads.CommandRunner {

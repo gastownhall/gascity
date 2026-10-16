@@ -1057,3 +1057,65 @@ func TestRepairEmptyType_StoreFailureIsLoggedAndPatchesInMemory(t *testing.T) {
 		t.Errorf("expected repair failure log mentioning %q and the error, got %q", b.ID, logged)
 	}
 }
+
+type getCountingStore struct {
+	beads.Store
+	gets []string
+}
+
+func (s *getCountingStore) Get(id string) (beads.Bead, error) {
+	s.gets = append(s.gets, id)
+	return s.Store.Get(id)
+}
+
+func TestResolveSessionIDByLiveIdentifier_SkipsTheBeadIDLookup(t *testing.T) {
+	store := &getCountingStore{Store: beads.NewMemStore()}
+	b, _ := store.Create(beads.Bead{
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"alias": "rig/worker"},
+	})
+
+	id, err := session.ResolveSessionIDByLiveIdentifier(store, "rig/worker")
+	if err != nil {
+		t.Fatalf("ResolveSessionIDByLiveIdentifier(alias): %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+	if len(store.gets) != 0 {
+		t.Fatalf("Get calls = %v, want none: the caller has already looked the identifier up as a bead id", store.gets)
+	}
+}
+
+func TestResolveSessionIDByLiveIdentifier_DoesNotResolveABeadID(t *testing.T) {
+	store := beads.NewMemStore()
+	b, _ := store.Create(beads.Bead{
+		Type:   session.BeadType,
+		Labels: []string{session.LabelSession},
+	})
+
+	if _, err := session.ResolveSessionIDByLiveIdentifier(store, b.ID); !errors.Is(err, session.ErrSessionNotFound) {
+		t.Fatalf("ResolveSessionIDByLiveIdentifier(bead id) = %v, want ErrSessionNotFound", err)
+	}
+}
+
+func TestResolveSessionID_LooksUpTheBeadIDOnce(t *testing.T) {
+	store := &getCountingStore{Store: beads.NewMemStore()}
+	b, _ := store.Create(beads.Bead{
+		Type:     session.BeadType,
+		Labels:   []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": "worker-1"},
+	})
+
+	id, err := session.ResolveSessionID(store, "worker-1")
+	if err != nil {
+		t.Fatalf("ResolveSessionID(session_name): %v", err)
+	}
+	if id != b.ID {
+		t.Fatalf("got %q, want %q", id, b.ID)
+	}
+	if strings.Join(store.gets, ",") != "worker-1" {
+		t.Fatalf("Get calls = %v, want one bead-id lookup of worker-1", store.gets)
+	}
+}
