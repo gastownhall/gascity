@@ -43,7 +43,23 @@ server's own Unix socket is skipped, though its database may still live here.
 
 ## History protection
 
-Compact only rewrites history that this city grew.
+Compact protects history that may be shared through a Dolt remote, and history
+from before it first saw the database. The protection is by position, not by
+author: every commit after the watermark is squashed, whichever city wrote it.
+
+- **External endpoints are compacted only on a loopback host.** For an
+  external endpoint on a non-loopback `GC_DOLT_HOST` (a remote or
+  cloud-hosted server), compact exits 0 without connecting: no flatten, no
+  GC, no watermark. Its history grows without bound. The city's own managed
+  server is compacted however `GC_DOLT_HOST` addresses it. A bd-owned proxied
+  store (the default for new cities) is not compacted.
+- **A database several cities write to is squashed for all of them** when
+  this city's managed server holds it or this city reaches it over loopback.
+  Compact never filters by author, so every city's commits after the
+  watermark go into the same flatten. To keep the shared database out, list
+  the city's other databases in `GC_DOLT_COMPACT_ONLY_DBS` on the
+  `mol-dog-compactor` order, or disable the order. See "Shared and non-local
+  databases" in `docs/troubleshooting/dolt-bloat-recovery.md` (#7896).
 
 - **Databases with a remote are never flattened.** Any configured Dolt remote
   (a team remote, bd's `refs/dolt/data`, a federated city) means other clones
@@ -80,7 +96,8 @@ Compact only rewrites history that this city grew.
     and the next run sets it again by the same first-sight rule: at HEAD, or
     at root when the commit after root is a flatten commit or
     `.compact-full-history` exists. Create that marker before deleting the tag
-    only if this city grew the whole history.
+    only if no other city, clone, or client outside this city has ever written
+    to this database, including before this city started using it.
 
 ## Flags
 

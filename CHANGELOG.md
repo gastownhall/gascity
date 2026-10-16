@@ -452,6 +452,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
   too, with a warning naming the file. Rigs that inherit the city endpoint are
   compacted as before (#7994, #7997).
+- **The Dolt compactor docs no longer claim it only rewrites history this
+  city grew.** The `gc-compact-base` watermark is a position, not an author:
+  a database several cities write to is flattened for all of them when the
+  city whose managed server holds it, or any city that reaches it over
+  loopback, compacts it. A city skips an external endpoint on a non-loopback
+  (for example cloud-hosted) Dolt host with exit 0, so it never compacts that
+  database. "Shared and non-local databases" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` covers keeping a shared
+  database out of `mol-dog-compactor` and a stop-everything `gc bd compact`
+  procedure (#7896, #7993).
 - **One agent on a harness that cannot receive MCP no longer fails the whole
   city's start.** gc skips that agent's MCP projection with a warning naming
   the harness and the fix; that agent's own session start still fails with the
@@ -580,6 +590,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   checks of a stopped city report `not checked: store not running` as passing
   (on a running city they warn that the store's proxy is not running). Planned
   for 1.5.2.
+- **The Dolt compactor still flattens a database that several cities write
+  to.** The `mol-dog-compactor` order squashes every commit after its
+  watermark, whoever wrote it, so the city whose managed Dolt server holds a
+  shared database, and every city that reaches it over loopback (including a
+  relay or tunnel on a loopback port), flattens the other cities' history
+  too. Making compaction safe for shared and cloud-hosted databases is
+  tracked in #7896 and is not in 1.5.1. On those cities, keep the shared
+  database out of the order with `GC_DOLT_COMPACT_ONLY_DBS`, or disable it
+  (`[[orders.overrides]]` with `name = "mol-dog-compactor"` and
+  `enabled = false`), and compact the shared database by hand with every
+  writer stopped, as "Shared and non-local databases" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` describes.
 - **The reaper reports `partial` on every run while a subtree is held.** On a
   city with a permanently held subtree, every reaper run (every 30 minutes)
   emits an `order.skipped` event with outcome `partial`. This is expected and
