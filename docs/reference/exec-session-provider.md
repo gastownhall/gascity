@@ -95,17 +95,18 @@ two steps:
 A canceled call is reported as canceled whatever the script's exit code, so a
 `TERM` handler may exit with any status, including 2.
 
-Trap `TERM` (or `EXIT`, which bash also runs when `TERM` ends the script) to
-clean up. `SIGINT` is not sent: a script that traps only `INT` gets no chance
-to roll back. Keep the rollback inside the grace period; prefer one bounded
-step (for example `docker rm -f <id>`) over a graceful stop that waits out its
-own timeout.
+Trap `TERM` to clean up. An `EXIT` trap alone is not enough: bash runs it when
+`TERM` ends the script, but dash (`/bin/sh` on Debian and Ubuntu) does not, so
+pair it with `trap 'exit 143' TERM` as in the example below. `SIGINT` is not
+sent: a script that traps only `INT` gets no chance to roll back. Keep the
+rollback inside the grace period; prefer one bounded step (for example
+`docker rm -f <id>`) over a graceful stop that waits out its own timeout.
 
 ```bash
-created=$(my-backend create "$name")
+created=$(my-backend create "$name") || exit 1
 trap 'my-backend remove "$created"' EXIT   # runs on failure, on exit, and on SIGTERM
 trap 'exit 143' TERM                       # turn SIGTERM into an ordinary exit
-my-backend wait-ready "$created"
+my-backend wait-ready "$created" || exit 1
 trap - EXIT TERM                           # startup succeeded; keep the session
 ```
 
