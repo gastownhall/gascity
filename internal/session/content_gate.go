@@ -33,6 +33,14 @@ const (
 // pure: a generation mismatch between the row and the live runtime, which
 // needs a runtime read, is the caller's to check. The first matching reason
 // wins, in the order the constants list them.
+//
+// It does not yet see a v2 stop request (the drain_intent_* keys at the
+// current generation, which the v2 drain writes before it sets state to
+// draining): those keys are the v2 reconciler's own and Info carries no
+// field for them. In that window content can start a turn in a session v2 is
+// about to drain, so I7 holds here only from state=draining on, until the
+// session package owns a "stop requested at generation g" predicate this
+// gate can call.
 func ContentGate(info Info, running bool, now time.Time) string {
 	state := State(strings.TrimSpace(info.MetadataState))
 	switch {
