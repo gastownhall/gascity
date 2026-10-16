@@ -341,8 +341,9 @@ on how each city reaches that database:
 
 | How a city reaches the database | What its compactor does |
 |---|---|
-| Its own managed server, written only by this city | Flattens commits after the watermark, then runs a full GC |
-| Loopback, but other cities write to the same database (shared host, tunnel, local proxy) | Flattens **every** city's commits after the watermark into one commit |
+| Its own bd-owned proxied store (the default for cities created by Gas City 1.5 and later) | Nothing: `gc dolt compact` prints `dolt lifecycle is owned by bd for proxied scopes; nothing to do` |
+| Its own Gas City–managed server, written only by this city | Flattens commits after the watermark, then runs a full GC |
+| Loopback, but other cities write to the same database (shared host, SSH tunnel, port forward) | Flattens **every** city's commits after the watermark into one commit |
 | A non-loopback host (a remote or cloud-hosted Dolt server) | Nothing: no flatten, no GC, no watermark |
 | Loopback, and the database has any Dolt remote | Bare `CALL DOLT_GC()` only, unless `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` |
 
@@ -375,34 +376,54 @@ the history grows.
 
 Every bd write is a Dolt commit, and garbage collection cannot reclaim history
 that is still reachable. In a 2,000-commit test, the database was over 70
-times larger after `dolt gc --full` than after a flatten plus GC.
-`[maintenance.dolt]` runs a plain `CALL DOLT_GC()`, which does not shorten
-history either. Automatic compaction for shared and cloud-hosted databases is
-tracked in [#7896](https://github.com/gastownhall/gascity/issues/7896).
+times larger after `dolt gc --full` than after a flatten plus GC. Turning on
+`[maintenance.dolt]` does not shorten history either. Automatic compaction for
+shared and cloud-hosted databases is tracked in
+[#7896](https://github.com/gastownhall/gascity/issues/7896).
 
 ### Bound history on a shared or non-local database by hand
 
 `bd compact` squashes commits older than a retention window into one commit
 and keeps the recent ones. It rebuilds the branch from a snapshot of the log
 and then hard-resets `main` to the result, with no protection against
-concurrent writers. A write that lands while it runs is lost, so every city
+concurrent writers. A write that lands while it runs is lost, so every writer
 must be stopped first.
 
 1. Agree on a retention window (`<N>` days) with every city that writes to the
    database.
-2. Run `gc stop` in every city that shares the database.
-3. From one city, preview, then compact:
+2. Run `gc stop` in every city that shares the database, and close any other
+   `bd` or `dolt sql` client connected to it.
+3. Work from the city whose own Dolt server holds the database, or from any of
+   them if no city manages that server. `gc stop` also stopped that city's
+   server; if the commands below cannot connect, run `gc dolt start` there
+   first.
+4. Preview, delete the `gc-compact-base` tag if the database has one, then
+   compact. Name the store explicitly so `gc bd` does not pick one from your
+   working directory: `--rig <rig>` for a rig's store, or `--city <city-path>`
+   for the city's own store.
 
    ```bash
-   gc bd compact --days <N> --dry-run
-   gc bd compact --days <N> --force
+   gc bd --rig <rig> compact --days <N> --dry-run
+   gc bd --rig <rig> sql "SELECT tag_name FROM dolt_tags"
+   gc bd --rig <rig> sql "CALL DOLT_TAG('-d', 'gc-compact-base')"  # only if listed
+   gc bd --rig <rig> compact --days <N> --force
    ```
 
-4. Restart every city with `gc start`.
+5. Restart every city with `gc start`.
 
 `bd compact` squashes everything older than the window, including history from
-before the `gc-compact-base` watermark. If the database has a Dolt remote,
-every other clone must re-clone or hard-reset afterward.
+before the `gc-compact-base` watermark. A tag left on a squashed commit keeps
+that commit and all history before it reachable, so the GC cannot reclaim it
+(bd warns that a tag still anchors old history). A later `gc dolt compact` also
+refuses to flatten the database, because the tag is no longer an ancestor of
+`HEAD`. Once the tag is deleted, the next compactor run that sees the database
+sets it again by the first-sight rule.
+
+`bd compact` does not push. If the database has a Dolt remote, the remote keeps
+the full history, the local branch has diverged from it, and each fetch brings
+the old history back into the local store. Announce a compaction window to
+every clone, force-push the rewritten branch, and have every other clone
+re-clone or hard-reset.
 
 ## Expected Outcome
 
@@ -427,15 +448,15 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   `gc-compact-base` watermark cross the threshold, and then gets
   `CALL DOLT_GC('--full')`. A database with remotes gets a bare
   `CALL DOLT_GC()` and is never flattened (see **History protection** above).
-  A database on a non-loopback host is skipped entirely, and a database that
-  several cities share needs care (see **Shared and non-local databases**
-  above).
   Under the `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` opt-in, compaction fetches the
   remote, flattens, and force-pushes the rewritten branch. Dolt does not
   support an atomic `DOLT_PUSH('--force-with-lease', ...)`, so the script
   fetches again and compares the remote head immediately before its force
   push. That check catches known drift, but a remote write can still land in
-  the short window between fetch and push.
+  the short window between fetch and push. The order does nothing for a
+  bd-owned proxied store or a database on a non-loopback host, and a database
+  that several cities share needs care (see **Shared and non-local databases**
+  above).
 - **Mind `orders.max_timeout` if you set one.** The compactor order asks
   for a 24-hour timeout to accommodate serialized full-GC runs on large
   stores. A city-level `orders.max_timeout` below 24h will cap the

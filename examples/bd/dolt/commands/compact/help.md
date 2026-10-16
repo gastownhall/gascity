@@ -49,7 +49,8 @@ author: every commit after the watermark is squashed, whichever city wrote it.
 
 - **Only loopback servers are compacted.** For a non-loopback `GC_DOLT_HOST`
   (a remote or cloud-hosted server), compact exits 0 without connecting: no
-  flatten, no GC, no watermark. Its history grows without bound.
+  flatten, no GC, no watermark. Its history grows without bound. A bd-owned
+  proxied store (the default for new cities) is not compacted either.
 - **A database several cities share over loopback is squashed for all of
   them.** bd commits carry no per-city author, so compact cannot tell the
   cities' commits apart. Disable `mol-dog-compactor` on those cities if that
