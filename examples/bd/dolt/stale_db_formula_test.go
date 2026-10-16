@@ -1398,6 +1398,70 @@ func extractFirstBashFence(t *testing.T, markdown string) string {
 	return body
 }
 
+// TestStaleDBFormulaBashBlockHasNoEmbeddedFenceLookingLine pins GH#7967: the
+// cleanup step's printf-built report note embeds literal ```json / ```
+// sequences as OUTPUT DATA, not as markdown structure. An unescaped \n
+// inside a TOML multi-line basic string decoded those to real newlines, so
+// ```json landed on its OWN line between the step's true opening and
+// closing fence — indistinguishable, to a human skimming the rendered step
+// or an agent whose tooling renders the prompt as markdown, from a second,
+// premature closing fence. That is exactly what "dog sessions claim the
+// stale-db order and report the parse failure instead of scanning" in the
+// issue describes: whatever read the step stopped at that line, handing
+// bash a script truncated mid-statement with an unclosed single quote.
+//
+// TestStaleDBFormulaRenderedShellIsStrictAndValid above does not catch this:
+// its extraction (strings.LastIndex over the raw bytes) finds the TRUE
+// final fence regardless of what any OTHER line looks like, so it stays
+// green whether or not an earlier line is confusable with one. This case
+// asserts the stronger property that test cannot: between the step's one
+// true opening fence and its one true closing fence, no other line's
+// trimmed content begins with ``` at all — the rendered markdown has
+// exactly two fence-looking lines, not three or more.
+func TestStaleDBFormulaBashBlockHasNoEmbeddedFenceLookingLine(t *testing.T) {
+	root := repoRoot(t)
+	f, err := formula.NewParser().ParseFile(filepath.Join(root, "formulas", "mol-dog-stale-db.toml"))
+	if err != nil {
+		t.Fatalf("ParseFile: %v", err)
+	}
+	if len(f.Steps) != 1 {
+		t.Fatalf("len(Steps) = %d, want 1", len(f.Steps))
+	}
+
+	vars := make(map[string]string, len(f.Vars))
+	for name, def := range f.Vars {
+		if def.Default != nil {
+			vars[name] = *def.Default
+		}
+	}
+	rendered := formula.Substitute(f.Steps[0].Description, vars)
+	if residual := formula.CheckResidualVars(rendered); len(residual) != 0 {
+		t.Fatalf("rendered formula has residual vars: %v", residual)
+	}
+
+	lines := strings.Split(rendered, "\n")
+	start, end := -1, -1
+	for i, l := range lines {
+		if strings.HasPrefix(strings.TrimSpace(l), "```") {
+			if start < 0 {
+				start = i
+			} else {
+				end = i
+			}
+		}
+	}
+	if start < 0 || end < 0 {
+		t.Fatalf("expected an opening and a closing fence line, found start=%d end=%d", start, end)
+	}
+	for i := start + 1; i < end; i++ {
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), "```") {
+			t.Fatalf("line %d looks like a fence delimiter inside the bash block: %q\n"+
+				"this is the exact shape of GH#7967: an embedded ``` on its own line reads as a "+
+				"premature closing fence to anything parsing this step as markdown", i, lines[i])
+		}
+	}
+}
+
 func TestStaleDBOrderUsesParsedFieldsOnly(t *testing.T) {
 	root := repoRoot(t)
 	data, err := os.ReadFile(filepath.Join(root, "orders", "mol-dog-stale-db.toml"))
