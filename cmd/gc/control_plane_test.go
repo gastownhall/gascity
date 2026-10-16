@@ -16,6 +16,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/connect"
+	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
 // resetControlPlaneForTest drops every cached plane and clears the
@@ -383,6 +384,30 @@ func TestDialGCSocketRefusesOnAWorkerSiteWithoutDialing(t *testing.T) {
 	}
 }
 
+// TestDialCitySocketDecidesFromTheCitysOwnPlane: a city's socket is refused
+// when that city is a worker site and dialed when it is Local, whichever city
+// marked the invocation.
+func TestDialCitySocketDecidesFromTheCitysOwnPlane(t *testing.T) {
+	resetControlPlaneForTest(t)
+	dials := countSocketDials(t)
+	box, local := t.TempDir(), t.TempDir()
+	makeWorkerSite(t, box)
+
+	if _, err := dialCitySocket(local, "/nonexistent/local.sock", time.Millisecond); err == nil || errors.Is(err, errWorkerSiteNoController) {
+		t.Fatalf("Local city dial error = %v, want the dialer's own error", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("Local city dials = %d, want 1", got)
+	}
+	conn, err := dialCitySocket(box, "/nonexistent/box.sock", time.Millisecond)
+	if conn != nil || !errors.Is(err, errWorkerSiteNoController) {
+		t.Fatalf("worker-site city dial = (%v, %v), want errWorkerSiteNoController", conn, err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("a worker-site city's dial reached the dialer: dials = %d, want 1", got)
+	}
+}
+
 // TestControlPlaneGateRefusesAMalformedDescriptor resolves a city whose
 // descriptor is malformed: every command refuses it except the four that read
 // the file themselves.
@@ -471,6 +496,92 @@ func TestControlPlaneGateThroughRun(t *testing.T) {
 	}
 	if controlPlaneGateExempt {
 		t.Fatal("run() left the gate exemption set")
+	}
+}
+
+// newControlPlaneBoxCity returns a city directory that is a worker site whose
+// descriptor this process has read but no invocation has marked.
+func newControlPlaneBoxCity(t *testing.T) string {
+	t.Helper()
+	box := t.TempDir()
+	if err := os.WriteFile(filepath.Join(box, "city.toml"), []byte("[workspace]\nname = \"box-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeControlPlaneFixture(t, box, testDescriptor(box, nil))
+	return box
+}
+
+// TestControlPlaneFlagCityFromInsideABoxStopsThroughRun: eager pack-command
+// discovery resolves the city environment's city before cobra parses --city.
+// With GC_CITY on a worker site, `gc --city <local> stop` still reaches the
+// Local city's controller, and the invocation is never marked a worker site.
+func TestControlPlaneFlagCityFromInsideABoxStopsThroughRun(t *testing.T) {
+	resetControlPlaneForTest(t)
+	clearGCEnv(t)
+	box := newControlPlaneBoxCity(t)
+	local := setupCity(t, "local-city")
+	commands := startAcknowledgingStandaloneController(t, local)
+	overrideShutdownBeadsProviderForStop(t, func(string) error { return nil })
+	t.Setenv("GC_CITY", box)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"--city", local, "stop"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc --city <local> stop = %d from inside a box; stderr=%s", code, stderr.String())
+	}
+	select {
+	case cmd := <-commands:
+		if cmd != "stop" {
+			t.Fatalf("the Local controller received %q, want stop", cmd)
+		}
+	default:
+		t.Fatal("the Local controller received no stop request")
+	}
+	if !strings.Contains(stdout.String(), "Controller stopping...") {
+		t.Fatalf("stdout = %q, want the acknowledged controller stop", stdout.String())
+	}
+	if workerSiteProcess.Load() {
+		t.Fatal("discovery of the box marked an invocation against a Local city a worker site")
+	}
+}
+
+// TestControlPlaneBoxStopRefusesThroughRun: `gc stop` that resolves the box
+// itself marks the invocation a worker site and refuses up front: it dials
+// nothing, cleans up nothing, and leaves alone a supervisor registration the
+// city held before `gc connect` attached it.
+func TestControlPlaneBoxStopRefusesThroughRun(t *testing.T) {
+	resetControlPlaneForTest(t)
+	clearGCEnv(t)
+	box := newControlPlaneBoxCity(t)
+	reg := supervisor.NewRegistry(supervisor.RegistryPath())
+	if err := reg.Register(box, "box-city"); err != nil {
+		t.Fatal(err)
+	}
+	shutdowns := 0
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		shutdowns++
+		return nil
+	})
+	dials := countSocketDials(t)
+	t.Setenv("GC_CITY", box)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"stop"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc stop in a box exited 0; stdout=%s", stdout.String())
+	}
+	if want := "gc stop: " + errWorkerSiteRefusesController.Error() + "\n"; stderr.String() != want || stdout.Len() != 0 {
+		t.Fatalf("gc stop in a box: stdout=%q stderr=%q, want only the refusal %q", stdout.String(), stderr.String(), want)
+	}
+	if entries, err := reg.List(); err != nil || len(entries) != 1 {
+		t.Fatalf("registry after the refused stop = %v, %v; want the box's entry", entries, err)
+	}
+	if !workerSiteProcess.Load() {
+		t.Fatal("gc stop in a box was not marked a worker site")
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("gc stop in a box dialed %d gc sockets, want 0", got)
+	}
+	if shutdowns != 0 {
+		t.Fatalf("gc stop in a box shut the bead store down %d times, want 0", shutdowns)
 	}
 }
 

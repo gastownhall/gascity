@@ -615,8 +615,10 @@ func TestWorkerSitePingNudgeWakeSocketDialsOnlyLocally(t *testing.T) {
 }
 
 // TestWorkerSiteControllerStopDialsNothing: gc stop's controller client dials
-// through the city seam. A file stands at the socket path so the client gets
-// past its stat to the dial.
+// through the city seam and fails closed on a worker site, whose controller is
+// the remote one, whether or not anything stands at the socket path. A file
+// stands there first so the Local control gets past the client's stat to the
+// dial.
 func TestWorkerSiteControllerStopDialsNothing(t *testing.T) {
 	resetControlPlaneForTest(t)
 	cityDir := newWorkerSiteCity(t)
@@ -635,12 +637,86 @@ func TestWorkerSiteControllerStopDialsNothing(t *testing.T) {
 		t.Fatalf("Local controller stop dials = %d, want 1", got)
 	}
 	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
-	res := sendControllerStop(cityDir, false)
-	if res.outcome != controllerStopDefinitePreEntryUnavailable {
-		t.Fatalf("worker-site stop outcome = %v, want definite pre-entry unavailable", res.outcome)
+	for _, leg := range []string{"socket file present", "no socket file"} {
+		if leg == "no socket file" {
+			if err := os.Remove(sock); err != nil {
+				t.Fatal(err)
+			}
+		}
+		res := sendControllerStop(cityDir, false)
+		if res.outcome != controllerStopOutcomeInvalid || !errors.Is(res.err, errWorkerSiteNoController) {
+			t.Fatalf("%s: worker-site stop = %v (%v), want invalid wrapping errWorkerSiteNoController", leg, res.outcome, res.err)
+		}
+		if got := dials.Load(); got != 1 {
+			t.Fatalf("%s: worker-site controller stop reached the dialer: dials = %d, want 1", leg, got)
+		}
 	}
-	if got := dials.Load(); got != 1 {
-		t.Fatalf("worker-site controller stop reached the dialer: dials = %d, want 1", got)
+}
+
+// TestWorkerSiteCmdStopBodyRefuses: the stop body refuses a worker site before
+// it asks a controller to stop or cleans up directly. A box has no controller
+// socket, so without the refusal the direct path would mark the box's sessions
+// asleep, stop them and retire the bead store behind the remote controller.
+func TestWorkerSiteCmdStopBodyRefuses(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := newWorkerSiteCity(t)
+	t.Setenv("GC_BEADS", "file")
+	active, err := openNudgeBeadStore(cityDir).Create(beads.Bead{
+		Title:    "active",
+		Type:     sessionBeadType,
+		Labels:   []string{sessionBeadLabel},
+		Metadata: map[string]string{"state": "active", "session_name": "active"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sp := runtime.NewFake()
+	if err := sp.Start(context.Background(), "active", runtime.Config{}); err != nil {
+		t.Fatal(err)
+	}
+	oldFactory := sessionProviderForStopCity
+	t.Cleanup(func() { sessionProviderForStopCity = oldFactory })
+	sessionProviderForStopCity = func(*config.City, string) (runtime.Provider, error) { return sp, nil }
+	shutdowns := 0
+	overrideShutdownBeadsProviderForStop(t, func(string) error {
+		shutdowns++
+		return nil
+	})
+	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
+	dials := countSocketDials(t)
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "box-city"},
+		Beads:     config.BeadsConfig{Provider: "file"},
+		Daemon:    config.DaemonConfig{ShutdownTimeout: "0s"},
+	}
+
+	var stdout, stderr lockedBuffer
+	if code := cmdStopBody(cityDir, cfg, false, &stdout, &stderr); code == 0 {
+		t.Fatalf("cmdStopBody on a worker site = 0, want a refusal; stdout=%q", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), errWorkerSiteRefusesController.Error()) {
+		t.Fatalf("stderr = %q, want the worker-site refusal", stderr.String())
+	}
+	if got := dials.Load(); got != 0 {
+		t.Fatalf("the refused stop dialed %d gc sockets, want 0", got)
+	}
+	if shutdowns != 0 {
+		t.Fatalf("the refused stop shut the bead store down %d times, want 0", shutdowns)
+	}
+	if !sp.IsRunning("active") {
+		t.Fatal("the refused stop stopped a box session")
+	}
+	// Read with the descriptor gone, as a Local reader would.
+	if err := os.Remove(filepath.Join(cityDir, ".gc", "control-plane.toml")); err != nil {
+		t.Fatal(err)
+	}
+	forgetControlPlane(cityDir)
+	got, err := openNudgeBeadStore(cityDir).Get(active.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reason := got.Metadata["sleep_reason"]; reason != "" {
+		t.Fatalf("the refused stop marked the session asleep: sleep_reason = %q", reason)
 	}
 }
 
@@ -895,6 +971,9 @@ func TestWorkerSiteV2DrainAckSucceedsOnItsRowAck(t *testing.T) {
 			resetControlPlaneForTest(t)
 			cityPath, store, id := drainAckCity(t, tc.reconciler)
 			writeControlPlaneFixture(t, cityPath, testDescriptor(cityPath, nil))
+			// The stub answers as a converted seam would. The real keyed poke
+			// is still a direct controller dial, which CN-1b2 converts
+			// (internal/worker/AGENTS.md).
 			prevPoke := drainAckPokeController
 			drainAckPokeController = func(string, reconcilekey.Key) error { return errWorkerSiteNoController }
 			t.Cleanup(func() { drainAckPokeController = prevPoke })

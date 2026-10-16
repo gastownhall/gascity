@@ -24,9 +24,10 @@ import (
 // `.gc/control-plane.toml` is a worker site: a box `gc connect` attached to a
 // remote controller's ledgers. Every gc process there resolves Plane=Worker,
 // builds no runtime provider that can act, dials no controller, supervisor
-// or wake socket, and refuses to read controller-local state as a fallback.
-// A city with no descriptor is Plane=Local and behaves exactly as before,
-// apart from one stat per city path per process.
+// or wake socket through the seams below (internal/worker/AGENTS.md lists the
+// direct dials CN-1b2 still converts), and refuses to read controller-local
+// state as a fallback. A city with no descriptor is Plane=Local and behaves
+// exactly as before, apart from one stat per city path per process.
 
 // planeKind says which plane a city directory is on.
 type planeKind int
@@ -86,7 +87,8 @@ func (p controlPlane) classBindingMismatch(bindingFor func(class string) string)
 // no city path read it (pokeSupervisor through dialGCSocket, and a seam handed
 // an empty city path): a multi-city host such as the supervisor never resolves
 // its managed cities that way, so one box-like city among them cannot turn the
-// others into worker sites.
+// others into worker sites. An advisory resolution never sets it either (see
+// withAdvisoryControlPlane).
 var workerSiteProcess atomic.Bool
 
 // errWorkerSiteNoController is returned instead of dialing a controller,
@@ -272,14 +274,15 @@ func dialGCSocket(path string, timeout time.Duration) (net.Conn, error) {
 }
 
 // dialCitySocket dials one city's gc socket (its nudge wake socket, or its
-// controller socket for gc stop). When cityPath is a worker site, or the
-// invocation resolved one, it returns errWorkerSiteNoController without
-// dialing.
+// controller socket for gc stop), deciding from that city's own plane: when
+// cityPath is a worker site it returns errWorkerSiteNoController without
+// dialing, and a Local city's socket is dialed whichever city the invocation
+// resolved. With no city path it decides from the invocation (onWorkerSite).
 func dialCitySocket(cityPath, path string, timeout time.Duration) (net.Conn, error) {
 	if onWorkerSite(cityPath) {
 		return nil, errWorkerSiteNoController
 	}
-	return dialGCSocket(path, timeout)
+	return dialUnixSocket(path, timeout)
 }
 
 // controlPlaneExemptCommands are the top-level commands that run with a
@@ -312,10 +315,28 @@ func controlPlaneGateExemptFor(root *cobra.Command, args []string) bool {
 // (markInvocationPlane). A descriptor that cannot be read or decoded fails
 // the resolution unless the command is exempt.
 func withControlPlane(ctx resolvedContext, err error) (resolvedContext, error) {
+	return fillControlPlane(ctx, err, markInvocationPlane)
+}
+
+// withAdvisoryControlPlane is withControlPlane for an advisory resolution
+// (eager pack-command discovery): it reads the city's plane without marking
+// the invocation. Discovery runs before cobra parses the command line, so the
+// city it finds from the city environment, GC_DIR or the working directory
+// need not be the city a --city flag targets, and marking it would make an
+// invocation against a Local city refuse as a worker site. A descriptor it
+// cannot use still fails the resolution, so discovery degrades to no city.
+func withAdvisoryControlPlane(ctx resolvedContext, err error) (resolvedContext, error) {
+	return fillControlPlane(ctx, err, controlPlaneFor)
+}
+
+// fillControlPlane fills a local context's Plane from planeOf. A descriptor
+// that cannot be read or decoded fails the resolution unless the command is
+// exempt.
+func fillControlPlane(ctx resolvedContext, err error, planeOf func(cityPath string) (controlPlane, error)) (resolvedContext, error) {
 	if err != nil || ctx.Remote != nil || ctx.CityPath == "" {
 		return ctx, err
 	}
-	plane, planeErr := markInvocationPlane(ctx.CityPath)
+	plane, planeErr := planeOf(ctx.CityPath)
 	if planeErr != nil {
 		if controlPlaneGateExempt {
 			return ctx, nil
@@ -407,6 +428,6 @@ func noteWorkerSitePoke(stderr io.Writer, command string, err error) bool {
 	if !errors.Is(err, errWorkerSiteNoController) {
 		return false
 	}
-	fmt.Fprintf(stderr, "%s: worker site: no controller runs in this box; the remote controller acts on the recorded change at its next reconcile\n", command) //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck // best-effort stderr
 	return true
 }

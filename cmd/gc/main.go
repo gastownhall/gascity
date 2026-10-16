@@ -569,6 +569,10 @@ type contextResolutionMode struct {
 	// around. Eager discovery captures the city it picks into the
 	// pack-command closures the user later runs, so a cheaper-but-different
 	// answer would end up executing pack code against the wrong city.
+	//
+	// It reads the city's plane but never marks the invocation a worker site
+	// (withAdvisoryControlPlane): eager discovery runs before cobra parses
+	// --city, so the city it finds need not be the one the command targets.
 	advisory bool
 	// cityOnly marks an authoritative resolution whose caller reads only
 	// CityPath. It skips the rig decoration (rigFromCwdDir) and nothing else:
@@ -709,6 +713,9 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 }
 
 func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext, error) {
+	if mode.advisory {
+		return withAdvisoryControlPlane(resolveContextChain(mode))
+	}
 	return withControlPlane(resolveContextChain(mode))
 }
 

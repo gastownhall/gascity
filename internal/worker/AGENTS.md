@@ -103,15 +103,23 @@ seams consult it:
   `workerSiteProcess`, which the city-less senders read (`dialGCSocket`,
   and a seam handed an empty city path). A multi-city host, the supervisor,
   never sets it by looking a city up, so one worker-site city cannot turn
-  the others into worker sites.
+  the others into worker sites. Nor does an advisory resolution (eager
+  pack-command discovery, `withAdvisoryControlPlane`): it runs before cobra
+  parses `--city`, so the city it finds need not be the one the command
+  targets.
 - `resolveWorkerSpec` returns `guard.New()`, so the runtime under every
   handle a box builds refuses each operation with
   `guard.ErrControllerOwnedRuntime`.
-- Socket dials go through `dialGCSocket` (city-less: the supervisor socket)
-  or `dialCitySocket` (one city's wake socket, and gc stop's controller
-  socket), which refuse with `errWorkerSiteNoController`; `pokeController`,
-  `reloadControllerConfig`, `pokeControlDispatch` and
-  `cityUsesManagedReconciler` short-circuit before reaching a sender.
+- Socket dials go through `dialGCSocket` (city-less: the supervisor socket),
+  which refuses on the process flag, or `dialCitySocket` (one city's wake
+  socket, and gc stop's controller socket), which refuses a worker-site
+  city's dial and dials a Local city's socket whichever city the invocation
+  resolved; both refuse with `errWorkerSiteNoController`. The controller-stop
+  client fails closed on that refusal (`controllerStopOutcomeInvalid`): a
+  box has no controller socket, and its absence is no proof that the remote
+  controller is gone. `pokeController`, `reloadControllerConfig`,
+  `pokeControlDispatch` and `cityUsesManagedReconciler` short-circuit
+  before reaching a sender.
 - Fallback reads of controller-local state refuse with
   `errWorkerSiteLocalState`: the local events log, and any class whose
   configured binding is not the binding of the descriptor ledger whose
@@ -119,10 +127,14 @@ seams consult it:
   takes that verdict before it opens or creates a binding, as a standing
   refusal, so the by-id resolver and the graph binding refuse too while work
   ids still resolve to work.
-- `gc start`, `gc restart`, `gc register` (and `gc init`'s registration),
-  `gc supervisor run`, `start` and `install` refuse with
+- `gc start`, `gc restart`, `gc stop`, `gc register` (and `gc init`'s
+  registration), `gc supervisor run`, `start` and `install` refuse with
   `errWorkerSiteRefusesController`, and the supervisor's per-city start
   (`startOneCity`) refuses a worker-site city whatever city it was started in.
+  The supervisor files that per-city refusal as an init failure, with no
+  category of its own: it lists the city as `init_failed` with the refusal as
+  its error, retries it on the init-failure backoff, and fails a pending
+  `city.create` request with `city_init_failed`.
 - Under v2 the drain-ack's row commit is the ack; the guard's refusal to
   mirror it into the env flag is a warning. Under legacy there is no in-box
   drain-ack (D-DRAINACK) and the guard's refusal stays loud.
