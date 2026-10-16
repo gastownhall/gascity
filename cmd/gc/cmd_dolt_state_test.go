@@ -3105,6 +3105,84 @@ esac
 	}
 }
 
+// TestRecoverManagedDoltProcessKeepsUnmeasuredServerWithoutReportingItHealthy
+// pins recover-managed when the readiness wait on a rebound port only ever
+// failed to dial out of this host: it keeps the server and launches nothing,
+// but reports ready and healthy as false, with ready_inconclusive set.
+func TestRecoverManagedDoltProcessKeepsUnmeasuredServerWithoutReportingItHealthy(t *testing.T) {
+	cityPath := t.TempDir()
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Dir(layout.PIDFile), 0o755); err != nil {
+		t.Fatalf("MkdirAll(runtime dir): %v", err)
+	}
+	if err := os.MkdirAll(layout.DataDir, 0o755); err != nil {
+		t.Fatalf("MkdirAll(data dir): %v", err)
+	}
+
+	oldPort := reserveRandomTCPPort(t)
+	newPort := reserveRandomTCPPort(t)
+	for newPort == oldPort {
+		newPort = reserveRandomTCPPort(t)
+	}
+	listener := startTCPListenerProcessInDir(t, newPort, layout.DataDir)
+
+	if err := os.WriteFile(layout.PIDFile, []byte(strconv.Itoa(listener.Process.Pid)+"\n"), 0o644); err != nil {
+		t.Fatalf("WriteFile(pid): %v", err)
+	}
+	state := doltRuntimeState{
+		Running:   true,
+		PID:       listener.Process.Pid,
+		Port:      newPort,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}
+	if err := writeDoltRuntimeStateFile(layout.StateFile, state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(layout): %v", err)
+	}
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), state); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+
+	binDir := t.TempDir()
+	invocationFile := filepath.Join(t.TempDir(), "dolt-invocation")
+	writeFakeDoltSQLBinary(t, binDir, invocationFile, `#!/bin/sh
+set -eu
+case "${1:-}" in
+  config)
+    exit 0
+    ;;
+  *)
+    printf 'dolt %s\n' "$*" >> "$INVOCATION_FILE"
+    exit 1
+    ;;
+esac
+`)
+	t.Setenv("PATH", strings.Join([]string{binDir, os.Getenv("PATH")}, string(os.PathListSeparator)))
+	stubManagedDoltDial(t, func(string, string, time.Duration) (net.Conn, error) {
+		return nil, dialErrorFor("connect", syscall.EADDRNOTAVAIL)
+	})
+
+	report, err := recoverManagedDoltProcess(cityPath, "127.0.0.1", strconv.Itoa(oldPort), "root", "warning", 2*time.Second)
+	if err != nil {
+		t.Fatalf("recoverManagedDoltProcess() error = %v", err)
+	}
+	if report.Ready || report.Healthy || !report.ReadyInconclusive || report.Restarted {
+		t.Fatalf("recoverManagedDoltProcess() = %+v, want ready and healthy false, ready_inconclusive true, no restart", report)
+	}
+	if report.Port != newPort {
+		t.Fatalf("recoverManagedDoltProcess().Port = %d, want the kept server's port %d", report.Port, newPort)
+	}
+	if !managedStopPIDAlive(listener.Process.Pid) {
+		t.Fatalf("listener pid %d no longer alive after recovery", listener.Process.Pid)
+	}
+	if invocation, err := os.ReadFile(invocationFile); err == nil && strings.TrimSpace(string(invocation)) != "" {
+		t.Fatalf("recoverManagedDoltProcess() unexpectedly launched dolt:\n%s", string(invocation))
+	}
+}
+
 func writeFakeDoltSQLBinary(t *testing.T, binDir, invocationFile, body string) {
 	t.Helper()
 	script := strings.ReplaceAll(body, "$INVOCATION_FILE", invocationFile)

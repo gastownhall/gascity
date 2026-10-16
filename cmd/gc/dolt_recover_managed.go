@@ -15,6 +15,7 @@ type managedDoltRecoverReport struct {
 	HadPID            bool
 	Forced            bool
 	Ready             bool
+	ReadyInconclusive bool
 	PID               int
 	Port              int
 	Healthy           bool
@@ -125,9 +126,11 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		if alternatePort := recoverManagedDoltObservedPort(cityPath, port); alternatePort != "" {
 			observePort = alternatePort
 		}
-		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
-			report.Ready = true
-			report.Healthy = true
+		if reuse := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); reuse && recoverManagedDoltShouldReuseExisting(report.Port, port) {
+			if !report.ReadyInconclusive {
+				report.Ready = true
+				report.Healthy = true
+			}
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
@@ -237,6 +240,7 @@ func managedDoltRecoverFields(report managedDoltRecoverReport) []string {
 		"had_pid\t" + strconv.FormatBool(report.HadPID),
 		"forced\t" + strconv.FormatBool(report.Forced),
 		"ready\t" + strconv.FormatBool(report.Ready),
+		"ready_inconclusive\t" + strconv.FormatBool(report.ReadyInconclusive),
 		"pid\t" + strconv.Itoa(report.PID),
 		"port\t" + strconv.Itoa(report.Port),
 		"healthy\t" + strconv.FormatBool(report.Healthy),
@@ -395,8 +399,13 @@ func observeExistingManagedDoltForRecovery(cityPath, host, port, user string, ti
 		return false
 	}
 	if report != nil {
-		report.Ready = true
-		report.Healthy = true
+		// A server kept on an inconclusive wait was never measured, so keep it
+		// without reporting it ready or healthy.
+		report.ReadyInconclusive = existing.ReadyInconclusive
+		if !existing.ReadyInconclusive {
+			report.Ready = true
+			report.Healthy = true
+		}
 	}
 	return true
 }
