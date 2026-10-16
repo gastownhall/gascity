@@ -915,7 +915,7 @@ calls = 2
 [[count]]
 path = "cmd/gc/nudge_dispatcher_test.go"
 resource = "listener_helper"
-calls = 4
+calls = 6
 
 [[count]]
 path = "cmd/gc/order_dispatch_close_race_test.go"
