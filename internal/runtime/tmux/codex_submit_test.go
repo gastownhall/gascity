@@ -1,10 +1,12 @@
 package tmux
 
 import (
+	"errors"
 	"os"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 // nudgeKeystrokesForFamily composes the keys a nudge actually puts into a pane,
@@ -146,4 +148,103 @@ func nudgeSessionSource(t *testing.T) string {
 		return rest
 	}
 	return rest[:end]
+}
+
+// TestCodexComposerDraftIsTheLastPromptLine reads codex's live composer: the
+// last "› " line. Earlier ones are submitted turns in the scrollback, and the
+// idle placeholder is not a draft.
+func TestCodexComposerDraftIsTheLastPromptLine(t *testing.T) {
+	cases := []struct {
+		name  string
+		lines []string
+		want  bool
+	}{
+		{"empty composer", []string{"›"}, false},
+		{"empty composer with space", []string{"› "}, false},
+		{"empty framed composer", []string{"│ › │"}, false},
+		{"idle placeholder", []string{"› Ask Codex to do anything"}, false},
+		{"typed nudge", []string{"› please respond to the review"}, true},
+		{"framed typed nudge", []string{"│ › please respond to the review │"}, true},
+		{"staged paste", []string{"› [Pasted Content 1234 chars]"}, true},
+		{
+			"scrollback turn above an empty composer",
+			[]string{"› earlier submitted turn", "", "◦ Working (12s • esc to interrupt)", "› "},
+			false,
+		},
+		{
+			"empty scrollback prompt above a drafted composer",
+			[]string{"› ", "◦ Working (12s • esc to interrupt)", "› please respond to the review"},
+			true,
+		},
+		{"no composer line", []string{"• Ran make test"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := codexComposerHasDraft(tc.lines); got != tc.want {
+				t.Fatalf("codexComposerHasDraft(%q) = %v, want %v", tc.lines, got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConfirmCodexQueuedFollowUpAcceptsClearedComposer: one Enter, and a
+// composer that drained means codex queued the nudge behind its turn.
+func TestConfirmCodexQueuedFollowUpAcceptsClearedComposer(t *testing.T) {
+	var sends int
+	err := confirmCodexQueuedFollowUp(
+		func() error { sends++; return nil },
+		func() (bool, error) { return false, nil },
+		func(time.Duration) {},
+	)
+	if err != nil {
+		t.Fatalf("err = %v, want nil", err)
+	}
+	if sends != 1 {
+		t.Fatalf("sends = %d, want 1 (queued follow-up is a single Enter)", sends)
+	}
+}
+
+// TestConfirmCodexQueuedFollowUpDoesNotResendWhenDraftRemains: a draft that
+// stays is unconfirmed and gets no second Enter in the same call.
+func TestConfirmCodexQueuedFollowUpDoesNotResendWhenDraftRemains(t *testing.T) {
+	var sends, polls int
+	err := confirmCodexQueuedFollowUp(
+		func() error { sends++; return nil },
+		func() (bool, error) { polls++; return true, nil },
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed", err)
+	}
+	if sends != 1 {
+		t.Fatalf("sends = %d, want 1 (no Enter retry; staged-paste recovery is recoverStagedDraft)", sends)
+	}
+	if polls != submitConfirmPollsPerSend {
+		t.Fatalf("polls = %d, want %d", polls, submitConfirmPollsPerSend)
+	}
+}
+
+// TestConfirmCodexQueuedFollowUpSurfacesErrors: a failed send is not
+// observed, and a failed read ends the wait with that error.
+func TestConfirmCodexQueuedFollowUpSurfacesErrors(t *testing.T) {
+	sendErr := errors.New("send-keys failed")
+	readCalled := false
+	err := confirmCodexQueuedFollowUp(
+		func() error { return sendErr },
+		func() (bool, error) { readCalled = true; return false, nil },
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, sendErr) || readCalled {
+		t.Fatalf("send failure: err = %v, read called = %v; want the send error and no read", err, readCalled)
+	}
+
+	readErr := errors.New("capture-pane failed")
+	err = confirmCodexQueuedFollowUp(
+		func() error { return nil },
+		func() (bool, error) { return false, readErr },
+		func(time.Duration) {},
+	)
+	if !errors.Is(err, readErr) {
+		t.Fatalf("read failure: err = %v, want the read error", err)
+	}
 }

@@ -801,11 +801,14 @@ func TestNudgeSessionClaudeBusyThroughoutIsNotCredited(t *testing.T) {
 }
 
 // TestNudgeSessionCodexBusyThroughoutIsNotCredited is the codex twin of the
-// Claude test above. codex's composer starts with "› ", so the drained-composer
-// check must read that prompt. Through Claude's "❯ " a codex composer is never
+// Claude test above. codex's composer starts with "› ", so the composer check
+// must read that prompt. Through Claude's "❯ " a codex composer is never
 // observed, and every nudge into a busy codex pane would requeue although codex
-// consumed it, each re-paste led by an Escape that cancels the turn the last
-// copy started. Every row sends exactly one Escape+Enter submit.
+// consumed it. A pane already running a turn gets Enter only, never the
+// Escape that cancels that turn. The busy indicator belongs to the
+// earlier turn and confirms nothing; the composer decides. A drained composer
+// means codex queued the nudge behind the turn, a nudge still in the composer
+// (typed or as a staged paste) is unconfirmed, and no row re-sends.
 func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 	const message = "reminder: please respond to the review"
 	turn := []string{"• Ran make test", "  └ ok  ./...", "", "◦ Working (48s • esc to interrupt)", ""}
@@ -818,10 +821,10 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 		want     error
 		keys     []string
 	}{
-		{"detached, composer drained", "busy-codex-drained-detached", "0", []string{"› "}, ErrNudgeSubmitDeliveredUnobserved, []string{"C-u", "Escape", "Enter"}},
-		{"attached, composer drained", "busy-codex-drained-attached", "1", []string{"› "}, ErrNudgeSubmitDeliveredUnobserved, []string{"Escape", "Enter"}},
-		{"detached, nudge typed in the composer", "busy-codex-typed-detached", "0", []string{"› " + message}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Escape", "Enter"}},
-		{"detached, nudge staged as a paste", "busy-codex-staged-detached", "0", []string{"› [Pasted Content 1234 chars]"}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Escape", "Enter"}},
+		{"detached, composer drained", "busy-codex-drained-detached", "0", []string{"› "}, nil, []string{"C-u", "Enter"}},
+		{"attached, composer drained", "busy-codex-drained-attached", "1", []string{"› "}, nil, []string{"Enter"}},
+		{"detached, nudge typed in the composer", "busy-codex-typed-detached", "0", []string{"› " + message}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Enter"}},
+		{"detached, nudge staged as a paste", "busy-codex-staged-detached", "0", []string{"› [Pasted Content 1234 chars]"}, ErrNudgeSubmitUnconfirmed, []string{"C-u", "Enter"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -842,7 +845,7 @@ func TestNudgeSessionCodexBusyThroughoutIsNotCredited(t *testing.T) {
 					t.Fatalf("NudgeSession = %v, want %v", err, tt.want)
 				}
 				if keys := ex.sentKeys(); !slices.Equal(keys, tt.keys) {
-					t.Fatalf("sent keys = %q, want %q (one Escape+Enter submit, none into the running turn)", keys, tt.keys)
+					t.Fatalf("sent keys = %q, want %q (one Enter, no Escape into the running turn)", keys, tt.keys)
 				}
 			})
 		})
