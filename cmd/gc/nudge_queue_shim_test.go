@@ -634,15 +634,15 @@ func pinnedShimBatch(now time.Time) (nudgequeue.Item, nudgequeue.Item) {
 	return first, second
 }
 
-// assertNoClaimUnderKey fails when the beads queue hands out any item under
-// the file batch's key: the moved copy is unpinned, so the beads queue pins it
-// under a key of its own, and a part of the file batch can never be sent under
-// the file batch's key.
+// assertNoClaimUnderKey fails when the destination queue hands out any item
+// under the source batch's key: the moved copy is unpinned, so the destination
+// pins it under a key of its own, and a part of the source batch can never be
+// sent under the source batch's key.
 func assertNoClaimUnderKey(t *testing.T, stage string, claimed []nudgequeue.Item, key string) {
 	t.Helper()
 	for _, item := range claimed {
 		if item.DeliveryBatch == key {
-			t.Fatalf("%s: beads ClaimBatch handed out %s under the file batch's key %q", stage, item.ID, key)
+			t.Fatalf("%s: ClaimBatch handed out %s under the source batch's key %q", stage, item.ID, key)
 		}
 	}
 }
@@ -892,6 +892,105 @@ func TestNudgeQueueShimToFileMovesPastACorruptRecord(t *testing.T) {
 	if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-good-1", "n-good-2"}) {
 		t.Fatalf("file pending = %v, want every record that decodes moved", got)
 	}
+}
+
+// pinnedBeadsShimBatch enqueues n-a and n-b in beads, claims them as one
+// batch and releases the claim with the pin kept, as a beads-mode delivery
+// whose send failed before it committed would. It returns the batch's key.
+func pinnedBeadsShimBatch(t *testing.T, f shimFixture, target storebinding.ClaimTarget, now time.Time) string {
+	t.Helper()
+	for _, id := range []string{"n-a", "n-b"} {
+		if err := f.beads.EnqueueDeferred(shimItem(id, now)); err != nil {
+			t.Fatalf("EnqueueDeferred(%s): %v", id, err)
+		}
+	}
+	claimed, err := f.beads.ClaimBatch(target, now)
+	if err != nil || len(claimed) != 2 || claimed[0].DeliveryBatch == "" {
+		t.Fatalf("beads ClaimBatch = %+v, %v; want both members pinned", claimed, err)
+	}
+	key := claimed[0].DeliveryBatch
+	if err := f.beads.ReleaseClaims(shimIDs(claimed), time.Time{}); err != nil {
+		t.Fatalf("ReleaseClaims: %v", err)
+	}
+	if pending := f.beadsState(t).Pending; len(pending) != 2 || pending[0].DeliveryBatch != key || pending[1].DeliveryBatch != key {
+		t.Fatalf("beads pending after release = %+v, want both still pinned to %q", pending, key)
+	}
+	return key
+}
+
+// A pinned beads batch moved to the file queue arrives there unpinned, so the
+// file queue pins it under a key of its own, never under the beads batch's
+// key.
+func TestNudgeQueueShimToFileMovesAPinnedBatchUnpinned(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	target := shimTarget("alpha/worker")
+	key := pinnedBeadsShimBatch(t, f, target, now)
+
+	assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{Moved: 1})
+	for _, item := range f.fileState(t).Pending {
+		if item.DeliveryBatch != "" {
+			t.Fatalf("file member %s batch = %q, want the moved copy unpinned", item.ID, item.DeliveryBatch)
+		}
+	}
+	fileClaim, err := f.file.ClaimBatch(target, now)
+	if err != nil {
+		t.Fatalf("file ClaimBatch: %v", err)
+	}
+	if got := shimIDs(fileClaim); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
+		t.Fatalf("file claim = %v, want the whole batch", got)
+	}
+	assertNoClaimUnderKey(t, "file claim", fileClaim, key)
+}
+
+// partialAckBeads acks only the first id of the shim's first multi-id Ack and
+// then fails, as a store error part way through Ack's per-id loop would.
+type partialAckBeads struct {
+	nudgeQueueShimBeads
+	failed bool
+}
+
+func (q *partialAckBeads) Ack(ids []string, outcome, reason, commitBoundary string) error {
+	if !q.failed && len(ids) > 1 {
+		q.failed = true
+		if err := q.nudgeQueueShimBeads.Ack(ids[:1], outcome, reason, commitBoundary); err != nil {
+			return err
+		}
+		return errShimCrash
+	}
+	return q.nudgeQueueShimBeads.Ack(ids, outcome, reason, commitBoundary)
+}
+
+// A partial Ack after the import leaves n-b live in beads under the beads
+// batch's key K, so a stale beads-mode claimant sends {n-b} under K. The file
+// queue holds both members and must send them under a key of its own: under
+// K, a key-deduplicating runtime would replay {n-b}'s receipt for the whole
+// batch and ack n-a unseen.
+func TestNudgeQueueShimToFilePartialAckNeverLetsTheFileReuseTheBeadsKey(t *testing.T) {
+	f := newShimFixture(t)
+	now := time.Now().UTC()
+	target := shimTarget("alpha/worker")
+	key := pinnedBeadsShimBatch(t, f, target, now)
+
+	partial := &partialAckBeads{nudgeQueueShimBeads: f.beads}
+	if _, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, f.file, partial, now); !errors.Is(err, errShimCrash) {
+		t.Fatalf("shim error = %v, want the Ack failure", err)
+	}
+	beadsClaim, err := f.beads.ClaimBatch(target, now)
+	if err != nil {
+		t.Fatalf("beads ClaimBatch: %v", err)
+	}
+	if got := shimIDs(beadsClaim); !reflect.DeepEqual(got, []string{"n-b"}) || beadsClaim[0].DeliveryBatch != key {
+		t.Fatalf("beads claim = %+v, want n-b resumed under %q", beadsClaim, key)
+	}
+	fileClaim, err := f.file.ClaimBatch(target, now)
+	if err != nil {
+		t.Fatalf("file ClaimBatch: %v", err)
+	}
+	if got := shimIDs(fileClaim); !reflect.DeepEqual(got, []string{"n-a", "n-b"}) {
+		t.Fatalf("file claim = %v, want both imported members", got)
+	}
+	assertNoClaimUnderKey(t, "file claim", fileClaim, key)
 }
 
 // A beads record whose id the file queue already holds as a dead letter is

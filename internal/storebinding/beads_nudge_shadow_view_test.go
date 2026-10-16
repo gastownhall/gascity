@@ -526,6 +526,31 @@ func TestNudgeShadowViewReportsACorruptRecordAsCorrupt(t *testing.T) {
 	})
 }
 
+// A retired record whose stamped terminal_at does not parse is corrupt to the
+// view's projection, the one reader of terminal_at. Find and
+// FindIncludingTerminal report it wrapping ErrBeadsNudgeQueueCorrupt, so a
+// caller that looks up many nudges can skip only that one.
+func TestNudgeShadowViewReportsAnUnparsableTerminalTimeAsCorrupt(t *testing.T) {
+	runShadowViewCase(t, "corrupt-terminal-at", func(t *testing.T, f shadowViewFixture) {
+		now := time.Now().UTC()
+		if err := f.fd.Queue.Enqueue(testNudgeItem("n-retired", "", now)); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if err := f.fd.Queue.Ack([]string{"n-retired"}, "injected", "", ""); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		if err := f.store.SetMetadata(nudgeQueueBeadID("n-retired"), nudgeMetaTerminalAt, "not-a-time"); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+		if _, ok, err := f.fd.Shadows.FindIncludingTerminal("n-retired"); ok || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("FindIncludingTerminal = %v, %v; want an error wrapping ErrBeadsNudgeQueueCorrupt", ok, err)
+		}
+		if _, ok, err := f.fd.Shadows.Find("n-retired"); ok || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("Find = %v, %v; want an error wrapping ErrBeadsNudgeQueueCorrupt", ok, err)
+		}
+	})
+}
+
 // ShadowHistorySince skips an undecodable record and returns the rest beside
 // a partial result naming it.
 func TestNudgeShadowViewShadowHistorySinceReportsACorruptRecordAsPartial(t *testing.T) {

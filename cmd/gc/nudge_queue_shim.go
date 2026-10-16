@@ -110,8 +110,8 @@ type nudgeQueueShimFile interface {
 	// in place.
 	removeMigrated(items []nudgequeue.Item, now time.Time) ([]nudgequeue.Item, error)
 	// importMigrated appends the moved items as pending, unpinned and
-	// unclaimed, unless their id is already queued, and returns the ids it skipped because the queue holds
-	// them as dead letters.
+	// unclaimed, unless their id is already queued, and returns the ids it
+	// skipped because the queue holds them as dead letters.
 	importMigrated(items []nudgequeue.Item) (dead []string, err error)
 }
 
@@ -142,9 +142,11 @@ type nudgeQueueShimReport struct {
 	// LeaseHeld batches wait for a member's unexpired lease to end.
 	LeaseHeld int
 	// Raced batches reached the beads queue, but a process still writing the
-	// file queue claimed a member, or replaced or removed one, between the
-	// shim's read and its removal. The batch stays whole in the file queue
-	// too, so it may be delivered twice; it is never lost.
+	// file queue changed a member between the shim's read and its removal.
+	// If it claimed a member, nothing is removed and the batch stays whole in
+	// the file queue too, so it may be delivered twice. If it replaced or
+	// removed a member, the remaining members leave the file queue and the
+	// change is reported. Either way nothing is lost.
 	Raced int
 	// Retired batches stay in the file queue because the beads queue does
 	// not serve every member: it already retired the id (a quick flip back
