@@ -756,8 +756,9 @@ func TestFencedInputUnderAnotherFenceSendsNothing(t *testing.T) {
 
 // For a matching fence the pane receives exactly what the unfenced call
 // types, with literal text arriving by buffer instead of send-keys -l (E4).
-// The model types send-keys -l text as given; real tmux drops a trailing ";"
-// from it (E5), which TestFencedNudgeRealTmuxTextIsByteExact pins.
+// The model reads send-keys -l text as tmux does (literalTextFromArgs), so
+// the unfenced path's E5 escaping of a trailing ";" must round-trip here, as
+// TestFencedNudgeRealTmuxTextIsByteExact pins on real tmux.
 func TestFencedInputMatchesUnfencedInputEvents(t *testing.T) {
 	unfenced := map[string]func(p *Provider) error{
 		"claude short immediate": func(p *Provider) error {
