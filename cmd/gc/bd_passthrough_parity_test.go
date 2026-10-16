@@ -45,6 +45,9 @@ exit 0
 // bdParityCity is one arm's fixture. Every path it creates lives under root,
 // so normalizing root makes two arms' outputs comparable.
 type bdParityCity struct {
+	// rawRoot is root as t.TempDir spells it; on macOS it reaches root through
+	// the /var -> /private/var symlink, and gc reports some paths each way.
+	rawRoot                       string
 	root, city, rig, bin, scratch string
 }
 
@@ -69,11 +72,13 @@ func newBdParityCity(t *testing.T, opts bdParityOpts) bdParityCity {
 	resetCLIStorageRoutes(t)
 	captureCLIStorageStderr(t)
 
-	root, err := filepath.EvalSymlinks(t.TempDir())
+	rawRoot := t.TempDir()
+	root, err := filepath.EvalSymlinks(rawRoot)
 	if err != nil {
 		t.Fatal(err)
 	}
 	c := bdParityCity{
+		rawRoot: rawRoot,
 		root:    root,
 		city:    filepath.Join(root, "city"),
 		bin:     filepath.Join(root, "bin"),
@@ -151,7 +156,8 @@ func runBdParityArm(t *testing.T, legacy bool, opts bdParityOpts, setup func(t *
 	code := doBd(args, &stdout, &stderr)
 	log, _ := os.ReadFile(filepath.Join(c.scratch, "bd.log"))
 	norm := func(s string) string {
-		return bdParityTimestamp.ReplaceAllString(strings.ReplaceAll(s, c.root, "$ROOT"), "$$TIME")
+		s = strings.ReplaceAll(strings.ReplaceAll(s, c.root, "$ROOT"), c.rawRoot, "$ROOT")
+		return bdParityTimestamp.ReplaceAllString(s, "$$TIME")
 	}
 	return bdParityResult{code: code, stdout: norm(stdout.String()), stderr: norm(stderr.String()), bd: norm(string(log))}
 }
