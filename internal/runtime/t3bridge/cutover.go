@@ -24,6 +24,7 @@ var (
 	_ runtime.KeyedNudgeProvider              = (*seamBackedProvider)(nil)
 	_ runtime.SessionBindingProvider          = (*seamBackedProvider)(nil)
 	_ runtime.TurnFenceProvider               = (*seamBackedProvider)(nil)
+	_ runtime.TurnObservationProvider         = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -96,4 +97,16 @@ func (s *seamBackedProvider) InterruptTurn(ctx context.Context, name, turnID str
 // WaitTurnEnded passes through to the raw bridge.
 func (s *seamBackedProvider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
 	return s.raw.WaitTurnEnded(ctx, name, turnID, timeout)
+}
+
+// TurnCapabilities implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnCapabilities(name string) runtime.TurnCapabilities {
+	return s.raw.TurnCapabilities(name)
+}
+
+// TurnHistory implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnHistory(ctx context.Context, name string) (runtime.TurnHistory, error) {
+	return s.raw.TurnHistory(ctx, name)
 }

@@ -1578,7 +1578,7 @@ func (p *Provider) dispatchProjectCreate(projectID, title, workspaceRoot, provid
 		"projectId":     projectID,
 		"title":         title,
 		"workspaceRoot": workspaceRoot,
-		"createdAt":     time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":     time.Now().UTC().Format(t3TimeLayout),
 	}
 	if provider != "" || model != "" {
 		command["defaultModelSelection"] = map[string]interface{}{
@@ -1610,7 +1610,7 @@ func (p *Provider) dispatchThreadCreate(
 		"interactionMode": "default",
 		"branch":          nil,
 		"worktreePath":    nil,
-		"createdAt":       time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt":       time.Now().UTC().Format(t3TimeLayout),
 	}
 	if branch != "" {
 		command["branch"] = branch
@@ -1637,7 +1637,7 @@ func (p *Provider) dispatchThreadSessionStop(threadID string) error {
 		"type":      "thread.session.stop",
 		"commandId": p.nextCommandID("t3bridge-session-stop"),
 		"threadId":  threadID,
-		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt": time.Now().UTC().Format(t3TimeLayout),
 	})
 }
 
@@ -1667,7 +1667,7 @@ func (p *Provider) dispatchThreadModelSelection(threadID, provider, model string
 
 func (p *Provider) dispatchActivity(threadID, kind, summary string, payload map[string]interface{}) error {
 	tone := "info"
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	now := time.Now().UTC().Format(t3TimeLayout)
 	return p.rpcDispatchCommand(map[string]interface{}{
 		"type":      "thread.activity.append",
 		"commandId": p.nextCommandID("t3bridge-activity"),
@@ -1730,8 +1730,14 @@ func deliveryIDNamespace(city string) string {
 	return namespace
 }
 
+// t3TimeLayout is the layout of every createdAt the bridge stamps on a T3
+// command: UTC with millisecond precision. T3 records a turn start's
+// requestedAt from it, so a turn's start and its message's createdAt compare
+// equal (DES-O1 §4.8 row 3).
+const t3TimeLayout = "2006-01-02T15:04:05.000Z"
+
 func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
-	now := time.Now().UTC().Format("2006-01-02T15:04:05.000Z")
+	now := time.Now().UTC().Format(t3TimeLayout)
 	return p.rpcDispatchCommand(map[string]interface{}{
 		"type":      "thread.turn.start",
 		"commandId": ids.commandID,
@@ -1765,7 +1771,7 @@ func (p *Provider) dispatchTurnInterruptFor(ctx context.Context, threadID, turnI
 		"type":      "thread.turn.interrupt",
 		"commandId": p.nextCommandID("t3bridge-interrupt"),
 		"threadId":  threadID,
-		"createdAt": time.Now().UTC().Format("2006-01-02T15:04:05.000Z"),
+		"createdAt": time.Now().UTC().Format(t3TimeLayout),
 	}
 	if turnID != "" {
 		command["turnId"] = turnID

@@ -469,3 +469,22 @@ func TestFullFakeWaitTurnEndedSessionGoneEndsTheTurn(t *testing.T) {
 		t.Fatalf("session gone mid-wait = %+v, %v; want no turn, nil", st, err)
 	}
 }
+
+// Kills a t3bridge profile whose turn capabilities differ from production's
+// static V1 row, or that a FullFake script can change: the row is a fixed
+// trait the profile answers itself.
+func TestT3BridgeProfileAnswersProductionsTurnCapabilities(t *testing.T) {
+	f := runtime.NewFake()
+	f.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"s": {{}}}
+	fake, ok := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}).(runtime.TurnObservationProvider)
+	if !ok {
+		t.Fatal("the t3bridge profile lacks TurnObservationProvider")
+	}
+	want := t3bridge.NewSeamBacked().(runtime.TurnObservationProvider).TurnCapabilities("s")
+	if want == (runtime.TurnCapabilities{}) {
+		t.Fatal("production t3bridge declares no turn capabilities")
+	}
+	if got := fake.TurnCapabilities("s"); got != want {
+		t.Fatalf("t3bridge profile TurnCapabilities = %+v, production declares %+v", got, want)
+	}
+}

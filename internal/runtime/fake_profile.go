@@ -94,7 +94,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -231,10 +231,27 @@ type (
 		LivenessObserverWithError
 		SessionBindingProvider
 		TurnFenceProvider
+		TurnObservationProvider
 		sleepTrait
 		turnInterruptTrait
 	}
 )
+
+// t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
+// trait the profile answers itself; a test pins it to production.
+var t3bridgeTurnCapabilities = TurnCapabilities{
+	Start:    TurnStartRecorded,
+	End:      TurnEndRecorded,
+	Fence:    TurnFenceChecked,
+	Link:     TurnLinkCorrelated,
+	Lossless: false,
+}
+
+// TurnCapabilities implements [TurnObservationProvider] with t3bridge's
+// static row; TurnHistory stays forwarded to the backend.
+func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
+	return t3bridgeTurnCapabilities
+}
 
 // FullFake is a [Fake] implementing every [ProfileBackend] interface, the
 // ones Fake lacks answered from its session state.
