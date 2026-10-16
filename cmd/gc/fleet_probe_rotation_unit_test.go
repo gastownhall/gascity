@@ -76,3 +76,77 @@ func TestFleetGuard_EpisodeFailureCountsEndWithTheEpisode(t *testing.T) {
 		t.Errorf("episodeFailures(s1) after an operator reset = %d, want 0", got)
 	}
 }
+
+// A breaker that closes on its own ends the episode: the next one ranks every
+// session even again, not by what failed before the recovery.
+func TestFleetGuard_EpisodeFailureCountsClearWhenTheBreakerCloses(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	tripFleet(t, g, clk)
+	probe := admitFleetProbe(t, g, clk, "p1")
+	probe.Resolve(fleetStartOK)
+	clk.Advance(10 * time.Second)
+	g.ObserveLiveness("p1", true)
+	clk.Advance(stabilityThreshold)
+	g.ObserveLiveness("p1", true)
+	if got := fleetState(g); got != resilience.StateClosed {
+		t.Fatalf("premise: state = %v, want closed", got)
+	}
+	for _, id := range []string{"s1", "s2", "s3"} {
+		if got := g.episodeFailures(id); got != 0 {
+			t.Errorf("episodeFailures(%s) after the breaker closed = %d, want 0", id, got)
+		}
+	}
+}
+
+// Failures that aged out of the trip window without opening the breaker belong
+// to no episode: a later trip starts every session's count from its own
+// failure, not from the stale one.
+func TestFleetGuard_FailuresBeforeTheWindowDoNotCarryIntoTheNextEpisode(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	failFleetStart(t, g, "s1", "a")
+	clk.Advance(fleetFailureWindow + time.Second)
+	failFleetStart(t, g, "s2", "a")
+	clk.Advance(time.Second)
+	failFleetStart(t, g, "s3", "b")
+	clk.Advance(time.Second)
+	failFleetStart(t, g, "s4", "c")
+	if got := fleetState(g); got != resilience.StateOpen {
+		t.Fatalf("premise: state = %v, want open", got)
+	}
+	if got := g.episodeFailures("s1"); got != 0 {
+		t.Errorf("episodeFailures(s1) = %d, want 0: its failure aged out before the episode began", got)
+	}
+	if got := g.episodeFailures("s2"); got != 1 {
+		t.Errorf("episodeFailures(s2) = %d, want 1", got)
+	}
+}
+
+// A session the reconciler is done with carries no failure count.
+func TestFleetGuard_ForgetSessionDropsItsEpisodeFailureCount(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	tripFleet(t, g, clk)
+	if got := g.episodeFailures("s1"); got != 1 {
+		t.Fatalf("premise: episodeFailures(s1) = %d, want 1", got)
+	}
+	g.ForgetSession("s1")
+	if got := g.episodeFailures("s1"); got != 0 {
+		t.Errorf("episodeFailures(s1) after ForgetSession = %d, want 0", got)
+	}
+	if got := g.episodeFailures("s2"); got != 1 {
+		t.Errorf("episodeFailures(s2) = %d, want 1: ForgetSession must touch only its own session", got)
+	}
+}
+
+// A probe whose session starts but dies inside the stability window failed that
+// probe: it counts against the session, so the next probe goes elsewhere.
+func TestFleetGuard_ProbeDeathInsideStabilityCountsAgainstTheSession(t *testing.T) {
+	g, clk := newFleetTestGuard(t)
+	tripFleet(t, g, clk)
+	probe := admitFleetProbe(t, g, clk, "p1")
+	probe.Resolve(fleetStartOK)
+	clk.Advance(5 * time.Second)
+	g.ObserveLiveness("p1", false)
+	if got := g.episodeFailures("p1"); got != 1 {
+		t.Errorf("episodeFailures(p1) after its probe session died = %d, want 1", got)
+	}
+}

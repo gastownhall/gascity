@@ -208,6 +208,16 @@ type fleetStatus struct {
 	Reason string
 }
 
+// fleetTransition is a queued breaker transition. operator marks a close made
+// by `gc breaker reset` rather than by a probe session staying up, so the log
+// line and the event say who closed it. A closed→closed transition is an
+// operator reset of a breaker that was not open: it is logged to stderr only,
+// because no state changed for a breaker.state_changed event to describe.
+type fleetTransition struct {
+	resilience.Transition
+	operator bool
+}
+
 // fleetFailure is one counted automatic-start failure.
 type fleetFailure struct {
 	at       time.Time
@@ -253,7 +263,7 @@ type fleetStartGuard struct {
 	starts      map[string]fleetStart
 	reason      string
 	openSince   time.Time
-	transitions []resilience.Transition
+	transitions []fleetTransition
 	// deferred counts starts the gate kept from being attempted since the
 	// last tick record.
 	deferred int
@@ -286,7 +296,7 @@ func (g *fleetStartGuard) breaker() *resilience.Breaker {
 func (g *fleetStartGuard) onTransition(t resilience.Transition) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	g.transitions = append(g.transitions, t)
+	g.transitions = append(g.transitions, fleetTransition{Transition: t})
 	switch {
 	case t.From == resilience.StateClosed:
 		g.openSince = t.At
@@ -588,7 +598,9 @@ func (g *fleetStartGuard) NoteStateCache(age time.Duration, known bool, expected
 
 // Reset closes the breaker and forgets its failure window and the starts it
 // was confirming. It reports whether the breaker was open or half-open. The
-// close is queued as a transition like any other.
+// close is queued as an operator transition, so the log and the event say it
+// was a reset; a reset of a breaker that was already closed is queued too, for
+// the log only.
 func (g *fleetStartGuard) Reset() bool {
 	if g == nil {
 		return false
@@ -604,17 +616,17 @@ func (g *fleetStartGuard) Reset() bool {
 	clear(g.starts)
 	clear(g.attempts)
 	g.openSince = time.Time{}
-	if prev == resilience.StateClosed {
-		return false
-	}
-	g.transitions = append(g.transitions, resilience.Transition{
-		Scope:   fleetBreakerScope,
-		OpClass: resilience.OpClassSessionStart,
-		From:    prev,
-		To:      resilience.StateClosed,
-		At:      g.now(),
+	g.transitions = append(g.transitions, fleetTransition{
+		Transition: resilience.Transition{
+			Scope:   fleetBreakerScope,
+			OpClass: resilience.OpClassSessionStart,
+			From:    prev,
+			To:      resilience.StateClosed,
+			At:      g.now(),
+		},
+		operator: true,
 	})
-	return true
+	return prev != resilience.StateClosed
 }
 
 // Status returns the breaker's current state. A nil guard reports closed.
@@ -662,13 +674,17 @@ func (g *fleetStartGuard) Flush(rec events.Recorder, stderr io.Writer) {
 	for _, t := range pending {
 		if stderr != nil {
 			switch {
+			case t.operator && t.From == resilience.StateClosed:
+				fmt.Fprintf(stderr, "session reconciler: fleet start breaker reset by operator: it was already closed; the failure window and start confirmations were cleared\n") //nolint:errcheck
+			case t.operator:
+				fmt.Fprintf(stderr, "session reconciler: fleet start breaker closed by operator reset: automatic session starts resumed\n") //nolint:errcheck
 			case t.From == resilience.StateClosed && t.To == resilience.StateOpen:
 				fmt.Fprintf(stderr, "session reconciler: fleet start breaker opened (%s; backoff %s): automatic session starts are limited to probes until sessions stay up; clear with `gc breaker reset`\n", reason, t.Backoff.Round(time.Millisecond)) //nolint:errcheck
 			case t.To == resilience.StateClosed:
 				fmt.Fprintf(stderr, "session reconciler: fleet start breaker closed: automatic session starts resumed\n") //nolint:errcheck
 			}
 		}
-		if rec == nil {
+		if rec == nil || (t.operator && t.From == resilience.StateClosed) {
 			continue
 		}
 		payload, err := json.Marshal(breakerStateChangedPayload{
@@ -687,10 +703,18 @@ func (g *fleetStartGuard) Flush(rec events.Recorder, stderr io.Writer) {
 			Ts:      t.At.UTC(),
 			Actor:   "gc",
 			Subject: t.Scope,
-			Message: fmt.Sprintf("fleet start breaker %s→%s", t.From, t.To),
+			Message: fleetTransitionMessage(t),
 			Payload: payload,
 		})
 	}
+}
+
+// fleetTransitionMessage is the breaker.state_changed event message.
+func fleetTransitionMessage(t fleetTransition) string {
+	if t.operator {
+		return fmt.Sprintf("fleet start breaker %s→%s (operator reset)", t.From, t.To)
+	}
+	return fmt.Sprintf("fleet start breaker %s→%s", t.From, t.To)
 }
 
 // recordTick closes one reconciler tick: it records the breaker's state to the
