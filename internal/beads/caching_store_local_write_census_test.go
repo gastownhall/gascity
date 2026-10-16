@@ -35,6 +35,7 @@ var localWriteCensusExempt = map[string]string{
 	"CachingStore.Ping":                                  "read",
 	"CachingStore.Ready":                                 "read",
 	"CachingStore.ReadyContext":                          "read",
+	"CachingStore.ReadyPreferCache":                      "read",
 	"CachingStore.SawRows":                               "read",
 	"CachingStore.Stats":                                 "read",
 	"CachingStore.Stopped":                               "read",
@@ -56,6 +57,7 @@ var localWriteCensusExempt = map[string]string{
 	// Handle constructors: the handles' own methods are in the census.
 	"CachingStore.AtomicConditionalCloserHandle": "handle constructor",
 	"CachingStore.GraphApplyHandle":              "handle constructor",
+	"CachingStore.GuardedBatcherHandle":          "handle constructor",
 	"CachingStore.Handles":                       "handle constructor",
 	"CachingStore.ReadyGraphOnlyHandle":          "handle constructor",
 	// Cache maintenance: these install what the backing already holds, under
