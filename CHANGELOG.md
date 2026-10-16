@@ -639,8 +639,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   copy, flattened that copy and reported the rig's database as compacted.
   Compact now skips such a rig with a log line naming its endpoint, and skips
   a same-named copy on the managed server with a warning; `--only-db` cannot
-  reach either. Rigs that inherit the city endpoint are compacted as before
-  (#7994).
+  reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
+  too, with a warning naming the file. Rigs that inherit the city endpoint are
+  compacted as before (#7994).
 
 ## [1.5.0] - 2026-10-05
 

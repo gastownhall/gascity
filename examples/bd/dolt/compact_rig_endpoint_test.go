@@ -10,20 +10,27 @@ import (
 
 // Fake-Dolt regressions for a city on managed Dolt whose rig is pinned to a
 // different Dolt endpoint (`gc rig set-endpoint <rig> --external` or --self,
-// a legacy config.yaml host, or bd's binding to a remote host). The compactor
-// talks only to the city's compaction target, and the pinned rig's database
-// does not live there. It must be skipped with a log line: never queried on
-// the managed server, never compacted as a same-named copy there, and never a
-// reason to fail the run. Rigs that follow the city endpoint are still
-// compacted. The real-Dolt counterpart is
+// a legacy config.yaml host or socket, or bd's binding to a remote host). The
+// compactor talks only to the city's compaction target, and the pinned rig's
+// database does not live there. It must be skipped with a log line: never
+// queried on the managed server, never compacted as a same-named copy there,
+// and never a reason to fail the run. Rigs that follow the city endpoint are
+// still compacted. The real-Dolt counterpart is
 // compact_rig_endpoint_real_dolt_test.go.
 
 // compactCloudDoltHost is a Dolt host that is not on this machine, and
 // compactCloudDoltEndpoint the endpoint a cloud-pinned rig names.
+// compactCityDoltHost is a non-loopback name for the city's managed server,
+// as a containerized deployment spells it.
 const (
 	compactCloudDoltHost     = "beads.dolt-cloud.example"
 	compactCloudDoltEndpoint = compactCloudDoltHost + ":3306"
+	compactCityDoltHost      = "dolt.city.example"
 )
+
+// compactUnknownEndpointSkip is how a scope's skip line names the reason when
+// its config.yaml cannot be read.
+const compactUnknownEndpointSkip = "has an unknown Dolt endpoint"
 
 // compactCloudPinConfig is the canonical .beads/config.yaml that
 // `gc rig set-endpoint <rig> --external --host beads.dolt-cloud.example
@@ -122,8 +129,25 @@ exit 1
 `, strings.Join(served, " "), shellQuote(inner), shellQuote(fixture.doltLog)))
 }
 
+// makeCompactRigConfigUnreadable removes every permission from the rig's
+// .beads/config.yaml until the test ends and returns its path. Root ignores
+// file mode, so the test is skipped there.
+func makeCompactRigConfigUnreadable(t *testing.T, rig string) string {
+	t.Helper()
+	if os.Geteuid() == 0 {
+		t.Skip("root ignores file mode")
+	}
+	configPath := filepath.Join(rig, ".beads", "config.yaml")
+	if err := os.Chmod(configPath, 0); err != nil {
+		t.Fatalf("make rig config unreadable: %v", err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(configPath, 0o644) })
+	return configPath
+}
+
 // assertCompactPinnedScopeSkipLine requires an output line that skips db
-// because scope is pinned to endpoint.
+// because scope is pinned to endpoint. For a scope whose endpoint is unknown,
+// endpoint is compactUnknownEndpointSkip.
 func assertCompactPinnedScopeSkipLine(t *testing.T, out, db, scope, endpoint string) {
 	t.Helper()
 	for _, line := range strings.Split(out, "\n") {
@@ -137,7 +161,7 @@ func assertCompactPinnedScopeSkipLine(t *testing.T, out, db, scope, endpoint str
 		}
 		return
 	}
-	t.Fatalf("output has no skip line for db=%s pinned to %s:\n%s", db, endpoint, out)
+	t.Fatalf("output has no skip line for db=%s naming %q:\n%s", db, endpoint, out)
 }
 
 // The reported failure: a managed city, one rig inheriting the managed
@@ -242,18 +266,142 @@ func TestCompactScriptSkipsManagedCopyOfPinnedRigDatabase(t *testing.T) {
 	}
 }
 
+// A rig pinned to a Unix socket, which may be this server's, or to another
+// port on this server's host, which may be stale, as bd's binding is once
+// gc's server restarts on a fresh port, is skipped like any pinned rig. But
+// the database of its name here may be its live store, so the warning asks
+// for a check instead of calling that database a copy to drop. A rig pinned
+// to another host keeps the copy wording. Both hold for --only-db too.
+func TestCompactScriptWarnsPinnedRigDatabaseHereMayBeLive(t *testing.T) {
+	// In metadata and endpoint, otherPortToken becomes a port the fixture does
+	// not listen on.
+	const otherPortToken = "{{other_port}}"
+	cases := []struct {
+		name string
+		// runHost is the run's GC_DOLT_HOST; empty means the fixture's
+		// 127.0.0.1.
+		runHost  string
+		metadata string
+		config   string
+		endpoint string
+		// doubt is why the rig's endpoint may still lead to this server; empty
+		// means the endpoint names another host.
+		doubt string
+	}{
+		{
+			name:    "bd binding to this server's host on another port",
+			runHost: compactCityDoltHost,
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rigdb",` +
+				`"dolt_server_host":"` + compactCityDoltHost + `","dolt_server_port":` + otherPortToken + `}`,
+			endpoint: compactCityDoltHost + ":" + otherPortToken,
+			doubt:    "another port on this host and may be stale",
+		},
+		{
+			name:     "rig-local server on another loopback port (--self)",
+			config:   "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: 127.0.0.1\ndolt.port: 28232\n",
+			endpoint: "127.0.0.1:28232",
+			doubt:    "another port on this host and may be stale",
+		},
+		{
+			name:     "legacy socket",
+			config:   "issue_prefix: rg\ndolt.socket: /run/rig-dolt/mysql.sock\n",
+			endpoint: "unix:/run/rig-dolt/mysql.sock",
+			doubt:    "a Unix socket that may belong to this server",
+		},
+		{
+			name:     "external pin to another host",
+			config:   compactCloudPinConfig("rg"),
+			endpoint: compactCloudDoltEndpoint,
+		},
+	}
+	for _, tc := range cases {
+		for _, onlyDB := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/only-db %t", tc.name, onlyDB), func(t *testing.T) {
+				fixture := newCompactScriptFixture(t)
+				expand := strings.NewReplacer(otherPortToken, fmt.Sprint(fixture.port+1)).Replace
+				rig := filepath.Join(t.TempDir(), "rig")
+				writeCompactRigScope(t, rig, "rigdb", tc.config)
+				if tc.metadata != "" {
+					if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(expand(tc.metadata)), 0o644); err != nil {
+						t.Fatalf("write rig metadata: %v", err)
+					}
+				}
+				installCompactRigListGC(t, fixture, rig)
+				copyPath := filepath.Join(fixture.dataDir, "rigdb")
+				var args []string
+				if onlyDB {
+					args = []string{"--gc-only", "--only-db", "rigdb"}
+				} else if err := os.MkdirAll(filepath.Join(copyPath, ".dolt"), 0o755); err != nil {
+					t.Fatalf("mkdir managed rigdb: %v", err)
+				}
+				runHost := "127.0.0.1"
+				env := []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500"}
+				if tc.runHost != "" {
+					runHost = tc.runHost
+					env = append(env, "GC_DOLT_HOST="+tc.runHost)
+				}
+
+				out, err := fixture.runWithArgs(t, "success", args, env...)
+				if err != nil {
+					t.Fatalf("compact failed: %v\n%s", err, out)
+				}
+				if log := readCompactDoltLog(t, fixture); strings.Contains(log, "db=rigdb ") {
+					t.Fatalf("the rig is pinned elsewhere, but the managed server's rigdb was queried:\n%s\ndolt log:\n%s", out, log)
+				}
+				endpoint := expand(tc.endpoint)
+				assertCompactPinnedScopeSkipLine(t, out, "rigdb", rig, endpoint)
+				var want, unwanted string
+				switch {
+				case tc.doubt != "" && !onlyDB:
+					want = "compact: db=rigdb WARN: " + copyPath + " on this server may still be the live store of scope=" + rig +
+						", whose Dolt endpoint " + endpoint + " is " + tc.doubt +
+						" — skip; check which server the scope uses before you drop it"
+					unwanted = "drop or archive"
+				case tc.doubt != "":
+					want = "compact: db=rigdb WARN: requested by name, but it is the database of scope=" + rig +
+						", whose Dolt endpoint " + endpoint + " is " + tc.doubt +
+						"; this server, " + runHost + ":" + fmt.Sprint(fixture.port) +
+						", may still hold its live store — skip; check which server the scope uses first"
+					unwanted = "gc compacts only"
+				case !onlyDB:
+					want = "compact: db=rigdb WARN: " + copyPath + " on this server is not the store of scope=" + rig +
+						", which is pinned to Dolt endpoint " + endpoint + " — skip; drop or archive the copy if it is stale"
+					unwanted = "may still be the live store"
+				default:
+					want = "compact: db=rigdb WARN: requested by name, but it is the database of scope=" + rig +
+						", which is pinned to Dolt endpoint " + endpoint + "; gc compacts only " + runHost + ":" + fmt.Sprint(fixture.port) + " — skip"
+					unwanted = "may still hold its live store"
+				}
+				if !strings.Contains(out, want) {
+					t.Fatalf("output is missing the warning %q:\n%s", want, out)
+				}
+				if strings.Contains(out, unwanted) {
+					t.Fatalf("output must not say %q here:\n%s", unwanted, out)
+				}
+			})
+		}
+	}
+}
+
 // Which scopes count as pinned elsewhere. A scope is skipped only on
 // unambiguous evidence that its database lives on another server; everything
 // else keeps today's behavior and is compacted here.
 func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
-	const portToken = "{{managed_port}}"
+	// In metadata, config and wantEndpoint, portToken becomes the fixture's
+	// managed port and otherPortToken a port it does not listen on.
+	const (
+		portToken      = "{{managed_port}}"
+		otherPortToken = "{{other_port}}"
+	)
 	cases := []struct {
 		name string
+		// runHost is the run's GC_DOLT_HOST; empty means the fixture's
+		// loopback host.
+		runHost string
 		// metadata is the rig's metadata.json; empty means the server-mode
 		// default naming the rig's database.
 		metadata string
-		// config is the rig's config.yaml; portToken becomes the fixture's
-		// managed port.
+		// config is the rig's config.yaml.
 		config string
 		// wantEndpoint is the endpoint a skipped rig is pinned to; empty means
 		// the rig's database is compacted on the managed server.
@@ -280,6 +428,16 @@ func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
 			wantEndpoint: "127.0.0.1:28232",
 		},
 		{
+			name:         "external pin to another host on the managed port",
+			config:       "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: " + compactCloudDoltHost + "\ndolt.port: " + portToken + "\n",
+			wantEndpoint: compactCloudDoltHost + ":" + portToken,
+		},
+		{
+			name:    "explicit pin naming a non-loopback managed host itself",
+			runHost: compactCityDoltHost,
+			config:  "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.host: Dolt.City.Example\ndolt.port: " + portToken + "\n",
+		},
+		{
 			name:         "socket pin",
 			config:       "gc.endpoint_origin: explicit\ngc.endpoint_status: verified\ndolt.socket: /run/rig-dolt/mysql.sock\n",
 			wantEndpoint: "unix:/run/rig-dolt/mysql.sock",
@@ -299,6 +457,10 @@ func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
 				`"dolt_server_host":"` + compactCloudDoltHost + `","dolt_server_port":3306}`,
 		},
 		{
+			name:   "inherited rig mirroring an external endpoint",
+			config: compactInheritedConfig("rg") + "dolt.host: " + compactCloudDoltHost + "\ndolt.port: 3306\n",
+		},
+		{
 			name:   "legacy config with only a stale port mirror",
 			config: "issue_prefix: rg\ndolt.port: 1\n",
 		},
@@ -312,15 +474,60 @@ func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
 			wantEndpoint: compactCloudDoltEndpoint,
 		},
 		{
+			name:         "legacy config pinned to a remote host with no port",
+			config:       "issue_prefix: rg\ndolt.host: " + compactCloudDoltHost + "\n",
+			wantEndpoint: compactCloudDoltHost + ":<unset>",
+		},
+		{
+			name:         "legacy config naming a socket",
+			config:       "issue_prefix: rg\ndolt.socket: /run/rig-dolt/mysql.sock\n",
+			wantEndpoint: "unix:/run/rig-dolt/mysql.sock",
+		},
+		{
+			name:         "legacy config naming a non-loopback managed host on another port",
+			runHost:      compactCityDoltHost,
+			config:       "issue_prefix: rg\ndolt.host: " + compactCityDoltHost + "\ndolt.port: " + otherPortToken + "\n",
+			wantEndpoint: compactCityDoltHost + ":" + otherPortToken,
+		},
+		{
+			name:    "legacy config naming a non-loopback managed host on the managed port",
+			runHost: compactCityDoltHost,
+			config:  "issue_prefix: rg\ndolt.host: " + compactCityDoltHost + "\ndolt.port: " + portToken + "\n",
+		},
+		{
+			name:    "legacy config naming a non-loopback managed host with no port",
+			runHost: compactCityDoltHost,
+			config:  "issue_prefix: rg\ndolt.host: " + compactCityDoltHost + "\n",
+		},
+		{
 			name: "bd-owned binding to a remote host",
 			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rigdb",` +
 				`"dolt_server_host":"` + compactCloudDoltHost + `","dolt_server_port":3306}`,
 			wantEndpoint: compactCloudDoltEndpoint,
 		},
 		{
+			name: "bd-owned binding to a remote host on the managed port",
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rigdb",` +
+				`"dolt_server_host":"` + compactCloudDoltHost + `","dolt_server_port":` + portToken + `}`,
+			wantEndpoint: compactCloudDoltHost + ":" + portToken,
+		},
+		{
 			name: "bd-owned binding to a loopback host",
 			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rigdb",` +
 				`"dolt_server_host":"127.0.0.1","dolt_server_port":1}`,
+		},
+		{
+			name:    "bd-owned binding to a non-loopback managed host on another port",
+			runHost: compactCityDoltHost,
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rigdb",` +
+				`"dolt_server_host":"` + compactCityDoltHost + `","dolt_server_port":` + otherPortToken + `}`,
+			wantEndpoint: compactCityDoltHost + ":" + otherPortToken,
+		},
+		{
+			name:    "bd-owned binding to a non-loopback managed host on the managed port",
+			runHost: compactCityDoltHost,
+			metadata: `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"rigdb",` +
+				`"dolt_server_host":"` + compactCityDoltHost + `","dolt_server_port":` + portToken + `}`,
 		},
 		{
 			name: "no endpoint evidence at all",
@@ -329,22 +536,30 @@ func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fixture := newCompactScriptFixture(t)
+			expand := strings.NewReplacer(
+				portToken, fmt.Sprint(fixture.port),
+				otherPortToken, fmt.Sprint(fixture.port+1),
+			).Replace
 			rig := filepath.Join(t.TempDir(), "rig")
-			config := strings.ReplaceAll(tc.config, portToken, fmt.Sprint(fixture.port))
-			writeCompactRigScope(t, rig, "rigdb", config)
+			writeCompactRigScope(t, rig, "rigdb", expand(tc.config))
 			if tc.metadata != "" {
-				if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(tc.metadata), 0o644); err != nil {
+				if err := os.WriteFile(filepath.Join(rig, ".beads", "metadata.json"), []byte(expand(tc.metadata)), 0o644); err != nil {
 					t.Fatalf("write rig metadata: %v", err)
 				}
 			}
 			installCompactRigListGC(t, fixture, rig)
+			wantEndpoint := expand(tc.wantEndpoint)
 			served := []string{"beads"}
-			if tc.wantEndpoint == "" {
+			if wantEndpoint == "" {
 				served = append(served, "rigdb")
 			}
 			serveOnlyCompactDatabases(t, fixture, served...)
 
-			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+			env := []string{"GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1"}
+			if tc.runHost != "" {
+				env = append(env, "GC_DOLT_HOST="+tc.runHost)
+			}
+			out, err := fixture.run(t, "success", env...)
 			if err != nil {
 				t.Fatalf("compact failed: %v\n%s", err, out)
 			}
@@ -352,50 +567,105 @@ func TestCompactScriptClassifiesRigEndpoints(t *testing.T) {
 			if !strings.Contains(out, "db=beads commits=600") {
 				t.Fatalf("the city's own database was not reached:\n%s", out)
 			}
-			if tc.wantEndpoint == "" {
+			if wantEndpoint == "" {
 				if !strings.Contains(log, "db=rigdb ") || strings.Contains(out, "db=rigdb scope=") {
 					t.Fatalf("rigdb lives on the managed server and must be compacted there:\n%s", out)
 				}
 				return
 			}
 			if strings.Contains(log, "db=rigdb ") {
-				t.Fatalf("rigdb lives on %s, but the managed server was queried for it:\n%s\ndolt log:\n%s", tc.wantEndpoint, out, log)
+				t.Fatalf("rigdb lives on %s, but the managed server was queried for it:\n%s\ndolt log:\n%s", wantEndpoint, out, log)
 			}
-			assertCompactPinnedScopeSkipLine(t, out, "rigdb", rig, tc.wantEndpoint)
+			assertCompactPinnedScopeSkipLine(t, out, "rigdb", rig, wantEndpoint)
 		})
 	}
 }
 
-// A rig config.yaml that cannot be read is no evidence of a pin. The run warns,
-// naming the file, and compacts the rig's database as it did before scopes were
-// classified: one unreadable file must not stop compaction of every database in
-// the city, the city's own included.
-func TestCompactScriptUnreadableRigConfigDoesNotAbortRun(t *testing.T) {
-	if os.Geteuid() == 0 {
-		t.Skip("root ignores file mode")
+// A rig config.yaml that cannot be read leaves the rig's endpoint unknown. The
+// run warns, naming the file, and skips the rig's database as it skips a
+// pinned rig's: if the rig lives on another endpoint, a same-named database
+// here is a stale copy, and flattening it costs far more than one missed
+// compaction. The run still succeeds and compacts the city's database, and a
+// name that a scope on the managed server also claims is compacted as usual.
+func TestCompactScriptUnreadableRigConfigSkipsRig(t *testing.T) {
+	cases := []struct {
+		name string
+		// db is the rig's database; "beads" is also the city's.
+		db     string
+		config string
+		// managedCopy puts a database named db in the managed data dir.
+		managedCopy bool
+	}{
+		{name: "inherited rig", db: "rigdb", config: compactInheritedConfig("rg")},
+		{
+			name:        "external pin with a same-named copy on the managed server",
+			db:          "cloudrig",
+			config:      compactCloudPinConfig("cr"),
+			managedCopy: true,
+		},
+		{name: "rig sharing the city's database name", db: "beads", config: compactInheritedConfig("rg")},
 	}
-	fixture := newCompactScriptFixture(t)
-	rig := writeCompactRigScope(t, t.TempDir(), "rigdb", compactInheritedConfig("rg"))
-	configPath := filepath.Join(rig, ".beads", "config.yaml")
-	if err := os.Chmod(configPath, 0); err != nil {
-		t.Fatalf("make rig config unreadable: %v", err)
-	}
-	t.Cleanup(func() { _ = os.Chmod(configPath, 0o644) })
-	installCompactRigListGC(t, fixture, rig)
-	serveOnlyCompactDatabases(t, fixture, "beads", "rigdb")
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			fixture := newCompactScriptFixture(t)
+			copyPath := filepath.Join(fixture.dataDir, tc.db)
+			if tc.managedCopy {
+				if err := os.MkdirAll(filepath.Join(copyPath, ".dolt"), 0o755); err != nil {
+					t.Fatalf("mkdir managed copy: %v", err)
+				}
+			}
+			rig := writeCompactRigScope(t, t.TempDir(), tc.db, tc.config)
+			configPath := makeCompactRigConfigUnreadable(t, rig)
+			installCompactRigListGC(t, fixture, rig)
 
-	out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500", "GC_DOLT_COMPACT_DRY_RUN=1")
+			out, err := fixture.run(t, "success", "GC_DOLT_COMPACT_THRESHOLD_COMMITS=500")
+			if err != nil {
+				t.Fatalf("an unreadable rig config.yaml must not fail the run: %v\n%s", err, out)
+			}
+			if !strings.Contains(out, "scope="+rig+" WARN: cannot read "+configPath) {
+				t.Fatalf("output must name the rig and the config.yaml it cannot read:\n%s", out)
+			}
+			assertCompactPinnedScopeSkipLine(t, out, tc.db, rig, compactUnknownEndpointSkip)
+			if !strings.Contains(out, "db=beads commits=600->600") {
+				t.Fatalf("the city's own database was not compacted:\n%s", out)
+			}
+			if tc.db == "beads" {
+				if strings.Contains(out, "db=beads WARN:") {
+					t.Fatalf("the city claims beads, so it is compacted with no copy warning:\n%s", out)
+				}
+				return
+			}
+			if log := readCompactDoltLog(t, fixture); strings.Contains(log, "db="+tc.db+" ") {
+				t.Fatalf("the rig's endpoint is unknown, but the managed server's %s was compacted as its store:\n%s\ndolt log:\n%s",
+					tc.db, out, log)
+			}
+			if tc.managedCopy && !strings.Contains(out, "compact: db="+tc.db+" WARN: "+copyPath+" on this server may not be the store of scope="+rig) {
+				t.Fatalf("output must warn that %s may not be the rig's store:\n%s", copyPath, out)
+			}
+		})
+	}
+}
+
+// --only-db cannot reach the database of a rig whose config.yaml cannot be
+// read either: the request is refused with a warning naming the cause.
+func TestCompactScriptOnlyDBRefusesUnknownEndpointRigDatabase(t *testing.T) {
+	fixture := newCompactScriptFixture(t)
+	if err := os.MkdirAll(filepath.Join(fixture.dataDir, "rigdb", ".dolt"), 0o755); err != nil {
+		t.Fatalf("mkdir rigdb: %v", err)
+	}
+	rig := writeCompactRigScope(t, t.TempDir(), "rigdb", compactInheritedConfig("rg"))
+	makeCompactRigConfigUnreadable(t, rig)
+	installCompactRigListGC(t, fixture, rig)
+
+	out, err := fixture.runWithArgs(t, "success", []string{"--gc-only", "--only-db", "rigdb"})
 	if err != nil {
-		t.Fatalf("an unreadable rig config.yaml must not abort the run: %v\n%s", err, out)
+		t.Fatalf("compact failed: %v\n%s", err, out)
 	}
-	if !strings.Contains(out, "db=beads commits=600") {
-		t.Fatalf("the city's own database was not reached:\n%s", out)
+	if log := readCompactDoltLog(t, fixture); strings.TrimSpace(log) != "" {
+		t.Fatalf("--only-db of a rig whose endpoint is unknown must issue no SQL here:\n%s\ndolt log:\n%s", out, log)
 	}
-	if log := readCompactDoltLog(t, fixture); !strings.Contains(log, "db=rigdb ") || strings.Contains(out, "db=rigdb scope=") {
-		t.Fatalf("with no readable endpoint evidence the rig's database is compacted as before:\n%s", out)
-	}
-	if !strings.Contains(out, "scope="+rig+" WARN: cannot read "+configPath) {
-		t.Fatalf("output must name the rig and the config.yaml it cannot read:\n%s", out)
+	if !strings.Contains(out, "compact: db=rigdb WARN: requested by name, but it is the database of scope="+rig+", whose Dolt endpoint is unknown") {
+		t.Fatalf("output must explain why the requested database is refused:\n%s", out)
 	}
 }
 
