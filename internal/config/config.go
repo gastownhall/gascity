@@ -259,6 +259,9 @@ type City struct {
 	Storage *StorageConfig `toml:"storage,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
+	// Ops holds the operation-journal rollout gates (ops.content,
+	// ops.control, ops.lifecycle).
+	Ops OpsConfig `toml:"ops,omitempty"`
 	// Session configures the session provider backend.
 	Session SessionConfig `toml:"session,omitempty"`
 	// Mail configures the mail provider backend.
@@ -5019,6 +5022,9 @@ func Parse(data []byte) (*City, error) {
 		cfg.Agents[i].source = sourceInline
 	}
 	if err := validateBeadsModes(cfg.Beads); err != nil {
+		return nil, err
+	}
+	if err := validateOpsModes(cfg.Ops); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class

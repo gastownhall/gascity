@@ -27,6 +27,7 @@ City is the top-level configuration for a Gas City instance.
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
 | `storage` | StorageConfig |  |  | Storage assigns the six semantic storage classes to immutable named bindings. Nil preserves the existing all-Work storage topology. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
+| `ops` | OpsConfig |  |  | Ops holds the operation-journal rollout gates (ops.content, ops.control, ops.lifecycle). |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
@@ -594,6 +595,16 @@ NamedSessionPatch modifies an existing named session identified by canonical nam
 | `name` | string |  |  | Name is the canonical named-session identity. Use this to disambiguate sessions that share the same template. |
 | `template` | string |  |  | Template is a compatibility targeting key when Name is omitted. |
 | `mode` | string |  |  | Mode overrides the named-session controller mode ("on_demand" or "always"). Enum: `on_demand`, `always` |
+
+## OpsConfig
+
+OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution.
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `content` | string |  | `off` | ContentMode records message deliveries (session submit and messages, nudge, mail notify) as message ops. "off" (the shipped default; all three gates ship off), "auto" records where the store can and degrades loudly where it cannot, and "require" refuses a request it cannot record before any effect (experimental until the X12 harness passes). A change takes effect at the next process start. Enum: `off`, `auto`, `require` |
+| `control` | string |  | `off` | ControlMode records interrupt (stop) and respond requests as ops. "off" (the shipped default), "auto" records where the store can and degrades loudly where it cannot, and "require" refuses a request it cannot record before any effect (experimental until the X12 harness passes). A change takes effect at the next process start. Enum: `off`, `auto`, `require` |
+| `lifecycle` | string |  | `off` | LifecycleMode records wake, suspend, reset (restart), kill and close requests as ops. "off" (the shipped default), "auto" records where the store can and degrades loudly where it cannot, and "require" refuses a request it cannot record before any effect (experimental until the X12 harness passes). A change takes effect at the next process start. Enum: `off`, `auto`, `require` |
 
 ## OptionChoice
 
