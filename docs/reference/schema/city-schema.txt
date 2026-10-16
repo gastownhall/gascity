@@ -1638,7 +1638,7 @@
         },
         "gc_timeout": {
           "type": "string",
-          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m.",
+          "description": "GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.\nDefaults to 10m. Has no effect yet: the loop does not run\nCALL DOLT_GC() until production wires OpenDoltOps (see Dolt above).",
           "default": "10m"
         }
       },
@@ -2043,7 +2043,7 @@
       "properties": {
         "dolt": {
           "$ref": "#/$defs/DoltMaintenance",
-          "description": "Dolt configures the weekly Dolt store maintenance loop\n(CALL DOLT_GC + backup snapshot)."
+          "description": "Dolt configures the weekly Dolt store maintenance loop. As of this\nrelease the loop only OBSERVES on its schedule: startMaintenanceLoop\n(cmd/gc/api_state.go) does not yet wire OpenDoltOps/OpenDoltBackup,\nso CALL DOLT_GC() and the backup snapshot do not run. The supervisor\nlog reports this on startup (\"mode=observe-only (snapshot and\nDOLT_GC not yet wired)\")."
         }
       },
       "additionalProperties": false,

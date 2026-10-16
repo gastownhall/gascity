@@ -130,13 +130,18 @@ type StoreMaintenanceLoopDeps struct {
 
 	// OpenDoltOps opens a SQL connection to the managed Dolt store for
 	// one maintenance cycle. Nil leaves runDoltGC a no-op so deployments
-	// can wire maintenance dependencies incrementally. Production wires
-	// this to NewSQLDoltOps.
+	// can wire maintenance dependencies incrementally. NewSQLDoltOps
+	// below is the adapter for this; no production caller sets it yet
+	// (cmd/gc/api_state.go's startMaintenanceLoop constructs
+	// StoreMaintenanceLoopDeps without it), so the loop currently stays
+	// observe-only in production — see MaintenanceConfig.Dolt
+	// (internal/config/config.go) for the operator-facing note.
 	OpenDoltOps DoltOpsFactory
 
 	// OpenDoltBackup opens a DoltBackupRunner for one snapshot cycle.
-	// Nil leaves runSnapshot a no-op. Production wires this to
-	// NewExecDoltBackupRunner rooted at the managed Dolt DB dir.
+	// Nil leaves runSnapshot a no-op. NewExecDoltBackupRunner below is
+	// the adapter, rooted at the managed Dolt DB dir; no production
+	// caller sets it yet, for the same reason as OpenDoltOps above.
 	OpenDoltBackup DoltBackupRunnerFactory
 
 	// Mail sends operator alert mail on failed runs when Cfg.AlertTo is

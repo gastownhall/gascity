@@ -416,7 +416,7 @@ DoltMaintenance configures the periodic Dolt store maintenance loop.
 | `enabled` | boolean |  |  | Enabled toggles the maintenance loop. Defaults to false (opt-in). |
 | `interval` | string |  | `168h` | Interval is the cadence between maintenance runs as a duration string (e.g., "168h"). Defaults to 168h (weekly). |
 | `alert_to` | string |  |  | AlertTo is the agent identity to mail on failure (e.g., "gascity/mayor"). Empty disables alert mail. |
-| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. |
+| `gc_timeout` | string |  | `10m` | GCTimeout is the ceiling for CALL DOLT_GC() as a duration string. Defaults to 10m. Has no effect yet: the loop does not run CALL DOLT_GC() until production wires OpenDoltOps (see Dolt above). |
 
 ## EventsConfig
 
@@ -571,7 +571,7 @@ MaintenanceConfig groups periodic store-maintenance subsections.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop (CALL DOLT_GC + backup snapshot). |
+| `dolt` | DoltMaintenance |  |  | Dolt configures the weekly Dolt store maintenance loop. As of this release the loop only OBSERVES on its schedule: startMaintenanceLoop (cmd/gc/api_state.go) does not yet wire OpenDoltOps/OpenDoltBackup, so CALL DOLT_GC() and the backup snapshot do not run. The supervisor log reports this on startup ("mode=observe-only (snapshot and DOLT_GC not yet wired)"). |
 
 ## ModelPricing
 

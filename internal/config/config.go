@@ -2782,8 +2782,12 @@ func (c ConvergenceConfig) MaxTotalOrDefault() int {
 
 // MaintenanceConfig groups periodic store-maintenance subsections.
 type MaintenanceConfig struct {
-	// Dolt configures the weekly Dolt store maintenance loop
-	// (CALL DOLT_GC + backup snapshot).
+	// Dolt configures the weekly Dolt store maintenance loop. As of this
+	// release the loop only OBSERVES on its schedule: startMaintenanceLoop
+	// (cmd/gc/api_state.go) does not yet wire OpenDoltOps/OpenDoltBackup,
+	// so CALL DOLT_GC() and the backup snapshot do not run. The supervisor
+	// log reports this on startup ("mode=observe-only (snapshot and
+	// DOLT_GC not yet wired)").
 	Dolt DoltMaintenance `toml:"dolt,omitempty"`
 }
 
@@ -2799,7 +2803,8 @@ type DoltMaintenance struct {
 	// "gascity/mayor"). Empty disables alert mail.
 	AlertTo string `toml:"alert_to,omitempty"`
 	// GCTimeout is the ceiling for CALL DOLT_GC() as a duration string.
-	// Defaults to 10m.
+	// Defaults to 10m. Has no effect yet: the loop does not run
+	// CALL DOLT_GC() until production wires OpenDoltOps (see Dolt above).
 	GCTimeout string `toml:"gc_timeout,omitempty" jsonschema:"default=10m"`
 }
 
