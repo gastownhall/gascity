@@ -4,14 +4,18 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
+	"slices"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/connect"
 	"github.com/spf13/cobra"
 )
@@ -47,33 +51,42 @@ func (p controlPlane) Worker() bool { return p.kind == planeWorker }
 // Descriptor on the Local plane.
 func (p controlPlane) Descriptor() connect.Descriptor { return p.descriptor }
 
-// attachedBindings maps each storage binding a descriptor ledger serves to
-// the classes the ledger lists for it. The Local plane attaches nothing: it
-// has no descriptor, and its bindings are opened as configured.
-func (p controlPlane) attachedBindings() map[string][]string {
+// ledgerBindingFor returns the storage binding of the descriptor ledger that
+// lists class (the reserved work binding for the city ledger), and false when
+// no ledger lists it or the plane is Local. CN-1c's ledger classes are the
+// authority: a binding is attached for a class only through the ledger the
+// bundle put that class on.
+func (p controlPlane) ledgerBindingFor(class string) (string, bool) {
 	if !p.Worker() {
-		return nil
+		return "", false
 	}
-	bindings := make(map[string][]string, len(p.descriptor.Ledgers))
 	for _, ledger := range p.descriptor.Ledgers {
-		binding, ok := connect.ScopeBinding(ledger.Scope)
-		if !ok {
+		if !slices.Contains(ledger.Classes, class) {
 			continue
 		}
-		bindings[binding] = append(bindings[binding], ledger.Classes...)
+		return connect.ScopeBinding(ledger.Scope)
 	}
-	return bindings
+	return "", false
 }
 
-// attachesBinding reports whether a descriptor ledger serves binding.
-func (p controlPlane) attachesBinding(binding string) bool {
-	_, ok := p.attachedBindings()[binding]
-	return ok
+// classBindingMismatch returns the first class whose configured binding is
+// not the binding of the descriptor ledger that lists it, and false when the
+// box's [storage] assigns every class as the descriptor does.
+func (p controlPlane) classBindingMismatch(bindingFor func(class string) string) (string, bool) {
+	for _, class := range connect.StorageClasses() {
+		if attached, ok := p.ledgerBindingFor(class); !ok || attached != bindingFor(class) {
+			return class, true
+		}
+	}
+	return "", false
 }
 
-// workerSiteProcess is set once any city this process resolved is a worker
-// site. The socket dial seam reads it, because a socket path does not say
-// which city it belongs to.
+// workerSiteProcess is set once this invocation's own context resolution
+// finds a worker site, or a descriptor it cannot use. Only senders that know
+// no city path read it (pokeSupervisor through dialGCSocket, and a seam handed
+// an empty city path): a multi-city host such as the supervisor never resolves
+// its managed cities that way, so one box-like city among them cannot turn the
+// others into worker sites.
 var workerSiteProcess atomic.Bool
 
 // errWorkerSiteNoController is returned instead of dialing a controller,
@@ -94,14 +107,29 @@ func (e errWorkerSiteLocalState) Error() string {
 }
 
 // errControlPlaneDescriptor reports a `.gc/control-plane.toml` that exists but
-// cannot be read or decoded. Every command except the exempt ones refuses it.
+// cannot be read or decoded, or one gc cannot tell is absent. Every command
+// except the exempt ones refuses it, and every worker-site seam treats it as a
+// worker site: presence, not a decoded field, is what makes a box.
 type errControlPlaneDescriptor struct {
 	path   string
 	reason string
+	// present is false when gc could not stat the path, so it cannot tell
+	// whether the file is there.
+	present bool
 }
 
 func (e *errControlPlaneDescriptor) Error() string {
-	return fmt.Sprintf("control-plane descriptor %s: %s (rerun gc connect to rewrite it)", e.path, e.reason)
+	if !e.present {
+		return fmt.Sprintf("cannot check for the control-plane descriptor %s: %s; make the city's .gc directory readable so gc can tell whether this city directory is a worker site", e.path, e.reason)
+	}
+	return fmt.Sprintf("control-plane descriptor %s is present but unusable: %s; its presence marks this city directory a worker site attached to a remote controller, and only gc connect writes it (remove it only if this directory is not a worker site)", e.path, e.reason)
+}
+
+// isControlPlaneDescriptorError reports whether err carries an
+// *errControlPlaneDescriptor.
+func isControlPlaneDescriptorError(err error) bool {
+	var descErr *errControlPlaneDescriptor
+	return errors.As(err, &descErr)
 }
 
 // controlPlanes caches each city path's resolved plane, or the error
@@ -119,8 +147,9 @@ type controlPlaneResult struct {
 // controlPlaneFor returns cityPath's plane: Local when it holds no
 // `.gc/control-plane.toml`, Worker with the strictly decoded descriptor when
 // it does, and an *errControlPlaneDescriptor when the file cannot be read or
-// decoded. The answer is cached per process per path, and a Worker answer sets
-// workerSiteProcess.
+// decoded. The answer is cached per process per path. It never sets
+// workerSiteProcess: a lookup made for one city by a multi-city host says
+// nothing about the process (see markInvocationPlane).
 func controlPlaneFor(cityPath string) (controlPlane, error) {
 	key := filepath.Clean(cityPath)
 	controlPlanes.mu.Lock()
@@ -133,9 +162,6 @@ func controlPlaneFor(cityPath string) (controlPlane, error) {
 		controlPlanes.byPath = make(map[string]controlPlaneResult)
 	}
 	controlPlanes.byPath[key] = controlPlaneResult{plane: plane, err: err}
-	if err == nil && plane.Worker() {
-		workerSiteProcess.Store(true)
-	}
 	return plane, err
 }
 
@@ -147,47 +173,83 @@ func forgetControlPlane(cityPath string) {
 	delete(controlPlanes.byPath, filepath.Clean(cityPath))
 }
 
+// readControlPlane stats the descriptor first, so a path gc cannot check is
+// told apart from a file that is there but unusable. A `.gc` that is not a
+// directory (ENOTDIR) cannot hold the file, so it is absent.
 func readControlPlane(cityPath string) (controlPlane, error) {
 	path := filepath.Join(cityPath, citylayout.ControlPlaneDescriptorPath)
-	data, err := os.ReadFile(path)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return controlPlane{kind: planeLocal}, nil
-	case err != nil:
+	if _, err := os.Stat(path); err != nil {
+		if errors.Is(err, fs.ErrNotExist) || errors.Is(err, syscall.ENOTDIR) {
+			return controlPlane{kind: planeLocal}, nil
+		}
 		return controlPlane{}, &errControlPlaneDescriptor{path: path, reason: err.Error()}
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return controlPlane{}, &errControlPlaneDescriptor{path: path, reason: err.Error(), present: true}
 	}
 	descriptor, err := connect.DecodeDescriptor(data)
 	if err != nil {
-		return controlPlane{}, &errControlPlaneDescriptor{path: path, reason: err.Error()}
+		return controlPlane{}, &errControlPlaneDescriptor{path: path, reason: err.Error(), present: true}
 	}
 	return controlPlane{kind: planeWorker, descriptor: descriptor}, nil
 }
 
-// onWorkerSite reports whether this process is a worker site or cityPath is
-// one. A descriptor that does not decode is not a worker site here: the
-// command gate has already refused it for every command but the exempt ones,
-// which read the file themselves.
+// onWorkerSite reports whether cityPath is a worker site, deciding from that
+// city's own descriptor; with no city path it reports whether this
+// invocation resolved one. It fails closed: a descriptor that cannot be used
+// answers true, so a command that never reached the gate (or an exempt one)
+// still cannot act on a runtime or dial a socket.
 func onWorkerSite(cityPath string) bool {
-	if workerSiteProcess.Load() {
-		return true
-	}
 	if cityPath == "" {
-		return false
+		return workerSiteProcess.Load()
 	}
 	plane, err := controlPlaneFor(cityPath)
-	return err == nil && plane.Worker()
+	return err != nil || plane.Worker()
 }
 
 // workerSiteClassRefusal returns the refusal for class on a worker site when
-// the binding it resolves to is one no descriptor ledger serves: a SQLite or
-// file binding, or any binding the bundle did not carry. It returns nil on
-// the Local plane and for an attached binding.
+// the binding it resolves to is not the binding of the descriptor ledger that
+// lists the class: a SQLite binding, a binding the bundle did not carry, or a
+// box [storage] that disagrees with the bundle. A descriptor that cannot be
+// used is itself the refusal. It returns nil on the Local plane and for the
+// class's own ledger binding.
 func workerSiteClassRefusal(cityPath, class, binding string) error {
 	if cityPath == "" {
 		return nil
 	}
 	plane, err := controlPlaneFor(cityPath)
-	if err != nil || !plane.Worker() || plane.attachesBinding(binding) {
+	switch {
+	case err != nil:
+		return err
+	case !plane.Worker():
+		return nil
+	}
+	if attached, ok := plane.ledgerBindingFor(class); ok && attached == binding {
+		return nil
+	}
+	return errWorkerSiteLocalState{what: class + " store"}
+}
+
+// workerSiteStorageRefusal is the one-shot storage funnel's worker-site
+// verdict, taken before any binding is opened or created: on a worker site
+// whose [storage] assigns some class to another binding than the descriptor
+// ledger listing it, every infrastructure class refuses (a standing refusal,
+// so work ids still resolve to work). A descriptor that cannot be used refuses
+// the same way. It returns nil on the Local plane and when the box's
+// [storage] agrees with the descriptor.
+func workerSiteStorageRefusal(cityPath string, storage config.StorageConfig) error {
+	plane, err := controlPlaneFor(cityPath)
+	switch {
+	case err != nil:
+		return err
+	case !plane.Worker():
+		return nil
+	}
+	class, mismatch := plane.classBindingMismatch(func(class string) string {
+		return storage.Classes.BindingFor(config.StorageClass(class))
+	})
+	if !mismatch {
 		return nil
 	}
 	return errWorkerSiteLocalState{what: class + " store"}
@@ -199,14 +261,25 @@ var dialUnixSocket = func(path string, timeout time.Duration) (net.Conn, error) 
 	return net.DialTimeout("unix", path, timeout)
 }
 
-// dialGCSocket dials a gc control socket (the supervisor's or the nudge wake
-// socket). On a worker site it returns errWorkerSiteNoController without
-// dialing.
+// dialGCSocket dials a gc socket that belongs to no one city (the
+// supervisor's). When this invocation resolved a worker site it returns
+// errWorkerSiteNoController without dialing.
 func dialGCSocket(path string, timeout time.Duration) (net.Conn, error) {
 	if workerSiteProcess.Load() {
 		return nil, errWorkerSiteNoController
 	}
 	return dialUnixSocket(path, timeout)
+}
+
+// dialCitySocket dials one city's gc socket (its nudge wake socket, or its
+// controller socket for gc stop). When cityPath is a worker site, or the
+// invocation resolved one, it returns errWorkerSiteNoController without
+// dialing.
+func dialCitySocket(cityPath, path string, timeout time.Duration) (net.Conn, error) {
+	if onWorkerSite(cityPath) {
+		return nil, errWorkerSiteNoController
+	}
+	return dialGCSocket(path, timeout)
 }
 
 // controlPlaneExemptCommands are the top-level commands that run with a
@@ -235,13 +308,14 @@ func controlPlaneGateExemptFor(root *cobra.Command, args []string) bool {
 	return controlPlaneExemptCommands[target.Name()]
 }
 
-// withControlPlane fills a local context's Plane. A descriptor that cannot
-// be read or decoded fails the resolution unless the command is exempt.
+// withControlPlane fills a local context's Plane and marks the invocation
+// (markInvocationPlane). A descriptor that cannot be read or decoded fails
+// the resolution unless the command is exempt.
 func withControlPlane(ctx resolvedContext, err error) (resolvedContext, error) {
 	if err != nil || ctx.Remote != nil || ctx.CityPath == "" {
 		return ctx, err
 	}
-	plane, planeErr := controlPlaneFor(ctx.CityPath)
+	plane, planeErr := markInvocationPlane(ctx.CityPath)
 	if planeErr != nil {
 		if controlPlaneGateExempt {
 			return ctx, nil
@@ -252,34 +326,68 @@ func withControlPlane(ctx resolvedContext, err error) (resolvedContext, error) {
 	return ctx, nil
 }
 
+// gateControlPlaneAt is the command gate for a city a command found without
+// the context resolver (its session environment, GC_DIR or the working
+// directory): it marks the invocation and returns the descriptor error unless
+// the command is exempt.
+func gateControlPlaneAt(cityPath string) error {
+	_, err := withControlPlane(resolvedContext{CityPath: cityPath}, nil)
+	return err
+}
+
+// markInvocationPlane resolves the plane of the city this invocation runs
+// against, and sets workerSiteProcess when it is a worker site or holds a
+// descriptor that cannot be used (fail closed). Only the invocation's own
+// context resolution calls it.
+func markInvocationPlane(cityPath string) (controlPlane, error) {
+	plane, err := controlPlaneFor(cityPath)
+	if err != nil || plane.Worker() {
+		workerSiteProcess.Store(true)
+	}
+	return plane, err
+}
+
 // refuseControllerOnWorkerSite returns errWorkerSiteRefusesController when
-// cityPath, or this process, is a worker site.
+// cityPath is a worker site, and the descriptor error when its descriptor
+// cannot be used.
 func refuseControllerOnWorkerSite(cityPath string) error {
-	if onWorkerSite(cityPath) {
+	if cityPath == "" {
+		if workerSiteProcess.Load() {
+			return errWorkerSiteRefusesController
+		}
+		return nil
+	}
+	plane, err := controlPlaneFor(cityPath)
+	switch {
+	case err != nil:
+		return err
+	case plane.Worker():
 		return errWorkerSiteRefusesController
 	}
 	return nil
 }
 
-// refuseSupervisorOnWorkerSite refuses `gc supervisor run` in a box. The
-// supervisor is machine-wide, so the city it is judged by is the one this
-// invocation's flags, environment or working directory resolve; finding no
-// city is not a refusal.
+// refuseSupervisorOnWorkerSite refuses `gc supervisor run`, `start` and
+// `install` in a box. The supervisor is machine-wide, so the city it is
+// judged by is the one this invocation's --city flag, city environment,
+// GC_DIR or working directory finds; finding no city is not a refusal. A
+// supervisor started with no city context (systemd delegation, a service
+// unit) is judged per city instead: startOneCity refuses each worker-site
+// city it is asked to run.
 func refuseSupervisorOnWorkerSite() error {
 	if workerSiteProcess.Load() {
 		return errWorkerSiteRefusesController
 	}
-	ctx, err := resolveContextMode(contextResolutionMode{advisory: true})
-	var descErr *errControlPlaneDescriptor
-	switch {
-	case errors.As(err, &descErr):
-		return err
-	case err != nil:
+	// The local tiers only (flag, env, GC_DIR, cwd): a rig binding does not
+	// change the plane, and resolving one reads the supervisor registry.
+	cityPath, ok := probeLocalCity()
+	if !ok {
 		return nil
-	case ctx.Plane.Worker():
-		return errWorkerSiteRefusesController
 	}
-	return nil
+	if _, err := markInvocationPlane(cityPath); err != nil {
+		return err
+	}
+	return refuseControllerOnWorkerSite(cityPath)
 }
 
 // noteWorkerSitePoke reports a poke that found no controller on a worker

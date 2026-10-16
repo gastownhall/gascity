@@ -619,7 +619,12 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) { return cfg, nil }, target.sessionName, target.sessionID)
 	} else {
 		current, rowName, err := currentDrainCheckTarget()
-		if err != nil {
+		switch {
+		case isControlPlaneDescriptorError(err):
+			// The session's city is there, but its plane is unknown, so no
+			// source can answer: unknown, not "not draining".
+			return writeRuntimeDrainCheckUnknown(defaultSessionDisplayIdentity(), []string{drainCheckFailure(drainCheckSourceRow, err)}, jsonOutput, stdout, stderr)
+		case err != nil:
 			return 1 // no session to check; silent without context, as before
 		}
 		target = current
@@ -899,7 +904,7 @@ func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, 
 			return drainAckRefused
 		}
 	}
-	return finishRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(rowAckedDrainOps{drainOps: dops, stderr: stderr}, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -1253,6 +1258,25 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 	}
 	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// rowAckedDrainOps is the strict path's drainOps after the row ack committed.
+// The row is the ack there; the env flag only mirrors it into the runtime. A
+// worker site's guard holds no runtime to mirror into, so its
+// ErrControllerOwnedRuntime is "not applicable" (a warning), as drain-check
+// reads it, rather than failing an ack that is already in force.
+type rowAckedDrainOps struct {
+	drainOps
+	stderr io.Writer
+}
+
+func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
+	err := o.drainOps.setDrainAck(sessionName)
+	if errors.Is(err, guard.ErrControllerOwnedRuntime) {
+		fmt.Fprintf(o.stderr, "gc runtime drain-ack: warning: the row ack is in force; no runtime here to mirror it into: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil
+	}
+	return err
 }
 
 // drainAckRefused is runtimeDrainAck's status for a v2 ack that the row check

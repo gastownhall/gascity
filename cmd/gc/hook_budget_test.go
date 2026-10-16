@@ -560,9 +560,16 @@ func assertHookBudgetGolden(t *testing.T, goldenDir, scenario string, f hookBudg
 // TestHookRequestBudgetOnAWorkerSite runs every hook scenario, and the hook
 // claim's continuation nudge, in a city a worker-site descriptor attached to a
 // remote controller. Each sends its ledger exactly what it sends in the same
-// city on the Local plane, and none dials a gc socket: the hook verbs reach the
-// controller only through pokeController (the claim continuation) and the
-// nudge wake ping (every queue write), and both short-circuit in a box.
+// city on the Local plane, and none dials through the gc socket seam: the hook
+// verbs reach the controller only through pokeController (the claim
+// continuation) and the nudge wake ping (every queue write), and both
+// short-circuit in a box. The test writes only the descriptor, so each
+// command's own resolution finds the worker site.
+//
+// The fixture's work store is the file provider. A connect-path box never has
+// one (CN-3b's mint refuses a work binding on [beads] provider file or exec:,
+// mint_binding_unreachable); CN-1b does not refuse it in the box, so the
+// scenario measures the request counts the hook verbs make on any work store.
 func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
 	model := beadstest.WireModel{Handshake: hookBudgetHandshake, LedgerRows: hookBudgetLedgerRows}
 	type siteScenario struct {
@@ -593,7 +600,9 @@ func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
 		f := newHookBudgetFixture(t)
 		sc.seed(t, f)
 		if workerSite {
-			makeWorkerSite(t, f.cityDir)
+			// Only the descriptor: the hook command's own resolution must
+			// find the worker site.
+			writeControlPlaneFixture(t, f.cityDir, testDescriptor(f.cityDir, nil))
 		}
 		dials := countSocketDials(t)
 		run := recordHookCommand(t, func(stdout, stderr io.Writer) int { return sc.run(t, f, stdout, stderr) })

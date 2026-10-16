@@ -684,6 +684,11 @@ func resolveStartDirRef(ref string) (string, error) {
 
 func requireBootstrappedCity(dir string) (string, error) {
 	ctx, err := resolveContextFromPath(dir)
+	if isControlPlaneDescriptorError(err) {
+		// The city is there; its descriptor is what is wrong, so gc init is
+		// not the remedy.
+		return "", err
+	}
 	if err != nil {
 		absDir, absErr := filepath.Abs(dir)
 		if absErr == nil {
@@ -695,8 +700,8 @@ func requireBootstrappedCity(dir string) (string, error) {
 	if !citylayout.HasRuntimeRoot(cityPath) {
 		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
 	}
-	// Starting a city constructs its controller, which a worker site's box
-	// never runs: the city is the remote controller's.
+	// Starting or restarting a city constructs its controller, which a worker
+	// site's box never runs: the city is the remote controller's.
 	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
 		return "", err
 	}

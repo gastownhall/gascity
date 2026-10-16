@@ -63,8 +63,10 @@ type controllerStopClient struct {
 
 func sendControllerStop(cityPath string, force bool) controllerStopResult {
 	return controllerStopClient{
-		stat:         os.Stat,
-		dial:         net.DialTimeout,
+		stat: os.Stat,
+		dial: func(_, address string, timeout time.Duration) (net.Conn, error) {
+			return dialCitySocket(cityPath, address, timeout)
+		},
 		dialTimeout:  controllerStopDialTimeout,
 		writeTimeout: controllerStopWriteTimeout,
 		readTimeout:  controllerStopReadTimeout,

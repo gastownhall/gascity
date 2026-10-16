@@ -107,14 +107,14 @@ func writeControlPlaneBytes(t *testing.T, cityDir string, data []byte) {
 }
 
 // makeWorkerSite writes a descriptor whose city ledger serves every class and
-// resolves the plane, which sets the process flag the way a command's context
-// resolution does.
+// marks the invocation the way a command's own context resolution does, which
+// sets the process flag.
 func makeWorkerSite(t *testing.T, cityDir string) {
 	t.Helper()
 	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
-	plane, err := controlPlaneFor(cityDir)
+	plane, err := markInvocationPlane(cityDir)
 	if err != nil {
-		t.Fatalf("controlPlaneFor: %v", err)
+		t.Fatalf("markInvocationPlane: %v", err)
 	}
 	if !plane.Worker() {
 		t.Fatal("fixture: the descriptor did not make a worker site")
@@ -151,7 +151,10 @@ func TestControlPlaneForAbsentDescriptorIsLocal(t *testing.T) {
 	}
 }
 
-func TestControlPlaneForValidDescriptorIsWorkerAndSetsTheFlag(t *testing.T) {
+// TestControlPlaneForValidDescriptorIsWorker: the lookup answers Worker and
+// leaves the process flag alone (a multi-city host's lookup says nothing
+// about the process); the invocation's own context resolution sets it.
+func TestControlPlaneForValidDescriptorIsWorker(t *testing.T) {
 	resetControlPlaneForTest(t)
 	cityDir := t.TempDir()
 	want := testDescriptor(cityDir, map[string][]string{"infra": {"graph", "sessions"}})
@@ -164,11 +167,19 @@ func TestControlPlaneForValidDescriptorIsWorkerAndSetsTheFlag(t *testing.T) {
 	if !plane.Worker() {
 		t.Fatal("a valid descriptor resolved Local, want Worker")
 	}
-	if !workerSiteProcess.Load() {
-		t.Fatal("a Worker plane did not set the worker-site flag")
+	if workerSiteProcess.Load() {
+		t.Fatal("a seam lookup set the worker-site flag; only the invocation's context resolution may")
 	}
 	if got := plane.Descriptor(); got.SessionID != want.SessionID || len(got.Ledgers) != 2 {
 		t.Fatalf("descriptor = %+v, want the one written", got)
+	}
+
+	ctx, err := withControlPlane(resolvedContext{CityPath: cityDir}, nil)
+	if err != nil || !ctx.Plane.Worker() {
+		t.Fatalf("withControlPlane = (%+v, %v), want a Worker plane", ctx.Plane, err)
+	}
+	if !workerSiteProcess.Load() {
+		t.Fatal("the invocation's context resolution did not set the worker-site flag")
 	}
 }
 
@@ -196,8 +207,22 @@ func TestControlPlaneForMalformedDescriptorIsATypedError(t *testing.T) {
 			if descErr.reason == "" {
 				t.Fatal("error carries no reason")
 			}
+			if !descErr.present || !strings.Contains(err.Error(), "present but unusable") {
+				t.Fatalf("error = %v, want the present-but-unusable wording", err)
+			}
+			if strings.Contains(err.Error(), "rerun gc connect") {
+				t.Fatalf("error = %v names a remedy command that does not exist yet", err)
+			}
 			if workerSiteProcess.Load() {
-				t.Fatal("a malformed descriptor set the worker-site flag")
+				t.Fatal("a seam lookup set the worker-site flag")
+			}
+			// The invocation fails closed: a descriptor it cannot use marks
+			// the process a worker site, even for an exempt command.
+			if _, err := withControlPlane(resolvedContext{CityPath: cityDir}, nil); !errors.As(err, &descErr) {
+				t.Fatalf("withControlPlane = %v, want the descriptor error", err)
+			}
+			if !workerSiteProcess.Load() {
+				t.Fatal("an unusable descriptor did not mark the invocation a worker site")
 			}
 		})
 	}
@@ -211,8 +236,53 @@ func TestControlPlaneForUnreadableDescriptorIsATypedError(t *testing.T) {
 		t.Fatal(err)
 	}
 	var descErr *errControlPlaneDescriptor
-	if _, err := controlPlaneFor(cityDir); !errors.As(err, &descErr) {
-		t.Fatalf("controlPlaneFor error = %v, want *errControlPlaneDescriptor", err)
+	if _, err := controlPlaneFor(cityDir); !errors.As(err, &descErr) || !descErr.present {
+		t.Fatalf("controlPlaneFor error = %v, want a present *errControlPlaneDescriptor", err)
+	}
+}
+
+// TestControlPlaneForUncheckableDescriptorSaysSo: a .gc the caller cannot
+// traverse is not "present but unusable"; the message says gc could not
+// check, and the plane still fails closed.
+func TestControlPlaneForUncheckableDescriptorSaysSo(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root traverses a mode-0 directory")
+	}
+	resetControlPlaneForTest(t)
+	cityDir := t.TempDir()
+	gcDir := filepath.Join(cityDir, ".gc")
+	if err := os.MkdirAll(gcDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(gcDir, 0); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(gcDir, 0o755) })
+
+	_, err := controlPlaneFor(cityDir)
+	var descErr *errControlPlaneDescriptor
+	if !errors.As(err, &descErr) || descErr.present {
+		t.Fatalf("controlPlaneFor error = %v, want an uncheckable *errControlPlaneDescriptor", err)
+	}
+	if !strings.Contains(err.Error(), "cannot check for the control-plane descriptor") {
+		t.Fatalf("error = %v, want the cannot-check wording", err)
+	}
+	if !onWorkerSite(cityDir) {
+		t.Fatal("onWorkerSite = false for a descriptor gc cannot check, want true (fail closed)")
+	}
+}
+
+// TestControlPlaneForGCThatIsNotADirectoryIsLocal: a .gc file cannot hold the
+// descriptor, so ENOTDIR is absence, not an error.
+func TestControlPlaneForGCThatIsNotADirectoryIsLocal(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, ".gc"), []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plane, err := controlPlaneFor(cityDir)
+	if err != nil || plane.Worker() {
+		t.Fatalf("controlPlaneFor = (%+v, %v), want Local", plane, err)
 	}
 }
 
@@ -250,7 +320,10 @@ func TestControlPlaneForCachesPerPath(t *testing.T) {
 	}
 }
 
-func TestControlPlaneAttachedBindingsComeFromTheLedgers(t *testing.T) {
+// TestControlPlaneLedgerBindingsComeFromTheLedgerClasses: a class is attached
+// through the ledger whose classes list it, at that ledger's binding, and the
+// box's [storage] matches only when it assigns every class the same way.
+func TestControlPlaneLedgerBindingsComeFromTheLedgerClasses(t *testing.T) {
 	resetControlPlaneForTest(t)
 	cityDir := t.TempDir()
 	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, map[string][]string{
@@ -261,28 +334,31 @@ func TestControlPlaneAttachedBindingsComeFromTheLedgers(t *testing.T) {
 	if err != nil {
 		t.Fatalf("controlPlaneFor: %v", err)
 	}
-	got := plane.attachedBindings()
-	want := map[string][]string{
-		"work":    {"work"},
-		"infra":   {"graph", "sessions", "messaging"},
-		"archive": {"orders", "nudges"},
+	want := map[string]string{
+		"work": "work", "graph": "infra", "sessions": "infra", "messaging": "infra",
+		"orders": "archive", "nudges": "archive",
 	}
-	if len(got) != len(want) {
-		t.Fatalf("attached bindings = %v, want %v", got, want)
-	}
-	for binding, classes := range want {
-		if !slices.Equal(got[binding], classes) {
-			t.Errorf("binding %q serves %v, want %v", binding, got[binding], classes)
-		}
-		if !plane.attachesBinding(binding) {
-			t.Errorf("attachesBinding(%q) = false, want true", binding)
+	for class, binding := range want {
+		if got, ok := plane.ledgerBindingFor(class); !ok || got != binding {
+			t.Errorf("ledgerBindingFor(%q) = (%q, %v), want %q", class, got, ok, binding)
 		}
 	}
-	if plane.attachesBinding("local") {
-		t.Error("attachesBinding(local) = true for a binding no ledger lists")
+	if got, ok := plane.ledgerBindingFor("unknown"); ok {
+		t.Errorf("ledgerBindingFor(unknown) = %q, want no ledger", got)
 	}
-	if (controlPlane{}).attachesBinding("work") {
-		t.Error("a Local plane attaches bindings; it has no descriptor")
+	if _, ok := (controlPlane{}).ledgerBindingFor("work"); ok {
+		t.Error("a Local plane attaches a class; it has no descriptor")
+	}
+
+	if class, mismatch := plane.classBindingMismatch(func(class string) string { return want[class] }); mismatch {
+		t.Errorf("a [storage] that agrees with the descriptor mismatched at %q", class)
+	}
+	// The binding is attached, but not for this class: the descriptor puts
+	// sessions on infra and this box's [storage] routes it to archive.
+	swapped := maps.Clone(want)
+	swapped["sessions"] = "archive"
+	if class, mismatch := plane.classBindingMismatch(func(class string) string { return swapped[class] }); !mismatch || class != "sessions" {
+		t.Errorf("classBindingMismatch = (%q, %v), want sessions", class, mismatch)
 	}
 }
 
