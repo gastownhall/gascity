@@ -50,19 +50,23 @@ func TestOpenLaneConversationsFindsOpenLaneOps(t *testing.T) {
 	}
 }
 
-// TestOpenLaneConversationsReportsTruncation proves a list that fills its
-// limit reports truncation, and one that does not, none.
+// TestOpenLaneConversationsReportsTruncation proves a list that fills every
+// page up to the cap reports truncation, and one that does not, none.
 func TestOpenLaneConversationsReportsTruncation(t *testing.T) {
 	h := newLaneHarness(t)
 	h.propose(t, laneMsgOn("gc-1", "a"))
 	h.propose(t, laneMsgOn("gc-2", "b"))
-	convs, truncated, err := h.store.OpenLaneConversations(2)
-	if err != nil || !truncated {
-		t.Fatalf("OpenLaneConversations(2) = %v, truncated %v, %v; want truncated", convs, truncated, err)
+	// With a limit of one, more rows than laneScanPages pages hold truncate.
+	for i := range laneScanPages {
+		h.propose(t, laneMsgOn("gc-1", "extra-"+string(rune('a'+i))))
 	}
-	convs, truncated, err = h.store.OpenLaneConversations(3)
+	convs, truncated, err := h.store.OpenLaneConversations(1)
+	if err != nil || !truncated {
+		t.Fatalf("OpenLaneConversations(1) = %v, truncated %v, %v; want truncated", convs, truncated, err)
+	}
+	convs, truncated, err = h.store.OpenLaneConversations(laneScanPages + 3)
 	if err != nil || truncated || len(convs) != 2 {
-		t.Fatalf("OpenLaneConversations(3) = %v, truncated %v, %v; want both, untruncated", convs, truncated, err)
+		t.Fatalf("OpenLaneConversations(pages+3) = %v, truncated %v, %v; want both, untruncated", convs, truncated, err)
 	}
 }
 
@@ -83,5 +87,34 @@ func TestOpenLaneConversationsReadError(t *testing.T) {
 	s := &Store{store: beads.SessionStore{Store: failingListStore{&beads.MemStore{}}}, clk: &clock.Fake{Time: t0}, prefix: "gc"}
 	if convs, _, err := s.OpenLaneConversations(10); err == nil || convs != nil {
 		t.Fatalf("OpenLaneConversations = %v, %v; want the list error", convs, err)
+	}
+}
+
+// TestOpenLaneConversationsPagesPastAHotConversation proves one
+// conversation's backlog does not hide the conversations behind it: each
+// keyed list reads on in pages of limit rows, and reports truncation only
+// when it stops at the page cap after a full page.
+func TestOpenLaneConversationsPagesPastAHotConversation(t *testing.T) {
+	h := newLaneHarness(t)
+	for _, key := range []string{"a1", "a2", "a3"} {
+		h.propose(t, laneMsgOn("gc-hot", key))
+	}
+	h.propose(t, laneMsgOn("gc-cold", "b1"))
+	convs, truncated, err := h.store.OpenLaneConversations(2)
+	if err != nil || truncated {
+		t.Fatalf("OpenLaneConversations(2) = %v, truncated %v, %v; want every page read", convs, truncated, err)
+	}
+	if want := []string{"gc-hot", "gc-cold"}; !reflect.DeepEqual(convs, want) {
+		t.Fatalf("conversations = %v, want %v", convs, want)
+	}
+	for i := range laneScanPages {
+		h.propose(t, laneMsgOn("gc-hot", "more-"+string(rune('a'+i))))
+	}
+	convs, truncated, err = h.store.OpenLaneConversations(1)
+	if err != nil || !truncated {
+		t.Fatalf("OpenLaneConversations(1) = %v, truncated %v, %v; want truncated at the page cap", convs, truncated, err)
+	}
+	if want := []string{"gc-hot", "gc-cold"}; !reflect.DeepEqual(convs, want) {
+		t.Fatalf("capped conversations = %v, want %v from the pages read", convs, want)
 	}
 }
