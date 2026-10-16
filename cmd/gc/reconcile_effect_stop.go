@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"time"
@@ -103,6 +104,16 @@ type stopPlan struct {
 	now     time.Time
 	idle    bool // an idle-timeout stop clears the pane's scrollback after it (SESS-576)
 	restart bool // A13's restart clears the runtime's restart marker after it (C7a-2b)
+	// stalled is the claim an execution-stalled drain was requested for (the
+	// backstop's marker), which a confirmed stop gives back (v5.10x).
+	stalled stalledClaim
+}
+
+// stalledClaim is the claim an execution-stalled stop gives back: its bead
+// and the seat that holds it.
+type stalledClaim struct {
+	beadID string
+	row    session.Info
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -135,6 +146,9 @@ func stopDecide(v txView) txStep {
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
+	if stopReason(v.It) == executionStalledDrainReason {
+		plan.stalled = stalledClaim{beadID: strings.TrimSpace(v.Meta[executionClaimNudgeWorkKey]), row: v.Row}
+	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -192,6 +206,7 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		}
 		if ok {
 			clearRestartMarker(sp, p)
+			releaseStalledClaim(c.release, p.stalled)
 		}
 		return stopped{Confirmed: ok, Performed: v.Proceed, Reason: v.Reason}, nil
 	}
@@ -202,7 +217,37 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		removeCorpse(ctx, *k, now())
 	}
 	clearRestartMarker(sp, p)
+	releaseStalledClaim(c.release, p.stalled)
 	return stopped{Confirmed: true}, nil
+}
+
+// releaseStalledClaim gives back, after a confirmed stop, the claim an
+// execution-stalled drain was requested for (v5.10x): read live on the
+// seat's legs, and released only while still in_progress and assigned to
+// this seat (ReleaseWorkBead fences its write on both). The finalize's work
+// read then finds the seat free, so it closes, and a fresh seat takes the
+// claim: the drain's convergence. Without it the finalize kept the seat
+// asleep holding the claim, the assigned-work wake restarted it on the same
+// claim, and the backstop drained it again, in a loop (maintainer-city,
+// build 42dd71f94d). Best effort: a claim it cannot release stays, as before.
+func releaseStalledClaim(r *closeReleases, c stalledClaim) {
+	if r == nil || c.beadID == "" {
+		return
+	}
+	scope := releaseScope(c.row, r.cfg)
+	hits, err := seatWorkFor(r.legs, scope).match(seatWorkQuery{scope: scope, statuses: []string{"in_progress"}}, false)
+	if err != nil {
+		fmt.Fprintf(r.stderr, "execution-stalled stop: reading %s's claim %s: %v\n", c.row.ID, c.beadID, err) //nolint:errcheck // best-effort
+	}
+	for _, hit := range hits {
+		if hit.bead.ID != c.beadID {
+			continue
+		}
+		// The stranded repair's policy: the claim's route kept, its release
+		// fenced on its status and assignee.
+		out := releaseListed([]seatWorkHit{hit}, releaseStrandedRepair, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
+		logRelease(r.stderr, "execution-stalled", c.row.ID, out, nil)
+	}
 }
 
 // clearRestartMarker clears the runtime's restart marker after A13's

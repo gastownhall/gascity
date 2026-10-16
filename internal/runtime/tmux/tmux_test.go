@@ -722,7 +722,7 @@ func TestHiddenAttachedClientCanSendText(t *testing.T) {
 	}
 	defer tm.CloseHiddenAttachClient(sessionName)
 
-	used, err := tm.sendHiddenAttachedText(sessionName, "HELLO_HIDDEN_ATTACH")
+	used, err := tm.sendHiddenAttachedText(context.Background(), sessionName, "HELLO_HIDDEN_ATTACH")
 	if err != nil {
 		t.Fatalf("sendHiddenAttachedText: %v", err)
 	}
@@ -2479,7 +2479,7 @@ func TestSendKeysLiteralWithRetry_ImmediateSuccess(t *testing.T) {
 	defer func() { _ = tm.KillSession(sessionName) }()
 
 	// Should succeed immediately — no retry needed
-	err := tm.sendKeysLiteralWithRetry(sessionName, "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), sessionName, "hello", 5*time.Second)
 	if err != nil {
 		t.Errorf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2494,7 +2494,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFails(t *testing.T) {
 
 	// Target a session that doesn't exist — should fail immediately, not retry
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-xyz", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-xyz", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2515,7 +2515,7 @@ func TestSendKeysLiteralWithRetry_NonTransientFailsFast(t *testing.T) {
 	// Use a nonexistent session — tmux returns "session not found" which is
 	// non-transient, so the function should fail fast (well under the timeout).
 	start := time.Now()
-	err := tm.sendKeysLiteralWithRetry("gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "gt-nonexistent-session-fast-fail", "hello", 5*time.Second)
 	elapsed := time.Since(start)
 
 	if err == nil {
@@ -2534,7 +2534,7 @@ func TestSendKeysLiteralWithRetryFallsBackToPasteBufferOnCommandTooLong(t *testi
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", "large startup prompt", time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", "large startup prompt", time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2561,7 +2561,7 @@ func TestSendKeysLiteralWithRetryUsesPasteBufferForLargeText(t *testing.T) {
 	tm := NewTmuxWithConfig(DefaultConfig())
 	tm.exec = fe
 
-	err := tm.sendKeysLiteralWithRetry("%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
+	err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", strings.Repeat("x", maxSendKeysLiteralLen+1), time.Second)
 	if err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
@@ -2579,7 +2579,7 @@ func TestSendStartupKeysLiteralWithRetryChunksLargeCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2600,7 +2600,7 @@ func TestSendStartupKeysLiteralWithRetryRecognizesCopilotProviderFamily(t *testi
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "github-copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "github-copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2621,7 +2621,7 @@ func TestSendKeysLiteralWithRetryDoesNotChunkOrdinaryCopilotText(t *testing.T) {
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendKeysLiteralWithRetry("%1", text, 3*time.Second); err != nil {
+	if err := tm.sendKeysLiteralWithRetry(context.Background(), "%1", text, 3*time.Second); err != nil {
 		t.Fatalf("sendKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2642,7 +2642,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotChunkOtherProviders(t *testing.T)
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2+1)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "claude", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "claude", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 
@@ -2665,7 +2665,7 @@ func TestSendStartupKeysLiteralWithRetryDoesNotRepeatCompletedCopilotChunks(t *t
 	tm.exec = fe
 
 	text := strings.Repeat("x", copilotMaxPasteBytes*2)
-	if err := tm.sendStartupKeysLiteralWithRetry("%1", text, "copilot", 3*time.Second); err != nil {
+	if err := tm.sendStartupKeysLiteralWithRetry(context.Background(), "%1", text, "copilot", 3*time.Second); err != nil {
 		t.Fatalf("sendStartupKeysLiteralWithRetry() = %v, want nil", err)
 	}
 

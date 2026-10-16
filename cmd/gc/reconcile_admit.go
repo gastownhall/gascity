@@ -43,6 +43,7 @@ const (
 	intentRollback        = "rollback"          // A10 (C3)
 	intentRowMetadata     = "row-metadata"      // A7 (M1)
 	intentRuntimeAlias    = "runtime-alias"     // A7's runtime alias sync, after its alias write (M1)
+	intentMarkerClear     = "marker-clear"      // A13's pinned skip: clears the runtime's restart marker (SESS-521)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
 	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first

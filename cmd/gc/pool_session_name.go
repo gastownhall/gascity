@@ -71,7 +71,7 @@ type releasedPoolAssignment struct {
 // createPoolSessionBeadWithIdentifiers and the sync lane in session_beads.go),
 // so a live runtime resolves straight back to its bead. Because a failed create
 // is retried under a NEW bead and therefore a new name, the ga-vcjr9 box leak
-// is closed by ordering rather than by name reuse: releaseBeadScopedPoolRuntime
+// is closed by ordering rather than by name reuse: releaseRowOwnedRuntime
 // tears the failed attempt's runtime down before its row may close, and
 // ensurePoolIdentityNotHeldByOpenRow refuses a successor while that row is open.
 func PoolSessionName(template, beadID string) string {

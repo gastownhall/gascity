@@ -98,6 +98,7 @@ func gatherDemand(env demandGatherEnv, reads demandReads) (v demandView, err err
 			fmt.Fprintf(stderr, "gatherDemand: %v (using named demand=false)\n", probeErr) //nolint:errcheck
 		}
 	}
+	v.ProbeStores = demandProbeStores(targets)
 	v.RelocatedClaimRefs = assignedWorkRelocatedClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	v.WakeClaimRefs = assignedWorkClaimRefs(env.CityPath, env.Cfg, env.CityStore)
 	return v, nil

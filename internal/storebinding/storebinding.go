@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -332,13 +333,33 @@ type OrdersGraphBinder interface {
 	BindGraph(GraphStore) OrdersStore
 }
 
-// ClaimTarget is the data-only identity and session-generation fence for a nudge claim.
-// It matches the the legacy combined layout queue contract and deliberately contains no store handle.
+// ClaimTarget is the identity and session-generation fence for a nudge claim.
+// It deliberately contains no store handle. LiveFenceSessions is a lazy census,
+// not a store handle: it lets the target adopt a nudge pinned to a session that
+// no longer holds a seat.
 type ClaimTarget struct {
 	QueueKeys         []string
 	SessionID         string
 	ContinuationEpoch string
+	// LiveFenceSessions reports the ids of the sessions that still hold a
+	// nudge fence and whether that census was available. Nil keeps strict
+	// fencing. An implementation calls it at most once per claim, and only
+	// when a due candidate is pinned to a session other than SessionID. In
+	// ClaimBatch a pinned batch's due members are such candidates, and a live
+	// member that is not yet due makes its batch not whole without asking. A
+	// session-pinned item is claimable by another session only if the census
+	// is available, contains SessionID, and does not contain the item's
+	// session.
+	LiveFenceSessions func() (map[string]struct{}, bool)
 }
+
+// ErrNudgeDeliveryRejected is the runtime's definitive "no": nothing was
+// delivered, so RecordFailure clears the item's delivery batch and the next
+// claim pins it under a new key. It is runtime.ErrNudgeRejected: the queue
+// adopts the runtime's delivery vocabulary rather than translating it, so a
+// caller reports a rejection by passing the runtime's error (or one wrapping
+// it) as RecordFailure's cause.
+var ErrNudgeDeliveryRejected = runtime.ErrNudgeRejected
 
 // ErrNudgeSessionFenceMismatch marks a delivery failure caused by a queued
 // nudge's session fence not matching the live target. It is CONTRACT
@@ -376,20 +397,46 @@ var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismat
 // items, aging dead letters out, and sweeping retired records past retention —
 // is Maintain's alone, and the infrastructure owner runs it on its own cadence.
 //
-// A delivery read (ClaimDue, ListFor, ListForAgent) that meets a record it
-// cannot decode skips it rather than failing every delivery to that target:
-// it returns everything it could read together with an error for which
-// beads.IsPartialResult reports true. The caller delivers what it got and
-// reports the error.
+// A delivery read (ClaimDue, ClaimBatch, ListFor, ListForAgent, Lookup) that
+// meets a record it cannot decode skips it rather than failing every delivery
+// to that target: it returns everything it could read together with an error
+// for which beads.IsPartialResult reports true. The caller delivers what it got
+// and reports the error.
+//
+// The whole-queue reads (DueKeys, Empty, Snapshot) serve the queue's owner and
+// diagnostics. They are read-only and may be stale.
 type NudgeQueue interface {
 	Enqueue(nudgequeue.Item) error
 	EnqueueDeferred(nudgequeue.Item) error
 	ClaimDue(ClaimTarget, time.Time) ([]nudgequeue.Item, error)
+	// ClaimBatch claims the target's next delivery batch: a pinned batch that
+	// can be claimed whole (every live member due, fence-passing, addressed
+	// to one of the target's keys, and none in flight), all of its pending
+	// members and nothing else; otherwise every due unpinned item, pinned to
+	// a newly minted key. A pinned batch is never claimed in part. Each
+	// returned item carries ClaimedAt, LeaseUntil and DeliveryBatch.
+	ClaimBatch(ClaimTarget, time.Time) ([]nudgequeue.Item, error)
 	ListForAgent(string, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error)
 	ListFor(ClaimTarget, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error)
+	// Lookup reports the bucket each id is in, as of now. Ids the queue no
+	// longer serves (acked, retired, unknown) are absent; an item past its
+	// deliver-by deadline reads as dead.
+	Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error)
+	// DueKeys returns, sorted and unique, the non-empty queue keys with a due
+	// pending item or an in-flight item whose lease has expired. Like the
+	// delivery reads, it skips a record it cannot decode and returns the keys
+	// it could read together with an error for which beads.IsPartialResult
+	// reports true; the caller acts on the keys and reports the error.
+	DueKeys(time.Time) ([]string, error)
+	// Empty reports that the queue serves no pending, in-flight or dead item.
+	// An unreadable queue is not empty: it reports false with the error.
+	Empty() (bool, error)
 	Snapshot() (nudgequeue.State, error)
 	Ack([]string, string, string, string) error
-	ReleaseClaims([]string) error
+	// ReleaseClaims returns in-flight ids to pending. A non-zero notBefore
+	// keeps them from being claimed again before then; the zero time releases
+	// them for immediate redelivery. Delivery batches are kept.
+	ReleaseClaims(ids []string, notBefore time.Time) error
 	RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error)
 	Rollback(nudgequeue.Item, string) error
 	WithdrawQueuedWaitNudges([]string) error

@@ -337,6 +337,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
+	// The commit lands on a runtime alive with the PreWake token whatever the
+	// Start returned (commitStep), so the binding is read whatever it returned.
+	prepared.runtimeBinding = startedRuntimeBinding(ctx, prepared.cfg.Env["GC_CITY_PATH"], leaf, name)
 	in.ticket.verdict = verdictInconclusive
 	switch {
 	case runtime.IsProviderCapacity(out.err):

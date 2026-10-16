@@ -433,6 +433,11 @@ func bdRigQualifiedMetadataRefusal(cfg *config.City, bdArgs []string) (string, b
 func doBd(args []string, stdout, stderr io.Writer) int {
 	cityName, rigName, bdArgs := extractBdScopeFlags(args)
 
+	// From here on the passthrough only reads the city config, so the guards
+	// and env builders below share one composed load instead of each walking
+	// the packs again (see invocationConfigMemo for which loads it answers).
+	defer beginInvocationConfigMemo()()
+
 	bdArgs, err := rewriteBdHeartbeatArgs(bdArgs)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -457,12 +462,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Use the full config load path (includes pack expansion + site
+	// Use the full composed load (includes pack expansion + site
 	// binding overlay) so migrated rigs (path only in .gc/site.toml)
 	// resolve to their bound path. A raw config.Load here would make
 	// every already-migrated rig look unbound and fail the new guard
-	// in resolveBdScopeTarget / bdRigScopeTarget.
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// in resolveBdScopeTarget / bdRigScopeTarget. The passthrough loader
+	// is that same composition without the builtin readiness pass; see
+	// loadCityConfigForBdPassthrough.
+	cfg, err := loadBdPassthroughConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -574,7 +581,12 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// bd's fuzzy/substring resolver can silently match a longer ID that
 	// contains the supplied ID as a substring (e.g. "gcy-dv7" → "gcy-wisp-dv78").
 	// Verify via BdStore.Get — which already enforces an exact-ID match —
-	// before forwarding any mutation to the bd subprocess.
+	// before forwarding any mutation to the bd subprocess. The read goes
+	// through the scope's bd front door (bdWriteGuardStore), never a native
+	// store: only bd's own resolver can show the collision. A scope whose bd
+	// resolves prefixed ids exactly skips the read when every id the write
+	// names is prefixed, unless the write is close-shaped
+	// (bdWriteGuardNeedsRead).
 	//
 	// Fail-closed: if the arg scanner reports ambiguity (unrecognized
 	// value-consuming flag), the command is rejected rather than forwarded
@@ -603,42 +615,40 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
-			// Store-unavailable: we cannot verify, but we must not block
-			// legitimate writes. Fall through; bd will error on actual problems.
-			if storeErr == nil {
-				guardStore = store
-				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				// A bulk mutation (e.g. a maintenance order closing a batch of
-				// stale wisps) reads every id in one bd show instead of one or
-				// two bd forks per id. Only ids bd answered exactly are
-				// accepted from the batch; the rest take the exact per-id Get
-				// below, which is what tells a substring collision from an
-				// absent bead.
-				verifyIDs := writeIDs
-				if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
-					if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
-						for id, bead := range found {
-							guardBeads[id] = bead
-						}
-						verifyIDs = unresolved
-					}
-				}
-				for _, id := range verifyIDs {
-					bead, getErr := store.Get(id)
-					if errors.Is(getErr, beads.ErrIDCollision) {
-						// bd resolved a different bead — block the write to prevent
-						// mutating the wrong bead via substring resolution.
-						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
-						return 1
-					}
-					if getErr == nil {
+		if len(writeIDs) > 0 && bdWriteGuardNeedsRead(bdArgs, writeIDs, target.ScopeRoot) {
+			store := bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
+			guardStore = store
+			guardBeads = make(map[string]beads.Bead, len(writeIDs))
+			// A bulk mutation (e.g. a maintenance order closing a batch of
+			// stale wisps) reads every id in one bd show instead of one or
+			// two bd forks per id. Only ids bd answered exactly are
+			// accepted from the batch; the rest take the exact per-id Get
+			// below, which is what tells a substring collision from an
+			// absent bead.
+			verifyIDs := writeIDs
+			if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+				if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
+					for id, bead := range found {
 						guardBeads[id] = bead
 					}
-					// ErrNotFound or any other error: bead may be absent, ephemeral,
-					// or the read seam differs from the write seam — fall through.
+					verifyIDs = unresolved
 				}
+			}
+			for _, id := range verifyIDs {
+				bead, getErr := store.Get(id)
+				if errors.Is(getErr, beads.ErrIDCollision) {
+					// bd resolved a different bead — block the write to prevent
+					// mutating the wrong bead via substring resolution.
+					fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				if getErr == nil {
+					guardBeads[id] = bead
+				}
+				// ErrNotFound or any other error: bead may be absent, ephemeral,
+				// or the read seam differs from the write seam — fall through.
+				// An unavailable bd cannot verify, but must not block
+				// legitimate writes; bd will error on actual problems.
 			}
 		}
 	}
@@ -927,11 +937,25 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	return 0
 }
 
+// resolveBdCityPath and loadBdPassthroughConfig are the passthrough's city
+// resolution and its one config load. They are variables only so the routing
+// parity tests can run doBd with the full loaders (resolveCity, loadCityConfig)
+// and compare; production never reassigns them.
+var (
+	resolveBdCityPath       = resolveCityPathOnly
+	loadBdPassthroughConfig = loadCityConfigForBdPassthrough
+)
+
+// resolveBdCity names the city a gc bd invocation runs against. It resolves
+// the city only: every rig decision the passthrough makes is
+// resolveBdScopeTarget's, from the composed config, so the rig name the
+// general resolver derives from cwd (with a full config load) would be
+// discarded unread.
 func resolveBdCity(cityName string) (string, error) {
 	if strings.TrimSpace(cityName) != "" {
 		return validateCityPath(cityName)
 	}
-	return resolveCity()
+	return resolveBdCityPath()
 }
 
 // extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
@@ -1019,6 +1043,12 @@ func resolveBdScopeTarget(cfg *config.City, cityPath, rigName string, args []str
 	// scripts that trusted the flag. (gastownhall/gascity#3410)
 	if cityExplicit {
 		return cityTarget, nil
+	}
+
+	// A by-id read or write routes by its subjects' prefix: the verb's flag
+	// manifest says which tokens are ids, and an id's prefix names its store.
+	if target, ok := bdSubjectPrefixTarget(cfg, cityTarget, cityPath, args); ok {
+		return target, nil
 	}
 
 	// Bead-ID auto-detect accepts a candidate store only when the id actually

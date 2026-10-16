@@ -562,3 +562,105 @@ func TestWrapperDoesNotReapplyBeadPolicy(t *testing.T) {
 		t.Errorf("the binding received ready queries %+v, want exactly the caller's own %+v", recorder.ready, readyQuery)
 	}
 }
+
+// scriptedNudgeQueue answers the queue's batch claim and owner reads with
+// scripted results and records what it was asked.
+type scriptedNudgeQueue struct {
+	storebinding.NudgeQueue
+	err       error
+	notBefore []time.Time
+}
+
+func (q *scriptedNudgeQueue) ClaimBatch(storebinding.ClaimTarget, time.Time) ([]nudgequeue.Item, error) {
+	return nil, q.err
+}
+
+func (q *scriptedNudgeQueue) Lookup([]string, time.Time) (map[string]nudgequeue.Bucket, error) {
+	return map[string]nudgequeue.Bucket{}, q.err
+}
+
+func (q *scriptedNudgeQueue) DueKeys(time.Time) ([]string, error) { return nil, q.err }
+
+func (q *scriptedNudgeQueue) Empty() (bool, error) { return q.err == nil, q.err }
+
+func (q *scriptedNudgeQueue) ReleaseClaims(_ []string, notBefore time.Time) error {
+	q.notBefore = append(q.notBefore, notBefore)
+	return q.err
+}
+
+// TestQueueBatchClaimAndOwnerReadsAreObservable pins how the verbs NQ-2a added
+// are reported. The batch claim is classified as ClaimDue is: an idle or
+// partial claim is healthy. Lookup and DueKeys answer beside a partial result
+// the same way. Every verb's failure is reported as failed, its error crosses
+// the wrapper verbatim, and ReleaseClaims hands its notBefore through unchanged.
+func TestQueueBatchClaimAndOwnerReadsAreObservable(t *testing.T) {
+	partial := &beads.PartialResultError{Op: "nudge queue", Err: errors.New("one record did not decode")}
+	failure := errors.New("queue store unreachable")
+	notBefore := time.Date(2026, 10, 14, 9, 0, 0, 0, time.UTC)
+	verbs := []struct {
+		name string
+		call func(storebinding.NudgeQueue) error
+		// kind is the event kind; partialOK says a partial result is a
+		// healthy answer for this verb.
+		kind      string
+		partialOK bool
+	}{
+		{name: "ClaimBatch", kind: "claim", partialOK: true, call: func(q storebinding.NudgeQueue) error {
+			_, err := q.ClaimBatch(storebinding.ClaimTarget{QueueKeys: []string{storebindingtest.ConformanceNudgeAgent}}, time.Now().UTC())
+			return err
+		}},
+		{name: "Lookup", kind: "read", partialOK: true, call: func(q storebinding.NudgeQueue) error {
+			_, err := q.Lookup([]string{"n-1"}, time.Now().UTC())
+			return err
+		}},
+		{name: "DueKeys", kind: "read", partialOK: true, call: func(q storebinding.NudgeQueue) error {
+			_, err := q.DueKeys(time.Now().UTC())
+			return err
+		}},
+		{name: "Empty", kind: "read", call: func(q storebinding.NudgeQueue) error {
+			_, err := q.Empty()
+			return err
+		}},
+		{name: "ReleaseClaims", kind: "write", call: func(q storebinding.NudgeQueue) error {
+			return q.ReleaseClaims([]string{"n-1"}, notBefore)
+		}},
+	}
+	for _, verb := range verbs {
+		for _, outcome := range []struct {
+			name string
+			err  error
+			want string
+		}{
+			{name: "healthy", want: "ok"},
+			{name: "partial", err: partial, want: map[bool]string{true: "ok", false: "failed"}[verb.partialOK]},
+			{name: "failed", err: failure, want: "failed"},
+		} {
+			t.Run(verb.name+"/"+outcome.name, func(t *testing.T) {
+				observer := &recordingObserver{}
+				adapters := storebindingtest.ReferenceAdapters(storebindingtest.Wrap(t))
+				inner := adapters.Nudges
+				scripted := &scriptedNudgeQueue{NudgeQueue: inner.Queue, err: outcome.err}
+				inner.Queue = scripted
+				wrapped, err := storebinding.WrapNudges(inner, storebinding.ClassWrapping{
+					Binding:    wrappedBindingName,
+					Capability: storebindingtest.ReferenceCapability,
+					Observer:   observer,
+				})
+				if err != nil {
+					t.Fatalf("wrapping the Nudges front doors: %v", err)
+				}
+				got := verb.call(wrapped.Queue)
+				if !errors.Is(got, outcome.err) || (outcome.err != nil && got.Error() != outcome.err.Error()) {
+					t.Fatalf("%s returned %v, want the binding's own %v verbatim", verb.name, got, outcome.err)
+				}
+				want := "nudges/wrapped " + verb.kind + " " + verb.name + " " + outcome.want
+				if stream := observer.stream(); len(stream) != 1 || stream[0] != want {
+					t.Errorf("%s emitted %v, want exactly %q", verb.name, stream, want)
+				}
+				if verb.name == "ReleaseClaims" && (len(scripted.notBefore) != 1 || !scripted.notBefore[0].Equal(notBefore)) {
+					t.Errorf("ReleaseClaims reached the binding with notBefore %v, want %v", scripted.notBefore, notBefore)
+				}
+			})
+		}
+	}
+}

@@ -36,6 +36,7 @@ go_test(
         "phase1_conformance_test.go",
         "phase2_conformance_test.go",
         "phase2_fake_worker_test.go",
+        "phase2_interaction_signal_bound_test.go",
         "phase2_result_helpers_test.go",
         "phase2_startup_bound_deadline_test.go",
         "phase2_transcript_helpers_test.go",

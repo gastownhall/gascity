@@ -716,16 +716,67 @@ func (r *syncResponseRecorder) BodyString() string {
 
 func waitForRecorderSubstring(t *testing.T, rec *syncResponseRecorder, want string, timeout time.Duration) string {
 	t.Helper()
+	return waitForRecorderBody(rec, timeout, func(body string) bool {
+		return strings.Contains(body, want)
+	})
+}
 
+// waitForRecorderBody polls rec until done reports true for its body or
+// timeout elapses, and returns the last body it read.
+func waitForRecorderBody(rec *syncResponseRecorder, timeout time.Duration, done func(body string) bool) string {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		body := rec.BodyString()
-		if strings.Contains(body, want) {
+		if done(body) {
 			return body
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return rec.BodyString()
+}
+
+// sseFrameComplete reports whether body holds the whole SSE frame that
+// contains want. writeSSEFrame writes a frame's event line, "data: ",
+// payload, and blank-line terminator as separate writes, so a body that
+// merely contains want can end mid-frame. Compact JSON payloads hold no raw
+// newline, so the first blank line after want ends that frame.
+func sseFrameComplete(body, want string) bool {
+	i := strings.Index(body, want)
+	return i >= 0 && strings.Contains(body[i:], "\n\n")
+}
+
+// waitForRecorderFrame is waitForRecorderSubstring for a caller that decodes
+// the frame containing want: it waits until that frame is complete (see
+// sseFrameComplete).
+func waitForRecorderFrame(t *testing.T, rec *syncResponseRecorder, want string, timeout time.Duration) string {
+	t.Helper()
+	return waitForRecorderBody(rec, timeout, func(body string) bool {
+		return sseFrameComplete(body, want)
+	})
+}
+
+func TestSSEFrameComplete(t *testing.T) {
+	const payload = `{"request_id":"req-1"}`
+	tests := []struct {
+		name string
+		body string
+		want string
+		ok   bool
+	}{
+		{name: "event line only", body: "event: pending\n", want: "event: pending\n"},
+		{name: "data prefix without payload", body: "event: pending\ndata: ", want: "event: pending\n"},
+		{name: "payload without blank line", body: "event: pending\ndata: " + payload + "\n", want: "event: pending\n"},
+		{name: "blank line only before want", body: ": keepalive\n\nevent: pending\ndata: " + payload + "\n", want: "event: pending\n"},
+		{name: "finished frame with a longer event name", body: "event: pending_cleared\ndata: " + payload + "\n\n", want: "event: pending\n"},
+		{name: "finished frame", body: "id: 7\nevent: pending\ndata: " + payload + "\n\n", want: "event: pending\n", ok: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sseFrameComplete(tt.body, tt.want); got != tt.ok {
+				t.Fatalf("sseFrameComplete(%q, %q) = %v, want %v", tt.body, tt.want, got, tt.ok)
+			}
+		})
+	}
 }
 
 func TestHandleSessionList(t *testing.T) {
@@ -7682,18 +7733,20 @@ func TestSessionStreamStructuredHistoryStallEmitsPending(t *testing.T) {
 			if closeErr != nil {
 				t.Fatalf("close resolved transcript entry: %v", closeErr)
 			}
-			body := waitForRecorderSubstring(t, rec, "event: pending_cleared", time.Second)
+			body := waitForRecorderFrame(t, rec, "event: pending_cleared\n", time.Second)
 			cancel()
 			<-done
 
-			if !strings.Contains(body, "event: pending") {
+			if !strings.Contains(body, "event: pending\n") {
 				t.Fatalf("structured history stream missing pending SSE event: %s", body)
 			}
-			if !strings.Contains(body, "event: pending_cleared") {
-				t.Fatalf("structured history stream missing pending-cleared SSE event: %s", body)
+			clearedFrame := firstSSETestFrame(t, body, "pending_cleared")
+			var cleared SessionPendingClearedEvent
+			if err := json.Unmarshal([]byte(clearedFrame.Data), &cleared); err != nil {
+				t.Fatalf("decode pending-cleared SSE event: %v; data=%s", err, clearedFrame.Data)
 			}
-			if !strings.Contains(body, `"request_id":"req-structured-1"`) {
-				t.Fatalf("structured history stream pending-cleared event missing request ID: %s", body)
+			if cleared.RequestID != "req-structured-1" {
+				t.Fatalf("structured history stream pending-cleared request ID = %q, want %q: %s", cleared.RequestID, "req-structured-1", body)
 			}
 		})
 	}

@@ -22,6 +22,7 @@ import (
 const (
 	decideRestartRequested   = "restart-requested"
 	decideRestartPinnedClear = "restart-requested:pinned-clear"
+	decideRestartMarkerClear = "restart-requested:pinned-marker-clear"
 )
 
 // armRestartRequested is A13. An operator-dormant row is A4's to stop, and
@@ -36,6 +37,14 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 	info := r.row.Info
 	if !r.found {
 		return intent{}, false
+	}
+	// A clear that failed backs off its own key; while that record is live
+	// the row falls through to the rest of A13 and the later arms, and the
+	// clear is decided again when it releases (the #7893 review).
+	if rec, ok := r.w.Backoff[markerClearBackoffKey(r.k)]; ok && rec.live(r.w.Now) {
+		r.after(rec.Until.Sub(r.w.Now))
+	} else if r.pinnedMarkerClear() {
+		return intent{Kind: intentMarkerClear, Reason: decideRestartMarkerClear, Basis: rowBasis{Incarnation: r.row.Incarnation, InstanceToken: r.row.InstanceToken}}, true
 	}
 	if !r.restartPending() {
 		return r.freshCycle() // SESS-612 (C7a-2c)
@@ -66,6 +75,20 @@ func armRestartRequested(r *rowFacts) (intent, bool) {
 // (the #7879 review; legacy clears it).
 func (r *rowFacts) restartPending() bool {
 	return (r.rowRestartRequested() || r.runtimeRestartRequested() && !r.pinnedCollateral()) && !operatorDormantStop(r.row.Info, r.w.Now) && !r.drained()
+}
+
+// pinnedMarkerClear reports legacy's pinned skip of the runtime's own
+// restart marker (SESS-521, mc-nm6yt): a pinned configured named row with no
+// explicit reset, no row marker (A13's row-marker clear comes first), no
+// operator hold and no drain, whose own running runtime carries the marker,
+// has the marker cleared and keeps its runtime. Kept, the marker would fire
+// the old request after an unpin. It rests on the runtime (freshOwnAlive),
+// which the clear's effect reads fresh.
+func (r *rowFacts) pinnedMarkerClear() bool {
+	if !r.pinnedCollateral() || r.rowRestartRequested() || operatorDormantStop(r.row.Info, r.w.Now) || r.drained() || !r.runtimeRestartRequested() {
+		return false
+	}
+	return r.freshOwnAlive()
 }
 
 // pinnedCollateral reports a pinned configured named row holding no

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"log"
@@ -74,8 +75,13 @@ const startCommitMaxAttempts = 3
 // as before, which leaves the window between that read and the write. A
 // require-mode store that cannot fence, and a store that reports
 // beads.ErrConditionalWriteUnsupported at call time, return an error.
-func (s *Store) CommitStartedIfCurrent(expected Info, patch MetadataPatch) (bool, error) {
-	return s.CommitStartedIfCurrentUnder(expected, patch, nil)
+//
+// ctx bounds only the wait for the session mutation lock (see
+// WithSessionMutationLockContext), never the work done under it. When the
+// lock is still held at ctx's end the call returns an error matching
+// ErrSessionMutationBusy, with no session row read or written.
+func (s *Store) CommitStartedIfCurrent(ctx context.Context, expected Info, patch MetadataPatch) (bool, error) {
+	return s.CommitStartedIfCurrentUnder(ctx, expected, patch, nil)
 }
 
 // ErrStartCommitHeld refuses a start commit (StartCommitRefusingHolds) whose
@@ -100,7 +106,8 @@ func StartCommitRefusingHolds() StartCommitOpt {
 // CommitStartedIfCurrentUnder is CommitStartedIfCurrent for a start run under
 // lease: a re-read row that no longer records the lease is not current, so a
 // start whose lease was taken over commits nothing. A nil lease checks none.
-func (s *Store) CommitStartedIfCurrentUnder(expected Info, patch MetadataPatch, lease *RuntimeLease, opts ...StartCommitOpt) (bool, error) {
+// ctx bounds only the lock wait, as for CommitStartedIfCurrent.
+func (s *Store) CommitStartedIfCurrentUnder(ctx context.Context, expected Info, patch MetadataPatch, lease *RuntimeLease, opts ...StartCommitOpt) (bool, error) {
 	var o startCommitOpts
 	for _, opt := range opts {
 		opt(&o)
@@ -110,7 +117,7 @@ func (s *Store) CommitStartedIfCurrentUnder(expected Info, patch MetadataPatch, 
 		return false, fmt.Errorf("committing start of session %q: %w", expected.ID, err)
 	}
 	applied := false
-	err = WithSessionMutationLock(expected.ID, func() error {
+	err = WithSessionMutationLockContext(ctx, expected.ID, func() error {
 		var conflict error
 		for attempt := 0; attempt < startCommitMaxAttempts; attempt++ {
 			bead, err := s.validatedBead(expected.ID)
@@ -150,9 +157,14 @@ func (s *Store) CommitStartedIfCurrentUnder(expected Info, patch MetadataPatch, 
 // observed creation is still pending. Completion and incarnation allocation use
 // the same process-local lock. fn must not acquire that lock again or call a
 // provider; retired-session cleanup belongs after this critical section.
-func (s *Store) WithPendingCreateRollback(expected Info, fn func() error) (bool, error) {
+//
+// ctx bounds only the wait for the session mutation lock (see
+// WithSessionMutationLockContext), never the work done under it. When the
+// lock is still held at ctx's end the call returns an error matching
+// ErrSessionMutationBusy, with no session row read or written.
+func (s *Store) WithPendingCreateRollback(ctx context.Context, expected Info, fn func() error) (bool, error) {
 	applied := false
-	err := WithSessionMutationLock(expected.ID, func() error {
+	err := WithSessionMutationLockContext(ctx, expected.ID, func() error {
 		current, _, err := s.GetPersistedResponse(expected.ID)
 		if err != nil {
 			return err
@@ -972,20 +984,26 @@ var errPendingCreateRollbackSuperseded = errors.New("pending create is no longer
 //     call time, returns an error matching beads.IsConditionalWriteUnsupported,
 //     with closed false and nothing written. The caller then keeps its
 //     transaction.
-func (s *Store) RollbackPendingCreateAtomically(expected Info, closePatch, postClosePatch MetadataPatch) (closed, postClosed bool, err error) {
-	return s.RollbackPendingCreateAtomicallyUnder(expected, closePatch, postClosePatch, nil)
+//
+// ctx bounds only the wait for the session mutation lock (see
+// WithSessionMutationLockContext), never the work done under it. When the
+// lock is still held at ctx's end the call returns an error matching
+// ErrSessionMutationBusy, with no session row read or written.
+func (s *Store) RollbackPendingCreateAtomically(ctx context.Context, expected Info, closePatch, postClosePatch MetadataPatch) (closed, postClosed bool, err error) {
+	return s.RollbackPendingCreateAtomicallyUnder(ctx, expected, closePatch, postClosePatch, nil)
 }
 
 // RollbackPendingCreateAtomicallyUnder is RollbackPendingCreateAtomically for
 // a start holding held: a row that no longer records the lease is not rolled
 // back, as a superseded one is not. A nil lease checks none.
-func (s *Store) RollbackPendingCreateAtomicallyUnder(expected Info, closePatch, postClosePatch MetadataPatch, held *RuntimeLease) (closed, postClosed bool, err error) {
+// ctx bounds only the lock wait, as for RollbackPendingCreateAtomically.
+func (s *Store) RollbackPendingCreateAtomicallyUnder(ctx context.Context, expected Info, closePatch, postClosePatch MetadataPatch, held *RuntimeLease) (closed, postClosed bool, err error) {
 	closer, ok := beads.AtomicConditionalCloserFor(s.store)
 	if !ok {
 		return false, false, beads.ErrConditionalWriteUnsupported
 	}
 	lease := LeaseFromInfo(expected)
-	err = WithSessionMutationLock(expected.ID, func() error {
+	err = WithSessionMutationLockContext(ctx, expected.ID, func() error {
 		bead, err := s.validatedBead(expected.ID)
 		if err != nil {
 			return err

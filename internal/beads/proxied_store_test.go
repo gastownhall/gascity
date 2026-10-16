@@ -1043,7 +1043,7 @@ func TestProxiedStoreBracketsTheConditionalWriteHandles(t *testing.T) {
 }
 
 // bracketLeaf is a write leaf whose every mutating method — the Store surface's
-// and the four write capabilities the wrapper implements as methods — runs
+// and the five write capabilities the wrapper implements as methods — runs
 // onWrite and succeeds. The bracket is the subject, not the write.
 type bracketLeaf struct {
 	Store
@@ -1074,6 +1074,11 @@ func (l *bracketLeaf) CreateWithForeignID(Bead) (Bead, error)        { l.onWrite
 func (l *bracketLeaf) CreateWithStorage(Bead, StorageClass) (Bead, error) {
 	l.onWrite()
 	return Bead{}, nil
+}
+
+func (l *bracketLeaf) ApplyGuarded(context.Context, GuardedBatch) (GuardedResult, error) {
+	l.onWrite()
+	return GuardedResult{}, nil
 }
 
 // TestProxiedStoreBracketsEveryInsideWriteMethod is council pr2 E-I6.
@@ -1144,6 +1149,19 @@ func TestProxiedStoreBracketsEveryInsideWriteMethod(t *testing.T) {
 		{"CreateWithForeignID", func(s *ProxiedStore) error { _, err := s.CreateWithForeignID(Bead{ID: "gcg-1"}); return err }},
 		{"CreateWithStorage", func(s *ProxiedStore) error {
 			_, err := s.CreateWithStorage(Bead{Title: "t", Type: "task"}, StorageDefault)
+			return err
+		}},
+		// Reached the way every caller reaches it: through discovery, which
+		// lands on the wrapper itself, never on the write leaf.
+		{"ApplyGuarded", func(s *ProxiedStore) error {
+			batcher, ok := GuardedBatcherFor(s)
+			if !ok {
+				return errors.New("GuardedBatcherFor(*ProxiedStore) = false over a capable write leaf")
+			}
+			if batcher != GuardedBatcher(s) {
+				return fmt.Errorf("GuardedBatcherFor(*ProxiedStore) = %T, want the bracketing wrapper", batcher)
+			}
+			_, err := batcher.ApplyGuarded(context.Background(), GuardedBatch{Items: []GuardedItem{{Create: &Bead{ID: "prx-9", Title: "t"}}}})
 			return err
 		}},
 	}
@@ -1244,6 +1262,18 @@ func TestProxiedStoreConditionalResolveTargetIsTheDocumentedGap(t *testing.T) {
 	}
 	if _, claims := any(store).(AtomicConditionalCloserHandleProvider); claims {
 		t.Error("ProxiedStore claims AtomicConditionalCloserHandleProvider again, which AtomicConditionalCloserFor never consults on it")
+	}
+
+	// INSIDE the bracket: GuardedBatcherFor does not follow the resolve
+	// target, so over a capable write leaf it lands on the wrapper's own
+	// bracketed ApplyGuarded, and over this bd leaf (no batcher) it reports
+	// no capability rather than reaching past the wrapper.
+	if batcher, ok := GuardedBatcherFor(store); ok {
+		t.Fatalf("GuardedBatcherFor over a write leaf with no batcher = (%T, true), want no capability", batcher)
+	}
+	capable := NewProxiedStoreForGuardedBatchConformance("prx").(*ProxiedStore)
+	if batcher, ok := GuardedBatcherFor(capable); !ok || batcher != GuardedBatcher(capable) {
+		t.Fatalf("GuardedBatcherFor = (%T, %v), want the wrapper's bracketed batcher", batcher, ok)
 	}
 
 	// INSIDE the bracket: the one lookup that reaches the adapter.

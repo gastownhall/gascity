@@ -204,8 +204,11 @@ func (p *simProvider) SetMeta(name, key, value string) error {
 }
 
 func (p *simProvider) RemoveMeta(name, key string) error {
-	p.setRestart(name, key, false)
-	return p.Fake.RemoveMeta(name, key)
+	err := p.Fake.RemoveMeta(name, key)
+	if err == nil { // a failed removal keeps the marker
+		p.setRestart(name, key, false)
+	}
+	return err
 }
 
 func (p *simProvider) setRestart(name, key string, set bool) {

@@ -29,7 +29,8 @@
 #     gates, in every mode (fork PRs included: no network needed);
 #   - integration-smoke runs //test/integration's bdstore and REST smoke
 #     tests (scripts/test-integration-shard's bdstore_tests and
-#     rest_smoke_tests; .bazelrc test:integration-smoke) and gates, in
+#     rest_smoke_tests; test/integration/BUILD.bazel
+#     integration_smoke_test, a go_variant_test) and gates, in
 #     every mode: they
 #     never failed in 33 main runs of the full suite, which is still flaky;
 #   - integration runs on the nightly schedule and dispatches only,
@@ -253,8 +254,11 @@ jobs:
           packages='{"lane":"integration-packages","cmd":"test --config=ci --config=integration-packages --keep_going //test:integration_packages'"$fresh"'"}'
           # Gating. The integration suite's bdstore and REST smoke tests
           # (scripts/test-integration-shard bdstore_tests + rest_smoke_tests:
-          # .bazelrc test:integration-smoke's --test_filter).
-          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test'"$fresh"'"}'
+          # test/integration/BUILD.bazel integration_smoke_test's args). A
+          # dedicated go_variant_test target rather than a global
+          # --test_filter (GA-1), so --config=integration alone no longer
+          # filters anything.
+          smoke='{"lane":"integration-smoke","cmd":"test --config=ci --config=integration --keep_going //test/integration:integration_smoke_test'"$fresh"'"}'
           # Every mode tests: the gate (the required check) fails a run that
           # started no lane. Acceptance and integration-packages run on the
           # fork pool too (mode fork-ro, instance oss-fork, loopback only):

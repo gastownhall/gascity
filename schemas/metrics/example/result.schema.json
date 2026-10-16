@@ -221,6 +221,7 @@
               "beads-city-migrate-proxied",
               "storage-repair-sequence",
               "runtime-workdir-export",
+              "agent-is-foreign",
               "breaker-reset",
               "breaker-status"
             ]

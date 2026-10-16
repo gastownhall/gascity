@@ -260,9 +260,11 @@ func relocatedGraphLegFrom(binding beads.Store, relocated bool, cityStore beads.
 
 // federateReadyBeads reads the ready set from every leg and merges it.
 //
-// The per-leg read goes through the LIVE handle, which is what the API's ready
-// arm does, so a caching-wrapped leg answers from its backing store rather than
-// from a cache the CLI process never primed.
+// The per-leg read goes through the LIVE handle, because the CLI process never
+// primed a cache: a caching-wrapped leg answers from its backing store. The
+// API's ready arm instead prefers each leg's warm ready cache
+// (beads.ReadyPreferCache), and the Source rule of humaHandleBeadReady's
+// federation contract names the cases where the two answers can differ.
 func federateReadyBeads(legs []readyLeg, q beads.ReadyQuery) ([]beads.Bead, error) {
 	return federateBeadLegs(legs, func(store beads.Store) ([]beads.Bead, error) {
 		return beads.HandlesFor(store).Live.Ready(q)

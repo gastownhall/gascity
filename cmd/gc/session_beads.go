@@ -2018,7 +2018,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// bead-scoped name too, so it must not mint a second generation
 			// beside an open, unconfirmed create for the same slot identity —
 			// that row may still own a box whose teardown has not been
-			// confirmed (releaseBeadScopedPoolRuntime, ga-vcjr9).
+			// confirmed (releaseRowOwnedRuntime, ga-vcjr9).
 			leaseTemplate := tp.TemplateName
 			if tp.RigName != "" && !strings.Contains(leaseTemplate, "/") {
 				leaseTemplate = tp.RigName + "/" + leaseTemplate
@@ -2062,7 +2062,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					// Bead-ID scoped, same as the planner's create path
 					// (createPoolSessionBeadWithIdentifiers): the runtime name
 					// resolves back to its bead. ga-vcjr9's leak is closed by
-					// releaseBeadScopedPoolRuntime (a failed create's runtime is
+					// releaseRowOwnedRuntime (a failed create's runtime is
 					// torn down before its row may close) plus the identity
 					// lease, not by reusing a name across generations.
 					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
@@ -3104,13 +3104,15 @@ func reapStaleSessionBeads(
 		if startHolderLive(store, cityPath, info) {
 			continue
 		}
-		// A bead-scoped pool row may only close once its runtime is confirmed
-		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9). IsRunning=false is not
+		// A row that owns its runtime name (a bead-scoped pool row, or a
+		// manual session on a runtime that cannot vouch for identity) may only
+		// close once its runtime is confirmed gone (releaseRowOwnedRuntime,
+		// ga-vcjr9). IsRunning=false is not
 		// proof of teardown (k8s reports false for a pod whose tmux is not up,
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
-		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
+		if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, now)) {
 			continue
 		}
 		if closeSeat(store, sw, info, closeWhy{reason: "stale-session", gate: closeReleasing}, now.UTC(), stderr) {

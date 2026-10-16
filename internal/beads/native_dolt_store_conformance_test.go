@@ -58,3 +58,13 @@ func TestNativeDoltStoreIsAForeignIDCreator(t *testing.T) {
 		t.Fatalf("%T is not a beads.ForeignIDCreator; the two conformance rows that depend on it are skipping, and a skip reports as a pass", store)
 	}
 }
+
+// TestNativeDoltStoreGuardedBatchConformance runs the guarded-batch contract
+// against the native store over an in-memory storage whose batch applier keeps
+// the issueops.BatchApplier contract (all or nothing, typed item refusals,
+// per-item row versions).
+func TestNativeDoltStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "NativeDoltStore", func(*testing.T) beads.Store {
+		return beads.NewNativeDoltStoreForGuardedBatchConformance()
+	})
+}

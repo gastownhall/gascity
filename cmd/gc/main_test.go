@@ -358,6 +358,12 @@ func TestPackV2ImportsScript(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "pack-v2-imports.txtar")))
 }
 
+// TestBdPassthroughWalkUpScript pins gc bd's routing for the walk-up shape,
+// which in-process tests cannot reach (test binaries refuse ambient discovery).
+func TestBdPassthroughWalkUpScript(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "bd-passthrough-walkup.txtar")))
+}
+
 func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
 	params := testscript.Params{
 		Dir:         "testdata",

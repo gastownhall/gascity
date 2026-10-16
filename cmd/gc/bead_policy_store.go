@@ -265,6 +265,15 @@ func (s *beadPolicyStore) DepListBatch(ids []string) (map[string][]beads.Dep, er
 	return batch.DepListBatch(ids)
 }
 
+// ReadyPreferCache forwards the cache-preferred ready read with the policy's
+// expanded read tier, exactly as Ready and both handles do. An inner store
+// with no ready cache is read live, as beads.ReadyPreferCache reads any
+// cache-less store. Explicit for the reason DeleteBatch is: the embedded Store
+// interface does not promote optional capabilities.
+func (s *beadPolicyStore) ReadyPreferCache(query beads.ReadyQuery) ([]beads.Bead, error) {
+	return beads.ReadyPreferCache(s.Store, expandPolicyReadyQuery(query))
+}
+
 func (s *beadPolicyStore) Handles() beads.StoreHandles {
 	handles := beads.HandlesFor(s.Store)
 	handles.Cached = beadPolicyCachedReader{CachedReader: handles.Cached}

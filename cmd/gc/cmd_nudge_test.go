@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"testing"
@@ -3341,6 +3342,7 @@ func TestQueuedNudgeReleaseAfter(t *testing.T) {
 		{"session mapping of the runtime refusal", fmt.Errorf("%w: %w", session.ErrPendingInteraction, runtimeRefusal), true, time.Time{}},
 		{"permission prompt the runtime would not type into", fmt.Errorf("sending message to session: %w: sess-worker", runtime.ErrPendingInteraction), true, backoff},
 		{"session pending-interaction refusal", session.ErrPendingInteraction, true, backoff},
+		{"runtime could not be observed", fmt.Errorf("sending message to session: %w: bridge down", runtime.ErrRuntimeUnavailable), true, backoff},
 		{"busy timeout", errors.New(`agent "sess-worker" busy, timed out waiting for idle`), false, time.Time{}},
 		{"submit delivered but unobserved", fmt.Errorf("nudging: %w", tmux.ErrNudgeSubmitDeliveredUnobserved), false, time.Time{}},
 	}
@@ -5307,23 +5309,25 @@ func TestPruneDeadQueuedNudges_RemovesOldDeadItems(t *testing.T) {
 	}
 }
 
-func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
+func TestPruneDeadQueuedNudges_PrunesShadowlessItemsPastRetention(t *testing.T) {
+	// A dead letter with no BeadID has no terminal shadow to confirm, so it
+	// ages out on DeadAt alone; a zero DeadAt gives no age and is kept. A
+	// shadow-backed item past retention is still kept when no store is
+	// available to confirm its terminal record.
 	dir := t.TempDir()
 	now := time.Now()
 
-	// Directly inject a dead item without a BeadID into the queue state.
 	err := withNudgeQueueState(dir, func(state *nudgeQueueState) error {
-		state.Dead = append(state.Dead, queuedNudge{
-			ID:      "n-orphan",
-			Agent:   "worker",
-			Source:  "session",
-			Message: "no bead record",
-			DeadAt:  now.Add(-3 * time.Hour),
-		})
+		state.Dead = append(state.Dead,
+			queuedNudge{ID: "n-old", Agent: "worker", Source: "session", Message: "old", DeadAt: now.Add(-3 * time.Hour)},
+			queuedNudge{ID: "n-recent", Agent: "worker", Source: "session", Message: "recent", DeadAt: now.Add(-30 * time.Minute)},
+			queuedNudge{ID: "n-undated", Agent: "worker", Source: "session", Message: "undated"},
+			queuedNudge{ID: "n-shadowed", BeadID: "gc-shadow", Agent: "worker", Source: "session", Message: "shadowed", DeadAt: now.Add(-3 * time.Hour)},
+		)
 		return nil
 	})
 	if err != nil {
-		t.Fatalf("seed dead item: %v", err)
+		t.Fatalf("seed dead items: %v", err)
 	}
 
 	err = withNudgeQueueState(dir, func(state *nudgeQueueState) error {
@@ -5333,12 +5337,65 @@ func TestPruneDeadQueuedNudges_RetainsItemsWithoutBeadID(t *testing.T) {
 		t.Fatalf("pruneDeadQueuedNudges: %v", err)
 	}
 
-	_, _, dead, err := listQueuedNudges(dir, "worker", now)
+	state, err := nudgequeue.LoadState(dir)
 	if err != nil {
-		t.Fatalf("listQueuedNudges: %v", err)
+		t.Fatalf("LoadState: %v", err)
 	}
-	if len(dead) != 1 || dead[0].ID != "n-orphan" {
-		t.Fatalf("dead = %v, want [n-orphan] retained (no bead record)", dead)
+	got := make([]string, 0, len(state.Dead))
+	for _, item := range state.Dead {
+		got = append(got, item.ID)
+	}
+	slices.Sort(got)
+	if want := []string{"n-recent", "n-shadowed", "n-undated"}; !slices.Equal(got, want) {
+		t.Fatalf("dead IDs = %v, want %v", got, want)
+	}
+}
+
+func TestRunNudgeQueueMaintenanceSweep_EmptiesQueueOfAgedShadowlessDeferredSubmit(t *testing.T) {
+	// A deferred submit (internal/session/submit.go) is queued without a
+	// bead shadow. Once dead past retention it must not hold the queue
+	// non-empty, or nudgeQueueIsEmpty's fast path is lost city-wide.
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+
+	dir := t.TempDir()
+	now := time.Now().UTC()
+	created := now.Add(-3 * time.Hour)
+	if err := nudgequeue.WithState(dir, func(state *nudgequeue.State) error {
+		state.Dead = append(state.Dead, nudgequeue.Item{
+			ID:           "nudge-deferred1",
+			Agent:        "worker",
+			SessionID:    "gc-worker",
+			Source:       "session",
+			Message:      "deferred submit",
+			CreatedAt:    created,
+			DeliverAfter: created,
+			ExpiresAt:    created.Add(time.Hour),
+			DeadAt:       now.Add(-2 * time.Hour),
+			LastError:    "expired",
+		})
+		return nil
+	}); err != nil {
+		t.Fatalf("seed queue state: %v", err)
+	}
+	if nudgeQueueIsEmpty(dir) {
+		t.Fatal("nudgeQueueIsEmpty before sweep = true, want false")
+	}
+
+	if err := runNudgeQueueMaintenanceSweep(dir, now); err != nil {
+		t.Fatalf("runNudgeQueueMaintenanceSweep: %v", err)
+	}
+
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatalf("LoadState: %v", err)
+	}
+	if len(state.Pending) != 0 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("queue after sweep = pending %d, in-flight %d, dead %d; want all empty", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	if !nudgeQueueIsEmpty(dir) {
+		t.Fatal("nudgeQueueIsEmpty after sweep = false, want true")
 	}
 }
 

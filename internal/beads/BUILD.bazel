@@ -31,6 +31,7 @@ go_library(
         "@com_github_steveyegge_beads//issueops",
         "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
+        "@org_golang_x_sync//singleflight",
         "@org_modernc_sqlite//:sqlite",
     ] + select({
         "@rules_go//go/platform:android": [
@@ -98,6 +99,7 @@ go_test(
         "caching_store_partial_list_internal_test.go",
         "caching_store_primitives_test.go",
         "caching_store_ready_outcome_test.go",
+        "caching_store_ready_prefer_cache_test.go",
         "caching_store_ready_projection_internal_test.go",
         "caching_store_ready_staleness_internal_test.go",
         "caching_store_recent_local_event_internal_test.go",
@@ -140,6 +142,7 @@ go_test(
         "doltlite_count_test.go",
         "doltlite_namespace_census_test.go",
         "doltlite_read_store_graph_ready_test.go",
+        "doltlite_read_store_guarded_batch_test.go",
         "doltlite_read_store_test.go",
         "doltlite_seek_test.go",
         "event_payload_contract_test.go",
@@ -151,7 +154,10 @@ go_test(
         "factory_metadata_backend_test.go",
         "factory_test.go",
         "filestore_atomic_close_test.go",
+        "filestore_guarded_batch_test.go",
         "filestore_test.go",
+        "guarded_batch_export_test.go",
+        "guarded_batch_test.go",
         "hangbudget_linux_test.go",
         "hangbudget_test.go",
         "live_ready_test.go",
@@ -166,6 +172,7 @@ go_test(
         "namespace_census_test.go",
         "native_dolt_events_journal_read_test.go",
         "native_dolt_events_journal_test.go",
+        "native_dolt_guarded_batch_export_integration_test.go",
         "native_dolt_proxied_open_test.go",
         "native_dolt_readonly_test.go",
         "native_dolt_store_allow_schema_behind_migrate_test.go",
@@ -186,6 +193,7 @@ go_test(
         "native_dolt_store_graph_apply_integration_test.go",
         "native_dolt_store_graph_deadline_test.go",
         "native_dolt_store_graph_validate_test.go",
+        "native_dolt_store_guarded_batch_integration_test.go",
         "native_dolt_store_integration_test.go",
         "native_dolt_store_label_cas_integration_test.go",
         "native_dolt_store_lifecycle_test.go",
@@ -282,10 +290,10 @@ go_test(
         "//conditions:default": {},
     }),
     # The integration build (//test:integration_packages) runs ~1700 tests for
-    # ~300 s on one worker; 10 shards bring each to about a minute. The guard
+    # ~300 s on one worker; 13 shards bring each to under a minute. The guard
     # scripts/integration_packages_shards_test.go keeps the tests in
     # heavy_tests.txt apart.
-    shard_count = 10,
+    shard_count = 13,
     deps = [
         "//internal/beadmeta",
         "//internal/beads/beadstest",

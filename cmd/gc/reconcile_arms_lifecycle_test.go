@@ -367,9 +367,10 @@ func TestSimRuntimeRestartMarkerRestartsALiveRow(t *testing.T) {
 	s.noViolations(t)
 }
 
-// TestSimRuntimeRestartMarkerSparesAPinnedRow (C7a-2b; SESS-521): a pinned
-// named row whose runtime alone carries the marker, with no explicit reset
-// on the row, is not killed.
+// TestSimRuntimeRestartMarkerSparesAPinnedRow (C7a-2b, mc-nm6yt; SESS-521):
+// a pinned named row whose runtime alone carries the marker, with no
+// explicit reset on the row, is not killed, and the marker is cleared, so
+// a later unpin over the same runtime restarts nothing.
 func TestSimRuntimeRestartMarkerSparesAPinnedRow(t *testing.T) {
 	s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-time.Hour),
 		"configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"), gc1Work())
@@ -382,6 +383,22 @@ func TestSimRuntimeRestartMarkerSparesAPinnedRow(t *testing.T) {
 	}
 	if m := s.gc1(); len(s.sp.kills) != 0 || m["session_key"] != "k-1" {
 		t.Fatalf("kills %d, row %v; want the pinned runtime left running", len(s.sp.kills), m)
+	}
+	// Legacy's pinned skip clears the runtime's marker (mc-nm6yt), so an
+	// unpin over the same runtime fires no old request.
+	s.sp.mu.Lock()
+	marked := s.sp.rts["s-gc-1"] != nil && s.sp.rts["s-gc-1"].restart
+	s.sp.mu.Unlock()
+	if marked {
+		t.Fatal("the pinned runtime still carries the restart marker")
+	}
+	s.ask("pin_awake", "")
+	for range 3 {
+		s.settle()
+		s.advance(simPatrol)
+	}
+	if m := s.gc1(); len(s.sp.kills) != 0 || m["session_key"] != "k-1" {
+		t.Fatalf("after the unpin: kills %d, row %v; want no old restart fired", len(s.sp.kills), m)
 	}
 	s.noViolations(t)
 }
@@ -469,16 +486,160 @@ func TestRestartMarkerFlipIsAnObservationChange(t *testing.T) {
 	}
 }
 
-// TestPinnedRuntimeMarkerAloneDecidesNothing (C7a-2b; SESS-521): a pinned
+// TestPinnedRuntimeMarkerIsCleared (C7a-2b, mc-nm6yt; SESS-521): a pinned
 // named row with no explicit reset, whose runtime alone carries the marker,
-// decides nothing: no kill, and no clear of a row marker it does not hold
-// (which would rewrite the row every pass).
-func TestPinnedRuntimeMarkerAloneDecidesNothing(t *testing.T) {
-	c := newHealCase(t, livenessAlive, desireWake, "state", "active", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true")
+// gets legacy's pinned skip: the marker cleared from its runtime, no kill,
+// and no write of a row marker it does not hold. A runtime not its own, or
+// a dead pane, decides no clear.
+func TestPinnedRuntimeMarkerIsCleared(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		attrs InventoryAttrs
+		want  bool
+	}{
+		{"its own live runtime", InventoryAttrs{DeadKnown: true, RestartRequested: true}, true},
+		{"a dead pane", InventoryAttrs{DeadKnown: true, AllPanesDead: true, RestartRequested: true}, false},
+		{"another incarnation", InventoryAttrs{DeadKnown: true, RestartRequested: true, Identity: runtimeIdentity{Known: true, Token: "tok-other"}}, false},
+		{"no marker", InventoryAttrs{DeadKnown: true}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			liveness := livenessAlive
+			if tc.attrs.AllPanesDead {
+				liveness = livenessDead
+			}
+			c := newHealCase(t, liveness, desireWake, "state", "active", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true")
+			c.w.ObsMaxAge = observeMaxAge
+			a := tc.attrs
+			if !a.Identity.Known {
+				a.Identity = runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
+			} else {
+				a.Identity.SessionID, a.Identity.Epoch = c.k.ID, "3"
+			}
+			c.w.Obs = newObserveCache().publish(c.w.Now, map[string]InventoryAttrs{"s-heal": a}, completeBackend("tmux", "s-heal"))
+			it, ok := armRestartRequested(&rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true})
+			if got := ok && it.Kind == intentMarkerClear && it.Reason == decideRestartMarkerClear && len(it.Patch) == 0; got != tc.want {
+				t.Fatalf("armRestartRequested = (%q, %q) %v %v, want a marker clear %t", it.Kind, it.Reason, ok, it.Patch, tc.want)
+			}
+		})
+	}
+}
+
+// pinnedMarkerCase is a pinned named row whose own live runtime alone
+// carries the restart marker, its fresh read and identity answering live.
+func pinnedMarkerCase(t *testing.T, meta ...string) (*healCase, *freshObserver) {
+	t.Helper()
+	base := append([]string{"state", "active", "configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"}, meta...)
+	c := newHealCase(t, livenessAlive, desireWake, base...)
 	c.w.ObsMaxAge = observeMaxAge
 	id := runtimeIdentity{Known: true, SessionID: c.k.ID, Epoch: "3", Token: "tok-3"}
 	c.w.Obs = newObserveCache().publish(c.w.Now, map[string]InventoryAttrs{"s-heal": {DeadKnown: true, RestartRequested: true, Identity: id}}, completeBackend("tmux", "s-heal"))
-	if it, ok := armRestartRequested(&rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}); ok {
-		t.Fatalf("armRestartRequested = (%q, %q) %v, want no decision", it.Kind, it.Reason, it.Patch)
+	live := &freshObserver{
+		Fake: runtime.NewFake(), l: runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: "1"},
+		env: map[string]string{"GC_SESSION_ID": c.k.ID, "GC_RUNTIME_EPOCH": "3", "GC_INSTANCE_TOKEN": "tok-3"},
+	}
+	return c, live
+}
+
+// TestPinnedMarkerClearEffect (mc-nm6yt): the clear's effect removes the
+// runtime's marker from its Current runtime and writes no row; a row
+// unpinned between the pass and the effect is refused, its marker kept for
+// A13's restart; a runtime not its own on the fresh read is left.
+func TestPinnedMarkerClearEffect(t *testing.T) {
+	c, live := pinnedMarkerCase(t)
+	it, s := c.run(t, live.tmux(), nil)
+	if it.Kind != intentMarkerClear || s.Outcome != settledNoop || s.Cause != "" || live.Fake.CountCalls("RemoveMeta", "s-heal") != 1 {
+		t.Fatalf("decided %q, settled %+v, %d marker clears; want one clear and no row write (a no-op settlement)", it.Kind, s, live.Fake.CountCalls("RemoveMeta", "s-heal"))
+	}
+
+	c, live = pinnedMarkerCase(t)
+	c.before = func() {
+		if err := c.store.SetMetadata(c.k.ID, "pin_awake", ""); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if _, s := c.run(t, live.tmux(), nil); s.Outcome != settledRefused || live.Fake.CountCalls("RemoveMeta", "s-heal") != 0 {
+		t.Fatalf("settled %+v, %d marker clears; want refused, the marker kept", s, live.Fake.CountCalls("RemoveMeta", "s-heal"))
+	}
+
+	c, live = pinnedMarkerCase(t)
+	live.env["GC_INSTANCE_TOKEN"] = "tok-other"
+	if _, s := c.run(t, live.tmux(), nil); live.Fake.CountCalls("RemoveMeta", "s-heal") != 0 {
+		t.Fatalf("settled %+v, cleared a runtime not its own", s)
+	}
+}
+
+// TestPinnedRowMarkerClearsFirst (SESS-521): a pinned row holding the row
+// marker too has the row marker cleared first (A13's row write); the
+// runtime's follows on a later pass.
+func TestPinnedRowMarkerClearsFirst(t *testing.T) {
+	c, _ := pinnedMarkerCase(t, "restart_requested", "true")
+	it, ok := armRestartRequested(&rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true})
+	if !ok || it.Kind != intentRowHeal || it.Reason != decideRestartPinnedClear {
+		t.Fatalf("armRestartRequested = (%q, %q) %v, want the row marker's clear first", it.Kind, it.Reason, ok)
+	}
+}
+
+// TestSimFailingMarkerClearHoldsNoSuspend (the #7893 review, its probe):
+// a pinned row's marker clear that keeps failing (a sidecar or a tmux
+// option the controller cannot remove) backs off its own record, so an
+// operator's suspend of the row stops its runtime on the first pass, as it
+// does when the clear lands.
+func TestSimFailingMarkerClearHoldsNoSuspend(t *testing.T) {
+	for _, failing := range []bool{false, true} {
+		t.Run(fmt.Sprintf("failing %t", failing), func(t *testing.T) {
+			s := converged(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "active", "instance_token", "tok-1", "session_key", "k-1", "last_woke_at", rowAt(-time.Hour),
+				"configured_named_session", "true", "configured_named_identity", "worker", "pin_awake", "true"), gc1Work())
+			if err := newDrainOps(s.sp).setRestartRequested("s-gc-1"); err != nil {
+				t.Fatal(err)
+			}
+			if failing {
+				s.sp.mu.Lock()
+				s.sp.RemoveMetaErrors = map[string]map[string]error{"s-gc-1": {"GC_RESTART_REQUESTED": errors.New("sim: permission denied")}}
+				s.sp.mu.Unlock()
+			}
+			for range 40 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.ask("state", "suspended", "sleep_intent", "user-hold", "suspended_at", s.clk.Now().Format(time.RFC3339))
+			s.settle()
+			s.sp.mu.Lock()
+			gone := s.sp.rts["s-gc-1"] == nil
+			s.sp.mu.Unlock()
+			if !gone {
+				t.Fatalf("failing %t: the suspend's first pass left the runtime; trace %q", failing, s.p.rowTrace[rowKey{Leg: rowLeg, ID: "gc-1"}])
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// TestMarkerClearBackoffHoldsOnlyTheClear (the #7893 review): the clear
+// settles on its own backoff key, and while that record is live A13 falls
+// through past the clear, its release the row's next deadline.
+func TestMarkerClearBackoffHoldsOnlyTheClear(t *testing.T) {
+	c, _ := pinnedMarkerCase(t)
+	if got := settledBackoffKey(intentMarkerClear, decideRestartMarkerClear, c.k); got != markerClearBackoffKey(c.k) || got == rowBackoffKey(c.k) {
+		t.Fatalf("the clear settles on %q, want its own key", got)
+	}
+	c.w.Backoff = map[string]backoffRecord{markerClearBackoffKey(c.k): {Consecutive: 1, Until: c.w.Now.Add(time.Minute)}}
+	r := &rowFacts{w: c.w, k: c.k, entry: c.a.Snapshot.Entries[c.k], row: c.w.Census.Rows[c.k], found: true}
+	if it, ok := armRestartRequested(r); ok && it.Kind == intentMarkerClear {
+		t.Fatalf("armRestartRequested = (%q, %q) under a live clear backoff, want a fall-through", it.Kind, it.Reason)
+	}
+	if !r.next.Equal(c.w.Now.Add(time.Minute)) {
+		t.Fatalf("next %v, want the backoff's release", r.next)
+	}
+}
+
+// TestMarkerClearNeedsOneSessionObject (the #7893 review nit): a fresh read
+// that sees another session object under the name between its reads clears
+// nothing.
+func TestMarkerClearNeedsOneSessionObject(t *testing.T) {
+	c, live := pinnedMarkerCase(t)
+	n := 0
+	live.read = func() { n++; live.l.ObjectID = fmt.Sprintf("$%d", n) }
+	if _, s := c.run(t, live.tmux(), nil); live.Fake.CountCalls("RemoveMeta", "s-heal") != 0 {
+		t.Fatalf("settled %+v, cleared over a moving session object", s)
 	}
 }

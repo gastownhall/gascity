@@ -373,8 +373,12 @@ func drainRuntime(dops drainOps, writeRow func() error, sp runtime.Provider, rec
 		}
 	}
 	if err := dops.setDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain flag is in force; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime drain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionDraining,
@@ -500,8 +504,12 @@ func undrainRuntime(dops drainOps, clearRow func() error, sp runtime.Provider, r
 		return 1
 	}
 	if err := dops.clearDrain(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The drain is cleared; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime undrain: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	rec.Record(events.Event{
 		Type:    events.SessionUndrained,
@@ -1212,8 +1220,12 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 // and the report.
 func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if err := dops.setDrainAck(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !runtime.OnlyMetadataNotMirrored(err) {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		// The ack is in force; only the runtime's view of it lags.
+		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr

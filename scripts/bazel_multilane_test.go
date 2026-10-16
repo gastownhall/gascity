@@ -129,8 +129,6 @@ func TestBazelCIConfigSuiteConfigs(t *testing.T) {
 	for config, flags := range map[string]string{
 		"acceptance":  "--define=gotags=acceptance_a --test_timeout=1100",
 		"integration": "--define=gotags=integration --test_timeout=1100",
-		// Its --test_filter: TestIntegrationSmokeLaneMatchesShardScript.
-		"integration-smoke": "--config=integration",
 	} {
 		for _, f := range strings.Fields(flags) {
 			if !strings.Contains(rc, "\ntest:"+config+" "+f+"\n") {
@@ -226,7 +224,7 @@ var multiLaneCommands = map[string]string{
 	"acceptance":           "test --config=ci --config=acceptance --keep_going //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests",
 	"integration":          "test --config=ci --config=integration --keep_going //test/integration:integration_test",
 	"integration-packages": "test --config=ci --config=integration-packages --keep_going //test:integration_packages",
-	"integration-smoke":    "test --config=ci --config=integration-smoke --keep_going //test/integration:integration_test",
+	"integration-smoke":    "test --config=ci --config=integration --keep_going //test/integration:integration_smoke_test",
 }
 
 // multiLaneFreshTargets are the targets the nightly fresh run adds to a lane
