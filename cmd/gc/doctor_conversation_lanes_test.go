@@ -1,0 +1,84 @@
+package main
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/doctor"
+)
+
+// newConversationLanesCheckForTest builds the check over store and a canned
+// lane-status answer.
+func newConversationLanesCheckForTest(kinds []string, store beads.Store, st conversationLaneStatus, queryErr error) (*conversationLanesDoctorCheck, *int) {
+	opened := 0
+	c := &conversationLanesDoctorCheck{
+		cfg: &config.City{Ops: config.OpsConfig{Authoritative: kinds}},
+		open: func() (beads.Store, error) {
+			opened++
+			return store, nil
+		},
+		sessions: func(s beads.Store) beads.Store { return s },
+		query:    func(string) (conversationLaneStatus, error) { return st, queryErr },
+	}
+	return c, &opened
+}
+
+// TestConversationLanesDoctorStates pins every state the check reports.
+func TestConversationLanesDoctorStates(t *testing.T) {
+	mem := newLaneTestStore()
+	bd := beads.NewBdStore(t.TempDir(), func(string, string, ...string) ([]byte, error) {
+		return nil, errors.New("the bd CLI must not run")
+	})
+	running := conversationLaneStatus{State: laneHostStateRunning, Kinds: []string{"message"}, Passes: 3, LastPassAt: "2026-10-16T12:00:00Z", LastPassAgeMS: 4000, Workers: 1}
+	quarantined := running
+	quarantined.Quarantined, quarantined.QuarantinedIDs = 2, []string{"gc-op-a", "gc-op-b"}
+	stale := running
+	stale.Kinds = nil
+	for _, tc := range []struct {
+		name     string
+		kinds    []string
+		store    beads.Store
+		st       conversationLaneStatus
+		queryErr error
+		status   doctor.CheckStatus
+		want     string
+		opens    int
+	}{
+		{name: "off", status: doctor.StatusOK, want: "conversation lanes are off", opens: 0},
+		{
+			name: "incapable store", kinds: []string{"message"}, store: bd, status: doctor.StatusError,
+			want: "conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore)", opens: 1,
+		},
+		{name: "no reply", kinds: []string{"message"}, store: mem, queryErr: errors.New("dial: no such file"), status: doctor.StatusWarning, want: "no lane-status reply", opens: 1},
+		{name: "no host", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusWarning, want: "runs no lane host", opens: 1},
+		{name: "refused", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateRefused, Reason: "conversation lanes need guarded batches"}, status: doctor.StatusError, want: "refused to start the lane host", opens: 1},
+		{name: "running", kinds: []string{"message"}, store: mem, st: running, status: doctor.StatusOK, want: "last pass 4s ago", opens: 1},
+		{name: "quarantined", kinds: []string{"message"}, store: mem, st: quarantined, status: doctor.StatusWarning, want: "2 op row(s) this gc cannot decode", opens: 1},
+		{name: "list changed since start", kinds: []string{"message"}, store: mem, st: stale, status: doctor.StatusWarning, want: "until its next start", opens: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, opened := newConversationLanesCheckForTest(tc.kinds, tc.store, tc.st, tc.queryErr)
+			r := c.Run(&doctor.CheckContext{CityPath: "/city"})
+			if r.Status != tc.status || !strings.Contains(r.Message, tc.want) {
+				t.Fatalf("Run = %v %q, want %v containing %q", r.Status, r.Message, tc.status, tc.want)
+			}
+			if *opened != tc.opens {
+				t.Fatalf("store opened %d times, want %d", *opened, tc.opens)
+			}
+			if tc.status == doctor.StatusError && r.FixHint == "" {
+				t.Fatal("an error carries no remedy")
+			}
+		})
+	}
+}
+
+// TestConversationLanesDoctorNotFixable pins the check's identity.
+func TestConversationLanesDoctorNotFixable(t *testing.T) {
+	c := newConversationLanesDoctorCheck("/city", &config.City{})
+	if c.Name() != "conversation-lanes" || c.CanFix() || c.WarmupEligible() {
+		t.Fatalf("check = %s fix %v warmup %v", c.Name(), c.CanFix(), c.WarmupEligible())
+	}
+}

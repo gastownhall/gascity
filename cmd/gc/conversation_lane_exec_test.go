@@ -1,0 +1,857 @@
+package main
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
+)
+
+var laneT0 = time.Date(2026, 10, 16, 12, 0, 0, 0, time.UTC)
+
+// laneTestClock is a fake clock safe to read from worker goroutines.
+type laneTestClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *laneTestClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *laneTestClock) Advance(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = c.now.Add(d)
+}
+
+// laneTestStore is a sessions store with the id prefix a production store
+// reports, so the op store discovers its namespace.
+type laneTestStore struct {
+	*beads.MemStore
+}
+
+func (laneTestStore) IDPrefix() string { return "gc" }
+
+func newLaneTestStore() laneTestStore {
+	return laneTestStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+}
+
+// laneFixture is one session row over a fake runtime, the stores a lane
+// needs, and a fake clock.
+type laneFixture struct {
+	dir     string
+	cfg     *config.City
+	store   beads.Store
+	sp      *runtime.Fake
+	clk     *laneTestClock
+	id      string
+	name    string
+	token   string
+	started bool
+}
+
+// laneFixtureOpt adjusts a fixture's session row metadata before it is
+// created.
+type laneFixtureOpt func(meta map[string]string)
+
+func noLaneToken(meta map[string]string) { delete(meta, "instance_token") }
+
+func laneTransport(transport string) laneFixtureOpt {
+	return func(meta map[string]string) { meta["transport"] = transport }
+}
+
+func newLaneFixture(t *testing.T, opts ...laneFixtureOpt) *laneFixture {
+	t.Helper()
+	return newLaneFixtureOver(t, newLaneTestStore(), opts...)
+}
+
+func newLaneFixtureOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt) *laneFixture {
+	t.Helper()
+	f := &laneFixture{
+		dir:   t.TempDir(),
+		cfg:   &config.City{},
+		store: store,
+		sp:    runtime.NewFake(),
+		clk:   &laneTestClock{now: laneT0},
+		name:  "worker-session",
+		token: "tok-1",
+	}
+	meta := map[string]string{
+		"session_name":       f.name,
+		"agent_name":         "worker",
+		"template":           "worker",
+		"state":              string(session.StateActive),
+		"generation":         "1",
+		"continuation_epoch": "1",
+		"instance_token":     f.token,
+	}
+	for _, o := range opts {
+		o(meta)
+	}
+	b, err := store.Create(beads.Bead{
+		Title: "Session: worker", Type: session.BeadType, Status: "open",
+		Labels: []string{session.LabelSession}, Metadata: meta,
+	})
+	if err != nil {
+		t.Fatalf("creating the session row: %v", err)
+	}
+	f.id = b.ID
+	f.token = meta["instance_token"]
+	f.startRuntime(t, f.token)
+	return f
+}
+
+// startRuntime starts the fake runtime as the incarnation token names, idle
+// long enough for the quiescence rule.
+func (f *laneFixture) startRuntime(t *testing.T, token string) {
+	t.Helper()
+	if f.started {
+		if err := f.sp.Stop(f.name); err != nil {
+			t.Fatalf("stopping the fake runtime: %v", err)
+		}
+	}
+	env := map[string]string{runtime.RuntimeEpochEnv: "1", runtime.ContinuationEpochEnv: "1"}
+	if token != "" {
+		env[runtime.InstanceTokenEnv] = token
+	}
+	if err := f.sp.Start(context.Background(), f.name, runtime.Config{Env: env}); err != nil {
+		t.Fatalf("starting the fake runtime: %v", err)
+	}
+	f.started = true
+	f.sp.SetActivity(f.name, time.Now().Add(-time.Minute))
+}
+
+// laneStore opens the op store as the lane host does: live reads over the
+// sessions store.
+func (f *laneFixture) laneStore(t *testing.T) *opjournal.Store {
+	t.Helper()
+	st, err := opjournal.NewLaneStore(beads.SessionStore{Store: laneLiveSessions{Store: f.store}}, f.clk)
+	if err != nil {
+		t.Fatalf("NewLaneStore: %v", err)
+	}
+	return st
+}
+
+func (f *laneFixture) lane(t *testing.T, st *opjournal.Store) *opjournal.ConversationLane {
+	t.Helper()
+	l, err := opjournal.NewLane(st, laneHostName, f.clk)
+	if err != nil {
+		t.Fatalf("NewLane: %v", err)
+	}
+	return l
+}
+
+// msg is a lane message to the fixture's conversation.
+func (f *laneFixture) msg(key string, role opjournal.Role, payload string, mods ...func(*opjournal.Request)) opjournal.Request {
+	r := opjournal.Request{
+		Conversation: f.id, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane, ClientKey: key,
+		Producer: opjournal.Producer{Principal: "gc:mail", Actor: opjournal.ActorBackground}, Payload: payload,
+		Policy: opjournal.Policy{Message: opjournal.MessagePolicy{Role: role}},
+	}
+	for _, m := range mods {
+		m(&r)
+	}
+	return r
+}
+
+func (f *laneFixture) propose(t *testing.T, st *opjournal.Store, req opjournal.Request) opjournal.Op {
+	t.Helper()
+	op, created, err := st.Propose(req)
+	if err != nil || !created {
+		t.Fatalf("Propose(%s) = created %v, %v", req.ClientKey, created, err)
+	}
+	return op
+}
+
+func (f *laneFixture) get(t *testing.T, st *opjournal.Store, id string) opjournal.Op {
+	t.Helper()
+	op, err := st.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	return op
+}
+
+// deps are the executor's dependencies over the fixture.
+func (f *laneFixture) deps(st *opjournal.Store) laneExecDeps {
+	return laneExecDeps{cityPath: f.dir, cfg: f.cfg, sessions: laneLiveSessions{Store: f.store}, sp: f.sp, lane: st, clk: f.clk}
+}
+
+// view reads the fixture's conversation as a pass does.
+func (f *laneFixture) view(t *testing.T) (opjournal.ConversationView, session.Info) {
+	t.Helper()
+	v, info, err := readConversationLaneView(sessionFrontDoor(laneLiveSessions{Store: f.store}), f.id)
+	if err != nil {
+		t.Fatalf("reading the view: %v", err)
+	}
+	return v, info
+}
+
+// pass runs one pass with the live executor; wrap may replace it.
+func (f *laneFixture) pass(ctx context.Context, t *testing.T, l *opjournal.ConversationLane, st *opjournal.Store, wrap func(*conversationLaneExec) opjournal.Executor) (opjournal.PassResult, error) {
+	t.Helper()
+	v, info := f.view(t)
+	e := newConversationLaneExec(f.deps(st), info)
+	var exec opjournal.Executor = e
+	if wrap != nil {
+		exec = wrap(e)
+	}
+	return l.Pass(ctx, v, exec)
+}
+
+// nudges are the texts the fake runtime received.
+func (f *laneFixture) nudges() []runtime.Call {
+	var out []runtime.Call
+	for _, c := range f.sp.Calls {
+		if c.Method == "Nudge" || c.Method == "NudgeNow" {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+func (f *laneFixture) fenceMisses() int {
+	n := 0
+	for _, c := range f.sp.Calls {
+		if c.Method == "FenceMismatch" {
+			n++
+		}
+	}
+	return n
+}
+
+// recordingHandle records every nudge request its handle sees.
+type recordingHandle struct {
+	worker.Handle
+	mu   *sync.Mutex
+	reqs *[]worker.NudgeRequest
+}
+
+func (h recordingHandle) Nudge(ctx context.Context, by session.Actor, req worker.NudgeRequest) (worker.NudgeResult, error) {
+	h.mu.Lock()
+	*h.reqs = append(*h.reqs, req)
+	h.mu.Unlock()
+	return h.Handle.Nudge(ctx, by, req)
+}
+
+// recordRequests makes e's handles record their nudge requests into reqs.
+func recordRequests(e *conversationLaneExec, mu *sync.Mutex, reqs *[]worker.NudgeRequest) {
+	inner := e.handle
+	e.handle = func(t nudgeTarget) (worker.Handle, error) {
+		h, err := inner(t)
+		if err != nil {
+			return nil, err
+		}
+		return recordingHandle{Handle: h, mu: mu, reqs: reqs}, nil
+	}
+}
+
+// beforeDeliverExec runs before ahead of its executor's Deliver.
+type beforeDeliverExec struct {
+	*conversationLaneExec
+	before func()
+}
+
+func (e beforeDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
+	e.before()
+	return e.conversationLaneExec.Deliver(ctx, d)
+}
+
+// TestConversationLaneViewFields pins every field of the view.
+func TestConversationLaneViewFields(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		info session.Info
+		want opjournal.ConversationView
+	}{
+		{
+			"active with a token",
+			session.Info{ID: "gc-1", MetadataState: "active", Generation: "3", ContinuationEpoch: "2", InstanceToken: "tok"},
+			opjournal.ConversationView{ID: "gc-1", Generation: 3, Epoch: 2, Token: "tok"},
+		},
+		{
+			"no token keeps the counters",
+			session.Info{ID: "gc-1", MetadataState: "active", Generation: "3", ContinuationEpoch: "2"},
+			opjournal.ConversationView{ID: "gc-1", Generation: 3, Epoch: 2},
+		},
+		{
+			"missing counters read as defaults",
+			session.Info{ID: "gc-1", MetadataState: "active", InstanceToken: "tok"},
+			opjournal.ConversationView{ID: "gc-1", Generation: int64(session.DefaultGeneration), Epoch: int64(session.DefaultContinuationEpoch), Token: "tok"},
+		},
+		{
+			"closed",
+			session.Info{ID: "gc-1", Closed: true, Generation: "1", ContinuationEpoch: "1", InstanceToken: "tok"},
+			opjournal.ConversationView{ID: "gc-1", Closed: true, Generation: 1, Epoch: 1, Token: "tok"},
+		},
+		{
+			"archived",
+			session.Info{ID: "gc-1", MetadataState: "archived", Generation: "1", ContinuationEpoch: "1"},
+			opjournal.ConversationView{ID: "gc-1", Closed: true, Generation: 1, Epoch: 1},
+		},
+		{
+			"asleep",
+			session.Info{ID: "gc-1", MetadataState: "asleep", Generation: "2", ContinuationEpoch: "1", InstanceToken: "tok"},
+			opjournal.ConversationView{ID: "gc-1", Generation: 2, Epoch: 1, Token: "tok", Dormant: true},
+		},
+		{
+			"drained",
+			session.Info{ID: "gc-1", MetadataState: "drained", Generation: "2", ContinuationEpoch: "1"},
+			opjournal.ConversationView{ID: "gc-1", Generation: 2, Epoch: 1, Dormant: true},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := conversationLaneView(tc.info); got != tc.want {
+				t.Fatalf("view = %+v, want %+v", got, tc.want)
+			}
+		})
+	}
+}
+
+// TestConversationLaneViewReadsMissingRowClosed proves an absent row is a
+// closed conversation, and a read failure is an error.
+func TestConversationLaneViewReadsMissingRowClosed(t *testing.T) {
+	store := newLaneTestStore()
+	v, _, err := readConversationLaneView(sessionFrontDoor(store), "gc-404")
+	if err != nil || !v.Closed || v.ID != "gc-404" {
+		t.Fatalf("view of a missing row = %+v, %v; want closed", v, err)
+	}
+	notSession, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if v, _, err := readConversationLaneView(sessionFrontDoor(store), notSession.ID); err != nil || !v.Closed {
+		t.Fatalf("view of a non-session row = %+v, %v; want closed", v, err)
+	}
+	if _, _, err := readConversationLaneView(sessionFrontDoor(laneFailingGetStore{store}), "gc-1"); err == nil {
+		t.Fatal("a failed read returned no error")
+	}
+}
+
+// laneFailingGetStore fails every Get.
+type laneFailingGetStore struct{ laneTestStore }
+
+func (laneFailingGetStore) Get(string) (beads.Bead, error) {
+	return beads.Bead{}, errors.New("store down")
+}
+
+// TestLaneExecDeliveryResultMapping pins the result mapping row by row.
+func TestLaneExecDeliveryResultMapping(t *testing.T) {
+	at := laneT0
+	live := context.Background()
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	delivered := func(ack opjournal.AckKind, degradation string) opjournal.DeliveryResult {
+		return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: at, Ack: ack}, Via: laneViaLive, Degradation: degradation}
+	}
+	someErr := errors.New("tmux exploded")
+	for _, tc := range []struct {
+		name       string
+		ctx        context.Context
+		res        worker.NudgeResult
+		err        error
+		unfenced   bool
+		want       opjournal.DeliveryResult
+		transient  bool
+		wantUnknwn bool
+	}{
+		{name: "delivered", ctx: live, res: worker.NudgeResult{Delivered: true}, want: delivered(opjournal.AckDelivered, "")},
+		{name: "delivered unfenced", ctx: live, res: worker.NudgeResult{Delivered: true, Unfenced: true}, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
+		{name: "delivered with no token", ctx: live, res: worker.NudgeResult{Delivered: true}, unfenced: true, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
+		{name: "unobserved", ctx: live, err: fmt.Errorf("submit: %w", runtime.ErrNudgeDeliveredUnobserved), want: delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
+		{name: "unobserved and unfenced", ctx: live, res: worker.NudgeResult{Unfenced: true}, err: runtime.ErrNudgeDeliveredUnobserved, want: delivered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
+		{name: "not delivered", ctx: live, res: worker.NudgeResult{}, transient: true},
+		{name: "pending interaction", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrNudgeRefusedPendingInteraction), transient: true},
+		{name: "fence miss", ctx: live, err: &runtime.FenceMismatchError{Session: "s", Found: "absent"}, transient: true},
+		{name: "runtime unavailable", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), transient: true},
+		{name: "partial fence miss", ctx: live, err: &runtime.FenceMismatchError{Session: "s", Found: "dead", Partial: true}, wantUnknwn: true},
+		{name: "canceled during the call", ctx: canceled, err: someErr, wantUnknwn: true},
+		{name: "deadline during the call", ctx: live, err: fmt.Errorf("x: %w", context.DeadlineExceeded), wantUnknwn: true},
+		{name: "rejected", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrNudgeRejected), want: opjournal.Rejected{KeyRejected: true, Reason: "x: " + runtime.ErrNudgeRejected.Error()}},
+		{name: "anything else", ctx: live, err: someErr, want: opjournal.NotDelivered{Cause: someErr}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := laneDeliveryResult(tc.ctx, tc.res, tc.err, at, tc.unfenced)
+			switch {
+			case tc.transient:
+				nd, ok := got.(opjournal.NotDelivered)
+				if !ok || !nd.Transient {
+					t.Fatalf("result = %#v, want a transient NotDelivered", got)
+				}
+			case tc.wantUnknwn:
+				if _, ok := got.(opjournal.Unknown); !ok {
+					t.Fatalf("result = %#v, want Unknown", got)
+				}
+			default:
+				if fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", tc.want) {
+					t.Fatalf("result = %#v, want %#v", got, tc.want)
+				}
+			}
+		})
+	}
+}
+
+// TestLaneExecControlUnsupported proves interrupt and respond are refused
+// until their slices land.
+func TestLaneExecControlUnsupported(t *testing.T) {
+	e := &conversationLaneExec{}
+	want := opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
+	if got := e.Interrupt(context.Background(), opjournal.InterruptCall{}); got != want {
+		t.Fatalf("Interrupt = %#v, want %#v", got, want)
+	}
+	if got := e.Respond(context.Background(), opjournal.RespondCall{}); got != want {
+		t.Fatalf("Respond = %#v, want %#v", got, want)
+	}
+}
+
+// TestLaneExecDeliversFencedRequest proves a delivery carries the Take's
+// fence, the gc:-scoped delivery key, live-only default delivery and
+// AllowUnfenced, closes succeeded with link none (no turn source), and stamps
+// the session's last nudge.
+func TestLaneExecDeliversFencedRequest(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "please run the tests"))
+	var mu sync.Mutex
+	var reqs []worker.NudgeRequest
+	res, err := f.pass(context.Background(), t, l, st, func(e *conversationLaneExec) opjournal.Executor {
+		recordRequests(e, &mu, &reqs)
+		return e
+	})
+	if err != nil || res.Done != opjournal.DoneAccepted {
+		t.Fatalf("Pass = %+v, %v; want accepted", res, err)
+	}
+	got := f.get(t, st, op.ID)
+	if len(reqs) != 1 {
+		t.Fatalf("nudge requests = %d, want 1", len(reqs))
+	}
+	req := reqs[0]
+	wantFence := runtime.InputFence{Generation: 1, Epoch: 1, Token: f.token}
+	if req.Fence != wantFence || !req.AllowUnfenced || req.Wake != worker.NudgeWakeLiveOnly ||
+		req.Delivery != worker.NudgeDeliveryDefault || req.DeliveryKey != "gc:"+got.DeliveryKey || req.Source != "" {
+		t.Fatalf("request = %+v, want fence %+v, AllowUnfenced, live_only, default, key gc:%s, no source", req, wantFence, got.DeliveryKey)
+	}
+	if req.Text != "please run the tests" {
+		t.Fatalf("text = %q, want the prompt verbatim", req.Text)
+	}
+	calls := f.nudges()
+	if len(calls) != 1 || calls[0].Fence != wantFence || calls[0].Message != "please run the tests" {
+		t.Fatalf("runtime nudges = %+v, want one fenced prompt", calls)
+	}
+	o := got.Outcome
+	if got.Status != opjournal.StatusClosed || o.Arm != opjournal.ArmSucceeded || o.Degradation != "" ||
+		o.Result.Via != laneViaLive || o.Result.Delivery.Ack != opjournal.AckDelivered {
+		t.Fatalf("op = %s %+v, want succeeded via live, acked delivered", got.Status, o)
+	}
+	if o.Result.TurnLink != opjournal.LinkNone || o.Result.TurnBasis != opjournal.BasisNoSource {
+		t.Fatalf("link = %s/%s, want none/no_source", o.Result.TurnLink, o.Result.TurnBasis)
+	}
+	row, err := f.store.Get(f.id)
+	if err != nil || row.Metadata[session.MetadataLastNudgeDeliveredAt] == "" {
+		t.Fatalf("session row = %v, %v; want the last nudge stamped", row.Metadata, err)
+	}
+}
+
+// TestLaneExecUnfencedRuntime proves a runtime that cannot fence still
+// delivers, and the op closes succeeded with unfenced_delivery.
+func TestLaneExecUnfencedRuntime(t *testing.T) {
+	f := newLaneFixture(t)
+	f.sp.InputFencingValue = runtime.InputFencingNone
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+	if res, err := f.pass(context.Background(), t, l, st, nil); err != nil || res.Done != opjournal.DoneAccepted {
+		t.Fatalf("Pass = %+v, %v", res, err)
+	}
+	got := f.get(t, st, op.ID)
+	if got.Outcome.Arm != opjournal.ArmSucceeded || got.Outcome.Degradation != opjournal.DegradationUnfencedDelivery {
+		t.Fatalf("outcome = %+v, want succeeded with unfenced_delivery", got.Outcome)
+	}
+	if calls := f.nudges(); len(calls) != 1 || calls[0].Fence != (runtime.InputFence{}) {
+		t.Fatalf("runtime nudges = %+v, want one unfenced nudge", calls)
+	}
+}
+
+// TestLaneExecTokenlessRow proves a row with no instance token delivers
+// unfenced and records it.
+func TestLaneExecTokenlessRow(t *testing.T) {
+	f := newLaneFixture(t, noLaneToken)
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	op := f.propose(t, st, f.msg("k1", opjournal.RoleNotice, "fyi"))
+	var mu sync.Mutex
+	var reqs []worker.NudgeRequest
+	if res, err := f.pass(context.Background(), t, l, st, func(e *conversationLaneExec) opjournal.Executor {
+		recordRequests(e, &mu, &reqs)
+		return e
+	}); err != nil || res.Done != opjournal.DoneAccepted {
+		t.Fatalf("Pass = %+v, %v", res, err)
+	}
+	if len(reqs) != 1 || !reqs[0].Fence.IsZero() {
+		t.Fatalf("requests = %+v, want one with no fence", reqs)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Degradation != opjournal.DegradationUnfencedDelivery {
+		t.Fatalf("outcome = %+v, want unfenced_delivery", got.Outcome)
+	}
+}
+
+// TestLaneExecRespawnBetweenTakeAndDelivery proves a respawn (a new token)
+// after the Take misses the fence: no text reaches the runtime, and the op
+// is released without a failure.
+func TestLaneExecRespawnBetweenTakeAndDelivery(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+	res, err := f.pass(context.Background(), t, l, st, func(e *conversationLaneExec) opjournal.Executor {
+		return beforeDeliverExec{conversationLaneExec: e, before: func() { f.startRuntime(t, "tok-2") }}
+	})
+	if err != nil || res.Done != opjournal.DoneReleased {
+		t.Fatalf("Pass = %+v, %v; want released", res, err)
+	}
+	if calls := f.nudges(); len(calls) != 0 {
+		t.Fatalf("runtime nudges = %+v, want none", calls)
+	}
+	if f.fenceMisses() != 1 {
+		t.Fatalf("fence misses = %d, want 1", f.fenceMisses())
+	}
+	got := f.get(t, st, op.ID)
+	if got.Status != opjournal.StatusAccepted || got.Failures != 0 || got.RetryAt.IsZero() {
+		t.Fatalf("op = %s failures %d retry_at %v; want a transient release", got.Status, got.Failures, got.RetryAt)
+	}
+}
+
+// TestLaneExecProtocolModeWaitsNotLive proves a protocol-mode runtime is not
+// live until OJ-12b: content waits not_live and nothing is typed.
+func TestLaneExecProtocolModeWaitsNotLive(t *testing.T) {
+	f := newLaneFixture(t)
+	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+	res, err := f.pass(context.Background(), t, l, st, nil)
+	if err != nil || res.Took != opjournal.TakeNone {
+		t.Fatalf("Pass = %+v, %v; want nothing taken", res, err)
+	}
+	if !laneWaitsFor(res, opjournal.WaitNotLive) {
+		t.Fatalf("waits = %+v, want not_live", res.Waits)
+	}
+	if len(f.nudges()) != 0 || f.get(t, st, op.ID).Status != opjournal.StatusSubmitted {
+		t.Fatal("a protocol-mode runtime received text")
+	}
+}
+
+// stampHost writes a runtime row whose host stamp names gen and kinds.
+func stampHost(t *testing.T, f *laneFixture, st *opjournal.Store, gen int64, kinds ...opjournal.Kind) {
+	t.Helper()
+	row := opjournal.RuntimeRow{
+		Conversation: f.id, Generation: 1, Epoch: 1,
+		Host: opjournal.HostStamp{Host: "box:b1#n1", Generation: gen, Kinds: kinds, Protocol: "v1", Build: "test", Since: laneT0},
+	}
+	b, err := opjournal.EncodeRuntimeRow(st.Prefix(), row)
+	if err != nil {
+		t.Fatalf("EncodeRuntimeRow: %v", err)
+	}
+	if _, err := f.store.Create(b); err != nil {
+		t.Fatalf("creating the runtime row: %v", err)
+	}
+}
+
+// TestLaneExecDefersToHostStamp proves a current-generation stamp listing
+// message makes content not live while rule closes still run, and a stamp
+// for an older generation is ignored.
+func TestLaneExecDefersToHostStamp(t *testing.T) {
+	t.Run("current generation", func(t *testing.T) {
+		f := newLaneFixture(t)
+		st := f.laneStore(t)
+		stampHost(t, f, st, 1, opjournal.KindMessage)
+		l := f.lane(t, st)
+		waiting := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		expired := f.propose(t, st, f.msg("k2", opjournal.RoleNotice, "late", func(r *opjournal.Request) {
+			r.StartBy = laneT0.Add(time.Minute)
+		}))
+		f.clk.Advance(2 * time.Minute)
+		res, err := f.pass(context.Background(), t, l, st, nil)
+		if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitNotLive) {
+			t.Fatalf("Pass = %+v, %v; want a not_live wait and nothing taken", res, err)
+		}
+		if got := f.get(t, st, expired.ID); got.Outcome.Arm != opjournal.ArmFailed || got.Outcome.Reason != opjournal.ReasonExpiredBeforeStart {
+			t.Fatalf("expired op = %+v, want the rule close failed{expired_before_start}", got.Outcome)
+		}
+		if len(f.nudges()) != 0 || f.get(t, st, waiting.ID).Status != opjournal.StatusSubmitted {
+			t.Fatal("a stamped conversation received text")
+		}
+	})
+	t.Run("older generation", func(t *testing.T) {
+		f := newLaneFixture(t)
+		st := f.laneStore(t)
+		stampHost(t, f, st, 0, opjournal.KindMessage)
+		l := f.lane(t, st)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		if res, err := f.pass(context.Background(), t, l, st, nil); err != nil || res.Done != opjournal.DoneAccepted {
+			t.Fatalf("Pass = %+v, %v; want the older stamp ignored", res, err)
+		}
+	})
+	t.Run("other kinds", func(t *testing.T) {
+		f := newLaneFixture(t)
+		st := f.laneStore(t)
+		stampHost(t, f, st, 1, opjournal.KindInterrupt)
+		l := f.lane(t, st)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		if res, err := f.pass(context.Background(), t, l, st, nil); err != nil || res.Done != opjournal.DoneAccepted {
+			t.Fatalf("Pass = %+v, %v; want a stamp without message ignored", res, err)
+		}
+	})
+}
+
+// TestLaneExecProbeGates proves the probe's content gates: a row's content
+// gate and a pending interaction each block, and a busy runtime waits.
+func TestLaneExecProbeGates(t *testing.T) {
+	t.Run("restart pending", func(t *testing.T) {
+		f := newLaneFixture(t, func(meta map[string]string) { meta["restart_requested"] = "true" })
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		if err != nil || res.Took != opjournal.TakeNone || len(res.Waits) != 1 ||
+			res.Waits[0].Reason != opjournal.WaitContentBlock || res.Waits[0].Detail != session.ContentGateRestartPending {
+			t.Fatalf("Pass = %+v, %v; want content_block restart_pending", res, err)
+		}
+	})
+	t.Run("pending interaction", func(t *testing.T) {
+		f := newLaneFixture(t)
+		f.sp.PendingInteractions = map[string]*runtime.PendingInteraction{f.name: {RequestID: "req-1"}}
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitPendingInteraction) {
+			t.Fatalf("Pass = %+v, %v; want pending_interaction", res, err)
+		}
+	})
+	t.Run("busy", func(t *testing.T) {
+		f := newLaneFixture(t)
+		f.sp.SetActivity(f.name, time.Now())
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+			e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
+			return e
+		})
+		if err != nil || res.Took != opjournal.TakeNone || !res.Busy {
+			t.Fatalf("Pass = %+v, %v; want busy", res, err)
+		}
+	})
+	t.Run("not running", func(t *testing.T) {
+		f := newLaneFixture(t)
+		if err := f.sp.Stop(f.name); err != nil {
+			t.Fatal(err)
+		}
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", func(r *opjournal.Request) { r.Policy.Message.Wake = opjournal.WakeLiveOnly }))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitNotRunning) {
+			t.Fatalf("Pass = %+v, %v; want not_running", res, err)
+		}
+	})
+	t.Run("unavailable", func(t *testing.T) {
+		f := newLaneFixture(t)
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+			e.observe = func(nudgeTarget) (worker.LiveObservation, error) {
+				return worker.LiveObservation{}, fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable)
+			}
+			return e
+		})
+		if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitUnavailable) {
+			t.Fatalf("Pass = %+v, %v; want unavailable", res, err)
+		}
+	})
+}
+
+// laneIdentifiers are the strings no delivered text may carry (I14).
+func laneIdentifiers(st *opjournal.Store, ops []opjournal.Op) []string {
+	var out []string
+	for _, op := range ops {
+		cur, err := st.Get(op.ID)
+		if err != nil {
+			continue
+		}
+		out = append(out, op.ID, op.ClientKey, op.Producer.Principal, cur.DeliveryKey, "gc:"+cur.DeliveryKey)
+		if !cur.Lease.IsZero() {
+			out = append(out, cur.Lease.String())
+		}
+	}
+	return append(out, "conversation@", "#"+laneHostName+".", "lane_seq", "attempt")
+}
+
+// TestLaneExecDeliveredTextCarriesNoMarker proves D-NOMARK (I14): the text
+// the runtime receives equals RenderDelivery's for a prompt, a notice batch
+// and a mixed batch, and carries no op id, client key, delivery key, lease,
+// lane seq, attempt or principal.
+func TestLaneExecDeliveredTextCarriesNoMarker(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		style opjournal.TextStyle
+		opts  []laneFixtureOpt
+		reqs  func(f *laneFixture) []opjournal.Request
+	}{
+		{"prompt", opjournal.TextReminder, nil, func(f *laneFixture) []opjournal.Request {
+			return []opjournal.Request{f.msg("k-prompt", opjournal.RolePrompt, "fix the build")}
+		}},
+		{"notice batch", opjournal.TextReminder, nil, func(f *laneFixture) []opjournal.Request {
+			return []opjournal.Request{f.msg("k-n1", opjournal.RoleNotice, "mail arrived"), f.msg("k-n2", opjournal.RoleNotice, "work slung")}
+		}},
+		{"mixed batch", opjournal.TextReminder, nil, func(f *laneFixture) []opjournal.Request {
+			return []opjournal.Request{f.msg("k-n1", opjournal.RoleNotice, "mail arrived"), f.msg("k-p", opjournal.RolePrompt, "now review it")}
+		}},
+		{"plain style", opjournal.TextPlain, []laneFixtureOpt{laneTransport("acp")}, func(f *laneFixture) []opjournal.Request {
+			return []opjournal.Request{f.msg("k-n1", opjournal.RoleNotice, "mail arrived")}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			st := f.laneStore(t)
+			var ops []opjournal.Op
+			for _, r := range tc.reqs(f) {
+				ops = append(ops, f.propose(t, st, r))
+			}
+			var leases []string
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+				return beforeDeliverExec{conversationLaneExec: e, before: func() {
+					for _, op := range ops {
+						if cur, err := st.Get(op.ID); err == nil && !cur.Lease.IsZero() {
+							leases = append(leases, cur.Lease.String())
+						}
+					}
+				}}
+			})
+			if err != nil || res.Done != opjournal.DoneAccepted || len(res.Taken) != len(ops) {
+				t.Fatalf("Pass = %+v, %v; want one accepted batch of %d", res, err, len(ops))
+			}
+			want, err := opjournal.RenderDelivery(ops, tc.style, false)
+			if err != nil {
+				t.Fatalf("RenderDelivery: %v", err)
+			}
+			calls := f.nudges()
+			if len(calls) != 1 || calls[0].Message != want {
+				t.Fatalf("runtime text = %+v, want %q", calls, want)
+			}
+			if len(leases) == 0 {
+				t.Fatal("no lease was seen during the effect")
+			}
+			for _, id := range append(laneIdentifiers(st, ops), leases...) {
+				if id != "" && strings.Contains(calls[0].Message, id) {
+					t.Fatalf("delivered text %q carries identifier %q", calls[0].Message, id)
+				}
+			}
+		})
+	}
+}
+
+// dyingStore models a host process that dies: once dead, every guarded
+// batch it applies fails.
+type dyingStore struct {
+	laneTestStore
+	dead *atomic.Bool
+}
+
+func (s dyingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
+	return dyingBatcher{inner: s.MemStore, dead: s.dead}, true
+}
+
+type dyingBatcher struct {
+	inner beads.GuardedBatcher
+	dead  *atomic.Bool
+}
+
+func (b dyingBatcher) ApplyGuarded(ctx context.Context, batch beads.GuardedBatch) (beads.GuardedResult, error) {
+	if b.dead.Load() {
+		// An invalid-batch answer, which Done does not retry, so the dead
+		// host gives up at once instead of retrying out its budget.
+		return beads.GuardedResult{}, fmt.Errorf("%w: the host process died", beads.ErrGuardedBatchUnsupported)
+	}
+	return b.inner.ApplyGuarded(ctx, batch)
+}
+
+// TestLaneExecRedeliveryAfterHostDies proves the redelivery path: the first
+// host's ctx is canceled mid-effect and its Done never lands; a second host
+// over the same store, once the fake clock passes the lease, re-takes the op,
+// types the text again with the D-NOTE line, and the op records the attempt
+// and maybe_delivered.
+func TestLaneExecRedeliveryAfterHostDies(t *testing.T) {
+	base := newLaneTestStore()
+	dead := new(atomic.Bool)
+	f := newLaneFixtureOver(t, dyingStore{laneTestStore: base, dead: dead})
+	first := f.laneStore(t)
+	op := f.propose(t, first, f.msg("k1", opjournal.RolePrompt, "deploy it"))
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	_, err := f.pass(ctx, t, f.lane(t, first), first, func(e *conversationLaneExec) opjournal.Executor {
+		return afterDeliverExec{conversationLaneExec: e, after: func() {
+			dead.Store(true)
+			cancel()
+		}}
+	})
+	if err == nil {
+		t.Fatal("the dying host's pass reported no error")
+	}
+	if got := f.get(t, first, op.ID); got.Status != opjournal.StatusExecuting {
+		t.Fatalf("op after the crash = %s, want still executing", got.Status)
+	}
+
+	// The second host runs over the same rows, without the dying wrapper.
+	f.store = base
+	second := f.laneStore(t)
+	f.clk.Advance(opjournal.DefaultLeaseTTL + opjournal.LeaseSkew + time.Second)
+	res, err := f.pass(context.Background(), t, f.lane(t, second), second, nil)
+	if err != nil || res.Done != opjournal.DoneAccepted {
+		t.Fatalf("second host Pass = %+v, %v; want accepted", res, err)
+	}
+	calls := f.nudges()
+	if len(calls) != 2 || calls[0].Message != "deploy it" {
+		t.Fatalf("runtime texts = %+v, want the prompt twice", calls)
+	}
+	cur := f.get(t, second, op.ID)
+	want, err := opjournal.RenderDelivery([]opjournal.Op{cur}, opjournal.TextReminder, true)
+	if err != nil {
+		t.Fatalf("RenderDelivery: %v", err)
+	}
+	if calls[1].Message != want || !strings.HasSuffix(calls[1].Message, opjournal.RedeliveryNote) {
+		t.Fatalf("redelivered text = %q, want %q ending with the D-NOTE line", calls[1].Message, want)
+	}
+	if cur.Attempt != 2 || cur.MaybeDelivered != 1 || cur.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = attempt %d maybe_delivered %d outcome %+v; want attempt 2, maybe_delivered 1, succeeded", cur.Attempt, cur.MaybeDelivered, cur.Outcome)
+	}
+	for _, id := range laneIdentifiers(second, []opjournal.Op{cur}) {
+		if id != "" && strings.Contains(calls[1].Message, id) {
+			t.Fatalf("redelivered text carries identifier %q", id)
+		}
+	}
+}
+
+// afterDeliverExec runs after once its executor's Deliver returns.
+type afterDeliverExec struct {
+	*conversationLaneExec
+	after func()
+}
+
+func (e afterDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
+	r := e.conversationLaneExec.Deliver(ctx, d)
+	e.after()
+	return r
+}

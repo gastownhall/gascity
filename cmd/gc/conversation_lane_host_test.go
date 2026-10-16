@@ -1,0 +1,913 @@
+package main
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"go/ast"
+	"go/parser"
+	"go/token"
+	"net"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+// laneWaitBudget bounds every wait on a host goroutine in these tests.
+const laneWaitBudget = 10 * time.Second
+
+// laneHostEnvFake is the controller state a test host runs over.
+type laneHostEnvFake struct {
+	f         *laneFixture
+	store     beads.Store
+	quiescent atomic.Bool
+	storeWork atomic.Int64
+
+	mu       sync.Mutex
+	enqueued []reconcilekey.Key
+}
+
+func (e *laneHostEnvFake) SessionsBeadStore() beads.SessionStore {
+	return beads.SessionStore{Store: e.store}
+}
+func (e *laneHostEnvFake) SessionProvider() runtime.Provider { return e.f.sp }
+func (e *laneHostEnvFake) Config() *config.City              { return e.f.cfg }
+func (e *laneHostEnvFake) CityPath() string                  { return e.f.dir }
+func (e *laneHostEnvFake) Enqueue(keys ...reconcilekey.Key) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	e.enqueued = append(e.enqueued, keys...)
+}
+
+func (e *laneHostEnvFake) beginStoreWork() func() {
+	e.storeWork.Add(1)
+	var once sync.Once
+	return func() { once.Do(func() { e.storeWork.Add(-1) }) }
+}
+func (e *laneHostEnvFake) storesQuiescent() bool { return e.quiescent.Load() }
+
+func (e *laneHostEnvFake) keys() []reconcilekey.Key {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return append([]reconcilekey.Key(nil), e.enqueued...)
+}
+
+// laneTimer is one timer or ticker a test host asked for.
+type laneTimer struct {
+	d time.Duration
+	c chan time.Time
+}
+
+// laneHostHarness is a host over a fixture with hand-driven timers, its
+// passes and worker exits reported on channels.
+type laneHostHarness struct {
+	f      *laneFixture
+	env    *laneHostEnvFake
+	h      *conversationLaneHost
+	ctx    context.Context
+	cancel context.CancelFunc
+	passes chan lanePassRecord
+	exits  chan string
+	timers chan laneTimer
+
+	mu      sync.Mutex
+	tickers []laneTimer
+	logs    []string
+}
+
+type lanePassRecord struct {
+	conv string
+	out  lanePassOutcome
+}
+
+func newLaneHostHarness(t *testing.T, f *laneFixture, kinds ...string) *laneHostHarness {
+	t.Helper()
+	env := &laneHostEnvFake{f: f, store: f.store}
+	hh := &laneHostHarness{
+		f: f, env: env,
+		passes: make(chan lanePassRecord, 256),
+		exits:  make(chan string, 256),
+		timers: make(chan laneTimer, 256),
+	}
+	h := newConversationLaneHost(env, kinds)
+	h.clk = f.clk
+	h.newTimer = func(d time.Duration) (<-chan time.Time, func()) {
+		tm := laneTimer{d: d, c: make(chan time.Time, 1)}
+		hh.timers <- tm
+		return tm.c, func() {}
+	}
+	h.newTicker = func(d time.Duration) (<-chan time.Time, func()) {
+		tm := laneTimer{d: d, c: make(chan time.Time, 1)}
+		hh.mu.Lock()
+		hh.tickers = append(hh.tickers, tm)
+		hh.mu.Unlock()
+		return tm.c, func() {}
+	}
+	h.logf = func(format string, args ...any) {
+		hh.mu.Lock()
+		defer hh.mu.Unlock()
+		hh.logs = append(hh.logs, fmt.Sprintf(format, args...))
+	}
+	h.onPass = func(conv string, out lanePassOutcome) { hh.passes <- lanePassRecord{conv, out} }
+	h.onWorkerExit = func(conv string) { hh.exits <- conv }
+	hh.h = h
+	hh.ctx, hh.cancel = context.WithCancel(context.Background())
+	t.Cleanup(func() {
+		hh.cancel()
+		h.wg.Wait()
+	})
+	return hh
+}
+
+func (hh *laneHostHarness) start() { hh.h.start(hh.ctx) }
+
+func (hh *laneHostHarness) nextPass(t *testing.T) lanePassRecord {
+	t.Helper()
+	select {
+	case p := <-hh.passes:
+		return p
+	case <-time.After(laneWaitBudget):
+		t.Fatal("no pass ran")
+		return lanePassRecord{}
+	}
+}
+
+func (hh *laneHostHarness) nextExit(t *testing.T) string {
+	t.Helper()
+	select {
+	case c := <-hh.exits:
+		return c
+	case <-time.After(laneWaitBudget):
+		t.Fatal("no worker exited")
+		return ""
+	}
+}
+
+func (hh *laneHostHarness) nextTimer(t *testing.T) laneTimer {
+	t.Helper()
+	select {
+	case tm := <-hh.timers:
+		return tm
+	case <-time.After(laneWaitBudget):
+		t.Fatal("no timer was set")
+		return laneTimer{}
+	}
+}
+
+func (hh *laneHostHarness) noPass(t *testing.T) {
+	t.Helper()
+	select {
+	case p := <-hh.passes:
+		t.Fatalf("unexpected pass over %s: %+v", p.conv, p.out)
+	default:
+	}
+}
+
+func (hh *laneHostHarness) tickerCount() int {
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	return len(hh.tickers)
+}
+
+func (hh *laneHostHarness) logLines() []string {
+	hh.mu.Lock()
+	defer hh.mu.Unlock()
+	return append([]string(nil), hh.logs...)
+}
+
+// TestLaneHostPokeRunsAPass proves Poke starts a worker whose pass delivers,
+// and that the idle worker then exits.
+func TestLaneHostPokeRunsAPass(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.h.wg.Wait() // the boot scan found nothing and the loop ended
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	if !hh.h.Poke(f.id) {
+		t.Fatal("Poke refused on a running host")
+	}
+	p := hh.nextPass(t)
+	if p.conv != f.id || p.out.err != nil || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want an accepted delivery over %s", p, f.id)
+	}
+	if p := hh.nextPass(t); p.out.res.Took != opjournal.TakeNone {
+		t.Fatalf("re-plan pass = %+v, want nothing taken", p.out.res)
+	}
+	if hh.nextExit(t) != f.id {
+		t.Fatal("the idle worker did not exit")
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v, want succeeded", got.Outcome)
+	}
+	if st := hh.h.status(f.clk.Now()); st.State != laneHostStateRunning || st.Workers != 0 || st.Passes != 2 || st.LastPassAt == "" {
+		t.Fatalf("status = %+v, want running, no workers, one pass", st)
+	}
+}
+
+// TestLaneHostOverSQLite runs the same delivery over a SQLite sessions
+// store.
+func TestLaneHostOverSQLite(t *testing.T) {
+	store, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	f := newLaneFixtureOver(t, store)
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	hh.h.Poke(f.id)
+	if p := hh.nextPass(t); p.out.err != nil || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want accepted", p.out)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded || len(f.nudges()) != 1 {
+		t.Fatalf("op = %+v nudges %d, want one succeeded delivery", got.Outcome, len(f.nudges()))
+	}
+}
+
+// TestLaneHostBootScanStartsPasses proves the boot scan pokes a
+// conversation with an open lane op, and with the list empty starts no
+// ticker.
+func TestLaneHostBootScanStartsPasses(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RoleNotice, "hello"))
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	if p := hh.nextPass(t); p.conv != f.id || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the boot scan's delivery", p)
+	}
+	if p := hh.nextPass(t); p.out.res.Took != opjournal.TakeNone {
+		t.Fatalf("re-plan pass = %+v, want nothing taken", p.out.res)
+	}
+	hh.nextExit(t)
+	hh.h.wg.Wait()
+	if n := hh.tickerCount(); n != 0 {
+		t.Fatalf("tickers = %d, want none with the list empty", n)
+	}
+}
+
+// TestLaneHostIdleBootStartsNothing proves an idle city with the list empty
+// pays one scan: no ticker, no worker.
+func TestLaneHostIdleBootStartsNothing(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.h.wg.Wait()
+	if n := hh.tickerCount(); n != 0 {
+		t.Fatalf("tickers = %d, want none", n)
+	}
+	hh.noPass(t)
+	if st := hh.h.status(f.clk.Now()); st.State != laneHostStateRunning || st.Workers != 0 {
+		t.Fatalf("status = %+v", st)
+	}
+}
+
+// TestLaneHostAntiEntropyTick proves a listed kind keeps the 60 s scan, and a
+// tick pokes a conversation whose op arrived without a doorbell.
+func TestLaneHostAntiEntropyTick(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start()
+	deadline := time.After(laneWaitBudget)
+	for hh.tickerCount() == 0 {
+		select {
+		case <-deadline:
+			t.Fatal("no ticker started with a kind listed")
+		case <-time.After(time.Millisecond):
+		}
+	}
+	hh.mu.Lock()
+	tick := hh.tickers[0]
+	hh.mu.Unlock()
+	if tick.d != laneHostScanInterval {
+		t.Fatalf("scan interval = %s, want %s", tick.d, laneHostScanInterval)
+	}
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RoleNotice, "hello"))
+	tick.c <- f.clk.Now()
+	if p := hh.nextPass(t); p.conv != f.id || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the tick's delivery", p)
+	}
+}
+
+// TestLaneSocketVerbPokes proves lane:<conv> and lane:<conv>:<op> reach the
+// host through the controller socket and start a pass, and that the verb
+// refuses bad ids and answers no-host for a city without one.
+func TestLaneSocketVerbPokes(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.h.wg.Wait()
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	if got := laneSocketConn(t, f.dir, laneSocketPrefix+f.id+":"+op.ID); got != "ok" {
+		t.Fatalf("lane: reply = %q, want ok", got)
+	}
+	if p := hh.nextPass(t); p.conv != f.id || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the verb's delivery", p)
+	}
+	for payload, want := range map[string]string{
+		"":             "refused invalid conversation id",
+		"bad id":       "refused invalid conversation id",
+		f.id + ":":     "refused invalid op id",
+		f.id + ":a:b":  "refused invalid op id",
+		f.id + ":@bad": "refused invalid op id",
+	} {
+		if got := laneSocketReply(f.dir, payload); got != want {
+			t.Errorf("laneSocketReply(%q) = %q, want %q", payload, got, want)
+		}
+	}
+	if got := laneSocketReply(t.TempDir(), "gc-1"); got != "no-host" {
+		t.Fatalf("reply for a city without a host = %q, want no-host", got)
+	}
+}
+
+// laneSocketConn sends one line through handleControllerConn and reads its
+// reply.
+func laneSocketConn(t *testing.T, cityPath, line string) string {
+	t.Helper()
+	client, server := net.Pipe()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		handleControllerConn(server, cityPath, controllerHostingStandalone, func() {}, nil, nil, nil, nil, nil)
+	}()
+	if _, err := client.Write([]byte(line + "\n")); err != nil {
+		t.Fatalf("writing %q: %v", line, err)
+	}
+	reply, err := bufio.NewReader(client).ReadString('\n')
+	_ = client.Close()
+	<-done
+	if err != nil {
+		t.Fatalf("reading the reply to %q: %v", line, err)
+	}
+	return strings.TrimSpace(reply)
+}
+
+// TestLaneStatusVerb proves lane-status answers the host's typed status, and
+// no_host for a city without one.
+func TestLaneStatusVerb(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start()
+	if got := laneSocketConn(t, f.dir, laneStatusCommand); !strings.Contains(got, `"state":"running"`) || !strings.Contains(got, `"kinds":["message"]`) {
+		t.Fatalf("lane-status = %s, want running with kinds [message]", got)
+	}
+	if got := conversationLaneStatusFor(t.TempDir(), time.Now()); got.State != laneHostStateNone {
+		t.Fatalf("status for a city without a host = %+v, want no_host", got)
+	}
+}
+
+// TestLaneHostTimerFires proves a worker sleeps until its pass's Next and the
+// timer's fire runs the next pass.
+func TestLaneHostTimerFires(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "later", func(r *opjournal.Request) {
+		r.NotBefore = laneT0.Add(30 * time.Second)
+	}))
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	if p := hh.nextPass(t); p.out.res.Took != opjournal.TakeNone || p.out.res.Next.IsZero() {
+		t.Fatalf("first pass = %+v, want a not_before wait with a Next", p.out.res)
+	}
+	tm := hh.nextTimer(t)
+	if tm.d != 30*time.Second {
+		t.Fatalf("timer = %s, want 30s", tm.d)
+	}
+	f.clk.Advance(30 * time.Second)
+	tm.c <- f.clk.Now()
+	if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass after the timer = %+v, want accepted", p.out.res)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v", got.Outcome)
+	}
+}
+
+// blockingExec is an executor whose Probe blocks until released, counting
+// concurrent probes per conversation.
+type blockingExec struct {
+	conv string
+	b    *laneBlocker
+}
+
+type laneBlocker struct {
+	clk      *laneTestClock
+	mu       sync.Mutex
+	inFlight map[string]int
+	maxSeen  map[string]int
+	probes   map[string]int
+	entered  chan string
+	release  chan struct{}
+}
+
+func newLaneBlocker(clk *laneTestClock) *laneBlocker {
+	return &laneBlocker{
+		clk: clk, inFlight: map[string]int{}, maxSeen: map[string]int{}, probes: map[string]int{},
+		entered: make(chan string, 64), release: make(chan struct{}),
+	}
+}
+
+func (e blockingExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
+	e.b.mu.Lock()
+	e.b.inFlight[e.conv]++
+	e.b.probes[e.conv]++
+	e.b.maxSeen[e.conv] = max(e.b.maxSeen[e.conv], e.b.inFlight[e.conv])
+	e.b.mu.Unlock()
+	e.b.entered <- e.conv
+	select {
+	case <-e.b.release:
+	case <-ctx.Done():
+	}
+	e.b.mu.Lock()
+	e.b.inFlight[e.conv]--
+	e.b.mu.Unlock()
+	return opjournal.Probe{
+		Available: true, Running: true, Boundary: opjournal.TriYes, Fence: laneFence(conv),
+		Caps: opjournal.Caps{Live: true, Input: opjournal.FenceAtomic},
+	}, nil
+}
+
+func (e blockingExec) Deliver(context.Context, opjournal.Delivery) opjournal.DeliveryResult {
+	return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: e.b.clk.Now(), Ack: opjournal.AckDelivered}, Via: "test"}
+}
+
+func (blockingExec) Interrupt(context.Context, opjournal.InterruptCall) opjournal.ControlResult {
+	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
+}
+
+func (blockingExec) Respond(context.Context, opjournal.RespondCall) opjournal.ControlResult {
+	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
+}
+
+func (b *laneBlocker) waitEntered(t *testing.T) string {
+	t.Helper()
+	select {
+	case c := <-b.entered:
+		return c
+	case <-time.After(laneWaitBudget):
+		t.Fatal("no probe started")
+		return ""
+	}
+}
+
+// addSession creates another open session row in f's store.
+func addSession(t *testing.T, f *laneFixture, name string) string {
+	t.Helper()
+	b, err := f.store.Create(beads.Bead{
+		Title: "Session: " + name, Type: session.BeadType, Status: "open", Labels: []string{session.LabelSession},
+		Metadata: map[string]string{"session_name": name, "state": "active", "generation": "1", "continuation_epoch": "1", "instance_token": "t-" + name},
+	})
+	if err != nil {
+		t.Fatalf("creating session %s: %v", name, err)
+	}
+	return b.ID
+}
+
+// TestLaneHostCapsWorkers proves at most maxWorkers conversations are served
+// at once: a poke past the cap queues and starts when a worker exits.
+func TestLaneHostCapsWorkers(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	convs := []string{f.id, addSession(t, f, "b"), addSession(t, f, "c")}
+	for i, conv := range convs {
+		r := f.msg(fmt.Sprintf("k%d", i), opjournal.RoleNotice, "hello")
+		r.Conversation = conv
+		f.propose(t, st, r)
+	}
+	b := newLaneBlocker(f.clk)
+	hh := newLaneHostHarness(t, f)
+	hh.h.maxWorkers = 2
+	hh.h.newExec = func(_ laneExecDeps, info session.Info) opjournal.Executor { return blockingExec{conv: info.ID, b: b} }
+	hh.start()
+	b.waitEntered(t)
+	b.waitEntered(t)
+	if st := hh.h.status(f.clk.Now()); st.Workers != 2 || st.Queued != 1 {
+		t.Fatalf("status = %+v, want 2 workers and 1 queued", st)
+	}
+	close(b.release)
+	seen := map[string]bool{}
+	for len(seen) < len(convs) {
+		seen[hh.nextPass(t).conv] = true
+	}
+	for _, conv := range convs {
+		if !seen[conv] {
+			t.Fatalf("conversation %s never passed: %v", conv, seen)
+		}
+	}
+}
+
+// TestLaneHostOnePassAtATime proves pokes during a pass never start a second
+// pass of the same conversation, and coalesce into one more pass after it.
+func TestLaneHostOnePassAtATime(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RoleNotice, "hello"))
+	b := newLaneBlocker(f.clk)
+	hh := newLaneHostHarness(t, f)
+	hh.h.newExec = func(_ laneExecDeps, info session.Info) opjournal.Executor { return blockingExec{conv: info.ID, b: b} }
+	hh.start()
+	b.waitEntered(t)
+	for range 10 {
+		hh.h.Poke(f.id)
+	}
+	// A second op arrives while the first pass is blocked, so the pass after
+	// it probes again; the ten pokes coalesce instead of running in parallel.
+	r := f.msg("k2", opjournal.RoleNotice, "again")
+	f.propose(t, st, r)
+	close(b.release)
+	hh.nextPass(t)
+	hh.nextPass(t)
+	hh.nextExit(t)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.maxSeen[f.id] != 1 {
+		t.Fatalf("max concurrent probes = %d, want 1", b.maxSeen[f.id])
+	}
+}
+
+// TestLaneHostRecoversPanic proves a panicking pass is recovered, backs
+// off, and the next pass runs.
+func TestLaneHostRecoversPanic(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	var calls atomic.Int32
+	hh := newLaneHostHarness(t, f)
+	hh.h.newExec = func(deps laneExecDeps, info session.Info) opjournal.Executor {
+		if calls.Add(1) == 1 {
+			panic("executor bug")
+		}
+		return newConversationLaneExec(deps, info)
+	}
+	hh.start()
+	if p := hh.nextPass(t); p.out.err == nil || !strings.Contains(p.out.err.Error(), "panicked") {
+		t.Fatalf("first pass = %+v, want a recovered panic", p.out)
+	}
+	tm := hh.nextTimer(t)
+	if tm.d != laneErrBackoffStart {
+		t.Fatalf("backoff = %s, want %s", tm.d, laneErrBackoffStart)
+	}
+	tm.c <- f.clk.Now()
+	if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass after the panic = %+v, want accepted", p.out)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v", got.Outcome)
+	}
+}
+
+// laneCountingStore counts reads.
+type laneCountingStore struct {
+	laneTestStore
+	reads *atomic.Int32
+}
+
+func (s laneCountingStore) Get(id string) (beads.Bead, error) {
+	s.reads.Add(1)
+	return s.laneTestStore.Get(id)
+}
+
+func (s laneCountingStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.reads.Add(1)
+	return s.laneTestStore.List(q)
+}
+
+// TestLaneHostQuiescentReadsNothing proves a quiescent city's scan and
+// passes read no store, and the worker retries later.
+func TestLaneHostQuiescentReadsNothing(t *testing.T) {
+	reads := new(atomic.Int32)
+	base := newLaneTestStore()
+	f := newLaneFixtureOver(t, laneCountingStore{laneTestStore: base, reads: reads})
+	hh := newLaneHostHarness(t, f)
+	hh.env.quiescent.Store(true)
+	reads.Store(0)
+	hh.start()
+	hh.h.Poke(f.id)
+	if p := hh.nextPass(t); !p.out.skipped {
+		t.Fatalf("pass = %+v, want skipped", p.out)
+	}
+	if tm := hh.nextTimer(t); tm.d != laneQuiescentRetry {
+		t.Fatalf("retry = %s, want %s", tm.d, laneQuiescentRetry)
+	}
+	if n := reads.Load(); n != 0 {
+		t.Fatalf("store reads while quiescent = %d, want 0", n)
+	}
+	if n := hh.env.storeWork.Load(); n != 0 {
+		t.Fatalf("store work left in flight = %d", n)
+	}
+}
+
+// TestLaneHostNeverTakesLegacyOps proves I2: an executor=legacy op is never
+// taken by the lane host.
+func TestLaneHostNeverTakesLegacyOps(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	r := f.msg("k1", opjournal.RolePrompt, "legacy")
+	r.Executor = opjournal.ExecutorLegacy
+	op := f.propose(t, st, r)
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.h.Poke(f.id)
+	if p := hh.nextPass(t); p.out.res.Took != opjournal.TakeNone {
+		t.Fatalf("pass = %+v, want nothing taken", p.out.res)
+	}
+	if got := f.get(t, st, op.ID); got.Status != opjournal.StatusSubmitted || len(f.nudges()) != 0 {
+		t.Fatalf("legacy op = %s, nudges %d; want untouched", got.Status, len(f.nudges()))
+	}
+}
+
+// TestLaneHostRefusesIncapableStore proves a BdStore sessions store keeps
+// the host off: silently with the list empty, and with a kind listed with the
+// typed refusal logged and reported.
+func TestLaneHostRefusesIncapableStore(t *testing.T) {
+	runner := func(string, string, ...string) ([]byte, error) {
+		return nil, errors.New("the bd CLI must not run")
+	}
+	for _, tc := range []struct {
+		name  string
+		kinds []string
+		state string
+		logs  int
+	}{
+		{"list empty", nil, laneHostStateOff, 0},
+		{"message listed", []string{"message"}, laneHostStateRefused, 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			hh := newLaneHostHarness(t, f, tc.kinds...)
+			hh.env.store = beads.NewBdStore(t.TempDir(), runner)
+			hh.start()
+			hh.h.wg.Wait()
+			st := hh.h.status(time.Now())
+			if st.State != tc.state {
+				t.Fatalf("state = %q, want %q", st.State, tc.state)
+			}
+			logs := hh.logLines()
+			if len(logs) != tc.logs {
+				t.Fatalf("logs = %q, want %d line(s)", logs, tc.logs)
+			}
+			if tc.logs > 0 && !strings.Contains(logs[0], "conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore). Remove the kind from [ops] authoritative, or bind the sessions class to a native store") {
+				t.Fatalf("refusal = %q", logs[0])
+			}
+			if hh.h.Poke(f.id) {
+				t.Fatal("Poke accepted by a host that is not running")
+			}
+			if got := laneSocketReply(f.dir, f.id); !strings.HasPrefix(got, "refused conversation lanes need guarded batches") {
+				t.Fatalf("lane: reply = %q, want the refusal", got)
+			}
+			if !errors.Is(laneStoreCapability(hh.env.store), errLaneStoreIncapable) {
+				t.Fatal("the refusal is not errLaneStoreIncapable")
+			}
+		})
+	}
+}
+
+// TestLaneHostRequestsWake proves a due if_needed op for a dormant
+// conversation records a wake and asks the controller to reconcile the
+// session, and a held row records none.
+func TestLaneHostRequestsWake(t *testing.T) {
+	t.Run("recorded", func(t *testing.T) {
+		f := newLaneFixture(t, func(meta map[string]string) { meta["state"] = string(session.StateAsleep) })
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "wake up", func(r *opjournal.Request) {
+			r.Policy.Message.Wake = opjournal.WakeIfNeeded
+		}))
+		hh := newLaneHostHarness(t, f)
+		hh.start()
+		p := hh.nextPass(t)
+		if !p.out.res.Wake || p.out.wake != session.WakeRecorded {
+			t.Fatalf("pass = %+v, want a recorded wake", p.out)
+		}
+		keys := hh.env.keys()
+		if len(keys) != 2 || keys[0] != reconcilekey.Allocator() || keys[1] != reconcilekey.Session(f.id) {
+			t.Fatalf("enqueued = %+v, want the allocator and the session", keys)
+		}
+		row, err := f.store.Get(f.id)
+		if err != nil || row.Metadata["wake_request"] == "" {
+			t.Fatalf("row = %v, %v; want a wake request", row.Metadata, err)
+		}
+		if tm := hh.nextTimer(t); tm.d != laneWakeRecheck {
+			t.Fatalf("recheck = %s, want %s", tm.d, laneWakeRecheck)
+		}
+	})
+	t.Run("held", func(t *testing.T) {
+		f := newLaneFixture(t, func(meta map[string]string) {
+			meta["state"] = string(session.StateAsleep)
+			meta["sleep_intent"] = string(session.SleepReasonUserHold)
+			meta["held_until"] = time.Now().Add(time.Hour).UTC().Format(time.RFC3339)
+		})
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "wake up", func(r *opjournal.Request) {
+			r.Policy.Message.Wake = opjournal.WakeIfNeeded
+		}))
+		hh := newLaneHostHarness(t, f)
+		hh.start()
+		if p := hh.nextPass(t); p.out.wake != session.WakeHeld {
+			t.Fatalf("pass = %+v, want a held wake", p.out)
+		}
+		if keys := hh.env.keys(); len(keys) != 0 {
+			t.Fatalf("enqueued = %+v, want none for a held row", keys)
+		}
+		if tm := hh.nextTimer(t); tm.d != laneWakeHeldRecheck {
+			t.Fatalf("recheck = %s, want %s", tm.d, laneWakeHeldRecheck)
+		}
+	})
+}
+
+// TestLaneHostReportsQuarantine proves the status counts op rows a pass
+// could not decode.
+func TestLaneHostReportsQuarantine(t *testing.T) {
+	f := newLaneFixture(t)
+	if _, err := f.store.Create(beads.Bead{
+		Title: "op", Type: "op", Status: "open", Labels: []string{opjournal.LabelOp},
+		Metadata: map[string]string{"gc.op.open": f.id, "gc.op.schema": "99"},
+	}); err != nil {
+		t.Fatalf("creating a row from the future: %v", err)
+	}
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.h.Poke(f.id)
+	hh.nextPass(t)
+	if st := hh.h.status(f.clk.Now()); st.Quarantined != 1 || len(st.QuarantinedIDs) != 1 {
+		t.Fatalf("status = %+v, want one quarantined row", st)
+	}
+}
+
+// TestLaneHostCancelStopsWorkers proves ending the host's ctx stops every
+// worker, including one waiting on its timer.
+func TestLaneHostCancelStopsWorkers(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "later", func(r *opjournal.Request) {
+		r.NotBefore = laneT0.Add(time.Hour)
+	}))
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start()
+	hh.nextPass(t)
+	hh.nextTimer(t)
+	hh.cancel()
+	done := make(chan struct{})
+	go func() {
+		hh.h.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("workers did not stop on cancel")
+	}
+	if hh.h.Poke(f.id) {
+		t.Fatal("Poke accepted after cancel")
+	}
+}
+
+// TestLaneHostNextDelay pins the worker's wait after each kind of pass.
+func TestLaneHostNextDelay(t *testing.T) {
+	clk := &laneTestClock{now: laneT0}
+	h := &conversationLaneHost{clk: clk}
+	var ws laneWorkerState
+	for _, tc := range []struct {
+		name string
+		out  lanePassOutcome
+		want time.Duration
+		idle bool
+	}{
+		{"idle", lanePassOutcome{}, 0, true},
+		{"more", lanePassOutcome{res: opjournal.PassResult{More: true}}, 0, false},
+		{"took, so re-plan", lanePassOutcome{res: opjournal.PassResult{Took: opjournal.TakeContent, Next: laneT0.Add(time.Hour)}}, 0, false},
+		{"next", lanePassOutcome{res: opjournal.PassResult{Next: laneT0.Add(7 * time.Second)}}, 7 * time.Second, false},
+		{"busy", lanePassOutcome{res: opjournal.PassResult{Busy: true}}, laneBusyFirst, false},
+		{"busy beats a later next", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(time.Minute)}}, laneBusyFirst, false},
+		{"quiescent", lanePassOutcome{skipped: true}, laneQuiescentRetry, false},
+		{"error", lanePassOutcome{err: errors.New("x")}, laneErrBackoffStart, false},
+		{"error again", lanePassOutcome{err: errors.New("x")}, 2 * laneErrBackoffStart, false},
+	} {
+		got, idle := h.nextDelay(tc.out, &ws)
+		if got != tc.want || idle != tc.idle {
+			t.Errorf("%s: delay %s idle %v, want %s idle %v", tc.name, got, idle, tc.want, tc.idle)
+		}
+	}
+	busy := lanePassOutcome{res: opjournal.PassResult{Busy: true}}
+	ws = laneWorkerState{}
+	h.nextDelay(busy, &ws)
+	clk.Advance(laneBusyFirstFor)
+	if d, _ := h.nextDelay(busy, &ws); d != laneBusyNext {
+		t.Errorf("busy after %s = %s, want %s", laneBusyFirstFor, d, laneBusyNext)
+	}
+	clk.Advance(laneBusyNextFor)
+	if d, _ := h.nextDelay(busy, &ws); d != laneBusyMax {
+		t.Errorf("busy after a minute = %s, want %s", d, laneBusyMax)
+	}
+}
+
+// TestConversationLaneHostStartedAfterOpSweep pins runController's start
+// line: the statement right after cs.startOpSweep(ctx).
+func TestConversationLaneHostStartedAfterOpSweep(t *testing.T) {
+	file, err := parser.ParseFile(token.NewFileSet(), "controller.go", nil, 0)
+	if err != nil {
+		t.Fatalf("parse controller.go: %v", err)
+	}
+	fn := findFuncDecl(file, "runController")
+	if fn == nil {
+		t.Fatal("controller.go: no func runController")
+	}
+	found := 0
+	ast.Inspect(fn, func(n ast.Node) bool {
+		block, ok := n.(*ast.BlockStmt)
+		if !ok {
+			return true
+		}
+		for i, stmt := range block.List {
+			if opSweepCallee(stmt) != "startOpSweep" {
+				continue
+			}
+			if i+1 >= len(block.List) || opSweepCallee(block.List[i+1]) != "startConversationLaneHost" {
+				t.Error("runController: the statement after startOpSweep is not cs.startConversationLaneHost")
+			}
+			found++
+		}
+		return true
+	})
+	if found != 1 {
+		t.Fatalf("runController: found %d startOpSweep calls, want 1", found)
+	}
+}
+
+// TestStartConversationLaneHostDelivers drives startConversationLaneHost on
+// a directly built controllerState: the boot scan finds the open lane op and
+// the live executor delivers it to the fake runtime.
+func TestStartConversationLaneHostDelivers(t *testing.T) {
+	f := newLaneFixture(t)
+	f.cfg.Ops.Authoritative = []string{"message"}
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	cs := &controllerState{cityBeadStore: f.store, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
+	ctx, cancel := context.WithCancel(context.Background())
+	h := cs.startConversationLaneHost(ctx)
+	t.Cleanup(func() {
+		cancel()
+		h.wg.Wait()
+	})
+	deadline := time.After(laneWaitBudget)
+	for {
+		if got := f.get(t, st, op.ID); got.Status == opjournal.StatusClosed {
+			if got.Outcome.Arm != opjournal.ArmSucceeded || len(f.nudges()) != 1 {
+				t.Fatalf("op = %+v nudges %d, want one succeeded delivery", got.Outcome, len(f.nudges()))
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the started host never delivered the op")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	if s := conversationLaneStatusFor(f.dir, time.Now()); s.State != laneHostStateRunning || len(s.Kinds) != 1 {
+		t.Fatalf("status = %+v, want running with the latched list", s)
+	}
+}
+
+// TestLaneHostParksLongWaits proves a worker whose next pass is more than
+// laneParkAfter away gives up its slot, and its park timer pokes it back.
+func TestLaneHostParksLongWaits(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "much later", func(r *opjournal.Request) {
+		r.NotBefore = laneT0.Add(time.Hour)
+	}))
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.nextPass(t)
+	if hh.nextExit(t) != f.id {
+		t.Fatal("the worker kept its slot")
+	}
+	tm := hh.nextTimer(t)
+	if tm.d != time.Hour {
+		t.Fatalf("park timer = %s, want 1h", tm.d)
+	}
+	if s := hh.h.status(f.clk.Now()); s.Workers != 0 || s.Parked != 1 {
+		t.Fatalf("status = %+v, want no worker and one parked", s)
+	}
+	f.clk.Advance(time.Hour)
+	tm.c <- f.clk.Now()
+	if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass after the park = %+v, want accepted", p.out.res)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v", got.Outcome)
+	}
+}
