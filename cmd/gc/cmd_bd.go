@@ -462,12 +462,14 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	// Use the full config load path (includes pack expansion + site
+	// Use the full composed load (includes pack expansion + site
 	// binding overlay) so migrated rigs (path only in .gc/site.toml)
 	// resolve to their bound path. A raw config.Load here would make
 	// every already-migrated rig look unbound and fail the new guard
-	// in resolveBdScopeTarget / bdRigScopeTarget.
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// in resolveBdScopeTarget / bdRigScopeTarget. The passthrough loader
+	// is that same composition without the builtin readiness pass; see
+	// loadCityConfigForBdPassthrough.
+	cfg, err := loadBdPassthroughConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc bd: loading config: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -932,11 +934,25 @@ func doBdReleaseIfCurrent(cityPath string, cfg *config.City, target execStoreTar
 	return 0
 }
 
+// resolveBdCityPath and loadBdPassthroughConfig are the passthrough's city
+// resolution and its one config load. They are variables only so the routing
+// parity tests can run doBd with the full loaders (resolveCity, loadCityConfig)
+// and compare; production never reassigns them.
+var (
+	resolveBdCityPath       = resolveCityPathOnly
+	loadBdPassthroughConfig = loadCityConfigForBdPassthrough
+)
+
+// resolveBdCity names the city a gc bd invocation runs against. It resolves
+// the city only: every rig decision the passthrough makes is
+// resolveBdScopeTarget's, from the composed config, so the rig name the
+// general resolver derives from cwd (with a full config load) would be
+// discarded unread.
 func resolveBdCity(cityName string) (string, error) {
 	if strings.TrimSpace(cityName) != "" {
 		return validateCityPath(cityName)
 	}
-	return resolveCity()
+	return resolveBdCityPath()
 }
 
 // extractBdScopeFlags extracts gc-owned --city/--rig flags from the raw
