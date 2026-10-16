@@ -29,11 +29,13 @@ func TestOpsParses(t *testing.T) {
 	}
 }
 
-// TestOpsRejectsOutOfEnum proves a typo in any gate fails a single layer
-// (Parse) and the composed root (a fragment supplying it), naming the gate.
+// TestOpsRejectsOutOfEnum proves a typo or a blank value in any gate fails a
+// single layer (Parse) and the composed root (a fragment supplying it), naming
+// the gate. A blank value is not unset: the resolver reads any non-empty value
+// as set, so letting one load would fail every gate's resolution at boot.
 func TestOpsRejectsOutOfEnum(t *testing.T) {
 	for _, key := range []string{"content", "control", "lifecycle"} {
-		for _, raw := range []string{"requre", "shadow", "true"} {
+		for _, raw := range []string{"requre", "shadow", "true", " "} {
 			t.Run(key+"="+raw, func(t *testing.T) {
 				layer := "[ops]\n" + key + " = \"" + raw + "\"\n"
 				want := "ops." + key

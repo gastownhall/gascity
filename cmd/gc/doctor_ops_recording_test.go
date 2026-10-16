@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -155,7 +156,7 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 		if r.Status != doctor.StatusWarning {
 			t.Fatalf("status = %v, want Warning: %s", r.Status, r.Message)
 		}
-		if !strings.Contains(r.Message, "1 open legacy op(s)") || !strings.Contains(r.Message, "sweeper") {
+		if !strings.Contains(r.Message, "; 1 open legacy op(s)") || !strings.Contains(r.Message, "sweeper") {
 			t.Fatalf("message %q does not name the one stale op and the sweeper", r.Message)
 		}
 		if len(r.Details) != 1 || !strings.Contains(r.Details[0], stale.ID) {
@@ -163,6 +164,51 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 		}
 		if !strings.Contains(r.FixHint, "restart the controller") {
 			t.Fatalf("remedy %q does not name the boot-latched gates", r.FixHint)
+		}
+	})
+
+	t.Run("stale ops past the read limit are a floor", func(t *testing.T) {
+		store := newOpSweepStore()
+		var last opjournal.Op
+		for i := range opSweepLimit + 1 {
+			last = seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, fmt.Sprintf("stale%03d", i))
+		}
+		c, _ := newTestOpsRecordingCheck(store, last.FinishBy.Add(2*opSweepInterval+time.Second),
+			rollout.WithOpsLifecycle(rollout.Auto))
+		r := c.Run(&doctor.CheckContext{})
+		want := fmt.Sprintf("; at least %d open legacy op(s)", opSweepLimit)
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, want) {
+			t.Fatalf("result = %v %q, want a Warning counting %q", r.Status, r.Message, want)
+		}
+	})
+
+	t.Run("a truncated scan warns", func(t *testing.T) {
+		store := newOpSweepStore()
+		seedUndecodableOps(t, store, 8*opSweepLimit) // a head longer than the scan's page cap
+		seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "behind")
+		c, _ := newTestOpsRecordingCheck(store, opSweepT0, rollout.WithOpsContent(rollout.Auto))
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "page cap") || !strings.Contains(r.Message, "not checked") {
+			t.Fatalf("result = %v %q, want a Warning that the scan stopped at its page cap", r.Status, r.Message)
+		}
+		want := fmt.Sprintf("%d op row(s) this gc cannot decode", 8*opSweepLimit)
+		if len(r.Details) != 1 || !strings.Contains(r.Details[0], want) || !strings.Contains(r.Details[0], "gc-op-newer00000") {
+			t.Fatalf("details = %q, want one line counting %q and naming the first row", r.Details, want)
+		}
+	})
+
+	t.Run("a truncated scan's stale count is a floor", func(t *testing.T) {
+		store := newOpSweepStore()
+		stale := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "stale")
+		seedUndecodableOps(t, store, 8*opSweepLimit) // with the stale op, more rows than the page cap reads
+		c, _ := newTestOpsRecordingCheck(store, stale.FinishBy.Add(2*opSweepInterval+time.Second),
+			rollout.WithOpsLifecycle(rollout.Auto))
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "; at least 1 open legacy op(s)") {
+			t.Fatalf("result = %v %q, want a Warning counting at least 1", r.Status, r.Message)
+		}
+		if len(r.Details) != 2 || !strings.Contains(r.Details[0], stale.ID) || !strings.Contains(r.Details[1], "cannot decode") {
+			t.Fatalf("details = %q, want the stale op, then the undecodable rows", r.Details)
 		}
 	})
 

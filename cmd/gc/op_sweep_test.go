@@ -172,6 +172,22 @@ func seedOp(t *testing.T, store beads.Store, clk clock.Clock, executor opjournal
 	return op
 }
 
+// seedUndecodableOps creates n submitted op rows of a schema this build
+// cannot decode, as a newer gc would write them: gc-op-newer00000 and on.
+func seedUndecodableOps(t *testing.T, store beads.Store, n int) {
+	t.Helper()
+	for i := range n {
+		if _, err := store.Create(beads.Bead{
+			ID: fmt.Sprintf("gc-op-newer%05d", i), Type: opjournal.BeadType,
+			CreatedAt: opSweepT0.Add(-time.Hour).Add(time.Duration(i) * time.Millisecond),
+			Labels:    []string{opjournal.LabelOp, opjournal.ConversationLabel("gc-1")},
+			Metadata:  map[string]string{"gc.op.schema": "99", "gc.op.status": string(opjournal.StatusSubmitted)},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func getOp(t *testing.T, store beads.Store, id string) opjournal.Op {
 	t.Helper()
 	st, err := opjournal.NewStore(beads.SessionStore{Store: store}, &clock.Fake{Time: opSweepT0}, opjournal.WithIDPrefix("gc"))
@@ -752,17 +768,7 @@ func TestOpSweepGatesOffRetriesAFailedSweep(t *testing.T) {
 // unsweepable rows longer than the cap may still be open.
 func TestOpSweepGatesOffTruncatedReadKeepsTicking(t *testing.T) {
 	store := newOpSweepStore()
-	head := 8 * opSweepLimit // more rows than legacyScanPages pages of opSweepLimit
-	for i := range head {
-		if _, err := store.Create(beads.Bead{
-			ID: fmt.Sprintf("gc-op-newer%05d", i), Type: opjournal.BeadType,
-			CreatedAt: opSweepT0.Add(-time.Hour).Add(time.Duration(i) * time.Millisecond),
-			Labels:    []string{opjournal.LabelOp, opjournal.ConversationLabel("gc-1")},
-			Metadata:  map[string]string{"gc.op.schema": "99", "gc.op.status": string(opjournal.StatusSubmitted)},
-		}); err != nil {
-			t.Fatal(err)
-		}
-	}
+	seedUndecodableOps(t, store, 8*opSweepLimit) // more rows than legacyScanPages pages of opSweepLimit
 	op := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "behind")
 	h := newOpSweepHarness(newOpSweepCS(store))
 	h.clk.Set(op.FinishBy.Add(time.Second))
@@ -772,6 +778,106 @@ func TestOpSweepGatesOffTruncatedReadKeepsTicking(t *testing.T) {
 	}
 	if !h.s.wantsTicker() {
 		t.Fatal("a truncated gates-off pass left no work")
+	}
+}
+
+// TestOpSweepGatesOffFullBatchKeepsTicking proves a gates-off pass that
+// closed a full batch of opSweepLimit ops leaves work: the read stopped at
+// the limit, so the ops behind it, an op still within its finish_by among
+// them, are reached only by later passes, and the loop returns once every op
+// is closed.
+func TestOpSweepGatesOffFullBatchKeepsTicking(t *testing.T) {
+	store := newOpSweepStore()
+	expired := make([]opjournal.Op, 0, opSweepLimit+1)
+	for i := range opSweepLimit + 1 {
+		expired = append(expired, seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, fmt.Sprintf("expired%03d", i)))
+	}
+	// Seeded last, so the oldest-first read reaches it only behind the backlog.
+	inflight := seedOp(t, store, &clock.Fake{Time: opSweepT0.Add(legacyop.ExecutionBound)}, opjournal.ExecutorLegacyAPI, "inflight")
+	h := newOpSweepHarness(newOpSweepCS(store))
+	h.clk.Set(expired[0].FinishBy.Add(time.Second))
+	done := runOpSweep(context.Background(), h)
+	select {
+	case h.ticks <- h.clk.Now():
+	case <-done:
+		t.Fatal("the loop returned after a full batch with every gate off")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweeper loop is not taking ticks")
+	}
+	h.tick(t) // the second pass left the in-flight op pending
+	for _, op := range expired {
+		if got := getOp(t, store, op.ID); got.Status != opjournal.StatusClosed {
+			t.Fatalf("expired op %s = %s after two passes, want closed", op.ID, got.Status)
+		}
+	}
+	if got := getOp(t, store, inflight.ID); got.Status != opjournal.StatusSubmitted {
+		t.Fatalf("an op within its finish_by was touched: %s", got.Status)
+	}
+	// The pass that tick started may already see the moved clock, close the
+	// op and end the loop; otherwise the next tick's pass does.
+	h.clk.Set(inflight.FinishBy.Add(time.Second))
+	select {
+	case h.ticks <- h.clk.Now():
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweeper loop neither took the tick nor returned")
+	}
+	waitOpSweep(t, done)
+	if got := getOp(t, store, inflight.ID); got.Status != opjournal.StatusClosed || got.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+		t.Fatalf("the in-flight op = %s %+v, want closed failed{deadline_in_flight}", got.Status, got.Outcome)
+	}
+	// The boot pass read a full batch of expired ops, not the in-flight op.
+	want := []string{
+		fmt.Sprintf("listed=%d closed=%d pending=0 ", opSweepLimit, opSweepLimit),
+		"listed=2 closed=1 pending=1 ",
+		"listed=1 closed=1 pending=0 ",
+	}
+	lines := h.logLines("op-sweep: listed=")
+	if len(lines) != len(want) {
+		t.Fatalf("summaries = %q, want %d", lines, len(want))
+	}
+	for i, w := range want {
+		if !strings.Contains(lines[i], w) {
+			t.Fatalf("summary %d = %q, want %q", i, lines[i], w)
+		}
+	}
+	if n := h.tickers.Load(); n != 1 {
+		t.Fatalf("started %d ticker(s), want 1", n)
+	}
+	if d := h.degraded(); len(d) != 0 {
+		t.Fatalf("degrades = %+v, want none", d)
+	}
+}
+
+// opSweepCloseRefusedStore refuses every conditional write as unsupported, a
+// close failure no later pass can clear.
+type opSweepCloseRefusedStore struct{ opSweepStore }
+
+func (opSweepCloseRefusedStore) UpdateIfMatch(string, int64, beads.UpdateOpts) error {
+	return fmt.Errorf("closing: %w", beads.ErrConditionalWriteUnsupported)
+}
+
+// TestOpSweepGatesOffRefusedFullBatchStops proves a gates-off full batch in
+// which no op closed, its closes refused for good, leaves no work: a store
+// refusing every close cannot keep the loop ticking.
+func TestOpSweepGatesOffRefusedFullBatchStops(t *testing.T) {
+	inner := newOpSweepStore()
+	var last opjournal.Op
+	for i := range opSweepLimit + 1 {
+		last = seedOp(t, inner, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, fmt.Sprintf("refused%03d", i))
+	}
+	h := newOpSweepHarness(newOpSweepCS(opSweepCloseRefusedStore{inner}))
+	h.clk.Set(last.FinishBy.Add(time.Second))
+	waitOpSweep(t, runOpSweep(context.Background(), h))
+	if n := h.tickers.Load(); n != 0 {
+		t.Fatalf("started %d ticker(s) over a store refusing every close with every gate off, want none", n)
+	}
+	want := fmt.Sprintf("listed=%d closed=0 pending=0 raced=0 failed=%d ", opSweepLimit, opSweepLimit)
+	if l := h.logLines("op-sweep: listed="); len(l) != 1 || !strings.Contains(l[0], want) {
+		t.Fatalf("summaries = %q, want one containing %q", l, want)
+	}
+	if l := h.logLines("reason=conditional_writes_unsupported"); len(l) != 1 || !strings.Contains(l[0], "mode=off") {
+		t.Fatalf("degrade log lines = %q, want one mode=off conditional_writes_unsupported line", l)
 	}
 }
 

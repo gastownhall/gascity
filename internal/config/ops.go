@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"strings"
 
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
@@ -47,14 +46,16 @@ type OpsConfig struct {
 // composed root, beside validateBeadsModes, because a fragment may supply any
 // of these fields. A typo must never read as "off": an operator who wrote
 // "requre" would believe requests are refused unless recorded while none is.
-// The empty string (unset) is valid and defaults to off.
+// The empty string (unset) is valid and defaults to off. A blank value such as
+// " " is not unset, because internal/rollout reads any non-empty value as set,
+// so it is rejected like a typo.
 func validateOpsModes(o OpsConfig) error {
 	for _, f := range []struct{ key, raw string }{
 		{"ops.content", o.ContentMode},
 		{"ops.control", o.ControlMode},
 		{"ops.lifecycle", o.LifecycleMode},
 	} {
-		if strings.TrimSpace(f.raw) == "" {
+		if f.raw == "" {
 			continue
 		}
 		if _, err := gate.ParseMode(f.raw); err != nil {
