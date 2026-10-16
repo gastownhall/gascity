@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "backend_bundle.go",
         "backend_registry.go",
+        "beads_module_version.go",
         "connection.go",
         "files.go",
         "identity.go",
@@ -35,6 +36,7 @@ go_test(
     srcs = [
         "backend_bundle_library_test.go",
         "backend_registry_test.go",
+        "beads_module_version_test.go",
         "connection_bd_external_binding_test.go",
         "connection_bd_owned_direct_binding_test.go",
         "connection_bd_owned_server_test.go",

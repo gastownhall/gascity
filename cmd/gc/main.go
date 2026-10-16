@@ -1784,6 +1784,9 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			provider, "doltlite")
 	}
 	mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
+	// Native open can auto-migrate the store. Warn first if PATH bd would
+	// then be unable to read it. Never fatal.
+	warnPATHBdSchemaSkew(os.Stderr)
 	// One bd opener, used twice: as the factory's fallback store and as the
 	// WRITE leaf of the proxied split store. They must be the same store, or a
 	// demotion would silently change which store is doing the writing.

@@ -17,9 +17,10 @@ import (
 // (GC_SESSION_NAME == GC_ALIAS).
 //
 // The script visits each distinct identity once and scans the open ephemeral
-// tier once, so the ceiling is the design's budget: 8 processes.
+// tier once, then certifies the empty answer with one more bd read
+// (certifiedEmptyHookResult), so the ceiling is the design's budget: 9 processes.
 func TestEffectiveWorkQueryNoWorkBdInvocationBudget(t *testing.T) {
-	const ceiling = 8
+	const ceiling = 9
 
 	logPath := filepath.Join(t.TempDir(), "bd-invocations.log")
 	a := Agent{Name: "planner-a"}

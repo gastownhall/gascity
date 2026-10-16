@@ -38,7 +38,7 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 			`probe_assigned_graph_anchor_ready "$1"; ` +
 			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			certifiedEmptyHookResult
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
@@ -50,7 +50,7 @@ func oldEffectiveWorkQuery(a *Agent, topo QueryTopology) string {
 		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		certifiedEmptyHookResult
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
@@ -60,9 +60,9 @@ func oldEffectiveAssignedInProgressQuery(a *Agent, topo QueryTopology) string {
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(topo) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(topo) + certifiedEmptyHookResult})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(topo) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(topo) + certifiedEmptyHookResult})
 }
 
 func oldEffectiveAssignedReadyQuery(a *Agent, topo QueryTopology) string {
@@ -71,9 +71,9 @@ func oldEffectiveAssignedReadyQuery(a *Agent, topo QueryTopology) string {
 	}
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(topo) + certifiedEmptyHookResult})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + certifiedEmptyHookResult})
 }
 
 func oldEffectiveRoutedPoolQuery(a *Agent, topo QueryTopology) string {

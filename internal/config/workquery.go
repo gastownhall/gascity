@@ -920,6 +920,25 @@ func ephemeralAssignedReadyProbeScript(shellVar string, topo QueryTopology) stri
 		`fi; `
 }
 
+// certifiedEmptyHookResult is the terminal clause of every default hook-check
+// query. The tiers above deliberately discard bd's stderr and fall through
+// (a store one tier cannot open says nothing about the next tier), but that
+// makes a globally broken bd — schema skew after a store migration, a missing
+// binary, an unreadable store — collapse every tier into the same empty
+// answer a genuinely idle hook produces, and agents with assigned work
+// quietly stand down. So an empty hook is
+// never a fallback: before answering "[]" the script re-runs one cheap bd
+// read with stderr captured, and if bd cannot serve it, surfaces bd's own
+// error on stderr and exits non-zero. `gc hook` and the prompt snippets
+// treat a non-zero query as an error, so the failure reaches a human instead
+// of being spent as an idle signal.
+const certifiedEmptyHookResult = `if bd_probe_err=$(bd list --limit=1 --json 2>&1 >/dev/null); then ` +
+	`printf "[]"; ` +
+	`else ` +
+	`printf "hook check failed: refusing to report an empty hook because bd is broken: %s\n" "$bd_probe_err" >&2; ` +
+	`exit 97; ` +
+	`fi`
+
 // namedSelfTargetAdmit is the origin-gate condition that lets a non-ephemeral
 // session continue to the routed (pool-demand) tier instead of short-circuiting.
 // It is true only when the session carries a claim alias (GC_ALIAS) and the probe
@@ -995,7 +1014,7 @@ func routedPoolWorkQueryProbeScript(topo QueryTopology, targetCount int) string 
 	for i := 1; i <= targetCount; i++ {
 		script += fmt.Sprintf(`probe_pool_demand "$%d"; `, i)
 	}
-	return script + `printf "[]"`
+	return script + certifiedEmptyHookResult
 }
 
 func routedPoolWorkQueryCommand(topo QueryTopology, targets ...string) string {
@@ -1118,7 +1137,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 			`probe_assigned_graph_anchor_ready "$1"; ` +
 			graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 			`probe_pool_demand "$1"; ` +
-			`printf "[]"`
+			certifiedEmptyHookResult
 		return shellquote.Join([]string{"sh", "-c", script, "--", target})
 	}
 	script := legacyControlAssignedWorkQueryScript(topo) +
@@ -1130,7 +1149,7 @@ func buildWorkQuery(a *Agent, topo QueryTopology) string {
 		graphWorkflowAnchorFallbackBeforeFreshPoolScript() +
 		`probe_pool_demand "$1"; ` +
 		`probe_pool_demand "$2"; ` +
-		`printf "[]"`
+		certifiedEmptyHookResult
 	return shellquote.Join([]string{"sh", "-c", script, "--", target, legacyTarget})
 }
 
@@ -1154,9 +1173,9 @@ func (a *Agent) EffectiveAssignedInProgressQueryFor(topo QueryTopology) string {
 func buildAssignedInProgressQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(topo) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedInProgressWorkQueryScript(topo) + certifiedEmptyHookResult})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(topo) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedInProgressWorkQueryScript(topo) + certifiedEmptyHookResult})
 }
 
 // EffectiveAssignedReadyQuery returns the assigned-ready-only command for
@@ -1176,9 +1195,9 @@ func (a *Agent) EffectiveAssignedReadyQueryFor(topo QueryTopology) string {
 func buildAssignedReadyQuery(a *Agent, topo QueryTopology) string {
 	target := a.poolDemandTarget()
 	if legacyWorkflowControlQualifiedName(target) != "" {
-		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
+		return shellquote.Join([]string{"sh", "-c", legacyControlAssignedReadyWorkQueryScript(topo) + certifiedEmptyHookResult})
 	}
-	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + `printf "[]"`})
+	return shellquote.Join([]string{"sh", "-c", standardAssignedReadyWorkQueryScript(topo) + certifiedEmptyHookResult})
 }
 
 // EffectiveRoutedPoolQuery returns the routed-pool-only command for prompt
