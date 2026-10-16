@@ -1326,31 +1326,114 @@ func (q *fileNudgeQueue) removeMigrated(items []nudgequeue.Item, now time.Time) 
 
 // importMigrated appends, under the lock, the items the shim moves into the
 // queue, as pending, with the claim and the delivery batch cleared and every
-// other field kept (nudgeItemForMove). An id the queue already holds is
-// skipped, so a re-run imports nothing twice; it returns the skipped ids the
-// queue holds as dead letters, which were therefore not imported.
-func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) ([]string, error) {
-	var dead []string
-	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
-		dead = dead[:0]
-		deadIDs := make(map[string]bool, len(state.Dead))
-		for _, item := range state.Dead {
-			deadIDs[item.ID] = true
+// other field kept (nudgeItemForMove) but BeadID. This queue's wait readers and
+// Ack read an item's gc:nudge shadow, which a beads-born item never had and a
+// beads-mode sweep may have closed, so each appended item gets an open shadow,
+// saved as Enqueue saves one, and BeadID names it. With the zero store it opens
+// its own, and fails if none opens: an item queued without its shadow is one
+// the wait readers never see. The shadows it created are rolled back if the
+// queue write fails.
+//
+// Each item is matched by (ID, CreatedAt), as removeMigrated matches. One the
+// queue already holds live is skipped, shadow and all, so a re-run imports
+// nothing twice. One it holds as a dead letter is skipped and reported Dead.
+// An id it holds under another creation time names a different nudge, and the
+// queue keeps one item per id, so that item is skipped and reported Collided.
+func (q *fileNudgeQueue) importMigrated(items []nudgequeue.Item) (nudgeImportSkips, error) {
+	store := q.store
+	if store.Store == nil {
+		opened, handle, err := openNudgeBeadStoreOwned(q.cityPath)
+		if err != nil {
+			return nudgeImportSkips{}, err
 		}
+		defer closeBeadStoreHandle(handle) //nolint:errcheck // best-effort
+		store = opened
+	}
+	var skips nudgeImportSkips
+	var created []string
+	err := withNudgeQueueState(q.cityPath, func(state *nudgeQueueState) error {
+		skips = nudgeImportSkips{}
+		live, dead := heldNudgeKeys(state)
 		for _, item := range items {
-			if queuedNudgeExists(state, item.ID) {
-				if deadIDs[item.ID] {
-					dead = append(dead, item.ID)
-				}
+			key := nudgeMigrationKeyOf(item)
+			switch {
+			case live[key]:
+				continue
+			case dead[key]:
+				skips.Dead = append(skips.Dead, item.ID)
+				continue
+			case queuedNudgeExists(state, item.ID):
+				skips.Collided = append(skips.Collided, item.ID)
 				continue
 			}
-			state.Pending = append(state.Pending, nudgeItemForMove(item))
+			moved, createdID, err := shadowMovedNudge(store, item)
+			if err != nil {
+				return err
+			}
+			if createdID != "" {
+				created = append(created, createdID)
+			}
+			state.Pending = append(state.Pending, moved)
 		}
 		sortQueuedNudges(state)
 		return nil
 	})
 	if err != nil {
-		return nil, err
+		return nudgeImportSkips{}, rollbackNudgeShadows(store, created, err)
 	}
-	return dead, nil
+	return skips, nil
+}
+
+// heldNudgeKeys returns the keys of the items state holds live, pending or in
+// flight, and of those it holds as dead letters.
+func heldNudgeKeys(state *nudgeQueueState) (live, dead map[nudgeMigrationKey]bool) {
+	live = make(map[nudgeMigrationKey]bool, len(state.Pending)+len(state.InFlight))
+	for _, bucket := range [][]queuedNudge{state.Pending, state.InFlight} {
+		for _, item := range bucket {
+			live[nudgeMigrationKeyOf(item)] = true
+		}
+	}
+	dead = make(map[nudgeMigrationKey]bool, len(state.Dead))
+	for _, item := range state.Dead {
+		dead[nudgeMigrationKeyOf(item)] = true
+	}
+	return live, dead
+}
+
+// shadowMovedNudge is the copy of item importMigrated queues: nudgeItemForMove,
+// with BeadID naming the open shadow Save finds or creates for it. A Save that
+// names no shadow fails, since the copy would point at a shadow that does not
+// exist. It also returns the shadow's id when Save created it, for the
+// rollback.
+func shadowMovedNudge(store beads.NudgesStore, item nudgequeue.Item) (nudgequeue.Item, string, error) {
+	moved := nudgeItemForMove(item)
+	beadID, created, err := ensureQueuedNudgeBead(store, moved)
+	if err != nil {
+		return moved, "", fmt.Errorf("saving the shadow of moved nudge %q: %w", item.ID, err)
+	}
+	if beadID == "" {
+		return moved, "", fmt.Errorf("saving the shadow of moved nudge %q: no nudges store is open", item.ID)
+	}
+	moved.BeadID = beadID
+	if !created {
+		return moved, "", nil
+	}
+	return moved, beadID, nil
+}
+
+// rollbackNudgeShadows closes the shadows created for a queue write that failed
+// with err, through the front door's rollback as Enqueue closes its own, and
+// joins any rollback failure onto err so a leaked open shadow is diagnosable.
+//
+// Like Enqueue's rollback, it runs after the lock is released, which leaves a
+// window open (ga-w68ksk): an Enqueue of the same nudge id in between reuses
+// the open shadow and commits an item whose BeadID names the shadow this then
+// closes.
+func rollbackNudgeShadows(store beads.NudgesStore, beadIDs []string, err error) error {
+	for _, beadID := range beadIDs {
+		if rbErr := nudgeFrontDoor(store).RollbackEnqueue(beadID); rbErr != nil {
+			err = errors.Join(err, fmt.Errorf("rollback nudge bead %q: %w", beadID, rbErr))
+		}
+	}
+	return err
 }

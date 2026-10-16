@@ -60,10 +60,11 @@ func isControlPlaneBacklogBead(b beads.Bead) bool {
 }
 
 // isNotificationBacklogBead reports whether a bead is a short-lived delivery
-// chore (nudge or mail) rather than durable backlog. It mirrors the
-// nudge-mail-reaper notification predicate: the nudge:/mail: title prefix, the
-// gc:nudge label, and the mail bead type. A beads nudge queue record is the
-// same chore in beads queue mode, so it counts too.
+// chore (nudge or mail) rather than durable backlog. It is a deliberate
+// superset of the nudge-mail-reaper notification predicate (the nudge:/mail:
+// title prefix, the gc:nudge label, and the mail bead type): it also counts a
+// beads nudge queue record, the same chore in beads queue mode, which the
+// beads queue retires and sweeps itself.
 func isNotificationBacklogBead(b beads.Bead) bool {
 	if beadmail.IsMessageBead(b) || hasLabel(b.Labels, nudgeBeadLabel) || storebinding.IsNudgeQueueRecord(b) {
 		return true

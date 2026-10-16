@@ -10,6 +10,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storebinding"
 )
 
@@ -26,6 +27,8 @@ func openShimTestBeadsStore(t *testing.T) beads.Store {
 	return sqlite
 }
 
+// shimFixture holds both queues over one store, as a city's nudges-class store
+// holds the file queue's gc:nudge shadows beside the beads queue's records.
 type shimFixture struct {
 	city  string
 	file  *fileNudgeQueue
@@ -36,11 +39,11 @@ type shimFixture struct {
 func newShimFixture(t *testing.T) shimFixture {
 	t.Helper()
 	city := t.TempDir()
-	file, ok := openNudgeQueue(city, beads.NudgesStore{}).Queue.(*fileNudgeQueue)
+	store := openShimTestBeadsStore(t)
+	file, ok := openNudgeQueue(city, beads.NudgesStore{Store: store}).Queue.(*fileNudgeQueue)
 	if !ok {
 		t.Fatal("openNudgeQueue did not build the file queue")
 	}
-	store := openShimTestBeadsStore(t)
 	queue, err := storebinding.NewBeadsNudgeQueue(beads.NudgesStore{Store: store})
 	if err != nil {
 		t.Fatalf("NewBeadsNudgeQueue: %v", err)
@@ -50,6 +53,18 @@ func newShimFixture(t *testing.T) shimFixture {
 		t.Fatalf("the beads queue %T does not serve the shim's live read", queue)
 	}
 	return shimFixture{city: city, file: file, beads: shimBeads, store: store}
+}
+
+// shareShadowStore hands the fixture's store to the file queue verbs that open
+// their own (ClaimDue, Ack), so the shadows they terminalize are the ones the
+// wait helpers read. It replaces a package seam, so the test stays serial.
+func (f shimFixture) shareShadowStore(t *testing.T) {
+	t.Helper()
+	prev := openOwnedNudgeBeadStore
+	openOwnedNudgeBeadStore = func(string) (beads.NudgesStore, beads.Store) {
+		return beads.NudgesStore{Store: f.store}, nil
+	}
+	t.Cleanup(func() { openOwnedNudgeBeadStore = prev })
 }
 
 // writeFileState replaces the file queue's state, as a process still writing
@@ -148,7 +163,8 @@ func TestNudgeQueueShimRoundTripPreservesEveryItemField(t *testing.T) {
 		state.InFlight = []nudgequeue.Item{stale}
 	})
 	// A moved item keeps every field but its claim and its delivery batch:
-	// the destination pins it under a key of its own.
+	// the destination pins it under a key of its own. The move back into the
+	// file also points BeadID at the shadow it saves (checked below).
 	unpinned := pinned
 	unpinned.DeliveryBatch = ""
 	want := map[string]nudgequeue.Item{
@@ -186,31 +202,63 @@ func TestNudgeQueueShimRoundTripPreservesEveryItemField(t *testing.T) {
 	if len(back.InFlight)+len(back.Dead) != 0 {
 		t.Fatalf("file queue after the move back = %+v, want every item pending", back)
 	}
+	// The file queue's readers need an open shadow behind each item. These
+	// items were written without one, so the move back saves a new one each.
+	for id, item := range want {
+		shadow, open, err := nudgeShadows(beads.NudgesStore{Store: f.store}).Find(id)
+		if err != nil || !open {
+			t.Fatalf("shadow of %s after the move back: open = %v, err = %v; want an open shadow", id, open, err)
+		}
+		item.BeadID = shadow.BeadID
+		want[id] = item
+	}
 	assertItems("back in the file", back.Pending)
 }
 
+// An imported record is retired as migrated, and the shadow view then answers
+// for the nudge from the shadow the file queue's copy points at, not from the
+// retired record.
 func TestNudgeQueueShimRetiresImportedRecordsAsMigrated(t *testing.T) {
-	store := openShimTestBeadsStore(t)
-	fronts, err := storebinding.NewBeadsNudgeFrontDoors(beads.NudgesStore{Store: store})
+	f := newShimFixture(t)
+	fronts, err := storebinding.NewBeadsNudgeFrontDoors(beads.NudgesStore{Store: f.store})
 	if err != nil {
 		t.Fatalf("NewBeadsNudgeFrontDoors: %v", err)
 	}
-	city := t.TempDir()
-	file := openNudgeQueue(city, beads.NudgesStore{}).Queue.(*fileNudgeQueue)
 	now := time.Now().UTC()
-	if err := fronts.Queue.Enqueue(shimItem("n-migrate", now)); err != nil {
+	if err := f.beads.Enqueue(shimItem("n-migrate", now)); err != nil {
 		t.Fatalf("Enqueue: %v", err)
 	}
-	if _, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, file, fronts.Queue.(nudgeQueueShimBeads), now); err != nil {
-		t.Fatalf("shim: %v", err)
+	assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{Moved: 1})
+
+	record := shimQueueRecord(t, f.store, "n-migrate")
+	if record.Status != "closed" || record.Metadata["terminal_state"] != nudgeQueueMigratedOutcome ||
+		record.Metadata["terminal_reason"] != nudgeQueueMigratedReason || record.Metadata["commit_boundary"] != nudgeQueueMigratedBoundary {
+		t.Fatalf("retired record: status %q, metadata %v; want it closed as migrated", record.Status, record.Metadata)
 	}
-	shadow, ok, err := fronts.Shadows.FindIncludingTerminal("n-migrate")
-	if err != nil || !ok {
-		t.Fatalf("FindIncludingTerminal = %v, %v", ok, err)
+	pending := f.fileState(t).Pending
+	if len(pending) != 1 {
+		t.Fatalf("file pending = %v, want the imported item", shimIDs(pending))
 	}
-	if shadow.State != "migrated" || shadow.TerminalReason != "imported into the file queue" || shadow.CommitBoundary != "queue-mode-switch" {
-		t.Fatalf("migrated record projected %+v", shadow)
+	shadow := mustFindShimShadow(t, fronts.Shadows, "n-migrate")
+	if shadow.State != "queued" || !shadow.Open || shadow.BeadID != pending[0].BeadID {
+		t.Fatalf("view of the moved nudge = %+v, want the open shadow %s the file copy points at", shadow, pending[0].BeadID)
 	}
+}
+
+// shimQueueRecord returns the beads queue record of nudge id, open or closed.
+func shimQueueRecord(t *testing.T, store beads.Store, id string) beads.Bead {
+	t.Helper()
+	records, err := store.List(beads.ListQuery{Label: "gc:nudge-queue", IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing the queue records: %v", err)
+	}
+	for _, record := range records {
+		if record.Metadata["nudge_id"] == id {
+			return record
+		}
+	}
+	t.Fatalf("no queue record of %s", id)
+	return beads.Bead{}
 }
 
 func TestNudgeQueueShimLeaseHeldItemWaits(t *testing.T) {
@@ -326,13 +374,13 @@ func (f *failingShimFile) removeMigrated(items []nudgequeue.Item, now time.Time)
 	return f.nudgeQueueShimFile.removeMigrated(items, now)
 }
 
-func (f *failingShimFile) importMigrated(items []nudgequeue.Item) ([]string, error) {
+func (f *failingShimFile) importMigrated(items []nudgequeue.Item) (nudgeImportSkips, error) {
 	if f.failImport {
 		f.failImport = false
 		if _, err := f.nudgeQueueShimFile.importMigrated(items); err != nil {
-			return nil, err
+			return nudgeImportSkips{}, err
 		}
-		return nil, errShimCrash
+		return nudgeImportSkips{}, errShimCrash
 	}
 	return f.nudgeQueueShimFile.importMigrated(items)
 }
@@ -442,9 +490,11 @@ func TestNudgeQueueShimMovesAnOldBinaryWriteOnTheNextPass(t *testing.T) {
 	})
 }
 
-// A quick flip back: the item went file → beads → file, so the beads queue
-// remembers its id as retired. Moving it to beads again would be a no-op
-// there, so it stays in the file queue and is reported, never dropped.
+// The quick flip-back stranding in the shim header, NQ-3a's interim behavior,
+// pinned so the fix (ReinstateMigrated, ga-w0hgvz) flips this test. The item
+// went file → beads → file, so the beads queue holds its record retired
+// "migrated". Moving it to beads again is a no-op there, so it stays in the
+// file queue, reported Retired, where no beads-mode process delivers it.
 func TestNudgeQueueShimFlipBackInsideTheRetiredWindowKeepsTheItem(t *testing.T) {
 	f := newShimFixture(t)
 	now := time.Now().UTC()
@@ -584,6 +634,104 @@ func TestNudgeQueueShimClaimRacingTheReadLeavesAtMostADuplicate(t *testing.T) {
 		// record, so the claim is not lost either.
 		if err := f.beads.Ack([]string{"n-race"}, "injected", "", ""); err != nil {
 			t.Fatalf("claimant Ack: %v", err)
+		}
+	})
+}
+
+// A withdrawal or rollback racing the shim's read is not carried across: the
+// copy in the destination stays deliverable, so a canceled or failed nudge
+// can still be delivered once. There is no fence spanning the two stores to
+// close the window. This pins today's behavior; ga-1d75jm closes the window
+// before NQ-3b runs the shim and flips these cases.
+func TestNudgeQueueShimWithdrawOrRollbackRacingTheMoveIsNotCarriedAcross(t *testing.T) {
+	t.Run("file-to-beads", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			race     func(f shimFixture, item nudgequeue.Item) error
+			wantDead []string
+		}{
+			{"withdraw", func(f shimFixture, item nudgequeue.Item) error {
+				return f.file.WithdrawQueuedWaitNudges([]string{item.ID})
+			}, []string{}},
+			{"rollback", func(f shimFixture, item nudgequeue.Item) error {
+				return f.file.Rollback(item, "sling failed")
+			}, []string{"n-cancel"}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newShimFixture(t)
+				now := time.Now().UTC()
+				item := shimItem("n-cancel", now)
+				f.writeFileState(t, func(state *nudgequeue.State) { state.Pending = []nudgequeue.Item{item} })
+				racing := &racingShimFile{nudgeQueueShimFile: f.file, race: func() {
+					if err := tc.race(f, item); err != nil {
+						t.Fatalf("stale-mode %s: %v", tc.name, err)
+					}
+				}}
+				report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToBeads, racing, f.beads, now)
+				if err != nil {
+					t.Fatalf("shim: %v", err)
+				}
+				assertShimReport(t, report, nudgeQueueShimReport{Raced: 1})
+				state := f.fileState(t)
+				if len(state.Pending)+len(state.InFlight) != 0 {
+					t.Fatalf("file live = %+v, want the item no longer live in the file", state)
+				}
+				if got := shimIDs(state.Dead); !reflect.DeepEqual(got, tc.wantDead) {
+					t.Fatalf("file dead = %v, want %v", got, tc.wantDead)
+				}
+				if got := shimIDs(f.beadsState(t).Pending); !reflect.DeepEqual(got, []string{"n-cancel"}) {
+					t.Fatalf("beads pending = %v, want the moved copy still deliverable (ga-1d75jm)", got)
+				}
+			})
+		}
+	})
+	t.Run("beads-to-file", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			race   func(f shimFixture, item nudgequeue.Item) error
+			assert func(t *testing.T, f shimFixture)
+		}{
+			{"withdraw", func(f shimFixture, item nudgequeue.Item) error {
+				return f.beads.WithdrawQueuedWaitNudges([]string{item.ID})
+			}, func(t *testing.T, f shimFixture) {
+				record := shimQueueRecord(t, f.store, "n-cancel")
+				if record.Metadata["terminal_state"] != "failed" || record.Metadata["terminal_reason"] != "wait-canceled" {
+					t.Fatalf("record metadata %v, want the withdrawal kept, not overwritten as migrated", record.Metadata)
+				}
+			}},
+			{"rollback", func(f shimFixture, item nudgequeue.Item) error {
+				return f.beads.Rollback(item, "sling failed")
+			}, func(t *testing.T, f shimFixture) {
+				if got := shimIDs(f.beadsState(t).Dead); !reflect.DeepEqual(got, []string{"n-cancel"}) {
+					t.Fatalf("beads dead = %v, want the rollback kept, not overwritten as migrated", got)
+				}
+			}},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				f := newShimFixture(t)
+				now := time.Now().UTC()
+				item := shimItem("n-cancel", now)
+				if err := f.beads.EnqueueDeferred(item); err != nil {
+					t.Fatalf("EnqueueDeferred: %v", err)
+				}
+				racing := &shimBeadsQueue{nudgeQueueShimBeads: f.beads}
+				racing.beforeAck = func() {
+					if err := tc.race(f, item); err != nil {
+						t.Fatalf("stale-mode %s: %v", tc.name, err)
+					}
+				}
+				report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, f.file, racing, now)
+				if err != nil {
+					t.Fatalf("shim: %v", err)
+				}
+				assertShimReport(t, report, nudgeQueueShimReport{Moved: 1})
+				tc.assert(t, f)
+				if got := shimIDs(f.fileState(t).Pending); !reflect.DeepEqual(got, []string{"n-cancel"}) {
+					t.Fatalf("file pending = %v, want the imported copy still deliverable (ga-1d75jm)", got)
+				}
+			})
 		}
 	})
 }
@@ -997,21 +1145,13 @@ func TestNudgeQueueShimToFilePartialAckNeverLetsTheFileReuseTheBeadsKey(t *testi
 // not imported. Its record is retired with a reason saying so, and its batch
 // is reported apart from the moved ones.
 func TestNudgeQueueShimToFileReportsAnIDTheFileHoldsDead(t *testing.T) {
-	store := openShimTestBeadsStore(t)
-	fronts, err := storebinding.NewBeadsNudgeFrontDoors(beads.NudgesStore{Store: store})
-	if err != nil {
-		t.Fatalf("NewBeadsNudgeFrontDoors: %v", err)
-	}
-	queue := fronts.Queue.(nudgeQueueShimBeads)
-	city := t.TempDir()
-	file := openNudgeQueue(city, beads.NudgesStore{}).Queue.(*fileNudgeQueue)
-	f := shimFixture{city: city, file: file, beads: queue, store: store}
+	f := newShimFixture(t)
 	now := time.Now().UTC()
 	dead := shimItem("n-dead-in-file", now)
 	dead.DeadAt = now.Add(-time.Minute)
 	f.writeFileState(t, func(state *nudgequeue.State) { state.Dead = []nudgequeue.Item{dead} })
 	for _, id := range []string{"n-dead-in-file", "n-fresh"} {
-		if err := queue.EnqueueDeferred(shimItem(id, now)); err != nil {
+		if err := f.beads.EnqueueDeferred(shimItem(id, now)); err != nil {
 			t.Fatalf("EnqueueDeferred(%s): %v", id, err)
 		}
 	}
@@ -1028,13 +1168,404 @@ func TestNudgeQueueShimToFileReportsAnIDTheFileHoldsDead(t *testing.T) {
 	if got := shimIDs(state.Dead); !reflect.DeepEqual(got, []string{"n-dead-in-file"}) {
 		t.Fatalf("file dead = %v, want the dead letter untouched", got)
 	}
-	skipped := mustFindShimShadow(t, fronts.Shadows, "n-dead-in-file")
-	if skipped.State != nudgeQueueMigratedOutcome || skipped.TerminalReason != nudgeQueueMigratedDeadReason {
-		t.Fatalf("skipped record projected %+v, want it retired with reason %q", skipped, nudgeQueueMigratedDeadReason)
+	skipped := shimQueueRecord(t, f.store, "n-dead-in-file")
+	if skipped.Metadata["terminal_state"] != nudgeQueueMigratedOutcome || skipped.Metadata["terminal_reason"] != nudgeQueueMigratedDeadReason {
+		t.Fatalf("skipped record metadata %v, want it retired with reason %q", skipped.Metadata, nudgeQueueMigratedDeadReason)
 	}
-	moved := mustFindShimShadow(t, fronts.Shadows, "n-fresh")
-	if moved.State != nudgeQueueMigratedOutcome || moved.TerminalReason != nudgeQueueMigratedReason {
-		t.Fatalf("moved record projected %+v, want it retired as imported", moved)
+	moved := shimQueueRecord(t, f.store, "n-fresh")
+	if moved.Metadata["terminal_state"] != nudgeQueueMigratedOutcome || moved.Metadata["terminal_reason"] != nudgeQueueMigratedReason {
+		t.Fatalf("moved record metadata %v, want it retired as imported", moved.Metadata)
+	}
+}
+
+// An id the file queue holds under another creation time names a different
+// nudge, which the file queue keeps one item for. The beads record is not
+// imported over it: it stays live in beads and its batch is reported, and the
+// file queue's item is left as it was.
+func TestNudgeQueueShimToFileLeavesAnIDTheFileHoldsUnderAnotherCreationTime(t *testing.T) {
+	cases := []struct {
+		name string
+		hold func(state *nudgequeue.State, held nudgequeue.Item)
+	}{
+		{"live", func(state *nudgequeue.State, held nudgequeue.Item) {
+			state.Pending = []nudgequeue.Item{held}
+		}},
+		{"dead", func(state *nudgequeue.State, held nudgequeue.Item) {
+			held.DeadAt = held.CreatedAt
+			state.Dead = []nudgequeue.Item{held}
+		}},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShimFixture(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			held := shimItem("n-reused", now)
+			held.CreatedAt = now.Add(-2 * time.Hour)
+			held.Message = "an earlier nudge under the same id"
+			f.writeFileState(t, func(state *nudgequeue.State) { tc.hold(state, held) })
+			before := f.fileState(t)
+			if err := f.beads.EnqueueDeferred(shimItem("n-reused", now)); err != nil {
+				t.Fatalf("EnqueueDeferred: %v", err)
+			}
+
+			assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{
+				Collided:    1,
+				CollidedIDs: []string{"n-reused"},
+			})
+			if got := shimIDs(f.beadsState(t).Pending); !reflect.DeepEqual(got, []string{"n-reused"}) {
+				t.Fatalf("beads pending = %v, want the record still live", got)
+			}
+			if after := f.fileState(t); !reflect.DeepEqual(after, before) {
+				t.Fatalf("file queue after the shim = %+v\nwant it unchanged: %+v", after, before)
+			}
+		})
+	}
+}
+
+// A wait reminder queued in beads mode has no gc:nudge shadow, and the file
+// queue's wait readers read only shadows. Moved back and delivered before
+// readiness next runs, it still resolves its attempt and closes the wait.
+func TestNudgeQueueShimBeadsBornWaitReminderFinalizesInTheFile(t *testing.T) {
+	f := newShimFixture(t)
+	f.shareShadowStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	wait, reminder := f.shimWait(t, now)
+	if err := f.beads.Enqueue(reminder); err != nil {
+		t.Fatalf("beads Enqueue: %v", err)
+	}
+	assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{Moved: 1})
+	f.deliverFromFile(t, now)
+
+	resolved, err := waitNudgeAttemptQueuedOrResolved(nudgeShadows(beads.NudgesStore{Store: f.store}), reminder.ID)
+	if err != nil {
+		t.Fatalf("waitNudgeAttemptQueuedOrResolved: %v", err)
+	}
+	if !resolved {
+		t.Error("readiness after the delivery reads the attempt as unresolved, so it queues the reminder again")
+	}
+	f.assertWaitFinalizesFromDelivery(t, wait, reminder.ID, now)
+}
+
+// The beads queue's shadow view and the file queue's shadows must agree on a
+// wait reminder moved into the file queue, before and after its delivery: the
+// view reads the migrated record as no record and answers from the shadow the
+// file copy points at. Read from the retired record instead, readiness would
+// see an unresolved attempt and queue the reminder again, and the redelivery
+// check would never move to the next attempt.
+func TestNudgeQueueShimMovedWaitReminderAnswersBothShadowReaders(t *testing.T) {
+	f := newShimFixture(t)
+	f.shareShadowStore(t)
+	fronts, err := storebinding.NewBeadsNudgeFrontDoors(beads.NudgesStore{Store: f.store})
+	if err != nil {
+		t.Fatalf("NewBeadsNudgeFrontDoors: %v", err)
+	}
+	now := time.Now().UTC().Truncate(time.Second)
+	wait, reminder := f.shimWait(t, now)
+	if err := f.beads.Enqueue(reminder); err != nil {
+		t.Fatalf("beads Enqueue: %v", err)
+	}
+	assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{Moved: 1})
+
+	readers := []struct {
+		name   string
+		reader storebinding.NudgeShadows
+	}{
+		{"beads view", fronts.Shadows},
+		{"legacy shadows", nudgeShadows(beads.NudgesStore{Store: f.store})},
+	}
+	closedWait := wait
+	closedWait.State = waitStateClosed
+	assertReaders := func(stage, wantNext string) {
+		t.Helper()
+		for _, r := range readers {
+			queued, err := waitNudgeAttemptQueuedOrResolved(r.reader, reminder.ID)
+			if err != nil || !queued {
+				t.Errorf("%s: %s reads the reminder queued-or-resolved = %v, %v; want true", stage, r.name, queued, err)
+			}
+			next, err := nextWaitDeliveryAttempt(r.reader, closedWait)
+			if err != nil || next != wantNext {
+				t.Errorf("%s: %s next delivery attempt = %q, %v; want %q", stage, r.name, next, err, wantNext)
+			}
+		}
+	}
+	assertReaders("before the delivery", "")
+	f.deliverFromFile(t, now)
+	assertReaders("after the delivery", "2")
+	f.assertWaitFinalizesFromDelivery(t, wait, reminder.ID, now)
+}
+
+// A file-born wait reminder whose shadow a beads-mode sweep closed is moved
+// back pointing at that closed shadow. Readiness running before the delivery
+// must read it as queued, and the delivery must close the wait and leave no
+// shadow of the reminder open.
+func TestNudgeQueueShimRoundTripPastASweptShadowFinalizesTheWait(t *testing.T) {
+	f := newShimFixture(t)
+	f.shareShadowStore(t)
+	now := time.Now().UTC().Truncate(time.Second)
+	wait, reminder := f.shimWait(t, now)
+	if err := f.file.Enqueue(reminder); err != nil {
+		t.Fatalf("file Enqueue: %v", err)
+	}
+	shadows := nudgeShadows(beads.NudgesStore{Store: f.store})
+	swept, open, err := shadows.Find(reminder.ID)
+	if err != nil || !open {
+		t.Fatalf("shadow after the file enqueue: open = %v, err = %v", open, err)
+	}
+	assertShimReport(t, f.shim(t, nudgeQueueShimToBeads, now), nudgeQueueShimReport{Moved: 1})
+	if err := nudgeFrontDoor(beads.NudgesStore{Store: f.store}).SweepStale(swept.BeadID, nudgeMailSweepNudgeCloseReason, now); err != nil {
+		t.Fatalf("SweepStale: %v", err)
+	}
+	assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{Moved: 1})
+
+	queued, err := waitNudgeAttemptQueuedOrResolved(shadows, reminder.ID)
+	if err != nil {
+		t.Fatalf("waitNudgeAttemptQueuedOrResolved: %v", err)
+	}
+	if !queued {
+		t.Error("readiness after the move back reads the reminder as not queued")
+		// Readiness then queues the reminder again, as dispatchReadyWaitNudges
+		// does; the file already holds its id, so only a new shadow is written.
+		if err := f.file.Enqueue(reminder); err != nil {
+			t.Fatalf("file Enqueue from readiness: %v", err)
+		}
+	}
+	f.deliverFromFile(t, now)
+	f.assertWaitFinalizesFromDelivery(t, wait, reminder.ID, now)
+}
+
+// The open duplicate in the shim header, pinned so the fix (ga-c9fwn7) flips
+// this test. beads → file moves only live records, so a wait reminder the
+// beads queue delivered before the switch back leaves file mode's wait
+// readers no terminal gc:nudge shadow, and the wait does not finalize. Born
+// in beads mode, the reminder has no shadow, so readiness reads its attempt
+// as unresolved and queues it again. Born in file mode, it left its shadow
+// open, so readiness reads it as queued until the stale sweep closes that
+// shadow.
+func TestNudgeQueueShimReminderDeliveredInBeadsBeforeTheSwitchBackDoesNotFinalize(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		fileBorn   bool
+		wantQueued bool
+	}{
+		{name: "beads-born", wantQueued: false},
+		{name: "file-born", fileBorn: true, wantQueued: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShimFixture(t)
+			f.shareShadowStore(t)
+			now := time.Now().UTC().Truncate(time.Second)
+			wait, reminder := f.shimWait(t, now)
+			if tc.fileBorn {
+				if err := f.file.Enqueue(reminder); err != nil {
+					t.Fatalf("file Enqueue: %v", err)
+				}
+				assertShimReport(t, f.shim(t, nudgeQueueShimToBeads, now), nudgeQueueShimReport{Moved: 1})
+			} else if err := f.beads.Enqueue(reminder); err != nil {
+				t.Fatalf("beads Enqueue: %v", err)
+			}
+			claimed, err := f.beads.ClaimDue(shimTarget("alpha/worker"), now)
+			if err != nil || len(claimed) != 1 {
+				t.Fatalf("beads ClaimDue = %v, %v; want the one reminder", shimIDs(claimed), err)
+			}
+			if err := f.beads.Ack([]string{claimed[0].ID}, "injected", "", "provider-nudge-return"); err != nil {
+				t.Fatalf("beads Ack: %v", err)
+			}
+			assertShimReport(t, f.shim(t, nudgeQueueShimToFile, now), nudgeQueueShimReport{})
+
+			queued, err := waitNudgeAttemptQueuedOrResolved(nudgeShadows(beads.NudgesStore{Store: f.store}), reminder.ID)
+			if err != nil {
+				t.Fatalf("waitNudgeAttemptQueuedOrResolved: %v", err)
+			}
+			finalized, err := finalizeReadyWaitFromNudge(sessionpkg.NewStore(beads.SessionStore{Store: f.store}), beads.NudgesStore{Store: f.store}, wait, now)
+			if err != nil {
+				t.Fatalf("finalizeReadyWaitFromNudge: %v", err)
+			}
+			if queued != tc.wantQueued || finalized {
+				t.Errorf("file-mode readiness = %v and finalization = %v, want %v and false; if ga-c9fwn7 has landed, flip this test to assertWaitFinalizesFromDelivery", queued, finalized, tc.wantQueued)
+			}
+		})
+	}
+}
+
+// With the zero store, importMigrated opens the city's nudges store for the
+// shadows it saves, as Enqueue does, and closes the handle it opened.
+func TestNudgeQueueShimImportWithTheZeroStoreOpensItsOwnStore(t *testing.T) {
+	city := t.TempDir()
+	backing := beads.NewMemStore()
+	spy := &closeStoreSpy{Store: backing}
+	opens := 0
+	prev := openNudgeWorkStore
+	openNudgeWorkStore = func(string, string) (beads.Store, error) {
+		opens++
+		return spy, nil
+	}
+	t.Cleanup(func() { openNudgeWorkStore = prev })
+	file := openNudgeQueue(city, beads.NudgesStore{}).Queue.(*fileNudgeQueue)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if skips, err := file.importMigrated([]nudgequeue.Item{shimItem("n-owned", now)}); err != nil || !reflect.DeepEqual(skips, nudgeImportSkips{}) {
+		t.Fatalf("importMigrated = %+v, %v; want the item imported", skips, err)
+	}
+	if opens != 1 || spy.closeCount() != 1 {
+		t.Fatalf("store opens = %d, closes = %d; want the one handle opened and closed", opens, spy.closeCount())
+	}
+	shadow, open, err := nudgeShadows(beads.NudgesStore{Store: backing}).Find("n-owned")
+	if err != nil || !open {
+		t.Fatalf("shadow in the opened store: open = %v, err = %v", open, err)
+	}
+	pending := shimFixture{city: city}.fileState(t).Pending
+	if len(pending) != 1 || pending[0].BeadID != shadow.BeadID {
+		t.Fatalf("file pending = %+v, want the item pointing at its shadow %s", pending, shadow.BeadID)
+	}
+}
+
+// A move into the file queue that cannot save the shadows its items need fails
+// the batch, whether the nudges store would not open or opened as no store:
+// the file queue's readers read a shadowless item as absent. Nothing is
+// imported, and the beads record stays live for the next pass.
+func TestNudgeQueueShimToFileFailsTheBatchWhenNoShadowStoreOpens(t *testing.T) {
+	errOpen := errors.New("store locked")
+	cases := []struct {
+		name    string
+		openErr error
+	}{
+		{"open error", errOpen},
+		{"no store", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newShimFixture(t)
+			now := time.Now().UTC()
+			if err := f.beads.EnqueueDeferred(shimItem("n-unshadowed", now)); err != nil {
+				t.Fatalf("EnqueueDeferred: %v", err)
+			}
+			prev := openNudgeWorkStore
+			openNudgeWorkStore = func(string, string) (beads.Store, error) { return nil, tc.openErr }
+			t.Cleanup(func() { openNudgeWorkStore = prev })
+			file := openNudgeQueue(f.city, beads.NudgesStore{}).Queue.(*fileNudgeQueue)
+
+			report, err := shimNudgeQueue(context.Background(), nudgeQueueShimToFile, file, f.beads, now)
+			if err == nil {
+				t.Fatal("shim succeeded with no store to save the shadows in")
+			}
+			if tc.openErr != nil && !errors.Is(err, tc.openErr) {
+				t.Fatalf("shim error = %v, want the open failure %v", err, tc.openErr)
+			}
+			assertShimReport(t, report, nudgeQueueShimReport{Failed: 1})
+			if got := shimIDs(f.beadsState(t).Pending); !reflect.DeepEqual(got, []string{"n-unshadowed"}) {
+				t.Fatalf("beads pending = %v, want the record still live", got)
+			}
+			if state := f.fileState(t); len(state.Pending)+len(state.InFlight)+len(state.Dead) != 0 {
+				t.Fatalf("file queue = %+v, want nothing imported", state)
+			}
+		})
+	}
+}
+
+// When the queue write fails, importMigrated closes the shadows it created for
+// it, so the failed import leaves no open shadow behind an item the file never
+// queued.
+func TestNudgeQueueShimImportRollsBackItsShadowsWhenTheWriteFails(t *testing.T) {
+	city := t.TempDir()
+	store := &selectiveErrStore{Store: beads.NewMemStore(), failOnCreate: func(b beads.Bead) error {
+		if b.Title == "nudge:n-second" {
+			return errors.New("create refused")
+		}
+		return nil
+	}}
+	file := openNudgeQueue(city, beads.NudgesStore{Store: store}).Queue.(*fileNudgeQueue)
+	now := time.Now().UTC().Truncate(time.Second)
+
+	if _, err := file.importMigrated([]nudgequeue.Item{shimItem("n-first", now), shimItem("n-second", now)}); err == nil {
+		t.Fatal("importMigrated succeeded past a refused shadow create")
+	}
+	if pending := (shimFixture{city: city}).fileState(t).Pending; len(pending) != 0 {
+		t.Fatalf("file pending = %v, want nothing imported", shimIDs(pending))
+	}
+	shadow, ok, err := nudgeShadows(beads.NudgesStore{Store: store}).FindIncludingTerminal("n-first")
+	if err != nil || !ok {
+		t.Fatalf("FindIncludingTerminal(n-first) = %v, %v", ok, err)
+	}
+	if shadow.Open || shadow.CloseReason != nudgequeue.EnqueueRollbackCloseReason {
+		t.Fatalf("shadow created for the failed import = %+v, want it closed as a rollback", shadow)
+	}
+}
+
+// shimWait creates, on the fixture's store, a ready wait for the session
+// shimItem's items are fenced to, and returns it with the reminder file-mode
+// readiness queues for it (dispatchReadyWaitNudges).
+func (f shimFixture) shimWait(t *testing.T, now time.Time) (sessionpkg.WaitInfo, queuedNudge) {
+	t.Helper()
+	b, err := f.store.Create(beads.Bead{
+		Type:   waitBeadType,
+		Labels: []string{waitBeadLabel, "session:gc-session-1"},
+		Metadata: map[string]string{
+			"session_id":       "gc-session-1",
+			"session_name":     "worker",
+			"kind":             "deps",
+			"state":            waitStateReady,
+			"dep_ids":          "gc-1",
+			"dep_mode":         "all",
+			"registered_epoch": "3",
+			"delivery_attempt": "1",
+		},
+	})
+	if err != nil {
+		t.Fatalf("creating the wait: %v", err)
+	}
+	wait := sessionpkg.WaitInfoFromBead(b)
+	reminder := newQueuedNudgeWithOptions("alpha/worker", "Wait satisfied ("+wait.ID+"): Wait satisfied.", "wait", now, queuedNudgeOptions{
+		ID:                waitNudgeID(wait),
+		SessionID:         wait.SessionID,
+		ContinuationEpoch: wait.RegisteredEpoch,
+		Reference:         &nudgeReference{Kind: "bead", ID: wait.ID},
+	})
+	return wait, reminder
+}
+
+// deliverFromFile claims the file queue's one due nudge for shimItem's session
+// and acks it injected, as a delivery that reached the session does.
+func (f shimFixture) deliverFromFile(t *testing.T, now time.Time) {
+	t.Helper()
+	claimed, err := f.file.ClaimDue(shimTarget("alpha/worker"), now)
+	if err != nil || len(claimed) != 1 {
+		t.Fatalf("file ClaimDue = %v, %v; want the one reminder", shimIDs(claimed), err)
+	}
+	if err := f.file.Ack([]string{claimed[0].ID}, "injected", "", "provider-nudge-return"); err != nil {
+		t.Fatalf("file Ack: %v", err)
+	}
+}
+
+// assertWaitFinalizesFromDelivery runs the ready-wait finalizer and checks it
+// closed wait from the delivered reminder nudgeID, leaving none of the
+// reminder's shadows open.
+func (f shimFixture) assertWaitFinalizesFromDelivery(t *testing.T, wait sessionpkg.WaitInfo, nudgeID string, now time.Time) {
+	t.Helper()
+	finalized, err := finalizeReadyWaitFromNudge(sessionpkg.NewStore(beads.SessionStore{Store: f.store}), beads.NudgesStore{Store: f.store}, wait, now)
+	if err != nil {
+		t.Fatalf("finalizeReadyWaitFromNudge: %v", err)
+	}
+	if !finalized {
+		t.Error("the delivered reminder did not finalize the wait")
+	}
+	closed, err := f.store.Get(wait.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", wait.ID, err)
+	}
+	if closed.Status != "closed" || closed.Metadata["state"] != waitStateClosed || closed.Metadata["nudge_id"] != nudgeID || closed.Metadata["commit_boundary"] != "provider-nudge-return" {
+		t.Errorf("wait after the delivery: status %q, metadata %v; want it closed from %s", closed.Status, closed.Metadata, nudgeID)
+	}
+	rows, err := f.store.List(beads.ListQuery{Label: "nudge:" + nudgeID, IncludeClosed: true})
+	if err != nil {
+		t.Fatalf("listing the shadows of %s: %v", nudgeID, err)
+	}
+	if len(rows) == 0 {
+		t.Errorf("no shadow of %s was ever written", nudgeID)
+	}
+	for _, row := range rows {
+		if row.Status != "closed" {
+			t.Errorf("shadow %s of %s is %s with state %q, want every shadow closed", row.ID, nudgeID, row.Status, row.Metadata["state"])
+		}
 	}
 }
 

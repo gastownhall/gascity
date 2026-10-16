@@ -144,7 +144,7 @@ func TestNudgeShadowViewProjectsALiveRecordAsQueued(t *testing.T) {
 }
 
 func TestNudgeShadowViewProjectsEveryAckOutcome(t *testing.T) {
-	outcomes := []string{"injected", "accepted_for_injection", "injected_unobserved", "failed", "expired", "superseded", "migrated"}
+	outcomes := []string{"injected", "accepted_for_injection", "injected_unobserved", "failed", "expired", "superseded"}
 	runShadowViewCase(t, "ack", func(t *testing.T, f shadowViewFixture) {
 		now := time.Now().UTC()
 		for _, outcome := range outcomes {
@@ -374,6 +374,52 @@ func TestNudgeShadowViewFallsBackToLegacyShadows(t *testing.T) {
 	})
 }
 
+// A record the queue-mode shim retired migrated is no record to the view: the
+// nudge moved into the file queue, whose gc:nudge shadow answers for it from
+// then on, open while it is queued and terminal once it is delivered. With no
+// legacy shadow either, the nudge is not found.
+func TestNudgeShadowViewReadsAMigratedRecordAsNoRecord(t *testing.T) {
+	runShadowViewCase(t, "migrated", func(t *testing.T, f shadowViewFixture) {
+		now := time.Now().UTC()
+		legacy := nudgequeue.NewStore(beads.NudgesStore{Store: f.store})
+		moved := testNudgeItem("n-moved", "", now)
+		bare := testNudgeItem("n-bare", "", now)
+		for _, item := range []nudgequeue.Item{moved, bare} {
+			if err := f.fd.Queue.Enqueue(item); err != nil {
+				t.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		if _, created, err := legacy.Save(moved); err != nil || !created {
+			t.Fatalf("legacy Save = %v, %v", created, err)
+		}
+		if err := f.fd.Queue.Ack([]string{moved.ID, bare.ID}, NudgeQueueMigratedOutcome, "imported into the file queue", "queue-mode-switch"); err != nil {
+			t.Fatalf("Ack migrated: %v", err)
+		}
+
+		shadow, ok, err := f.fd.Shadows.Find(moved.ID)
+		if err != nil || !ok || !shadow.Open || shadow.State != "queued" || shadow.BeadID == nudgeQueueBeadID(moved.ID) {
+			t.Fatalf("Find(moved) = %+v, %v, %v; want the open legacy shadow", shadow, ok, err)
+		}
+		if again := mustFindTerminal(t, f.fd.Shadows, moved.ID); again.BeadID != shadow.BeadID || again.State != "queued" {
+			t.Fatalf("FindIncludingTerminal(moved) = %+v, want the legacy shadow %s", again, shadow.BeadID)
+		}
+		if err := legacy.Terminalize(moved, "injected", "delivered", "provider", now); err != nil {
+			t.Fatalf("legacy Terminalize: %v", err)
+		}
+		assertNotOpenFind(t, f.fd.Shadows, moved.ID)
+		if delivered := mustFindTerminal(t, f.fd.Shadows, moved.ID); delivered.BeadID != shadow.BeadID || delivered.State != "injected" {
+			t.Fatalf("FindIncludingTerminal(moved) after the delivery = %+v, want the delivered legacy shadow %s", delivered, shadow.BeadID)
+		}
+
+		if got, ok, err := f.fd.Shadows.Find(bare.ID); err != nil || ok {
+			t.Errorf("Find(bare) = %+v, %v, %v; want no record and no shadow", got, ok, err)
+		}
+		if got, ok, err := f.fd.Shadows.FindIncludingTerminal(bare.ID); err != nil || ok {
+			t.Errorf("FindIncludingTerminal(bare) = %+v, %v, %v; want no record and no shadow", got, ok, err)
+		}
+	})
+}
+
 func TestNudgeShadowViewShadowHistorySince(t *testing.T) {
 	runShadowViewCase(t, "history", func(t *testing.T, f shadowViewFixture) {
 		now := time.Now().UTC()
@@ -416,6 +462,44 @@ func TestNudgeShadowViewShadowHistorySince(t *testing.T) {
 		}
 		if later["n-acked"] || later["n-legacy"] {
 			t.Errorf("history since a later time = %v, want records retired before it left out", later)
+		}
+	})
+}
+
+// ShadowHistorySince lists each nudge once, from where Find answers for it: a
+// nudge with both a queue record and a legacy shadow from the record, and one
+// whose record was retired migrated from its legacy shadow.
+func TestNudgeShadowViewShadowHistorySinceListsEachNudgeOnce(t *testing.T) {
+	runShadowViewCase(t, "history-once", func(t *testing.T, f shadowViewFixture) {
+		now := time.Now().UTC()
+		legacy := nudgequeue.NewStore(beads.NudgesStore{Store: f.store})
+		toBeads := testNudgeItem("n-to-beads", "", now)
+		toFile := testNudgeItem("n-to-file", "", now)
+		for _, item := range []nudgequeue.Item{toBeads, toFile} {
+			if _, _, err := legacy.Save(item); err != nil {
+				t.Fatalf("legacy Save(%s): %v", item.ID, err)
+			}
+			if err := f.fd.Queue.Enqueue(item); err != nil {
+				t.Fatalf("Enqueue(%s): %v", item.ID, err)
+			}
+		}
+		if err := f.fd.Queue.Ack([]string{toFile.ID}, NudgeQueueMigratedOutcome, "imported into the file queue", "queue-mode-switch"); err != nil {
+			t.Fatalf("Ack migrated: %v", err)
+		}
+
+		history, err := f.fd.Shadows.ShadowHistorySince(now.Add(-time.Minute))
+		if err != nil {
+			t.Fatalf("ShadowHistorySince: %v", err)
+		}
+		rows := map[string][]nudgequeue.NudgeShadow{}
+		for _, shadow := range history {
+			rows[shadow.ID] = append(rows[shadow.ID], shadow)
+		}
+		if got := rows[toBeads.ID]; len(got) != 1 || got[0].BeadID != nudgeQueueBeadID(toBeads.ID) {
+			t.Errorf("history rows of %s = %+v, want the queue record only", toBeads.ID, got)
+		}
+		if got := rows[toFile.ID]; len(got) != 1 || got[0].BeadID == nudgeQueueBeadID(toFile.ID) || got[0].State != "queued" {
+			t.Errorf("history rows of %s = %+v, want its open legacy shadow only", toFile.ID, got)
 		}
 	})
 }
@@ -551,8 +635,56 @@ func TestNudgeShadowViewReportsAnUnparsableTerminalTimeAsCorrupt(t *testing.T) {
 	})
 }
 
-// ShadowHistorySince skips an undecodable record and returns the rest beside
-// a partial result naming it.
+// Every queue transition that retires or dead-letters a record stamps
+// terminal_at, so a retired or dead record with neither terminal_at nor dead_at
+// is corrupt to the view's projection, not a record retired at the zero time
+// that ShadowHistorySince would drop as older than any cutoff. Find,
+// FindIncludingTerminal and ShadowHistorySince all report it wrapping
+// ErrBeadsNudgeQueueCorrupt, and its legacy shadow does not answer in its
+// place.
+func TestNudgeShadowViewReportsAMissingTerminalTimeAsCorrupt(t *testing.T) {
+	runShadowViewCase(t, "missing-terminal-at", func(t *testing.T, f shadowViewFixture) {
+		now := time.Now().UTC()
+		for _, id := range []string{"n-retired", "n-dead"} {
+			if err := f.fd.Queue.Enqueue(testNudgeItem(id, "", now)); err != nil {
+				t.Fatalf("Enqueue(%s): %v", id, err)
+			}
+			if _, _, err := nudgequeue.NewStore(beads.NudgesStore{Store: f.store}).Save(testNudgeItem(id, "", now)); err != nil {
+				t.Fatalf("legacy Save(%s): %v", id, err)
+			}
+		}
+		if err := f.fd.Queue.Ack([]string{"n-retired"}, "injected", "", ""); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		if dead, err := f.fd.Queue.RecordFailure([]string{"n-dead"}, ErrNudgeSessionFenceMismatch, now); err != nil || len(dead) != 1 {
+			t.Fatalf("RecordFailure = %d dead, %v; want n-dead dead-lettered", len(dead), err)
+		}
+		for _, id := range []string{"n-retired", "n-dead"} {
+			for _, key := range []string{nudgeMetaTerminalAt, nudgeMetaDeadAt} {
+				if err := f.store.SetMetadata(nudgeQueueBeadID(id), key, ""); err != nil {
+					t.Fatalf("SetMetadata(%s, %s): %v", id, key, err)
+				}
+			}
+			if _, ok, err := f.fd.Shadows.FindIncludingTerminal(id); ok || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+				t.Fatalf("FindIncludingTerminal(%s) = %v, %v; want an error wrapping ErrBeadsNudgeQueueCorrupt", id, ok, err)
+			}
+			if _, ok, err := f.fd.Shadows.Find(id); ok || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+				t.Fatalf("Find(%s) = %v, %v; want an error wrapping ErrBeadsNudgeQueueCorrupt", id, ok, err)
+			}
+		}
+		history, err := f.fd.Shadows.ShadowHistorySince(now.Add(-time.Minute))
+		if !beads.IsPartialResult(err) || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("ShadowHistorySince error = %v, want a partial result wrapping ErrBeadsNudgeQueueCorrupt", err)
+		}
+		if len(history) != 0 {
+			t.Fatalf("ShadowHistorySince = %+v, want neither corrupt record nor its legacy shadow", history)
+		}
+	})
+}
+
+// ShadowHistorySince skips a record it cannot decode or project and returns
+// the rest beside a partial result naming it. Such a record still answers for
+// its id, so a legacy shadow of that id is not listed in its place.
 func TestNudgeShadowViewShadowHistorySinceReportsACorruptRecordAsPartial(t *testing.T) {
 	runShadowViewCase(t, "corrupt-history", func(t *testing.T, f shadowViewFixture) {
 		now := time.Now().UTC()
@@ -560,6 +692,21 @@ func TestNudgeShadowViewShadowHistorySinceReportsACorruptRecordAsPartial(t *test
 			t.Fatalf("Enqueue: %v", err)
 		}
 		seedCorruptNudgeRecord(t, f.store, "n-corrupt", testNudgeAgent)
+		if err := f.fd.Queue.Enqueue(testNudgeItem("n-retired", "", now)); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		if err := f.fd.Queue.Ack([]string{"n-retired"}, "injected", "", ""); err != nil {
+			t.Fatalf("Ack: %v", err)
+		}
+		if err := f.store.SetMetadata(nudgeQueueBeadID("n-retired"), nudgeMetaTerminalAt, "not-a-time"); err != nil {
+			t.Fatalf("SetMetadata: %v", err)
+		}
+		legacy := nudgequeue.NewStore(beads.NudgesStore{Store: f.store})
+		for _, id := range []string{"n-corrupt", "n-retired"} {
+			if _, _, err := legacy.Save(testNudgeItem(id, "", now)); err != nil {
+				t.Fatalf("legacy Save(%s): %v", id, err)
+			}
+		}
 		history, err := f.fd.Shadows.ShadowHistorySince(now.Add(-time.Minute))
 		if !beads.IsPartialResult(err) || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
 			t.Fatalf("ShadowHistorySince error = %v, want a partial result wrapping ErrBeadsNudgeQueueCorrupt", err)

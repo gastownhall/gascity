@@ -6,7 +6,9 @@ package storebinding
 // already is the observable record. This view answers the shadow contract from
 // queue records first and falls back to the legacy gc:nudge shadows that a city
 // accumulated before it switched, so a wait that straddles the switch still
-// resolves.
+// resolves. A record the queue-mode shim retired as migrated answers nothing:
+// the nudge moved into the file queue, which saved it an open gc:nudge shadow,
+// so the view reads that shadow instead.
 //
 // The view is read-only over queue records. Retiring a record outside the
 // queue's own transitions would break the queue's single-winner lifecycle, so
@@ -27,6 +29,13 @@ import (
 // shadow view. A queue record is retired only by the queue's own verbs (Ack,
 // RecordFailure, Rollback, WithdrawQueuedWaitNudges, Maintain).
 var ErrNudgeShadowViewReadOnly = errors.New("beads nudge shadow view is read-only: queue records are retired through the queue")
+
+// NudgeQueueMigratedOutcome is the terminal state the queue-mode shim retires
+// a beads queue record with once it has moved the nudge into the file queue.
+// The nudge lives on under the gc:nudge shadow the file queue saved for it, so
+// the shadow view reads such a record as no record and never projects the
+// state, which nudgequeue.ClassifyTerminalState does not classify (ga-0qe8xy).
+const NudgeQueueMigratedOutcome = "migrated"
 
 // nudgeShadowQueuedState is the shadow state of a nudge that is still queued.
 const nudgeShadowQueuedState = "queued"
@@ -69,8 +78,9 @@ var _ NudgeShadows = (*beadsNudgeShadowView)(nil)
 
 // Find returns the queued nudge nudgeID. A queue record answers whenever one
 // exists: a live record is projected open, and a dead or retired one is not
-// open, so it is not found. Only an id with no queue record falls back to the
-// legacy gc:nudge shadow, which Find returns only while it is open.
+// open, so it is not found. Only an id with no queue record, or with one
+// retired migrated (NudgeQueueMigratedOutcome), falls back to the legacy
+// gc:nudge shadow, which Find returns only while it is open.
 //
 // A queue record that does not decode is an error wrapping
 // ErrBeadsNudgeQueueCorrupt, never a legacy answer: the record exists, so the
@@ -91,9 +101,10 @@ func (v *beadsNudgeShadowView) Find(nudgeID string) (nudgequeue.NudgeShadow, boo
 	return v.legacy.Find(nudgeID)
 }
 
-// FindIncludingTerminal returns nudgeID's queue record projected in any state,
-// or else its legacy gc:nudge shadow, terminal ones included. A queue record
-// that does not decode is reported as Find reports it.
+// FindIncludingTerminal returns nudgeID's queue record projected in any state
+// but retired migrated, or else its legacy gc:nudge shadow, terminal ones
+// included. A queue record that does not decode is reported as Find reports
+// it.
 func (v *beadsNudgeShadowView) FindIncludingTerminal(nudgeID string) (nudgequeue.NudgeShadow, bool, error) {
 	shadow, found, err := v.recordShadow(nudgeID)
 	if err != nil || found {
@@ -104,10 +115,13 @@ func (v *beadsNudgeShadowView) FindIncludingTerminal(nudgeID string) (nudgequeue
 
 // ShadowHistorySince lists, oldest first, every live and dead queue record,
 // every retired one whose terminal_at is at or after since, and the legacy
-// shadows legacy ShadowHistorySince reports. The queue records are read by
-// lifecycle state, one indexed List each, never by the family label alone. A
-// record that does not decode is skipped and reported as a partial result
-// beside the rest.
+// shadows legacy ShadowHistorySince reports, answering for each nudge as Find
+// does: a nudge with a queue record only from the record, and one with none,
+// or with a record retired migrated, only from its legacy shadows. The queue
+// records are read by lifecycle state, one indexed List each, never by the
+// family label alone. A record that does not decode or project is skipped and
+// reported as a partial result beside the rest, and its legacy shadow is not
+// listed in its place.
 func (v *beadsNudgeShadowView) ShadowHistorySince(since time.Time) ([]nudgequeue.NudgeShadow, error) {
 	var records []beads.Bead
 	for _, state := range []string{nudgeQueueStateLive, nudgeQueueStateDead, nudgeQueueStateTerminal} {
@@ -122,17 +136,26 @@ func (v *beadsNudgeShadowView) ShadowHistorySince(since time.Time) ([]nudgequeue
 	now := time.Now().UTC()
 	var history []nudgequeue.NudgeShadow
 	var corrupt []error
+	recorded := make(map[string]bool, len(records))
 	for _, record := range records {
 		entry, err := decodeNudgeQueueBead(record, now)
 		if err != nil {
+			if id := record.Metadata[nudgeMetaNudgeID]; id != "" {
+				recorded[id] = true
+			}
 			corrupt = append(corrupt, err)
 			continue
 		}
 		shadow, err := projectNudgeQueueRecord(entry, now)
 		if err != nil {
+			recorded[entry.item.ID] = true
 			corrupt = append(corrupt, err)
 			continue
 		}
+		if nudgeQueueRecordMigrated(entry) {
+			continue
+		}
+		recorded[entry.item.ID] = true
 		if _, served := nudgeQueueBucketOf(entry, now); !served && shadow.TerminalAt.Before(since) {
 			continue
 		}
@@ -142,7 +165,11 @@ func (v *beadsNudgeShadowView) ShadowHistorySince(since time.Time) ([]nudgequeue
 	if err != nil {
 		return nil, fmt.Errorf("listing legacy nudge shadow history: %w", err)
 	}
-	history = append(history, legacy...)
+	for _, shadow := range legacy {
+		if !recorded[shadow.ID] {
+			history = append(history, shadow)
+		}
+	}
 	sort.SliceStable(history, func(i, j int) bool { return history[i].CreatedAt.Before(history[j].CreatedAt) })
 	return history, nudgeQueueQuarantined("ShadowHistorySince", corrupt)
 }
@@ -160,7 +187,10 @@ func (v *beadsNudgeShadowView) SweepStale(beadID, closeReason string, now time.T
 
 // Save confirms that the queue holds a record for item, returning the record's
 // bead id and created=false. The record is the shadow, so there is nothing to
-// create: a nudge with no record has to be enqueued first.
+// create: a nudge with no record has to be enqueued first. The confirmation
+// reads no state, so it also confirms a retired record, even one retired
+// migrated, which Find reads as absent and answers from the legacy gc:nudge
+// shadow. Find is the state-aware read (ga-w0hgvz).
 func (v *beadsNudgeShadowView) Save(item nudgequeue.Item) (string, bool, error) {
 	if item.ID == "" {
 		return "", false, errors.New("saving nudge shadow: empty nudge id")
@@ -187,7 +217,7 @@ func (v *beadsNudgeShadowView) RollbackEnqueue(beadID string) error {
 }
 
 // recordShadow reads nudgeID's queue record and projects it, reporting false
-// when the queue holds no record for it.
+// when the queue holds no record for it or holds one retired migrated.
 func (v *beadsNudgeShadowView) recordShadow(nudgeID string) (nudgequeue.NudgeShadow, bool, error) {
 	if nudgeID == "" {
 		return nudgequeue.NudgeShadow{}, false, nil
@@ -208,7 +238,16 @@ func (v *beadsNudgeShadowView) recordShadow(nudgeID string) (nudgequeue.NudgeSha
 	if err != nil {
 		return nudgequeue.NudgeShadow{}, false, err
 	}
+	if nudgeQueueRecordMigrated(entry) {
+		return nudgequeue.NudgeShadow{}, false, nil
+	}
 	return shadow, true, nil
+}
+
+// nudgeQueueRecordMigrated reports whether the queue-mode shim retired entry
+// as migrated (NudgeQueueMigratedOutcome).
+func nudgeQueueRecordMigrated(entry nudgeQueueEntry) bool {
+	return entry.state == nudgeQueueStateTerminal && entry.bead.Metadata[nudgeMetaTerminalState] == NudgeQueueMigratedOutcome
 }
 
 // projectNudgeQueueRecord projects one queue record onto the shadow view, as
@@ -224,6 +263,11 @@ func (v *beadsNudgeShadowView) recordShadow(nudgeID string) (nudgequeue.NudgeSha
 // A dead record is not open because the file queue closes an item's shadow
 // when it dead-letters the item; wait readiness (open only) and finalization
 // (any state) therefore get the same answers in both queue modes.
+//
+// A dead or retired record's time is its terminal_at, else its dead_at. Every
+// queue transition that retires or dead-letters a record stamps terminal_at,
+// so a record with neither is corrupt (ErrBeadsNudgeQueueCorrupt), like one
+// whose stamp does not parse.
 func projectNudgeQueueRecord(entry nudgeQueueEntry, now time.Time) (nudgequeue.NudgeShadow, error) {
 	item := entry.item
 	shadow := nudgequeue.NudgeShadow{
@@ -270,6 +314,9 @@ func projectNudgeQueueRecord(entry nudgeQueueEntry, now time.Time) (nudgequeue.N
 	}
 	if terminalAt.IsZero() {
 		terminalAt = item.DeadAt
+	}
+	if terminalAt.IsZero() {
+		return nudgequeue.NudgeShadow{}, fmt.Errorf("%w: bead %q has neither %s nor %s", ErrBeadsNudgeQueueCorrupt, entry.bead.ID, nudgeMetaTerminalAt, nudgeMetaDeadAt)
 	}
 	shadow.TerminalAt = terminalAt
 	return shadow, nil

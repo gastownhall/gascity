@@ -469,6 +469,15 @@ type NudgeShadows interface {
 	RollbackEnqueue(string) error
 	SweepStale(string, string, time.Time) error
 	StaleShadowsBefore(time.Time, int, map[string]bool) ([]nudgequeue.NudgeShadow, error)
+	// ShadowHistorySince lists, oldest first, at least every shadow created
+	// or retired at or after since. The cutoff bounds what must be listed,
+	// not what may be: the beads shadow view also lists every live and dead
+	// queue record however old, where the legacy gc:nudge store leaves out an
+	// open shadow created before since. A nudge can be listed once per
+	// shadow it has, as when a gc:nudge shadow was closed and a later save
+	// for the same id opened another; the view lists a nudge that has a
+	// queue record once, from the record, unless the record was retired
+	// migrated.
 	ShadowHistorySince(time.Time) ([]nudgequeue.NudgeShadow, error)
 	Find(string) (nudgequeue.NudgeShadow, bool, error)
 	FindIncludingTerminal(string) (nudgequeue.NudgeShadow, bool, error)

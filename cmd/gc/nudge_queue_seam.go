@@ -36,9 +36,35 @@ type nudgeClaimRepinner interface {
 // openNudgeQueue is the only constructor of the city's nudge queue in cmd/gc.
 // store is the nudges-class store the caller already holds. With the zero
 // value, Enqueue, RecordFailure and the verbs that run a maintenance pass open
-// their own, as the facades always did; Rollback and WithdrawQueuedWaitNudges
-// do not, and reach shadows only through a caller-passed store, so with the
-// zero value they retire the queue item and leave its shadow open.
+// their own, as the facades always did, and so does the shim's import
+// (importMigrated), which saves the moved items' shadows; Rollback and
+// WithdrawQueuedWaitNudges do not, and reach shadows only through a
+// caller-passed store, so with the zero value they retire the queue item and
+// leave its shadow open.
+//
+// It builds the file queue only: the beads queue, its shadow view
+// (storebinding.NewBeadsNudgeFrontDoors) and the shim that moves live work
+// between the two (shimNudgeQueue) have no production caller yet. The change
+// that selects the queue by mode here owes four more things (ga-w0hgvz):
+//
+//   - In beads mode, the wait helpers' shadow reads (nudgeShadows) must go
+//     through that view: a moved item's legacy gc:nudge shadow stays open, so
+//     a direct read sees the item still queued and never finalizes its wait.
+//     The view's Save confirms a record in any state, even one retired
+//     migrated; Find is the state-aware read.
+//   - A shim pass must run in the configured mode's direction from the site
+//     that reads the mode. Its import (importMigrated) saves each moved
+//     item's shadow under the state.json lock, one delivery batch per hold,
+//     so a large batch on a slow store can keep the other queue verbs past
+//     their lock wait: save the shadows before taking the lock, as Enqueue
+//     does, or bound the hold.
+//   - file → beads must reinstate a record retired "migrated"
+//     (ReinstateMigrated, DES-NQ D12), or a quick flip back strands the
+//     batch in the file queue (the shim header).
+//   - The shim reads the beads queue through ListLive, which only the
+//     concrete queue has, so the caller type-asserts it: add ListLive to the
+//     contract, or have NewBeadsNudgeFrontDoors return a queue the shim takes
+//     as it is.
 func openNudgeQueue(cityPath string, store beads.NudgesStore) nudgeQueueHandle {
 	q := &fileNudgeQueue{cityPath: cityPath, store: store, clk: clock.Real{}}
 	return nudgeQueueHandle{
