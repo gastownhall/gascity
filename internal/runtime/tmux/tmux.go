@@ -393,7 +393,6 @@ type Tmux struct {
 	interactionDedupOnce sync.Once
 	hiddenAttachMu       sync.Mutex
 	hiddenAttachClients  map[string]*hiddenAttachClient
-	hiddenAttachSeq      atomic.Uint64
 
 	// pokeMu guards pokes, which tracks gc's own send-keys per session so
 	// GetSessionActivity can discount activity that is only our poke's echo
@@ -2148,7 +2147,7 @@ func (t *Tmux) ensureHiddenAttachedClient(target string) error {
 	// fast-path IsSessionAttached check, so an attach that races ahead of the
 	// hook is still caught; an empty channel (set-hook failed) falls back to the
 	// legacy poll.
-	channel := fmt.Sprintf("gc-hidden-attach-%d", t.hiddenAttachSeq.Add(1))
+	channel := newHiddenAttachChannel()
 	if _, err := t.run("set-hook", "-t", target, "client-attached", "wait-for -S "+channel); err != nil {
 		channel = ""
 	}
@@ -2189,6 +2188,16 @@ func (t *Tmux) hiddenAttachCommandArgsForWitness(target string, witness namedSoc
 	return append(args, "attach-session", "-t", target)
 }
 
+// hiddenAttachGlobalSeq keeps wait-for channel names unique in this process.
+// tmux stores an unconsumed wait-for -S, and a per-Tmux counter repeats
+// gc-hidden-attach-1 on a shared server. The next attach then wakes on the
+// previous session's signal and looks ready while it is still detached.
+var hiddenAttachGlobalSeq atomic.Uint64
+
+func newHiddenAttachChannel() string {
+	return fmt.Sprintf("gc-hidden-attach-%d-%d", os.Getpid(), hiddenAttachGlobalSeq.Add(1))
+}
+
 func hiddenAttachScriptArgs(goos string, tmuxArgs []string) []string {
 	if goos == "darwin" {
 		args := []string{"-q", "/dev/null", "tmux"}
@@ -2218,7 +2227,9 @@ func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClien
 	// contend with the attach. tmux remembers a signal that precedes the wait, so
 	// there is no signal-before-wait race. The wait-for is bounded by
 	// hiddenAttachReadyTimeout (not extended — it is the same ceiling the poll
-	// used), and IsSessionAttached is the authoritative confirmation on timeout.
+	// used). A wake is readiness only once IsSessionAttached confirms it. A
+	// remembered signal from another attach is not this session and falls
+	// through to the poll, which also observes client exit.
 	waitErr := make(chan error, 1)
 	go func() {
 		ctx, cancel := context.WithTimeout(context.Background(), hiddenAttachReadyTimeout)
@@ -2229,10 +2240,13 @@ func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClien
 
 	select {
 	case err := <-waitErr:
-		if err == nil || t.IsSessionAttached(target) {
+		if t.IsSessionAttached(target) {
 			return nil
 		}
-		return fmt.Errorf("timed out waiting for hidden tmux client to attach: %w", err)
+		if err != nil {
+			return fmt.Errorf("timed out waiting for hidden tmux client to attach: %w", err)
+		}
+		return t.pollForHiddenAttachReady(target, client)
 	case err, ok := <-client.done:
 		if t.IsSessionAttached(target) {
 			return nil
@@ -2245,8 +2259,9 @@ func (t *Tmux) waitForHiddenAttachReady(target string, client *hiddenAttachClien
 }
 
 // pollForHiddenAttachReady is the fallback used when the client-attached hook
-// could not be armed: poll IsSessionAttached until the client attaches, the
-// client exits, or the deadline elapses.
+// could not be armed, or when a wait-for wake was not this session being
+// attached. It polls IsSessionAttached until the client attaches, the client
+// exits, or the deadline elapses.
 func (t *Tmux) pollForHiddenAttachReady(target string, client *hiddenAttachClient) error {
 	deadline := time.Now().Add(hiddenAttachReadyTimeout)
 	for time.Now().Before(deadline) {

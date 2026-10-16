@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -1320,5 +1322,60 @@ func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
 				t.Errorf("err = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// A stored wait-for notification is not attachment. The shared test server
+// keeps an unconsumed wait-for -S, and the next hidden attach used to treat
+// that wake as ready while #{session_attached} was still 0.
+func TestWaitForHiddenAttachReadyIgnoresStaleSignalUntilAttached(t *testing.T) {
+	exec := &fakeExecutor{outs: []string{
+		"sess|0", // fast path: not attached
+		"",       // wait-for returns on a stored signal
+		"sess|0", // signal was not this session
+		"sess|0", // first poll still detached
+		"sess|1", // client has now attached
+	}}
+	tm := NewTmux()
+	tm.exec = exec
+	client := &hiddenAttachClient{done: make(chan error), channel: "gc-hidden-attach-stale"}
+
+	start := time.Now()
+	if err := tm.waitForHiddenAttachReady("sess", client); err != nil {
+		t.Fatalf("waitForHiddenAttachReady: %v", err)
+	}
+	if time.Since(start) < hiddenAttachPollInterval {
+		t.Fatal("returned on the bare wait-for signal before the session was attached")
+	}
+}
+
+func TestWaitForHiddenAttachReadyAcceptsSignalOnceAttached(t *testing.T) {
+	exec := &fakeExecutor{outs: []string{
+		"sess|0", // fast path: not yet
+		"",       // wait-for
+		"sess|1", // this session is attached
+	}}
+	tm := NewTmux()
+	tm.exec = exec
+	client := &hiddenAttachClient{done: make(chan error), channel: "gc-hidden-attach-live"}
+
+	start := time.Now()
+	if err := tm.waitForHiddenAttachReady("sess", client); err != nil {
+		t.Fatalf("waitForHiddenAttachReady: %v", err)
+	}
+	if time.Since(start) >= hiddenAttachPollInterval {
+		t.Fatal("polled after the session was already attached")
+	}
+}
+
+func TestHiddenAttachChannelNamesDoNotRepeat(t *testing.T) {
+	first := newHiddenAttachChannel()
+	second := newHiddenAttachChannel()
+	if first == second {
+		t.Fatalf("channel names repeated: %q", first)
+	}
+	prefix := fmt.Sprintf("gc-hidden-attach-%d-", os.Getpid())
+	if !strings.HasPrefix(first, prefix) || !strings.HasPrefix(second, prefix) {
+		t.Fatalf("channels = %q, %q, want prefix %q", first, second, prefix)
 	}
 }
