@@ -32,7 +32,13 @@ env = { GC_DOLT_COMPACT_THRESHOLD_COMMITS = "5000" }
 
 ## Disk Preflight
 
-Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB), no history is flattened and no pending-GC marker gets its full GC; the run retries at the next 2-hour interval. Databases with remotes still get their working-set GC, and `--gc-only` and bare-GC runs skip the check. A targeted `--only-db` run for one database with a pending-GC marker may finish that interrupted GC, but cannot start a new flatten. Set the threshold to `0` to disable the check.
+Before compacting, `gc dolt compact` checks free space on the Dolt data volume. If free bytes fall below `GC_DOLT_COMPACT_MIN_FREE_BYTES` (default 5 GiB), no history is flattened and no pending-GC marker gets its full GC; the run retries at the next 2-hour interval. Databases with remotes still get their working-set GC, and `--gc-only` and bare-GC runs skip the check. Below the floor, only `gc dolt compact --only-db <database>` naming a single database with a pending-GC marker may finish that interrupted GC, and it cannot start a new flatten. A `GC_DOLT_COMPACT_ONLY_DBS` scope, including one set in an order override's `env`, never grants that recovery. Set the threshold to `0` to disable the check.
+
+A run that holds work below the floor still exits successfully, so `mol-dog-compactor` records an `order.skipped` event rather than a plain completion. The outcome is `skipped` when no GC ran and `partial` when a working-set GC still ran. The reason carries the free bytes and the floor, and each held database is listed with why it was held:
+
+```bash
+gc events --type order.skipped --payload-match order_name=mol-dog-compactor
+```
 
 If free-space probing fails, the compactor exits without changing a database. Fix the filesystem probe or set the threshold to `0` only when deliberately disabling this guard.
 
@@ -44,13 +50,13 @@ If the post-flatten integrity check detects unexpected data changes, the databas
 
 ### Doctor checks
 
-`gc doctor` includes a `dolt-compact-state` check that surfaces quarantine, pending-GC, authoritative pending-push, and backup pending-push markers. Its recovery hints use `gc dolt compact --only-db <database>`, after any required marker inspection or remote reconciliation. The `dolt-noms-size` check warns when a managed database's aggregate on-disk footprint crosses a warning or error byte-size threshold — an absolute size measurement, not a row-count ratio. A healthy compact cadence keeps both green.
+`gc doctor` includes a `dolt-compact-state` check that surfaces quarantine, pending-GC, authoritative pending-push, and backup pending-push markers. Its recovery hints use `gc dolt compact --only-db <database>`, after any required marker inspection or remote reconciliation. For a pending-GC marker on a database with a remote, the hint names two routes: the plain `--only-db` run finishes the GC locally and drops the deferred push, so `gc dolt sync` reports the database as diverged until you reconcile it; `GC_DOLT_COMPACT_ALLOW_FEDERATED=1 gc dolt compact --only-db <database>` completes the push, and belongs only in a compaction window announced to every clone. The `dolt-noms-size` check warns when a managed database's aggregate on-disk footprint crosses a warning or error byte-size threshold — an absolute size measurement, not a row-count ratio. A healthy compact cadence keeps both green.
 
 ## Troubleshooting Quick Reference
 
 | Symptom | Meaning | Action |
 |---------|---------|--------|
-| `compact: disk CRITICAL` in logs | Disk free below `GC_DOLT_COMPACT_MIN_FREE_BYTES`; new compaction skipped. | Free disk space; compact retries automatically. For a pending-GC marker, follow the targeted `gc doctor` recovery hint. |
+| `order.skipped` event for `mol-dog-compactor`, or `compact: disk CRITICAL` from a manual `gc dolt compact` | Disk free below `GC_DOLT_COMPACT_MIN_FREE_BYTES`; new compaction held. The event lists each held database. | Free disk space; compact retries automatically. List held runs with `gc events --type order.skipped --payload-match order_name=mol-dog-compactor`. For a pending-GC marker, run `gc dolt compact --only-db <database>` for that one database, as the `gc doctor` recovery hint describes. |
 | Database appears in quarantine log | Post-flatten integrity check failed; DB flagged for manual review. | See [Recover from Dolt Bloat](/troubleshooting/dolt-bloat-recovery) for manual GC procedure. |
 
 ## See Also

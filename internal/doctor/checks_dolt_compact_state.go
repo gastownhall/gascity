@@ -66,7 +66,7 @@ func (c *DoltCompactStateCheck) scanMarkers() ([]compactStateMarker, []string) {
 				continue
 			}
 			markerPath := filepath.Join(dir, e.Name())
-			data, err := os.ReadFile(markerPath) //nolint:gosec
+			data, err := os.ReadFile(markerPath) //nolint:gosec // marker path is derived from managed city pack state layout
 			if err != nil {
 				readWarnings = append(readWarnings, fmt.Sprintf("unreadable marker %s: %v", markerPath, err))
 				continue
@@ -146,7 +146,7 @@ func compactMarkerFixHint(m compactStateMarker) string {
 		return fmt.Sprintf("inspect %s; clear the marker only after verifying its recorded evidence", m.path)
 	case "compact-pending-gc":
 		if m.remote != "" {
-			return fmt.Sprintf("remote-backed GC incomplete for %s via %s; inspect %s, then reconcile manually or retry with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 only during an announced compaction window", m.db, m.remote, m.path)
+			return fmt.Sprintf("remote-backed GC incomplete for %s via %s; inspect %s, then either finish the GC locally with gc dolt compact --only-db %s, which drops the deferred push so gc dolt sync reports %s diverged until you reconcile it manually, or complete the push with GC_DOLT_COMPACT_ALLOW_FEDERATED=1 gc dolt compact --only-db %s only during an announced compaction window", m.db, m.remote, m.path, m.db, m.db, m.db)
 		}
 		return fmt.Sprintf("GC incomplete for %s; inspect %s, then run: gc dolt compact --only-db %s", m.db, m.path, m.db)
 	case "compact-pending-push":

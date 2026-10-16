@@ -178,14 +178,40 @@ set -eu
 #                      each database, bypassing the commit-count threshold and
 #                      the flatten path — recovery for a database stranded below
 #                      the threshold with orphaned oldgen archives.
-#   --only-db <name>   restrict to the named database (repeatable; augments
-#                      GC_DOLT_COMPACT_ONLY_DBS).
+#   --only-db <name>   restrict to the named database (repeatable, a repeat is
+#                      ignored; augments GC_DOLT_COMPACT_ONLY_DBS).
 #   --dry-run          print intended actions without mutating Dolt.
 #   --skip-fetch       bypass CALL DOLT_FETCH for every database (sets
 #                      GC_DOLT_COMPACT_SKIP_FETCH=1) — opt-out for cities whose
 #                      remote is uncredentialed, where the fetch would crash the
 #                      managed dolt server. Compaction proceeds from the local
 #                      source of truth and any remote push is deferred.
+
+# disk_preflight grants pending-GC recovery under critical disk only to a
+# selection made entirely with --only-db, so keep the scope the environment (or
+# an order override) set before the flags below augment it.
+only_dbs_env_input="${GC_DOLT_COMPACT_ONLY_DBS:-}"
+
+# select_only_db NAME appends one --only-db name to GC_DOLT_COMPACT_ONLY_DBS. A
+# repeated name is ignored, so one database selected twice is still a
+# single-database selection.
+select_only_db() {
+  if [ -z "$1" ]; then
+    printf 'compact: --only-db requires a database name\n' >&2
+    exit 2
+  fi
+  case ",${GC_DOLT_COMPACT_ONLY_DBS:-}," in
+    *,"$1",*)
+      ;;
+    ,,)
+      GC_DOLT_COMPACT_ONLY_DBS="$1"
+      ;;
+    *)
+      GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},$1"
+      ;;
+  esac
+}
+
 gc_only=0
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -198,24 +224,11 @@ while [ "$#" -gt 0 ]; do
         printf 'compact: --only-db requires a database name\n' >&2
         exit 2
       fi
-      if [ -n "${GC_DOLT_COMPACT_ONLY_DBS:-}" ]; then
-        GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},$2"
-      else
-        GC_DOLT_COMPACT_ONLY_DBS="$2"
-      fi
+      select_only_db "$2"
       shift 2
       ;;
     --only-db=*)
-      only_db_flag_value="${1#--only-db=}"
-      if [ -z "$only_db_flag_value" ]; then
-        printf 'compact: --only-db requires a database name\n' >&2
-        exit 2
-      fi
-      if [ -n "${GC_DOLT_COMPACT_ONLY_DBS:-}" ]; then
-        GC_DOLT_COMPACT_ONLY_DBS="${GC_DOLT_COMPACT_ONLY_DBS},${only_db_flag_value}"
-      else
-        GC_DOLT_COMPACT_ONLY_DBS="${only_db_flag_value}"
-      fi
+      select_only_db "${1#--only-db=}"
       shift
       ;;
     --dry-run)
@@ -349,6 +362,10 @@ dry_run="${GC_DOLT_COMPACT_DRY_RUN:-}"
 only_dbs="${GC_DOLT_COMPACT_ONLY_DBS:-}"
 pending_gc_recovery_only=0
 disk_critical=0
+disk_critical_reason=""
+disk_held_scopes=""
+compact_gc_ran=0
+recovery_marker_gone_hold="pending-GC marker disappeared, recovery-only run held other work"
 bare_gc_input="${GC_DOLT_COMPACT_BARE_GC:-}"
 skip_fetch_input="${GC_DOLT_COMPACT_SKIP_FETCH:-}"
 allow_federated_input="${GC_DOLT_COMPACT_ALLOW_FEDERATED:-}"
@@ -2255,6 +2272,7 @@ run_full_gc() {
     return 1
   fi
   rm -f "$gc_err_tmp"
+  compact_gc_ran=1
 
   printf 'compact: db=%s %s duration=%ss — ok\n' \
     "$db" "$success_prefix" "$elapsed"
@@ -2692,6 +2710,7 @@ run_bare_gc() {
     return 1
   fi
   rm -f "$gc_err_tmp"
+  compact_gc_ran=1
 
   printf 'compact: db=%s bare-gc duration=%ss — ok\n' "$db" "$elapsed"
   return 0
@@ -2737,6 +2756,7 @@ compact_shared_history_database() {
   if [ "$disk_critical" = "1" ] && [ "$pending_gc_recovery_only" != "1" ] && has_compact_marker "$pending_gc_dir" "$db"; then
     printf 'compact: db=%s pending_gc=present — skipping full GC under critical disk; working-set GC only, marker kept; select it alone with --only-db %s to recover\n' \
       "$db" "$db" >&2
+    record_disk_hold "$db" "pending-GC full GC held below the disk floor, working-set GC only"
   elif has_compact_marker "$pending_gc_dir" "$db"; then
     guard_pending_remote=$(compact_marker_value "$pending_gc_dir" "$db" remote || true)
     guard_pending_from_head=$(compact_marker_value "$pending_gc_dir" "$db" compacted_from_head || true)
@@ -2812,6 +2832,7 @@ flatten_database() {
 
   if [ "$pending_gc_recovery_only" = "1" ] && ! has_compact_marker "$pending_gc_dir" "$db"; then
     printf 'compact: db=%s pending_gc marker disappeared — skipping under critical disk\n' "$db" >&2
+    record_disk_hold "$db" "$recovery_marker_gone_hold"
     return 0
   fi
 
@@ -2849,6 +2870,7 @@ flatten_database() {
 
   if [ "$pending_gc_recovery_only" = "1" ] && ! has_compact_marker "$pending_gc_dir" "$db"; then
     printf 'compact: db=%s pending_gc marker disappeared — refusing non-recovery work under critical disk\n' "$db" >&2
+    record_disk_hold "$db" "$recovery_marker_gone_hold"
     return 0
   fi
 
@@ -2878,7 +2900,14 @@ flatten_database() {
   fi
 
   if [ "$disk_critical" = "1" ] && [ "$pending_gc_recovery_only" != "1" ]; then
-    printf 'compact: db=%s skipping history rewrite under critical disk\n' "$db" >&2
+    if has_compact_marker "$pending_gc_dir" "$db"; then
+      printf 'compact: db=%s pending_gc=present — skipping full GC under critical disk, marker kept; select it alone with --only-db %s to recover\n' \
+        "$db" "$db" >&2
+      record_disk_hold "$db" "pending-GC full GC held below the disk floor"
+    else
+      printf 'compact: db=%s skipping history rewrite under critical disk\n' "$db" >&2
+      record_disk_hold "$db" "compaction held below the disk floor"
+    fi
     return 0
   fi
 
@@ -2960,6 +2989,7 @@ flatten_database() {
 
   if [ "$pending_gc_recovery_only" = "1" ]; then
     printf 'compact: db=%s pending_gc marker disappeared — refusing non-recovery work under critical disk\n' "$db" >&2
+    record_disk_hold "$db" "$recovery_marker_gone_hold"
     return 0
   fi
 
@@ -3886,6 +3916,7 @@ disk_preflight() {
   _dp_available_bytes=$(awk -v available_kb="$_dp_available_kb" 'BEGIN { printf "%.0f", available_kb * 1024 }')
   if decimal_less_than "$_dp_available_bytes" "$_dp_min_free"; then
     disk_critical=1
+    disk_critical_reason="free disk below GC_DOLT_COMPACT_MIN_FREE_BYTES: free_bytes=$_dp_available_bytes floor=$_dp_min_free"
     printf 'compact: disk CRITICAL: free_bytes=%s floor=%s DOLT_DATA_DIR=%s\n' \
       "$_dp_available_bytes" "$_dp_min_free" "$DOLT_DATA_DIR" >&2
     case "$only_dbs" in
@@ -3893,6 +3924,11 @@ disk_preflight() {
         ;;
       *)
         if valid_database_name "$only_dbs" && has_compact_marker "$pending_gc_dir" "$only_dbs"; then
+          if [ -n "$only_dbs_env_input" ]; then
+            printf 'compact: db=%s pending_gc=present — GC_DOLT_COMPACT_ONLY_DBS does not grant recovery under critical disk; run gc dolt compact --only-db %s without it set\n' \
+              "$only_dbs" "$only_dbs" >&2
+            return 0
+          fi
           pending_gc_recovery_only=1
           printf 'compact: db=%s pending_gc=present — proceeding with recovery only under critical disk\n' "$only_dbs" >&2
           return 0
@@ -3900,6 +3936,33 @@ disk_preflight() {
         ;;
     esac
     return 0
+  fi
+}
+
+# record_disk_hold DB REASON
+#   Record a database whose work the critical-disk floor held, for the order
+#   outcome declaration. Database names pass valid_database_name and reasons
+#   are fixed text, so neither needs JSON escaping.
+record_disk_hold() {
+  disk_held_scopes="${disk_held_scopes:+$disk_held_scopes,}$(printf '{"scope":"%s","reason":"%s"}' "$1" "$2")"
+}
+
+# write_order_outcome declares critical-disk holds to the order runner through
+# GC_ORDER_OUTCOME_FILE (contract: core assets/scripts/order_outcome.sh):
+# skipped when no GC ran, partial when a working-set GC still ran.
+# A run that held nothing writes nothing and records as a plain completion.
+write_order_outcome() {
+  if [ -z "${GC_ORDER_OUTCOME_FILE:-}" ] || [ -z "$disk_held_scopes" ]; then
+    return 0
+  fi
+  outcome_kind=skipped
+  if [ "$compact_gc_ran" = "1" ]; then
+    outcome_kind=partial
+  fi
+  if ! printf '{"outcome":"%s","reason":"%s","scopes":[%s]}\n' \
+    "$outcome_kind" "$disk_critical_reason" "$disk_held_scopes" > "$GC_ORDER_OUTCOME_FILE"; then
+    printf 'compact: unable to write order outcome declaration to %s\n' "$GC_ORDER_OUTCOME_FILE" >&2
+    return 1
   fi
 }
 
@@ -4031,6 +4094,7 @@ main() {
     printf 'compact: %s database(s) failed compaction\n' "$failed_count" >&2
     exit 1
   fi
+  write_order_outcome || exit 1
   exit 0
 }
 

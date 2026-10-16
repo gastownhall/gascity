@@ -134,19 +134,49 @@ func TestDoltCompactStateCheckReportsStaleMarkersWithFixHints(t *testing.T) {
 }
 
 func TestDoltCompactStateCheckDoesNotSuggestUnannouncedRemoteRecovery(t *testing.T) {
-	for _, markerType := range []string{"compact-pending-gc", "compact-pending-push"} {
-		t.Run(markerType, func(t *testing.T) {
+	tests := []struct {
+		markerType   string
+		wantMentions []string
+		// wantLocalRetry is whether the hint offers the plain local
+		// gc dolt compact --only-db retry, which never pushes.
+		wantLocalRetry bool
+	}{
+		{
+			markerType: "compact-pending-gc",
+			wantMentions: []string{
+				"finish the GC locally with gc dolt compact --only-db analytics",
+				"drops the deferred push so gc dolt sync reports analytics diverged until you reconcile it manually",
+				"GC_DOLT_COMPACT_ALLOW_FEDERATED=1 gc dolt compact --only-db analytics",
+			},
+			wantLocalRetry: true,
+		},
+		{
+			markerType:   "compact-pending-push",
+			wantMentions: []string{"reconcile manually"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.markerType, func(t *testing.T) {
 			dir := newDoltCompactStateTestCity(t)
-			markerPath := writeDoltCompactStateMarker(t, dir, markerType, "analytics", "remote recovery pending", compactStateOldCreatedAt)
+			markerPath := writeDoltCompactStateMarker(t, dir, tc.markerType, "analytics", "remote recovery pending", compactStateOldCreatedAt)
 			content := fmt.Sprintf("db=analytics\nreason=remote recovery pending\ncreated_at=%s\nremote=origin\n", compactStateOldCreatedAt)
 			if err := os.WriteFile(markerPath, []byte(content), 0o600); err != nil {
 				t.Fatal(err)
 			}
 
 			r := newTestDoltCompactStateCheck(dir).Run(&CheckContext{CityPath: dir})
-			assertDoltCompactStateMentions(t, r, "remote=origin", "reconcile manually", "announced compaction window")
+			assertDoltCompactStateMentions(t, r, append([]string{"remote=origin", "announced compaction window"}, tc.wantMentions...)...)
+			if got := strings.Count(r.FixHint, "GC_DOLT_COMPACT_ALLOW_FEDERATED=1"); got != 1 {
+				t.Fatalf("FixHint names the federated opt-in %d times, want once: %s", got, r.FixHint)
+			}
+			if _, federated, _ := strings.Cut(r.FixHint, "GC_DOLT_COMPACT_ALLOW_FEDERATED=1"); !strings.Contains(federated, "only during an announced compaction window") {
+				t.Fatalf("federated retry is not confined to an announced compaction window: %s", r.FixHint)
+			}
+			if got := strings.Contains(r.FixHint, "locally with gc dolt compact --only-db"); got != tc.wantLocalRetry {
+				t.Fatalf("FixHint offers the local retry = %v, want %v: %s", got, tc.wantLocalRetry, r.FixHint)
+			}
 			if strings.Contains(r.FixHint, "then run: gc dolt compact") {
-				t.Fatalf("remote-backed marker suggests an unannounced retry: %s", r.FixHint)
+				t.Fatalf("remote-backed marker suggests an unqualified retry: %s", r.FixHint)
 			}
 		})
 	}
