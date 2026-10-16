@@ -4,12 +4,14 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/sling"
 )
 
 // bdSubjectPrefixTarget routes a by-id gc bd invocation by its subjects'
 // prefixes alone. ok is false, and the caller keeps the existence-probe chain,
-// unless argv is a by-id read or write whose subjects scan exactly and every
-// subject's prefix belongs to the same single bound store.
+// unless argv is a by-id read or write whose subjects scan exactly, every
+// subject's prefix belongs to the same single bound store, and argv names no
+// -C / --directory.
 //
 // The existence probe in resolveBdScopeTarget exists to tell bead ids from
 // id-shaped tokens that are not ids (a flag value, free text), and it costs a
@@ -18,7 +20,14 @@ import (
 // (bdByIDReadSubjects, bdMutationWriteIDs), and a subject's prefix names the
 // store that mints it. A subject absent from that store is answered by bd
 // there ("not found"), rather than by whichever store cwd or GC_RIG named.
+//
+// A -C directory outranks the prefix, because bd resolves its store from it
+// over the BEADS_DIR the returned target pins: answered by prefix, the exact-ID
+// guard would read one store while bd writes another, so -C keeps the chain.
 func bdSubjectPrefixTarget(cfg *config.City, cityTarget execStoreTarget, cityPath string, args []string) (execStoreTarget, bool) {
+	if extractBdDirectoryFlag(args) != "" {
+		return execStoreTarget{}, false
+	}
 	ids := bdAddressedSubjects(args)
 	if len(ids) == 0 {
 		return execStoreTarget{}, false
@@ -41,10 +50,7 @@ func bdAddressedSubjects(args []string) []string {
 	if ids := bdByIDReadSubjects(args); len(ids) > 0 {
 		return ids
 	}
-	if ids, ok, ambiguous := bdMutationWriteIDs(args); ok && !ambiguous {
-		return ids
-	}
-	return nil
+	return bdByIDMutationSubjects(args)
 }
 
 // bdPrefixOwner returns the one bound store whose prefix id carries. ok is
@@ -52,13 +58,16 @@ func bdAddressedSubjects(args []string) []string {
 // rigs, configured with the same prefix), or when the owner is a rig with no
 // path binding, which resolveBdScopeTarget deliberately never aliases to the
 // city store.
+//
+// It walks cfg.Rigs itself rather than calling sling.FindRigByPrefix, which
+// returns only the first matching rig and so cannot see a second one.
 func bdPrefixOwner(cfg *config.City, cityTarget execStoreTarget, cityPath, id string) (execStoreTarget, bool) {
 	prefix := beadPrefix(cfg, id)
 	if prefix == "" {
 		return execStoreTarget{}, false
 	}
 	var owners []execStoreTarget
-	if strings.EqualFold(prefix, config.EffectiveHQPrefix(cfg)) {
+	if sling.IsHQPrefix(cfg, prefix) {
 		owners = append(owners, cityTarget)
 	}
 	for _, rig := range cfg.Rigs {

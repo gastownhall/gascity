@@ -205,8 +205,15 @@ func TestResolveBdScopeTargetSkipsProbesThatCannotChangeTheAnswer(t *testing.T) 
 		// only the bead's existence tells it from free text.
 		{"id-shaped flag value from rig cwd, present", rigDir, "", []string{"create", "--parent", "demo-abc", "--title", "x"}, true, 1, "city"},
 		{"id-shaped flag value from rig cwd, absent", rigDir, "", []string{"create", "--parent", "demo-abc", "--title", "x"}, false, 1, "rig"},
-		// Subjects in two different stores give no single answer by prefix.
+		// Subjects in one store route by prefix together; subjects in two
+		// different stores give no single answer by prefix.
+		{"subjects in one rig store", cityDir, "", []string{"close", "fe-abc", "fe-def"}, false, 0, "rig"},
 		{"subjects in two stores", cityDir, "", []string{"close", "demo-abc", "fe-abc"}, true, 1, "city"},
+		// bd resolves its store from -C over the BEADS_DIR the target pins, so
+		// an argv naming a directory keeps the chain, whose -C arm answers a
+		// probe miss with the store bd will act on.
+		{"city id write with -C rig dir", cityDir, "", []string{"update", "demo-abc", "-C", rigDir, "--set-metadata", "k=v"}, false, 1, "rig"},
+		{"city id read with --directory= rig dir", cityDir, "", []string{"show", "demo-abc", "--directory=" + rigDir}, false, 1, "rig"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
