@@ -668,8 +668,8 @@ func TestDegradeReasonsAndUnrecorded(t *testing.T) {
 		fmt.Errorf("x: %w", opjournal.ErrContention):                 DegradeContention,
 		errors.New("transport"):                                      DegradeStoreError,
 	} {
-		if got := degradeReason(err); got != want {
-			t.Errorf("degradeReason(%v) = %s, want %s", err, got, want)
+		if got := DegradeReason(err); got != want {
+			t.Errorf("DegradeReason(%v) = %s, want %s", err, got, want)
 		}
 	}
 	if openReason(opjournal.ErrNoNamespace) != ReasonNoNamespace || openReason(errors.New("x")) != ReasonStoreUnavailable {

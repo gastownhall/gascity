@@ -311,7 +311,7 @@ func (r *Recorder) inflightAnswer(kind opjournal.Kind, key string, minted bool, 
 func (r *Recorder) closeExpired(st *opjournal.Store, key string, minted bool, op opjournal.Op, now time.Time) (*Admission, error) {
 	cur, _, err := st.CloseExpired(op, now, string(r.Executor))
 	if err != nil {
-		r.degrade(op.Kind, StageClose, degradeReason(err), err)
+		r.degrade(op.Kind, StageClose, DegradeReason(err), err)
 		r.count(op.Kind, StageAdmit, ResultBusy, "")
 		return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
 	}
@@ -337,7 +337,7 @@ func (r *Recorder) adopt(st *opjournal.Store, key string, minted bool, op opjour
 		}
 	}
 	if !errors.Is(err, opjournal.ErrAttemptMoved) && !errors.Is(err, opjournal.ErrAlreadyTerminal) {
-		r.degrade(op.Kind, StageAdopt, degradeReason(err), err)
+		r.degrade(op.Kind, StageAdopt, DegradeReason(err), err)
 	}
 	r.count(op.Kind, StageAdopt, ResultBusy, "")
 	return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
@@ -364,7 +364,7 @@ func (r *Recorder) unrecordable(req Request, key string, minted bool, err error)
 // cannotRecord answers a request the store cannot record: degrade, then run
 // it unrecorded in auto or refuse it in require.
 func (r *Recorder) cannotRecord(kind opjournal.Kind, key string, minted bool, stage, reason string, err error) (*Admission, error) {
-	r.degrade(kind, stage, degradeReason(err), err)
+	r.degrade(kind, stage, DegradeReason(err), err)
 	if r.Mode == gate.Require {
 		r.count(kind, StageAdmit, ResultRefused, reason)
 		return nil, fmt.Errorf("%w: %w", ErrUnavailable, err)
@@ -469,7 +469,7 @@ func (a *Admission) Finish(res Result) Finished {
 		r.count(a.Op.Kind, StageClose, ResultFailed, "")
 		return Finished{}
 	}
-	r.degrade(a.Op.Kind, StageClose, degradeReason(err), err)
+	r.degrade(a.Op.Kind, StageClose, DegradeReason(err), err)
 	if r.Inflight == nil {
 		a.release()
 		r.count(a.Op.Kind, StageClose, ResultFailed, "")
@@ -578,8 +578,10 @@ func proposeReason(err error) string {
 	return ReasonProposeError
 }
 
-// degradeReason is the reason class a degrade reports for err.
-func degradeReason(err error) string {
+// DegradeReason is the reason class a degrade reports for err: a capability
+// or namespace gap, contention, or a store error. Every surface that degrades
+// past an op-store failure classifies it here, so the classes cannot drift.
+func DegradeReason(err error) string {
 	switch {
 	case errors.Is(err, beads.ErrConditionalWriteUnsupported):
 		return DegradeConditionalWritesUnsupported

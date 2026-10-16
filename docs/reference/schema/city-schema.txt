@@ -1225,6 +1225,10 @@
           "$ref": "#/$defs/BeadsConfig",
           "description": "Beads configures the bead store backend."
         },
+        "ops": {
+          "$ref": "#/$defs/OpsConfig",
+          "description": "Ops holds the operation-journal rollout gates (ops.content,\nops.control, ops.lifecycle)."
+        },
         "session": {
           "$ref": "#/$defs/SessionConfig",
           "description": "Session configures the session provider backend."
@@ -2105,6 +2109,43 @@
       "additionalProperties": false,
       "type": "object",
       "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
+    },
+    "OpsConfig": {
+      "properties": {
+        "content": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"off\" is the shipped default for all three\ngates. \"auto\" records where the store can and degrades loudly where it\ncannot. \"require\" refuses a request it cannot record before any effect.\nExperimental: each mode takes effect as each request surface gains op\nrecording. A change takes effect at the next process start.",
+          "default": "off"
+        },
+        "control": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Records interrupt (stop) and respond requests as ops. \"off\" is the\nshipped default. \"auto\" records where the store can and degrades loudly\nwhere it cannot. \"require\" refuses a request it cannot record before any\neffect. Experimental: each mode takes effect as each request surface\ngains op recording. A change takes effect at the next process start.",
+          "default": "off"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"off\" is the shipped default. \"auto\" records where the store can and\ndegrades loudly where it cannot. \"require\" refuses a request it cannot\nrecord before any effect. Experimental: each mode takes effect as each\nrequest surface gains op recording. A change takes effect at the next\nprocess start.",
+          "default": "off"
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution."
     },
     "OptionChoice": {
       "properties": {

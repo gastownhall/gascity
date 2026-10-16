@@ -1822,3 +1822,63 @@ func TestStoreLeavesAForgedArrivalSeqUntouched(t *testing.T) {
 		t.Fatalf("Close changed %s to %q", forged, b.Metadata[forged])
 	}
 }
+
+// TestHasSubmittedOps proves the capability-free open-op probe: false on a
+// store with no op rows or only closed ones, true once any op (lane or
+// legacy) is submitted, and one keyed read of at most one row.
+func TestHasSubmittedOps(t *testing.T) {
+	h := newHarness(t)
+	probe := func() bool {
+		t.Helper()
+		got, err := HasSubmittedOps(beads.SessionStore{Store: h.rec})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return got
+	}
+	if probe() {
+		t.Fatal("an empty store reports a submitted op")
+	}
+	closedOp := h.propose(t, legacyReq(ExecutorLegacyAPI, "closed"))
+	if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "legacy:api"); err != nil {
+		t.Fatal(err)
+	}
+	if probe() {
+		t.Fatal("a closed op reads as submitted")
+	}
+	h.propose(t, legacyReq(ExecutorLane, "lane"))
+	h.rec.Reset()
+	if !probe() {
+		t.Fatal("a submitted op was not seen")
+	}
+	ops := h.rec.Ops()
+	if len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Limit != 1 {
+		t.Fatalf("probe ops = %+v, want one keyed list of limit 1", ops)
+	}
+}
+
+// TestHasSubmittedOpsReadError proves a failed read is returned, never read
+// as "no ops".
+func TestHasSubmittedOpsReadError(t *testing.T) {
+	if _, err := HasSubmittedOps(beads.SessionStore{Store: failingListStore{beads.NewMemStore()}}); err == nil {
+		t.Fatal("a failed read reported no error")
+	}
+}
+
+// TestHasSubmittedOpsNilStore proves a nil or typed-nil store is an error,
+// never a panic or "no ops".
+func TestHasSubmittedOpsNilStore(t *testing.T) {
+	if _, err := HasSubmittedOps(beads.SessionStore{}); err == nil {
+		t.Fatal("a nil store reported no error")
+	}
+	var nilMem *beads.MemStore
+	if _, err := HasSubmittedOps(beads.SessionStore{Store: nilMem}); err == nil {
+		t.Fatal("a typed nil store reported no error")
+	}
+}
+
+type failingListStore struct{ beads.Store }
+
+func (failingListStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, errors.New("dolt down")
+}
