@@ -54,9 +54,21 @@ evidence from tests, source, an issue, or a commit.
   allocation. Keep the fresh read and write inside that lock; provider calls
   and retired-session cleanup stay outside. This is an in-process fence, not
   protection against arbitrary external bead writers.
+- The mutation lock's acquire can be timed. `WithSessionMutationLockContext`
+  tries the lock first, then waits no longer than its context; a wait that
+  ends with the lock still held returns `ErrSessionMutationBusy` (wrapping the
+  context's error). A busy result means `fn` never ran and never will, so the
+  caller may retry the whole operation. The context bounds only the wait, not
+  `fn`. `CommitStartedIfCurrent`, `WithPendingCreateRollback`,
+  `RollbackPendingCreateAtomically` (and the `...Under` variants of the first
+  and third) take it as their first parameter. A `Manager` or `Store` method that takes a lock-bounding
+  `ctx` puts it first and says in its doc comment what it bounds; do not add a
+  parallel `...Ctx` variant.
 - `testing/synctest.Wait` does not consider `sync.Mutex.Lock` durably blocked.
   A test that pauses a lock holder on a channel and waits for a competing
-  mutex waiter will hang. `store_start_fence_test.go` checks the shared lock
+  mutex waiter will hang. The context-aware waiter is durably blocked, since
+  the lock is a channel, so it can be driven under `synctest` with a
+  `context.WithTimeout`. `store_start_fence_test.go` checks the shared lock
   directly at both read and write boundaries instead of relying on timing.
 - `awake` is not proof that creation completed: the reconciler can heal a
   running, still-claimed creation to awake before provider Start returns

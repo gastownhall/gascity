@@ -2136,11 +2136,17 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			return nil
 		}
 		rollbacksThisTick++
-		var batch map[string]string
-		if clearClaim {
-			batch = rollbackPendingCreateClearingClaim(info, sessFront, clk.Now().UTC(), stderr)
-		} else {
-			batch = rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+		// The tick waits only a bounded time for the session's mutation lock; a
+		// busy lock leaves the store untouched and the rollback to the next tick.
+		lockCtx, cancelLock := tickSessionLockContext(ctx)
+		defer cancelLock()
+		batch, busy := rollbackPendingCreateReportingBusy(lockCtx, info, sessFront, clk.Now().UTC(), clearClaim, stderr)
+		if busy {
+			fmt.Fprintf(stderr, "session reconciler: pending-create rollback of %s skipped: session mutation lock busy\n", name) //nolint:errcheck
+			if trace != nil {
+				trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRollbackLockBusy, TraceOutcomeSkipped, templateName, name, nil)
+			}
+			return nil
 		}
 		if batch == nil {
 			fmt.Fprintf(stderr, "session reconciler: pending-create rollback not applied for %s: snapshot superseded, already closed, or store failure\n", name) //nolint:errcheck

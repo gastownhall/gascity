@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -178,7 +179,7 @@ func rollbackPendingCreateConfirmed(expected, current sessionpkg.Info, sessFront
 	if sessFront == nil || strings.TrimSpace(current.ID) == "" {
 		return pendingCreateRollbackFailed
 	}
-	if batch := rollbackPendingCreate(current, sessFront, now, stderr); batch != nil {
+	if batch := rollbackPendingCreate(context.Background(), current, sessFront, now, stderr); batch != nil {
 		return pendingCreateRolledBack
 	}
 	reread, _, err := sessFront.GetPersistedResponse(current.ID)

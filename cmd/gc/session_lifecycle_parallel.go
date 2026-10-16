@@ -1011,6 +1011,40 @@ func prepareStartCandidate(
 	return prepareStartCandidateForCity(candidate, "", "", cfg, nil, store, clk, io.Discard, nil, dispatchOptionSources{})
 }
 
+// tickSessionLockWait bounds how long the tick goroutine waits for one
+// session's mutation lock at the start gate, the pending-create rollback and
+// pending-create recovery. A session whose lock is still held after it is
+// skipped for this tick and retried on the next, so one slow holder cannot
+// stall the loop for every other session.
+const tickSessionLockWait = 250 * time.Millisecond
+
+// tickSessionLockContext returns the context that bounds one tick-side wait
+// for a session mutation lock: ctx cut off after tickSessionLockWait. A nil ctx
+// is treated as context.Background().
+func tickSessionLockContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	return context.WithTimeout(ctx, tickSessionLockWait)
+}
+
+// startSessionLockBusy reports whether candidate's session mutation lock is
+// still held by another goroutine after tickSessionLockWait. It decides only
+// that: a free lock is released again at once, so the answer is a hint, and
+// prepare's own bounded acquire stays the authority. Candidates without a
+// session bead or front door are never busy, and an acquire failing for any
+// other reason is left for prepare to report.
+func startSessionLockBusy(ctx context.Context, candidate startCandidate, sessFront *sessionpkg.Store) bool {
+	id := strings.TrimSpace(candidate.info.ID)
+	if id == "" || sessFront == nil {
+		return false
+	}
+	lockCtx, cancel := tickSessionLockContext(ctx)
+	defer cancel()
+	err := sessionpkg.WithSessionMutationLockContext(lockCtx, id, func() error { return nil })
+	return errors.Is(err, sessionpkg.ErrSessionMutationBusy)
+}
+
 // prepareStartCandidateForCity prepares a start for candidate within the city at
 // cityPath. workDirResolver resolves the task work dir; dispatchSources read the
 // session's trigger bead for opt_* pins when it holds no claimed work, and the
@@ -1033,7 +1067,11 @@ func prepareStartCandidateForCity(
 ) (*preparedStart, error) {
 	var undo preWakeUndo
 	if id := strings.TrimSpace(candidate.info.ID); id != "" && store != nil {
-		if err := sessionpkg.WithSessionMutationLock(id, func() error {
+		// The tick runs this, so the wait for the lock is bounded; a busy lock
+		// returns an error wrapping ErrSessionMutationBusy with nothing written.
+		lockCtx, cancelLock := tickSessionLockContext(context.Background())
+		defer cancelLock()
+		if err := sessionpkg.WithSessionMutationLockContext(lockCtx, id, func() error {
 			sessFront := sessionFrontDoor(store)
 			// GENUINE store re-Get (WI-6 R4): the whole bead is reloaded through the
 			// session front door AS Info (template_overrides can change out of band,
@@ -2267,7 +2305,7 @@ func commitAsyncStartResultWithContext(
 		if refreshed.err == nil && shouldRollbackPendingCreateInfo(refreshed.prepared.candidate.info) &&
 			releaseRowOwnedRuntime(refreshed.prepared.candidate.info, sp, stderr, nil, nil) {
 			stopStaleAsyncStartRuntime(refreshed, sp, stderr)
-			rollbackPendingCreate(refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
+			rollbackPendingCreate(context.Background(), refreshed.prepared.candidate.info, sessFront, clk.Now().UTC(), stderr)
 		}
 		logLifecycleOutcome(stderr, "start", wave, name, template, "context_canceled", refreshed.started, time.Now(), ctx.Err(), refreshed.phases)
 		return false
@@ -2975,7 +3013,7 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	applied, err := sessFront.CommitStartedIfCurrentUnder(context.Background(), info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator's suspend landed while the start ran (CONTRACT S1
 		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
@@ -3306,7 +3344,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// preceding it: the mark clears pending_create_claim, which the rollback
 			// fence (PendingCreateLease.CanRollback) requires, so a mark written
 			// first turns the rollback into a silent no-op (ga-z8yi2j).
-			rollbackPendingCreateMarkingTerminal(info, sessFront, clk.Now().UTC(), reason, stderr)
+			rollbackPendingCreateMarkingTerminal(context.Background(), info, sessFront, clk.Now().UTC(), reason, stderr)
 		} else if _, markErr := markProviderTerminalError(result.prepared.candidate.info, sessFront, clk, reason); markErr != nil {
 			fmt.Fprintf(stderr, "session reconciler: marking terminal provider error for %s: %v\n", name, markErr) //nolint:errcheck
 		}
@@ -3380,7 +3418,7 @@ func commitStartFailure(result startResult, sessFront *sessionpkg.Store, clk clo
 			// must clear for a fresh attempt next tick, matching base's fast
 			// recovery — see TestGastown_Reconciler_SessionRestartsAfterExit.
 			if releaseRowOwnedRuntime(info, result.provider, stderr, nil, nil) {
-				rollbackPendingCreate(info, sessFront, clk.Now().UTC(), stderr)
+				rollbackPendingCreate(context.Background(), info, sessFront, clk.Now().UTC(), stderr)
 			}
 		} else {
 			// The preserved row keeps its claim and identity, not this
@@ -3572,7 +3610,21 @@ func recoverRunningPendingCreate(
 		// session in, as every confirmed start does.
 		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
 	})
-	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	lockCtx, cancelLock := tickSessionLockContext(context.Background())
+	defer cancelLock()
+	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(lockCtx, prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	if errors.Is(err, sessionpkg.ErrSessionMutationBusy) {
+		// Another goroutine holds the session's mutation lock past the tick's
+		// bounded wait, and the commit did not run. The recovery is idempotent and
+		// retried next tick, so nothing is folded here: the start-prep residue
+		// buildPreparedStart already persisted (an instance_token mint, a
+		// stale-resume clear) reaches the snapshot on that retry.
+		fmt.Fprintf(stderr, "session reconciler: pending-create recovery of %s skipped: session mutation lock busy\n", tp.SessionName) //nolint:errcheck
+		if trace != nil {
+			trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonPendingCreateRecoveryLockBusy, TraceOutcomeSkipped, tp.TemplateName, tp.SessionName, nil)
+		}
+		return false, nil
+	}
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator suspended the row before its start committed (CONTRACT
 		// S1 v5.6, §12.2 row 65): the heal never stamps the start over the
@@ -3858,11 +3910,14 @@ func unattributedStartError(err error, identity pendingCreateIdentity) error {
 // claim cleared before the fenced read makes PendingCreateLease.CanRollback
 // refuse the rollback (ga-z8yi2j).
 //
-// It returns the applied clears and true on success, or (nil, false) when the
-// snapshot was superseded, the bead was already closed, or a store operation
-// failed. The session_name clear is left out of the returned clears when the
-// row was reopened before it could land.
-func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, commitMsg string, preClose map[string]string, stderr io.Writer) (map[string]string, bool) {
+// ctx bounds the wait for the session's mutation lock. It returns the applied
+// clears and ok=true on success, or (nil, false, false) when the snapshot was
+// superseded, the bead was already closed, or a store operation failed. When
+// the lock stayed held past ctx it returns (nil, false, true) with nothing read
+// or written, so the caller can retry the whole rollback. The session_name clear
+// is left out of the returned clears when the row was reopened before it could
+// land.
+func rollbackPendingCreateClears(ctx context.Context, info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, commitMsg string, preClose map[string]string, stderr io.Writer) (clears map[string]string, ok, busy bool) {
 	store := sessFront.Store()
 	preCloseClears := map[string]string{"last_woke_at": ""}
 	for k, v := range preClose {
@@ -3889,14 +3944,17 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 	for k, v := range failedCreateClosePatch(info, now) {
 		closePatch[k] = v
 	}
-	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(info, closePatch, postCloseClears)
+	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(ctx, info, closePatch, postCloseClears)
+	if errors.Is(txErr, sessionpkg.ErrSessionMutationBusy) {
+		return nil, false, true
+	}
 	if !applied && beads.IsConditionalWriteUnsupported(txErr) {
 		// No atomic close on this store (BdStore, exec, plain MemStore, a legacy
 		// sqlite layout), or it refused at call time and wrote nothing: keep the
 		// historical Tx. Tx has no read operation, so hold the same per-session
 		// lock used by start completion and preWakeCommit across the fresh read
 		// AND the transaction.
-		applied, txErr = sessFront.WithPendingCreateRollback(info, func() error {
+		applied, txErr = sessFront.WithPendingCreateRollback(ctx, info, func() error {
 			return store.Tx(commitMsg, func(tx beads.Tx) error {
 				if err := tx.SetMetadataBatch(info.ID, preCloseClears); err != nil {
 					return err
@@ -3911,6 +3969,9 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 			})
 		})
 		postClosed = applied && txErr == nil
+		if errors.Is(txErr, sessionpkg.ErrSessionMutationBusy) {
+			return nil, false, true
+		}
 	}
 	if txErr != nil {
 		fmt.Fprintf(stderr, "session beads: %s: %v\n", commitMsg, txErr) //nolint:errcheck
@@ -3927,10 +3988,10 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 		if snapshot, err := store.Get(info.ID); err == nil && snapshot.Status == "closed" {
 			cancelStateAssignedToRetiredSessionBead(store.Store, info.ID, now, stderr)
 		}
-		return nil, false
+		return nil, false, false
 	}
 	if !applied {
-		return nil, false
+		return nil, false, false
 	}
 	cancelStateAssignedToRetiredSessionBead(store.Store, info.ID, now, stderr)
 	// Mirror the union of both clears onto the typed snapshot. The post-close
@@ -3941,7 +4002,7 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 			batch[k] = v
 		}
 	}
-	return batch, true
+	return batch, true, false
 }
 
 // startupHealthEpisodeKey is the key a session's startup-health episode
@@ -4405,16 +4466,38 @@ func staleAsyncStartRuntimeAttribution(info sessionpkg.Info, name string, sp run
 // STORE-ONLY (it never sets *session.Status), so the raw bead stays open and the
 // returned batch deliberately carries NO Closed change — matching what a raw
 // re-projection of *session sees. The Closed reconstruction is the separate
-// Get-cutover concern, not a pre-pass fold.
-func rollbackPendingCreate(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
-	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
-		return nil
-	}
-	batch, ok := rollbackPendingCreateClears(info, sessFront, now, "gc: rollback pending-create session "+info.ID, nil, stderr)
-	if !ok {
-		return nil
-	}
+// Get-cutover concern, not a pre-pass fold. ctx bounds the wait for the
+// session's mutation lock; a nil batch means the rollback did not apply.
+func rollbackPendingCreate(ctx context.Context, info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
+	batch, _ := rollbackPendingCreateReportingBusy(ctx, info, sessFront, now, false, stderr)
 	return batch
+}
+
+// rollbackPendingCreateReportingBusy is rollbackPendingCreate, or
+// rollbackPendingCreateClearingClaim when clearClaim is set, and also reports
+// busy=true when ctx ended while another goroutine still held the session's
+// mutation lock. A busy rollback read and wrote nothing, so the caller can
+// retry it on a later tick.
+func rollbackPendingCreateReportingBusy(ctx context.Context, info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, clearClaim bool, stderr io.Writer) (batch map[string]string, busy bool) {
+	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
+		return nil, false
+	}
+	commitMsg := "gc: rollback pending-create session "
+	if clearClaim {
+		commitMsg = "gc: rollback pending-create session clearing claim "
+	}
+	batch, ok, busy := rollbackPendingCreateClears(ctx, info, sessFront, now, commitMsg+info.ID, nil, stderr)
+	if !ok {
+		return nil, busy
+	}
+	if clearClaim {
+		// The store received the failed-create ClosePatch and claim clears via
+		// closeFailedCreateBeadInTx; mirror them onto the snapshot too (still NO
+		// Closed change — the close is store-only).
+		batch = mergeMetadataPatch(batch, sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)))
+		batch = mergeMetadataPatch(batch, map[string]string{"pending_create_claim": "", "pending_create_started_at": ""})
+	}
+	return batch, false
 }
 
 // rollbackPendingCreateMarkingTerminal is rollbackPendingCreate for a start that
@@ -4424,11 +4507,11 @@ func rollbackPendingCreate(info sessionpkg.Info, sessFront *sessionpkg.Store, no
 // close is written (ga-z8yi2j: a mark written before the rollback clears
 // pending_create_claim, which the fence requires, turning the rollback into a
 // silent no-op).
-func rollbackPendingCreateMarkingTerminal(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, reason string, stderr io.Writer) {
+func rollbackPendingCreateMarkingTerminal(ctx context.Context, info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, reason string, stderr io.Writer) {
 	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
 		return
 	}
-	rollbackPendingCreateClears(info, sessFront, now, "gc: rollback pending-create session on terminal provider error "+info.ID, providerTerminalErrorPatch(strings.TrimSpace(reason), now), stderr)
+	rollbackPendingCreateClears(ctx, info, sessFront, now, "gc: rollback pending-create session on terminal provider error "+info.ID, providerTerminalErrorPatch(strings.TrimSpace(reason), now), stderr)
 }
 
 // rollbackPendingCreateClearingClaim is rollbackPendingCreate plus the
@@ -4439,19 +4522,8 @@ func rollbackPendingCreateMarkingTerminal(info sessionpkg.Info, sessFront *sessi
 // boundary (one fenced atomic close, or one Tx), so the pre-close clears and
 // the failed-create close land or fail together (ga-igcny0.1.1) instead of
 // leaving an open creating bead with its runtime name already cleared.
-func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
-	if strings.TrimSpace(info.ID) == "" || sessFront == nil {
-		return nil
-	}
-	batch, ok := rollbackPendingCreateClears(info, sessFront, now, "gc: rollback pending-create session clearing claim "+info.ID, nil, stderr)
-	if !ok {
-		return nil
-	}
-	// The store received the failed-create ClosePatch and claim clears via
-	// closeFailedCreateBeadInTx; mirror them onto the snapshot too (still NO
-	// Closed change — the close is store-only).
-	batch = mergeMetadataPatch(batch, sessionpkg.ClosePatch(now.UTC(), string(sessionpkg.StateFailedCreate)))
-	batch = mergeMetadataPatch(batch, map[string]string{"pending_create_claim": "", "pending_create_started_at": ""})
+func rollbackPendingCreateClearingClaim(ctx context.Context, info sessionpkg.Info, sessFront *sessionpkg.Store, now time.Time, stderr io.Writer) map[string]string {
+	batch, _ := rollbackPendingCreateReportingBusy(ctx, info, sessFront, now, true, stderr)
 	return batch
 }
 
@@ -4612,6 +4684,16 @@ func executePlannedStartsTraced(
 					}
 					continue
 				}
+				// A session another goroutine holds the mutation lock of is
+				// skipped here, ahead of every slot, ticket, lease and breaker
+				// restart, so the skip writes nothing and the next pass retries.
+				if startSessionLockBusy(ctx, candidate, sessFront) {
+					logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), "skipped_session_busy", time.Time{}, time.Time{}, nil)
+					if trace != nil {
+						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionLockBusy, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), nil)
+					}
+					continue
+				}
 				var release func()
 				var done func()
 				if startOpts.async {
@@ -4751,6 +4833,19 @@ func executePlannedStartsTraced(
 				}
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
 				if err != nil {
+					// The session's lock was taken between the gate and prepare's
+					// own acquire: nothing was read or written, so there is no
+					// in-flight marker to clear and no wake failure to record. The
+					// breaker restart counted above stays counted (a rare, stated
+					// limit); the next pass retries.
+					if errors.Is(err, sessionpkg.ErrSessionMutationBusy) {
+						fmt.Fprintf(stderr, "session reconciler: pre-wake %s: skipped: session mutation lock busy\n", candidate.name()) //nolint:errcheck
+						drop("skipped_session_busy", nil)
+						if trace != nil {
+							trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonSessionLockBusy, TraceOutcomeSkipped, candidate.tp.TemplateName, candidate.name(), nil)
+						}
+						continue
+					}
 					// A PreWake refused because the row moved (or the lease was
 					// taken over) is no restart and leaves the row's in-flight
 					// marker to whoever moved it; the next pass decides again.

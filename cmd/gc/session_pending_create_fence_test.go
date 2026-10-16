@@ -65,10 +65,10 @@ func TestRollbackPendingCreateRejectsStaleSnapshot(t *testing.T) {
 				}
 			}
 			before, _ := store.Get(info.ID)
-			for _, rollback := range []func(sessionpkg.Info, *sessionpkg.Store, time.Time, io.Writer) map[string]string{
+			for _, rollback := range []func(context.Context, sessionpkg.Info, *sessionpkg.Store, time.Time, io.Writer) map[string]string{
 				rollbackPendingCreate, rollbackPendingCreateClearingClaim,
 			} {
-				if fold := rollback(info, sessionFrontDoor(store), clk.Now(), io.Discard); fold != nil {
+				if fold := rollback(context.Background(), info, sessionFrontDoor(store), clk.Now(), io.Discard); fold != nil {
 					t.Error("stale rollback returned a mutation fold")
 				}
 			}
@@ -84,7 +84,7 @@ func TestStartCompletionRejectsRolledBackSnapshot(t *testing.T) {
 	store := beads.NewMemStore()
 	result := pendingCreateFenceFixture(t, store)
 	clk := &clock.Fake{Time: time.Now()}
-	if rollbackPendingCreate(result.prepared.candidate.info, sessionFrontDoor(store), clk.Now(), io.Discard) == nil {
+	if rollbackPendingCreate(context.Background(), result.prepared.candidate.info, sessionFrontDoor(store), clk.Now(), io.Discard) == nil {
 		t.Fatal("pending creation was not rolled back")
 	}
 	before, _ := store.Get(result.prepared.candidate.info.ID)
@@ -181,7 +181,7 @@ func TestAsyncStartFinalCommitStaleCleanup(t *testing.T) {
 				if scenario == "persistence-error" {
 					return
 				}
-				if rollbackPendingCreate(info, sessionFrontDoor(store), clk.Now(), io.Discard) == nil {
+				if rollbackPendingCreate(context.Background(), info, sessionFrontDoor(store), clk.Now(), io.Discard) == nil {
 					t.Fatal("rollback at final commit boundary did not apply")
 				}
 				switch scenario {
