@@ -7,8 +7,11 @@ import (
 	"os"
 	"os/exec"
 	"regexp"
+	"runtime"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/searchpath"
 )
 
 // Output caps and concurrency, mirroring the BFF's exec-core.ts contract.
@@ -167,6 +170,16 @@ func (b *cappedBuffer) String() string { return b.buf.String() }
 // The GIT_* settings neutralize attacker-authored repo config in a probed cwd
 // — no transport protocols and no terminal credential prompt — so a hostile
 // repo cannot drive an out-of-band helper that inherits this environment.
+//
+// The default PATH is expanded through internal/searchpath, the same helper
+// gc init's provider-readiness probes use (gastownhall/gascity#3001,
+// #3962), so this sandbox finds a package-manager-installed tool the same
+// way those probes do: without it, the hardcoded /usr/local/bin-only
+// default left Apple Silicon's Homebrew prefix (/opt/homebrew/bin) off the
+// subprocess's PATH, so execBdPing's `bd ping` could not find `dolt` and the
+// dashboard reported a healthy, running Dolt-backed rig as disconnected
+// (gastownhall/gascity#7979). ADMIN_PATH, when an operator sets it, is still
+// used as-is and is not expanded further.
 func cleanEnv() []string {
 	home := os.Getenv("HOME")
 	if home == "" {
@@ -174,7 +187,7 @@ func cleanEnv() []string {
 	}
 	path := os.Getenv("ADMIN_PATH")
 	if path == "" {
-		path = home + "/.local/bin:/usr/local/bin:/usr/bin:/bin"
+		path = searchpath.ExpandPath(home, runtime.GOOS, "/usr/local/bin:/usr/bin:/bin")
 	}
 	return []string{
 		"PATH=" + path,
