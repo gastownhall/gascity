@@ -1,6 +1,8 @@
 package rollout
 
 import (
+	"os"
+	"regexp"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -54,9 +56,28 @@ func TestOpsGatesSpecs(t *testing.T) {
 		if s.VersionAnchor != "internal/opjournal/legacyop" {
 			t.Errorf("%s: VersionAnchor = %q, want internal/opjournal/legacyop", g.key, s.VersionAnchor)
 		}
+		if !beadIDShape.MatchString(s.Owner.Bead) {
+			t.Errorf("%s: Owner.Bead = %q, want a tracker bead id (ga-...), not a plan label", g.key, s.Owner.Bead)
+		}
 	}
 	if envOpsContent != "GC_OPS_CONTENT" || envOpsControl != "GC_OPS_CONTROL" || envOpsLifecycle != "GC_OPS_LIFECYCLE" {
 		t.Errorf("env names = %q, %q, %q", envOpsContent, envOpsControl, envOpsLifecycle)
+	}
+}
+
+// beadIDShape is the shape of a tracker bead id.
+var beadIDShape = regexp.MustCompile(`^ga-[a-z0-9]+$`)
+
+// TestOpsGatesVersionAnchorPresent ties the ops gates' VersionAnchor to the
+// package it names: legacyop is deleted with the last ops gate (OJ-22), so
+// once it is gone these gates are dead and must be removed too.
+func TestOpsGatesVersionAnchorPresent(t *testing.T) {
+	t.Parallel()
+	for _, g := range opsGates() {
+		anchor := specByKey(g.key).VersionAnchor
+		if _, err := os.Stat("../../" + anchor + "/doc.go"); err != nil {
+			t.Errorf("%s: VersionAnchor %s is gone (%v); the legacy executors it gates were deleted, so remove the %s gate", g.key, anchor, err, g.key)
+		}
 	}
 }
 

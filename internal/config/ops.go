@@ -20,24 +20,25 @@ import (
 // name in prompt-rendering code, and a bare Content or Lifecycle would collide
 // with unrelated identifiers there.
 type OpsConfig struct {
-	// ContentMode records message deliveries (session submit and messages, nudge,
-	// mail notify) as message ops. "off" (the shipped default; all three gates
-	// ship off), "auto" records where the store can and degrades loudly where
-	// it cannot, and "require" refuses a request it cannot record before any
-	// effect (experimental until the X12 harness passes). A change takes
-	// effect at the next process start.
+	// Records message deliveries (session submit and messages, nudge, mail
+	// notify) as message ops. "off" is the shipped default for all three
+	// gates. "auto" records where the store can and degrades loudly where it
+	// cannot. "require" refuses a request it cannot record before any effect.
+	// Experimental: each mode takes effect as each request surface gains op
+	// recording. A change takes effect at the next process start.
 	ContentMode string `toml:"content,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
-	// ControlMode records interrupt (stop) and respond requests as ops. "off"
-	// (the shipped default), "auto" records where the store can and degrades
-	// loudly where it cannot, and "require" refuses a request it cannot record
-	// before any effect (experimental until the X12 harness passes). A change
-	// takes effect at the next process start.
+	// Records interrupt (stop) and respond requests as ops. "off" is the
+	// shipped default. "auto" records where the store can and degrades loudly
+	// where it cannot. "require" refuses a request it cannot record before any
+	// effect. Experimental: each mode takes effect as each request surface
+	// gains op recording. A change takes effect at the next process start.
 	ControlMode string `toml:"control,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
-	// LifecycleMode records wake, suspend, reset (restart), kill and close
-	// requests as ops. "off" (the shipped default), "auto" records where the
-	// store can and degrades loudly where it cannot, and "require" refuses a
-	// request it cannot record before any effect (experimental until the X12
-	// harness passes). A change takes effect at the next process start.
+	// Records wake, suspend, reset (restart), kill and close requests as ops.
+	// "off" is the shipped default. "auto" records where the store can and
+	// degrades loudly where it cannot. "require" refuses a request it cannot
+	// record before any effect. Experimental: each mode takes effect as each
+	// request surface gains op recording. A change takes effect at the next
+	// process start.
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
 }
 
