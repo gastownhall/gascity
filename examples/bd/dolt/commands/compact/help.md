@@ -43,7 +43,18 @@ server's own Unix socket is skipped, though its database may still live here.
 
 ## History protection
 
-Compact only rewrites history that this city grew.
+Compact protects history that may be shared through a Dolt remote, and history
+from before it first saw the database. The protection is by position, not by
+author: every commit after the watermark is squashed, whichever city wrote it.
+
+- **Only loopback servers are compacted.** For a non-loopback `GC_DOLT_HOST`
+  (a remote or cloud-hosted server), compact exits 0 without connecting: no
+  flatten, no GC, no watermark. Its history grows without bound.
+- **A database several cities share over loopback is squashed for all of
+  them.** bd commits carry no per-city author, so compact cannot tell the
+  cities' commits apart. Disable `mol-dog-compactor` on those cities if that
+  is not wanted. See "Shared and non-local databases" in
+  `docs/troubleshooting/dolt-bloat-recovery.md` (#7896).
 
 - **Databases with a remote are never flattened.** Any configured Dolt remote
   (a team remote, bd's `refs/dolt/data`, a federated city) means other clones

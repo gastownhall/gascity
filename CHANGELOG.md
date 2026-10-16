@@ -351,6 +351,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The Dolt compactor docs no longer claim it only rewrites history this
+  city grew.** The `gc-compact-base` watermark is a position, not an author:
+  a database several cities write to over loopback is flattened for all of
+  them, and a non-loopback (for example cloud-hosted) Dolt host is skipped
+  with exit 0, so its history is never compacted. "Shared and non-local
+  databases" in `docs/troubleshooting/dolt-bloat-recovery.md` covers disabling
+  `mol-dog-compactor` on sharing cities and a stop-everything `gc bd compact`
+  procedure (#7896).
+
 - **The core `orphan-sweep` order no longer releases claims it cannot vouch
   for.** On a rig store shared with another city it used to release that
   city's live claims as dead, in every shape they take: `<rig>/<name>` crew,

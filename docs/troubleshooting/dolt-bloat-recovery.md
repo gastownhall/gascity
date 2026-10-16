@@ -214,8 +214,14 @@ usable later; `.no-sync` states that it never will.
 
 ## History protection
 
-`gc dolt compact` only squashes history that this city grew. Two rules
-enforce this.
+`gc dolt compact` protects two kinds of history: history that may be shared
+with other clones through a Dolt remote, and history that existed before
+compact first saw the database. Two rules enforce this.
+
+The protection is by position in the history, not by author. Every commit
+after the watermark is squashed, whoever wrote it, so a database that several
+cities write to needs extra care. See
+[Shared and non-local databases](#shared-and-non-local-databases).
 
 ### Databases with remotes
 
@@ -327,6 +333,77 @@ limited to what the source city's compactor would have squashed anyway. To
 keep it, create the tag at HEAD before the first compact run:
 `CALL DOLT_TAG('gc-compact-base', 'HEAD')`.
 
+## Shared and non-local databases
+
+The compactor only acts on a Dolt server it reaches over loopback
+(`localhost`, `127.x.x.x`, `::1`). What it does to a database therefore depends
+on how each city reaches that database:
+
+| How a city reaches the database | What its compactor does |
+|---|---|
+| Its own managed server, written only by this city | Flattens commits after the watermark, then runs a full GC |
+| Loopback, but other cities write to the same database (shared host, tunnel, local proxy) | Flattens **every** city's commits after the watermark into one commit |
+| A non-loopback host (a remote or cloud-hosted Dolt server) | Nothing: no flatten, no GC, no watermark |
+| Loopback, and the database has any Dolt remote | Bare `CALL DOLT_GC()` only, unless `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` |
+
+bd writes commits under the same default author (`beads`) in every city, so
+nothing in the history says which city wrote a commit. The compactor cannot
+leave another city's commits alone.
+
+### A database several cities share over loopback
+
+If you don't want one city to squash the others' history, disable the
+compactor on every city that reaches the shared database over loopback:
+
+```toml
+# city.toml
+[[orders.overrides]]
+name = "mol-dog-compactor"
+enabled = false
+```
+
+Cities that reach the database only over a non-loopback host need no change;
+their compactor already skips it.
+
+### A non-loopback endpoint grows without bound
+
+For a non-loopback host, `gc dolt compact` logs a
+`compact: GC_DOLT_HOST=<host> is not a local ... — skip` line and exits 0
+without connecting, so the order run reports success. `gc doctor`'s
+`dolt-noms-size` check also skips external endpoints. Nothing warns you while
+the history grows.
+
+Every bd write is a Dolt commit, and garbage collection cannot reclaim history
+that is still reachable. In a 2,000-commit test, the database was over 70
+times larger after `dolt gc --full` than after a flatten plus GC.
+`[maintenance.dolt]` runs a plain `CALL DOLT_GC()`, which does not shorten
+history either. Automatic compaction for shared and cloud-hosted databases is
+tracked in [#7896](https://github.com/gastownhall/gascity/issues/7896).
+
+### Bound history on a shared or non-local database by hand
+
+`bd compact` squashes commits older than a retention window into one commit
+and keeps the recent ones. It rebuilds the branch from a snapshot of the log
+and then hard-resets `main` to the result, with no protection against
+concurrent writers. A write that lands while it runs is lost, so every city
+must be stopped first.
+
+1. Agree on a retention window (`<N>` days) with every city that writes to the
+   database.
+2. Run `gc stop` in every city that shares the database.
+3. From one city, preview, then compact:
+
+   ```bash
+   gc bd compact --days <N> --dry-run
+   gc bd compact --days <N> --force
+   ```
+
+4. Restart every city with `gc start`.
+
+`bd compact` squashes everything older than the window, including history from
+before the `gc-compact-base` watermark. If the database has a Dolt remote,
+every other clone must re-clone or hard-reset afterward.
+
 ## Expected Outcome
 
 DoltHub's archive format typically delivers ~30% compression on top of
@@ -350,6 +427,9 @@ If GC finishes but the size barely moves, the chunks are nearly all live
   `gc-compact-base` watermark cross the threshold, and then gets
   `CALL DOLT_GC('--full')`. A database with remotes gets a bare
   `CALL DOLT_GC()` and is never flattened (see **History protection** above).
+  A database on a non-loopback host is skipped entirely, and a database that
+  several cities share needs care (see **Shared and non-local databases**
+  above).
   Under the `GC_DOLT_COMPACT_ALLOW_FEDERATED=1` opt-in, compaction fetches the
   remote, flattens, and force-pushes the rewritten branch. Dolt does not
   support an atomic `DOLT_PUSH('--force-with-lease', ...)`, so the script

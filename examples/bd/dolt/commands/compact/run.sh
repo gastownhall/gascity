@@ -61,8 +61,12 @@
 # no remote phase at all: it is never fetched or pushed, never gets a
 # pending-push marker, and an existing one is cleared so it cannot block flatten.
 #
-# History protection (#5958). The compactor only rewrites history it can show
-# this city grew:
+# History protection (#5958). The compactor protects history that may be
+# shared through a Dolt remote and history from before it first saw the
+# database. The watermark is a position, not an author: every commit after it
+# is squashed, whichever city wrote it, so a database several cities reach over
+# loopback is flattened for all of them. Non-loopback hosts are skipped before
+# connecting (no flatten, no GC, no watermark); see #7896.
 #   * Shared-history guard: a database with ANY configured Dolt remote may share
 #     its history with other clones (a team remote, bd's refs/dolt/data, a
 #     federated city), so it is never flattened or force-pushed. It gets a bare
@@ -2763,10 +2767,11 @@ defer_writer_race_after_flatten() {
 
 # --- History protection (#5958) ---------------------------------------------
 #
-# The compactor may only squash history this city grew. The boundary is the
-# Dolt tag gc-compact-base, stored IN the database: it survives runtime-state
-# wipes, travels with dolt backups, and keeps the protected history reachable
-# through DOLT_GC --full. Branch pushes never carry it.
+# The compactor may only squash history after its watermark, the Dolt tag
+# gc-compact-base. The watermark is a position, not an author: commits from any
+# writer after it are squashed. The tag is stored IN the database: it survives
+# runtime-state wipes, travels with dolt backups, and keeps the protected
+# history reachable through DOLT_GC --full. Branch pushes never carry it.
 compact_base_tag="gc-compact-base"
 compact_flatten_message="compaction: flatten history"
 
@@ -3300,7 +3305,7 @@ flatten_database() {
   fi
 
   # Provenance watermark: stamped on first sight at any commit count, so the
-  # threshold below only ever counts history this city grew after the stamp.
+  # threshold below only ever counts history written after the stamp.
   resolve_compact_base "$db" "$root" || return 1
   flatten_base="$compact_base"
   if [ "$flatten_base" = "$root" ]; then
