@@ -585,8 +585,8 @@ func TestInventoryEnvReadCoversAcpAndSubprocess(t *testing.T) {
 }
 
 // Kills: an ack key read creeping back (v5 O3). A sidecar read asks for the
-// identity keys only (twice, for a consistent snapshot), and a batched read
-// makes no per-key call.
+// identity keys only (twice, for a consistent snapshot), then the restart
+// marker's fallback (C7a-2b), and a batched read makes no per-key call.
 func TestInventoryEnvReadReadsNoAck(t *testing.T) {
 	tmux := newScriptedInventoryProvider("gc-t")
 	acp := sidecarProvider([]string{"gc-c"}, nil)
@@ -600,7 +600,7 @@ func TestInventoryEnvReadReadsNoAck(t *testing.T) {
 		}
 	}
 	once := []string{"GC_SESSION_ID", "GC_RUNTIME_EPOCH", "GC_INSTANCE_TOKEN", "GT_PROCESS_NAMES"}
-	if want := append(append([]string(nil), once...), once...); !reflect.DeepEqual(keys, want) {
+	if want := append(append(append([]string(nil), once...), once...), "GC_RESTART_REQUESTED"); !reflect.DeepEqual(keys, want) {
 		t.Fatalf("sidecar keys read = %q, want %q", keys, want)
 	}
 	if n := tmux.CountCalls("GetMeta", "gc-t"); n != 0 || tmux.totalEnvCalls() != 1 {

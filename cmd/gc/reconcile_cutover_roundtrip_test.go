@@ -1,6 +1,9 @@
 package main
 
 import (
+	"errors"
+	"fmt"
+	"io"
 	"maps"
 	"slices"
 	"strings"
@@ -8,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -225,6 +229,76 @@ func TestRollbackHoldsAV2SignaledStopForAnAttachedClient(t *testing.T) {
 			leg.settle(t, c.name+" (legacy after v2)")
 			if _, up := liveRuntimes(leg.sp.simProvider)["s-gc-1"]; up != c.up {
 				t.Errorf("legacy after the rollback: runtime up %t, want %t", up, c.up)
+			}
+		})
+	}
+}
+
+// attachProbe is a fake whose attach probe answers attached, or errs; its
+// IsRunning reads stale (a tmux state cache past its TTL), and its server
+// may confirm dead.
+type attachProbe struct {
+	*runtime.Fake
+	attached bool
+	err      error
+	dead     bool
+}
+
+func (p attachProbe) IsAttachedWithError(string) (bool, error) { return p.attached, p.err }
+func (attachProbe) IsRunning(string) bool                      { return false }
+func (p attachProbe) ServerConfirmedDead() bool                { return p.dead }
+
+// TestRollbackGuardReadsPresenceFromTheAttachProbe (mc-7i9i7; the #7824 r2
+// and #7858 reviews). Kills the guard holding a gone runtime, and the guard
+// letting a present, attached one go. Presence and attachment come from the
+// error-aware attach probe, never IsRunning, which here reads a stale cache
+// (not running) throughout: a session not found is gone; an unavailable
+// probe with the server confirmed dead (no tmux server left) is gone; one
+// with the server not confirmed dead holds, and so does any other probe
+// error (g5, as v2's L3); an attached client holds; a detached one does
+// not. An ack at the row's generation keeps legacy's stop; one of another
+// incarnation acks nothing of this one's.
+func TestRollbackGuardReadsPresenceFromTheAttachProbe(t *testing.T) {
+	unavailable := fmt.Errorf("probing attachment: tmux server unreachable or empty: %w", runtime.ErrRuntimeUnavailable)
+	notFound := fmt.Errorf("probing attachment: %w", runtime.ErrSessionNotFound)
+	signaled := []string{
+		"state", "draining", "state_reason", session.DrainAckStopPendingReason, "generation", "2", "session_name", "s-gc-1",
+		session.DrainIntentReasonKey, "idle", session.DrainIntentIncarnationKey, "2",
+	}
+	for _, c := range []struct {
+		name     string
+		attached bool
+		err      error
+		dead     bool
+		ack      string // the ack half's incarnation, "" for none
+		held     bool
+	}{
+		{"session not found", false, notFound, false, "", false},
+		{"unavailable, the server confirmed dead", false, unavailable, true, "", false},
+		{"unavailable, the server not confirmed dead", false, unavailable, false, "", true},
+		{"another probe error (g5)", false, errors.New("probe failed"), false, "", true},
+		{"attached, IsRunning stale (the #7858 probe)", true, nil, false, "", true},
+		{"detached", false, nil, false, "", false},
+		{"attached, acked at its generation", true, nil, false, "2", false},
+		{"attached, acked by another incarnation", true, nil, false, "1", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			meta := map[string]string{}
+			for i := 0; i+1 < len(signaled); i += 2 {
+				meta[signaled[i]] = signaled[i+1]
+			}
+			if c.ack != "" {
+				meta[session.DrainAckIncarnationKey] = c.ack
+			}
+			store := beads.NewMemStore()
+			b, err := store.Create(beads.Bead{Title: "gc-1", Type: sessionBeadType, Metadata: meta})
+			if err != nil {
+				t.Fatal(err)
+			}
+			sp := attachProbe{Fake: runtime.NewFake(), attached: c.attached, err: c.err, dead: c.dead}
+			info := session.Info{ID: b.ID, MetadataState: "draining", StateReason: session.DrainAckStopPendingReason, SessionNameMetadata: "s-gc-1"}
+			if held := v2SignaledStopHeldForAttach(store, sp, info, "s-gc-1", io.Discard); held != c.held {
+				t.Errorf("held %t, want %t", held, c.held)
 			}
 		})
 	}

@@ -689,7 +689,7 @@ func runGitIn(t *testing.T, dir string, args ...string) {
 // provider is not bd (file- or exec-backed): gc bd refuses the scope, and the
 // orders declare it skipped without escalating every cooldown.
 func TestMaintenanceOrdersSkipNonBdStoresQuietly(t *testing.T) {
-	for _, script := range []string{"reaper.sh", "jsonl-export.sh"} {
+	for _, script := range []string{"reaper.sh", "jsonl-export.sh", "cross-rig-deps.sh"} {
 		t.Run(script, func(t *testing.T) {
 			f := newScopeFixture(t, "")
 			f.env["FAKE_NOT_BD_SCOPES"] = "city"

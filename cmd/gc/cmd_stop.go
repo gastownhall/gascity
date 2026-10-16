@@ -869,29 +869,56 @@ func teardownServerForStop(sp runtime.Provider, stderr io.Writer, logPrefix stri
 	}
 }
 
+// cityStopMarkAttempts bounds a city-stop mark's fenced write against
+// concurrent writers to the row.
+const cityStopMarkAttempts = 3
+
+// cityStopMark is the city-stop mark decided on a fresh read of the row: only
+// a row still active with no sleep reason is marked.
+func cityStopMark(info session.Info, _ session.PersistedResponse) session.MetadataPatch {
+	if sessionMetadataStateInfo(info) != "active" || strings.TrimSpace(info.SleepReason) != "" {
+		return nil
+	}
+	return session.MetadataPatch{"sleep_reason": string(session.SleepReasonCityStop)}
+}
+
 func markCityStopSessionSleepReason(sessFront *session.Store, stderr io.Writer) {
-	if !sessFront.Backed() {
+	markSessionsCityStop(sessFront, nil, "gc stop", stderr)
+}
+
+// markSessionsCityStop stamps sleep_reason=city-stop on the active sessions
+// that carry no sleep reason, or only on those named in names when names is
+// non-nil. min_active_sessions' floor revival (cityStopPoolBeads) wakes
+// exactly the asleep city-stop pool seats, so a stop that should hand its
+// floor back marks it. Each mark is decided again on a fresh read of the
+// row and fenced on its revision (UpdateMetadataFenced), so an operator's
+// suspend or another sleep that lands after the listing is never written
+// over: the floor revival does not honor a user hold. logPrefix opens the
+// warning lines.
+func markSessionsCityStop(sessFront *session.Store, names map[string]bool, logPrefix string, stderr io.Writer) {
+	if !sessFront.Backed() || names != nil && len(names) == 0 {
 		return
 	}
-	// The label-only, closed-excluded, IsSessionBeadOrRepairable-UNfiltered Info
-	// lister is byte-identical to the former ListByLabel("gc:session") + closed-skip
-	// sweep: it keeps damaged gc:session-labeled beads with a non-"session" type (which
-	// the narrowing Store.List would drop) and reads each row's classifier through the
-	// typed twin (sessionMetadataStateInfo) + the Info.SleepReason mirror.
+	// The label-only, closed-excluded lister reads each row's classifier through
+	// the typed twin (sessionMetadataStateInfo) and the Info.SleepReason mirror.
+	// A gc:session-labeled row that is not a session bead, not even a
+	// repairable one, is skipped: the fenced mark re-reads through the session
+	// front door, which refuses it (ErrSessionNotFound), so it was never marked
+	// and would only warn on every stop.
 	sessions, err := sessFront.ListLabeledSessionInfosUnfiltered()
 	if err != nil {
-		fmt.Fprintf(stderr, "gc stop: marking sessions: %v\n", err) //nolint:errcheck // best-effort warning
+		fmt.Fprintf(stderr, "%s: marking sessions: %v\n", logPrefix, err) //nolint:errcheck // best-effort warning
 		return
 	}
 	for _, info := range sessions {
-		if sessionMetadataStateInfo(info) != "active" {
+		if !session.IsSessionBeadOrRepairableInfo(info) || sessionMetadataStateInfo(info) != "active" || names != nil && !names[strings.TrimSpace(info.SessionName)] {
 			continue
 		}
 		if strings.TrimSpace(info.SleepReason) != "" {
 			continue
 		}
-		if err := sessFront.SetMarker(info.ID, "sleep_reason", string(session.SleepReasonCityStop)); err != nil {
-			fmt.Fprintf(stderr, "gc stop: marking session %s: %v\n", info.ID, err) //nolint:errcheck // best-effort warning
+		if _, err := sessFront.UpdateMetadataFenced(info.ID, cityStopMarkAttempts, cityStopMark); err != nil {
+			fmt.Fprintf(stderr, "%s: marking session %s: %v\n", logPrefix, info.ID, err) //nolint:errcheck // best-effort warning
 		}
 	}
 }

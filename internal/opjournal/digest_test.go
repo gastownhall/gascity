@@ -1,6 +1,7 @@
 package opjournal
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -70,12 +71,69 @@ func TestRequestDigestCoverage(t *testing.T) {
 		"causation":   func(r *Request) { r.Causation = "gc-77" },
 		"correlation": func(r *Request) { r.Correlation = "run-1" },
 		"actor":       func(r *Request) { r.Producer.Actor = ActorAgent },
+		"executor":    func(r *Request) { r.Executor = ExecutorLegacyAPI },
+		"minted key":  func(r *Request) { r.MintedKey = true },
 	}
 	for name, change := range same {
 		r := baseMessage()
 		change(&r)
 		if digestOf(t, r) != base {
 			t.Errorf("changing %s changed the digest", name)
+		}
+	}
+}
+
+// The deliver-now target is digest-covered, and absent it leaves a now
+// message's digest where it was.
+func TestRequestDigestCoversTheNowTarget(t *testing.T) {
+	now := baseMessage()
+	now.Policy.Message.When = WhenNow
+	base := digestOf(t, now)
+	if base == digestOf(t, baseMessage()) {
+		t.Fatal("when: now did not change the digest")
+	}
+	gen := now
+	gen.Policy.Message.NowGeneration = 3
+	turn := gen
+	turn.Policy.Message.NowTurn = "t1"
+	seen := map[string]bool{base: true}
+	for name, r := range map[string]Request{"now_gen": gen, "now_turn": turn} {
+		d := digestOf(t, r)
+		if seen[d] {
+			t.Errorf("%s did not change the digest", name)
+		}
+		seen[d] = true
+	}
+}
+
+// NowGeneration and NowTurn are valid only on a when: now message, the
+// generation is >= 1 when set, and a turn needs one.
+func TestNowTargetValidation(t *testing.T) {
+	spec, _ := Lookup(KindMessage)
+	at := time.Date(2026, 10, 13, 12, 0, 0, 0, time.UTC)
+	for name, m := range map[string]MessagePolicy{
+		"now_gen on boundary":      {When: WhenBoundary, NowGeneration: 3},
+		"now_turn on boundary":     {When: WhenBoundary, NowGeneration: 3, NowTurn: "t1"},
+		"now_gen on interrupt":     {When: WhenInterrupt, NowGeneration: 3},
+		"now_turn without now_gen": {When: WhenNow, NowTurn: "t1"},
+		"negative now_gen":         {When: WhenNow, NowGeneration: -1},
+		"now_turn with a space":    {When: WhenNow, NowGeneration: 3, NowTurn: " t1"},
+	} {
+		r := baseMessage()
+		r.Policy.Message = m
+		if _, err := normalizeRequest(r, spec, at); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("%s: normalizeRequest = %v, want ErrInvalidRequest", name, err)
+		}
+	}
+	for name, m := range map[string]MessagePolicy{
+		"no target":       {When: WhenNow},
+		"generation":      {When: WhenNow, NowGeneration: 3},
+		"generation+turn": {When: WhenNow, NowGeneration: 3, NowTurn: "t1"},
+	} {
+		r := baseMessage()
+		r.Policy.Message = m
+		if _, err := normalizeRequest(r, spec, at); err != nil {
+			t.Errorf("%s: normalizeRequest = %v", name, err)
 		}
 	}
 }

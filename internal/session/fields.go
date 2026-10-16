@@ -148,16 +148,14 @@ const (
 )
 
 // Shared sites. The pending ones' beads: mc-cfmtd (S1's PreWake, the C5a1
-// replay), mc-yeiz3 (NEW-1) and mc-fmhlc (NEW-2), both the C5d replay,
-// mc-h28bx (C5a3), mc-7je1h (the SESS-537/538 accrual owner).
+// replay), mc-h28bx (C5a3), mc-7je1h (the SESS-537/538 accrual owner).
 var (
 	legacyPreWake = legacy(srcTransition, "PreWakePatch")
 	legacyCommit  = legacy(srcTransition, "CommitStartedPatch")
 	v2PreWake     = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-cfmtd",
 		"S1's PreWake stamps the incarnation and consumes and clears the row's requests")
-	v2AwakeHeal = v2(srcHeals, "armAwakeHeal").pending("mc-yeiz3",
-		"A6's asleep-to-awake heal clears the wake request (D7 rule 2)")
-	v2SatisfiedWake = Site{Mode: ModeV2, File: srcHeals}.pending("mc-fmhlc", "A6's satisfied-wake clear (D7)")
+	v2AwakeHeal     = v2(srcHeals, "armAwakeHeal")     // A6's asleep-to-awake heal clears the wake request (D7 rule 2)
+	v2SatisfiedWake = v2(srcHeals, "armSatisfiedWake") // A6's satisfied-wake clear (D7 rule 2)
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
 		"S2's adopt commit clears the wake request (D7)")
 	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538), which
@@ -223,7 +221,7 @@ var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2
 	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "idle_claim_nudge_token", "idle_claim_nudge_stalled", "idle_claim_nudge_stalled_token", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 	"continuation_claim_nudge_count", "continuation_claim_nudge_at", "execution_claim_nudge_work", "execution_claim_nudge_root",
-	"execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at", "execution_claim_nudge_stalled",
+	"execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at", "execution_claim_nudge_token", "execution_claim_started", "execution_claim_nudge_stalled",
 	"execution_claim_nudge_stalled_token", "execution_claim_hold"), true, v2(srcHeals, "asleepHealPatch"), "session_key", "started_config_hash",
 	PrimedAtMetadataKey, PrimingAttemptedAtMetadataKey, PromptHashMetadataKey),
 	false, v2("cmd/gc/allocator_create_named.go", "createEffects.writeNamed"), "agent_name", CanonicalInstanceNameMetadata, CanonicalPoolSlotMetadata,
@@ -439,10 +437,12 @@ var registry = slices.Concat([]Field{
 	// Advisory: diagnostics, pacing and usage stamps. The execution backstop's
 	// are written every pass, under either controller.
 	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "writeExecutionClaimMarker")), "execution_claim_nudge_work",
-		"execution_claim_nudge_root", "execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at"),
+		"execution_claim_nudge_root", "execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at",
+		"execution_claim_nudge_token"),
 	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "poolExecutionBackstop.exhausted")), "execution_claim_nudge_stalled",
 		"execution_claim_nudge_stalled_token"),
 	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "poolExecutionBackstop.observeHold")), "execution_claim_hold"),
+	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "poolExecutionBackstop.markStarted")), "execution_claim_started"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/drain_reminder.go", "writeDrainReminderMarker")), "drain_reminder_at", "drain_reminder_count",
 		"drain_reminder_drain", "drain_reminder_failed"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/drain_reminder.go", "noteDrainReminderHold")), "drain_reminder_hold"),
@@ -460,6 +460,11 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(op("internal/session/waits.go", "StampWaitLookupCapMetadata")),
 		"wait_lookup_capped_at", "wait_lookup_capped_label", "wait_lookup_capped_limit", "wait_lookup_capped_source"),
 	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey),
+	// The thread a runtime hosts the session in (runtime.SessionBinding):
+	// recorded at each confirmed start (create, resume, pending-create
+	// recovery), read by no decision.
+	same(ClassAdvisory, false, sites(legacyCommit, op(srcManager, "Manager.confirmStartedRuntimeMetadata"), opRestartConfirm, op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")),
+		MetadataRuntimeThreadID, MetadataRuntimeProjectID),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/session_wake.go", "freshWakeResetPriorValues")), PrimingAttemptedAtMetadataKey),
 	same(ClassAdvisory, false, sites(legacyCreate), "synced_at", "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts"),
 	same(ClassAdvisory, false, sites(legacy(srcBeads, "startupKickoffReopenMetadata")), "startup_kickoff_last_nudge_at"),

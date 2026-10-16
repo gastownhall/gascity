@@ -379,6 +379,9 @@ func (s *Server) humaHandleMailGet(ctx context.Context, input *MailGetInput) (*I
 // the framework from MailSendInput's struct tags.
 func (s *Server) humaHandleMailSend(ctx context.Context, input *MailSendInput) (*IndexOutput[mail.Message], error) {
 	index := s.latestIndex()
+	if err := s.refuseUnconfiguredMailSender(ctx, input.Body.From); err != nil {
+		return nil, err
+	}
 	resolved, resolveErr := s.resolveMailSendRecipientWithContext(ctx, input.Body.To)
 	if resolveErr != nil {
 		if errors.Is(resolveErr, errMailNoBeadStore) {
@@ -646,6 +649,9 @@ func (s *Server) humaHandleMailReply(ctx context.Context, input *MailReplyInput)
 	index := s.latestIndex()
 	id := input.ID
 	rig := input.Rig
+	if err := s.refuseUnconfiguredMailSender(ctx, input.Body.From); err != nil {
+		return nil, err
+	}
 
 	// Idempotency: reply at most once per Idempotency-Key. The message ID is
 	// folded into the cache path because it lives in the URL, not the body —

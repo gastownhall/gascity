@@ -4,14 +4,18 @@ import (
 	"context"
 	"errors"
 	"reflect"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	otellog "go.opentelemetry.io/otel/log"
 	otellogglobal "go.opentelemetry.io/otel/log/global"
 	sdklog "go.opentelemetry.io/otel/sdk/log"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
 // resetInstruments resets the sync.Once so initInstruments re-runs against
@@ -378,4 +382,132 @@ func logValueStringSlice(value attribute.Value) []string {
 		out = append(out, item.AsString())
 	}
 	return out
+}
+
+// TestRecordOpRecord pins gc.ops.record.total: one datapoint per (kind,
+// surface, stage, result, unrecorded_reason), the reason empty unless the
+// request ran unrecorded.
+func TestRecordOpRecord(t *testing.T) {
+	resetInstruments(t)
+	reader := sdkmetric.NewManualReader()
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+
+	ctx := context.Background()
+	RecordOpRecord(ctx, "message", "api", "admit", "recorded", "")
+	RecordOpRecord(ctx, "message", "api", "admit", "recorded", "")
+	RecordOpRecord(ctx, "wake", "cli", "admit", "unrecorded", "store_unavailable")
+
+	var out metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &out); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range out.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gc.ops.record.total" {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+				var key []string
+				for _, k := range []attribute.Key{"kind", "surface", "stage", "result", "unrecorded_reason"} {
+					v, ok := dp.Attributes.Value(k)
+					if !ok {
+						t.Fatalf("datapoint %v lacks %s", dp.Attributes, k)
+					}
+					key = append(key, v.AsString())
+				}
+				if dp.Attributes.Len() != 5 {
+					t.Fatalf("datapoint attributes %v, want exactly five", dp.Attributes)
+				}
+				got[strings.Join(key, "|")] = dp.Value
+			}
+		}
+	}
+	want := map[string]int64{
+		"message|api|admit|recorded|":                 2,
+		"wake|cli|admit|unrecorded|store_unavailable": 1,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("gc.ops.record.total = %v, want %v", got, want)
+	}
+}
+
+func TestRecordTurnInterrupt(t *testing.T) {
+	resetInstruments(t)
+	reader := sdkmetric.NewManualReader()
+	prev := otel.GetMeterProvider()
+	otel.SetMeterProvider(sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader)))
+	t.Cleanup(func() { otel.SetMeterProvider(prev) })
+	exp := installRecordingLogExporter(t)
+
+	ctx := context.Background()
+	RecordTurnInterrupt(ctx, "s-1", "turn-1", "settled", "unfenced_interrupt", "delivered", nil)
+	RecordTurnInterrupt(ctx, "s-2", "turn-2", "settled", "unfenced_interrupt", "delivered", nil)
+	RecordTurnInterrupt(ctx, "s-3", "", "unavailable", "", "queued", errors.New("queue write failed"))
+
+	var out metricdata.ResourceMetrics
+	if err := reader.Collect(ctx, &out); err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	got := map[string]int64{}
+	for _, sm := range out.ScopeMetrics {
+		for _, m := range sm.Metrics {
+			if m.Name != "gc.session.turn_interrupts.total" {
+				continue
+			}
+			for _, dp := range m.Data.(metricdata.Sum[int64]).DataPoints {
+				var key []string
+				for _, k := range []attribute.Key{"outcome", "degradation", "message_disposition"} {
+					v, ok := dp.Attributes.Value(k)
+					if !ok {
+						t.Fatalf("datapoint %v lacks %s", dp.Attributes, k)
+					}
+					key = append(key, v.AsString())
+				}
+				if dp.Attributes.Len() != 3 {
+					t.Fatalf("datapoint attributes %v, want exactly three", dp.Attributes)
+				}
+				got[strings.Join(key, "|")] = dp.Value
+			}
+		}
+	}
+	want := map[string]int64{
+		"settled|unfenced_interrupt|delivered": 2,
+		"unavailable||queued":                  1,
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("gc.session.turn_interrupts.total = %v, want %v", got, want)
+	}
+
+	exp.mu.Lock()
+	var recs []sdklog.Record
+	for _, rec := range exp.records {
+		if rec.Body().AsString() == "session.turn_interrupt" {
+			recs = append(recs, rec.Clone())
+		}
+	}
+	exp.mu.Unlock()
+	if len(recs) != 3 {
+		t.Fatalf("session.turn_interrupt events = %d, want 3", len(recs))
+	}
+	first := recordAttrs(recs[0])
+	for k, v := range map[string]string{"session": "s-1", "turn": "turn-1", "outcome": "settled", "degradation": "unfenced_interrupt", "message_disposition": "delivered", "error": ""} {
+		if got := first[k].AsString(); got != v {
+			t.Fatalf("first event %s = %q, want %q", k, got, v)
+		}
+	}
+	if recs[0].Severity() != otellog.SeverityInfo {
+		t.Fatalf("first event severity = %v, want INFO", recs[0].Severity())
+	}
+	last := recordAttrs(recs[2])
+	for k, v := range map[string]string{"session": "s-3", "turn": "", "outcome": "unavailable", "message_disposition": "queued", "error": "queue write failed"} {
+		if got := last[k].AsString(); got != v {
+			t.Fatalf("last event %s = %q, want %q", k, got, v)
+		}
+	}
+	if recs[2].Severity() != otellog.SeverityError {
+		t.Fatalf("last event severity = %v, want ERROR", recs[2].Severity())
+	}
 }

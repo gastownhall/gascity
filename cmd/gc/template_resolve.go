@@ -124,6 +124,12 @@ type TemplateParams struct {
 	// DependencyOnly marks a realized cold slot kept only so dependency wake
 	// has something concrete to wake even when pool check wants zero.
 	DependencyOnly bool
+	// NamedCanonicalOnly marks an on_demand configured named session that is
+	// desired only because the tick's session snapshot held its canonical
+	// bead (no assigned work wants it). syncSessionBeads creates no row for
+	// it when its fresh read finds that bead gone: an operator close won
+	// the race (mc-58gr9).
+	NamedCanonicalOnly bool
 	// ManualSession marks a discovered root created outside pool scale logic
 	// (for example via `gc session new`). These sessions stay desired without
 	// inflating poolDesired for config-managed slots.

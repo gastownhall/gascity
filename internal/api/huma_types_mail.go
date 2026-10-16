@@ -58,7 +58,7 @@ type MailSendInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Rig     string `json:"rig,omitempty" doc:"Rig name."`
-		From    string `json:"from,omitempty" doc:"Sender name."`
+		From    string `json:"from,omitempty" doc:"Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from)."`
 		To      string `json:"to" doc:"Recipient name." minLength:"1"`
 		Subject string `json:"subject" doc:"Message subject." minLength:"1"`
 		Body    string `json:"body,omitempty" doc:"Message body."`
@@ -93,7 +93,7 @@ type MailReplyInput struct {
 	Rig            string `query:"rig" required:"false" doc:"Rig hint."`
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
-		From    string `json:"from,omitempty" doc:"Sender name."`
+		From    string `json:"from,omitempty" doc:"Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from)."`
 		Subject string `json:"subject,omitempty" doc:"Reply subject."`
 		Body    string `json:"body,omitempty" doc:"Reply body."`
 	}

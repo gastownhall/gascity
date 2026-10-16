@@ -59,6 +59,12 @@ type SubmitOutcome struct {
 	// Deferred marks a queue the actor caused: the call may not start
 	// or resume the session (CONTRACT v5.9 D8 rule 1), so a controller should.
 	Deferred bool
+	// Interrupt is what an interrupt_now did about the turn it targeted when
+	// the session's runtime reports turns (SESSION-RUNTIME-020). It is
+	// set once the fence ran, a failed send or queue write included; nil when
+	// the submit took no turn-fenced path or was refused before the fence (a
+	// stopping or kill-pending row, the runtime lease not taken).
+	Interrupt *TurnInterruptReport
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
@@ -121,6 +127,10 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 	if err := m.checkStarter(by); err != nil {
 		return SubmitOutcome{}, err
 	}
+	var seen turnSighting // lock waits and lease retries fall after it
+	if intent == SubmitIntentInterruptNow {
+		seen = m.sightTurn(ctx, id)
+	}
 	var outcome SubmitOutcome
 	err := withSessionStartLock(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
@@ -159,6 +169,10 @@ func (m *Manager) submit(ctx context.Context, by Actor, id, message, resumeComma
 				if err := m.pendingInteractionLocked(sessName); err != nil {
 					return err
 				}
+			}
+			if tf := m.turnFenceFor(ctx, by, id, b, sessName, seen); tf != nil {
+				outcome, err = m.fencedInterruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints, tf, seen)
+				return err
 			}
 			outcome.Queued, err = m.interruptAndSubmitLocked(ctx, by, id, b, sessName, message, resumeCommand, hints)
 			outcome.Deferred = outcome.Queued
@@ -824,13 +838,39 @@ func newSessionSubmitPollerCommand(exe string, environ []string, cityPath, sessi
 }
 
 func isGoTestExecutable(path string) bool {
+	argv0 := ""
+	if len(os.Args) > 0 {
+		argv0 = os.Args[0]
+	}
+	return isGoTestExecutableFor(path, argv0, os.Getenv("TEST_SRCDIR"))
+}
+
+// isGoTestExecutableFor reports whether path names a Go test binary, given the
+// running process's argv0 and TEST_SRCDIR.
+func isGoTestExecutableFor(path, argv0, testSrcdir string) bool {
 	// The running bazel test binary drops the .test suffix but keeps the
 	// <target>_test name and exports TEST_SRCDIR; probes that exec a renamed
-	// spy binary must not match.
-	if os.Getenv("TEST_SRCDIR") != "" && path == os.Args[0] && strings.HasSuffix(filepath.Base(path), "_test") {
+	// spy binary must not match. Sibling gates such as internal/testenv and
+	// cmd/gc/test_guard.go need no symlink comparison: they classify only the
+	// running process, by an argv0 basename that is <target>_test whether or
+	// not bazel exec'd it through a symlink.
+	if testSrcdir != "" && strings.HasSuffix(filepath.Base(path), "_test") && isRunningBinary(path, argv0) {
 		return true
 	}
 	return strings.HasSuffix(filepath.Base(path), ".test")
+}
+
+// isRunningBinary reports whether path, as reported by os.Executable, is the
+// binary argv0 names. Bazel execs a test through its runfiles path, which is a
+// symlink under local execution; on Linux os.Executable reads /proc/self/exe,
+// which names the symlink's resolved target, so argv0 is also compared after
+// resolving symlinks.
+func isRunningBinary(path, argv0 string) bool {
+	if path == argv0 {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(argv0)
+	return err == nil && resolved == path
 }
 
 func sessionSubmitPollerPIDPath(cityPath, sessionName, agentName string) string {

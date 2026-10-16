@@ -4797,7 +4797,7 @@
             "type": "string"
           },
           "from": {
-            "description": "Sender name.",
+            "description": "Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).",
             "type": "string"
           },
           "subject": {
@@ -4815,7 +4815,7 @@
             "type": "string"
           },
           "from": {
-            "description": "Sender name.",
+            "description": "Sender: the operator (human, or the dashboard's wire alias DASHBOARD_OPERATOR_WIRE_ALIAS), a configured agent, a configured named session, or a live session of a configured agent. Optional in the schema, but an empty or unconfigured sender is refused (422 at body.from).",
             "type": "string"
           },
           "rig": {
@@ -30518,7 +30518,7 @@
         "summary": "Get v0 city by city name bead by ID"
       },
       "patch": {
-        "description": "Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to 10 seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.\n\nRefused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root, its type and label matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler). Each refusal names the offending field in errors[].",
+        "description": "Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to 10 seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.\n\nRefused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root; or a coordination row: a mail message (type message), a session wait (the gc:wait label, or a gate carrying session:\u003csession_id\u003e), a queued nudge (gc:nudge, gc:nudge-queue), an order's run record (order-tracking, order-run:*) or an external-messaging row (gc:extmsg-*); types and labels matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler, /mail, gc session wait, the nudge queue, order dispatch, /extmsg/*). Each refusal names the offending field in errors[].",
         "operationId": "patch-v0-city-by-city-name-bead-by-id",
         "parameters": [
           {
@@ -31325,7 +31325,7 @@
     },
     "/v0/city/{cityName}/bead/{id}/update": {
       "post": {
-        "description": "Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to 10 seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.\n\nRefused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root, its type and label matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler). Each refusal names the offending field in errors[].",
+        "description": "Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to 10 seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.\n\nRefused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root; or a coordination row: a mail message (type message), a session wait (the gc:wait label, or a gate carrying session:\u003csession_id\u003e), a queued nudge (gc:nudge, gc:nudge-queue), an order's run record (order-tracking, order-run:*) or an external-messaging row (gc:extmsg-*); types and labels matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler, /mail, gc session wait, the nudge queue, order dispatch, /extmsg/*). Each refusal names the offending field in errors[].",
         "operationId": "post-v0-city-by-city-name-bead-by-id-update",
         "parameters": [
           {
@@ -31759,7 +31759,7 @@
         "summary": "Get v0 city by city name beads"
       },
       "post": {
-        "description": "Refused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root, its type and label matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler). Each refusal names the offending field in errors[].",
+        "description": "Refused with 422, nothing written: on any bead, a metadata key that is not a valid bead-metadata key, or a label that does not read back as itself from one CSV record (a comma, a quote, a newline or a carriage return); and any write to a controller-owned row, or one that would make a row controller-owned: a session row (type session, or the gc:session label), a startup-health episode or a convergence root; or a coordination row: a mail message (type message), a session wait (the gc:wait label, or a gate carrying session:\u003csession_id\u003e), a queued nudge (gc:nudge, gc:nudge-queue), an order's run record (order-tracking, order-run:*) or an external-messaging row (gc:extmsg-*); types and labels matched in any case and spacing. Only their owners write them (the session verbs, the controller, the convergence handler, /mail, gc session wait, the nudge queue, order dispatch, /extmsg/*). Each refusal names the offending field in errors[].",
         "operationId": "create-bead",
         "parameters": [
           {

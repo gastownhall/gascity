@@ -33,7 +33,7 @@ func newHarness(t *testing.T) *harness {
 
 // newHarnessOver records every operation on backing (a store wrapping mem, or
 // mem itself) and checks, at cleanup, that the op store only ever listed by
-// the conversation key.
+// a key: gc.op.open, or gc.op.status on op rows.
 func newHarnessOver(t *testing.T, mem *beads.MemStore, backing beads.Store) *harness {
 	t.Helper()
 	rec := beadstest.NewOpRecordingStore(backing)
@@ -52,8 +52,11 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 		if op.Kind != beadstest.OpList {
 			continue
 		}
-		if !strings.HasPrefix(op.Query.Label, labelOpConvPrefix) {
-			t.Errorf("unkeyed list %+v from %v", op.Query, op.Caller)
+		q := op.Query
+		openKeyed := q.Label == "" && len(q.Metadata) == 1 && q.Metadata[keyOpen] != ""
+		legacyKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyStatus] == string(StatusSubmitted)
+		if !openKeyed && !legacyKeyed {
+			t.Errorf("unkeyed list %+v from %v", q, op.Caller)
 		}
 		for _, req := range beads.NativeListPlan(op.Query) {
 			if !beads.NativeListRequestKeyed(req) {
@@ -63,16 +66,20 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 	}
 }
 
+// msgReq is a lane message: the store tests drive the lane's status machine
+// and leases, which only lane ops take.
 func msgReq(key, payload string) Request {
 	return Request{
-		Conversation: "gc-1", Kind: KindMessage, ClientKey: key,
+		Conversation: "gc-1", Kind: KindMessage, Executor: ExecutorLane, ClientKey: key,
 		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator}, Payload: payload,
 	}
 }
 
+// lifecycleReq is a lifecycle-lane op: the store tests drive the lane's
+// status machine, which only lane ops take.
 func lifecycleReq(kind Kind, key string) Request {
 	r := Request{
-		Conversation: "gc-1", Kind: kind, ClientKey: key,
+		Conversation: "gc-1", Kind: kind, Executor: ExecutorLane, ClientKey: key,
 		Producer: Producer{Principal: "operator:alice", Actor: ActorOperator},
 	}
 	if kind == KindKill {
@@ -522,13 +529,21 @@ func TestListOpen(t *testing.T) {
 	if want := []string{a.ID, c.ID, b.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
 		t.Fatalf("ListOpen = %v, want %v", ids(got), want)
 	}
-	if ops := h.rec.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Label != ConversationLabel("gc-1") {
-		t.Fatalf("ListOpen issued %+v, want exactly one keyed List", ops)
+	if ops := h.rec.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpList ||
+		ops[0].Query.Label != "" || fmt.Sprint(ops[0].Query.Metadata) != fmt.Sprint(map[string]string{keyOpen: "gc-1"}) {
+		t.Fatalf("ListOpen issued %+v, want exactly one List keyed by %s", ops, keyOpen)
+	}
+	h.rec.Reset()
+	if ops, quarantined, err := h.store.ListOpenTolerant("gc-1"); err != nil || len(quarantined) != 0 || fmt.Sprint(ids(ops)) != fmt.Sprint(ids(got)) {
+		t.Fatalf("ListOpenTolerant = %v, %v, %v; want ListOpen's answer", ids(ops), quarantined, err)
+	}
+	if n := h.countOps(beadstest.OpList); n != 1 {
+		t.Fatalf("ListOpenTolerant issued %d lists, want 1", n)
 	}
 
 	if _, err := h.mem.Create(beads.Bead{
 		ID: "gc-op-bogus", Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
-		Metadata: map[string]string{keySchema: "1", keyKind: "message"},
+		Metadata: map[string]string{keySchema: "1", keyKind: "message", keyOpen: "gc-1"},
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -1279,4 +1294,531 @@ func TestUpdateTextSurvivesBdTyping(t *testing.T) {
 			t.Fatalf("ListOpen: %v", err)
 		}
 	})
+}
+
+// legacyReq is a message an O0 legacy surface records: start_by and
+// finish_by at the legacy execution bound, 15 minutes out.
+func legacyReq(executor ExecutorKind, key string) Request {
+	r := msgReq(key, "hello")
+	r.Executor = executor
+	r.Producer.Principal = "operator"
+	r.StartBy = t0.Add(15 * time.Minute)
+	r.FinishBy = r.StartBy
+	return r
+}
+
+// Propose writes the executor and nothing changes it: a retry naming another
+// executor (a gate flip between attempts) returns the stored op.
+func TestProposeWritesTheExecutorOnce(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+	if op.Executor != ExecutorLegacyAPI {
+		t.Fatalf("executor %s", op.Executor)
+	}
+	again, created, err := h.store.Propose(legacyReq(ExecutorLane, "k"))
+	if err != nil || created || again.Executor != ExecutorLegacyAPI {
+		t.Fatalf("re-Propose under another executor = %s created %v, %v", again.Executor, created, err)
+	}
+	if defaulted := h.propose(t, legacyReq("", "k2")); defaulted.Executor != ExecutorLegacy {
+		t.Fatalf("defaulted executor %s, want legacy", defaulted.Executor)
+	}
+	if _, _, err := h.store.Propose(legacyReq("box", "k3")); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("Propose(executor box) = %v, want ErrInvalidRequest", err)
+	}
+}
+
+// A minted key skips the read-first Get: one create and nothing else.
+func TestProposeMintedKeySkipsTheRead(t *testing.T) {
+	h := newHarness(t)
+	req := legacyReq(ExecutorLegacyCLI, "k-minted")
+	req.MintedKey = true
+	h.rec.Reset()
+	op := h.propose(t, req)
+	ops := h.rec.Ops()
+	if len(ops) != 1 || ops[0].Kind != beadstest.OpCreate {
+		t.Fatalf("minted Propose issued %+v, want exactly one create", ops)
+	}
+	if op.Revision != h.revision(t, op.ID) {
+		t.Fatalf("Revision %d, bead revision %d", op.Revision, h.revision(t, op.ID))
+	}
+	h.rec.Reset()
+	req.MintedKey = false
+	if _, created, err := h.store.Propose(req); err != nil || created {
+		t.Fatalf("supplied-key retry = created %v, %v", created, err)
+	}
+	if n := h.countOps(beadstest.OpCreate); n != 0 {
+		t.Fatalf("supplied-key retry issued %d creates", n)
+	}
+}
+
+// Preview is Propose's first half: the same id and digest, no I/O.
+func TestPreviewEqualsPropose(t *testing.T) {
+	h := newHarness(t)
+	req := legacyReq(ExecutorLegacyAPI, "k")
+	h.rec.Reset()
+	pre, err := h.store.Preview(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ops := h.rec.Ops(); len(ops) != 0 {
+		t.Fatalf("Preview issued %+v", ops)
+	}
+	op := h.propose(t, req)
+	if pre.ID != op.ID || pre.PayloadDigest != op.PayloadDigest || pre.Status != StatusSubmitted || pre.Executor != op.Executor {
+		t.Fatalf("Preview = %s %s %s, Propose = %s %s %s", pre.ID, pre.PayloadDigest, pre.Status, op.ID, op.PayloadDigest, op.Status)
+	}
+	big := req
+	big.Payload = strings.Repeat("x", MaxInlinePayload+1)
+	if _, err := h.store.Preview(big); !errors.Is(err, ErrPayloadTooLarge) {
+		t.Fatalf("Preview(oversized) = %v", err)
+	}
+}
+
+// Payloads spelled like JSON scalars round-trip on create, and their digest
+// with them, on MemStore and SQLite.
+func TestScalarSpelledPayloadsRoundTrip(t *testing.T) {
+	sq, err := beads.OpenSQLiteStore(t.TempDir(), beads.WithSQLiteStoreIDPrefix("gcs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if c, ok := sq.(interface{ CloseStore() error }); ok {
+			_ = c.CloseStore()
+		}
+	})
+	sqStore, err := NewStore(beads.SessionStore{Store: sq}, &clock.Fake{Time: t0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, s := range map[string]*Store{"memstore": newHarness(t).store, "sqlite": sqStore} {
+		for i, payload := range []string{"null", "042", "true", "1e3", "-0"} {
+			op, created, err := s.Propose(msgReq(fmt.Sprint("k", i), payload))
+			if err != nil || !created {
+				t.Fatalf("%s: Propose(%q) = %v, %v", name, payload, created, err)
+			}
+			got, err := s.Get(op.ID)
+			if err != nil || got.Payload != payload || got.PayloadDigest != op.PayloadDigest || RequestDigest(got) != op.PayloadDigest {
+				t.Fatalf("%s: payload %q read back %q (digest %s), %v", name, payload, got.Payload, got.PayloadDigest, err)
+			}
+			if _, created, err := s.Propose(msgReq(fmt.Sprint("k", i), payload)); err != nil || created {
+				t.Fatalf("%s: re-Propose(%q) = created %v, %v", name, payload, created, err)
+			}
+		}
+	}
+}
+
+func TestAdopt(t *testing.T) {
+	finish := t0.Add(30 * time.Minute)
+	t.Run("adopts", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		h.clk.Advance(time.Minute)
+		got, err := h.store.Adopt(op.ID, 0, "legacy:api", finish)
+		if err != nil {
+			t.Fatal(err)
+		}
+		stored, _ := h.store.Get(op.ID)
+		last := stored.Transitions[len(stored.Transitions)-1]
+		switch {
+		case got.Attempt != 1 || stored.Attempt != 1:
+			t.Fatalf("attempt %d (stored %d), want 1", got.Attempt, stored.Attempt)
+		case !stored.FinishBy.Equal(finish) || !got.FinishBy.Equal(finish):
+			t.Fatalf("finish_by %s, want %s", stored.FinishBy, finish)
+		case stored.Status != StatusSubmitted || len(stored.Transitions) != 2 ||
+			last != (Transition{Status: StatusSubmitted, At: t0.Add(time.Minute), By: "legacy:api"}):
+			t.Fatalf("status %s transitions %+v", stored.Status, stored.Transitions)
+		}
+		if _, err := h.store.Adopt(op.ID, 0, "legacy:api", finish); !errors.Is(err, ErrAttemptMoved) {
+			t.Fatalf("second adoption of attempt 0 = %v, want ErrAttemptMoved", err)
+		}
+	})
+	t.Run("refusals", func(t *testing.T) {
+		h := newHarness(t)
+		closedOp := h.propose(t, legacyReq(ExecutorLegacyAPI, "closed"))
+		if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "legacy:api"); err != nil {
+			t.Fatal(err)
+		}
+		lane := h.propose(t, legacyReq(ExecutorLane, "lane"))
+		cli := h.propose(t, legacyReq(ExecutorLegacyCLI, "cli"))
+		bare := h.propose(t, legacyReq(ExecutorLegacy, "bare"))
+		api := h.propose(t, legacyReq(ExecutorLegacyAPI, "api"))
+		for _, c := range []struct {
+			name, id string
+			finish   time.Time
+			want     error
+		}{
+			{"closed", closedOp.ID, finish, ErrAlreadyTerminal},
+			{"lane", lane.ID, finish, ErrIllegalTransition},
+			{"legacy:cli", cli.ID, finish, ErrIllegalTransition},
+			{"bare legacy", bare.ID, finish, ErrIllegalTransition},
+			{"finish_by before start_by", api.ID, api.StartBy.Add(-time.Second), ErrInvalidRequest},
+			{"no finish_by", api.ID, time.Time{}, ErrInvalidRequest},
+		} {
+			rev := h.revision(t, c.id)
+			if _, err := h.store.Adopt(c.id, 0, "legacy:api", c.finish); !errors.Is(err, c.want) {
+				t.Errorf("%s: Adopt = %v, want %v", c.name, err, c.want)
+			}
+			if h.revision(t, c.id) != rev {
+				t.Errorf("%s: a refused adoption wrote the row", c.name)
+			}
+		}
+	})
+	t.Run("32 concurrent adopters, one winner", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		var wins, moved atomic.Int32
+		var wg sync.WaitGroup
+		for range 32 {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				_, err := h.store.Adopt(op.ID, 0, "legacy:api", finish)
+				switch {
+				case err == nil:
+					wins.Add(1)
+				case errors.Is(err, ErrAttemptMoved):
+					moved.Add(1)
+				default:
+					t.Errorf("Adopt = %v", err)
+				}
+			}()
+		}
+		wg.Wait()
+		if wins.Load() != 1 || moved.Load() != 31 {
+			t.Fatalf("wins %d moved %d, want 1 and 31", wins.Load(), moved.Load())
+		}
+		if got, _ := h.store.Get(op.ID); got.Attempt != 1 {
+			t.Fatalf("attempt %d after one adoption", got.Attempt)
+		}
+	})
+}
+
+func TestListOpenLegacy(t *testing.T) {
+	h := newHarness(t)
+	api := h.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
+	h.clk.Advance(time.Second)
+	cli := h.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
+	h.clk.Advance(time.Second)
+	bare := h.propose(t, legacyReq(ExecutorLegacy, "c"))
+	h.clk.Advance(time.Second)
+	h.propose(t, legacyReq(ExecutorLane, "lane"))
+	closedOp := h.propose(t, legacyReq(ExecutorLegacyAPI, "closed"))
+	if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "legacy:api"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.mem.Create(beads.Bead{
+		ID: "gc-op-bogus", Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
+		Metadata: map[string]string{keySchema: "1", keyKind: "message", keyStatus: string(StatusSubmitted)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	h.rec.Reset()
+	got, undecodable, truncated, err := h.store.ListOpenLegacy(100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{api.ID, cli.ID, bare.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Fatalf("ListOpenLegacy = %v, want %v", ids(got), want)
+	}
+	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
+		t.Fatalf("undecodable = %v", undecodable)
+	}
+	if truncated {
+		t.Fatal("a read whose matches ran out reported truncated")
+	}
+	ops := h.rec.Ops()
+	if len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Label != LabelOp ||
+		ops[0].Query.Metadata[keyStatus] != string(StatusSubmitted) || ops[0].Query.Limit != 100 {
+		t.Fatalf("ListOpenLegacy issued %+v, want one List keyed by %s", ops, keyStatus)
+	}
+	if got, _, truncated, err := h.store.ListOpenLegacy(1); err != nil || truncated || len(got) != 1 || got[0].ID != api.ID {
+		t.Fatalf("ListOpenLegacy(1) = %v, truncated %t, %v", ids(got), truncated, err)
+	}
+}
+
+// limit counts legacy ops returned, not rows read: a head of lane and
+// undecodable rows at least limit long does not starve the sweeper. Rows
+// read stay bounded by legacyScanPages pages of limit, and a read the cap
+// stops after a full page reports truncated: rows behind it may be unread.
+func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
+	h := newHarness(t)
+	for i := range 3 {
+		h.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+	}
+	if _, err := h.mem.Create(beads.Bead{
+		ID: "gc-op-bogus", Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
+		Metadata: map[string]string{keySchema: "1", keyKind: "message", keyStatus: string(StatusSubmitted)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	a := h.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
+	b := h.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
+	h.propose(t, legacyReq(ExecutorLegacyCLI, "c"))
+	got, undecodable, truncated, err := h.store.ListOpenLegacy(2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{a.ID, b.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
+		t.Fatalf("ListOpenLegacy(2) = %v, want %v", ids(got), want)
+	}
+	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
+		t.Fatalf("undecodable = %v", undecodable)
+	}
+	if truncated {
+		t.Fatal("a read that found limit legacy ops reported truncated")
+	}
+
+	// A head longer than the cap hides the legacy op behind it, and says so.
+	capped := newHarness(t)
+	for i := range 2*legacyScanPages + 1 {
+		capped.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+	}
+	capped.propose(t, legacyReq(ExecutorLegacyCLI, "late"))
+	capped.rec.Reset()
+	if got, _, truncated, err := capped.store.ListOpenLegacy(2); err != nil || len(got) != 0 || !truncated {
+		t.Fatalf("ListOpenLegacy(2) past the scan cap = %v, truncated %t, %v", ids(got), truncated, err)
+	}
+	if n := capped.countOps(beadstest.OpList); n != legacyScanPages {
+		t.Fatalf("read %d pages, want the cap %d", n, legacyScanPages)
+	}
+
+	// Matches that run out on the last page the cap allows are not truncated.
+	short := newHarness(t)
+	for i := range 2*legacyScanPages - 1 {
+		short.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+	}
+	short.rec.Reset()
+	if got, _, truncated, err := short.store.ListOpenLegacy(2); err != nil || len(got) != 0 || truncated {
+		t.Fatalf("ListOpenLegacy(2) ending on the cap's short page = %v, truncated %t, %v", ids(got), truncated, err)
+	}
+	if n := short.countOps(beadstest.OpList); n != legacyScanPages {
+		t.Fatalf("read %d pages, want %d", n, legacyScanPages)
+	}
+}
+
+func TestCloseKnown(t *testing.T) {
+	out := Outcome{Arm: ArmSucceeded, Result: Result{Via: "legacy.delivered"}}
+	t.Run("fast path", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		h.rec.Reset()
+		got, err := h.store.CloseKnown(op, out, "legacy:cli")
+		if err != nil || got.Status != StatusClosed || got.Outcome != out {
+			t.Fatalf("CloseKnown = %+v, %v", got, err)
+		}
+		ops := h.rec.Ops()
+		if len(ops) != 1 || ops[0].Kind != beadstest.OpUpdateIfMatch {
+			t.Fatalf("CloseKnown issued %+v, want one fenced update", ops)
+		}
+		b, _ := h.mem.Get(op.ID)
+		if b.Status != "closed" || b.Metadata[keyOpen] != "" {
+			t.Fatalf("bead %s open key %q after CloseKnown", b.Status, b.Metadata[keyOpen])
+		}
+		if stored, _ := h.store.Get(op.ID); stored.Outcome != out || stored.Status != StatusClosed {
+			t.Fatalf("stored %+v", stored)
+		}
+	})
+	t.Run("fallback when the row moved", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		if _, err := h.store.Adopt(op.ID, 0, "legacy:api", t0.Add(time.Hour)); err != nil {
+			t.Fatal(err)
+		}
+		got, err := h.store.CloseKnown(op, out, "legacy:api")
+		if err != nil || got.Status != StatusClosed || got.Attempt != 1 {
+			t.Fatalf("CloseKnown after a move = %+v, %v", got, err)
+		}
+		if _, err := h.store.CloseKnown(op, Outcome{Arm: ArmFailed, Reason: ReasonOther}, "legacy:api"); !errors.Is(err, ErrAlreadyTerminal) {
+			t.Fatalf("CloseKnown with another outcome = %v, want ErrAlreadyTerminal", err)
+		}
+		if _, err := h.store.CloseKnown(op, out, "legacy:api"); err != nil {
+			t.Fatalf("CloseKnown again with the same outcome = %v", err)
+		}
+	})
+	t.Run("refuses a bad outcome", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		if _, err := h.store.CloseKnown(op, Outcome{Arm: ArmFailed}, "legacy:api"); !errors.Is(err, ErrInvalidRequest) {
+			t.Fatalf("CloseKnown(failed, no reason) = %v", err)
+		}
+	})
+}
+
+// Every close blanks gc.op.open, a bead closed outside the journal included,
+// so ListOpen never reads a closed row.
+func TestClosesBlankTheOpenKey(t *testing.T) {
+	h := newHarness(t)
+	closedOp := h.propose(t, msgReq("a", "x"))
+	if _, err := h.store.Close(closedOp.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	canceled := h.propose(t, msgReq("b", "x"))
+	if r, _, err := h.store.Cancel(canceled.ID, "operator:bob", ""); err != nil || r != CancelClosed {
+		t.Fatalf("Cancel = %s, %v", r, err)
+	}
+	external := h.propose(t, msgReq("c", "x"))
+	if err := h.mem.Close(external.ID); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := h.mem.Get(external.ID); b.Metadata[keyOpen] != "gc-1" {
+		t.Fatalf("setup: external close dropped %s", keyOpen)
+	}
+	if _, err := h.store.Close(external.ID, Outcome{Arm: ArmFailed, Reason: ReasonClosedExternally}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	for _, id := range []string{closedOp.ID, canceled.ID, external.ID} {
+		if b, _ := h.mem.Get(id); b.Metadata[keyOpen] != "" {
+			t.Errorf("%s still carries %s = %q", id, keyOpen, b.Metadata[keyOpen])
+		}
+	}
+	if open, err := h.store.ListOpen("gc-1"); err != nil || len(open) != 0 {
+		t.Fatalf("ListOpen = %v, %v", ids(open), err)
+	}
+}
+
+// ListOpenTolerant serves the conversation's decodable rows and quarantines
+// the rest, where ListOpen fails.
+func TestListOpenTolerantQuarantines(t *testing.T) {
+	h := newHarness(t)
+	a := h.propose(t, msgReq("a", "x"))
+	if _, err := h.mem.Create(beads.Bead{
+		ID: "gc-op-newer", Type: BeadType, Labels: []string{LabelOp, ConversationLabel("gc-1")},
+		Metadata: map[string]string{keySchema: "1", keyKind: "teleport", keyOpen: "gc-1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	b := h.propose(t, msgReq("b", "y"))
+	h.rec.Reset()
+	ops, quarantined, err := h.store.ListOpenTolerant("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ids(ops)) != fmt.Sprint([]string{a.ID, b.ID}) {
+		t.Fatalf("served %v", ids(ops))
+	}
+	if len(quarantined) != 1 || quarantined[0].ID != "gc-op-newer" || !errors.Is(quarantined[0].Err, ErrUnsupportedKind) {
+		t.Fatalf("quarantined %+v", quarantined)
+	}
+	if n := h.countOps(beadstest.OpList); n != 1 || len(h.rec.Ops()) != 1 {
+		t.Fatalf("ListOpenTolerant issued %+v, want one list", h.rec.Ops())
+	}
+	if _, err := h.store.ListOpen("gc-1"); !errors.Is(err, ErrUnsupportedKind) {
+		t.Fatalf("ListOpen = %v, want ErrUnsupportedKind", err)
+	}
+}
+
+// CloseExpired closes an open legacy op past its finish_by, deciding on the
+// row it reads: an op adopted (finish_by moved), a lane op, an op not yet
+// expired and a closed op are not written.
+func TestCloseExpired(t *testing.T) {
+	expired := Outcome{Arm: ArmFailed, Reason: ReasonDeadlineInFlight}
+	past := t0.Add(16 * time.Minute)
+	t.Run("closes an expired legacy op", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		h.rec.Reset()
+		got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep")
+		if err != nil || !closedNow || got.Status != StatusClosed || got.Outcome != expired {
+			t.Fatalf("CloseExpired = %s %+v closed %v, %v", got.Status, got.Outcome, closedNow, err)
+		}
+		if ops := h.rec.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpUpdateIfMatch {
+			t.Fatalf("CloseExpired of a known expired op issued %+v, want one fenced update", ops)
+		}
+		if b, _ := h.mem.Get(op.ID); b.Status != "closed" {
+			t.Fatalf("bead %s", b.Status)
+		}
+		if last := got.Transitions[len(got.Transitions)-1]; last.By != "controller:op-sweep" {
+			t.Fatalf("closed by %q", last.By)
+		}
+	})
+	t.Run("leaves an adopted op open", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyAPI, "k"))
+		if _, err := h.store.Adopt(op.ID, 0, "legacy:api", past.Add(15*time.Minute)); err != nil {
+			t.Fatal(err)
+		}
+		rev := h.revision(t, op.ID)
+		// op is the row as read before the adoption: the fenced write misses
+		// and the re-read sees the adopter's finish_by.
+		got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep")
+		if err != nil || closedNow || got.Status != StatusSubmitted || got.Attempt != 1 {
+			t.Fatalf("CloseExpired(adopted) = %s attempt %d closed %v, %v", got.Status, got.Attempt, closedNow, err)
+		}
+		if h.revision(t, op.ID) != rev {
+			t.Fatal("CloseExpired wrote an adopted op")
+		}
+	})
+	t.Run("leaves an op at or before its finish_by open", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		for _, now := range []time.Time{t0, op.FinishBy} {
+			if got, closedNow, err := h.store.CloseExpired(op, now, "controller:op-sweep"); err != nil || closedNow || got.Status != StatusSubmitted {
+				t.Fatalf("CloseExpired(at %s) = %s closed %v, %v", now, got.Status, closedNow, err)
+			}
+		}
+	})
+	t.Run("never closes a lane op", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLane, "k"))
+		if got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep"); err != nil || closedNow || got.Status != StatusSubmitted {
+			t.Fatalf("CloseExpired(lane) = %s closed %v, %v", got.Status, closedNow, err)
+		}
+	})
+	t.Run("returns a closed op unchanged", func(t *testing.T) {
+		h := newHarness(t)
+		op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+		done := Outcome{Arm: ArmSucceeded, Result: Result{Via: "legacy"}}
+		if _, err := h.store.Close(op.ID, done, "legacy:cli"); err != nil {
+			t.Fatal(err)
+		}
+		got, closedNow, err := h.store.CloseExpired(op, past, "controller:op-sweep")
+		if err != nil || closedNow || got.Status != StatusClosed || got.Outcome != done {
+			t.Fatalf("CloseExpired(closed) = %s %+v closed %v, %v", got.Status, got.Outcome, closedNow, err)
+		}
+	})
+}
+
+// Only its legacy path, an adopter or the sweeper closes a legacy op, and it
+// never leaves submitted before: Transition and Cancel refuse an open one.
+func TestLegacyOpsRefuseTransitionAndCancel(t *testing.T) {
+	h := newHarness(t)
+	op := h.propose(t, legacyReq(ExecutorLegacyCLI, "k"))
+	for _, to := range []Status{StatusAccepted, StatusExecuting} {
+		if _, err := h.store.Transition(op.ID, StatusSubmitted, to, "lane"); !errors.Is(err, ErrIllegalTransition) {
+			t.Fatalf("Transition(legacy op -> %s) = %v, want ErrIllegalTransition", to, err)
+		}
+	}
+	if _, _, err := h.store.Cancel(op.ID, "operator:alice", "no"); !errors.Is(err, ErrIllegalTransition) {
+		t.Fatalf("Cancel(open legacy op) = %v, want ErrIllegalTransition", err)
+	}
+	if got, _ := h.store.Get(op.ID); got.Status != StatusSubmitted || got.Revision != op.Revision {
+		t.Fatalf("refused moves wrote the op: %s revision %d", got.Status, got.Revision)
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded, Result: Result{Via: "legacy"}}, "legacy:cli"); err != nil {
+		t.Fatal(err)
+	}
+	if res, _, err := h.store.Cancel(op.ID, "operator:alice", "no"); err != nil || res != CancelAlreadyTerminal {
+		t.Fatalf("Cancel(closed legacy op) = %s, %v; want already_terminal", res, err)
+	}
+}
+
+// A gc.op.arrival_seq a producer wrote through bd is not this build's key:
+// the store neither reads it nor removes it.
+func TestStoreLeavesAForgedArrivalSeqUntouched(t *testing.T) {
+	const forged = "gc.op.arrival_seq"
+	h := newHarness(t)
+	op := h.propose(t, msgReq("a", "x"))
+	if err := h.mem.SetMetadata(op.ID, forged, "9"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := h.store.Get(op.ID)
+	if err != nil || got.ArrivalSeq != 0 {
+		t.Fatalf("Get = ArrivalSeq %d, %v; want 0", got.ArrivalSeq, err)
+	}
+	if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded}, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := h.mem.Get(op.ID); b.Metadata[forged] != "9" {
+		t.Fatalf("Close changed %s to %q", forged, b.Metadata[forged])
+	}
 }
