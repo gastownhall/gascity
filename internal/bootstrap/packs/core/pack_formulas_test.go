@@ -362,6 +362,74 @@ func TestMolScopedWorkResolvesRepoBeforeRemovingWorktree(t *testing.T) {
 // TestMolDoWorkWorkBeadCloseFailsClosed pins that a refused work-bead close
 // (for example, the typed work-record close gate) stops the step instead of
 // falling through to close the formula step over still-open work.
+// TestMolDoWorkClosesItsOwnStepViaHookCurrent pins GH#7967's sibling,
+// GH#7991: the do-work step's self-close used to gate on $GC_BEAD_ID, which
+// "exists only in the controller's dispatch condition environment, never in
+// a session shell" (cmd/gc/cmd_hook_current.go) — so the guard was always
+// false on a pool-managed session and the step silently stayed open after
+// the real work closed. It must resolve its own bead through `gc hook
+// current --id-only` instead, the same pattern the drain step and
+// mol-polecat-commit already use, verify it before closing (in_progress,
+// the right gc.step_ref, and not the work item itself), and fail loudly
+// rather than silently skip when it cannot.
+func TestMolDoWorkClosesItsOwnStepViaHookCurrent(t *testing.T) {
+	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
+
+	if strings.Contains(step, `[ -n "${GC_BEAD_ID:-}" ]`) {
+		t.Fatal("do-work must not gate its own close on $GC_BEAD_ID; it is never set in a session shell")
+	}
+
+	resolveAt := strings.Index(step, "gc hook current --id-only")
+	if resolveAt < 0 {
+		t.Fatal("do-work must resolve its own step bead via gc hook current --id-only")
+	}
+	if !strings.Contains(step, `STEP_BEAD_ID=$(gc hook current --id-only) || exit 1`) {
+		t.Fatal("do-work must fail closed when gc hook current itself fails")
+	}
+	if !strings.Contains(step, `if [ -z "$STEP_BEAD_ID" ]`) {
+		t.Fatal("do-work must also fail closed when gc hook current succeeds but names nothing")
+	}
+
+	showAt := strings.Index(step, `gc bd show "$STEP_BEAD_ID" --json`)
+	if showAt < resolveAt {
+		t.Fatal("do-work must show the resolved step bead before acting on it")
+	}
+
+	checkAt := strings.Index(step, "jq -e")
+	if checkAt < showAt {
+		t.Fatal("do-work must verify the resolved bead before closing it")
+	}
+	checkEnd := strings.Index(step[checkAt:], "gc bd update")
+	if checkEnd < 0 {
+		t.Fatal("do-work must close the verified step bead")
+	}
+	check := step[checkAt : checkAt+checkEnd]
+	for _, want := range []string{
+		`.status == "in_progress"`,
+		`.metadata["gc.step_ref"] == "mol-do-work.do-work"`,
+		`.id != $work`,
+	} {
+		if !strings.Contains(check, want) {
+			t.Fatalf("do-work's verification is missing %q: %s", want, check)
+		}
+	}
+	if !strings.Contains(step, "--arg work \"$WORK_BEAD_ID\"") {
+		t.Fatal("do-work must pass WORK_BEAD_ID into jq as a bound variable, not interpolate it into the filter")
+	}
+
+	closeAt := strings.Index(step[checkAt:], `gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed`)
+	if closeAt < 0 {
+		t.Fatal("do-work must close $STEP_BEAD_ID with gc.outcome=pass after verification")
+	}
+	closeLine := step[checkAt+closeAt:]
+	if nl := strings.Index(closeLine, "\n"); nl >= 0 {
+		closeLine = closeLine[:nl]
+	}
+	if !strings.HasSuffix(closeLine, "|| exit 1") {
+		t.Errorf("do-work's own-step close must fail closed with `|| exit 1`: %s", closeLine)
+	}
+}
+
 func TestMolDoWorkWorkBeadCloseFailsClosed(t *testing.T) {
 	step := formulaStep(t, readFormula(t, "mol-do-work.toml"), "do-work")
 	closes := 0
