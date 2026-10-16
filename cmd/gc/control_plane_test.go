@@ -1,0 +1,399 @@
+package main
+
+import (
+	"bytes"
+	"errors"
+	"maps"
+	"net"
+	"os"
+	"path/filepath"
+	"slices"
+	"strconv"
+	"strings"
+	"sync/atomic"
+	"testing"
+	"time"
+
+	"github.com/gastownhall/gascity/internal/citylayout"
+	"github.com/gastownhall/gascity/internal/connect"
+)
+
+// resetControlPlaneForTest drops every cached plane and clears the
+// worker-site flag, now and when the test ends, so no plane leaks between
+// tests. Tests that call it must stay serial: the cache and the flag are
+// process state.
+func resetControlPlaneForTest(t *testing.T) {
+	t.Helper()
+	clearControlPlaneState()
+	t.Cleanup(clearControlPlaneState)
+}
+
+func clearControlPlaneState() {
+	controlPlanes.mu.Lock()
+	controlPlanes.byPath = nil
+	controlPlanes.mu.Unlock()
+	workerSiteProcess.Store(false)
+}
+
+// testDescriptor returns a valid worker-site descriptor for cityDir whose
+// city ledger serves every class, plus any binding ledgers named in
+// bindingClasses (binding name to the classes it serves, which the city
+// ledger then gives up).
+func testDescriptor(cityDir string, bindingClasses map[string][]string) connect.Descriptor {
+	moved := map[string]bool{}
+	for _, classes := range bindingClasses {
+		for _, class := range classes {
+			moved[class] = true
+		}
+	}
+	var cityClasses []string
+	for _, class := range connect.StorageClasses() {
+		if !moved[class] {
+			cityClasses = append(cityClasses, class)
+		}
+	}
+	d := connect.Descriptor{
+		Schema:     connect.DescriptorSchema,
+		Plane:      connect.PlaneWorker,
+		City:       "box-city",
+		SessionID:  "box-s1",
+		Generation: 1,
+		Contract:   connect.Contract,
+		Credential: connect.CredentialFilePrefix + "/home/agent/.config/gascity/connect/box-city/box-s1/bearer",
+		Ledgers: []connect.DescriptorLedger{{
+			Scope:      connect.ScopeCity,
+			Classes:    cityClasses,
+			URL:        "https://ledger.example.test:7491",
+			ProjectID:  "proj-city",
+			Workspaces: []string{filepath.Clean(cityDir)},
+		}},
+	}
+	port := 7492
+	for _, name := range slices.Sorted(maps.Keys(bindingClasses)) {
+		d.Ledgers = append(d.Ledgers, connect.DescriptorLedger{
+			Scope:      connect.BindingScope(name),
+			Classes:    bindingClasses[name],
+			URL:        "https://" + name + ".example.test:" + strconv.Itoa(port),
+			ProjectID:  "proj-" + name,
+			Workspaces: []string{filepath.Join(filepath.Clean(cityDir), ".gc", "storage", name)},
+		})
+		port++
+	}
+	return d
+}
+
+// writeControlPlaneFixture makes cityDir a worker site whose descriptor is d,
+// as `gc connect` would leave it, and drops any plane this process cached for
+// cityDir.
+func writeControlPlaneFixture(t *testing.T, cityDir string, d connect.Descriptor) {
+	t.Helper()
+	data, err := connect.EncodeDescriptor(d)
+	if err != nil {
+		t.Fatalf("EncodeDescriptor: %v", err)
+	}
+	writeControlPlaneBytes(t, cityDir, data)
+}
+
+func writeControlPlaneBytes(t *testing.T, cityDir string, data []byte) {
+	t.Helper()
+	path := filepath.Join(cityDir, citylayout.ControlPlaneDescriptorPath)
+	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+		t.Fatalf("MkdirAll: %v", err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatalf("WriteFile(%s): %v", path, err)
+	}
+	forgetControlPlane(cityDir)
+}
+
+// makeWorkerSite writes a descriptor whose city ledger serves every class and
+// resolves the plane, which sets the process flag the way a command's context
+// resolution does.
+func makeWorkerSite(t *testing.T, cityDir string) {
+	t.Helper()
+	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, nil))
+	plane, err := controlPlaneFor(cityDir)
+	if err != nil {
+		t.Fatalf("controlPlaneFor: %v", err)
+	}
+	if !plane.Worker() {
+		t.Fatal("fixture: the descriptor did not make a worker site")
+	}
+}
+
+// countSocketDials replaces the gc socket dialer with one that counts and
+// refuses every dial, and returns the count.
+func countSocketDials(t *testing.T) *atomic.Int32 {
+	t.Helper()
+	var dials atomic.Int32
+	prev := dialUnixSocket
+	dialUnixSocket = func(string, time.Duration) (net.Conn, error) {
+		dials.Add(1)
+		return nil, errors.New("counting dialer: no listener")
+	}
+	t.Cleanup(func() { dialUnixSocket = prev })
+	return &dials
+}
+
+func TestControlPlaneForAbsentDescriptorIsLocal(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := t.TempDir()
+
+	plane, err := controlPlaneFor(cityDir)
+	if err != nil {
+		t.Fatalf("controlPlaneFor: %v", err)
+	}
+	if plane.Worker() {
+		t.Fatal("a city with no descriptor resolved Worker, want Local")
+	}
+	if workerSiteProcess.Load() {
+		t.Fatal("a Local plane set the worker-site flag")
+	}
+}
+
+func TestControlPlaneForValidDescriptorIsWorkerAndSetsTheFlag(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := t.TempDir()
+	want := testDescriptor(cityDir, map[string][]string{"infra": {"graph", "sessions"}})
+	writeControlPlaneFixture(t, cityDir, want)
+
+	plane, err := controlPlaneFor(cityDir)
+	if err != nil {
+		t.Fatalf("controlPlaneFor: %v", err)
+	}
+	if !plane.Worker() {
+		t.Fatal("a valid descriptor resolved Local, want Worker")
+	}
+	if !workerSiteProcess.Load() {
+		t.Fatal("a Worker plane did not set the worker-site flag")
+	}
+	if got := plane.Descriptor(); got.SessionID != want.SessionID || len(got.Ledgers) != 2 {
+		t.Fatalf("descriptor = %+v, want the one written", got)
+	}
+}
+
+func TestControlPlaneForMalformedDescriptorIsATypedError(t *testing.T) {
+	for name, body := range map[string]string{
+		"not toml":      "schema = [",
+		"unknown key":   "schema = 1\nplane = \"worker\"\nextra = 1\n",
+		"local plane":   "schema = 1\nplane = \"local\"\n",
+		"empty file":    "",
+		"wrong version": "schema = 2\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			resetControlPlaneForTest(t)
+			cityDir := t.TempDir()
+			writeControlPlaneBytes(t, cityDir, []byte(body))
+
+			_, err := controlPlaneFor(cityDir)
+			var descErr *errControlPlaneDescriptor
+			if !errors.As(err, &descErr) {
+				t.Fatalf("controlPlaneFor error = %v, want *errControlPlaneDescriptor", err)
+			}
+			if want := filepath.Join(cityDir, citylayout.ControlPlaneDescriptorPath); descErr.path != want {
+				t.Fatalf("error path = %q, want %q", descErr.path, want)
+			}
+			if descErr.reason == "" {
+				t.Fatal("error carries no reason")
+			}
+			if workerSiteProcess.Load() {
+				t.Fatal("a malformed descriptor set the worker-site flag")
+			}
+		})
+	}
+}
+
+func TestControlPlaneForUnreadableDescriptorIsATypedError(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := t.TempDir()
+	// A directory where the file belongs cannot be read as a descriptor.
+	if err := os.MkdirAll(filepath.Join(cityDir, citylayout.ControlPlaneDescriptorPath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	var descErr *errControlPlaneDescriptor
+	if _, err := controlPlaneFor(cityDir); !errors.As(err, &descErr) {
+		t.Fatalf("controlPlaneFor error = %v, want *errControlPlaneDescriptor", err)
+	}
+}
+
+func TestControlPlaneForCachesPerPath(t *testing.T) {
+	resetControlPlaneForTest(t)
+	worker, local := t.TempDir(), t.TempDir()
+	writeControlPlaneFixture(t, worker, testDescriptor(worker, nil))
+
+	if plane, err := controlPlaneFor(worker); err != nil || !plane.Worker() {
+		t.Fatalf("first read: plane=%+v err=%v, want Worker", plane, err)
+	}
+	if plane, err := controlPlaneFor(local); err != nil || plane.Worker() {
+		t.Fatalf("local city: plane=%+v err=%v, want Local", plane, err)
+	}
+	// Removing the file and writing one for the other city changes nothing
+	// this process already resolved.
+	if err := os.Remove(filepath.Join(worker, citylayout.ControlPlaneDescriptorPath)); err != nil {
+		t.Fatal(err)
+	}
+	data, err := connect.EncodeDescriptor(testDescriptor(local, nil))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(local, ".gc"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(local, citylayout.ControlPlaneDescriptorPath), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if plane, err := controlPlaneFor(worker + "/"); err != nil || !plane.Worker() {
+		t.Fatalf("cached read: plane=%+v err=%v, want the cached Worker", plane, err)
+	}
+	if plane, err := controlPlaneFor(local); err != nil || plane.Worker() {
+		t.Fatalf("cached read: plane=%+v err=%v, want the cached Local", plane, err)
+	}
+}
+
+func TestControlPlaneAttachedBindingsComeFromTheLedgers(t *testing.T) {
+	resetControlPlaneForTest(t)
+	cityDir := t.TempDir()
+	writeControlPlaneFixture(t, cityDir, testDescriptor(cityDir, map[string][]string{
+		"infra":   {"graph", "sessions", "messaging"},
+		"archive": {"orders", "nudges"},
+	}))
+	plane, err := controlPlaneFor(cityDir)
+	if err != nil {
+		t.Fatalf("controlPlaneFor: %v", err)
+	}
+	got := plane.attachedBindings()
+	want := map[string][]string{
+		"work":    {"work"},
+		"infra":   {"graph", "sessions", "messaging"},
+		"archive": {"orders", "nudges"},
+	}
+	if len(got) != len(want) {
+		t.Fatalf("attached bindings = %v, want %v", got, want)
+	}
+	for binding, classes := range want {
+		if !slices.Equal(got[binding], classes) {
+			t.Errorf("binding %q serves %v, want %v", binding, got[binding], classes)
+		}
+		if !plane.attachesBinding(binding) {
+			t.Errorf("attachesBinding(%q) = false, want true", binding)
+		}
+	}
+	if plane.attachesBinding("local") {
+		t.Error("attachesBinding(local) = true for a binding no ledger lists")
+	}
+	if (controlPlane{}).attachesBinding("work") {
+		t.Error("a Local plane attaches bindings; it has no descriptor")
+	}
+}
+
+func TestDialGCSocketRefusesOnAWorkerSiteWithoutDialing(t *testing.T) {
+	resetControlPlaneForTest(t)
+	dials := countSocketDials(t)
+
+	if _, err := dialGCSocket("/nonexistent/local.sock", time.Millisecond); err == nil || errors.Is(err, errWorkerSiteNoController) {
+		t.Fatalf("local dial error = %v, want the dialer's own error", err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("local dials = %d, want 1", got)
+	}
+
+	makeWorkerSite(t, t.TempDir())
+	conn, err := dialGCSocket("/nonexistent/worker.sock", time.Millisecond)
+	if conn != nil || !errors.Is(err, errWorkerSiteNoController) {
+		t.Fatalf("worker-site dial = (%v, %v), want errWorkerSiteNoController", conn, err)
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("a worker-site dial reached the dialer: dials = %d, want 1", got)
+	}
+}
+
+// TestControlPlaneGateRefusesAMalformedDescriptor resolves a city whose
+// descriptor is malformed: every command refuses it except the four that read
+// the file themselves.
+func TestControlPlaneGateRefusesAMalformedDescriptor(t *testing.T) {
+	resetControlPlaneForTest(t)
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"gate-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeControlPlaneBytes(t, cityDir, []byte("schema = ["))
+	t.Setenv("GC_CITY", cityDir)
+
+	var descErr *errControlPlaneDescriptor
+	if _, err := resolveContext(); !errors.As(err, &descErr) {
+		t.Fatalf("resolveContext error = %v, want *errControlPlaneDescriptor", err)
+	}
+	if _, err := resolveCommandContext([]string{cityDir}); !errors.As(err, &descErr) {
+		t.Fatalf("resolveCommandContext(path) error = %v, want *errControlPlaneDescriptor", err)
+	}
+
+	prev := controlPlaneGateExempt
+	t.Cleanup(func() { controlPlaneGateExempt = prev })
+	controlPlaneGateExempt = true
+	ctx, err := resolveContext()
+	if err != nil {
+		t.Fatalf("an exempt command's resolveContext = %v, want the city", err)
+	}
+	if ctx.CityPath != cityDir || ctx.Plane.Worker() {
+		t.Fatalf("exempt context = %+v, want the city on the Local plane", ctx)
+	}
+}
+
+func TestControlPlaneGateExemptsOnlyTheCommandsThatReadTheFile(t *testing.T) {
+	root := newRootCmd(&bytes.Buffer{}, &bytes.Buffer{})
+	for _, tc := range []struct {
+		args []string
+		want bool
+	}{
+		{[]string{"doctor"}, true},
+		{[]string{"doctor", "--verbose"}, true},
+		{[]string{"--city", "/x", "doctor"}, true},
+		{[]string{"version"}, true},
+		{[]string{"help"}, true},
+		{[]string{"help", "start"}, true},
+		{[]string{"start"}, false},
+		{[]string{"session", "list"}, false},
+		{[]string{"events"}, false},
+		{[]string{}, false},
+		{[]string{"no-such-command"}, false},
+	} {
+		if got := controlPlaneGateExemptFor(root, tc.args); got != tc.want {
+			t.Errorf("controlPlaneGateExemptFor(%q) = %v, want %v", tc.args, got, tc.want)
+		}
+	}
+	if !controlPlaneExemptCommands["connect"] {
+		t.Error("gc connect is not exempt; it writes and reads the descriptor itself")
+	}
+}
+
+// TestControlPlaneGateThroughRun runs real commands through run(): a
+// command that resolves the city refuses a malformed descriptor, and
+// `gc version` still runs.
+func TestControlPlaneGateThroughRun(t *testing.T) {
+	resetControlPlaneForTest(t)
+	clearGCEnv(t)
+	cityDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityDir, "city.toml"), []byte("[workspace]\nname = \"gate-city\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeControlPlaneBytes(t, cityDir, []byte("schema = ["))
+	t.Setenv("GC_CITY", cityDir)
+
+	var stdout, stderr bytes.Buffer
+	if code := run([]string{"rig", "list"}, &stdout, &stderr); code == 0 {
+		t.Fatalf("gc rig list on a malformed descriptor exited 0; stdout=%s", stdout.String())
+	}
+	if !strings.Contains(stderr.String(), citylayout.ControlPlaneDescriptorPath) {
+		t.Fatalf("stderr does not name the descriptor:\n%s", stderr.String())
+	}
+
+	stdout.Reset()
+	stderr.Reset()
+	if code := run([]string{"version"}, &stdout, &stderr); code != 0 {
+		t.Fatalf("gc version = %d on a malformed descriptor; stderr=%s", code, stderr.String())
+	}
+	if controlPlaneGateExempt {
+		t.Fatal("run() left the gate exemption set")
+	}
+}

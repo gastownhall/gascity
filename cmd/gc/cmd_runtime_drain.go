@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -717,8 +718,13 @@ func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) 
 // GC_DRAIN". Only the typed sentinels count; an error that merely reads like
 // absence (an adapter's "command not found") or that also says the runtime
 // could not be observed is a failure to answer.
+//
+// The worker-site guard's refusal is "meta not applicable" too: a box holds no
+// runtime meta, so the session row alone answers there. In-box drain-ack has
+// no path under the legacy reconciler (D-DRAINACK); the guard makes that loud
+// instead of reading a box-local runtime.
 func drainCheckRuntimeAbsent(err error) bool {
-	if errors.Is(err, runtime.ErrMetaUnsupported) {
+	if errors.Is(err, runtime.ErrMetaUnsupported) || errors.Is(err, guard.ErrControllerOwnedRuntime) {
 		return true
 	}
 	return errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable)

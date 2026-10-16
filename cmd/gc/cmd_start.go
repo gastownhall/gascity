@@ -695,6 +695,11 @@ func requireBootstrappedCity(dir string) (string, error) {
 	if !citylayout.HasRuntimeRoot(cityPath) {
 		return "", fmt.Errorf("city runtime not bootstrapped at %s; run \"gc init %s\" first", cityPath, cityPath)
 	}
+	// Starting a city constructs its controller, which a worker site's box
+	// never runs: the city is the remote controller's.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		return "", err
+	}
 	return cityPath, nil
 }
 

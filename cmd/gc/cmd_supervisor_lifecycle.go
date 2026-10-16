@@ -625,6 +625,10 @@ StandardOutput=journal).`,
 var runSupervisorFunc = runSupervisor
 
 func doSupervisorRun(stdout, stderr io.Writer) int {
+	if err := refuseSupervisorOnWorkerSite(); err != nil {
+		fmt.Fprintf(stderr, "gc supervisor run: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	defaultSupervisorBeadsActor()
 	return runSupervisorFunc(stdout, stderr)
 }

@@ -110,7 +110,7 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
-			if err := pokeControlDispatch(cityPath); err != nil {
+			if err := pokeControlDispatch(cityPath); err != nil && !noteWorkerSitePoke(stderr, "gc convoy poke", err) {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}

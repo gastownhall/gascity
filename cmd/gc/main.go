@@ -215,6 +215,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	var observedStdout *countingWriter
 	options.invocationArgs = append([]string(nil), args...)
 	root := newRootCmdWithOptions(execStdout, stderr, options)
+	prevPlaneGateExempt := controlPlaneGateExempt
+	controlPlaneGateExempt = controlPlaneGateExemptFor(root, args)
+	defer func() { controlPlaneGateExempt = prevPlaneGateExempt }()
 	root.SetArgs(args)
 	root.SetOut(execStdout)
 	root.SetErr(stderr)
@@ -602,6 +605,7 @@ type resolvedContext struct {
 	CityPath string        // absolute path to city root (empty when Remote is set)
 	RigName  string        // rig name (empty if not in a rig context)
 	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
+	Plane    controlPlane  // the city's plane: Local, or Worker when it holds .gc/control-plane.toml
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an
@@ -627,7 +631,7 @@ func resolveCommandContext(args []string) (resolvedContext, error) {
 	// name to resolveContextFromPath's upward city walk (which would silently
 	// target an ambient ancestor city).
 	if classifyCityRef(args[0]) == cityRefName {
-		return resolveCityNameContext(args[0], resolveContextFromPath)
+		return withControlPlane(resolveCityNameContext(args[0], resolveContextFromPath))
 	}
 	return resolveContextFromPath(args[0])
 }
@@ -699,6 +703,12 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 }
 
 func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext, error) {
+	return withControlPlane(resolveContextChain(mode))
+}
+
+// resolveContextChain is resolveContextAllowRemoteMode's priority chain,
+// before the city's plane is filled in.
+func resolveContextChain(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
 	// surfaces here regardless.
 	if target, handled, err := resolveRemoteTarget(); err != nil {
@@ -857,6 +867,12 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
+	return withControlPlane(resolveCityContextFromPath(path))
+}
+
+// resolveCityContextFromPath is resolveContextFromPath before the city's
+// plane is filled in.
+func resolveCityContextFromPath(path string) (resolvedContext, error) {
 	abs := normalizePathForCompare(path)
 	// Validate the explicit target directly before scanning the registry for
 	// rig bindings. An unrelated registered city with a broken/stale config

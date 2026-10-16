@@ -161,7 +161,13 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 	return supervisor.CityEntry{}, false, nil
 }
 
+// cityUsesManagedReconciler reports whether a controller manages cityPath. A
+// worker site is managed by definition: its controller is remote, so the
+// answer is true without probing a socket.
 func cityUsesManagedReconciler(cityPath string) bool {
+	if onWorkerSite(cityPath) {
+		return true
+	}
 	if controllerAlive(cityPath) != 0 {
 		return true
 	}
