@@ -2879,7 +2879,9 @@ func claimDueQueuedNudgesMatching(cityPath string, now time.Time, match func(que
 // carries a pin and its batch can be claimed whole (wholePinnedBatch), the
 // batch is that pinned batch, all of its pending items and nothing else: a
 // redelivery after an unknown outcome must be the same delivery. Otherwise it
-// is every due unpinned item, pinned to a new key.
+// is every due unpinned item, pinned to a new key. A pinned batch is taken
+// whole whatever its items' deliver_after, unlike storebinding's
+// NudgeQueue.ClaimBatch, which waits until every member is due.
 //
 // The claim also moves each item it takes onto target's fence in the queue
 // (refencedQueuedNudge), not only in the delivered copy. A batch thus carries
@@ -2977,7 +2979,10 @@ func claimDueQueuedNudges(cityPath string, now time.Time, match func(queuedNudge
 //
 // Whether a batch splits is decided only for a batch that has a due,
 // claimable item, because match may list the city's sessions (the Leg-B
-// census): a batch whose items are all backed off never asks it.
+// census): a batch whose items are all backed off never asks it. Deciding it
+// does ask about the batch's items that are not yet due: the batch is claimed
+// whole whatever their deliver_after, so whether each passes the fence decides
+// the claim.
 func wholePinnedBatch(state *nudgeQueueState, claimable, match func(queuedNudge) bool) string {
 	inFlight := make(map[string]bool, len(state.InFlight))
 	for _, item := range state.InFlight {
