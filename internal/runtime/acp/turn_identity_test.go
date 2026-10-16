@@ -354,7 +354,9 @@ func TestInterruptTurnCancelsTheRunningTurn(t *testing.T) {
 // (TestInterruptTurnCancelNeverFollowsTheNextPrompt,
 // TestInterruptTurnSIGINTNeverReachesTheNextTurn,
 // TestInterruptTurnCancelFollowsItsOwnPrompt) pin each window without -race;
-// this test catches a split critical section reliably only under -race.
+// this test is probabilistic. It catches a split critical section in roughly
+// 4 of 10 -race runs and essentially never without -race, and no CI lane runs
+// -race, so it is not a CI guard for that regression.
 func TestInterruptTurnNeverCancelsTheNextTurn(t *testing.T) {
 	p := NewProviderWithDir(filepath.Join(shortTempDir(t), "acp"), Config{
 		NudgeBusyTimeout: protocolUnitWait,

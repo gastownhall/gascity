@@ -77,9 +77,12 @@ func (sc *sessionConn) interrupt(name string, cancelTimeout time.Duration) error
 
 // interruptTurn is interrupt aimed at turn turnID. In one critical section of
 // mu it checks that turnID is the running turn and takes that turn's idle
-// channel and outstanding permission requests. Everything it sends afterwards
-// is checked against that channel atomically with the send (see cancelTurn
-// and signalTurn), so none of it reaches the agent once the turn has ended.
+// channel and outstanding permission requests. Its two signals are checked
+// against that channel atomically with the send: session/cancel under stdinMu
+// (cancelTurn) and the SIGINT fallback under mu (signalTurn), so neither
+// reaches the agent once the turn has ended. The canceled permission replies
+// are not fenced: they answer the turn's own request ids and may reach the
+// agent after the turn ends, as replies do when a turn ends on its own.
 // When turnID is not running it sends nothing, not even permission replies,
 // and returns a *runtime.TurnNotCurrentError. When it is, the cancel, settle
 // and SIGINT fallback run on a goroutine the connection owns, and
@@ -114,10 +117,13 @@ func (sc *sessionConn) interruptTurn(name, turnID string, cancelTimeout time.Dur
 
 // cancelAndSettle sends the canceled permission replies and session/cancel
 // for the turn behind idleCh, then waits up to cancelTimeout for it to end and
-// falls back to SIGINT, as interrupt documents. Every send is keyed to idleCh
-// and made only while that channel is open, checked atomically with the send,
-// so none reaches the agent after that turn has ended. What the agent does
-// with a SIGINT it received during the turn is up to the agent.
+// falls back to SIGINT, as interrupt documents. session/cancel (under
+// stdinMu) and the SIGINT (under mu) are each made only while idleCh is open,
+// checked atomically with the send, so neither reaches the agent after that
+// turn has ended. The canceled permission replies answer the turn's own
+// request ids and may arrive after the turn ends, as they do on a natural end.
+// What the agent does with a SIGINT it received during the turn is up to the
+// agent.
 func (sc *sessionConn) cancelAndSettle(name, sessionID string, idleCh <-chan struct{}, replies [][]byte, cancelTimeout time.Duration) error {
 	// A goroutine writes the replies and the cancel, so the wait below stays
 	// bounded even if the agent has stopped reading its stdin.

@@ -133,8 +133,9 @@ func TestTurnFenceUnavailableIsRuntimeUnavailable(t *testing.T) {
 	if !errors.Is(runtime.ErrTurnFenceUnavailable, runtime.ErrRuntimeUnavailable) {
 		t.Fatal("ErrTurnFenceUnavailable does not wrap ErrRuntimeUnavailable")
 	}
+	fenceErr := runtime.ErrTurnFenceUnavailable
 	for _, other := range []error{runtime.ErrSessionNotFound, runtime.ErrTurnNotCurrent, runtime.ErrTurnIdentityUnsupported} {
-		if errors.Is(runtime.ErrTurnFenceUnavailable, other) {
+		if errors.Is(fenceErr, other) {
 			t.Errorf("ErrTurnFenceUnavailable matches %v", other)
 		}
 	}

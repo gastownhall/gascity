@@ -81,7 +81,9 @@
   `Interrupt` shares, keyed to that channel. A check and a channel taken in
   separate critical sections can cancel the next turn;
   `TestInterruptTurnNeverCancelsTheNextTurn` interleaves the two 1,000 times
-  (reliable only under `-race`), and
+  (probabilistic: it catches a split critical section in roughly 4 of 10
+  `-race` runs and essentially never without, and no CI lane runs `-race`),
+  and
   `TestInterruptTurnCancelNeverFollowsTheNextPrompt` pins the window after
   the critical section deterministically.
 - ACP still reports `keystroke` mode, so `internal/session` never consults
