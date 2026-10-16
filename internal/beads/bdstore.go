@@ -1362,9 +1362,11 @@ func isBdNotFoundEnvelope(out []byte) bool {
 // escape. The lexer also reads one byte at a time, so a non-ASCII byte would
 // come back re-encoded as a different ID. Such IDs are refused, along with
 // control characters, which no ID contains, leaving absence unproven rather
-// than confirmed for an ID bd was never asked about. A trailing '*' turns the
-// clause into a prefix match, whose empty answer still proves the exact ID
-// absent.
+// than confirmed for an ID bd was never asked about. quoteBdQueryValue
+// escapes '"' and '\' for List's wisp filters; Get refuses them instead, so
+// a confirmed absence never rests on bd's escape handling. A trailing '*'
+// turns the clause into a prefix match, whose empty answer still proves the
+// exact ID absent.
 func isExactIDQueryable(id string) bool {
 	if id == "" {
 		return false
@@ -3327,12 +3329,19 @@ func isBdQueryUnsupported(err error) bool {
 		strings.Contains(text, "unknown command query")
 }
 
+// canApplyWispsServerLimit reports whether the wisp-leg bd query may carry the
+// caller's limit. That query sends no --sort, so bd cuts its page in its own
+// order (priority ASC, created_at DESC, id ASC), a valid prefix only for
+// SortDefault. Under SortCreatedDesc a newer row of lower priority, or the
+// larger id of a created_at tie, falls outside bd's page, so a created-desc
+// read fetches every predicated row and Go cuts the canonical (created_at
+// DESC, id DESC) prefix.
 func canApplyWispsServerLimit(query ListQuery) bool {
 	// SeekAfter: the compound (created_at, id) boundary is resolved Go-side
 	// (identical tie-break to the in-memory sort), not via a bd query flag, so
 	// a bd-side limit would cut rows before that filter runs — same class as
 	// CreatedBefore. So are IDs, as bdListRequiresClientLimit has it for bd list.
-	return (query.Sort == SortDefault || query.Sort == SortCreatedDesc) &&
+	return query.Sort == SortDefault &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
@@ -3378,7 +3387,8 @@ func isPrintableASCII(value string) bool {
 
 // quoteBdQueryValue renders value as a bd query DSL string literal: double
 // quotes, with backslash and double quote escaped the way bd's lexer reads
-// them back.
+// them back. Get's isExactIDQueryable refuses those two bytes rather than
+// escaping them, so its proof of absence never rests on this round trip.
 func quoteBdQueryValue(value string) string {
 	var sb strings.Builder
 	sb.Grow(len(value) + 2)

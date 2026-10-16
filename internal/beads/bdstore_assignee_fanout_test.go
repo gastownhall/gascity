@@ -174,6 +174,53 @@ func TestBdStoreListWispsDefaultSortKeepsServerLimit(t *testing.T) {
 	}
 }
 
+// bd's own order is no prefix of created-desc: it puts a higher priority
+// first, and breaks a created_at tie by id ASC where created-desc takes the
+// larger id. A created-desc read therefore reaches bd unlimited and Go cuts
+// the limit, for a quoted value as for a bare one.
+func TestBdStoreListWispsCreatedDescReadsUnlimited(t *testing.T) {
+	cases := []struct {
+		name string
+		rows []fanoutRow
+		want string
+	}{
+		{"older row of higher priority", []fanoutRow{
+			{ID: "w-old", Priority: 0, Created: "2026-09-25T08:00:00Z"},
+			{ID: "w-new", Priority: 2, Created: "2026-09-25T10:00:00Z"},
+		}, "w-new"},
+		{"created_at tie", []fanoutRow{
+			{ID: "w-1", Priority: 2, Created: "2026-09-25T08:00:00Z"},
+			{ID: "w-2", Priority: 2, Created: "2026-09-25T08:00:00Z"},
+		}, "w-2"},
+	}
+	for _, assignee := range []string{"rig/a", "rig-a"} { // quoted, bare
+		for _, tc := range cases {
+			t.Run(assignee+"/"+tc.name, func(t *testing.T) {
+				rows := slices.Clone(tc.rows)
+				for i := range rows {
+					rows[i].Assignee = assignee
+				}
+				fake := &predicatedBd{t: t, rows: rows}
+				s := beads.NewBdStore("/city", fake.runner)
+
+				got, err := s.List(beads.ListQuery{
+					Assignee: assignee, TierMode: beads.TierBoth, Sort: beads.SortCreatedDesc, Limit: 1,
+				})
+				if err != nil {
+					t.Fatalf("List: %v", err)
+				}
+				if want := []string{tc.want}; !slices.Equal(fanoutIDs(got), want) {
+					t.Fatalf("List ids = %v, want %v (calls %v)", fanoutIDs(got), want, fake.calls)
+				}
+				query := firstCommandWithPrefix(fake.calls, "bd query ")
+				if !strings.Contains(query, "--limit 0") {
+					t.Fatalf("query cmd = %q, want --limit 0 for a created-desc read", query)
+				}
+			})
+		}
+	}
+}
+
 // IDs is matched only Go-side, so bd must not cut the limit before that
 // filter runs, or the wanted row is never read. The assignee is bare, so the
 // limit gate is what is under test.
