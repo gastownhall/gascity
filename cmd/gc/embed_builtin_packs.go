@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/BurntSushi/toml"
 	"github.com/gastownhall/gascity/internal/builtinpacks"
@@ -410,9 +411,46 @@ func packExists(dir string) bool {
 // peekBeadsProvider reads just the beads.provider field from a city.toml
 // without doing full config parsing. Returns "" if not set or on error.
 func peekBeadsProvider(tomlPath string) string {
+	return peekCityTOMLBeads(tomlPath).Provider
+}
+
+// peekBeadsBackend reads just the beads.backend field from a city.toml, the
+// same way peekBeadsProvider reads the provider.
+func peekBeadsBackend(tomlPath string) string {
+	return peekCityTOMLBeads(tomlPath).Backend
+}
+
+// cityTOMLBeadsPeek is what one city.toml's [beads] table says about the
+// provider and backend, read without composing the city config.
+type cityTOMLBeadsPeek struct {
+	Provider string
+	Backend  string
+}
+
+// cityTOMLBeadsPeekDecodes counts the city.toml decodes the [beads] peek
+// performed (memo answers excluded), for tests that pin a command's cost.
+var cityTOMLBeadsPeekDecodes atomic.Int64
+
+// peekCityTOMLBeads answers the [beads] peek for tomlPath. Decoding TOML means
+// decoding the whole file, about 15 ms for a production-sized city.toml, and a
+// one-shot command asks many times (10 per `gc bd show`, 19 per `gc ready` on
+// maintainer-city), so inside an invocation memo scope the file is decoded once.
+// Outside a scope every peek reads the file, so a long-lived process sees edits.
+func peekCityTOMLBeads(tomlPath string) cityTOMLBeadsPeek {
+	if memo := currentInvocationConfigMemo(); memo != nil {
+		return memo.cityTOMLBeadsPeek(tomlPath)
+	}
+	peek, _ := decodeCityTOMLBeadsPeek(tomlPath)
+	return peek
+}
+
+// decodeCityTOMLBeadsPeek reads and decodes tomlPath's [beads] table. ok is
+// false when the file could not be read or parsed; the peek is then empty.
+func decodeCityTOMLBeadsPeek(tomlPath string) (cityTOMLBeadsPeek, bool) {
+	cityTOMLBeadsPeekDecodes.Add(1)
 	data, err := os.ReadFile(tomlPath)
 	if err != nil {
-		return ""
+		return cityTOMLBeadsPeek{}, false
 	}
 	var peek struct {
 		Beads struct {
@@ -421,25 +459,9 @@ func peekBeadsProvider(tomlPath string) string {
 		} `toml:"beads"`
 	}
 	if _, err := toml.Decode(string(data), &peek); err != nil {
-		return ""
+		return cityTOMLBeadsPeek{}, false
 	}
-	return peek.Beads.Provider
-}
-
-func peekBeadsBackend(tomlPath string) string {
-	data, err := os.ReadFile(tomlPath)
-	if err != nil {
-		return ""
-	}
-	var peek struct {
-		Beads struct {
-			Backend string `toml:"backend"`
-		} `toml:"beads"`
-	}
-	if _, err := toml.Decode(string(data), &peek); err != nil {
-		return ""
-	}
-	return peek.Beads.Backend
+	return cityTOMLBeadsPeek{Provider: peek.Beads.Provider, Backend: peek.Beads.Backend}, true
 }
 
 // peekEventsProvider reads just the events.provider field from a city.toml

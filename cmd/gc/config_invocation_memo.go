@@ -50,6 +50,9 @@ import (
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
+	// beadsPeeks are the decoded [beads] tables of the city.toml files this
+	// scope peeked (peekCityTOMLBeads), by normalized path.
+	beadsPeeks map[string]cityTOMLBeadsPeek
 }
 
 type invocationConfigMemoEntry struct {
@@ -96,6 +99,27 @@ func currentInvocationConfigMemo() *invocationConfigMemo {
 	invocationConfigMemoMu.Lock()
 	defer invocationConfigMemoMu.Unlock()
 	return activeInvocationConfigMemo
+}
+
+// cityTOMLBeadsPeek answers peekCityTOMLBeads for tomlPath from this scope,
+// decoding the file on the first ask. Only a decoded answer is remembered: a
+// peek that could not read or parse the file is retried by the next caller,
+// the rule the composed-config entries keep for errors.
+func (m *invocationConfigMemo) cityTOMLBeadsPeek(tomlPath string) cityTOMLBeadsPeek {
+	key := normalizePathForCompare(filepath.Clean(tomlPath))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if peek, ok := m.beadsPeeks[key]; ok {
+		return peek
+	}
+	peek, ok := decodeCityTOMLBeadsPeek(tomlPath)
+	if ok {
+		if m.beadsPeeks == nil {
+			m.beadsPeeks = map[string]cityTOMLBeadsPeek{}
+		}
+		m.beadsPeeks[key] = peek
+	}
+	return peek
 }
 
 // loadComposedCityConfig is config.LoadWithIncludesOptions for the cmd/gc
