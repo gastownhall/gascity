@@ -69,6 +69,13 @@ func DiscoverKeyedPath(searchPaths []string, provider, workDir, gcSessionID stri
 		// discovers by cwd. Preferring the keyed hit removes the newest-wins
 		// ambiguity when several sessions share a work dir.
 		return sessionlog.FindZCodeSessionFileByID(searchPaths, workDir, gcSessionID)
+	case "opencode":
+		// The OpenCode mirror filename IS the provider session id (the bead's
+		// session_key), so the identity lookup is exact. SupportsIDLookup stays
+		// false for the same reason as zcode. Without the keyed hit, sessions
+		// sharing a work dir are indistinguishable and usage sweeps refuse them
+		// as ambiguous.
+		return sessionlog.FindOpenCodeSessionFileByID(searchPaths, gcSessionID)
 	}
 	if !SupportsIDLookup(provider) {
 		return ""

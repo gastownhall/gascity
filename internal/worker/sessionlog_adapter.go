@@ -157,6 +157,17 @@ func (a SessionLogAdapter) CodexTailUsage(path, cursorID string) ([]sessionlog.T
 	return sessionlog.ExtractCodexTailUsageFromSearchPaths(a.SearchPaths, path)
 }
 
+// OpenCodeTailUsage reads per-invocation token usage from a mirrored OpenCode
+// session export. Validation merges the OpenCode mirror root
+// (~/.local/share/gascity/opencode-transcripts) with the configured search
+// paths. cursorID is accepted for signature symmetry with TailUsage: the export
+// is a single JSON document parsed whole, so there is no window to grow and the
+// caller's cursor filter alone decides what is new.
+func (a SessionLogAdapter) OpenCodeTailUsage(path, cursorID string) ([]sessionlog.TailUsage, error) {
+	_ = cursorID
+	return sessionlog.ExtractOpenCodeTailUsageFromSearchPaths(a.SearchPaths, path)
+}
+
 // InvocationUsage reads per-invocation token usage from a discovered
 // transcript using the SAME extractor the prompt-op telemetry gate uses for
 // the provider's invocation-usage family (invocationUsageSpecs). It returns

@@ -54,6 +54,12 @@ func defaultPricingRegistry() *pricing.Registry {
 //
 //   - claude: Manager.TranscriptPath (session-key stat or ambiguity-guarded
 //     project-slug listing — cheap) + the Claude JSONL tail extractor.
+//   - opencode: the session's own export, mirrored under the OpenCode
+//     transcript root as <session_key>.json. Resolved by that key through
+//     Manager.TranscriptPath; never by workdir, because sessions sharing a
+//     workdir would otherwise be attributed each other's export. The whole
+//     export is parsed (it is one JSON document, not an append-only log) and
+//     the provider-reported cost is preferred over the price table.
 //   - codex: identity-first. When the session bead carries a session_key
 //     (captured from the codex hook; codex rollout filenames end in the
 //     same uuid), the rollout is resolved by that suffix via
@@ -196,12 +202,7 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		telemetry.RecordInvocationTokens(ctx, labels,
 			int64(u.InputTokens), int64(u.OutputTokens),
 			int64(u.CacheReadTokens), int64(u.CacheCreationTokens))
-		cost, priced := h.pricing.Estimate(providerFamily, u.Model, pricing.Usage{
-			PromptTokens:        u.InputTokens,
-			CompletionTokens:    u.OutputTokens,
-			CacheReadTokens:     u.CacheReadTokens,
-			CacheCreationTokens: u.CacheCreationTokens,
-		})
+		cost, priced := invocationCost(h.pricing, providerFamily, u)
 		if priced {
 			telemetry.RecordInvocationCostEstimate(ctx, labels, cost)
 		}
@@ -216,6 +217,23 @@ func (h *SessionHandle) recordInvocationTelemetry(ctx context.Context) {
 		slog.Debug("persisting invocation usage cursor failed; next prompt op may re-record",
 			slog.String("session_id", id), slog.Any("error", err))
 	}
+}
+
+// invocationCost prices one invocation. A cost the provider's own transcript
+// recorded (OpenCode) wins over the price table: it reflects the upstream the
+// session actually routed through, which a static (family, model) table cannot
+// know. Without one the registry decides, and a miss is reported unpriced so
+// the fact keeps its tokens and is flagged rather than zero-filled.
+func invocationCost(registry *pricing.Registry, family string, u sessionlog.TailUsage) (float64, bool) {
+	if u.HasReportedCost {
+		return u.ReportedCostUSD, true
+	}
+	return registry.Estimate(family, u.Model, pricing.Usage{
+		PromptTokens:        u.InputTokens,
+		CompletionTokens:    u.OutputTokens,
+		CacheReadTokens:     u.CacheReadTokens,
+		CacheCreationTokens: u.CacheCreationTokens,
+	})
 }
 
 // modelUsageFact builds a model usage Fact from one transcript invocation. The
@@ -306,6 +324,10 @@ var invocationUsageSpecs = map[string]invocationUsageSpec{
 		discover: discoverCodexInvocationTranscript,
 		extract:  SessionLogAdapter.CodexTailUsage,
 	},
+	"opencode": {
+		discover: discoverInvocationTranscriptViaManager,
+		extract:  SessionLogAdapter.OpenCodeTailUsage,
+	},
 }
 
 // invocationUsageFamily resolves a provider string to its registered
@@ -316,8 +338,11 @@ func invocationUsageFamily(provider string) string {
 	if strings.Contains(strings.ToLower(provider), "claude") {
 		return "claude"
 	}
-	if sessionlog.ProviderFamily(provider) == "codex" {
+	switch sessionlog.ProviderFamily(provider) {
+	case "codex":
 		return "codex"
+	case "opencode":
+		return "opencode"
 	}
 	return ""
 }
@@ -681,12 +706,7 @@ func (f *Factory) sweepResolvedTranscript(ctx context.Context, family, id string
 	agentName := sweepAgentName(meta)
 	lastRecorded := ""
 	for _, u := range pending {
-		cost, priced := registry.Estimate(family, u.Model, pricing.Usage{
-			PromptTokens:        u.InputTokens,
-			CompletionTokens:    u.OutputTokens,
-			CacheReadTokens:     u.CacheReadTokens,
-			CacheCreationTokens: u.CacheCreationTokens,
-		})
+		cost, priced := invocationCost(registry, family, u)
 		// Mirror the prompt-op seam's OTel metrics so the agents this sweep recovers
 		// facts for also get live gc.agent.tokens.* / cost series — the family keys
 		// the label identically to the emitted fact's Provider so metrics and facts
