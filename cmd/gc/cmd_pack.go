@@ -81,6 +81,7 @@ func doPackFetch(stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc pack fetch: building lock: %v\n", err) //nolint:errcheck
 		return 1
 	}
+	invalidateInvocationConfigMemo()
 	if err := config.WriteLock(cityPath, lock); err != nil {
 		fmt.Fprintf(stderr, "gc pack fetch: writing lock: %v\n", err) //nolint:errcheck
 		return 1

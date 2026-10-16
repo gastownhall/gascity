@@ -239,9 +239,14 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 			return code
 		}
 	}
-	if target, _, findErr := root.Find(args); findErr == nil && invocationStoreMemoEligible(target) {
-		endStoreMemo := beginInvocationStoreMemo()
-		defer endInvocationStoreMemoLogged(endStoreMemo, stderr)
+	if target, _, findErr := root.Find(args); findErr == nil {
+		if invocationStoreMemoEligible(target) {
+			endStoreMemo := beginInvocationStoreMemo()
+			defer endInvocationStoreMemoLogged(endStoreMemo, stderr)
+		}
+		if invocationConfigMemoEligible(target) {
+			defer beginInvocationConfigMemo()()
+		}
 	}
 	executedCommand, executeErr := root.ExecuteC()
 	lifecycle.attemptFinalOutcome(resolveProductMetricsFinalOutcome(executedCommand, classification))

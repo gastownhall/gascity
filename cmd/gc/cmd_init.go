@@ -1267,7 +1267,7 @@ func cmdInitFromTOMLFileWithOptionsInternal(fs fsys.FS, tomlSrc, cityPath, nameO
 		if wroteCity {
 			writeCfg := cityCfg
 			writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
-			if err := config.WriteCityAndRigSiteBindingsForEdit(fs, cityTomlPath, &writeCfg); err != nil {
+			if err := writeCityConfigForEditFS(fs, cityTomlPath, &writeCfg); err != nil {
 				fmt.Fprintf(stderr, "gc init: %v\n", initSiteBindingPersistError(err)) //nolint:errcheck // best-effort stderr
 				return 1
 			}
@@ -2017,7 +2017,7 @@ func rewriteCopiedInitFromIdentity(fs fsys.FS, cityPath, nameOverride string) (*
 	if len(rigSiteBindings) > 0 {
 		writeCfg := *cfg
 		writeCfg.Rigs = append([]config.Rig(nil), rigSiteBindings...)
-		if err := config.WriteCityAndRigSiteBindingsForEdit(fs, copiedToml, &writeCfg); err != nil {
+		if err := writeCityConfigForEditFS(fs, copiedToml, &writeCfg); err != nil {
 			return nil, "", "", false, nil, initSiteBindingPersistError(err)
 		}
 	} else {

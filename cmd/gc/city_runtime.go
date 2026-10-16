@@ -459,6 +459,9 @@ const postCreateProtectionTimeout = 2 * time.Minute
 // decides is storage_boot.go; every caller here does is print the error and
 // stop this one city.
 func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
+	// A long-running host reloads city config on purpose; the per-invocation
+	// config memo (config_invocation_memo.go) would freeze it at boot.
+	leaveInvocationConfigMemo()
 	if err := checkReconcilerWiring(p); err != nil {
 		return nil, err
 	}

@@ -46,6 +46,9 @@ var (
 	// (and so have no real cache content on disk for the loader to expand)
 	// can stub this too. See #5382.
 	validateComposedConfigAfterInstall = func(cityPath string) error {
+		// The install just rewrote what the composition reads (the pack
+		// cache, packs.lock), so no earlier load in this invocation counts.
+		invalidateInvocationConfigMemo()
 		_, err := loadCityConfig(cityPath, io.Discard)
 		return err
 	}
@@ -1358,6 +1361,7 @@ func loadCityPackManifestFS(fs fsys.FS, cityPath string) (*cityPackManifest, err
 }
 
 func writeCityPackManifest(fs fsys.FS, cityPath string, manifest *cityPackManifest) error {
+	defer invalidateInvocationConfigMemo()
 	if manifest == nil {
 		manifest = &cityPackManifest{}
 	}

@@ -862,7 +862,7 @@ func citySelectsHostedBeadsCredentialProvider(cityPath string) (bool, error) {
 		}
 		hostedCredentialProbeCache.Delete(key)
 	}
-	// Inside an invocation scope (a `gc bd` passthrough) this is answered from
+	// Inside an invocation scope (any one-shot command) this is answered from
 	// the composition the rest of the command already read; see
 	// invocationConfigMemo. Outside one it is a plain composed load.
 	cfg, prov, err := loadComposedCityConfig(fsys.OSFS{}, cityConfigPath, hostedCredentialProbeLoad)

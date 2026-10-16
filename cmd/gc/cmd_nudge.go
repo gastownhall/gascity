@@ -983,6 +983,9 @@ func resolveNudgePollInterval(cityPath string, flagValue time.Duration, flagExpl
 }
 
 func cmdNudgePoll(args []string, sessionName string, interval, quiescence time.Duration, intervalExplicit bool, _ io.Writer, stderr io.Writer) int {
+	// A long-running host reloads city config on purpose; the per-invocation
+	// config memo (config_invocation_memo.go) would freeze it at boot.
+	leaveInvocationConfigMemo()
 	targetID := os.Getenv("GC_ALIAS")
 	if targetID == "" {
 		targetID = os.Getenv("GC_SESSION_ID")

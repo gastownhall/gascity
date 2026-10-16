@@ -1269,6 +1269,7 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	// Write updated config.
+	invalidateInvocationConfigMemo()
 	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

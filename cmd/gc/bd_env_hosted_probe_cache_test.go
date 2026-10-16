@@ -92,6 +92,17 @@ func TestHostedCredentialProbeReadsThroughTheInvocationMemo(t *testing.T) {
 		t.Fatal(err)
 	}
 	writeHostedProbeCity(t, cityPath, false, stamp.Add(time.Second))
+	// The memo re-composes when a source's size or mtime moves, which would
+	// read the rewrite too. Re-stamp the seeded entry's sources so it stands
+	// for a rewrite the stat check cannot see; only a memo read then returns
+	// the seeded answer.
+	memo := currentInvocationConfigMemo()
+	memo.mu.Lock()
+	for key, entry := range memo.entries {
+		entry.sources = invocationConfigSources(tomlPath, entry.prov)
+		memo.entries[key] = entry
+	}
+	memo.mu.Unlock()
 
 	// Control: a fresh composition reads the rewrite, so the probe's answer
 	// below tells a memo read from a fresh one.

@@ -557,6 +557,7 @@ func (v2RigPathSiteBindingCheck) Fix(ctx *doctor.CheckContext) error {
 		return err
 	}
 	cityTomlPath := filepath.Join(ctx.CityPath, "city.toml")
+	invalidateInvocationConfigMemo()
 	if err := config.WriteCityAndRigSiteBindingsForEdit(fsys.OSFS{}, cityTomlPath, cfg); err != nil {
 		return err
 	}

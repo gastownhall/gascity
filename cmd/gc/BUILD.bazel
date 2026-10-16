@@ -1476,6 +1476,7 @@ go_test(
         "init_prompt_template_path_test.go",
         "init_provider_readiness_test.go",
         "init_workspace_prefix_preserve_test.go",
+        "invocation_config_memo_test.go",
         "invocation_store_memo_test.go",
         "json_oddball_root_test.go",
         "json_output_test.go",
