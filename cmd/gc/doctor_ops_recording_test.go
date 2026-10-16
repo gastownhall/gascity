@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/rollout"
 )
 
@@ -67,8 +68,8 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 				t.Errorf("message %q lacks %q", r.Message, want)
 			}
 		}
-		if r.FixHint == "" {
-			t.Error("no remedy")
+		if !strings.Contains(r.FixHint, "conditional writes") || strings.Contains(r.FixHint, "id prefix") {
+			t.Errorf("remedy %q, want the conditional-writes remedy alone", r.FixHint)
 		}
 	})
 
@@ -84,14 +85,46 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 				t.Errorf("message %q lacks %q", r.Message, want)
 			}
 		}
+		if !strings.Contains(r.FixHint, "id prefix") || strings.Contains(r.FixHint, "conditional writes") {
+			t.Errorf("remedy %q, want the id-prefix remedy alone", r.FixHint)
+		}
 	})
 
 	t.Run("an unopenable store", func(t *testing.T) {
 		c, _ := newTestOpsRecordingCheck(nil, opSweepT0, rollout.WithOpsControl(rollout.Require))
 		c.open = func() (beads.Store, error) { return nil, errors.New("dolt down") }
 		r := c.Run(&doctor.CheckContext{})
-		if r.Status != doctor.StatusError || !strings.Contains(r.Message, "store_error") {
+		if r.Status != doctor.StatusError || !strings.Contains(r.Message, legacyop.DegradeStoreError) {
 			t.Fatalf("result = %v %q, want Error naming store_error", r.Status, r.Message)
+		}
+		if !strings.Contains(r.FixHint, "reachable") || strings.Contains(r.FixHint, "conditional writes") {
+			t.Errorf("remedy %q, want the reachability remedy", r.FixHint)
+		}
+	})
+
+	t.Run("a failed listing warns", func(t *testing.T) {
+		store := &opSweepFlakyStore{opSweepStore: newOpSweepStore()}
+		store.fails.Store(1)
+		c, _ := newTestOpsRecordingCheck(store, opSweepT0, rollout.WithOpsControl(rollout.Require))
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "listing open legacy ops failed") || !strings.Contains(r.Message, "dolt down") {
+			t.Fatalf("result = %v %q, want a Warning naming the failed listing", r.Status, r.Message)
+		}
+	})
+
+	t.Run("unresolved gates are not checked", func(t *testing.T) {
+		var opens atomic.Int32
+		c := newOpsRecordingDoctorCheck("/no/city", nil, rollout.ForTest(rollout.WithOpsContent(rollout.Require)), errors.New("bad [ops]"))
+		c.open = func() (beads.Store, error) {
+			opens.Add(1)
+			return newOpSweepStore(), nil
+		}
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusOK || !strings.Contains(r.Message, "not checked") {
+			t.Fatalf("result = %v %q, want OK not checked", r.Status, r.Message)
+		}
+		if opens.Load() != 0 {
+			t.Fatal("the check opened the store with unresolved gates")
 		}
 	})
 
@@ -127,6 +160,9 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 		}
 		if len(r.Details) != 1 || !strings.Contains(r.Details[0], stale.ID) {
 			t.Fatalf("details = %v, want the stale op %s", r.Details, stale.ID)
+		}
+		if !strings.Contains(r.FixHint, "restart the controller") {
+			t.Fatalf("remedy %q does not name the boot-latched gates", r.FixHint)
 		}
 	})
 

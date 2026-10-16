@@ -281,6 +281,24 @@ func (s *Store) ListOpenTolerant(conversation string) ([]Op, []QuarantinedRow, e
 	return out, quarantined, nil
 }
 
+// HasSubmittedOps reports whether store holds any submitted op row, lane or
+// legacy, with one keyed read of at most one row. Unlike NewStore it needs no
+// conditional-write capability or namespace, so a caller with nothing to
+// write (the op sweeper with every ops gate off) can learn there is nothing
+// to sweep without paying NewStore's capability probe.
+func HasSubmittedOps(store beads.Store) (bool, error) {
+	rows, err := store.List(beads.ListQuery{
+		Label:    LabelOp,
+		Metadata: map[string]string{keyStatus: string(StatusSubmitted)},
+		Limit:    1,
+		TierMode: beads.TierBoth,
+	})
+	if err != nil {
+		return false, fmt.Errorf("probing for submitted ops: %w", err)
+	}
+	return len(rows) > 0, nil
+}
+
 // legacyScanPages bounds ListOpenLegacy's read: at most this many pages of
 // limit rows.
 const legacyScanPages = 8
