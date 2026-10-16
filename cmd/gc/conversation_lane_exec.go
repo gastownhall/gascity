@@ -61,8 +61,7 @@ type conversationLaneExec struct {
 	deps   laneExecDeps
 	info   session.Info
 	target nudgeTarget
-	// budget bounds one probe's runtime calls, and a Deliver's handle
-	// resolution when its probe resolved none; laneProbeBudget in
+	// budget bounds one probe's runtime calls; laneProbeBudget in
 	// production.
 	budget time.Duration
 	// observe, matches, handle and idle are the runtime seams; production
@@ -261,21 +260,18 @@ func lanePending(p *worker.PendingInteraction, _ bool, err error) string {
 	}
 }
 
+// errLaneNoProbedHandle is a Deliver with no handle from its probe. The lane
+// delivers only after a probe that found the runtime running, live and
+// unblocked, which resolves the handle, so it is a bug; nothing is sent.
+var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a handle from its probe")
+
 // Deliver implements opjournal.Executor: one fenced live-only nudge of the
 // delivery's text, verbatim, under its delivery key, through the handle its
-// probe resolved (resolved here, bounded, when it resolved none).
+// probe resolved.
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
 	if h == nil {
-		hctx, cancel := context.WithTimeout(ctx, e.budget)
-		var err error
-		h, err = worker.ObserveBounded(hctx, laneDeliverHandleKey(e.deps.cityPath, e.info.ID), func(context.Context) (worker.Handle, error) {
-			return e.handle(e.target)
-		})
-		cancel()
-		if err != nil {
-			return laneHandleError(err)
-		}
+		return opjournal.NotDelivered{Transient: true, Cause: errLaneNoProbedHandle}
 	}
 	fence := runtime.InputFence{}
 	if d.Fence.Token != "" {
@@ -335,16 +331,6 @@ func laneDeliveryResult(ctx context.Context, res worker.NudgeResult, err error, 
 	}
 }
 
-// laneHandleError maps a failure to build the delivery's handle: nothing was
-// sent. A session that is gone or unobservable is transient; anything else
-// counts.
-func laneHandleError(err error) opjournal.DeliveryResult {
-	if errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, session.ErrSessionNotFound) {
-		return opjournal.NotDelivered{Transient: true, Cause: err}
-	}
-	return opjournal.NotDelivered{Cause: err}
-}
-
 // Interrupt implements opjournal.Executor: unsupported until OJ-15.
 func (e *conversationLaneExec) Interrupt(context.Context, opjournal.InterruptCall) opjournal.ControlResult {
 	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
@@ -377,10 +363,4 @@ func laneFenceMode(f runtime.InputFencing) opjournal.FenceMode {
 // wedged lane probe never blocks a lifecycle observation.
 func laneObservationKey(cityPath, sessionID string) string {
 	return "lane\x00" + cityPath + "\x00" + sessionID
-}
-
-// laneDeliverHandleKey keys a Deliver's bounded handle resolution, apart from
-// the probe's look.
-func laneDeliverHandleKey(cityPath, sessionID string) string {
-	return "lane-deliver\x00" + cityPath + "\x00" + sessionID
 }

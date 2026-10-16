@@ -1178,3 +1178,23 @@ func TestLaneExecBusyPassOverCacheReads(t *testing.T) {
 		t.Fatalf("backing lists = %+v, want the conversation's op list once", lists)
 	}
 }
+
+// TestLaneExecDeliverWithoutProbedHandle proves Deliver types only through
+// the handle its probe resolved: with none it sends nothing, resolves
+// nothing, and answers a transient not-delivered.
+func TestLaneExecDeliverWithoutProbedHandle(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	v, info := f.view(t)
+	e := newConversationLaneExec(f.deps(st), info)
+	var c laneSeamCounts
+	countSeams(e, &c)
+	out := e.Deliver(context.Background(), opjournal.Delivery{Key: "k", Text: "hi", Fence: laneFence(v)})
+	nd, ok := out.(opjournal.NotDelivered)
+	if !ok || !nd.Transient || !errors.Is(nd.Cause, errLaneNoProbedHandle) {
+		t.Fatalf("Deliver = %#v, want a transient not-delivered for the missing probe handle", out)
+	}
+	if len(f.nudges()) != 0 || c.handles.Load() != 0 {
+		t.Fatalf("nudges %d, handle resolutions %d; want none", len(f.nudges()), c.handles.Load())
+	}
+}
