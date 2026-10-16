@@ -19,9 +19,8 @@ func writeBeadsPeekCityTOML(t *testing.T, dir, body string) string {
 // TestCityTOMLBeadsPeekDecodesOncePerInvocation pins the peek's cost inside a
 // one-shot command. peekBeadsProvider and peekBeadsBackend read one table of
 // city.toml, but decoding TOML means decoding the whole file: about 15 ms for a
-// production-sized city.toml, paid 10 times by one `gc bd show` and 19 times by
-// one `gc ready` on maintainer-city. Inside an invocation memo scope the file is
-// decoded once.
+// production-sized city.toml, paid 10 times by one `gc bd show` on
+// maintainer-city. Inside an invocation memo scope the file is decoded once.
 func TestCityTOMLBeadsPeekDecodesOncePerInvocation(t *testing.T) {
 	path := writeBeadsPeekCityTOML(t, t.TempDir(), "[workspace]\nname = \"demo\"\n\n[beads]\nprovider = \"bd\"\nbackend = \"doltlite\"\n")
 
@@ -50,6 +49,86 @@ func TestCityTOMLBeadsPeekDecodesOncePerInvocation(t *testing.T) {
 			t.Fatalf("city.toml decodes = %d, want 2: a long-lived process must see edits", got)
 		}
 	})
+
+	t.Run("an unset field is still a decoded answer", func(t *testing.T) {
+		unset := writeBeadsPeekCityTOML(t, t.TempDir(), "[beads]\nprovider = \"bd\"\n")
+		end := beginInvocationConfigMemo()
+		defer end()
+		before := cityTOMLBeadsPeekDecodes.Load()
+		for range 3 {
+			if got := peekCityTOMLBeads(unset); got != (cityTOMLBeadsPeek{Provider: "bd"}) {
+				t.Fatalf("peekCityTOMLBeads = %+v, want provider bd and no backend", got)
+			}
+		}
+		if got := cityTOMLBeadsPeekDecodes.Load() - before; got != 1 {
+			t.Fatalf("city.toml decodes = %d, want 1 per scope: an unset backend is an answer, not a failure", got)
+		}
+	})
+}
+
+// TestCityTOMLBeadsPeekDecodesEachFieldOnItsOwn pins that a [beads] field
+// holding a non-string value is answered as unset without blanking the other
+// field: a non-string provider must not hide backend = "doltlite", or
+// beadsBackend falls back to dolt and the city is treated as managed Dolt. Such
+// a partial answer is not remembered, so the next peek in the scope sees the
+// file once it is fixed. Keys match the way the config loader matches them,
+// case-insensitively.
+func TestCityTOMLBeadsPeekDecodesEachFieldOnItsOwn(t *testing.T) {
+	rewritten := cityTOMLBeadsPeek{Provider: "file", Backend: "dolt"}
+	for _, tc := range []struct {
+		name string
+		body string
+		want cityTOMLBeadsPeek
+		// partial is set when a field could not be decoded, so the scope must
+		// not remember the answer.
+		partial bool
+	}{
+		{
+			name:    "non-string provider",
+			body:    "[beads]\nprovider = 1\nbackend = \"doltlite\"\n",
+			want:    cityTOMLBeadsPeek{Backend: "doltlite"},
+			partial: true,
+		},
+		{
+			name:    "non-string backend",
+			body:    "[beads]\nprovider = \"bd\"\nbackend = [\"doltlite\"]\n",
+			want:    cityTOMLBeadsPeek{Provider: "bd"},
+			partial: true,
+		},
+		{
+			name: "keys in another case",
+			body: "[Beads]\nProvider = \"file\"\nBACKEND = \"doltlite\"\n",
+			want: cityTOMLBeadsPeek{Provider: "file", Backend: "doltlite"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := writeBeadsPeekCityTOML(t, dir, tc.body)
+			check := func(t *testing.T) {
+				t.Helper()
+				if got := peekBeadsProvider(path); got != tc.want.Provider {
+					t.Fatalf("peekBeadsProvider = %q, want %q", got, tc.want.Provider)
+				}
+				if got := peekBeadsBackend(path); got != tc.want.Backend {
+					t.Fatalf("peekBeadsBackend = %q, want %q", got, tc.want.Backend)
+				}
+			}
+			t.Run("outside a scope", check)
+			t.Run("inside a scope", func(t *testing.T) {
+				end := beginInvocationConfigMemo()
+				defer end()
+				check(t)
+				writeBeadsPeekCityTOML(t, dir, "[beads]\nprovider = \"file\"\nbackend = \"dolt\"\n")
+				want := tc.want
+				if tc.partial {
+					want = rewritten
+				}
+				if got := peekCityTOMLBeads(path); got != want {
+					t.Fatalf("peek after the file was rewritten = %+v, want %+v: the scope remembers only an answer that decoded both fields", got, want)
+				}
+			})
+		})
+	}
 }
 
 // TestCityTOMLBeadsPeekDoesNotRememberAFailedRead pins that only a decoded

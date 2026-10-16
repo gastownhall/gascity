@@ -28,11 +28,12 @@ import (
 //
 // The memo is OFF unless a command opens a scope with beginInvocationConfigMemo,
 // so a long-running process (the supervisor, the API server) never sees it and
-// keeps reloading what it reloads today. Inside a scope it answers only the one
-// load shape every one of those helpers uses — the OS filesystem, no extra
-// includes, and exactly the one-shot options (SkipRevisionSnapshot, nothing
-// else) — and only for a successful load; an error is never remembered, so a
-// helper that failed to load still fails on its own terms.
+// keeps reloading what it reloads today. Inside a scope it answers a composed
+// load only for the one load shape every one of those helpers uses — the OS
+// filesystem, no extra includes, and exactly the one-shot options
+// (SkipRevisionSnapshot, nothing else) — and only for a successful load; an
+// error is never remembered, so a helper that failed to load still fails on its
+// own terms.
 //
 // Inside a scope the memo serves every composed load of that shape, not only
 // the helpers named above: every loadCityConfigFS and
@@ -47,6 +48,11 @@ import (
 // re-read of files edited during the few hundred milliseconds between two of
 // the helpers' loads, which the uncached path never guaranteed either (each
 // load already reads its sources one by one).
+//
+// The scope also answers the city.toml [beads] peek (peekCityTOMLBeads): the
+// first peek of a file decodes it and later peeks in the scope get that answer.
+// A peek that could not read or parse the file, or decode one of its fields, is
+// not remembered.
 type invocationConfigMemo struct {
 	mu      sync.Mutex
 	entries map[string]invocationConfigMemoEntry
@@ -102,9 +108,10 @@ func currentInvocationConfigMemo() *invocationConfigMemo {
 }
 
 // cityTOMLBeadsPeek answers peekCityTOMLBeads for tomlPath from this scope,
-// decoding the file on the first ask. Only a decoded answer is remembered: a
-// peek that could not read or parse the file is retried by the next caller,
-// the rule the composed-config entries keep for errors.
+// decoding the file on the first ask. Only an answer that decoded both fields
+// is remembered: a peek that could not read or parse the file, or decode one of
+// its fields, is retried by the next caller, the rule the composed-config
+// entries keep for errors.
 func (m *invocationConfigMemo) cityTOMLBeadsPeek(tomlPath string) cityTOMLBeadsPeek {
 	key := normalizePathForCompare(filepath.Clean(tomlPath))
 	m.mu.Lock()
