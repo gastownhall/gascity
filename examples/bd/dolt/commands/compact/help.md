@@ -6,6 +6,24 @@ runs in scheduled mode: it skips any database with fewer new commits than the
 threshold (default 2000, `GC_DOLT_COMPACT_THRESHOLD_COMMITS`), flattens the
 rest, verifies row preservation, and runs `CALL DOLT_GC('--full')`.
 
+## Which databases compact touches
+
+Compact works on one Dolt server, the one `GC_DOLT_HOST` and `GC_DOLT_PORT`
+name for the city: its managed server, or a loopback server the city uses as
+an external endpoint. It finds database names in the city's and each rig's
+`.beads/metadata.json` and in that server's data directory.
+
+- **A rig pinned to another Dolt endpoint is skipped.** Its database lives on
+  that endpoint, not on this server, and gc does not compact a server it does
+  not manage. This covers `gc rig set-endpoint <rig> --external`, a rig that
+  runs its own Dolt (`--self`, or `[[rigs]] dolt_port`), and a rig that bd
+  binds to a remote host. Compact logs the rig, its endpoint, and `— skip`,
+  and the run does not fail.
+- **A same-named database on this server is not that rig's store.** It is
+  usually the copy left behind when the rig moved. Compact leaves it alone,
+  `--only-db` included, and warns. Drop or archive the copy once you no longer
+  need it.
+
 ## History protection
 
 Compact only rewrites history that this city grew.
