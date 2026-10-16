@@ -11,10 +11,20 @@ import (
 var _ runtime.TurnObservationProvider = (*Provider)(nil)
 
 // v1TurnCapabilities is what T3 protocol V1 tells about every session's
-// turns (X11 §5.1): starts and ends are recorded by T3 and polled; the fence
-// is a fresh read before an untargeted interrupt; a delivery is linked to its
-// turn only by correlating requestedAt with the message's createdAt; and
-// latestTurn holds one turn, so a short turn between polls can be missed.
+// turns (X11 §5.1): starts are recorded by T3 and polled, and ends are rated
+// recorded too, with the residual below; the fence is a fresh read before an
+// untargeted interrupt; a delivery is linked to its turn only by correlating
+// requestedAt with the message's createdAt; and latestTurn holds one turn,
+// so a short turn between polls can be missed.
+//
+// Residual the static row does not express: on the bridge's T3 fork, the
+// snapshot does not keep every end. T3 clears latestTurn at most turn ends
+// and, short of a thread revert, restores it only when a turn's diff
+// completes, which happens only in a git workspace; that restore records an
+// interrupted turn, or a failed one whose diff was already captured, as
+// completed. A reader must therefore take a turn that was Current and is
+// then neither Current nor in Recent as ended, without knowing how, and must
+// not read a Recent status of completed as success.
 var v1TurnCapabilities = runtime.TurnCapabilities{
 	Start:    runtime.TurnStartRecorded,
 	End:      runtime.TurnEndRecorded,
@@ -32,13 +42,17 @@ func (p *Provider) TurnCapabilities(string) runtime.TurnCapabilities {
 // TurnHistory implements [runtime.TurnObservationProvider] from one uncached
 // snapshot. Current is the turn ObserveTurn reports, started at
 // latestTurn.requestedAt when latestTurn is that turn, whatever state
-// latestTurn reads. Recent holds latestTurn once it ended and is not the
-// active turn, the only turn V1 keeps. A running latestTurn that is not the
-// active turn, including the stale activeTurnId an absent-status session
-// keeps, is indeterminate until T3's next session-set. No delivery keys are reported: the
-// fork never fills a user message's turnId (DES-T3I F13). A snapshot that
-// cannot be read as a turn state fails with [runtime.ErrRuntimeUnavailable],
-// never idle.
+// latestTurn reads; unlike ObserveTurn, the read fails when that turn's id
+// fails [runtime.IsTurnIdentity]. Recent holds latestTurn once it ended and
+// is not the active turn, the only turn V1 keeps. A running latestTurn that
+// is not the active turn, including one named by the stale activeTurnId an
+// absent-status session keeps, is indeterminate until T3's next session-set.
+// When that stale id names an ended latestTurn, Recent holds it with
+// latestTurn's state, which may be the completed or interrupted mark T3
+// wrote while the turn still ran rather than how it ended. No delivery keys
+// are reported: the fork never fills a user message's turnId (DES-T3I F13).
+// A snapshot that cannot be read as a turn state fails with
+// [runtime.ErrRuntimeUnavailable], never idle.
 func (p *Provider) TurnHistory(ctx context.Context, name string) (runtime.TurnHistory, error) {
 	thread, err := p.freshSessionThread(ctx, name)
 	if err != nil {

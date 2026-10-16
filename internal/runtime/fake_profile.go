@@ -240,10 +240,11 @@ type (
 // t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
 // trait the profile answers itself; a test pins it to production.
 var t3bridgeTurnCapabilities = TurnCapabilities{
-	Start: TurnStartRecorded,
-	End:   TurnEndRecorded,
-	Fence: TurnFenceChecked,
-	Link:  TurnLinkCorrelated,
+	Start:    TurnStartRecorded,
+	End:      TurnEndRecorded,
+	Fence:    TurnFenceChecked,
+	Link:     TurnLinkCorrelated,
+	Lossless: false,
 }
 
 // TurnCapabilities implements [TurnObservationProvider] with t3bridge's
