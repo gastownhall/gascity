@@ -88,7 +88,7 @@ func recordedConn(t *testing.T, p *Provider, rec *stdinRecorder) (string, *sessi
 // startTurn opens a turn for prompt id and returns its id.
 func startTurn(t *testing.T, sc *sessionConn, id int64) string {
 	t.Helper()
-	if !sc.setActivePrompt(id) {
+	if _, ok := sc.setActivePrompt(id); !ok {
 		t.Fatal("setActivePrompt refused")
 	}
 	current, _ := sc.turns()
@@ -215,8 +215,9 @@ func TestObserveTurnReadsTheRunningRecord(t *testing.T) {
 	}
 }
 
-// Kills capabilities that differ from the X11 ACP row, or that claim the
-// owner's ring for a session another process owns.
+// Kills capabilities that differ from the X11 design's ACP row (see
+// runtime.TurnCapabilities), or that claim the owner's ring for a session
+// another process owns.
 func TestTurnCapabilitiesAreFullInTheOwner(t *testing.T) {
 	p := newTestProvider(t)
 	name, _ := injectConn(t, p)

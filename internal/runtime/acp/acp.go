@@ -806,9 +806,12 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	// stdinMu is held from opening the turn's record through writing its
 	// prompt: the record is published (ObserveTurn, TurnHistory, the turn
 	// event) from the moment it opens, and a session/cancel aimed at the
-	// turn must not reach the agent ahead of the prompt it cancels.
+	// turn must not reach the agent ahead of the prompt it cancels. The
+	// prompt write is the only I/O in this section: dropped turn events are
+	// logged after it, never while stdinMu is held.
 	sc.stdinMu.Lock()
-	if !sc.setActivePrompt(id) {
+	lost, ok := sc.setActivePrompt(id)
+	if !ok {
 		sc.stdinMu.Unlock()
 		// The stdout reader has drained, so no response could settle this
 		// turn. An exiting agent keeps the best-effort nil contract. The bound
@@ -831,6 +834,7 @@ func (p *Provider) nudgeConn(name string, sc *sessionConn, content []runtime.Con
 	}
 	ch, err := sc.sendRequestStdinLocked(msg)
 	sc.stdinMu.Unlock()
+	logLostTurnEvents(lost)
 	if err != nil {
 		sc.abandonPrompt(id, err)
 		// Non-pipe failures (e.g., marshal errors) have nothing to do with

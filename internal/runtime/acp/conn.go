@@ -89,7 +89,10 @@ type sessionConn struct {
 	// needs mu) from routing responses, avoiding a circular pipe deadlock.
 	// Nudge holds it from opening a turn's record through writing that
 	// turn's prompt, so no write aimed at the turn can precede its prompt.
-	// Lock order: stdinMu before mu; nothing takes stdinMu with mu held.
+	// The stdin write is the only I/O that runs under it: a stderr line
+	// written while it is held would let a blocked stderr stall every stdin
+	// writer. Lock order: stdinMu before mu; nothing takes stdinMu with mu
+	// held.
 	stdinMu sync.Mutex
 
 	// nudgeMu serializes Nudge calls so that waitIdle → setActivePrompt →
@@ -457,18 +460,17 @@ func isJSONObjectLine(line []byte) bool {
 
 // setActivePrompt marks the given request ID as the active prompt and opens
 // its turn. It returns false, marking nothing, when the connection has
-// drained: no response could ever settle that turn.
-func (sc *sessionConn) setActivePrompt(id int64) bool {
+// drained: no response could ever settle that turn. lost is the dropped turn
+// events now due to be logged; the caller logs them with logLostTurnEvents
+// once it holds no lock, since Nudge calls this with stdinMu held.
+func (sc *sessionConn) setActivePrompt(id int64) (lost int64, ok bool) {
 	sc.mu.Lock()
+	defer sc.mu.Unlock()
 	if sc.drained {
-		sc.mu.Unlock()
-		return false
+		return 0, false
 	}
 	sc.markBusyLocked(id)
-	lost := sc.takeLostTurnEventsLocked()
-	sc.mu.Unlock()
-	logLostTurnEvents(lost)
-	return true
+	return sc.takeLostTurnEventsLocked(), true
 }
 
 // drainPending cancels outstanding permission requests, fails the running

@@ -41,7 +41,9 @@
 - Log dropped events only after releasing `sc.mu`: take the count under the
   lock with `takeLostTurnEventsLocked`, then call `logLostTurnEvents`. A
   stderr write under the lock lets a blocked stderr stall every user of the
-  connection.
+  connection. The same holds for `stdinMu`: `setActivePrompt` hands its
+  count back instead of logging it, and Nudge logs it once the prompt write
+  has released `stdinMu` (`TestTurnEventsOpeningATurnHandsBackTheLoss`).
 - The stream is best-effort; the session transcript is the durable record.
   Consumers must tolerate a started event without its completed event, and
   the reverse.
@@ -72,6 +74,10 @@
   session/cancel aimed at it waits for its prompt instead of reaching the
   agent first and being ignored
   (`TestInterruptTurnCancelFollowsItsOwnPrompt`).
+- A turn that ends on its own cancels the permission requests it still
+  holds: `replyCanceled` writes those replies from a goroutine that takes
+  `stdinMu` separately, so they are unordered relative to the next prompt,
+  and Nudge can write that prompt first.
 - `InterruptTurn` is the turn-scoped path (`turn_identity.go`). In one
   critical section of `sc.mu` it checks that the named turn is
   `currentTurn` and takes that turn's idle channel and held permission

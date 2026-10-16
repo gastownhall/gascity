@@ -111,9 +111,9 @@ func (f TurnFence) AtLeast(floor TurnFence) bool { return f.rank() >= floor.rank
 func (l TurnLink) AtLeast(floor TurnLink) bool { return l.rank() >= floor.rank() }
 
 // TurnCapabilities is what a runtime can tell about one session's turns
-// (engdocs/design/x11-turn-identity-coverage.md §3.1). The zero value is
-// nothing on every axis. These are transport facts about the runtime, never
-// about the agent role running in it.
+// (engdocs/design/x11-turn-identity-coverage.md §3.1, a wave-2 design not
+// yet in tree). The zero value is nothing on every axis. These are transport
+// facts about the runtime, never about the agent role running in it.
 type TurnCapabilities struct {
 	Start TurnStart
 	End   TurnEnd
