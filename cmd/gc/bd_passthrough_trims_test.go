@@ -448,20 +448,11 @@ func TestGcBdValidationErrorsMatchTheFullLoad(t *testing.T) {
 		code := doBd([]string{"show", "demo-abc"}, &stdout, &stderr)
 		return code, strings.ReplaceAll(stderr.String(), cityDir, "$CITY"), snapBdTrimCounters().since(before)
 	}
-	// The one intended difference: the legacy full load also printed the
-	// missing-builtin-import hint, which gc bd no longer prints
-	// (TestGcBdDoesNotPrintTheMissingBuiltinImportHint).
-	dropImportHint := func(s string) string {
-		var kept []string
-		for _, line := range strings.SplitAfter(s, "\n") {
-			if !strings.Contains(line, "does not import required builtin pack") {
-				kept = append(kept, line)
-			}
-		}
-		return strings.Join(kept, "")
-	}
+
 	oldCode, oldStderr, _ := run(true)
-	oldStderr = dropImportHint(oldStderr)
+	// The one intended difference: the legacy full load also printed the
+	// missing-builtin-import hint.
+	oldStderr = dropMissingBuiltinImportHint(oldStderr)
 	newCode, newStderr, got := run(false)
 	if oldCode != newCode || oldStderr != newStderr {
 		t.Fatalf("validation failure differs:\n old: %d %q\n new: %d %q", oldCode, oldStderr, newCode, newStderr)
@@ -668,4 +659,17 @@ func TestBdPassthroughConfigAppliesFeatureFlags(t *testing.T) {
 			t.Fatalf("feature flags after the passthrough load = %+v, want both off per [daemon] formula_v2 = false", got)
 		}
 	})
+}
+
+// dropMissingBuiltinImportHint removes the missing-builtin-import hint, which
+// the legacy full load prints and gc bd no longer does
+// (TestGcBdDoesNotPrintTheMissingBuiltinImportHint), from captured stderr.
+func dropMissingBuiltinImportHint(s string) string {
+	var kept []string
+	for _, line := range strings.SplitAfter(s, "\n") {
+		if !strings.Contains(line, "does not import required builtin pack") {
+			kept = append(kept, line)
+		}
+	}
+	return strings.Join(kept, "")
 }

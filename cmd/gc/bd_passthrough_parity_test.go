@@ -155,7 +155,13 @@ func runBdParityArm(t *testing.T, legacy bool, opts bdParityOpts, setup func(t *
 	var stdout, stderr bytes.Buffer
 	code := doBd(args, &stdout, &stderr)
 	log, _ := os.ReadFile(filepath.Join(c.scratch, "bd.log"))
+	gcHome := os.Getenv("GC_HOME")
 	norm := func(s string) string {
+		// GC_HOME first: clearGCEnv puts it outside root, and a cache path in
+		// an error names it.
+		if gcHome != "" {
+			s = strings.ReplaceAll(s, gcHome, "$GC_HOME")
+		}
 		s = strings.ReplaceAll(strings.ReplaceAll(s, c.root, "$ROOT"), c.rawRoot, "$ROOT")
 		return bdParityTimestamp.ReplaceAllString(s, "$$TIME")
 	}

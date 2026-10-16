@@ -945,6 +945,7 @@ go_test(
         "bd_gc_binary_pin_test.go",
         "bd_mistyped_metadata_test.go",
         "bd_passthrough_bench_test.go",
+        "bd_passthrough_parity_extra_test.go",
         "bd_passthrough_parity_test.go",
         "bd_passthrough_trims_test.go",
         "bd_relocated_classes_test.go",
