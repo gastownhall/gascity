@@ -582,7 +582,8 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// before forwarding any mutation to the bd subprocess. The read goes
 	// through the scope's bd front door (bdWriteGuardStore), never a native
 	// store: only bd's own resolver can show the collision. A scope whose bd
-	// resolves ids exactly skips the read unless the write is close-shaped
+	// resolves prefixed ids exactly skips the read when every id the write
+	// names is prefixed, unless the write is close-shaped
 	// (bdWriteGuardNeedsRead).
 	//
 	// Fail-closed: if the arg scanner reports ambiguity (unrecognized
@@ -612,7 +613,7 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if len(writeIDs) > 0 && bdWriteGuardNeedsRead(bdArgs, target.ScopeRoot) {
+		if len(writeIDs) > 0 && bdWriteGuardNeedsRead(bdArgs, writeIDs, target.ScopeRoot) {
 			store := bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
 			guardStore = store
 			guardBeads = make(map[string]beads.Bead, len(writeIDs))

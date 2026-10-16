@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -37,6 +38,22 @@ func writeBoundBackendMetadata(t *testing.T, scopeRoot, backend string) {
 		`"storage_endpoint":"https://bdserve.example.invalid:30635","storage_database":"bd_prj_test"}` + "\n"
 	if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(metadata), 0o600); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// writeScopeBackendMetadata gives scopeRoot's workspace the metadata a
+// workspace on backend carries: none for "", the bare local Dolt marker for
+// "dolt", and a complete remote binding for any other backend.
+func writeScopeBackendMetadata(t *testing.T, scopeRoot, backend string) {
+	t.Helper()
+	switch backend {
+	case "":
+	case "dolt":
+		if err := os.WriteFile(filepath.Join(scopeRoot, ".beads", "metadata.json"), []byte(`{"backend":"dolt"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	default:
+		writeBoundBackendMetadata(t, scopeRoot, backend)
 	}
 }
 
@@ -105,11 +122,13 @@ func TestGcBdWriteGuardDoesNotOpenTheScopeStore(t *testing.T) {
 }
 
 // TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly pins the exact-ID
-// backends. bd's HTTP store refuses partial-id search, so a write's id either
-// names its bead exactly or fails in bd: the collision the guard reads for
-// cannot happen there, and the read is a whole bd round trip (~0.45 s against
-// a remote serve) per write. Close-shaped writes keep the read, because the
-// close gate and the claim-identity close consume the bead itself.
+// backends. bd's HTTP store refuses partial-id search, so a write's prefixed
+// id either names its bead exactly or fails in bd: the collision the guard
+// reads for cannot happen there, and the read is a whole bd round trip
+// (~0.45 s against a remote serve) per write. Close-shaped writes keep the
+// read, because the close gate and the claim-identity close consume the bead
+// itself; so does a write naming an unprefixed id, which bd rewrites
+// (TestGcBdWriteGuardReadsAnUnprefixedIDWhereBdResolvesIDsExactly).
 func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 	cases := []struct {
 		name      string
@@ -147,6 +166,40 @@ func TestGcBdWriteGuardSkipsTheReadWhereBdResolvesIDsExactly(t *testing.T) {
 	}
 }
 
+// TestGcBdWriteGuardReadsAnUnprefixedIDWhereBdResolvesIDsExactly pins the
+// limit of the exact-ID skip. bd's exact-only resolver retries an id that is
+// not prefixed (a bare hash) as <issue_prefix>-<id>, so on an http scope
+// `update abc` lands on demo-abc, a bead the write never named. The read is
+// skipped only when every id the write names is prefixed, and the guard
+// refuses the rewrite as it refuses any id bd resolves to a different bead.
+func TestGcBdWriteGuardReadsAnUnprefixedIDWhereBdResolvesIDsExactly(t *testing.T) {
+	for _, args := range [][]string{
+		{"update", "abc", "--status", "in_progress"},
+		{"update", "demo-abc", "abc", "demo-def", "--status", "in_progress"},
+	} {
+		t.Run(strings.Join(args, " "), func(t *testing.T) {
+			_, cityDir := bdSQLRefusalCityDir(t, "")
+			setCwd(t, cityDir)
+			writeBoundBackendMetadata(t, cityDir, "http")
+			calls := writeBatchGuardBdStub(t, `    "show --json demo-abc abc demo-def")
+      printf '[{"id":"demo-abc","status":"open"},{"id":"demo-def","status":"open"}]\n' ;;
+    "show --json abc")
+      printf '[{"id":"demo-abc","status":"open"}]\n' ;;`)
+
+			var stdout, stderr bytes.Buffer
+			if code := doBd(args, &stdout, &stderr); code != 1 {
+				t.Fatalf("doBd(%v) = %d, want 1 for an id bd rewrites to demo-abc; stderr=%q", args, code, stderr.String())
+			}
+			if !strings.Contains(stderr.String(), `bead "abc" resolved to a different bead ID`) {
+				t.Fatalf("stderr = %q, want the refusal to name abc", stderr.String())
+			}
+			if log := readBdCallLog(t, calls); strings.Contains(log, "update ") {
+				t.Fatalf("bd update ran on an id bd rewrites:\n%s", log)
+			}
+		})
+	}
+}
+
 // TestGcBdWriteGuardKeepsTheReadWhereBdResolvesFuzzily pins the other side of
 // the exact-ID skip: a workspace whose metadata names a backend bd resolves by
 // prefix match (Dolt, a bound Postgres, or no marker at all) keeps the guard
@@ -156,15 +209,7 @@ func TestGcBdWriteGuardKeepsTheReadWhereBdResolvesFuzzily(t *testing.T) {
 		t.Run("backend="+backend, func(t *testing.T) {
 			_, cityDir := bdSQLRefusalCityDir(t, "")
 			setCwd(t, cityDir)
-			switch backend {
-			case "":
-			case "dolt":
-				if err := os.WriteFile(filepath.Join(cityDir, ".beads", "metadata.json"), []byte(`{"backend":"dolt"}`+"\n"), 0o600); err != nil {
-					t.Fatal(err)
-				}
-			default:
-				writeBoundBackendMetadata(t, cityDir, backend)
-			}
+			writeScopeBackendMetadata(t, cityDir, backend)
 			calls := writeBatchGuardBdStub(t, `    "show --json demo-abc")
       printf '[{"id":"demo-abc","status":"open"}]\n' ;;`)
 
@@ -210,6 +255,109 @@ func TestGcBdWriteGuardCloseKeepsTheClaimIdentityOnExactIDBackends(t *testing.T)
 			want := strings.Join(args, " ") + " actor=sess-1"
 			if log := readBdCallLog(t, logPath); !strings.Contains(log, want) {
 				t.Fatalf("bd calls = %q, want the close to run as the claim's identity (%q)", log, want)
+			}
+		})
+	}
+}
+
+// guardRigCityDir is bdSQLRefusalCityDir plus one bound rig, r1 (prefix rr),
+// whose workspace lives outside the city. cityBackend and rigBackend set each
+// workspace's metadata (see writeScopeBackendMetadata).
+func guardRigCityDir(t *testing.T, cityBackend, rigBackend string) (cityDir, rigDir string) {
+	t.Helper()
+	rigDir = t.TempDir()
+	_, cityDir = bdSQLRefusalCityDir(t, fmt.Sprintf("\n[[rigs]]\nname = \"r1\"\npath = %q\nprefix = \"rr\"\n", rigDir))
+	if err := os.MkdirAll(filepath.Join(rigDir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(rigDir, ".beads", "config.yaml"), []byte(`issue_prefix: rr
+gc.endpoint_origin: inherited_city
+gc.endpoint_status: verified
+dolt.auto-start: false
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeScopeBackendMetadata(t, cityDir, cityBackend)
+	writeScopeBackendMetadata(t, rigDir, rigBackend)
+	return cityDir, rigDir
+}
+
+// bdCallContext is the bd context one bd call ran in.
+type bdCallContext struct {
+	cwd, rig, beadsDir string
+}
+
+// writeScopeLoggingBdStub replaces the fixture's bd with one that logs every
+// call's args and bd context, and answers `show` from the case arms given.
+func writeScopeLoggingBdStub(t *testing.T, showArms string) string {
+	t.Helper()
+	binDir := t.TempDir()
+	logPath := filepath.Join(t.TempDir(), "bd-calls.log")
+	script := "#!/bin/sh\nprintf '%s|%s|%s|%s\\n' \"$*\" \"$(pwd -P)\" \"${GC_RIG:-}\" \"${BEADS_DIR:-}\" >> " + logPath + "\n" +
+		"if [ \"$1\" = show ]; then\n  case \"$*\" in\n" + showArms + "\n  esac\nfi\nexit 0\n"
+	if err := os.WriteFile(filepath.Join(binDir, "bd"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	return logPath
+}
+
+// bdCallContextsFor returns, in call order, the context of every call in a
+// writeScopeLoggingBdStub log whose args are exactly args.
+func bdCallContextsFor(log, args string) []bdCallContext {
+	var contexts []bdCallContext
+	for _, line := range strings.Split(log, "\n") {
+		fields := strings.Split(line, "|")
+		if len(fields) == 4 && fields[0] == args {
+			contexts = append(contexts, bdCallContext{cwd: fields[1], rig: fields[2], beadsDir: fields[3]})
+		}
+	}
+	return contexts
+}
+
+// TestGcBdWriteGuardDecidesAndReadsAtTheRigItWrites pins the guard on a rig
+// write. Whether to read is the rig workspace's question, not the city's, and
+// the read runs in the same bd context (cwd, GC_RIG, BEADS_DIR) as the write
+// it guards: a read through the city's context reports a rig id absent, which
+// lets a collision through (gcy-g4o).
+func TestGcBdWriteGuardDecidesAndReadsAtTheRigItWrites(t *testing.T) {
+	cases := []struct {
+		name                    string
+		cityBackend, rigBackend string
+		wantReads               int
+	}{
+		{"fuzzy rig in an exact-ID city reads", "http", "dolt", 1},
+		{"exact-ID rig in a fuzzy city skips", "dolt", "http", 0},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, rigDir := guardRigCityDir(t, tc.cityBackend, tc.rigBackend)
+			setCwd(t, cityDir)
+			calls := writeScopeLoggingBdStub(t, `    "show --json rr-abc")
+      printf '[{"id":"rr-abc","status":"open"}]\n' ;;`)
+
+			args := []string{"update", "rr-abc", "--status", "in_progress"}
+			var stdout, stderr bytes.Buffer
+			if code := doBd(append([]string{"--rig", "r1"}, args...), &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd --rig r1 %v = %d, want 0; stderr=%q", args, code, stderr.String())
+			}
+			log := readBdCallLog(t, calls)
+			writes := bdCallContextsFor(log, strings.Join(args, " "))
+			if len(writes) != 1 {
+				t.Fatalf("forwarded writes = %d, want 1:\n%s", len(writes), log)
+			}
+			write := writes[0]
+			if !samePath(write.cwd, rigDir) || write.rig != "r1" || !samePath(write.beadsDir, filepath.Join(rigDir, ".beads")) {
+				t.Fatalf("the write ran in %+v, want the rig's bd context (%s, GC_RIG=r1)", write, rigDir)
+			}
+			reads := bdCallContextsFor(log, "show --json rr-abc")
+			if len(reads) != tc.wantReads {
+				t.Fatalf("guard reads = %d, want %d:\n%s", len(reads), tc.wantReads, log)
+			}
+			for _, read := range reads {
+				if read != write {
+					t.Fatalf("the guard read ran in %+v, the write in %+v: the read must ask the bd the write goes to", read, write)
+				}
 			}
 		})
 	}

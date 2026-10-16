@@ -9,24 +9,32 @@ import (
 	"github.com/gastownhall/gascity/internal/fsys"
 )
 
-// bdWriteGuardNeedsRead reports whether a gc bd write must read its target
-// beads before bd runs. The read has two consumers. The exact-ID collision
-// check (gcy-g4o) needs it wherever bd resolves a write's id by prefix match;
-// a scope whose bd resolves ids exactly cannot produce that collision. The
-// close-shaped writes (close, or update to closed) need the beads themselves,
-// for the work-record close gate and the claim-identity close, whatever the
-// scope.
-func bdWriteGuardNeedsRead(bdArgs []string, scopeRoot string) bool {
+// bdWriteGuardNeedsRead reports whether a gc bd write naming writeIDs must
+// read its target beads before bd runs. The read has two consumers. The
+// exact-ID collision check (gcy-g4o) needs it wherever bd may resolve a
+// write's id to a different bead. A scope whose bd resolves prefixed ids
+// exactly cannot produce that collision for a write whose ids are all
+// prefixed, but its bd still rewrites an unprefixed one
+// (contract.LooksLikePrefixedID). The close-shaped writes (close, or update
+// to closed) need the beads themselves, for the work-record close gate and
+// the claim-identity close, whatever the scope.
+func bdWriteGuardNeedsRead(bdArgs, writeIDs []string, scopeRoot string) bool {
 	if _, closes := workRecordCloseTargets(bdArgs); closes {
 		return true
+	}
+	for _, id := range writeIDs {
+		if !contract.LooksLikePrefixedID(id) {
+			return true
+		}
 	}
 	return !bdScopeResolvesIDsExactly(scopeRoot)
 }
 
 // bdScopeResolvesIDsExactly reports whether the bd serving scopeRoot resolves
-// every id argument exactly, per the backend its own .beads/metadata.json
-// names. A scope with no readable marker of its own — a redirect, or one that
-// inherits its city's backend — reports false and keeps the guard.
+// every prefixed id argument exactly, per the backend its own
+// .beads/metadata.json names. A scope with no readable marker of its own — a
+// redirect, or one that inherits its city's backend — reports false and keeps
+// the guard.
 func bdScopeResolvesIDsExactly(scopeRoot string) bool {
 	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, filepath.Join(scopeRoot, ".beads", "metadata.json"))
 	return err == nil && named && contract.BackendResolvesIDsExactly(backend)
