@@ -33,15 +33,17 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 	const rawIgnored = 26
 
 	cases := []struct {
-		name          string
-		absentTables  map[string]bool
-		absentColumns map[string]bool
-		likeDecoys    map[string][]string
-		ignored       int
-		wantLimited   bool
-		wantFloor     int
-		wantMissing   string
-		wantEffective int
+		name           string
+		absentTables   map[string]bool
+		absentColumns  map[string]bool
+		likeDecoys     map[string][]string
+		recasedColumns map[string]string
+		likeFoldsCase  bool
+		ignored        int
+		wantLimited    bool
+		wantFloor      int
+		wantMissing    string
+		wantEffective  int
 	}{
 		{
 			name:          "a corroborated cursor is believed as read",
@@ -145,6 +147,31 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			wantEffective: 11,
 		},
 		{
+			// Dolt's LIKE does not list a column re-cased by hand, so it reads
+			// as absent: the case-sensitive match the library's own SHOW COLUMNS
+			// reads make (beads#7592).
+			name:           "a re-cased sentinel column is not the sentinel column",
+			recasedColumns: map[string]string{"leases.granted_node": "GRANTED_NODE"},
+			ignored:        rawIgnored,
+			wantLimited:    true,
+			wantFloor:      11,
+			wantMissing:    "leases.granted_node",
+			wantEffective:  11,
+		},
+		{
+			// The Field comparison decides, not the server's LIKE collation: a
+			// LIKE that folds case lists the re-cased column, which still
+			// reads as absent.
+			name:           "a re-cased sentinel column is absent even where LIKE folds case",
+			recasedColumns: map[string]string{"leases.granted_node": "GRANTED_NODE"},
+			likeFoldsCase:  true,
+			ignored:        rawIgnored,
+			wantLimited:    true,
+			wantFloor:      11,
+			wantMissing:    "leases.granted_node",
+			wantEffective:  11,
+		},
+		{
 			// A floor at or above the raw cursor clamps nothing.
 			name:          "a floored table's absence does not raise a lower cursor",
 			absentTables:  map[string]bool{"bd_events_seq": true},
@@ -170,10 +197,12 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeProbeConnector{
-				cursors:       map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: int64(tc.ignored)},
-				absentTables:  tc.absentTables,
-				absentColumns: tc.absentColumns,
-				likeDecoys:    tc.likeDecoys,
+				cursors:        map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: int64(tc.ignored)},
+				absentTables:   tc.absentTables,
+				absentColumns:  tc.absentColumns,
+				likeDecoys:     tc.likeDecoys,
+				recasedColumns: tc.recasedColumns,
+				likeFoldsCase:  tc.likeFoldsCase,
 			}
 			report, err := readCursorsOver(context.Background(), fake)
 			if err != nil {

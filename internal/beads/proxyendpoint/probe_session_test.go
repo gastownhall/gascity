@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -590,10 +591,16 @@ type fakeProbeConnector struct {
 	// here exists, which keeps a healthy fixture a zero value.
 	absentTables  map[string]bool
 	absentColumns map[string]bool
-	// likeDecoys are columns a SHOW COLUMNS ... LIKE lists beside (or instead
-	// of) the one asked for, keyed like absentColumns: the pattern's '_'
-	// matches any one character.
+	// likeDecoys are other columns the table carries whose names a SHOW
+	// COLUMNS ... LIKE for the keyed column also matches, keyed like
+	// absentColumns: the pattern's '_' matches any one character.
 	likeDecoys map[string][]string
+	// recasedColumns are columns the table carries only under a name that
+	// differs in case, keyed like absentColumns. Dolt's SHOW COLUMNS ... LIKE
+	// matches case-sensitively and so does not list them; likeFoldsCase is a
+	// server whose LIKE folds case, as MySQL's does.
+	recasedColumns map[string]string
+	likeFoldsCase  bool
 	// head is what DOLT_HASHOF('HEAD') answers on the main-lane existence
 	// statement; "" means the fixture default, fakeProbeHead.
 	head string
@@ -700,20 +707,22 @@ func (c *fakeProbeConn) QueryContext(_ context.Context, query string, args []dri
 		if c.connector.absentTables[table] {
 			return nil, errors.New("Error 1146 (42S02): table not found: " + table)
 		}
-		// A LIKE pattern's '_' matches any one character, so the server may
-		// list a column the pattern only resembles.
-		decoys := c.connector.likeDecoys[table+"."+column]
-		if c.connector.absentColumns[table+"."+column] {
-			return &fakeShowColumnsRows{fields: decoys}, nil
+		// The server lists every column the table carries that the LIKE
+		// pattern matches, and only those.
+		key := table + "." + column
+		carried := append([]string(nil), c.connector.likeDecoys[key]...)
+		if recased, ok := c.connector.recasedColumns[key]; ok {
+			carried = append(carried, recased)
+		} else if !c.connector.absentColumns[key] {
+			carried = append(carried, column)
 		}
-		return &fakeShowColumnsRows{fields: append(decoys, column)}, nil
-	}
-	if strings.Contains(strings.ToLower(query), "information_schema.columns") {
-		key := namedArg(args, 0) + "." + namedArg(args, 1)
-		if c.connector.absentColumns[key] {
-			return &fakeProbeRows{value: 0}, nil
+		var listed []string
+		for _, name := range carried {
+			if likeMatches(column, name, c.connector.likeFoldsCase) {
+				listed = append(listed, name)
+			}
 		}
-		return &fakeProbeRows{value: 1}, nil
+		return &fakeShowColumnsRows{fields: listed}, nil
 	}
 	value, ok := c.connector.cursors[query]
 	if !ok {
@@ -739,6 +748,29 @@ func showColumnsTarget(query string) (table, column string) {
 		column = strings.Trim(strings.TrimSpace(pattern), "'")
 	}
 	return table, column
+}
+
+// likeMatches reports whether a LIKE pattern matches name: '_' is any one
+// character and '%' any run of them, compared case-sensitively as Dolt's SHOW
+// COLUMNS does unless foldCase.
+func likeMatches(pattern, name string, foldCase bool) bool {
+	var expr strings.Builder
+	if foldCase {
+		expr.WriteString("(?i)")
+	}
+	expr.WriteString("^")
+	for _, r := range pattern {
+		switch r {
+		case '_':
+			expr.WriteString(".")
+		case '%':
+			expr.WriteString(".*")
+		default:
+			expr.WriteString(regexp.QuoteMeta(string(r)))
+		}
+	}
+	expr.WriteString("$")
+	return regexp.MustCompile(expr.String()).MatchString(name)
 }
 
 // fakeShowColumnsRows is SHOW COLUMNS' result shape: one row per column, with

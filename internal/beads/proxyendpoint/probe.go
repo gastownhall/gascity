@@ -839,7 +839,9 @@ func (c *oneSessionConnector) closeUntaken() {
 // object — information_schema.tables point reads, and SHOW COLUMNS only once its
 // table is known to exist (readSentinelColumnPresent) — so none can poison the
 // session's catalog snapshot the way a bare SELECT against an absent table
-// would.
+// would, short of a concurrent DROP of that table between its existence read
+// and SHOW COLUMNS: that statement then fails, pinning the session as any failed
+// read does, and the error is returned rather than a reality.
 func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, error) {
 	for _, table := range ignoredSentinelTables {
 		exists, err := readExistsCount(ctx, conn, cursorExistsQuery, table)
@@ -882,9 +884,15 @@ func readIgnoredReality(ctx context.Context, conn *sql.Conn) (CursorReality, err
 // the same reason). SHOW COLUMNS fails on an absent table, and a failing
 // statement pins a Dolt session to its pre-statement catalog, so the column's
 // table is first asked about with the same information_schema.tables point read
-// the sentinel tables use, and an absent table is an absent column. The Field
-// comparison is exact (case-insensitive, as column names are) because the LIKE
-// pattern's '_' is a wildcard.
+// the sentinel tables use, and an absent table is an absent column.
+//
+// The LIKE pattern's '_' is a wildcard, so the Field comparison is the exact
+// one, and case-sensitive, as Dolt's LIKE already is and as the library's own
+// SHOW COLUMNS reads compare (hasContentHashColumn, and the sentinel probe
+// beads#7592 moves onto that shape). A column re-cased by hand, which no
+// migration produces, therefore reads as absent and floors the lane, where the
+// linked v1.3.1 sentinel probe — information_schema.columns, which folds case —
+// would believe it: that disagreement refuses an open, and never admits one.
 func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn) (bool, error) {
 	tableExists, err := readExistsCount(ctx, conn, cursorExistsQuery, IgnoredSentinelColumnTable)
 	if err != nil || tableExists == 0 {
@@ -909,7 +917,7 @@ func readSentinelColumnPresent(ctx context.Context, conn *sql.Conn) (bool, error
 		if err := rows.Scan(dest...); err != nil {
 			return false, err
 		}
-		if len(cells) > 0 && strings.EqualFold(string(cells[0]), IgnoredSentinelColumnName) {
+		if len(cells) > 0 && string(cells[0]) == IgnoredSentinelColumnName {
 			present = true
 		}
 	}
