@@ -7214,6 +7214,10 @@ func fileExists(path string) bool {
 	return err == nil
 }
 
+// maintenanceGCStderrNoise is the warning the maintenance gc stub prints on
+// stderr for every `gc bd` call.
+const maintenanceGCStderrNoise = "warning: fake gc stderr noise for this city"
+
 const maintenanceGCScopeRoute = `if [ "${1:-}" = "rig" ] && [ "${2:-}" = "list" ]; then
   if [ -n "${GC_CALL_LOG:-}" ]; then
     printf '%s\n' "$*" >> "$GC_CALL_LOG"
@@ -7234,7 +7238,7 @@ if [ "${1:-}" = "bd" ]; then
   fi
   # Real gc prints config warnings on stderr ahead of bd's output; the orders
   # must parse only stdout.
-  printf 'warning: fake gc stderr noise for this city\n' >&2
+  printf '` + maintenanceGCStderrNoise + `\n' >&2
   shift
   fake_scope=city
   if [ "${1:-}" = "--city" ]; then
@@ -11424,7 +11428,7 @@ func TestWispCompactSkipsNonEphemeralBeads(t *testing.T) {
 }
 
 // crossRigDepsEnv installs a `bd` stub that handles three subcommand shapes:
-//   - `bd list --status=closed --closed-after=... --json` → returns closedJSON
+//   - `bd query 'status=closed AND closed>"..."' --json --limit 0` → returns closedJSON
 //   - `bd dep list <id> --direction=up --type=blocks --json` → returns depsJSON
 //   - `bd dep remove ...` and `bd dep add ...` → appended to BD_LOG
 //
@@ -11439,21 +11443,22 @@ func crossRigDepsEnv(t *testing.T, closedJSON, depsJSON string) (bdLog string, e
 
 	stubPath := filepath.Join(binDir, "bd")
 	// Stub fails fast on unexpected subcommands or flag shapes so the test
-	// pins the script's bd contract; a regression dropping --json from
-	// `bd list` or --type=blocks from `bd dep list` would otherwise still
+	// pins the script's bd contract; a regression dropping --json or
+	// --limit 0 (bd before v1.3.1 caps an unflagged query at 50 rows) from
+	// `bd query`, or --type=blocks from `bd dep list`, would otherwise still
 	// pass.
 	writeExecutable(t, stubPath, fmt.Sprintf(`#!/bin/sh
 case "$1" in
-  list)
+  query)
     case "$*" in
-      *"--status=closed"*"--closed-after"*"--json"*)
+      *"status=closed AND closed>"*"--json"*"--limit 0"*)
         cat <<'EOF'
 %s
 EOF
         exit 0
         ;;
       *)
-        echo "bd list called with unexpected args: $*" >&2
+        echo "bd query called with unexpected args: $*" >&2
         exit 2
         ;;
     esac
@@ -11530,7 +11535,11 @@ func TestCrossRigDepsReportsResolvedSummary(t *testing.T) {
 	if err != nil {
 		t.Fatalf("cross-rig-deps.sh failed: %v\n%s", err, out)
 	}
-	if got, want := strings.TrimSpace(string(out)), "cross-rig-deps: resolved 1 cross-rig dependencies"; got != want {
+	// The script passes `gc bd query` stderr through so a bd refusal reaches
+	// the order log, so the fake gc's stderr warning shares the combined
+	// output; everything else must be exactly the summary line.
+	got := strings.TrimSpace(strings.ReplaceAll(string(out), maintenanceGCStderrNoise+"\n", ""))
+	if want := "cross-rig-deps: resolved 1 cross-rig dependencies"; got != want {
 		t.Fatalf("summary = %q, want %q", got, want)
 	}
 }
@@ -11733,7 +11742,7 @@ func TestCrossRigDepsReportsNonZeroCounter(t *testing.T) {
 	writeExecutable(t, filepath.Join(binDir, "bd"), fmt.Sprintf(`#!/bin/sh
 printf '%%s\n' "$*" >> "$BD_LOG"
 case "$1" in
-  list)
+  query)
     cat <<'JSON'
 %s
 JSON
