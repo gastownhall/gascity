@@ -71,6 +71,12 @@ var _ NudgeShadows = (*beadsNudgeShadowView)(nil)
 // exists: a live record is projected open, and a dead or retired one is not
 // open, so it is not found. Only an id with no queue record falls back to the
 // legacy gc:nudge shadow, which Find returns only while it is open.
+//
+// A queue record that does not decode is an error wrapping
+// ErrBeadsNudgeQueueCorrupt, never a legacy answer: the record exists, so the
+// legacy shadow would answer for the wrong thing. A caller that looks up many
+// nudges in one pass skips only the lookup that reports it (errors.Is), so
+// one corrupt record does not stop the others (DES-NQ invariant 6).
 func (v *beadsNudgeShadowView) Find(nudgeID string) (nudgequeue.NudgeShadow, bool, error) {
 	shadow, found, err := v.recordShadow(nudgeID)
 	if err != nil {
@@ -86,7 +92,8 @@ func (v *beadsNudgeShadowView) Find(nudgeID string) (nudgequeue.NudgeShadow, boo
 }
 
 // FindIncludingTerminal returns nudgeID's queue record projected in any state,
-// or else its legacy gc:nudge shadow, terminal ones included.
+// or else its legacy gc:nudge shadow, terminal ones included. A queue record
+// that does not decode is reported as Find reports it.
 func (v *beadsNudgeShadowView) FindIncludingTerminal(nudgeID string) (nudgequeue.NudgeShadow, bool, error) {
 	shadow, found, err := v.recordShadow(nudgeID)
 	if err != nil || found {
@@ -97,19 +104,20 @@ func (v *beadsNudgeShadowView) FindIncludingTerminal(nudgeID string) (nudgequeue
 
 // ShadowHistorySince lists, oldest first, every live and dead queue record,
 // every retired one whose terminal_at is at or after since, and the legacy
-// shadows legacy ShadowHistorySince reports. A record that does not decode is
-// skipped and reported as a partial result beside the rest.
+// shadows legacy ShadowHistorySince reports. The queue records are read by
+// lifecycle state, one indexed List each, never by the family label alone. A
+// record that does not decode is skipped and reported as a partial result
+// beside the rest.
 func (v *beadsNudgeShadowView) ShadowHistorySince(since time.Time) ([]nudgequeue.NudgeShadow, error) {
-	records, err := v.store.List(beads.ListQuery{
-		Label:         nudgeQueueLabel,
-		Type:          nudgeQueueBeadType,
-		IncludeClosed: true,
-		Sort:          beads.SortCreatedAsc,
-		TierMode:      beads.TierBoth,
-		Live:          true,
-	})
-	if err != nil {
-		return nil, fmt.Errorf("listing nudge queue history: %w", err)
+	var records []beads.Bead
+	for _, state := range []string{nudgeQueueStateLive, nudgeQueueStateDead, nudgeQueueStateTerminal} {
+		query := nudgeQueueStateQuery(state)
+		query.IncludeClosed = state == nudgeQueueStateTerminal
+		found, err := v.store.List(query)
+		if err != nil {
+			return nil, fmt.Errorf("listing %s nudge queue history: %w", state, err)
+		}
+		records = append(records, found...)
 	}
 	now := time.Now().UTC()
 	var history []nudgequeue.NudgeShadow

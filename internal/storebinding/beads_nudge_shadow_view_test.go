@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 )
 
@@ -500,6 +501,89 @@ func TestIsNudgeQueueRecord(t *testing.T) {
 	} {
 		if IsNudgeQueueRecord(b) {
 			t.Errorf("IsNudgeQueueRecord(%+v) = true, want false", b)
+		}
+	}
+}
+
+// A queue record that does not decode is reported, never answered from the
+// legacy shadow: the record exists, so a legacy answer would be wrong. The
+// error wraps ErrBeadsNudgeQueueCorrupt so a caller that looks up many nudges
+// can tell it apart and skip only the one lookup it fails.
+func TestNudgeShadowViewReportsACorruptRecordAsCorrupt(t *testing.T) {
+	runShadowViewCase(t, "corrupt", func(t *testing.T, f shadowViewFixture) {
+		now := time.Now().UTC()
+		seedCorruptNudgeRecord(t, f.store, "n-corrupt", testNudgeAgent)
+		// A legacy shadow under the same id must not answer for the record.
+		if _, _, err := nudgequeue.NewStore(beads.NudgesStore{Store: f.store}).Save(testNudgeItem("n-corrupt", "", now)); err != nil {
+			t.Fatalf("legacy Save: %v", err)
+		}
+		if _, ok, err := f.fd.Shadows.Find("n-corrupt"); ok || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("Find(corrupt) = %v, %v; want an error wrapping ErrBeadsNudgeQueueCorrupt", ok, err)
+		}
+		if _, ok, err := f.fd.Shadows.FindIncludingTerminal("n-corrupt"); ok || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("FindIncludingTerminal(corrupt) = %v, %v; want an error wrapping ErrBeadsNudgeQueueCorrupt", ok, err)
+		}
+	})
+}
+
+// ShadowHistorySince skips an undecodable record and returns the rest beside
+// a partial result naming it.
+func TestNudgeShadowViewShadowHistorySinceReportsACorruptRecordAsPartial(t *testing.T) {
+	runShadowViewCase(t, "corrupt-history", func(t *testing.T, f shadowViewFixture) {
+		now := time.Now().UTC()
+		if err := f.fd.Queue.Enqueue(testNudgeItem("n-good", "", now)); err != nil {
+			t.Fatalf("Enqueue: %v", err)
+		}
+		seedCorruptNudgeRecord(t, f.store, "n-corrupt", testNudgeAgent)
+		history, err := f.fd.Shadows.ShadowHistorySince(now.Add(-time.Minute))
+		if !beads.IsPartialResult(err) || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+			t.Fatalf("ShadowHistorySince error = %v, want a partial result wrapping ErrBeadsNudgeQueueCorrupt", err)
+		}
+		if len(history) != 1 || history[0].ID != "n-good" {
+			t.Fatalf("ShadowHistorySince = %+v, want the good record kept", history)
+		}
+	})
+}
+
+// ShadowHistorySince reads the queue family by lifecycle state, never by the
+// family label alone (DES-NQ D9.3, invariant 7): live and dead records open,
+// retired ones closed too.
+func TestNudgeShadowViewShadowHistorySinceReadsAreIndexed(t *testing.T) {
+	_, recorder, backing := newRecordedNudgeQueue(t)
+	fd, err := NewBeadsNudgeFrontDoors(beads.NudgesStore{Store: recorder})
+	if err != nil {
+		t.Fatalf("NewBeadsNudgeFrontDoors: %v", err)
+	}
+	now := time.Now().UTC()
+	seedUnrelatedNudges(t, backing, 3, now)
+	recorder.reset()
+	if _, err := fd.Shadows.ShadowHistorySince(now.Add(-time.Minute)); err != nil {
+		t.Fatalf("ShadowHistorySince: %v", err)
+	}
+	var queueLists []beads.ListQuery
+	for _, op := range recorder.Ops() {
+		if op.Kind == beadstest.OpList && op.Query.Label == nudgeQueueLabel {
+			queueLists = append(queueLists, op.Query)
+		}
+	}
+	states := map[string]bool{}
+	for _, query := range queueLists {
+		state := query.Metadata[nudgeMetaQueueState]
+		if state == "" {
+			t.Errorf("ShadowHistorySince listed %+v; want a read indexed on queue_state, never the family label alone", query)
+			continue
+		}
+		if !query.Live {
+			t.Errorf("ShadowHistorySince listed %+v without Live", query)
+		}
+		if query.IncludeClosed != (state == nudgeQueueStateTerminal) {
+			t.Errorf("ShadowHistorySince listed %+v; want only the terminal read to include closed records", query)
+		}
+		states[state] = true
+	}
+	for _, state := range []string{nudgeQueueStateLive, nudgeQueueStateDead, nudgeQueueStateTerminal} {
+		if !states[state] {
+			t.Errorf("ShadowHistorySince read states %v, want %s read", states, state)
 		}
 	}
 }
