@@ -30,9 +30,15 @@ func (partialHistoryBackend) TurnHistory(context.Context, string) (runtime.TurnH
 
 func newTurnObservationSession(t *testing.T, sp runtime.Provider) (*Manager, Info) {
 	t.Helper()
+	return newTurnObservationSessionOf(t, sp, "agent")
+}
+
+// newTurnObservationSessionOf creates a session of provider on sp.
+func newTurnObservationSessionOf(t *testing.T, sp runtime.Provider, provider string) (*Manager, Info) {
+	t.Helper()
 	mgr := newTestManager(t, beads.NewMemStore(), sp)
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{
-		Template: "helper", Command: "agent", WorkDir: t.TempDir(), Provider: "agent",
+		Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider,
 		ExtraMeta: map[string]string{"session_origin": "manual"},
 	})
 	if err != nil {
@@ -50,21 +56,22 @@ func TestRuntimeTurnTraitsPassTheRoutedRuntimeThrough(t *testing.T) {
 		mgr, info := newTurnObservationSession(t, runtime.FullFake{Fake: fake})
 		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{info.SessionName: {recorded}}
 		got := mgr.RuntimeTurnTraits(info)
-		want := RuntimeTurnTraits{Capabilities: recorded, Interrupt: runtime.TurnInterruptProtocol, IdleSnapshots: true}
+		want := RuntimeTurnTraits{Capabilities: recorded, Interrupt: runtime.TurnInterruptProtocol, IdleSnapshots: true, Replace: TurnReplacementInterrupt}
 		if got != want {
 			t.Fatalf("RuntimeTurnTraits = %+v, want %+v", got, want)
 		}
 	})
+	interrupt := TurnReplacementInterrupt
 	cases := []struct {
 		name string
 		sp   runtime.Provider
 		want RuntimeTurnTraits
 	}{
-		{"runtime without turn observation", runtime.NewFake(), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke}},
-		{"local backend with snapshots", runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, IdleSnapshots: true, LocalTranscripts: true}},
-		{"local backend without snapshots", runtime.NewFakeProfile(runtime.ProfileSubprocess, runtime.FullFake{Fake: runtime.NewFake()}), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, LocalTranscripts: true}},
-		{"remote backend", runtime.NewFakeProfile(runtime.ProfileK8s, runtime.FullFake{Fake: runtime.NewFake()}), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke}},
-		{"composite routed to a local backend", auto.New(runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), runtime.NewFake()), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, IdleSnapshots: true, LocalTranscripts: true}},
+		{"runtime without turn observation", runtime.NewFake(), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, Replace: interrupt}},
+		{"local backend with snapshots", runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, IdleSnapshots: true, LocalTranscripts: true, Replace: interrupt}},
+		{"local backend without snapshots", runtime.NewFakeProfile(runtime.ProfileSubprocess, runtime.FullFake{Fake: runtime.NewFake()}), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, LocalTranscripts: true, Replace: interrupt}},
+		{"remote backend", runtime.NewFakeProfile(runtime.ProfileK8s, runtime.FullFake{Fake: runtime.NewFake()}), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, Replace: interrupt}},
+		{"composite routed to a local backend", auto.New(runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), runtime.NewFake()), RuntimeTurnTraits{Capabilities: none, Interrupt: runtime.TurnInterruptKeystroke, IdleSnapshots: true, LocalTranscripts: true, Replace: interrupt}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {

@@ -7,10 +7,10 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/hybrid"
 )
 
-// Kills a locality or idle-snapshot answer read off the composite instead of
-// the session's routed leaf, and a backend taken to be local without saying
-// so.
-func TestTranscriptLocalityAndIdleSnapshotsFollowTheRoute(t *testing.T) {
+// Kills a locality, idle-snapshot or turn-reset answer read off the composite
+// instead of the session's routed leaf, and a backend taken to be local
+// without saying so.
+func TestTurnTraitsFollowTheRoute(t *testing.T) {
 	local := runtime.NewFakeProfile(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()})
 	remote := runtime.NewFakeProfile(runtime.ProfileK8s, runtime.FullFake{Fake: runtime.NewFake()})
 	composite := hybrid.New(local, remote, func(name string) bool { return name == "remote" })
@@ -20,13 +20,15 @@ func TestTranscriptLocalityAndIdleSnapshotsFollowTheRoute(t *testing.T) {
 		session   string
 		local     bool
 		snapshots bool
+		resets    bool
 	}{
-		{"tmux leaf", local, "s", true, true},
-		{"k8s leaf", remote, "s", false, false},
-		{"hybrid routed local", composite, "local", true, true},
-		{"hybrid routed remote", composite, "remote", false, false},
-		{"subprocess leaf", runtime.NewFakeProfile(runtime.ProfileSubprocess, runtime.FullFake{Fake: runtime.NewFake()}), "s", true, false},
-		{"undeclared backend", runtime.NewFake(), "s", false, false},
+		{"tmux leaf", local, "s", true, true, true},
+		{"k8s leaf", remote, "s", false, false, false},
+		{"hybrid routed local", composite, "local", true, true, true},
+		{"hybrid routed remote", composite, "remote", false, false, false},
+		{"subprocess leaf", runtime.NewFakeProfile(runtime.ProfileSubprocess, runtime.FullFake{Fake: runtime.NewFake()}), "s", true, false, false},
+		{"herdr leaf", runtime.NewFakeProfile(runtime.ProfileHerdr, runtime.FullFake{Fake: runtime.NewFake()}), "s", true, false, false},
+		{"undeclared backend", runtime.NewFake(), "s", false, false, true},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -35,6 +37,9 @@ func TestTranscriptLocalityAndIdleSnapshotsFollowTheRoute(t *testing.T) {
 			}
 			if got := runtime.IdleSnapshotsFor(tc.p, tc.session); got != tc.snapshots {
 				t.Errorf("IdleSnapshotsFor = %v, want %v", got, tc.snapshots)
+			}
+			if got := runtime.InterruptedTurnResetsFor(tc.p, tc.session); got != tc.resets {
+				t.Errorf("InterruptedTurnResetsFor = %v, want %v", got, tc.resets)
 			}
 		})
 	}

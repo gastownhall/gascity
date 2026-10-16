@@ -254,3 +254,14 @@ func IdleSnapshotsFor(p Provider, name string) bool {
 	_, ok := leaf.(IdleSnapshotProvider)
 	return ok
 }
+
+// InterruptedTurnResetsFor reports whether the backend serving session name
+// discards an interrupted turn: the leaf [ResolveBackend] names is an
+// [InterruptedTurnResetProvider]. Composites forward the reset to that leaf,
+// so it is the one whose answer counts. It resets nothing, so it costs no
+// runtime call.
+func InterruptedTurnResetsFor(p Provider, name string) bool {
+	leaf, _, _ := ResolveBackend(p, name)
+	_, ok := leaf.(InterruptedTurnResetProvider)
+	return ok
+}

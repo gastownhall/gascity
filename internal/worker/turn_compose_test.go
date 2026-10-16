@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -84,6 +85,20 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 		{name: "k8s codex", provider: "codex", build: plain(runtime.ProfileK8s), transcript: "codex", want: "none none/none/none/none/false keystroke interrupt"},
 		{name: "ssh claude", provider: "claude", build: plain(runtime.ProfileSSH), transcript: "claude", want: "none none/none/none/none/false keystroke interrupt"},
 		{name: "tmux pi", provider: "pi", build: plain(runtime.ProfileTmux), want: "none none/none/none/none/false keystroke restart"},
+		// Replace is internal/session's, as interrupt_now decides it: a family
+		// that cannot cancel a turn replaces none, and a Pi row with no ACP
+		// transport restarts on an ACP runtime that reports keystroke mode.
+		{name: "tmux antigravity", provider: "antigravity", build: plain(runtime.ProfileTmux), want: "none none/none/none/none/false keystroke none"},
+		{
+			name: "acp pi without acp transport", provider: "pi",
+			build: func() (runtime.Provider, func(string)) {
+				fake := runtime.NewFake()
+				return profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), func(name string) {
+					fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{name: {fullTurnCaps}}
+				}
+			},
+			want: "protocol recorded/recorded/atomic/exact/true keystroke restart",
+		},
 		{
 			name: "unsupported mode on a local transcript family", provider: "claude", transcript: "claude",
 			build: func() (runtime.Provider, func(string)) {
@@ -147,23 +162,24 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 //     return another conversation's;
 //   - exec, k8s and ssh are none because they declare no local transcripts
 //     (runtime.LocalTranscriptProvider), not because no file resolves;
-//   - Replace is interrupt on every protocol source and protocol-mode
-//     runtime, whatever the family's keystroke sequence, as deliver-now runs
-//     it there.
+//   - Replace is what interrupt_now does there (internal/session decides
+//     it): interrupt in protocol mode, interrupt_reset only on a backend that
+//     resets the interrupted turn (tmux), and restart for a Pi row with no ACP
+//     transport on any runtime that is not in protocol mode, ACP's included.
 func TestTurnCapabilitiesProductionProfileTable(t *testing.T) {
 	none := func(replace string) string { return "none none/none/none/none/false keystroke " + replace }
 	t3Row := "none none/none/none/none/false protocol interrupt"
 	if _, ok := profiled(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}).(runtime.TurnObservationProvider); ok {
 		t3Row = "protocol recorded/recorded/checked/correlated/false protocol interrupt"
 	}
-	acpRow := "protocol recorded/recorded/atomic/exact/true keystroke interrupt"
+	acpRow := "protocol recorded/recorded/atomic/exact/true keystroke "
 	noSnapshots := map[string]string{
 		"claude": "transcript recorded/none/checked/correlated/true keystroke interrupt",
 		"codex":  "transcript recorded/recorded/checked/correlated/true keystroke interrupt",
-		"gemini": none("interrupt_reset"),
+		"gemini": none("interrupt"),
 		"pi":     none("restart"),
 	}
-	remote := map[string]string{"claude": none("interrupt"), "codex": none("interrupt"), "gemini": none("interrupt_reset"), "pi": none("restart")}
+	remote := map[string]string{"claude": none("interrupt"), "codex": none("interrupt"), "gemini": none("interrupt"), "pi": none("restart")}
 	table := []struct {
 		profile runtime.Profile
 		rows    map[string]string
@@ -174,7 +190,7 @@ func TestTurnCapabilitiesProductionProfileTable(t *testing.T) {
 			"gemini": none("interrupt_reset"),
 			"pi":     none("restart"),
 		}},
-		{runtime.ProfileACP, map[string]string{"claude": acpRow, "codex": acpRow, "gemini": acpRow, "pi": acpRow}},
+		{runtime.ProfileACP, map[string]string{"claude": acpRow + "interrupt", "codex": acpRow + "interrupt", "gemini": acpRow + "interrupt", "pi": acpRow + "restart"}},
 		{runtime.ProfileSubprocess, noSnapshots},
 		{runtime.ProfileHerdr, noSnapshots},
 		{runtime.ProfileK8s, remote},
@@ -209,38 +225,13 @@ func TestComposeTurnCapabilitiesNormalizesRuntimeAxes(t *testing.T) {
 	support := sessionlog.TurnSupportFor("claude")
 	// A runtime's unknown axis values read as none, so a declaration naming
 	// only unknown values is no declaration and the transcript decides.
-	caps := composeTurnCapabilities(runtime.TurnCapabilities{Start: "someday"}, runtime.TurnInterruptKeystroke, support, true, true)
+	caps := composeTurnCapabilities(runtime.TurnCapabilities{Start: "someday"}, runtime.TurnInterruptKeystroke, support, true, true, TurnReplaceInterrupt)
 	if caps.Source != TurnSourceTranscript {
 		t.Fatalf("Source = %q, want transcript", caps.Source)
 	}
-	caps = composeTurnCapabilities(runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: "someday"}, runtime.TurnInterruptKeystroke, support, true, true)
+	caps = composeTurnCapabilities(runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: "someday"}, runtime.TurnInterruptKeystroke, support, true, true, TurnReplaceInterrupt)
 	if caps.Source != TurnSourceProtocol || caps.End != runtime.TurnEndNone || caps.Fence != runtime.TurnFenceNone {
 		t.Fatalf("composed = %q, want protocol with unknown axes as none", capsRow(caps))
-	}
-}
-
-// Kills a replacement read off the family table where deliver-now does
-// something else (internal/session/submit.go).
-func TestTurnReplaceFollowsDeliverNow(t *testing.T) {
-	cases := []struct {
-		family TurnReplace
-		source TurnSource
-		mode   runtime.TurnInterruptMode
-		want   TurnReplace
-	}{
-		{TurnReplaceInterruptReset, TurnSourceTranscript, runtime.TurnInterruptKeystroke, TurnReplaceInterruptReset},
-		{TurnReplaceRestart, TurnSourceNone, runtime.TurnInterruptKeystroke, TurnReplaceRestart},
-		{TurnReplaceInterruptReset, TurnSourceProtocol, runtime.TurnInterruptKeystroke, TurnReplaceInterrupt},
-		{TurnReplaceRestart, TurnSourceProtocol, runtime.TurnInterruptKeystroke, TurnReplaceInterrupt},
-		{TurnReplaceRestart, TurnSourceNone, runtime.TurnInterruptProtocol, TurnReplaceInterrupt},
-		{TurnReplaceInterrupt, TurnSourceNone, runtime.TurnInterruptUnsupported, TurnReplaceNone},
-		{TurnReplaceRestart, TurnSourceNone, runtime.TurnInterruptUnsupported, TurnReplaceRestart},
-		{TurnReplaceRestart, TurnSourceProtocol, runtime.TurnInterruptUnsupported, TurnReplaceNone},
-	}
-	for _, tc := range cases {
-		if got := turnReplaceFor(tc.family, tc.source, tc.mode); got != tc.want {
-			t.Errorf("turnReplaceFor(%s, %s, %s) = %s, want %s", tc.family, tc.source, tc.mode, got, tc.want)
-		}
 	}
 }
 
@@ -305,6 +296,25 @@ func TestCurrentTurnNeverReadsAnotherConversation(t *testing.T) {
 				t.Helper()
 				writeTranscriptLines(t, s.codexRolloutPath(s.info.SessionKey),
 					codexMeta(otherConversation, s.info.WorkDir), codexStarted(codexTurn2, "2026-10-08T03:00:00.000Z", 1791429600))
+			},
+			wantErr: runtime.ErrRuntimeUnavailable,
+		},
+		{
+			// A copied rollout shares the conversation id; neither copy is
+			// read as the session's.
+			name: "codex key finding two rollouts", provider: "codex", own: true,
+			foreign: func(t *testing.T, s turnSession) {
+				t.Helper()
+				// Today's day directory, under a start stamp the session's own
+				// rollout cannot have.
+				now := time.Now()
+				stamp := "T00-00-00"
+				if now.Format("15-04-05") == "00-00-00" {
+					stamp = "T00-00-01"
+				}
+				copied := filepath.Join(s.root, now.Format("2006"), now.Format("01"), now.Format("02"),
+					"rollout-"+now.Format("2006-01-02")+stamp+"-"+s.info.SessionKey+".jsonl")
+				writeTranscriptLines(t, copied, codexMeta(s.info.SessionKey, s.info.WorkDir), codexStarted(codexTurn2, "2026-10-08T03:00:00.000Z", 1791429600))
 			},
 			wantErr: runtime.ErrRuntimeUnavailable,
 		},

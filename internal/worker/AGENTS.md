@@ -70,6 +70,11 @@ session key finds and that records that conversation, never the work-directory
 fallback `Manager.TranscriptPath` serves for history. A session without a key
 yet, or whose transcript is not written yet, reads as
 `runtime.ErrRuntimeUnavailable`, not as a different capability.
+`TurnCapabilities.Replace` is internal/session's answer
+(`session.RuntimeTurnTraits.Replace`): what interrupt_now does to the
+session's turn, decided by the predicates interrupt_now runs on. The worker
+never derives it from a family table. A `RuntimeHandle` has no deliver-now,
+so it reports `none`.
 
 Identity is judged per turn, not from sessionlog's `MissingIDs`
 (`turnHistoryFromScan`). A turn without an id whose start lies inside the scan

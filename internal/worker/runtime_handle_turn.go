@@ -10,7 +10,9 @@ import (
 
 // A RuntimeHandle has no session row and so no transcript: its turns come from
 // its provider alone. A provider that observes turns is a protocol source;
-// anything else, tmux included, is none.
+// anything else, tmux included, is none. Nor has it deliver-now (its Interrupt
+// sends the provider's Interrupt alone, without a family's steps), so it
+// replaces no turn: Replace is none.
 
 // TurnCapabilities reports what the provider can tell about the session's
 // turns.
@@ -23,7 +25,7 @@ func (h *RuntimeHandle) turnCapabilities() TurnCapabilities {
 		runtime.TurnCapabilitiesFor(h.provider, h.sessionName),
 		runtime.TurnInterruptModeFor(h.provider, h.sessionName),
 		SessionLogAdapter{}.TurnSupportFor(h.providerName),
-		false, false,
+		false, false, TurnReplaceNone,
 	)
 }
 

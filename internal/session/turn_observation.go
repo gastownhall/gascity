@@ -19,9 +19,10 @@ import (
 // the session on a composite runtime, so a read costs no further store load.
 
 // RuntimeTurnTraits is what the runtime serving a session reports about
-// observing its turns. Every field is a fixed trait of the routed backend,
-// read without calling it, so composing them costs no runtime call and gives
-// the same answer for as long as the session's route stands.
+// observing and replacing its turns. Every field is a fixed trait of the
+// routed backend, or of the session's row on it, read without calling the
+// runtime, so composing them costs no runtime call and gives the same answer
+// for as long as the session's route stands.
 type RuntimeTurnTraits struct {
 	// Capabilities is what the runtime itself can tell about the session's
 	// turns, normalized as runtime.TurnCapabilitiesFor reports it.
@@ -36,17 +37,23 @@ type RuntimeTurnTraits struct {
 	// this host, so its transcript can be read here
 	// (runtime.LocalTranscriptsFor).
 	LocalTranscripts bool
+	// Replace is what interrupt_now does to the session's running turn on
+	// that backend, decided as interrupt_now decides it: the session's own
+	// family and transport with the backend's interrupt mode and reset.
+	Replace TurnReplacement
 }
 
 // RuntimeTurnTraits reports the turn-observation traits of the runtime
 // serving the session info describes.
 func (m *Manager) RuntimeTurnTraits(info Info) RuntimeTurnTraits {
 	name := info.SessionName
+	mode := runtime.TurnInterruptModeFor(m.sp, name)
 	return RuntimeTurnTraits{
 		Capabilities:     runtime.TurnCapabilitiesFor(m.sp, name),
-		Interrupt:        runtime.TurnInterruptModeFor(m.sp, name),
+		Interrupt:        mode,
 		IdleSnapshots:    runtime.IdleSnapshotsFor(m.sp, name),
 		LocalTranscripts: runtime.LocalTranscriptsFor(m.sp, name),
+		Replace:          turnReplacementFor(info, mode, runtime.InterruptedTurnResetsFor(m.sp, name)),
 	}
 }
 

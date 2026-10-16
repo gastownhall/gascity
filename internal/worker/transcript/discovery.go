@@ -33,8 +33,9 @@ func HasKeyedLookup(provider string) bool {
 }
 
 // inexactKeyedLookupFamilies are the keyed-lookup families whose lookup can
-// return a file of another conversation than the key names: Gemini's matches
-// a chat by its project directory, not by the recorded sessionId.
+// return a file of another conversation than the key names: Gemini's returns
+// the newest of the project directory's chats that record the key, rather
+// than refusing a second one.
 var inexactKeyedLookupFamilies = []string{"gemini"}
 
 // HasExactKeyedLookup reports whether a session key finds exactly the

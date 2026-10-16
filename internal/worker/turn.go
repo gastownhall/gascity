@@ -63,21 +63,23 @@ const (
 	TurnSourceNone TurnSource = "none"
 )
 
-// TurnReplace is the sequence a session's family needs to replace its running
-// turn with a new message (X11 D11), read by deliver-now.
-type TurnReplace string
+// TurnReplace is what deliver-now does to a session's running turn before it
+// delivers the new message (X11 D11), read by the lane's deliver-now. It is
+// internal/session's decision (session.RuntimeTurnTraits.Replace), the one
+// interrupt_now itself runs on, never a family table's.
+type TurnReplace = sessionpkg.TurnReplacement
 
-// The turn replacement sequences.
+// The turn replacements.
 const (
 	// TurnReplaceNone means the running turn cannot be replaced.
-	TurnReplaceNone TurnReplace = "none"
+	TurnReplaceNone = sessionpkg.TurnReplacementNone
 	// TurnReplaceInterrupt interrupts the turn, then delivers.
-	TurnReplaceInterrupt TurnReplace = "interrupt"
+	TurnReplaceInterrupt = sessionpkg.TurnReplacementInterrupt
 	// TurnReplaceInterruptReset interrupts, resets the interrupted turn, then
 	// delivers.
-	TurnReplaceInterruptReset TurnReplace = "interrupt_reset"
+	TurnReplaceInterruptReset = sessionpkg.TurnReplacementInterruptReset
 	// TurnReplaceRestart restarts the agent, discarding the pending turn.
-	TurnReplaceRestart TurnReplace = "restart"
+	TurnReplaceRestart = sessionpkg.TurnReplacementRestart
 )
 
 // TurnCapabilities is what a worker can tell about its session's turns.
@@ -88,7 +90,8 @@ type TurnCapabilities struct {
 	// Interrupt is how the runtime interrupts the session's turn. Unsupported
 	// forces Fence none.
 	Interrupt runtime.TurnInterruptMode
-	// Replace is the family's replacement sequence.
+	// Replace is what deliver-now does to the session's running turn, as
+	// internal/session decides it; none where the handle has no deliver-now.
 	Replace TurnReplace
 	// HookTurnID names the verified hook payload field carrying the turn id;
 	// empty until the X11 live arm verifies one.
@@ -172,11 +175,13 @@ func (o *turnObservation) clock() turnTiming {
 // see it, so without them End is none. Interrupt mode unsupported forces
 // Fence none. Every input is a fixed trait, never whether a file exists yet,
 // so the capabilities do not move while a session waits for its transcript.
-func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnInterruptMode, support sessionlog.TurnSupport, transcript, idleSnapshots bool) TurnCapabilities {
+// replace is internal/session's answer for the session, passed through.
+func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnInterruptMode, support sessionlog.TurnSupport, transcript, idleSnapshots bool, replace TurnReplace) TurnCapabilities {
 	caps := TurnCapabilities{
 		TurnCapabilities: noTurnCapabilities,
 		Source:           TurnSourceNone,
 		Interrupt:        mode,
+		Replace:          replace,
 		HookTurnID:       support.HookTurnID,
 	}
 	rcaps = rcaps.Normalized()
@@ -200,35 +205,7 @@ func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnIn
 	if mode == runtime.TurnInterruptUnsupported {
 		caps.Fence = runtime.TurnFenceNone
 	}
-	caps.Replace = turnReplaceFor(TurnReplace(support.Replace), caps.Source, mode)
 	return caps
-}
-
-// turnReplaceFor is the replacement deliver-now performs for a family whose
-// own sequence is family, on a session with the given source and interrupt
-// mode, as internal/session/submit.go runs it (X11 D11). A runtime that cannot
-// interrupt refuses the replacement unless the family restarts, and a
-// protocol source (ACP) never restarts. A protocol runtime replaces a turn by
-// interrupting it, never by the family's reset or restart: those steps are
-// off for ACP transport, and the restart for protocol mode.
-//
-// A protocol source stands in for submit.go's ACP-transport test. They differ
-// for a session on a protocol runtime whose bead records no ACP transport (a
-// city-wide ACP provider without session = "acp") and whose runtime reports
-// keystroke interrupts: deliver-now restarts a family that restarts there
-// (requiresHardRestartInterrupt), while this reports interrupt.
-func turnReplaceFor(family TurnReplace, source TurnSource, mode runtime.TurnInterruptMode) TurnReplace {
-	switch {
-	case mode == runtime.TurnInterruptUnsupported:
-		if family == TurnReplaceRestart && source != TurnSourceProtocol {
-			return TurnReplaceRestart
-		}
-		return TurnReplaceNone
-	case source == TurnSourceProtocol || mode == runtime.TurnInterruptProtocol:
-		return TurnReplaceInterrupt
-	default:
-		return family
-	}
 }
 
 // turnPlan is one composition of a session's turn source.
@@ -244,8 +221,9 @@ type turnPlan struct {
 func (h *SessionHandle) planTurns() (turnPlan, error) {
 	id := h.currentSessionID()
 	if id == "" {
+		// No session yet: nothing to read turns from, nor a turn to replace.
 		support := h.adapter.TurnSupportFor(h.session.Provider)
-		return turnPlan{caps: composeTurnCapabilities(noTurnCapabilities, runtime.TurnInterruptKeystroke, support, false, false)}, nil
+		return turnPlan{caps: composeTurnCapabilities(noTurnCapabilities, runtime.TurnInterruptKeystroke, support, false, false, TurnReplaceNone)}, nil
 	}
 	info, err := h.turnSession(id)
 	if err != nil {
@@ -257,7 +235,7 @@ func (h *SessionHandle) planTurns() (turnPlan, error) {
 	transcript := traits.LocalTranscripts &&
 		strings.TrimSpace(info.WorkDir) != "" &&
 		sessionpkg.HasKeyedTranscriptLookup(info, plan.provider)
-	plan.caps = composeTurnCapabilities(traits.Capabilities, traits.Interrupt, support, transcript, traits.IdleSnapshots)
+	plan.caps = composeTurnCapabilities(traits.Capabilities, traits.Interrupt, support, transcript, traits.IdleSnapshots, traits.Replace)
 	return plan, nil
 }
 

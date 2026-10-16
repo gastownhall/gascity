@@ -37,8 +37,8 @@ func TestRuntimeHandleTurnsComeFromItsProvider(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TurnCapabilities: %v", err)
 	}
-	if got := capsRow(caps); got != "protocol recorded/recorded/atomic/exact/true keystroke interrupt" {
-		t.Fatalf("TurnCapabilities = %q, want the provider's, as a protocol source", got)
+	if got := capsRow(caps); got != "protocol recorded/recorded/atomic/exact/true keystroke none" {
+		t.Fatalf("TurnCapabilities = %q, want the provider's, as a protocol source, replacing no turn", got)
 	}
 	got, err := h.CurrentTurn(context.Background())
 	if err != nil {
@@ -60,7 +60,7 @@ func TestRuntimeHandleTmuxReportsNoTurnSource(t *testing.T) {
 	if err != nil {
 		t.Fatalf("TurnCapabilities: %v", err)
 	}
-	if got := capsRow(caps); got != "none none/none/none/none/false keystroke interrupt" {
+	if got := capsRow(caps); got != "none none/none/none/none/false keystroke none" {
 		t.Fatalf("TurnCapabilities = %q, want none", got)
 	}
 	if _, err := h.CurrentTurn(context.Background()); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
@@ -76,9 +76,9 @@ func TestRuntimeHandleT3BridgeTurnSourceIsDerived(t *testing.T) {
 	sp := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: fake})
 	h := newTurnRuntimeHandle(t, sp)
 	fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {v1TurnCaps}}
-	want := "none none/none/none/none/false protocol interrupt"
+	want := "none none/none/none/none/false protocol none"
 	if _, ok := sp.(runtime.TurnObservationProvider); ok {
-		want = "protocol recorded/recorded/checked/correlated/false protocol interrupt"
+		want = "protocol recorded/recorded/checked/correlated/false protocol none"
 	}
 	caps, err := h.TurnCapabilities(context.Background())
 	if err != nil || capsRow(caps) != want {
