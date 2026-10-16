@@ -655,8 +655,11 @@ func (s *BdStore) Purge(beadsDir string, dryRun bool) (PurgeResult, error) {
 	dir := filepath.Dir(beadsDir)
 	// Route through the shared bd exec env policy (auto-backup opt-out and
 	// any other bd-only env normalization) like every other bd exec; the
-	// BEADS_DIR override replaces any inherited value.
-	env := execEnvFor("bd", processEnvSnapshotExcludingNativeDoltOpen(), map[string]string{"BEADS_DIR": beadsDir})
+	// BEADS_DIR override replaces any inherited value. execPurge runs the bd
+	// on PATH, so that is the binary the OTEL env translation probes.
+	env := execEnvFor("bd", processEnvSnapshotExcludingNativeDoltOpen(), map[string]string{"BEADS_DIR": beadsDir}, func() bool {
+		return bdReadsStandardOTELEnv(context.Background(), "bd")
+	})
 
 	var out []byte
 	var err error
