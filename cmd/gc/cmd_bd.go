@@ -579,7 +579,11 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 	// bd's fuzzy/substring resolver can silently match a longer ID that
 	// contains the supplied ID as a substring (e.g. "gcy-dv7" → "gcy-wisp-dv78").
 	// Verify via BdStore.Get — which already enforces an exact-ID match —
-	// before forwarding any mutation to the bd subprocess.
+	// before forwarding any mutation to the bd subprocess. The read goes
+	// through the scope's bd front door (bdWriteGuardStore), never a native
+	// store: only bd's own resolver can show the collision. A scope whose bd
+	// resolves ids exactly skips the read unless the write is close-shaped
+	// (bdWriteGuardNeedsRead).
 	//
 	// Fail-closed: if the arg scanner reports ambiguity (unrecognized
 	// value-consuming flag), the command is rejected rather than forwarded
@@ -608,42 +612,40 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 			fmt.Fprintf(stderr, "gc bd: cannot safely verify bead IDs (unrecognized flag in args %v); aborting to prevent substring-resolution mutation of the wrong bead\n", bdArgs) //nolint:errcheck // best-effort stderr
 			return 1
 		}
-		if len(writeIDs) > 0 {
-			store, storeErr := openStoreAtForCityWithConfig(target.ScopeRoot, cityPath, cfg)
-			// Store-unavailable: we cannot verify, but we must not block
-			// legitimate writes. Fall through; bd will error on actual problems.
-			if storeErr == nil {
-				guardStore = store
-				guardBeads = make(map[string]beads.Bead, len(writeIDs))
-				// A bulk mutation (e.g. a maintenance order closing a batch of
-				// stale wisps) reads every id in one bd show instead of one or
-				// two bd forks per id. Only ids bd answered exactly are
-				// accepted from the batch; the rest take the exact per-id Get
-				// below, which is what tells a substring collision from an
-				// absent bead.
-				verifyIDs := writeIDs
-				if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
-					if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
-						for id, bead := range found {
-							guardBeads[id] = bead
-						}
-						verifyIDs = unresolved
-					}
-				}
-				for _, id := range verifyIDs {
-					bead, getErr := store.Get(id)
-					if errors.Is(getErr, beads.ErrIDCollision) {
-						// bd resolved a different bead — block the write to prevent
-						// mutating the wrong bead via substring resolution.
-						fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
-						return 1
-					}
-					if getErr == nil {
+		if len(writeIDs) > 0 && bdWriteGuardNeedsRead(bdArgs, target.ScopeRoot) {
+			store := bdWriteGuardStore(target.ScopeRoot, cityPath, cfg)
+			guardStore = store
+			guardBeads = make(map[string]beads.Bead, len(writeIDs))
+			// A bulk mutation (e.g. a maintenance order closing a batch of
+			// stale wisps) reads every id in one bd show instead of one or
+			// two bd forks per id. Only ids bd answered exactly are
+			// accepted from the batch; the rest take the exact per-id Get
+			// below, which is what tells a substring collision from an
+			// absent bead.
+			verifyIDs := writeIDs
+			if getter, ok := store.(beads.ExactBatchGetter); ok && len(writeIDs) > 1 {
+				if found, unresolved, batchErr := getter.GetExactBatch(writeIDs); batchErr == nil {
+					for id, bead := range found {
 						guardBeads[id] = bead
 					}
-					// ErrNotFound or any other error: bead may be absent, ephemeral,
-					// or the read seam differs from the write seam — fall through.
+					verifyIDs = unresolved
 				}
+			}
+			for _, id := range verifyIDs {
+				bead, getErr := store.Get(id)
+				if errors.Is(getErr, beads.ErrIDCollision) {
+					// bd resolved a different bead — block the write to prevent
+					// mutating the wrong bead via substring resolution.
+					fmt.Fprintf(stderr, "gc bd: bead %q resolved to a different bead ID (substring collision); aborting to prevent mutating the wrong bead\n", id) //nolint:errcheck // best-effort stderr
+					return 1
+				}
+				if getErr == nil {
+					guardBeads[id] = bead
+				}
+				// ErrNotFound or any other error: bead may be absent, ephemeral,
+				// or the read seam differs from the write seam — fall through.
+				// An unavailable bd cannot verify, but must not block
+				// legitimate writes; bd will error on actual problems.
 			}
 		}
 	}
