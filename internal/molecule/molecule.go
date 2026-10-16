@@ -61,6 +61,7 @@ type Options struct {
 	DeferAssignees bool
 
 	nativeStepTopologyPrepared bool
+	stampAttachRootID          bool
 }
 
 const (
@@ -407,6 +408,7 @@ func Attach(ctx context.Context, store beads.Store, recipe *formula.Recipe, atta
 		PreserveRootType:           true,
 		DeferAssignees:             fencedDeferred,
 		nativeStepTopologyPrepared: true,
+		stampAttachRootID:          true,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("instantiate: %w", err)
@@ -488,7 +490,8 @@ func findExistingAttach(store beads.Store, recipe *formula.Recipe, rootBeadID, a
 			beadmeta.IdempotencyKeyMetadataKey: key,
 			beadmeta.RootBeadIDMetadataKey:     rootBeadID,
 		},
-		TierMode: beads.TierBoth,
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
@@ -753,6 +756,10 @@ func advanceAttachEpochFence(store beads.Store, writer beads.ConditionalWriter, 
 	return ErrEpochConflict
 }
 
+// existingAttachIDMapping maps each recipe step to its bead in the existing
+// attach rooted at root, matching step refs among the beads whose
+// AttachRootIDMetadataKey names root when any do (two for one step is an
+// error), else among the unstamped open beads a pre-stamp attach left.
 func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBeadID string, root beads.Bead) (map[string]string, error) {
 	idMapping := map[string]string{}
 	if recipe == nil {
@@ -772,14 +779,30 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 		return idMapping, nil
 	}
 	all, err := store.List(beads.ListQuery{
-		Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: rootBeadID},
-		TierMode: beads.TierBoth,
+		Metadata:      map[string]string{beadmeta.RootBeadIDMetadataKey: rootBeadID},
+		IncludeClosed: true,
+		TierMode:      beads.TierBoth,
 	})
 	if err != nil {
 		return nil, err
 	}
+	scoped := false
+	for _, bead := range all {
+		if strings.TrimSpace(bead.Metadata[beadmeta.AttachRootIDMetadataKey]) == root.ID {
+			scoped = true
+			break
+		}
+	}
+	matched := map[string]string{}
 	for _, bead := range all {
 		if bead.Metadata[beadmeta.MoleculeFailedMetadataKey] == "true" {
+			continue
+		}
+		owner := strings.TrimSpace(bead.Metadata[beadmeta.AttachRootIDMetadataKey])
+		if scoped && owner != root.ID {
+			continue
+		}
+		if !scoped && (owner != "" || bead.Status == "closed") {
 			continue
 		}
 		ref := strings.TrimSpace(bead.Metadata[beadmeta.StepRefMetadataKey])
@@ -790,10 +813,18 @@ func existingAttachIDMapping(store beads.Store, recipe *formula.Recipe, rootBead
 			continue
 		}
 		for _, stepID := range wantedRefs[ref] {
-			if idMapping[stepID] == "" {
-				idMapping[stepID] = bead.ID
+			prior := matched[stepID]
+			if prior == "" {
+				matched[stepID] = bead.ID
+				continue
+			}
+			if scoped && prior != bead.ID {
+				return nil, fmt.Errorf("attach root %s: step %q matches beads %s and %s", root.ID, stepID, prior, bead.ID)
 			}
 		}
+	}
+	for stepID, beadID := range matched {
+		idMapping[stepID] = beadID
 	}
 	return idMapping, nil
 }
@@ -982,6 +1013,9 @@ func Instantiate(ctx context.Context, store beads.Store, recipe *formula.Recipe,
 			}
 			if b.Metadata[beadmeta.StepRefMetadataKey] == "" {
 				b.Metadata[beadmeta.StepRefMetadataKey] = step.ID
+			}
+			if opts.stampAttachRootID {
+				b.Metadata[beadmeta.AttachRootIDMetadataKey] = idMapping[recipe.Steps[0].ID]
 			}
 
 			if graphWorkflow || step.Metadata[beadmeta.KindMetadataKey] != "" {
@@ -1401,16 +1435,22 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
 }
 
-// refuseSessionSteps refuses a recipe a step of which would make a
-// controller-owned row (coordclass.ControllerOwned: a session row by type or
-// the gc:session label, a substituted variable's included, a startup-health
-// episode or a convergence root), before anything is written: only its
-// owner mints one (mc-okw9n, mc-lp7zb, architecture B). The compile refuses
-// the literal marks (formula.Validate).
+// refuseSessionSteps refuses a recipe a step of which would make an owned
+// row, a substituted variable's included, before anything is written: a
+// controller-owned row (coordclass.ControllerOwned: a session row, a
+// startup-health episode, a convergence root) or a coordination row
+// (coordclass.CoordinationOwned: a mail message, a session wait, a queued
+// nudge, an order's run record, an extmsg row). Only its owner mints one
+// (mc-okw9n, mc-lp7zb, architecture B, the #7766 review). The compile
+// refuses the literal marks (formula.Validate).
 func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
 	for _, step := range steps {
-		if b := stepToBead(step, vars, nil); coordclass.ControllerOwned(b) {
+		b := stepToBead(step, vars, nil)
+		switch {
+		case coordclass.ControllerOwned(b):
 			return fmt.Errorf("formula step %q would make a controller-owned row (type %q, labels %v: a session row, a startup-health episode or a convergence root), which only its owner creates", step.ID, b.Type, b.Labels)
+		case coordclass.CoordinationOwned(b):
+			return fmt.Errorf("formula step %q would make a coordination row (type %q, labels %v: a mail message, a session wait, a queued nudge, an order's run record or an extmsg row), which only its owning route creates", step.ID, b.Type, b.Labels)
 		}
 	}
 	return nil

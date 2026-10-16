@@ -504,7 +504,8 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 // TestInitRefusesProdDoltPort and TestInitRefusesAmbientCityDoltPort so the
 // hardcoded-port and ambient-city detection arms exercise a single re-exec
 // call site instead of two, keeping this package's tracked subprocess census
-// unchanged (see internal/testpolicy/resourcecensus and test/test-resources.toml).
+// unchanged (see internal/testpolicy/resourcecensus and
+// test/test-resource-counts.toml).
 func assertRefusesDoltPort(t *testing.T, bin, testName, dir string, env []string, wantPanic bool, wantOutput []string) {
 	t.Helper()
 	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")

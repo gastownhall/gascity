@@ -74,6 +74,12 @@ type recorderInstruments struct {
 	// HTTP API request instrumentation
 	httpRequestTotal    metric.Int64Counter
 	httpRequestDuration metric.Float64Histogram
+
+	// Operation journal recording (O0 shadow ops)
+	opsRecordTotal metric.Int64Counter
+
+	// Turn-fenced deliver-now (SESSION-RUNTIME-020)
+	turnInterruptTotal metric.Int64Counter
 }
 
 var (
@@ -178,6 +184,16 @@ func initInstruments() {
 		inst.httpRequestDuration, _ = m.Float64Histogram("gc.http.duration_ms",
 			metric.WithDescription("HTTP API request latency in milliseconds"),
 			metric.WithUnit("ms"),
+		)
+
+		// Operation journal recording
+		inst.opsRecordTotal, _ = m.Int64Counter("gc.ops.record.total",
+			metric.WithDescription("Total operation-journal recording steps by kind, surface, stage and result"),
+		)
+
+		// Turn-fenced deliver-now
+		inst.turnInterruptTotal, _ = m.Int64Counter("gc.session.turn_interrupts.total",
+			metric.WithDescription("Total turn-fenced deliver-now requests by outcome, degradation and message disposition"),
 		)
 	})
 }
@@ -684,5 +700,54 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 		attribute.String("session", sessionName),
 		attribute.String("reason", reason),
 		attribute.String("transition", transition),
+	)
+}
+
+// RecordOpRecord counts one step of recording an operation-journal op
+// (gc.ops.record.total). kind is the op kind; surface is api, cli or
+// controller; stage is admit, close, adopt or sweep; result is recorded,
+// unrecorded, replayed, adopted, busy, key_reuse, refused, closed, left_open,
+// failed or late. unrecordedReason says why a request ran unrecorded or, in
+// require mode, was refused (store_unavailable, type_unregistered,
+// no_namespace, payload_too_large, invalid_key, invalid_request,
+// unmaterialized_target, no_generation, propose_error); it is empty for every
+// other result. Every value is a closed token, so the label set stays
+// bounded; no op id or key is ever a label.
+func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecordedReason string) {
+	initInstruments()
+	inst.opsRecordTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("kind", kind),
+			attribute.String("surface", surface),
+			attribute.String("stage", stage),
+			attribute.String("result", result),
+			attribute.String("unrecorded_reason", unrecordedReason),
+		),
+	)
+}
+
+// RecordTurnInterrupt records one turn-fenced deliver-now
+// (gc.session.turn_interrupts.total and a session.turn_interrupt log event).
+// outcome is settled, no_turn, stale, unsettled or unavailable; degradation is
+// unfenced_interrupt or empty; disposition is delivered, queued, deferred or
+// failed. The metric labels are only these closed tokens, so the label set
+// stays bounded; the session and turn ride the log event alone, and no
+// message text is recorded.
+func RecordTurnInterrupt(ctx context.Context, sessionName, turnID, outcome, degradation, disposition string, err error) {
+	initInstruments()
+	inst.turnInterruptTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("outcome", outcome),
+			attribute.String("degradation", degradation),
+			attribute.String("message_disposition", disposition),
+		),
+	)
+	emit(ctx, "session.turn_interrupt", severity(err),
+		attribute.String("session", sessionName),
+		attribute.String("turn", turnID),
+		attribute.String("outcome", outcome),
+		attribute.String("degradation", degradation),
+		attribute.String("message_disposition", disposition),
+		errKV(err),
 	)
 }

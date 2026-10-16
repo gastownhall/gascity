@@ -45,16 +45,13 @@ running the latched mode. An unknown value refuses to start the city.
 
 ### Admission
 
-A city that selects `v2` is refused at start until the build carries both
-controller groups. Those are the allocator (P3) and the first session
-group (P4.1). `v2ControllersInBuild` and `defaultV2Controllers` derive
-from the same two constants, so admission and the runtime cannot disagree.
-
-For smoke runs of the skeleton on a throwaway city, the developer
-override `GC_RECONCILER_V2_SKELETON=1` admits v2 anyway. The override is
-read through an injected `lookupEnv`, and it is deleted at P4.1. While it
-exists it is process-wide: under the supervisor it admits every city whose
-config selects v2. A skeleton city starts, restarts and scales nothing.
+Since the cutover (C9), a city that selects `v2` latches it from config
+alone, and its passes act. The latch still refuses v2 when the composed
+config enables a feature v2 defers (`v2LatchRefusals`: the identity
+circuit breaker, `depends_on`, `scale_check`, `max_session_age`, the stall
+timeouts, chat auto-suspend, an unadmitted runtime), and a city whose class
+stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
+remove the key to run legacy.
 
 `gc doctor` has a `daemon-session-reconciler` check:
 
@@ -62,8 +59,8 @@ config selects v2. A skeleton city starts, restarts and scales nothing.
 |---|---|
 | `legacy` or unset | OK |
 | an alias | WARN |
-| `v2`, admitted by the developer override | WARN |
-| `v2`, not admissible in this build | ERROR |
+| `v2`, admissible | OK |
+| `v2`, refused by the latch or by C0.7 | ERROR |
 | an unknown value | ERROR |
 
 ## Model: keys, queue, router

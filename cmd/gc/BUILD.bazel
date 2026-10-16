@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_binary", "go_library", "go_test")
+load("//tools/bazel/rules:go_test_run.bzl", "go_test_run")
 load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 # productmetrics_testhook (beside the root's integration): the tagged files
@@ -119,15 +120,18 @@ go_library(
         "cityinit_impl.go",
         "claim_class_route.go",
         "claim_cross_store.go",
+        "claim_identity_provenance.go",
         "class_store.go",
         "class_store_cache.go",
         "class_store_emit.go",
+        "class_store_emit_events_journal.go",
         "cli_class_stores.go",
         "cli_session_store.go",
         "cli_storage_routes.go",
         "clock_inject.go",
         "close_allowed.go",
         "cmd_agent.go",
+        "cmd_agent_is_foreign.go",
         "cmd_agent_script.go",
         "cmd_analyze.go",
         "cmd_analyze_reliability.go",
@@ -241,6 +245,7 @@ go_library(
         "compute_awake_bridge.go",
         "compute_awake_set.go",
         "config_hash.go",
+        "config_invocation_memo.go",
         "context_inject.go",
         "control_dispatcher_scope_gap_event.go",
         "controller.go",
@@ -272,6 +277,7 @@ go_library(
         "doctor_hold_label_routed_to.go",
         "doctor_mcp_checks.go",
         "doctor_order_tracking_retention.go",
+        "doctor_ownerless_runtimes.go",
         "doctor_pack_runtimes.go",
         "doctor_pool_idle_routed_work_check.go",
         "doctor_prompt_delivery_budget.go",
@@ -342,6 +348,7 @@ go_library(
         "embed_builtin_packs.go",
         "endpoint_capacity.go",
         "error_store.go",
+        "event_authorship.go",
         "event_export.go",
         "execution_backstop.go",
         "execution_emit_store.go",
@@ -379,6 +386,7 @@ go_library(
         "legacy_pack_preflight.go",
         "lifecycle_action_json.go",
         "main.go",
+        "managed_dolt_flight.go",
         "management_json.go",
         "max_session_age_tracker.go",
         "mcp_integration.go",
@@ -407,6 +415,7 @@ go_library(
         "pool.go",
         "pool_desired_state.go",
         "pool_detached_orphan_sweep.go",
+        "pool_orphan_foreign_identity.go",
         "pool_session_name.go",
         "pool_slot_workdir.go",
         "prime_auto_handoff_inject.go",
@@ -430,9 +439,11 @@ go_library(
         "reconcile_arms_close.go",
         "reconcile_arms_drain.go",
         "reconcile_arms_drift.go",
+        "reconcile_arms_fresh_cycle.go",
         "reconcile_arms_heals.go",
         "reconcile_arms_identity.go",
         "reconcile_arms_idle.go",
+        "reconcile_arms_lifecycle.go",
         "reconcile_arms_metadata.go",
         "reconcile_arms_start.go",
         "reconcile_arms_stop.go",
@@ -445,12 +456,14 @@ go_library(
         "reconcile_effect_drain.go",
         "reconcile_effect_drift.go",
         "reconcile_effect_fence.go",
+        "reconcile_effect_fresh_cycle.go",
         "reconcile_effect_heal.go",
         "reconcile_effect_launch.go",
         "reconcile_effect_metadata.go",
         "reconcile_effect_recycle.go",
         "reconcile_effect_rekey.go",
         "reconcile_effect_restart.go",
+        "reconcile_effect_restart_marker.go",
         "reconcile_effect_runtime.go",
         "reconcile_effect_signal.go",
         "reconcile_effect_start.go",
@@ -505,6 +518,7 @@ go_library(
         "runtime_inventory_ondeath.go",
         "runtime_inventory_view.go",
         "runtime_observation_cache.go",
+        "runtime_ownerless_reap.go",
         "runtime_registry.go",
         "runtime_token_fence.go",
         "scaffold_fs.go",
@@ -546,6 +560,7 @@ go_library(
         "session_reconciler_trace_store.go",
         "session_reconciler_trace_types.go",
         "session_resolve.go",
+        "session_runtime_binding.go",
         "session_sleep.go",
         "session_state_helpers.go",
         "session_target.go",
@@ -751,6 +766,7 @@ go_library(
         "@com_github_google_uuid//:uuid",
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
+        "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@org_golang_x_term//:term",
     ] + select({
@@ -861,6 +877,7 @@ go_test(
         "actor_helpers_test.go",
         "adoption_barrier_test.go",
         "agent_home_worktree_cleanup_test.go",
+        "agent_lookup_test.go",
         "allocator_backoff_test.go",
         "allocator_backstop_lane_test.go",
         "allocator_bucket_test.go",
@@ -936,6 +953,7 @@ go_test(
         "bead_policy_store_conformance_test.go",
         "bead_policy_store_graph_ready_test.go",
         "bead_policy_store_parent_projection_test.go",
+        "bead_policy_store_ready_cache_test.go",
         "bead_policy_store_test.go",
         "bead_worktree_liveness_discovery_test.go",
         "bead_worktree_liveness_fallback_test.go",
@@ -1028,9 +1046,11 @@ go_test(
         "cityinit_impl_test.go",
         "claim_class_route_test.go",
         "claim_cross_store_test.go",
+        "claim_identity_provenance_test.go",
         "class_store_agreement_test.go",
         "class_store_cache_test.go",
         "class_store_emit_claim_test.go",
+        "class_store_emit_events_journal_test.go",
         "class_store_emit_test.go",
         "class_store_test.go",
         "cli_class_stores_test.go",
@@ -1039,6 +1059,7 @@ go_test(
         "clock_inject_test.go",
         "close_allowed_scenarios_test.go",
         "close_allowed_test.go",
+        "cmd_agent_is_foreign_test.go",
         "cmd_agent_script_test.go",
         "cmd_agent_test.go",
         "cmd_analyze_reliability_test.go",
@@ -1149,6 +1170,7 @@ go_test(
         "cmd_metrics_test.go",
         "cmd_migrate_test.go",
         "cmd_nudge_acp_idle_test.go",
+        "cmd_nudge_delivery_key_test.go",
         "cmd_nudge_poll_due_work_gate_test.go",
         "cmd_nudge_runtime_test.go",
         "cmd_nudge_test.go",
@@ -1175,6 +1197,7 @@ go_test(
         "cmd_rig_test.go",
         "cmd_runtime_check_test.go",
         "cmd_runtime_conformance_test.go",
+        "cmd_runtime_drain_mirror_test.go",
         "cmd_runtime_drain_test.go",
         "cmd_runtime_heartbeat_test.go",
         "cmd_runtime_workdir_export_test.go",
@@ -1245,6 +1268,7 @@ go_test(
         "compute_awake_set_routed_demand_idle_test.go",
         "compute_awake_set_test.go",
         "config_hash_test.go",
+        "config_invocation_memo_test.go",
         "context_inject_test.go",
         "continuation_nudge_test.go",
         "control_dispatch_graph_store_test.go",
@@ -1377,6 +1401,7 @@ go_test(
         "embed_builtin_packs_test.go",
         "embedded_rig_custom_types_integration_test.go",
         "endpoint_capacity_test.go",
+        "event_authorship_test.go",
         "event_export_test.go",
         "execution_backstop_test.go",
         "execution_emit_store_test.go",
@@ -1462,12 +1487,14 @@ go_test(
         "legacy_raw_session_writes_test.go",
         "lifecycle_coordination_test.go",
         "lifecycle_live_query_test.go",
+        "live_pool_sessions_test.go",
         "load_city_config_snapshot_test.go",
         "mail_inject_newest_window_test.go",
         "mail_session_inbox_test.go",
         "main_scope_symlink_test.go",
         "main_test.go",
         "maintenance_startup_test.go",
+        "managed_dolt_flight_test.go",
         "management_json_test.go",
         "max_session_age_tracker_test.go",
         "mcp_integration_test.go",
@@ -1522,7 +1549,10 @@ go_test(
         "pack_import_formula_order_test.go",
         "path_helpers_test.go",
         "pending_create_attribution_test.go",
+        "pending_create_exec_pack_teardown_test.go",
         "pending_create_inflight_rollback_test.go",
+        "pending_create_teardown_sites_test.go",
+        "pending_create_unattributed_teardown_test.go",
         "pending_interaction_lane_test.go",
         "per_dispatch_model_test.go",
         "phase2_real_transport_deadline_test.go",
@@ -1541,6 +1571,7 @@ go_test(
         "pool_fresh_slot_compat_test.go",
         "pool_hook_processgroup_test.go",
         "pool_on_boot_parallel_test.go",
+        "pool_orphan_foreign_identity_test.go",
         "pool_pieces_prerefactor_test.go",
         "pool_pieces_test.go",
         "pool_release_bd_guard_test.go",
@@ -1563,11 +1594,13 @@ go_test(
         "prepared_start_oversized_prompt_test.go",
         "prepared_start_priming_test.go",
         "prime_inbox_test.go",
+        "prime_manual_provider_session_test.go",
         "prime_prompt_budget_test.go",
         "prime_session_key_capture_test.go",
         "prime_unmanaged_hook_guard_test.go",
         "probe_template_test.go",
         "proc_environ_settled_test.go",
+        "process_scan_error_log_test.go",
         "process_sweep_incarnation_test.go",
         "productmetrics_child_env_test.go",
         "productmetrics_controls_process_test.go",
@@ -1603,10 +1636,13 @@ go_test(
         "reconcile_arms_close_test.go",
         "reconcile_arms_drain_test.go",
         "reconcile_arms_drift_test.go",
+        "reconcile_arms_fresh_cycle_test.go",
         "reconcile_arms_heals_test.go",
         "reconcile_arms_idle_test.go",
+        "reconcile_arms_lifecycle_test.go",
         "reconcile_arms_metadata_test.go",
         "reconcile_arms_start_test.go",
+        "reconcile_cutover_roundtrip_test.go",
         "reconcile_dirty_test.go",
         "reconcile_effect_abandon_test.go",
         "reconcile_effect_class_fail_test.go",
@@ -1619,6 +1655,7 @@ go_test(
         "reconcile_effect_lease_test.go",
         "reconcile_effect_metadata_test.go",
         "reconcile_effect_recycle_test.go",
+        "reconcile_effect_recycle_tmux_integration_test.go",
         "reconcile_effect_rekey_test.go",
         "reconcile_effect_restart_e2e_test.go",
         "reconcile_effect_restart_test.go",
@@ -1626,11 +1663,11 @@ go_test(
         "reconcile_effect_signal_test.go",
         "reconcile_effect_start_test.go",
         "reconcile_effect_stop_test.go",
+        "reconcile_effect_stop_tmux_integration_test.go",
         "reconcile_effect_tx_test.go",
         "reconcile_effect_write_test.go",
         "reconcile_effect_zombie_test.go",
         "reconcile_effects_lint_test.go",
-        "reconcile_effects_mode_test.go",
         "reconcile_effects_test.go",
         "reconcile_effects_wiring_test.go",
         "reconcile_enqueue_test.go",
@@ -1661,6 +1698,9 @@ go_test(
         "reconcile_session_namelock_test.go",
         "reconcile_session_timeline_test.go",
         "reconcile_settle_test.go",
+        "reconcile_sim_coverage_test.go",
+        "reconcile_sim_determinism_test.go",
+        "reconcile_sim_drift_test.go",
         "reconcile_sim_invariants_test.go",
         "reconcile_sim_pending_test.go",
         "reconcile_sim_respawn_test.go",
@@ -1714,6 +1754,7 @@ go_test(
         "runtime_lease_kill_test.go",
         "runtime_lease_reopen_test.go",
         "runtime_observation_cache_test.go",
+        "runtime_ownerless_reap_test.go",
         "runtime_profiles_matrix_test.go",
         "runtime_registry_test.go",
         "runtime_token_fence_test.go",
@@ -1734,6 +1775,7 @@ go_test(
         "session_beads_current_claim_clear_test.go",
         "session_beads_handoff_orphan_test.go",
         "session_beads_mail_release_test.go",
+        "session_beads_named_close_race_test.go",
         "session_beads_provider_chat_test.go",
         "session_beads_retire_rows_canonical_test.go",
         "session_beads_test.go",
@@ -1812,7 +1854,9 @@ go_test(
         "session_reconciler_idle_probe_named_test.go",
         "session_reconciler_inc003_test.go",
         "session_reconciler_killed_seat_test.go",
+        "session_reconciler_killed_stale_heal_test.go",
         "session_reconciler_killsite_fold_test.go",
+        "session_reconciler_manual_create_test.go",
         "session_reconciler_named_collapse_test.go",
         "session_reconciler_observation_regression_test.go",
         "session_reconciler_pool_replacement_test.go",
@@ -1834,6 +1878,7 @@ go_test(
         "session_resume_policy_test.go",
         "session_resume_user_hold_test.go",
         "session_rollback_pending_create_atomic_test.go",
+        "session_runtime_binding_test.go",
         "session_scaffold_staging_test.go",
         "session_sleep_acp_idle_probe_test.go",
         "session_sleep_attached_test.go",
@@ -2167,11 +2212,13 @@ go_test(
         "@com_github_spf13_cobra//:cobra",
         "@com_github_spf13_pflag//:pflag",
         "@com_github_steveyegge_beads//backend",
+        "@com_github_steveyegge_beads//journalops",
         "@in_gopkg_yaml_v3//:yaml_v3",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",
         "@io_opentelemetry_go_otel_sdk_metric//:metric",
         "@io_opentelemetry_go_otel_sdk_metric//metricdata",
+        "@net_pgregory_rapid//:rapid",
         "@org_golang_x_mod//semver",
     ] + select({
         "@rules_go//go/platform:android": [
@@ -2195,14 +2242,66 @@ go_variant_test(
 )
 
 # The full 1024-seed v2 simulator corpus, a CI gate (CONTRACT v5.9n): gc_test
-# runs the first simCISeeds; these run all 1024 in sixteen ranges of 64, each
-# a target of its own (the same binary, no extra compile), so they run in
-# parallel beside gc_test's shards; medium's timeout fails a hang fast. The
-# pending creates (mc-cjtkj) grew a range's run, so the ranges halved.
+# runs the first simCISeeds; these run all 1024 of each corpus in sixteen
+# ranges of 64, the plain corpus and the floored one with pending creates
+# seeded (TestSimCorpusFlooredPending, mc-cjtkj). Each range runs once as an
+# action (go_test_run: the same binary, no extra compile), in parallel beside
+# gc_test's shards, writing its coverage census, and
+# gc_sim_coverage_gate_test sums the censuses (architecture item C), which
+# pulls every range into `bazel test`. A failing or hung range fails the
+# build with its failing seeds' violated: and replay: lines and its log's
+# tail, and is never cached; a passing one is cached as an action, so
+# --cache_test_results=no does not rerun it (--config=fresh does), and the
+# corpus's lines no longer reach bazel coverage's lcov (gc_test's shards still
+# cover its first 64 seeds). --test_filter, --test_arg and --test_env do not
+# reach a range; build one with
+#   bazel build //cmd/gc:gc_sim_corpus_<n>_run
+# and replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpus$' ./cmd/gc/
+# (TestSimCorpusFlooredPending for the floored ranges).
+SIM_CORPORA = {
+    "gc_sim_corpus": "TestSimCorpus",
+    "gc_sim_corpus_floored_pending": "TestSimCorpusFlooredPending",
+}
+
+SIM_RANGES = ["%s_%d" % (name, i) for name in SIM_CORPORA for i in range(16)]
+
+[go_test_run(
+    name = "%s_%d_run" % (name, i),
+    testonly = True,
+    outs = {"GC_V2_SIM_COVERAGE": "%s_%d.census.json" % (name, i)},
+    args = ["-test.run=^%s$" % test],
+    env = {
+        "GC_V2_SIM_SEEDS": "64",
+        "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
+    },
+    test = ":gc_test",
+) for name, test in SIM_CORPORA.items() for i in range(16)]
+
+# Fails on a registered arm, effect kind or settle outcome no range reaches,
+# unless simCoverageAllowlist names its generator bead (mc-i7efm), or when a
+# range's census is missing.
+go_variant_test(
+    name = "gc_sim_coverage_gate_test",
+    size = "small",
+    args = ["-test.run=^TestSimCoverageGate$$"],
+    data = [":%s_run" % r for r in SIM_RANGES],
+    env = {
+        "GC_V2_SIM_COVERAGE_FILES": " ".join(["$(rootpath :%s_run)" % r for r in SIM_RANGES]),
+        "GC_V2_SIM_COVERAGE_RANGES": str(len(SIM_RANGES)),
+    },
+    test = ":gc_test",
+)
+
+# The corpus on the shifted stream (TestSimCorpusShiftedRNG, mc-946b6): one
+# extra RNG draw per step, so 1024 schedules main's stream never takes, in
+# sixteen ranges of 64. Ordinary test targets, outside SIM_CORPORA (the #7765
+# review): a failure is never cached, a retry reruns it, and --runs_per_test
+# and --test_env reach it.
 [go_variant_test(
-    name = "gc_sim_corpus_%d_test" % i,
+    name = "gc_sim_corpus_shifted_%d_test" % i,
     size = "medium",
-    args = ["-test.run=^TestSimCorpus$$"],
+    args = ["-test.run=^TestSimCorpusShiftedRNG$$"],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),
@@ -2210,12 +2309,15 @@ go_variant_test(
     test = ":gc_test",
 ) for i in range(16)]
 
-# The floored corpus with pending creates seeded, all 1024 seeds in sixteen
-# ranges of 64, the same way (TestSimCorpusFlooredPending, mc-cjtkj).
+# The floored corpus (TestSimCorpusFloored: a min_active_sessions floor, no
+# pending creates), all 1024 seeds in sixteen ranges of 64 (CONTRACT v5.10l,
+# mc-su7hv); gc_test runs only its first 64. Ordinary test targets outside
+# SIM_CORPORA, as the shifted ranges are. Replay one seed with
+#   GC_V2_SIM_SEED=<seed> go test -run '^TestSimCorpusFloored$' ./cmd/gc/
 [go_variant_test(
-    name = "gc_sim_corpus_floored_pending_%d_test" % i,
+    name = "gc_sim_corpus_floored_%d_test" % i,
     size = "medium",
-    args = ["-test.run=^TestSimCorpusFlooredPending$$"],
+    args = ["-test.run=^TestSimCorpusFloored$$"],
     env = {
         "GC_V2_SIM_SEEDS": "64",
         "GC_V2_SIM_SEED_FIRST": str(1 + 64 * i),

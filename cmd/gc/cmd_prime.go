@@ -453,6 +453,16 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionName:       sessionName,
 			}))
 		}
+		if hookMode && isClientProviderChat(&a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS")) {
+			// A client's provider chat gets no worker persona (see
+			// isClientProviderChat); the controller's launch channel drops
+			// it with the same predicate. Unlike the unmanaged-hook exit
+			// above, this one deliberately comes after the nudge poller
+			// starts: the chat is a live session gc started, so nudges
+			// queued for it still reach it.
+			writePrimePromptWithFormat(stdout, "", "", "", hookMode, hookFormat, false, "", nil)
+			return 0, nil
+		}
 		var ctx PromptContext
 		if a.PromptTemplate != "" || hookMode || sessionTemplateContext {
 			ctx = buildPrimeContextFor(cityPath, cityName, &a, cfg.Rigs, cityQueryTopology(cityPath, cfg), stderr)

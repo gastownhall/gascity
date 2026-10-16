@@ -388,6 +388,7 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 
 // Nudge sends a best-effort redirect message to the worker.
 func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -412,7 +413,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text)
+			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -427,7 +428,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
+			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -442,7 +443,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
+			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -465,10 +466,10 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	}
 }
 
-// sentNudgeResult: a held session queued the nudge rather than taking it.
+// sentNudgeResult: a session that could not take the nudge now queued it.
 func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
 	if outcome.Queued {
-		return NudgeResult{Undelivered: NudgeQueuedHeld}
+		return NudgeResult{Undelivered: NudgeQueued}
 	}
 	return NudgeResult{Delivered: true}
 }

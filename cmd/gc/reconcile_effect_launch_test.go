@@ -602,6 +602,14 @@ func TestLaunchCommitPremise(t *testing.T) {
 		{"an outside close", []string{"closed"}, false, false, causeCommitLost, true},
 		{"an outside close over a zombie", []string{"closed", "zombie"}, false, false, causeCommitLost, true},
 		{"a kill fence over a zombie", []string{"state", "asleep", "sleep_reason", "killed", "zombie", ""}, false, false, causeCommitLost, true},
+		// An operator's suspend during the Start (mc-z1v39, §12.2 row 65: legacy too) moves state, which refuses.
+		{"an operator's suspend", []string{"sleep_intent", "user-hold", "held_until", gatherNow.Add(24 * time.Hour).Format(time.RFC3339), "suspended_at", gatherNow.Format(time.RFC3339), "state", "suspended"}, false, false, causeCommitLost, true},
+		// Pinned: S2's premise is the token and the state, not the hold (FactsCommit: a heartbeat's held_until
+		// during startup must not orphan the runtime), so a held row read awake commits. No v2 writer makes
+		// that shape during a start: the start owns its row (I8), a suspend writes state=suspended with the
+		// hold, and v2's awake heal never revives a held row (TestSoftSuspendIsNoHold "managed",
+		// TestAwakeHealNeverRevivesAnOperatorDormantRow). Legacy's heal pass did, which was mc-z1v39.
+		{"the operator's hold read awake (no v2 writer)", []string{"sleep_intent", "user-hold", "held_until", gatherNow.Add(24 * time.Hour).Format(time.RFC3339), "suspended_at", gatherNow.Format(time.RFC3339), "state", "awake"}, false, true, "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			k, leaf := launchKit(t, "asleep", "wake_attempts", "1")

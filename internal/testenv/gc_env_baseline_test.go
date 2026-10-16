@@ -189,9 +189,8 @@ func diffStringSets(want, got []string) (added, removed []string) {
 // Keep this list short and justified: anything here is a name the env-read
 // drift lock will not notice.
 var nonEnvGCConstantNames = map[string]string{
-	// A stderr token gc hook emits alongside exit code 2 so runtime hook
-	// consumers can distinguish "store unreachable" from exit-1 no-work. It is
-	// printed, never read from the environment.
+	// gc hook's stderr token; its doc in cmd/gc/cmd_hook.go states the exit-2
+	// contract and its scope. It is printed, never read from the environment.
 	"hookStoreUnavailableToken": "stderr token, not an env var",
 }
 

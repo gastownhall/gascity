@@ -1847,6 +1847,7 @@ func TestOrderDispatchCachesLastRunBetweenDispatches(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:  "recent run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:test-order"},
 	}); err != nil {
 		t.Fatal(err)
@@ -1889,6 +1890,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 
 	if _, err := store.Create(beads.Bead{
 		Title:     "recent run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(-30 * time.Minute),
 	}); err != nil {
@@ -1915,6 +1917,7 @@ func TestOrderDispatchRefreshesCachedLastRunBeforeDueDispatch(t *testing.T) {
 	store.reset()
 	if _, err := store.Create(beads.Bead{
 		Title:     "manual run",
+		Type:      "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels:    []string{"order-run:test-order"},
 		CreatedAt: now.Add(20 * time.Minute),
 	}); err != nil {
@@ -2689,6 +2692,7 @@ func TestOrderDispatchExecCooldown(t *testing.T) {
 	// Seed a recent exec run.
 	_, err := store.Create(beads.Bead{
 		Title:  "order:wasteland-poll",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:wasteland-poll"},
 	})
 	if err != nil {
@@ -6857,6 +6861,7 @@ func TestOrderDispatchRigCooldownIndependent(t *testing.T) {
 	// Seed a recent run for rig-A's order (scoped name).
 	_, err := store.Create(beads.Bead{
 		Title:  "order run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:db-health:rig:rig-a"},
 	})
 	if err != nil {
@@ -7305,6 +7310,7 @@ pool = "worker"
 	}
 	if _, err := cityStore.Create(beads.Bead{
 		Title:  "legacy rig digest run",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:rig-digest:rig:frontend"},
 	}); err != nil {
 		t.Fatalf("Create(legacy city run): %v", err)
@@ -7391,7 +7397,7 @@ func TestOrderDispatchSkipsRigEventWhenLegacyCursorReadFails(t *testing.T) {
 	rigStore := beads.NewMemStore()
 	legacyStore := labelFailListStore{
 		Store:     beads.NewMemStore(),
-		failLabel: "order:release-watch:rig:frontend",
+		failLabel: "order-run:release-watch:rig:frontend",
 	}
 	eventLog := events.NewFake()
 	eventLog.Record(events.Event{Type: events.BeadClosed, Actor: "test"})
@@ -7613,6 +7619,7 @@ pool = "worker"
 	}
 	if _, err := store.Create(beads.Bead{
 		Title:  "existing work",
+		Type:   "molecule", // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:file-order"},
 	}); err != nil {
 		t.Fatalf("Create(existing work): %v", err)
@@ -8082,6 +8089,7 @@ func TestOrderDispatchSkipsOpenWork(t *testing.T) {
 	// Seed an open wisp (non-tracking bead) for this order.
 	_, err := store.Create(beads.Bead{
 		Title:  "mol-do-work", // not "order:my-auto" → counts as real work
+		Type:   "molecule",    // the run's pour root: an order-run label alone is no run (mc-v8g4p)
 		Labels: []string{"order-run:my-auto"},
 	})
 	if err != nil {
@@ -10911,4 +10919,33 @@ title = "Do work"
 		titles = append(titles, b.Title)
 	}
 	t.Fatalf("dispatchWisp created no step bead from a formula shipped by a non-own layer (the #4378 bug); titles=%v", titles)
+}
+
+// TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel (architecture B v2,
+// mc-v8g4p): a plain task carrying an order's order-run label, even with an
+// open child, is no run of the order (orders.IsRunRecord) and holds no
+// single-flight, through the per-tick index and its live fallback alike; the
+// real molecule root of the same shape still does
+// (TestHasOpenWorkStrictBlocksOnWispWithOpenChildren).
+func TestHasOpenWorkStrictIgnoresAForgedOrderRunLabel(t *testing.T) {
+	store := beads.NewMemStore()
+	forged, err := store.Create(beads.Bead{Title: "forged", Type: "task", Labels: []string{"order-run:digest"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.Create(beads.Bead{Title: "step", ParentID: forged.ID}); err != nil {
+		t.Fatal(err)
+	}
+	ad := &memoryOrderDispatcher{}
+	if has, err := ad.hasOpenWorkStrict(store, "digest"); err != nil || has {
+		t.Fatalf("hasOpenWorkStrict = %t (%v), want no open work from a plain task", has, err)
+	}
+	idx := newOrderDispatchTrackingIndex(io.Discard)
+	entries, err := idx.entriesForStore(store, "s")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary := entries["digest"]; summary.openWorkTracking || len(summary.openRoots) != 0 {
+		t.Fatalf("index summary %+v, want no run of digest", summary)
+	}
 }

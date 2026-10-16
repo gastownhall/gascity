@@ -28,9 +28,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   row's labels, description, priority, assignee or parent, or any other
   metadata key, over HTTP. A typed work bead carrying the `gc:session`
   label is written only by `bd`. `bd update` stays the operator escape
-  hatch for all of these. The coordination classes (`message`,
-  `gc:wait`, `gc:nudge`, `order-tracking`, `gc:wisp`, `gc:extmsg-*`)
-  are unchanged.
+  hatch for all of these.
+
+- **The generic bead API no longer writes coordination beads either.** Mail
+  messages, session waits (the `gc:wait` label, or a `gate` carrying its
+  `session:<id>`), queued nudges (`gc:nudge`, `gc:nudge-queue`), order run
+  records (`order-tracking`, `order-run:*`) and external-messaging rows
+  (`gc:extmsg-*`) get the same 422, on a class-split city too, whatever rig
+  the body names; `POST /beads` no longer creates them, and neither a formula
+  (`PUT /formulas`, its pour, `POST /sling`) nor a sling batch makes or routes
+  one. Use their routes: `/mail`, `gc session wait`, `gc nudge`,
+  `gc order run`, `/extmsg/*`. One generic write remains on an order's run
+  root (the wisp or molecule root a run poured): close (`POST
+  /bead/{id}/close`, `DELETE /bead/{id}`); for anything else use `bd` or the
+  workflow's teardown. Wisps stay generic. `POST /mail` and its reply now
+  send only as a configured identity: the operator (`human`, or the
+  dashboard's `DASHBOARD_OPERATOR_WIRE_ALIAS`), a configured agent, a named
+  session or a live session of a configured agent; any other `from`, or none,
+  is a 422. And an `order-run:` label, or an `order:` and `seq:` pair, counts
+  toward an order's cooldown, event cursor and single-flight (in dispatch,
+  `gc order check` and `GET /orders/check`) only on its tracking bead or the
+  root its run poured.
+
+- **`gc runtime drain-check` has a third exit code, 3 ("unknown").** It now
+  reads the session row's state as well as the runtime's `GC_DRAIN`, and
+  exits 1 ("not draining") only when both sources answered. When a source
+  cannot be read and none says draining, it exits 3 with one stderr line
+  naming the source that failed. `if gc runtime drain-check` still treats 3
+  as false. Under `--json`, that case is now the error envelope with code
+  `drain_state_unknown` and `exit_code` 3, where it used to be
+  `command_failed` with exit 1; a successful result adds a `source` field.
+  Cases that move from exit 1 to exit 3: a `[name]` target that cannot be
+  resolved because the city, its config or its store cannot be read, or
+  that is ambiguous (a name a store that opened does not know still exits
+  1); a session row that cannot be read or found (for example a
+  `GC_SESSION_ID` that names no session row) while `GC_DRAIN` is clear; a
+  session provider that cannot be constructed; a runtime error that is not
+  a typed "session not found", including a local city whose tmux server is
+  not running and an exec adapter whose `get-meta` fails for any reason.
 
 - **New proxied scopes retire their proxy and Dolt child after 30 minutes
   idle.** Before this release every scope gc created was pinned to never, so a
@@ -184,6 +219,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`gc agent is-foreign <identity>` reports whether this city can vouch for
+  a claim's assignee.** It exits 0 (`local`) when the identity resolves
+  against this city's roster, or when one of this city's own session records,
+  open or closed, answers to it under its bead ID, session name, alias,
+  configured named identity or sole alias-history entry; 1 (`foreign`) when
+  neither does; and 2 (`unknown`) when it cannot answer (no roster, a failed
+  lookup, an unresolvable city, bad usage). `--json` adds the reason
+  (`roster`, `session_record`, `foreign_binding`, `absent_from_roster`,
+  `no_config`, `lookup_failed`) and its detail. `local` is not a liveness
+  claim. Scripts and formulas that reap claims should ask it instead of
+  re-deriving identity rules, and treat anything but exit 0 as "protect"
+  (#5955).
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
@@ -303,6 +350,65 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **The core `orphan-sweep` order no longer releases claims it cannot vouch
+  for.** On a rig store shared with another city it used to release that
+  city's live claims as dead, in every shape they take: `<rig>/<name>` crew,
+  foreign-binding pool instances (`<rig>/<binding>.<name>-<n>`), runtime
+  session names and bare session bead IDs, with a false cause note and a mail
+  for each sweep (#5955). The order now asks `gc agent is-foreign` about every
+  claimant that is neither configured nor live, in HQ and in every rig, before
+  any revalidation or session probe, and keeps the claim unless the verb
+  answers `local`. Each sweep that keeps claims prints `protected K
+  foreign/unknown claims` in its summary and a line naming every kept identity
+  and its claims, and declares a `partial` outcome, which the controller
+  records as an `order.skipped` event with one scope per identity; the run
+  still exits 0, and a sweep that only protects sends no mail. The verb is
+  asked at most once per distinct identity per sweep, within a gate budget of
+  `GC_ORPHAN_SWEEP_GATE_BUDGET_SECONDS` (default 120, under the order's 300s
+  timeout); past it, the remaining claimants are not asked, their claims are
+  kept and named with a "gate budget … exhausted" reason, and the sweep says
+  how many identities it did not ask. Where `timeout` is installed, an ask
+  still running when the budget runs out is abandoned and its claim kept and
+  named too, so one stalled store cannot run the sweep into the order's
+  timeout. Identities are asked from a random starting point each sweep, so a
+  large set of foreign claimants delays, but does not starve, release of a
+  dead local claim. Unlike the Go
+  pool sweep, the order has no route filter, so it gives bare identities no
+  shape exemption: a dead local ephemeral or bead-ID claim stays releasable
+  through its own session record. Migration notes: a person's claim, or a
+  local agent's claim whose config and session records are both gone, is now
+  kept and named every sweep instead of released; release it by hand with
+  `gc bd release-if-current <id> <assignee>`.
+- **The pool orphan sweep treats a claim it cannot observe as unobservable,
+  not dead.** On a shared store, an assignee in `<rig>/<name>` form that this
+  city's config does not mint — another city's identity, a binding this city
+  imports only on another rig, or an agent, binding or namepool name since
+  REMOVED from local config — used to be judged by local session evidence
+  alone and silently stripped (`in_progress` → `open`, assignee cleared).
+  The dead-assignee sweep now keeps such a claim unless one of this city's
+  own session beads, open or closed, answers to the identity under its alias,
+  its configured named identity or its sole alias-history entry (looked up per
+  identity, at most once per pass), and logs one
+  `protected N foreign/unknown identities` summary per pass naming each
+  identity it kept and its claims. A namepool seat whose name was trimmed
+  therefore stays reapable after it closes; claims under the earlier aliases
+  of a seat renamed more than once are kept and named. The orphan-close
+  release of a confirmed orphaned session is unchanged. The core `orphan-sweep`
+  order now applies the same gate through `gc agent is-foreign`; see the entry
+  above. Migration notes: a `<rig>/<name>` identity moved to another city on
+  the shared rig store keeps being released here until this city's closed
+  session records for it are purged or re-aliased.
+  The session record of a removed agent, binding or namepool name lasts until
+  closed session beads are purged, which happens only after
+  `GC_INFRA_SESSION_PURGE_AGE` (default 72h) on a relocated SQLite sessions
+  ledger with `wisp_ttl` set, or after `GC_REAPER_SESSION_PURGE_AGE` (default
+  720h) in the city store when the reaper's `GC_REAPER_SESSION_BEAD_PATTERN`
+  (default `gm-*`) matches the city's session bead IDs or is set to `""`.
+  Anywhere else closed session beads are kept indefinitely. Once the record is
+  purged, the sweep protects the identity's outstanding claims, so release them
+  explicitly (`gc bd release-if-current <id> <assignee>`/reassign) when
+  retiring one, and watch the summary line for claims held back.
 
 - **Codex `suggest` sessions start on current codex-cli and ask before
   acting.** `permission_mode = "suggest"` passed `--ask-for-approval

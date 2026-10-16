@@ -131,6 +131,14 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// demand reads ask the cache's backing (demandLegCache), and a cache
 	// carrying it would advertise exactness over a bd backing.
 	"CachedReadExact": nil,
+	// Engine-only (see above): the events journal. A cache holds no journal
+	// of its own, and carrying the read structurally would make every cached
+	// bd, memory or exec store type-assert as a journal. The feed is wired
+	// over the base store before the cache exists, and a consumer handed a
+	// class store discovers the journal with beads.ActiveEventsJournal, which
+	// unwraps the cache and applies the activation predicate.
+	"EventsJournalActive":   nil,
+	"ReadEventsJournalPage": nil,
 }
 
 // TestControllerBindingCacheForwardsEveryEngineCapability holds the cache to

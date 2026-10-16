@@ -111,11 +111,11 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 	}
 	bucket := responseCacheTimeBucket(time.Now())
 	if !blocking {
-		if body, ok := cachedResponseAs[StatusBody](s, cacheKey, bucket); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseAs[indexedResponse[StatusBody]](s, cacheKey, bucket); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
-		if body, ok := cachedResponseWithinAgeAs[StatusBody](s, cacheKey, statusResponseTTLFloor); ok {
-			return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: body}, nil
+		if hit, ok := cachedResponseWithinAgeAs[indexedResponse[StatusBody]](s, cacheKey, statusResponseTTLFloor); ok {
+			return &IndexOutput[StatusBody]{Index: hit.Index, CacheAgeS: cacheAgeSeconds(store), Body: hit.Body}, nil
 		}
 		// Stale-while-revalidate (ra-4u2eqc): the bucket and TTL-floor caches
 		// both missed, so any entry that exists is older than
@@ -137,19 +137,19 @@ func (s *Server) humaHandleStatus(ctx context.Context, input *StatusInput) (*Ind
 		// staleness and suppress the banner `gc status` renders above
 		// cacheAgeBannerThresholdSeconds; reporting only the store age would
 		// hide the SWR delay. The max preserves both.
-		if body, age, ok := staleResponseAs[StatusBody](s, cacheKey); ok {
+		if hit, age, ok := staleResponseAs[indexedResponse[StatusBody]](s, cacheKey); ok {
 			s.refreshStatusResponseInBackground(cacheKey, input.Lite)
 			return &IndexOutput[StatusBody]{
-				Index:     index,
+				Index:     hit.Index,
 				CacheAgeS: max(age.Seconds(), cacheAgeSeconds(store)),
-				Body:      body,
+				Body:      hit.Body,
 			}, nil
 		}
 	}
 
 	resp := s.buildStatusBody(ctx, input.Lite)
 	if !blocking {
-		s.storeResponse(cacheKey, bucket, resp)
+		s.storeResponse(cacheKey, bucket, indexedResponse[StatusBody]{Index: index, Body: resp})
 	}
 
 	return &IndexOutput[StatusBody]{Index: index, CacheAgeS: cacheAgeSeconds(store), Body: resp}, nil
@@ -179,8 +179,9 @@ func (s *Server) refreshStatusResponseInBackground(cacheKey string, lite bool) {
 			}
 		}()
 		defer s.endResponseRefresh(cacheKey)
+		index := s.latestIndex()
 		resp := s.buildStatusBody(ctx, lite)
-		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), resp)
+		s.storeResponse(cacheKey, responseCacheTimeBucket(time.Now()), indexedResponse[StatusBody]{Index: index, Body: resp})
 	})
 }
 
@@ -685,12 +686,13 @@ type statusWorkResult struct {
 }
 
 // statusWorkCounts tallies persisted open/in_progress work across BeadStores
-// and federates canonical Ready work the way GET /beads/ready does over the
-// work stores: the city store first, then BeadStores excluding the CityName
-// alias. Stores exposing beads.Counter answer persisted counts without
-// hydrating rows — the caching layer counts matches in memory when its cache is
-// clean (#1896). Stores are queried concurrently; results aggregate in
-// deterministic city/rig order.
+// and federates canonical Ready work over the work-store legs GET /beads/ready
+// reads, in the same order: the city store first, then BeadStores excluding the
+// CityName alias. It reads each leg from a different source, though (see
+// statusReadyStoreWithTimeout). Stores exposing beads.Counter answer persisted
+// counts without hydrating rows — the caching layer counts matches in memory
+// when its cache is clean (#1896). Stores are queried concurrently; results
+// aggregate in deterministic city/rig order.
 //
 // NOT identical to GET /beads/ready on a split city: that handler grew a
 // relocated-graph-store leg (huma_handlers_beads.go) and this one has none, so
@@ -966,10 +968,15 @@ func statusListStoreWithTimeout(ctx context.Context, state State, store beads.St
 	}
 }
 
-// statusReadyStoreWithTimeout reads the same live canonical Ready projection
-// as GET /beads/ready. Policy-aware stores retain their tier behavior through
-// ScopedStoreLike; the scoped clone binds bd subprocesses to reqCtx so timeout
-// cancellation cannot leak a child beyond the status request.
+// statusReadyStoreWithTimeout reads the canonical Ready projection of one leg
+// GET /beads/ready federates, but not from the source that endpoint uses. A
+// beads.ContextReadyReader is read through ReadyContext; for a CachingStore
+// that read is cache-only and fails with beads.ErrCacheUnavailable rather than
+// read live. Any other store is read live through ScopedStoreLike: policy-aware
+// stores retain their tier behavior, and the scoped clone binds bd subprocesses
+// to reqCtx so timeout cancellation cannot leak a child beyond the status
+// request. GET /beads/ready instead reads a leg whose cache cannot answer live
+// (beads.ReadyPreferCache).
 func statusReadyStoreWithTimeout(ctx context.Context, state State, store beads.Store) ([]beads.Bead, error) {
 	if store == nil {
 		return nil, nil

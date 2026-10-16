@@ -388,6 +388,14 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 			return &cfg.Agents[i]
 		}
 	}
+	return findAgentByLegacyTemplate(cfg, template)
+}
+
+// findAgentByLegacyTemplate is findAgentByTemplate's migration fallbacks, for
+// a trimmed template no agent matches exactly: a legacy bound form resolves to
+// the unbound agent, then a legacy unbound form to the one bound agent it
+// names (none when two match).
+func findAgentByLegacyTemplate(cfg *config.City, template string) *config.Agent {
 	for i := range cfg.Agents {
 		if legacyBoundTemplateMatchesUnboundAgent(&cfg.Agents[i], template) {
 			return &cfg.Agents[i]
@@ -403,6 +411,74 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 		}
 	}
 	return legacyUnboundMatch
+}
+
+// agentLookup is findAgentByTemplate over an index of cfg's agents, built
+// once, for a caller that resolves many templates against one config (the
+// demand build: one per agent and live pool session). An exact match
+// (config.AgentMatchesIdentity: the qualified name, or an unbound agent's
+// dir and name) is a map lookup, the earlier agent winning as in the scan;
+// anything else takes findAgentByTemplate's legacy fallbacks unchanged. It
+// is built per use rather than cached on the config, which callers may
+// mutate in place.
+type agentLookup struct {
+	cfg         *config.City
+	byQualified map[string]int
+	byDirName   map[[2]string]int // unbound agents only
+}
+
+func newAgentLookup(cfg *config.City) agentLookup {
+	l := agentLookup{cfg: cfg, byQualified: map[string]int{}, byDirName: map[[2]string]int{}}
+	if cfg == nil {
+		return l
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if q := a.QualifiedName(); !mapHas(l.byQualified, q) {
+			l.byQualified[q] = i
+		}
+		if k := [2]string{a.Dir, a.Name}; a.BindingName == "" && !mapHas(l.byDirName, k) {
+			l.byDirName[k] = i
+		}
+	}
+	return l
+}
+
+func mapHas[K comparable, V any](m map[K]V, k K) bool {
+	_, ok := m[k]
+	return ok
+}
+
+// find is findAgentByTemplate(l.cfg, template).
+func (l agentLookup) find(template string) *config.Agent {
+	template = strings.TrimSpace(template)
+	if l.cfg == nil || template == "" {
+		return nil
+	}
+	best := -1
+	if i, ok := l.byQualified[template]; ok {
+		best = i
+	}
+	dir, name := config.ParseQualifiedName(template)
+	if i, ok := l.byDirName[[2]string{dir, name}]; ok && (best < 0 || i < best) {
+		best = i
+	}
+	if best >= 0 {
+		return &l.cfg.Agents[best]
+	}
+	return findAgentByLegacyTemplate(l.cfg, template)
+}
+
+// normalize is normalizeAgentTemplateIdentity(l.cfg, template).
+func (l agentLookup) normalize(template string) string {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return ""
+	}
+	if agent := l.find(template); agent != nil {
+		return agent.QualifiedName()
+	}
+	return template
 }
 
 func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {
@@ -694,7 +770,7 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // recordWakeFailure increments wake_attempts and quarantines if threshold
 // exceeded. It returns the snapshot Info advanced by every write it made
 // (front-door migration Step 6d, write-returns-Info):
-//   - the ConversationResetPatch if session_key or started_config_hash was set
+//   - the ConversationResetPatch when the failure resets the conversation
 //   - the WakeFailureAccrualPatch (quarantine or single-counter increment)
 //
 // A quarantined accrual whose persist failed leaves the snapshot un-advanced for
@@ -705,8 +781,9 @@ func sessionHasProviderTerminalErrorInfo(info sessionpkg.Info) bool {
 // session_key / started_config_hash alone because the conversation the key
 // points at is provably still on disk. Only a probeable provider with a present
 // keyed transcript qualifies; everything else (no key, no work dir, provider we
-// cannot probe, transcript gone) returns false and keeps the unconditional
-// reset that recovery depends on. searchPaths is sessionTranscriptSearchPaths.
+// cannot probe, transcript gone) returns false, and the wake failure resets
+// the conversation unless recordWakeFailure retains a committed manual one
+// (SESSION-LIFE-MANUAL-LOSS). searchPaths is sessionTranscriptSearchPaths.
 func wakeFailureKeepsConversation(info sessionpkg.Info, searchPaths []string) bool {
 	sessionKey := strings.TrimSpace(info.SessionKey)
 	workDir := strings.TrimSpace(info.WorkDir)
@@ -799,26 +876,32 @@ func recordWakeFailure(info sessionpkg.Info, transcriptRoots []string, sessFront
 	// left behind by older builds. The store write is best-effort (its error is
 	// intentionally ignored, as before) while the Info fold is unconditional.
 	//
-	// Exception: keep a conversation that provably still exists on disk. The
-	// reset is recovery for an unresumable key, but any single wake failure
-	// lands here — a transient tmux/spawn flake included — and for providers
-	// that persist a keyed transcript the reset would permanently orphan a
-	// perfectly resumable conversation. Probe first and skip the clear when the
-	// transcript is there; unprobeable providers and absent transcripts keep the
-	// existing unconditional behavior. Attempt accrual and quarantine below are
-	// untouched either way, so a genuinely broken session still escalates.
+	// Exceptions: retain a committed manual conversation
+	// (SESSION-LIFE-MANUAL-LOSS), and keep a conversation that provably still
+	// exists on disk. The reset is recovery for an unresumable key, but any
+	// single wake failure lands here — a transient tmux/spawn flake included —
+	// and for providers that persist a keyed transcript the reset would
+	// permanently orphan a perfectly resumable conversation. Probe first and
+	// skip the clear when the transcript is there; any other conversation (an
+	// unprobeable provider's, an absent transcript's) resets. Attempt accrual
+	// and quarantine below are untouched either way, so a genuinely broken
+	// session still escalates. An always-named conversation is not a manual
+	// one here: it is kept only while the probe finds it. v2 keeps by the same
+	// rule (failureKeepsConversation, deadRuntimePatch's rapid crash); change
+	// the three together.
 	//
-	// The keep has a backstop (resumeBackstop): a resume the provider refused
+	// Either keep has a backstop (resumeBackstop): a resume the provider refused
 	// resets at once, and the maxResumeFailuresBeforeReset-th resume-shaped
 	// failure in a row resets too; a committed manual conversation's reset
 	// records session.conversation_reset{reason:resume-failed}.
 	if info.SessionKey != "" || info.StartedConfigHash != "" {
 		failures, _ := strconv.Atoi(info.ResumeFailures)
-		keeps := wakeFailureKeepsConversation(info, transcriptRoots)
-		backstop, count := resumeBackstop(failures, keeps, rf)
+		manual := sessionpkg.HasStartedManualConversation(info)
+		kept := manual || wakeFailureKeepsConversation(info, transcriptRoots)
+		backstop, count := resumeBackstop(failures, kept, rf)
 		patch := resumeFailuresPatch(info, count)
-		if !keeps || backstop {
-			if backstop && rec != nil && sessionpkg.HasStartedManualConversation(info) {
+		if !kept || backstop {
+			if backstop && rec != nil && manual {
 				rec.Record(resumeFailedConversationResetEvent(info, agentIdentity))
 			}
 			patch = sessionpkg.ConversationResetPatch(true)
@@ -932,11 +1015,13 @@ func isDeliberateSleepReason(reason string) bool {
 func recordChurn(info sessionpkg.Info, sessFront *sessionpkg.Store, clk clock.Clock, agentIdentity string) sessionpkg.Info {
 	count, _ := strconv.Atoi(info.ChurnCount)
 
-	// Always clear session_key on churn — context exhaustion means the
+	// Clear automatic-session keys on churn — context exhaustion means the
 	// conversation itself is the problem. A fresh conversation avoids
-	// re-hitting the same wall. Best-effort store write (error ignored, as
-	// before) with an unconditional Info fold.
-	if info.SessionKey != "" {
+	// re-hitting the same wall. A committed manual conversation keeps its
+	// identity under the same retry/quarantine accounting; replacing it takes
+	// an explicit reset. Best-effort store write (error ignored, as before)
+	// with an unconditional Info fold.
+	if info.SessionKey != "" && !sessionpkg.HasStartedManualConversation(info) {
 		reset := sessionpkg.ConversationResetPatch(false)
 		_ = sessFront.ApplyPatch(info.ID, reset)
 		info = info.ApplyPatch(reset)
@@ -1145,7 +1230,7 @@ func healStatePatchWithRollbackInfo(info sessionpkg.Info, alive bool, observed b
 			batch["sleep_reason"] = string(sessionpkg.SleepReasonFailedCreate)
 		}
 		if view.ResetContinuation || stalePendingCreateRollback {
-			if !isNamedSessionInfo(info) || namedSessionModeInfo(info) != "always" {
+			if !sessionpkg.PreserveConversationOnRuntimeLoss(info) {
 				batch["session_key"] = ""
 				batch["started_config_hash"] = ""
 				batch["continuation_reset_pending"] = "true"

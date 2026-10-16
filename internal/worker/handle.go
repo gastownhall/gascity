@@ -200,6 +200,24 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// DeliveryKey is the caller's stable identity for this one delivery. A
+	// caller that redelivers the same content after an unknown outcome
+	// passes the same key, so a runtime that deduplicates keyed deliveries
+	// ([runtime.KeyedNudgeProvider]) replays the first delivery instead of
+	// delivering twice. Distinct content needs a distinct key. Empty
+	// delivers unkeyed. Only default delivery is sure to carry the key:
+	// immediate and wait-idle delivery can go out unkeyed, as through
+	// [runtime.ImmediateNudgeProvider], whose NudgeNow takes no key.
+	DeliveryKey string `json:"delivery_key,omitempty"`
+}
+
+// nudgeDeliveryContext scopes req's delivery key to ctx for this one
+// delivery (see [runtime.WithNudgeDeliveryKey]).
+func nudgeDeliveryContext(ctx context.Context, req NudgeRequest) context.Context {
+	if req.DeliveryKey == "" {
+		return ctx
+	}
+	return runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -234,9 +252,18 @@ const (
 	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
 	// must queue it (a wait-idle nudge).
 	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
-	// NudgeQueuedHeld means the session is held, or (ActorBackground) not
-	// running, and queued the nudge itself; the caller must not queue it again.
+	// NudgeQueuedHeld means the session is held and the nudge was queued for
+	// it; the caller must not queue it again.
 	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
+	// NudgeQueued means the session could not take the nudge now (it is held,
+	// (ActorBackground) not running, or its agent is dead in a pane still up)
+	// and queued it itself; the caller must not queue it again.
+	NudgeQueued NudgeUndeliveredReason = "queued"
+	// NudgeUndeliveredAgentDead means the pane is up but its agent is dead (a
+	// crash the controller has not healed), or a fresh read could not vouch
+	// for it: text typed now would be lost with the pane, and nothing queued
+	// the nudge, so the caller queues it (mc-48az4).
+	NudgeUndeliveredAgentDead NudgeUndeliveredReason = "agent_dead"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.
@@ -258,10 +285,14 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 
 // HistoryRequest scopes transcript loading for a worker.
 type HistoryRequest struct {
-	TailCompactions int    `json:"tail_compactions,omitempty"`
-	LogicalID       string `json:"logical_conversation_id,omitempty"`
-	BeforeEntryID   string `json:"before_entry_id,omitempty"`
-	AfterEntryID    string `json:"after_entry_id,omitempty"`
+	TailCompactions int `json:"tail_compactions,omitempty"`
+	// LogicalID, when set, replaces the session's own logical conversation ID
+	// (session.Info.LogicalConversationID). The handle stitches snapshots that
+	// share it, so a caller-supplied value must change whenever the session
+	// starts a new conversation.
+	LogicalID     string `json:"logical_conversation_id,omitempty"`
+	BeforeEntryID string `json:"before_entry_id,omitempty"`
+	AfterEntryID  string `json:"after_entry_id,omitempty"`
 }
 
 // PendingInteraction is the worker-level view of a blocking interaction.

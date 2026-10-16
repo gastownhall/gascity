@@ -183,6 +183,8 @@ func preWakeStep(v txView, f preWakeFold, probeErr error) txStep {
 		return txStep{Refuse: causeLivenessUnknown, Err: probeErr}
 	case !session.IsSessionNameSyntaxValid(strings.TrimSpace(v.Row.SessionNameMetadata)):
 		return healInstead(v, txStep{Refuse: causeSessionName})
+	case healDrifted(v): // the carried timer heal no longer holds on the fresh row: no heal, no start
+		return txStep{Refuse: causeHeld}
 	case preWakeRefused(v) || session.IsKillPendingInfo(v.Row, v.Now): // the hold the intent's own patch writes too
 		return healInstead(v, txStep{Refuse: causeHeld})
 	case v.RT.Class != rtAbsent:
@@ -335,6 +337,9 @@ func startLaunch(ctx context.Context, c txCaps, in launchPass) (startOutcome, er
 	startCtx, stop := c.start.clock.WithDeadline(ctx, c.it.Deadline.Add(-startDeadlineSlack-startFailureSlack))
 	out := startOutcome{err: leaf.Start(startCtx, name, prepared.cfg), undo: in.undo, relaunched: in.relaunched, tp: in.tp, prepared: prepared}
 	stop()
+	// The commit lands on a runtime alive with the PreWake token whatever the
+	// Start returned (commitStep), so the binding is read whatever it returned.
+	prepared.runtimeBinding = startedRuntimeBinding(ctx, prepared.cfg.Env["GC_CITY_PATH"], leaf, name)
 	in.ticket.verdict = verdictInconclusive
 	switch {
 	case runtime.IsProviderCapacity(out.err):

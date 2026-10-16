@@ -11,12 +11,15 @@ import (
 
 // The transaction's fence legs (CONTRACT v5 F1, F4, C8.9): L3 and L4 read
 // fresh on the routed leaf, the leaf the runtime read used; L5 read live
-// through the pass's read-only stores; the idle proof on the routed leaf.
-// Each is bounded, and an unknown answer holds.
+// through the pass's read-only stores, past their caches (live lists, and
+// liveReads for a by-ID read); the idle proof on the routed leaf. Each is
+// bounded, and an unknown answer holds.
 
-// txWork is L5 read live: the row's open or in-progress assigned work over
-// every store its agent can reach. Only a clean read proves Free; a failed
-// or expired read, and the zero value, count as work.
+// txWork is L5 read live: the row's assigned work over every store its agent
+// can reach, in the form the effect asks for (readWork: open or in-progress;
+// an idle stop's late claim; a signal's awake work and live-claim veto).
+// Only a clean read proves Free; a failed or expired read, and the zero
+// value, count as work.
 type txWork struct {
 	Free bool // proven: no open or in-progress assigned work
 	Err  error
@@ -44,7 +47,9 @@ func (t *tx) readFence(ctx context.Context) string {
 
 // readLegs reads the legs and the idle proof n asks for, for name on leaf:
 // L3 and L4 fresh on the leaf, L5 through work, each bounded; now stamps the
-// quiet window, passNow the idle proof's pass.
+// quiet window, passNow the idle proof's pass. L5 comes after L3 and L4:
+// cheapest first, and nearest the CAS, so a claim landing while they are
+// read is seen (v5.10a B).
 func readLegs(ctx context.Context, leaf runtime.Provider, name string, n needs, now, passNow time.Time, work func() *txWork) txFence {
 	f := txFence{Read: n.Legs & (legAttach | legPending | legWork)}
 	if n.Legs&legAttach != 0 {
@@ -104,6 +109,9 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 	if p.reads.legs.unusable() != nil || p.World.Env == nil {
 		return &txWork{Err: errNoReadStore}
 	}
+	if signalReadsWork(it) {
+		return p.readSignalWork(row, it)
+	}
 	// One seat's read, live, over the pass's city work legs (NEW2-1: never
 	// the sessions store standing in for the work store). A close ends a
 	// dead seat, which the narrow ReleaseScope gates, as legacy's close gate
@@ -118,6 +126,22 @@ func (p *effectPass) readWork(row session.Info, it intent) *txWork {
 		scope = refuseScope(row, p.World.Env.Cfg)
 	}
 	has, err := sessionHasOpenAssignedWorkInStores(seatWorkFor(p.reads.legs, scope), scope)
+	return &txWork{Free: !has && err == nil, Err: err}
+}
+
+// readSignalWork is a controller signal's L5 (v5.10a B), legacy DRAIN-005's
+// live read: the seat's awake assigned work, in progress or ready and not
+// held (sessionHasAwakeAssignedWorkForReachableStore), under its release
+// scope; with none, an orphaned drain of a seat the live-claim veto covers
+// (liveClaimVetoApplies) reads the claim it stamped and whether it still
+// holds it (sessionOwnsLiveClaim). An error counts as work.
+func (p *effectPass) readSignalWork(row session.Info, it intent) *txWork {
+	cfg := p.World.Env.Cfg
+	sw := seatWorkFor(p.reads.legs, releaseScope(row, cfg))
+	has, err := sessionHasAwakeAssignedWorkForReachableStore(sw, row)
+	if err == nil && !has && it.Reason == decideDrainSignal+drainOrphaned && liveClaimVetoApplies(p.World.CityPath, cfg, row, p.World.Suspension) {
+		has, _, err = sessionOwnsLiveClaim(p.World.CityPath, cfg, p.reads.city, sw, row)
+	}
 	return &txWork{Free: !has && err == nil, Err: err}
 }
 

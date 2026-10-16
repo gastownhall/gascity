@@ -3,6 +3,7 @@ package main
 import (
 	"cmp"
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"time"
@@ -32,20 +33,24 @@ import (
 //     the Call removes it under the corpse exception, by exact session
 //     object, when L3 passes; an attached corpse stays.
 //  3. The finalize (D4): the intent's builder (Finish), else finalizePatch,
-//     on the close-gate work read live. A close lands as the premise close
+//     on the close-gate work read live (none for an idle stop). A close lands as the premise close
 //     (closeSection); any other finalize is one CAS that writes its patch
 //     and clears the stop request (D3 step 5). The events are legacy's:
 //     session.stopped with the stop metric when a stop was performed, and
 //     session.drain_acked_with_assigned_work when a drained row keeps work.
 
-// causeDispositionRefused: the Sleep cell refused the finalize's move.
-const causeDispositionRefused = "disposition-refused"
+const (
+	// causeDispositionRefused: the Sleep cell refused the finalize's move.
+	causeDispositionRefused = "disposition-refused"
+	// causeAlreadyGone: an operator-dormant stop found its runtime gone.
+	causeAlreadyGone = "already-gone"
+)
 
 // stopSections are the fence and the Call, the finalize write, and the
 // premise close, which only a finalize that closes reaches: a store that
 // cannot close atomically still stops and finalizes every other row.
 var stopSections = []section{
-	called(callStop, section{Premise: premiseDrainBasis, Decide: stopDecide}, stopCall),
+	called(callStop, drainBasis(probed(freshCycleProbe, stopDecideAfterProbe)), stopCall),
 	called(0, probed(finalizeWorkProbe, stopFinalizeStep), passStopped),
 	asStopClose(probed(finalizeWorkProbe, stopCloseStep)),
 }
@@ -71,8 +76,16 @@ func stopLegs(it intent) fenceLegs {
 		return legToken | legAttach | legPending | legWork
 	case it.Reason == decideIdleExhausted: // stopped over its work (SESS-575)
 		return legToken | legAttach | legPending
+	case it.Reason == decideRestartRequested: // A13 (v5.10u): an explicit restart stops an attached session, as legacy's
+		return legToken
 	}
 	return legToken | legAttach
+}
+
+// drainBasis is sec with the stop's drain-basis premise.
+func drainBasis(sec section) section {
+	sec.Premise = premiseDrainBasis
+	return sec
 }
 
 // asStopClose is sec as the stop's premise-close section.
@@ -90,6 +103,17 @@ type stopPlan struct {
 	corpse  *corpseObject
 	now     time.Time
 	idle    bool // an idle-timeout stop clears the pane's scrollback after it (SESS-576)
+	restart bool // A13's restart clears the runtime's restart marker after it (C7a-2b)
+	// stalled is the claim an execution-stalled drain was requested for (the
+	// backstop's marker), which a confirmed stop gives back (v5.10x).
+	stalled stalledClaim
+}
+
+// stalledClaim is the claim an execution-stalled stop gives back: its bead
+// and the seat that holds it.
+type stalledClaim struct {
+	beadID string
+	row    session.Info
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -103,7 +127,7 @@ type corpseObject struct {
 // stopped is the Call's outcome, which the finalize reads.
 type stopped struct {
 	Confirmed bool
-	Performed bool   // a provider Stop was issued
+	Performed bool   // the fence passed: a provider Stop was issued, or the passed runtime had already left the name
 	Reason    string // why not confirmed
 }
 
@@ -115,10 +139,16 @@ func stopDecide(v txView) txStep {
 	// only an idle stop's, must hold too, so the idle finalize never applies
 	// to another stop (a stop request's verb turns finalize on its own).
 	if fresh, _ := decideRow(&w, v.Alloc, v.It.Key); fresh.Kind != v.It.Kind || (isIdleReason(fresh.Reason) || isIdleReason(v.It.Reason)) && fresh.Reason != v.It.Reason {
+		if dormantGone(v) {
+			return txStep{Done: true, Cause: causeAlreadyGone} // the transaction notes the absence (noteAbsence)
+		}
 		return txStep{Refuse: causeRedecided}
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
-	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason)}
+	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
+	if stopReason(v.It) == executionStalledDrainReason {
+		plan.stalled = stalledClaim{beadID: strings.TrimSpace(v.Meta[executionClaimNudgeWorkKey]), row: v.Row}
+	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
 		return txStep{Pass: plan}
@@ -152,6 +182,16 @@ func stopDecide(v txView) txStep {
 	return txStep{Pass: plan}
 }
 
+// dormantGone reports an operator-dormant stop whose fresh read finds
+// nothing under the name: the runtime is already gone (a kill's own stop
+// finished after the pass read it alive). It settles as a no-op, with no row
+// backoff; the transaction notes the absence, as for every effect's absent
+// read, so the next pass decides the row on it (CONTRACT v5.10d (a),
+// v5.10g). Any other redecided stop keeps its backoff.
+func dormantGone(v txView) bool {
+	return v.It.Reason == decideDormantStop && v.RT != nil && v.RT.Class == rtAbsent
+}
+
 // stopCall stops a live runtime through its fence, or, with nothing live,
 // confirms C8.8 alone; a confirmed corpse is then removed when L3 passes.
 func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
@@ -164,6 +204,10 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 		if ok && v.Proceed && p.idle {
 			_ = sp.ClearScrollback(p.name) // legacy's, best effort
 		}
+		if ok {
+			clearRestartMarker(sp, p)
+			releaseStalledClaim(c.release, p.stalled)
+		}
 		return stopped{Confirmed: ok, Performed: v.Proceed, Reason: v.Reason}, nil
 	}
 	if p.name == "" || !confirmStopped(ctx, sp, p.names, p.name, p.now) {
@@ -172,7 +216,48 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 	if k := p.corpse; k != nil {
 		removeCorpse(ctx, *k, now())
 	}
+	clearRestartMarker(sp, p)
+	releaseStalledClaim(c.release, p.stalled)
 	return stopped{Confirmed: true}, nil
+}
+
+// releaseStalledClaim gives back, after a confirmed stop, the claim an
+// execution-stalled drain was requested for (v5.10x): read live on the
+// seat's legs, and released only while still in_progress and assigned to
+// this seat (ReleaseWorkBead fences its write on both). The finalize's work
+// read then finds the seat free, so it closes, and a fresh seat takes the
+// claim: the drain's convergence. Without it the finalize kept the seat
+// asleep holding the claim, the assigned-work wake restarted it on the same
+// claim, and the backstop drained it again, in a loop (maintainer-city,
+// build 42dd71f94d). Best effort: a claim it cannot release stays, as before.
+func releaseStalledClaim(r *closeReleases, c stalledClaim) {
+	if r == nil || c.beadID == "" {
+		return
+	}
+	scope := releaseScope(c.row, r.cfg)
+	hits, err := seatWorkFor(r.legs, scope).match(seatWorkQuery{scope: scope, statuses: []string{"in_progress"}}, false)
+	if err != nil {
+		fmt.Fprintf(r.stderr, "execution-stalled stop: reading %s's claim %s: %v\n", c.row.ID, c.beadID, err) //nolint:errcheck // best-effort
+	}
+	for _, hit := range hits {
+		if hit.bead.ID != c.beadID {
+			continue
+		}
+		// The stranded repair's policy: the claim's route kept, its release
+		// fenced on its status and assignee.
+		out := releaseListed([]seatWorkHit{hit}, releaseStrandedRepair, releaseSeatOfInfo(c.row), r.cfg, ReleaseOpts{})
+		logRelease(r.stderr, "execution-stalled", c.row.ID, out, nil)
+	}
+}
+
+// clearRestartMarker clears the runtime's restart marker after A13's
+// confirmed stop, best effort, as legacy's clearRestartRequested: a tmux
+// session takes its marker with it, but a corpse the stop leaves, or a
+// sidecar that outlives its process, keeps it.
+func clearRestartMarker(sp runtime.Provider, p stopPlan) {
+	if p.restart && p.name != "" {
+		_ = sp.RemoveMeta(p.name, "GC_RESTART_REQUESTED")
+	}
 }
 
 // removeCorpse removes a confirmed corpse under the corpse exception (v5
@@ -200,8 +285,14 @@ type finalizeWork struct {
 	anomaly *beads.Bead
 }
 
-// finalizeWorkProbe reads the row's work in the close-gate form.
+// finalizeWorkProbe reads the row's work in the close-gate form. An idle
+// stop's finalize reads none (mc-ensxp): A15's builders sleep the row
+// whatever its work and never close it, and the idle kill's events name no
+// kept bead; its claim check is the fence's L5, read before the stop.
 func finalizeWorkProbe(_ context.Context, r effectReads, v txView) (finalizeWork, error) {
+	if isIdleReason(v.It.Reason) {
+		return finalizeWork{}, nil
+	}
 	if r.legs.unusable() != nil || v.World.Env == nil {
 		return finalizeWork{}, errNoReadStore
 	}
@@ -226,6 +317,11 @@ func stopChoice(v txView, work finalizeWork, probeErr error) finalizeChoice {
 		OperatorHeld: session.DispositionOfInfo(v.Row).KeepsSlot(),
 		HonoredWake:  honoredWake(v),
 		FreshWake:    v.Row.WakeMode == "fresh", RestartRequested: v.Row.RestartRequested == "true",
+	}
+	if v.Alloc != nil && v.Alloc.Snapshot != nil {
+		if e := v.Alloc.Snapshot.Entries[v.It.Key]; e != nil && e.AssignedWork != nil {
+			f.AssignedBead = strings.TrimSpace(e.AssignedWork.BeadID)
+		}
 	}
 	switch {
 	case v.It.Finish != nil:
@@ -273,7 +369,7 @@ func honoredWake(v txView) bool {
 		return false
 	}
 	e := v.Alloc.Snapshot.Entries[v.It.Key]
-	return e != nil && e.Desired == desireWake
+	return e != nil && e.WakeHonored
 }
 
 // stopReason is a stop intent's drain reason.
@@ -415,5 +511,6 @@ func stopFacts(v txView, out stopped, kept *beads.Bead) effectFacts {
 }
 
 // agentStop is a performed stop, for legacy's stop metric
-// (telemetry.RecordAgentStop).
+// (telemetry.RecordAgentStop): one the fence passed, recorded as before
+// mc-rq4d0 also when the runtime had left the name and no Stop was issued.
 type agentStop struct{ Name, Identity string }

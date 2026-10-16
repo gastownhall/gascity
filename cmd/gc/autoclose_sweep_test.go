@@ -814,6 +814,7 @@ func TestQuiescentCloseReadsNothingAndConvergesAfterResume(t *testing.T) {
 		quiesceOnDispatch bool
 	}{
 		{name: "local close", actor: cacheLocalActor},
+		{name: "local close run after the city went quiescent", actor: cacheLocalActor, quiesceOnDispatch: true},
 		{name: "foreign close run after the city went quiescent", actor: "bd-close", quiesceOnDispatch: true},
 		{name: "scan close", actor: cacheReconcileActor},
 	} {
