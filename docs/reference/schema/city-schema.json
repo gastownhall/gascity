@@ -1227,7 +1227,7 @@
         },
         "ops": {
           "$ref": "#/$defs/OpsConfig",
-          "description": "Ops holds the operation-journal rollout gates (ops.content,\nops.control, ops.lifecycle)."
+          "description": "Ops holds the operation-journal rollout gates (ops.content,\nops.control, ops.lifecycle) and the conversation lane's switch\n(ops.authoritative)."
         },
         "session": {
           "$ref": "#/$defs/SessionConfig",
@@ -2150,11 +2150,18 @@
           ],
           "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"off\" is the shipped default. \"auto\" records where the store can and\ndegrades loudly where it cannot. \"require\" refuses a request it cannot\nrecord before any effect. Experimental: each mode takes effect as each\nrequest surface gains op recording. A change takes effect at the next\nprocess start.",
           "default": "off"
+        },
+        "authoritative": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path: a listed kind's requests are written as lane ops\nonly, and the controller's lane host delivers them. The default is\nempty. This build accepts message only. Experimental: it takes effect\nas each producer surface gains lane delivery (OJ-2b, OJ-5). message\njoins the default list nowhere before X12 and the A8 amendment. A\nlisted kind needs a sessions store with guarded batches. A change takes\neffect at the next controller start."
         }
       },
       "additionalProperties": false,
       "type": "object",
-      "description": "OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution."
+      "description": "OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution, and Authoritative, the conversation lane's switch, which is not a gate."
     },
     "OptionChoice": {
       "properties": {

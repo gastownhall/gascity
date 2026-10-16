@@ -260,7 +260,8 @@ type City struct {
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
 	// Ops holds the operation-journal rollout gates (ops.content,
-	// ops.control, ops.lifecycle).
+	// ops.control, ops.lifecycle) and the conversation lane's switch
+	// (ops.authoritative).
 	Ops OpsConfig `toml:"ops,omitempty"`
 	// Session configures the session provider backend.
 	Session SessionConfig `toml:"session,omitempty"`

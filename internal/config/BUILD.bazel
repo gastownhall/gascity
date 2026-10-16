@@ -74,6 +74,7 @@ go_library(
         "//internal/clock",
         "//internal/fsys",
         "//internal/git",
+        "//internal/opjournal",
         "//internal/orders",
         "//internal/pathdurability",
         "//internal/pathutil",

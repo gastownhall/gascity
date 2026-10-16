@@ -27,7 +27,7 @@ City is the top-level configuration for a Gas City instance.
 | `patches` | Patches |  |  | Patches holds targeted modifications applied after fragment merge. |
 | `storage` | StorageConfig |  |  | Storage assigns the six semantic storage classes to immutable named bindings. Nil preserves the existing all-Work storage topology. |
 | `beads` | BeadsConfig |  |  | Beads configures the bead store backend. |
-| `ops` | OpsConfig |  |  | Ops holds the operation-journal rollout gates (ops.content, ops.control, ops.lifecycle). |
+| `ops` | OpsConfig |  |  | Ops holds the operation-journal rollout gates (ops.content, ops.control, ops.lifecycle) and the conversation lane's switch (ops.authoritative). |
 | `session` | SessionConfig |  |  | Session configures the session provider backend. |
 | `mail` | MailConfig |  |  | Mail configures the mail provider backend. |
 | `events` | EventsConfig |  |  | Events configures the events provider backend. |
@@ -598,13 +598,14 @@ NamedSessionPatch modifies an existing named session identified by canonical nam
 
 ## OpsConfig
 
-OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution.
+OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution, and Authoritative, the conversation lane's switch, which is not a gate.
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
 | `content` | string |  | `off` | Records message deliveries (session submit and messages, nudge, mail notify) as message ops. "off" is the shipped default for all three gates. "auto" records where the store can and degrades loudly where it cannot. "require" refuses a request it cannot record before any effect. Experimental: each mode takes effect as each request surface gains op recording. A change takes effect at the next process start. Enum: `off`, `auto`, `require` |
 | `control` | string |  | `off` | Records interrupt (stop) and respond requests as ops. "off" is the shipped default. "auto" records where the store can and degrades loudly where it cannot. "require" refuses a request it cannot record before any effect. Experimental: each mode takes effect as each request surface gains op recording. A change takes effect at the next process start. Enum: `off`, `auto`, `require` |
 | `lifecycle` | string |  | `off` | Records wake, suspend, reset (restart), kill and close requests as ops. "off" is the shipped default. "auto" records where the store can and degrades loudly where it cannot. "require" refuses a request it cannot record before any effect. Experimental: each mode takes effect as each request surface gains op recording. A change takes effect at the next process start. Enum: `off`, `auto`, `require` |
+| `authoritative` | []string |  |  | Authoritative lists the op kinds the conversation lane executes instead of their legacy path: a listed kind's requests are written as lane ops only, and the controller's lane host delivers them. The default is empty. This build accepts message only. Experimental: it takes effect as each producer surface gains lane delivery (OJ-2b, OJ-5). message joins the default list nowhere before X12 and the A8 amendment. A listed kind needs a sessions store with guarded batches. A change takes effect at the next controller start. |
 
 ## OptionChoice
 
