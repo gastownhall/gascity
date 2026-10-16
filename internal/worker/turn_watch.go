@@ -10,6 +10,7 @@ import (
 	"github.com/fsnotify/fsnotify"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -99,10 +100,12 @@ func turnErrorClass(err error) turnErrClass {
 }
 
 // runTurnWatch reads, publishes what changed and waits for a hint or the
-// backstop poll, until ctx ends. The first successful read is always sent,
-// as is the first after a failure. A failed read is sent as an Err update
-// when the failure streak begins and whenever its error changes class, never
-// as an idle history.
+// backstop poll, until ctx ends. Each read runs under a turnWatchReadBound
+// deadline (boundedRead) that only its context-aware calls honor, and a read
+// in progress when ctx ends returns before the watch closes.
+// The first successful read is always sent, as is the first after a failure.
+// A failed read is sent as an Err update when the failure streak begins and
+// whenever its error changes class, never as an idle history.
 func runTurnWatch(ctx context.Context, out chan TurnUpdate, loop turnWatchLoop) {
 	defer close(out)
 	if loop.stop != nil {
@@ -112,7 +115,7 @@ func runTurnWatch(ctx context.Context, out chan TurnUpdate, loop turnWatchLoop) 
 	sent, failing := false, turnErrNone
 	why := turnWakeStart
 	for {
-		hist, err := loop.read(ctx, why)
+		hist, err := loop.boundedRead(ctx, why)
 		if ctx.Err() != nil {
 			return
 		}
@@ -135,6 +138,15 @@ func runTurnWatch(ctx context.Context, out chan TurnUpdate, loop turnWatchLoop) 
 			why = turnWakePoll
 		}
 	}
+}
+
+// boundedRead reads the source once, within turnWatchReadBound: a read whose
+// runtime or store does not answer in time fails as unavailable instead of
+// holding the watcher.
+func (loop turnWatchLoop) boundedRead(ctx context.Context, why turnWake) (runtime.TurnHistory, error) {
+	readCtx, cancel := context.WithTimeout(ctx, turnWatchReadBound)
+	defer cancel()
+	return loop.read(readCtx, why)
 }
 
 // publishTurnUpdate sends u, replacing an update the reader has not taken yet:
@@ -170,9 +182,7 @@ func protocolTurnWatch(timing turnTiming, read func(context.Context) (runtime.Tu
 	loop := turnWatchLoop{
 		timing: timing,
 		read: func(ctx context.Context, _ turnWake) (runtime.TurnHistory, error) {
-			readCtx, cancel := context.WithTimeout(ctx, turnWatchReadBound)
-			defer cancel()
-			return read(readCtx)
+			return read(ctx)
 		},
 		wait: func(hist runtime.TurnHistory, err error) time.Duration {
 			if err != nil || hist.Current.Active() || events == nil {
@@ -205,10 +215,18 @@ func (h *SessionHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, erro
 	switch plan.caps.Source {
 	case TurnSourceProtocol:
 		events, err := h.manager.SubscribeRuntimeTurnEvents(ctx)
-		if err != nil {
-			events = nil // no hints: the backstop poll alone
+		events = turnHints(plan.info.SessionName, events, err)
+		// Each read reloads the session first: closing its row leaves the
+		// runtime session answering, and the watch reports it not found
+		// rather than reading its history on.
+		read := func(ctx context.Context) (runtime.TurnHistory, error) {
+			info, err := h.reloadTurnSession(ctx, plan.info.ID)
+			if err != nil {
+				return runtime.TurnHistory{}, err
+			}
+			plan.info = info
+			return h.protocolTurnHistory(ctx, plan)
 		}
-		read := func(ctx context.Context) (runtime.TurnHistory, error) { return h.protocolTurnHistory(ctx, plan) }
 		return startTurnWatch(ctx, protocolTurnWatch(timing, read, events, plan.info.SessionName)), nil
 	case TurnSourceTranscript:
 		return startTurnWatch(ctx, h.transcriptTurnWatch(plan, timing)), nil
@@ -217,93 +235,139 @@ func (h *SessionHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, erro
 	}
 }
 
+// turnHints is the runtime's turn events a protocol watch wakes on, or nil
+// when there are none and the backstop poll carries the watch alone. A runtime
+// that sends no turn events is no news; a subscription that failed is logged,
+// as a transcript watch logs falling back from fsnotify.
+func turnHints(sessionName string, events <-chan runtime.TurnEvent, err error) <-chan runtime.TurnEvent {
+	if err == nil {
+		return events
+	}
+	if !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		slog.Warn("worker: protocol turn watch falls back to polling", slog.String("session", sessionName), slog.Any("err", err))
+	}
+	return nil
+}
+
+// reloadTurnSession reloads session id for a watcher's read, as turnSession
+// does, within ctx: a store or runtime probe that stalls leaves the read
+// unanswered (runtime.ErrRuntimeUnavailable) when ctx ends instead of holding
+// the watcher. Concurrent reloads of one session share one load.
+func (h *SessionHandle) reloadTurnSession(ctx context.Context, id string) (sessionpkg.Info, error) {
+	key := turnObservationKey("session", h.turnObservationScope(), id)
+	return ObserveShared(ctx, key, func(context.Context) (sessionpkg.Info, error) {
+		return h.turnSession(id)
+	})
+}
+
 // transcriptTurnWatch builds the watcher of a transcript source: fsnotify on
 // the transcript plus the backstop poll, every 5 s while a turn is open and
 // every 60 s while idle, with the idle overlay probing at most every 2 s while
 // an open turn looks quiet. A TurnFollower folds only appended bytes and
 // rescans after rotation or truncation. Until the conversation's transcript
 // resolves (no key yet, not written yet) every read is an Err update and the
-// watcher retries on the 5 s poll. The backstop poll, and only it, re-resolves
+// watcher retries on the 5 s poll. Every read reloads the session first, so a
+// session whose row closes is not found from the next read on, even while its
+// transcript is still written. The backstop poll, and only it, re-resolves
 // the transcript from the session as it stands, so a session that moved to a
 // new conversation's file is followed there; a resolution that fails drops
 // the file it was following, which may be the previous conversation's.
 func (h *SessionHandle) transcriptTurnWatch(plan turnPlan, timing turnTiming) turnWatchLoop {
-	wake := make(chan struct{}, 1)
-	var (
-		follower    *sessionlog.TurnFollower
-		notify      *transcriptNotifier
-		lastProbe   time.Time
-		lastResolve time.Time
-	)
-	stopNotify := func() {
-		if notify != nil {
-			notify.close()
-			notify = nil
+	w := &transcriptWatch{h: h, plan: plan, timing: timing, wake: make(chan struct{}, 1)}
+	return turnWatchLoop{timing: timing, read: w.read, hints: w.wake, wait: w.wait, stop: w.stopNotify}
+}
+
+// transcriptWatch is one transcript watcher's state. Only the watcher's own
+// goroutine uses it.
+type transcriptWatch struct {
+	h      *SessionHandle
+	plan   turnPlan
+	timing turnTiming
+	wake   chan struct{}
+
+	follower    *sessionlog.TurnFollower // nil while the transcript is unresolved
+	notify      *transcriptNotifier      // nil without fsnotify
+	lastProbe   time.Time
+	lastResolve time.Time
+}
+
+// read reads the transcript's turns. It reloads the session first, whatever
+// woke it, and fails with the reload; a failed reload leaves the transcript
+// followed. It then resolves the transcript while none is followed, and on a
+// backstop poll at least turnPollOpen after the last resolution.
+func (w *transcriptWatch) read(ctx context.Context, why turnWake) (runtime.TurnHistory, error) {
+	info, err := w.h.reloadTurnSession(ctx, w.plan.info.ID)
+	if err != nil {
+		return runtime.TurnHistory{}, err
+	}
+	w.plan.info = info
+	backstop := why == turnWakePoll && w.timing.now().Sub(w.lastResolve) >= turnPollOpen
+	if w.follower == nil || backstop {
+		if err := w.resolve(); err != nil {
+			w.stopNotify()
+			w.follower = nil
+			return runtime.TurnHistory{}, err
 		}
 	}
-	follow := func(path string) error {
-		f, err := h.adapter.NewTurnFollower(plan.provider, path)
-		if err != nil {
-			return err
-		}
-		stopNotify()
-		plan.path, follower = path, f
-		if !timing.noNotify {
-			notify = newTranscriptNotifier(path, wake)
-		}
+	probe := w.timing.now().Sub(w.lastProbe) >= turnOverlayEvery
+	hist, err := w.h.transcriptTurnHistory(ctx, w.plan, w.follower.Read, probe)
+	if probe && err == nil && w.plan.caps.End == runtime.TurnEndInferred {
+		w.lastProbe = w.timing.now()
+	}
+	return hist, err
+}
+
+// resolve resolves the transcript of the session's conversation, as read last
+// reloaded it, following it when it is not the file already followed.
+func (w *transcriptWatch) resolve() error {
+	w.lastResolve = w.timing.now()
+	path, err := w.h.conversationTranscript(w.plan.info, w.plan.provider)
+	if err != nil {
+		return err
+	}
+	if w.follower != nil && path == w.plan.path {
 		return nil
 	}
-	resolve := func() error {
-		lastResolve = timing.now()
-		info, err := h.turnSession(plan.info.ID)
-		if err != nil {
-			return err
-		}
-		path, err := h.conversationTranscript(info, plan.provider)
-		if err != nil {
-			return err
-		}
-		plan.info = info
-		if follower != nil && path == plan.path {
-			return nil
-		}
-		if err := follow(path); err != nil {
-			return transcriptTurnsUnavailable(plan, err)
-		}
-		return nil
+	if err := w.follow(path); err != nil {
+		return transcriptTurnsUnavailable(w.plan, err)
 	}
-	loop := turnWatchLoop{
-		timing: timing,
-		hints:  wake,
-		stop:   stopNotify,
+	return nil
+}
+
+// follow follows the transcript at path, moving the notifier to it.
+func (w *transcriptWatch) follow(path string) error {
+	f, err := w.h.adapter.NewTurnFollower(w.plan.provider, path)
+	if err != nil {
+		return err
 	}
-	loop.read = func(ctx context.Context, why turnWake) (runtime.TurnHistory, error) {
-		backstop := why == turnWakePoll && timing.now().Sub(lastResolve) >= turnPollOpen
-		if follower == nil || backstop {
-			if err := resolve(); err != nil {
-				stopNotify()
-				follower = nil
-				return runtime.TurnHistory{}, err
-			}
-		}
-		probe := timing.now().Sub(lastProbe) >= turnOverlayEvery
-		hist, err := h.transcriptTurnHistory(ctx, plan, follower.Read, probe)
-		if probe && err == nil && plan.caps.End == runtime.TurnEndInferred {
-			lastProbe = timing.now()
-		}
-		return hist, err
+	w.stopNotify()
+	w.plan.path, w.follower = path, f
+	if !w.timing.noNotify {
+		w.notify = newTranscriptNotifier(path, w.wake)
 	}
-	loop.wait = func(hist runtime.TurnHistory, err error) time.Duration {
-		switch {
-		case err == nil && hist.Current.Active() && plan.caps.End == runtime.TurnEndInferred:
-			return turnOverlayEvery
-		case err != nil || hist.Current.Active():
-			return turnPollOpen
-		default:
-			return turnPollIdle
-		}
+	return nil
+}
+
+// stopNotify releases the notifier, if there is one.
+func (w *transcriptWatch) stopNotify() {
+	if w.notify != nil {
+		w.notify.close()
+		w.notify = nil
 	}
-	return loop
+}
+
+// wait is the backstop delay after a read: the overlay's probe interval while
+// a turn whose end is inferred is open, turnPollOpen while a turn is open or
+// the read failed, turnPollIdle while idle.
+func (w *transcriptWatch) wait(hist runtime.TurnHistory, err error) time.Duration {
+	switch {
+	case err == nil && hist.Current.Active() && w.plan.caps.End == runtime.TurnEndInferred:
+		return turnOverlayEvery
+	case err != nil || hist.Current.Active():
+		return turnPollOpen
+	default:
+		return turnPollIdle
+	}
 }
 
 // transcriptNotifier wakes a watcher when its transcript is written, created,

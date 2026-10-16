@@ -144,6 +144,32 @@ func TestObserveSharedPanicReachesTheStarterOnly(t *testing.T) {
 	})
 }
 
+// Kills a joiner of a key observed with another type panicking in its own
+// frame: it gets an unavailable error, and the starter its answer.
+func TestObserveSharedJoinerOfAnotherTypeIsUnavailable(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		wedge := newWedgedObservation()
+		defer wedge.unblock()
+		ctx, cancel := context.WithTimeout(context.Background(), observeBound)
+		defer cancel()
+		starter := observeSharedAsync(ctx, t.Name(), wedge.observe)
+		synctest.Wait()
+		joiner := make(chan error, 1)
+		go func() {
+			_, err := ObserveShared(ctx, t.Name(), func(context.Context) (string, error) { return "other", nil })
+			joiner <- err
+		}()
+		synctest.Wait()
+		wedge.unblock()
+		if err := <-joiner; !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("joiner of another type = %v, want unavailable", err)
+		}
+		if got := <-starter; got.err != nil || got.value != wedgedAnswer {
+			t.Fatalf("starter = %+v, want its answer", got)
+		}
+	})
+}
+
 func TestObserveSharedRejectsBlankKey(t *testing.T) {
 	_, err := ObserveShared(context.Background(), " ", func(context.Context) (int, error) { return 1, nil })
 	if err == nil || errors.Is(err, runtime.ErrRuntimeUnavailable) {

@@ -144,7 +144,9 @@ type sharedFlight struct {
 // runtime.ErrRuntimeUnavailable and the context error, an answer that lands
 // as ctx ends is honored, and a blank key is a caller bug. A panic in observe
 // is re-raised on the call that started it; joiners get an error wrapping
-// runtime.ErrRuntimeUnavailable.
+// runtime.ErrRuntimeUnavailable. A key is observed with one type: a joiner of
+// an observation of another type, a caller bug, gets an error wrapping
+// runtime.ErrRuntimeUnavailable rather than its answer.
 func ObserveShared[T any](ctx context.Context, key string, observe func(context.Context) (T, error)) (T, error) {
 	var zero T
 	if strings.TrimSpace(key) == "" {
@@ -160,17 +162,18 @@ func ObserveShared[T any](ctx context.Context, key string, observe func(context.
 		if !joined {
 			go runSharedObservation(key, flight, observe)
 		}
-		var res boundedResult[T]
 		select {
 		case <-flight.done:
-			res = flight.res.(boundedResult[T])
 		case <-ctx.Done():
 			select {
 			case <-flight.done:
-				res = flight.res.(boundedResult[T])
 			default:
 				return zero, observationUnanswered(ctx.Err())
 			}
+		}
+		res, ok := flight.res.(boundedResult[T])
+		if !ok {
+			return zero, fmt.Errorf("worker: shared observation %q answered %T, not %T: %w", key, flight.res, res, runtime.ErrRuntimeUnavailable)
 		}
 		if !joined {
 			return res.take()

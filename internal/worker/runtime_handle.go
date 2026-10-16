@@ -32,7 +32,8 @@ type RuntimeHandleConfig struct {
 	Recorder     events.Recorder
 	// CityPath is the city the session belongs to, which scopes the
 	// handle's bounded turn reads as a SessionHandle's are; empty scopes
-	// them to Provider.
+	// them to Provider, so they share no read with the city's
+	// SessionHandles. Set it wherever the handle reads turns.
 	CityPath string
 }
 

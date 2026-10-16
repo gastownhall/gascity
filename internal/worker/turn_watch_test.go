@@ -1,15 +1,21 @@
 package worker
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"log"
+	"log/slog"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
 func TestWatchTurnsTranscript(t *testing.T) {
@@ -187,6 +193,12 @@ func (b turnScriptBackend) set(h runtime.TurnHistory, err error) {
 	b.state.mu.Lock()
 	defer b.state.mu.Unlock()
 	b.state.hist, b.state.err = h, err
+}
+
+func (b turnScriptBackend) readCount() int {
+	b.state.mu.Lock()
+	defer b.state.mu.Unlock()
+	return b.state.reads
 }
 
 func TestWatchTurnsProtocolHintTriggersARead(t *testing.T) {
@@ -475,6 +487,310 @@ func TestWatchTurnsPublishesAChangeOfErrorClass(t *testing.T) {
 			assertWatchCloses(t, ch)
 		})
 	}
+}
+
+// The protocol twin: closing a session's row leaves its runtime session
+// answering, yet the watch reports the session not found, whether it was
+// healthy or in an unavailable streak, and reads no history for it.
+func TestWatchTurnsProtocolPublishesAClosedSession(t *testing.T) {
+	cases := []struct {
+		name  string
+		start error // the backend's read error before the close
+		want  error // the first update's error
+	}{
+		{name: "healthy, then closed"},
+		{name: "unavailable, then closed", start: fmt.Errorf("owner gone: %w", runtime.ErrRuntimeUnavailable), want: runtime.ErrRuntimeUnavailable},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			backend := newTurnScriptBackend(false)
+			backend.set(runtime.TurnHistory{}, tc.start)
+			clock := newManualTurnClock(time.Now())
+			s := newTurnSession(t, runtime.NewFakeProfile(runtime.ProfileACP, backend), "claude", "")
+			s.handle.turns.timing = clock.timing()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ch, err := s.handle.WatchTurns(ctx)
+			if err != nil {
+				t.Fatalf("WatchTurns: %v", err)
+			}
+			if first := receiveTurnUpdate(t, ch); !errors.Is(first.Err, tc.want) {
+				t.Fatalf("first update = %+v, want error %v", first, tc.want)
+			}
+			// A second read like the first publishes nothing.
+			ask := clock.nextAsk(t)
+			ask.fire <- clock.now()
+			ask = clock.nextAsk(t)
+			assertNoPendingUpdate(t, ch)
+
+			if err := s.store.Close(s.info.ID); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			reads := backend.readCount()
+			ask.fire <- clock.now()
+			clock.nextAsk(t)
+			if got := receiveTurnUpdate(t, ch); !errors.Is(got.Err, runtime.ErrSessionNotFound) || errors.Is(got.Err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("update after the close = %+v, want ErrSessionNotFound", got)
+			}
+			if got := backend.readCount(); got != reads {
+				t.Fatalf("history reads after the close = %d, want %d: a closed session's runtime is not read", got, reads)
+			}
+			cancel()
+			assertWatchCloses(t, ch)
+		})
+	}
+}
+
+// The transcript twin: a session whose row closes while its transcript is
+// still written is not found from the next read on, whatever woke the read: a
+// write, or a poll too soon after the last resolution to re-resolve the
+// transcript (the idle overlay's). The transcript is not read on.
+func TestWatchTurnsTranscriptPublishesAClosedSession(t *testing.T) {
+	cases := []struct {
+		name   string
+		family string
+		notify bool     // a write wakes the watcher; else the test fires its poll
+		before []string // the transcript before the close
+		after  string   // the record written after the close
+	}{
+		{
+			name: "woken by a write", family: "codex", notify: true,
+			before: []string{codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142), codexComplete(codexTurn1, "2026-10-08T02:22:30.500Z")},
+			after:  codexStarted(codexTurn2, "2026-10-08T02:23:01.007Z", 1791426181),
+		},
+		{
+			name: "woken by the overlay's poll", family: "claude",
+			before: []string{claudePrompt(claudeTurn1, "2026-10-13T05:00:00.123Z")},
+			after:  claudeTurnDuration("2026-10-13T05:00:05.456Z"),
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), tc.family, "")
+			timing := clock.timing()
+			timing.noNotify = !tc.notify
+			s.handle.turns.timing = timing
+			path := s.writeTranscript(t, tc.family, tc.before...)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ch, err := s.handle.WatchTurns(ctx)
+			if err != nil {
+				t.Fatalf("WatchTurns: %v", err)
+			}
+			if first := receiveTurnUpdate(t, ch); first.Err != nil {
+				t.Fatalf("first update = %+v, want the history", first)
+			}
+			ask := clock.nextAsk(t)
+			if err := s.store.Close(s.info.ID); err != nil {
+				t.Fatalf("Close: %v", err)
+			}
+			appendTranscript(t, path, tc.after+"\n")
+			if !tc.notify {
+				if ask.d >= turnPollOpen {
+					t.Fatalf("poll after %s re-resolves the transcript, want one sooner than %s", ask.d, turnPollOpen)
+				}
+				clock.advance(ask.d)
+				ask.fire <- clock.now()
+			}
+			if got := receiveTurnUpdate(t, ch); !errors.Is(got.Err, runtime.ErrSessionNotFound) || errors.Is(got.Err, runtime.ErrRuntimeUnavailable) ||
+				got.History.Current.Active() || len(got.History.Recent) != 0 {
+				t.Fatalf("update after the close = %+v, want ErrSessionNotFound with no history", got)
+			}
+			// Nor does a later read, a backstop poll's included, read the
+			// transcript on.
+			ask = clock.nextAsk(t)
+			clock.advance(turnPollOpen)
+			ask.fire <- clock.now()
+			clock.nextAsk(t)
+			assertNoPendingUpdate(t, ch)
+			cancel()
+			assertWatchCloses(t, ch)
+		})
+	}
+}
+
+// A watch whose read stalls in the session store closes when its ctx ends,
+// not when the store answers, for either source: the read's session reload is
+// bounded like the rest of the read.
+func TestWatchTurnsClosesWhileTheStoreStalls(t *testing.T) {
+	cases := []struct {
+		name       string
+		sp         runtime.Provider
+		provider   string
+		transcript bool
+	}{
+		{name: "protocol", sp: runtime.NewFakeProfile(runtime.ProfileACP, newTurnScriptBackend(false)), provider: "claude"},
+		{name: "transcript", sp: profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), provider: "codex", transcript: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			s := newTurnSession(t, tc.sp, tc.provider, "")
+			if tc.transcript {
+				s.writeCompletedTurn(t, tc.provider)
+			}
+			store := newStallingTurnStore(t, s.store)
+			s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+			clock := newManualTurnClock(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+			s.handle.turns.timing = clock.timing()
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			ch, err := s.handle.WatchTurns(ctx)
+			if err != nil {
+				t.Fatalf("WatchTurns: %v", err)
+			}
+			if first := receiveTurnUpdate(t, ch); first.Err != nil {
+				t.Fatalf("first update = %+v, want the history", first)
+			}
+			ask := clock.nextAsk(t)
+			store.stall(s.info.ID)
+			clock.advance(ask.d) // a backstop poll: a transcript re-resolves too
+			ask.fire <- clock.now()
+			store.awaitStalled(t)
+			cancel()
+			// Well inside turnWatchReadBound: the watch closes as its ctx
+			// ends, not when the read's own bound runs out.
+			assertWatchClosesWithin(t, ch, turnWatchReadBound/2)
+		})
+	}
+}
+
+// stallingTurnStore is a store whose reads of one bead, once stalled, block
+// until the test ends, as a stalled backend's do.
+type stallingTurnStore struct {
+	beads.Store
+	mu      sync.Mutex
+	stalled string        // the bead whose reads block; empty: none
+	entered chan struct{} // receives once a read blocks
+	release chan struct{} // closed as the test ends
+}
+
+func newStallingTurnStore(t *testing.T, store beads.Store) *stallingTurnStore {
+	t.Helper()
+	s := &stallingTurnStore{Store: store, entered: make(chan struct{}, 1), release: make(chan struct{})}
+	t.Cleanup(func() { close(s.release) })
+	return s
+}
+
+// stall blocks the reads of id from now on.
+func (s *stallingTurnStore) stall(id string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stalled = id
+}
+
+func (s *stallingTurnStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	stalled := s.stalled != "" && id == s.stalled
+	s.mu.Unlock()
+	if stalled {
+		select {
+		case s.entered <- struct{}{}:
+		default:
+		}
+		<-s.release
+	}
+	return s.Store.Get(id)
+}
+
+// awaitStalled waits for a read to block.
+func (s *stallingTurnStore) awaitStalled(t *testing.T) {
+	t.Helper()
+	select {
+	case <-s.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("no read reached the stalled store")
+	}
+}
+
+// Every read the watcher makes, the first and each one after, runs within
+// turnWatchReadBound whatever its source: a read whose store or runtime does
+// not answer fails as unavailable instead of holding the watch.
+func TestRunTurnWatchBoundsEachRead(t *testing.T) {
+	type bound struct {
+		why  turnWake
+		ok   bool
+		left time.Duration
+	}
+	clock := newManualTurnClock(time.Now())
+	reads := make(chan bound, 4)
+	loop := turnWatchLoop{
+		timing: *clock.timing(),
+		read: func(ctx context.Context, why turnWake) (runtime.TurnHistory, error) {
+			deadline, ok := ctx.Deadline()
+			reads <- bound{why: why, ok: ok, left: time.Until(deadline)}
+			return runtime.TurnHistory{}, nil
+		},
+		wait: func(runtime.TurnHistory, error) time.Duration { return turnPollIdle },
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	ch := startTurnWatch(ctx, loop)
+	receiveTurnUpdate(t, ch)
+	clock.nextAsk(t).fire <- clock.now()
+	clock.nextAsk(t)
+	for i, want := range []turnWake{turnWakeStart, turnWakePoll} {
+		got := <-reads
+		if got.why != want || !got.ok || got.left <= 0 || got.left > turnWatchReadBound {
+			t.Fatalf("read %d = %+v, want wake %d with a deadline within %s", i, got, want, turnWatchReadBound)
+		}
+	}
+	cancel()
+	assertWatchCloses(t, ch)
+}
+
+// A protocol watch whose turn-event subscription failed polls alone and says
+// so; a runtime that sends no turn events is no news.
+func TestTurnHintsLogsAFailedSubscription(t *testing.T) {
+	logs := captureTurnLogs(t)
+	const fallback = "protocol turn watch falls back to polling"
+
+	events := make(chan runtime.TurnEvent)
+	if got := turnHints("s1", events, nil); got != events {
+		t.Fatalf("turnHints of a subscription = %v, want its events", got)
+	}
+	if got := turnHints("s1", nil, fmt.Errorf("acp: %w", runtime.ErrInteractionUnsupported)); got != nil || strings.Contains(logs.String(), fallback) {
+		t.Fatalf("turnHints without turn events = %v, logged %q; want nil and no fallback logged", got, logs.String())
+	}
+	if got := turnHints("s1", nil, errors.New("subscribe refused")); got != nil || !strings.Contains(logs.String(), fallback) || !strings.Contains(logs.String(), "subscribe refused") {
+		t.Fatalf("turnHints of a failed subscription = %v, logged %q; want nil and the fallback logged with its error", got, logs.String())
+	}
+}
+
+// turnLogBuffer is a log sink a test reads while other goroutines may write
+// to it.
+type turnLogBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *turnLogBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *turnLogBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+// captureTurnLogs points slog.Default() at a buffer for the rest of the test.
+// The cleanup restores the log package too: slog.SetDefault with a handler of
+// its own also points log's output at that handler and zeroes log's flags,
+// and setting the previous default back undoes neither.
+func captureTurnLogs(t *testing.T) *turnLogBuffer {
+	t.Helper()
+	logs := &turnLogBuffer{}
+	prev, prevWriter, prevFlags := slog.Default(), log.Writer(), log.Flags()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() {
+		slog.SetDefault(prev)
+		log.SetOutput(prevWriter)
+		log.SetFlags(prevFlags)
+	})
+	return logs
 }
 
 func TestTurnErrorClass(t *testing.T) {

@@ -468,7 +468,14 @@ func assertNoPendingUpdate(t *testing.T, ch <-chan TurnUpdate) {
 
 func assertWatchCloses(t *testing.T, ch <-chan TurnUpdate) {
 	t.Helper()
-	deadline := time.After(10 * time.Second)
+	assertWatchClosesWithin(t, ch, 10*time.Second)
+}
+
+// assertWatchClosesWithin asserts the watch closes within d of its ctx
+// ending, taking what it sends meanwhile.
+func assertWatchClosesWithin(t *testing.T, ch <-chan TurnUpdate, d time.Duration) {
+	t.Helper()
+	deadline := time.After(d)
 	for {
 		select {
 		case _, ok := <-ch:
@@ -476,7 +483,7 @@ func assertWatchCloses(t *testing.T, ch <-chan TurnUpdate) {
 				return
 			}
 		case <-deadline:
-			t.Fatal("watch did not close after ctx ended")
+			t.Fatalf("watch did not close within %s after ctx ended", d)
 		}
 	}
 }

@@ -42,8 +42,20 @@ type TurnHandle interface {
 	// newest ended turn changes (coalesced: latest wins), and an update with
 	// Err set when its source stops being readable and whenever the error
 	// changes class (unavailable, initializing, unsupported, not found),
-	// never an idle history instead.
-	// It closes when ctx is done. A session with no source is
+	// never an idle history instead. Every read reloads the session first,
+	// so a session closed while it is watched is not found from the next
+	// read on, as for CurrentTurn. A session reload or runtime probe that
+	// does not answer within 10 s fails its read as unavailable; a
+	// transcript's file reads are not bounded.
+	// From a transcript, CurrentTurn scans its last 16 MiB
+	// (sessionlog.ScanTurns) while WatchTurns folds what was appended since
+	// its last rescan (sessionlog.TurnFollower), so the two can disagree about
+	// a turn that began before that window. A transcript write wakes the watch
+	// at once, but a move to a new conversation's transcript, and every write
+	// while fsnotify is unavailable, is seen only on the backstop poll: within
+	// 60 s while the session is idle.
+	// It closes when ctx is done; a transcript watch closes once a file read
+	// in progress returns. A session with no source is
 	// runtime.ErrTurnIdentityUnsupported, returned at once.
 	WatchTurns(context.Context) (<-chan TurnUpdate, error)
 }
@@ -119,7 +131,8 @@ const (
 	// turn is open and while the session is idle.
 	turnPollOpen = 5 * time.Second
 	turnPollIdle = 60 * time.Second
-	// turnWatchReadBound bounds each protocol read the watcher makes.
+	// turnWatchReadBound bounds a watcher read's session reload and runtime
+	// probes. A transcript's file reads take no context and are not bounded.
 	turnWatchReadBound = 10 * time.Second
 )
 
@@ -172,10 +185,13 @@ func (o *turnObservation) clock() turnTiming {
 // agent on this host and the family finds the conversation's own transcript
 // by its key), the family records turn starts and the runtime interrupts by
 // keystroke; else none. An inferred end needs idle snapshots, or nobody can
-// see it, so without them End is none. Interrupt mode unsupported forces
-// Fence none. Every input is a fixed trait, never whether a file exists yet,
-// so the capabilities do not move while a session waits for its transcript.
-// replace is internal/session's answer for the session, passed through.
+// see it, so without them End is none. The transcript is never Lossless: a
+// read reports at most sessionlog.MaxRecentTurns ended turns from a bounded
+// window, so turns that end between two reads can fall out of it. Interrupt
+// mode unsupported forces Fence none. Every input is a fixed trait, never
+// whether a file exists yet, so the capabilities do not move while a session
+// waits for its transcript. replace is internal/session's answer for the
+// session, passed through.
 func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnInterruptMode, support sessionlog.TurnSupport, transcript, idleSnapshots bool, replace TurnReplace) TurnCapabilities {
 	caps := TurnCapabilities{
 		TurnCapabilities: noTurnCapabilities,
@@ -194,11 +210,10 @@ func composeTurnCapabilities(rcaps runtime.TurnCapabilities, mode runtime.TurnIn
 			end = runtime.TurnEndNone
 		}
 		caps.TurnCapabilities = runtime.TurnCapabilities{
-			Start:    runtime.TurnStartRecorded,
-			End:      end,
-			Fence:    runtime.TurnFenceChecked,
-			Link:     runtime.TurnLink(support.Link),
-			Lossless: true,
+			Start: runtime.TurnStartRecorded,
+			End:   end,
+			Fence: runtime.TurnFenceChecked,
+			Link:  runtime.TurnLink(support.Link),
 		}.Normalized()
 		caps.Source = TurnSourceTranscript
 	}
@@ -335,11 +350,12 @@ func turnCityScope(city sessionpkg.CityDir, err error, owner any) string {
 // turnObservationKey is the ObserveBounded key of a turn read of one session.
 // It is a namespace apart from liveness observation (postStartObservationKey
 // in cmd/gc), so a wedged turn read never blocks a liveness read, nor the
-// other way round. kind separates the history read from the idle snapshot.
-// Turn reads go through ObserveShared: concurrent readers of one session
-// share one read.
-func turnObservationKey(kind, scope, sessionName string) string {
-	return "worker.turns." + kind + "\x00" + scope + "\x00" + sessionName
+// other way round. kind separates the history read and the idle snapshot,
+// which name the session by its runtime name, from a watcher's session
+// reload, which names it by its id. Turn reads go through ObserveShared:
+// concurrent readers of one session share one read.
+func turnObservationKey(kind, scope, session string) string {
+	return "worker.turns." + kind + "\x00" + scope + "\x00" + session
 }
 
 func (h *SessionHandle) protocolTurnHistory(ctx context.Context, plan turnPlan) (runtime.TurnHistory, error) {
@@ -526,6 +542,10 @@ func turnMillis(t time.Time) time.Time {
 	return t.Truncate(time.Millisecond)
 }
 
+// runtimeTurnStatus maps a transcript's turn status to the runtime's. The
+// empty status, no recorded end, maps to the empty one: ended by a newer
+// turn. The switch must name every other sessionlog.TurnStatus, or a status
+// it misses reads as ended by a newer turn.
 func runtimeTurnStatus(s sessionlog.TurnStatus) runtime.TurnStatus {
 	switch s {
 	case sessionlog.TurnStatusCompleted:

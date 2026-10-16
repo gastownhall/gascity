@@ -852,6 +852,7 @@ func TestDiscoverScopedPathZCodeKeysBySeat(t *testing.T) {
 func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
 	for provider, want := range map[string]bool{
 		"claude": true, "claude/tmux-cli": true, "codex": true, "gemini": true, "kimi": true, "pi": true,
+		"zcode": true, "zcode/tmux-cli": true,
 		"opencode": false, "mimocode": false,
 	} {
 		if got := HasKeyedLookup(provider); got != want {
@@ -868,7 +869,7 @@ func TestHasKeyedLookupMatchesDiscoverKeyedPath(t *testing.T) {
 // lookup can return another conversation's file, or refuses an exact one.
 func TestHasExactKeyedLookup(t *testing.T) {
 	for provider, want := range map[string]bool{
-		"claude": true, "claude/tmux-cli": true, "codex": true, "kimi": true, "pi": true,
+		"claude": true, "claude/tmux-cli": true, "codex": true, "kimi": true, "pi": true, "zcode": true,
 		"gemini": false, "opencode": false, "mimocode": false,
 	} {
 		if got := HasExactKeyedLookup(provider); got != want {

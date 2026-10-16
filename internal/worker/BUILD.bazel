@@ -129,6 +129,7 @@ go_test(
         "//internal/testenv",
         "//internal/transcriptmeta",
         "//internal/usage",
+        "//internal/worker/builtin",
         "//pkg/eventexport",
         "@io_opentelemetry_go_otel//:otel",
         "@io_opentelemetry_go_otel//attribute",

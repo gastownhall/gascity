@@ -45,9 +45,8 @@ func (h *RuntimeHandle) WatchTurns(ctx context.Context) (<-chan TurnUpdate, erro
 	}
 	var events <-chan runtime.TurnEvent
 	if tp, ok := h.provider.(runtime.TurnEventProvider); ok {
-		if ch, err := tp.SubscribeTurnEvents(ctx); err == nil {
-			events = ch
-		}
+		ch, err := tp.SubscribeTurnEvents(ctx)
+		events = turnHints(h.sessionName, ch, err)
 	}
 	return startTurnWatch(ctx, protocolTurnWatch(defaultTurnTiming, h.protocolTurnHistory, events, h.sessionName)), nil
 }

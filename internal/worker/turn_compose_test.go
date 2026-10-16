@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"testing"
 	"time"
 
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime/auto"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
+	"github.com/gastownhall/gascity/internal/worker/builtin"
 )
 
 // unsupportedInterruptLocal is a local backend that cannot interrupt its
@@ -56,7 +58,7 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 	if _, ok := profiled(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}).(runtime.TurnObservationProvider); ok {
 		wantT3 = "protocol recorded/recorded/checked/correlated/false protocol interrupt"
 	}
-	tmuxClaude := "transcript recorded/inferred/checked/correlated/true keystroke interrupt"
+	tmuxClaude := "transcript recorded/inferred/checked/correlated/false keystroke interrupt"
 	cases := []matrixCase{
 		{
 			name: "acp behind auto", provider: "claude", transport: "acp",
@@ -74,11 +76,11 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 		// Capabilities are traits: the transcript not written yet does not
 		// lower them (CurrentTurn says unavailable instead).
 		{name: "tmux claude before its transcript", provider: "claude", build: plain(runtime.ProfileTmux), want: tmuxClaude},
-		{name: "tmux codex", provider: "codex", build: plain(runtime.ProfileTmux), transcript: "codex", want: "transcript recorded/recorded/checked/correlated/true keystroke interrupt"},
+		{name: "tmux codex", provider: "codex", build: plain(runtime.ProfileTmux), transcript: "codex", want: "transcript recorded/recorded/checked/correlated/false keystroke interrupt"},
 		// Gemini has no lookup that finds one conversation's chat by its key,
 		// so no chat file can be attributed to the session.
 		{name: "tmux gemini", provider: "gemini", build: plain(runtime.ProfileTmux), transcript: "gemini", want: "none none/none/none/none/false keystroke interrupt_reset"},
-		{name: "subprocess claude", provider: "claude", build: plain(runtime.ProfileSubprocess), transcript: "claude", want: "transcript recorded/none/checked/correlated/true keystroke interrupt"},
+		{name: "subprocess claude", provider: "claude", build: plain(runtime.ProfileSubprocess), transcript: "claude", want: "transcript recorded/none/checked/correlated/false keystroke interrupt"},
 		// A remote runtime's transcript is never read here, even when a file
 		// resolves for its work directory on this host.
 		{name: "exec claude", provider: "claude", build: plain(runtime.ProfileExec), transcript: "claude", want: "none none/none/none/none/false keystroke interrupt"},
@@ -162,6 +164,9 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 //     return another conversation's;
 //   - exec, k8s and ssh are none because they declare no local transcripts
 //     (runtime.LocalTranscriptProvider), not because no file resolves;
+//   - the transcript tier is never Lossless: a read reports at most
+//     sessionlog.MaxRecentTurns ended turns from a bounded window, so turns
+//     that end between two reads can fall out of it;
 //   - Replace is what interrupt_now does there (internal/session decides
 //     it): interrupt in protocol mode, interrupt_reset only on a backend that
 //     resets the interrupted turn (tmux), and restart for a Pi row with no ACP
@@ -174,8 +179,8 @@ func TestTurnCapabilitiesProductionProfileTable(t *testing.T) {
 	}
 	acpRow := "protocol recorded/recorded/atomic/exact/true keystroke "
 	noSnapshots := map[string]string{
-		"claude": "transcript recorded/none/checked/correlated/true keystroke interrupt",
-		"codex":  "transcript recorded/recorded/checked/correlated/true keystroke interrupt",
+		"claude": "transcript recorded/none/checked/correlated/false keystroke interrupt",
+		"codex":  "transcript recorded/recorded/checked/correlated/false keystroke interrupt",
 		"gemini": none("interrupt"),
 		"pi":     none("restart"),
 	}
@@ -185,8 +190,8 @@ func TestTurnCapabilitiesProductionProfileTable(t *testing.T) {
 		rows    map[string]string
 	}{
 		{runtime.ProfileTmux, map[string]string{
-			"claude": "transcript recorded/inferred/checked/correlated/true keystroke interrupt",
-			"codex":  "transcript recorded/recorded/checked/correlated/true keystroke interrupt",
+			"claude": "transcript recorded/inferred/checked/correlated/false keystroke interrupt",
+			"codex":  "transcript recorded/recorded/checked/correlated/false keystroke interrupt",
 			"gemini": none("interrupt_reset"),
 			"pi":     none("restart"),
 		}},
@@ -218,6 +223,29 @@ func TestTurnCapabilitiesProductionProfileTable(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// Whether a family composes to the transcript tier is decided across three
+// tables in two packages: sessionlog's family table (records turns), and the
+// keyed lookups and their inexact exceptions (internal/worker/transcript).
+// Over every builtin provider on a local runtime the tier is exactly Claude's
+// and Codex's, so a change to any of the tables that moves a family in or out
+// fails here.
+func TestTurnCapabilitiesTranscriptTierFamilies(t *testing.T) {
+	var got []string
+	for _, provider := range builtin.BuiltinProviderOrder() {
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: runtime.NewFake()}), provider, "")
+		caps, err := s.handle.TurnCapabilities(context.Background())
+		if err != nil {
+			t.Fatalf("TurnCapabilities(%s): %v", provider, err)
+		}
+		if caps.Source == TurnSourceTranscript {
+			got = append(got, provider)
+		}
+	}
+	if want := []string{"claude", "codex"}; !slices.Equal(got, want) {
+		t.Fatalf("transcript-tier builtin providers = %v, want %v", got, want)
 	}
 }
 
