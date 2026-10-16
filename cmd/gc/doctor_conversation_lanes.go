@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"slices"
 	"strings"
@@ -52,8 +53,9 @@ func (*conversationLanesDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // Run implements doctor.Check: OK with the list empty; an Error when a kind
 // is listed and the sessions store cannot apply guarded batches, or the
 // controller refused to start the host; a Warning when the controller does
-// not answer, runs no lane host, runs another list than city.toml's, or has
-// quarantined op rows; else OK with the last pass's age.
+// not answer, runs no lane host, waits for its sessions store, runs another
+// list than city.toml's, has quarantined op rows, or failed its last pass or
+// anything since its last good one; else OK with the last pass's age.
 func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	var kinds []string
@@ -73,6 +75,11 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	}
 	capErr := laneStoreCapability(c.sessions(store))
 	_ = closeBeadStoreHandle(store)
+	if errors.Is(capErr, errLaneStoreMissing) {
+		r.Status = doctor.StatusWarning
+		r.Message = fmt.Sprintf("conversation lanes on (%s): the city store has no sessions store", listed)
+		return r
+	}
 	if capErr != nil {
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("conversation lanes on (%s): %v", listed, capErr)
@@ -94,7 +101,12 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	case st.State == laneHostStateNone || st.State == "":
 		r.Status = doctor.StatusWarning
 		r.Message = fmt.Sprintf("conversation lanes on (%s): the controller runs no lane host for this city", listed)
-		r.FixHint = "run the city under a standalone controller (`gc start`); a supervisor-hosted city does not start the lane host yet"
+		r.FixHint = "the lane host runs only under the standalone controller (`gc start --foreground`) for now; a supervisor-hosted city (`gc start`) does not start it yet"
+		return r
+	case st.State == laneHostStateUnavailable:
+		r.Status = doctor.StatusWarning
+		r.Message = fmt.Sprintf("conversation lanes on (%s): the lane host waits for the controller's sessions store: %s", listed, st.Reason)
+		r.FixHint = "check the controller log for why the city store did not open"
 		return r
 	case st.State == laneHostStateRefused:
 		r.Status = doctor.StatusError
@@ -113,19 +125,53 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	if st.LastError != "" {
 		r.Details = append(r.Details, "last error: "+st.LastError)
 	}
+	for _, w := range st.Waiting {
+		r.Details = append(r.Details, laneWaitingDetail(w))
+	}
 	pass := "no pass yet"
 	if st.LastPassAt != "" {
-		pass = "last pass " + (time.Duration(st.LastPassAgeMS) * time.Millisecond).Round(time.Second).String() + " ago"
+		pass = "last pass " + laneAge(st.LastPassAgeMS) + " ago"
+	}
+	switch {
+	case st.LastPassFailed:
+		warnings = append(warnings, "the last pass failed")
+	case st.ErrorsSinceSuccess > 0:
+		warnings = append(warnings, fmt.Sprintf("%d failure(s) since the last pass that succeeded", st.ErrorsSinceSuccess))
+	}
+	if (st.LastPassFailed || st.ErrorsSinceSuccess > 0) && st.LastSuccessAt != "" {
+		pass += ", last success " + laneAge(st.LastSuccessAgeMS) + " ago"
 	}
 	if len(warnings) > 0 {
 		r.Status = doctor.StatusWarning
 		r.Severity = doctor.SeverityAdvisory
 		r.Message = fmt.Sprintf("conversation lanes on (%s), %s: %s", listed, pass, strings.Join(warnings, "; "))
-		r.FixHint = "upgrade this gc if a newer gc wrote the rows it cannot decode; restart the controller to apply a changed list"
+		r.FixHint = "see the details and the controller log; upgrade this gc if a newer gc wrote the rows it cannot decode; restart the controller to apply a changed list"
 		return r
 	}
 	r.Message = fmt.Sprintf("conversation lanes on (%s): %s, %d conversation(s) in service", listed, pass, st.Workers)
 	return r
+}
+
+// laneAge renders a status age in milliseconds to the second.
+func laneAge(ms int64) string {
+	return (time.Duration(ms) * time.Millisecond).Round(time.Second).String()
+}
+
+// laneWaitingDetail is one conversation's waits as a detail line.
+func laneWaitingDetail(w laneConversationWaits) string {
+	parts := make([]string, 0, len(w.Waits))
+	for _, op := range w.Waits {
+		p := op.Op + " " + op.Reason
+		if op.Detail != "" {
+			p += " (" + op.Detail + ")"
+		}
+		parts = append(parts, p)
+	}
+	line := "conversation " + w.Conversation + " waits: " + strings.Join(parts, ", ")
+	if w.Wake != "" {
+		line += "; wake " + w.Wake
+	}
+	return line
 }
 
 // queryConversationLaneStatus asks the city's controller; one that does not

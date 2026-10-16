@@ -194,7 +194,7 @@ func (f *laneFixture) deps(st *opjournal.Store) laneExecDeps {
 // view reads the fixture's conversation as a pass does.
 func (f *laneFixture) view(t *testing.T) (opjournal.ConversationView, session.Info) {
 	t.Helper()
-	v, info, err := readConversationLaneView(sessionFrontDoor(laneLiveSessions{Store: f.store}), f.id)
+	v, info, _, err := readConversationLaneView(sessionFrontDoor(laneLiveSessions{Store: f.store}), f.id)
 	if err != nil {
 		t.Fatalf("reading the view: %v", err)
 	}
@@ -322,23 +322,54 @@ func TestConversationLaneViewFields(t *testing.T) {
 	}
 }
 
-// TestConversationLaneViewReadsMissingRowClosed proves an absent row is a
-// closed conversation, and a read failure is an error.
+// TestConversationLaneViewReadsMissingRowClosed proves a row absent on two
+// reads is a closed conversation, reported absent, and a read failure is an
+// error.
 func TestConversationLaneViewReadsMissingRowClosed(t *testing.T) {
 	store := newLaneTestStore()
-	v, _, err := readConversationLaneView(sessionFrontDoor(store), "gc-404")
-	if err != nil || !v.Closed || v.ID != "gc-404" {
-		t.Fatalf("view of a missing row = %+v, %v; want closed", v, err)
+	v, _, absent, err := readConversationLaneView(sessionFrontDoor(store), "gc-404")
+	if err != nil || !v.Closed || !absent || v.ID != "gc-404" {
+		t.Fatalf("view of a missing row = %+v absent %v, %v; want closed and absent", v, absent, err)
 	}
 	notSession, err := store.Create(beads.Bead{Title: "task", Type: "task", Status: "open"})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
-	if v, _, err := readConversationLaneView(sessionFrontDoor(store), notSession.ID); err != nil || !v.Closed {
-		t.Fatalf("view of a non-session row = %+v, %v; want closed", v, err)
+	if v, _, absent, err := readConversationLaneView(sessionFrontDoor(store), notSession.ID); err != nil || !v.Closed || !absent {
+		t.Fatalf("view of a non-session row = %+v absent %v, %v; want closed", v, absent, err)
 	}
-	if _, _, err := readConversationLaneView(sessionFrontDoor(laneFailingGetStore{store}), "gc-1"); err == nil {
+	if _, _, _, err := readConversationLaneView(sessionFrontDoor(laneFailingGetStore{store}), "gc-1"); err == nil {
 		t.Fatal("a failed read returned no error")
+	}
+}
+
+// laneFlakyNotFoundStore answers not found to the first Get of each id.
+type laneFlakyNotFoundStore struct {
+	laneTestStore
+	mu   *sync.Mutex
+	seen map[string]bool
+}
+
+func (s laneFlakyNotFoundStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	first := !s.seen[id]
+	s.seen[id] = true
+	s.mu.Unlock()
+	if first {
+		return beads.Bead{}, fmt.Errorf("flaky read of %s: %w", id, beads.ErrNotFound)
+	}
+	return s.laneTestStore.Get(id)
+}
+
+// TestConversationLaneViewConfirmsAbsence proves one not-found answer does
+// not close a conversation: the second read finds the row.
+func TestConversationLaneViewConfirmsAbsence(t *testing.T) {
+	base := newLaneTestStore()
+	f := newLaneFixtureOver(t, base)
+	flaky := laneFlakyNotFoundStore{laneTestStore: base, mu: &sync.Mutex{}, seen: map[string]bool{}}
+	v, info, absent, err := readConversationLaneView(sessionFrontDoor(flaky), f.id)
+	if err != nil || v.Closed || absent || info.ID != f.id {
+		t.Fatalf("view = %+v absent %v, %v; want the open row from the second read", v, absent, err)
 	}
 }
 
@@ -854,4 +885,201 @@ func (e afterDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery) opj
 	r := e.conversationLaneExec.Deliver(ctx, d)
 	e.after()
 	return r
+}
+
+// TestLaneExecIncarnationMismatchBlocksContent proves a running runtime whose
+// live GC_SESSION_ID names another session is a content block
+// (incarnation): the op waits on it, asks for no wake, and nothing is typed.
+func TestLaneExecIncarnationMismatchBlocksContent(t *testing.T) {
+	f := newLaneFixture(t)
+	if err := f.sp.SetMeta(f.name, "GC_SESSION_ID", "gc-someone-else"); err != nil {
+		t.Fatal(err)
+	}
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", func(r *opjournal.Request) {
+		r.Policy.Message.Wake = opjournal.WakeIfNeeded
+	}))
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+	if err != nil || res.Took != opjournal.TakeNone || res.Wake || len(res.Waits) != 1 ||
+		res.Waits[0].Reason != opjournal.WaitContentBlock || res.Waits[0].Detail != laneContentBlockIncarnation {
+		t.Fatalf("Pass = %+v, %v; want a content_block incarnation wait and no wake", res, err)
+	}
+	if len(f.nudges()) != 0 || f.get(t, st, op.ID).Status != opjournal.StatusSubmitted {
+		t.Fatal("a stale incarnation received text")
+	}
+}
+
+// laneSeamCounts counts the executor's handle and idle calls.
+type laneSeamCounts struct {
+	handles, idles atomic.Int32
+}
+
+func countSeams(e *conversationLaneExec, c *laneSeamCounts) {
+	handle, idle := e.handle, e.idle
+	e.handle = func(t nudgeTarget) (worker.Handle, error) {
+		c.handles.Add(1)
+		return handle(t)
+	}
+	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
+		c.idles.Add(1)
+		return idle(t, obs)
+	}
+}
+
+// TestLaneExecBlockedProbeSkipsLooks proves a probe that a content gate or a
+// not-live runtime already decides resolves no handle and reads neither the
+// pending interaction nor the idle boundary.
+func TestLaneExecBlockedProbeSkipsLooks(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		opts  []laneFixtureOpt
+		setup func(f *laneFixture)
+	}{
+		{name: "content block", opts: []laneFixtureOpt{func(meta map[string]string) { meta["restart_requested"] = "true" }}},
+		{name: "not live", setup: func(f *laneFixture) { f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			if tc.setup != nil {
+				tc.setup(f)
+			}
+			st := f.laneStore(t)
+			f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+			var c laneSeamCounts
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+				countSeams(e, &c)
+				return e
+			})
+			if err != nil || res.Took != opjournal.TakeNone {
+				t.Fatalf("Pass = %+v, %v; want nothing taken", res, err)
+			}
+			if c.handles.Load() != 0 || c.idles.Load() != 0 {
+				t.Fatalf("handles %d idles %d, want none for a decided probe", c.handles.Load(), c.idles.Load())
+			}
+		})
+	}
+}
+
+// TestLaneExecResolvesTheHandleOnce proves a delivering pass resolves the
+// runtime's handle once: the probe's look and the delivery share it.
+func TestLaneExecResolvesTheHandleOnce(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+	var c laneSeamCounts
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+		countSeams(e, &c)
+		return e
+	})
+	if err != nil || res.Done != opjournal.DoneAccepted {
+		t.Fatalf("Pass = %+v, %v; want accepted", res, err)
+	}
+	if n := c.handles.Load(); n != 1 {
+		t.Fatalf("handle resolutions = %d, want 1", n)
+	}
+}
+
+// wedgedPendingHandle is a handle whose pending-interaction look never
+// answers until released.
+type wedgedPendingHandle struct {
+	worker.Handle
+	release chan struct{}
+}
+
+func (h wedgedPendingHandle) PendingStatus(context.Context) (*worker.PendingInteraction, bool, error) {
+	<-h.release
+	return nil, false, nil
+}
+
+// TestLaneExecProbeBoundsEveryLook proves a runtime call that wedges after
+// the first observation is bounded too: the probe answers unavailable within
+// its budget instead of holding the pass.
+func TestLaneExecProbeBoundsEveryLook(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+	start := time.Now()
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+		e.budget = 50 * time.Millisecond
+		inner := e.handle
+		e.handle = func(nt nudgeTarget) (worker.Handle, error) {
+			h, err := inner(nt)
+			if err != nil {
+				return nil, err
+			}
+			return wedgedPendingHandle{Handle: h, release: release}, nil
+		}
+		return e
+	})
+	if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitUnavailable) {
+		t.Fatalf("Pass = %+v, %v; want an unavailable wait", res, err)
+	}
+	if d := time.Since(start); d > laneWaitBudget/2 {
+		t.Fatalf("the probe took %s, want it bounded by its budget", d)
+	}
+}
+
+// laneReadLog records every read of a store.
+type laneReadLog struct {
+	laneTestStore
+	mu    *sync.Mutex
+	gets  *[]string
+	lists *[]beads.ListQuery
+}
+
+func (s laneReadLog) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	*s.gets = append(*s.gets, id)
+	s.mu.Unlock()
+	return s.laneTestStore.Get(id)
+}
+
+func (s laneReadLog) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
+	*s.lists = append(*s.lists, q)
+	s.mu.Unlock()
+	return s.laneTestStore.List(q)
+}
+
+// TestLaneExecReprobeReadsNoRow proves a re-probe of a busy runtime reads no
+// op row and no runtime row: it reuses the last probe's caps.
+func TestLaneExecReprobeReadsNoRow(t *testing.T) {
+	var mu sync.Mutex
+	var gets []string
+	var lists []beads.ListQuery
+	f := newLaneFixtureOver(t, laneReadLog{laneTestStore: newLaneTestStore(), mu: &mu, gets: &gets, lists: &lists})
+	st := f.laneStore(t)
+	stampHost(t, f, st, 0, opjournal.KindMessage)
+	v, info := f.view(t)
+	e := newConversationLaneExec(f.deps(st), info)
+	e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
+	p, err := e.Probe(context.Background(), v)
+	if err != nil || !p.Running || p.Boundary != opjournal.TriNo {
+		t.Fatalf("Probe = %+v, %v; want running and busy", p, err)
+	}
+	runtimeRow, err := opjournal.RuntimeRowID(st.Prefix(), f.id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	gets, lists = nil, nil
+	mu.Unlock()
+	p, err = e.Reprobe(context.Background(), v)
+	if err != nil || !p.Running || p.Boundary != opjournal.TriNo || !p.Caps.Live {
+		t.Fatalf("Reprobe = %+v, %v; want the busy runtime with the remembered caps", p, err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	for _, id := range gets {
+		if id == runtimeRow {
+			t.Fatalf("the re-probe read the runtime row %s", id)
+		}
+	}
+	for _, q := range lists {
+		if q.Label == opjournal.LabelOp {
+			t.Fatalf("the re-probe listed op rows: %+v", q)
+		}
+	}
 }

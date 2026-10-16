@@ -263,6 +263,7 @@ go_library(
         "conversation_lane_exec.go",
         "conversation_lane_host.go",
         "conversation_lane_view.go",
+        "conversation_lane_worker.go",
         "convoy_fields.go",
         "crash_tracker.go",
         "cwd_fallback_guard.go",

@@ -35,17 +35,22 @@ func conversationLaneView(info session.Info) opjournal.ConversationView {
 }
 
 // readConversationLaneView reads conversation conv's session row live
-// through front and returns its view and row. A row that does not exist, or
-// that is not a session row, is a closed conversation: no pass can deliver
-// into it, so its open ops close.
-func readConversationLaneView(front *session.Store, conv string) (opjournal.ConversationView, session.Info, error) {
-	info, err := front.Get(conv)
-	switch {
-	case err == nil:
-		return conversationLaneView(info), info, nil
-	case errors.Is(err, beads.ErrNotFound), errors.Is(err, session.ErrSessionNotFound):
-		return opjournal.ConversationView{ID: conv, Closed: true}, session.Info{ID: conv, Closed: true}, nil
-	default:
-		return opjournal.ConversationView{}, session.Info{}, err
+// through front and returns its view and row. A row that is missing, or that
+// is not a session row, on two reads in a row is a closed conversation: no
+// pass can deliver into it, so its open ops close. absent reports that case,
+// for the caller to log; one answer of absence is not proof enough to close
+// ops irreversibly (DS §0).
+func readConversationLaneView(front *session.Store, conv string) (view opjournal.ConversationView, info session.Info, absent bool, err error) {
+	for range 2 {
+		info, err = front.Get(conv)
+		switch {
+		case err == nil:
+			return conversationLaneView(info), info, false, nil
+		case errors.Is(err, beads.ErrNotFound), errors.Is(err, session.ErrSessionNotFound):
+			continue
+		default:
+			return opjournal.ConversationView{}, session.Info{}, false, err
+		}
 	}
+	return opjournal.ConversationView{ID: conv, Closed: true}, session.Info{ID: conv, Closed: true}, true, nil
 }

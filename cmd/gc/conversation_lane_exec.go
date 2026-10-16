@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -32,7 +33,7 @@ const (
 	// laneDeliveryKeyPrefix scopes a lane delivery key in the runtime's key
 	// space (OJ-7's format).
 	laneDeliveryKeyPrefix = "gc:"
-	// laneProbeBudget bounds one probe's runtime observation.
+	// laneProbeBudget bounds one probe's runtime calls.
 	laneProbeBudget = 10 * time.Second
 )
 
@@ -41,8 +42,10 @@ const (
 type laneExecDeps struct {
 	cityPath string
 	cfg      *config.City
-	// sessions is the sessions-class store the executor reads the session
-	// through and stamps it in.
+	// sessions is the sessions-class store the executor resolves the
+	// session's runtime through and stamps it in: the controller's cached
+	// store, as the legacy nudge path reads it. The pass reads the view and
+	// the op rows live; the executor's lookups need not.
 	sessions beads.Store
 	sp       runtime.Provider
 	// lane is the op store; Probe reads the runtime row's host stamp from it.
@@ -58,23 +61,50 @@ type conversationLaneExec struct {
 	deps   laneExecDeps
 	info   session.Info
 	target nudgeTarget
-	// observe, handle and idle are the runtime seams; production uses the
-	// cmd_nudge.go helpers.
+	// budget bounds one probe's runtime calls, and a Deliver's handle
+	// resolution when its probe resolved none; laneProbeBudget in
+	// production.
+	budget time.Duration
+	// observe, matches, handle and idle are the runtime seams; production
+	// uses the cmd_nudge.go helpers. observe reads the live runtime the
+	// target names unmasked, so matches can tell a stale incarnation from a
+	// stopped one; handle resolves the handle of a running runtime that
+	// matches.
 	observe func(nudgeTarget) (worker.LiveObservation, error)
+	matches func(nudgeTarget, worker.LiveObservation) (bool, error)
 	handle  func(nudgeTarget) (worker.Handle, error)
 	idle    func(nudgeTarget, worker.LiveObservation) bool
+	// live is the handle the last probe resolved; Deliver types through it.
+	live worker.Handle
+	// lastCaps and capsRead are the last Probe's capabilities, which
+	// Reprobe reuses instead of reading the runtime row again.
+	lastCaps opjournal.Caps
+	capsRead bool
 }
 
 var _ opjournal.Executor = (*conversationLaneExec)(nil)
 
 // newConversationLaneExec returns the live executor for info's conversation.
 func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversationLaneExec {
-	e := &conversationLaneExec{deps: deps, info: info, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, info)}
+	e := &conversationLaneExec{deps: deps, info: info, target: resolveNudgeTargetFromSessionInfo(deps.cityPath, deps.cfg, info), budget: laneProbeBudget}
 	e.observe = func(t nudgeTarget) (worker.LiveObservation, error) {
-		return workerObserveNudgeTarget(t, e.deps.sessions, e.deps.sp)
+		if t.sessionName == "" {
+			return workerObserveNudgeTarget(t, e.deps.sessions, e.deps.sp)
+		}
+		return workerObserveSessionTargetWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg, t.sessionName)
+	}
+	e.matches = func(t nudgeTarget, obs worker.LiveObservation) (bool, error) {
+		return nudgeTargetLiveGenerationMatches(t, obs, e.deps.sp)
 	}
 	e.handle = func(t nudgeTarget) (worker.Handle, error) {
-		return workerHandleForNudgeTarget(t, e.deps.sessions, e.deps.sp)
+		if t.sessionName == "" {
+			return workerHandleForNudgeTarget(t, e.deps.sessions, e.deps.sp)
+		}
+		// The probe observed this runtime running and matched its
+		// generation, so the handle is the runtime's, as
+		// workerHandleForNudgeTarget resolves a running, matching target.
+		return runtimeWorkerHandleWithConfig(t.cityPath, e.deps.sessions, e.deps.sp, t.cfg, t.sessionName,
+			strings.TrimSpace(t.providerFamily()), strings.TrimSpace(t.sessionTransport()), t.processNames())
 	}
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
@@ -82,20 +112,36 @@ func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversation
 	return e
 }
 
-// Probe implements opjournal.Executor: the live observation, bounded by ctx,
-// the row's content gate, the pending interaction, the idle boundary, the
-// view's fence and the runtime's caps.
+// Probe implements opjournal.Executor: the runtime's caps, then one bounded
+// look at the runtime (laneLook).
 func (e *conversationLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
-	p := opjournal.Probe{Available: true, Fence: laneFence(conv), TurnLive: opjournal.TriUnknown}
 	caps, err := e.caps(conv)
 	if err != nil {
 		return opjournal.Probe{}, err
 	}
-	p.Caps = caps
-	octx, cancel := context.WithTimeout(ctx, laneProbeBudget)
+	e.lastCaps, e.capsRead = caps, true
+	return e.probe(ctx, conv, caps)
+}
+
+// Reprobe is Probe without reading any row: it reuses the last Probe's caps,
+// so a host re-probing a busy runtime on its backoff costs no store read
+// (DES-O1 §4.3). Before any Probe it is Probe.
+func (e *conversationLaneExec) Reprobe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
+	if !e.capsRead {
+		return e.Probe(ctx, conv)
+	}
+	return e.probe(ctx, conv, e.lastCaps)
+}
+
+// probe is one look at the runtime under caps, the whole look bounded by
+// e.budget.
+func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.ConversationView, caps opjournal.Caps) (opjournal.Probe, error) {
+	p := opjournal.Probe{Available: true, Fence: laneFence(conv), TurnLive: opjournal.TriUnknown, Caps: caps}
+	e.live = nil
+	octx, cancel := context.WithTimeout(ctx, e.budget)
 	defer cancel()
-	obs, err := worker.ObserveBounded(octx, laneObservationKey(e.deps.cityPath, e.info.ID), func(context.Context) (worker.LiveObservation, error) {
-		return e.observe(e.target)
+	look, err := worker.ObserveBounded(octx, laneObservationKey(e.deps.cityPath, e.info.ID), func(lctx context.Context) (laneLook, error) {
+		return e.look(lctx, caps)
 	})
 	switch {
 	case errors.Is(err, runtime.ErrRuntimeUnavailable):
@@ -104,28 +150,57 @@ func (e *conversationLaneExec) Probe(ctx context.Context, conv opjournal.Convers
 	case errors.Is(err, runtime.ErrSessionNotFound), errors.Is(err, session.ErrSessionNotFound):
 		return p, nil
 	case err != nil:
-		return opjournal.Probe{}, fmt.Errorf("observing session %s: %w", e.info.ID, err)
+		return opjournal.Probe{}, fmt.Errorf("probing session %s: %w", e.info.ID, err)
 	}
-	p.Running = obs.Running && obs.Alive
-	p.ContentBlock = session.ContentGate(e.info, p.Running, e.deps.clk.Now())
-	if p.ContentBlock == "" {
-		matches, err := nudgeTargetLiveGenerationMatches(e.target, obs, e.deps.sp)
+	p.Running, p.ContentBlock, p.Pending, p.Boundary = look.running, look.block, look.pending, look.boundary
+	e.live = look.handle
+	return p, nil
+}
+
+// laneLook is one look at the runtime.
+type laneLook struct {
+	running  bool
+	block    string
+	pending  string
+	boundary opjournal.Tri
+	handle   worker.Handle
+}
+
+// look observes the runtime, gates content on the row (session.ContentGate)
+// and on the live incarnation, and, only for a running runtime content may
+// reach, resolves its handle once and reads the pending interaction and the
+// idle boundary through it.
+func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (laneLook, error) {
+	obs, err := e.observe(e.target)
+	if err != nil {
+		return laneLook{}, err
+	}
+	l := laneLook{running: obs.Running && obs.Alive}
+	l.block = session.ContentGate(e.info, l.running, e.deps.clk.Now())
+	if l.running && l.block == "" {
+		matches, err := e.matches(e.target, obs)
 		if err != nil {
-			return opjournal.Probe{}, fmt.Errorf("matching session %s's live generation: %w", e.info.ID, err)
+			return laneLook{}, fmt.Errorf("matching session %s's live generation: %w", e.info.ID, err)
 		}
 		if !matches {
-			p.ContentBlock = laneContentBlockIncarnation
+			l.block = laneContentBlockIncarnation
 		}
 	}
-	if !p.Running {
-		return p, nil
+	if !l.running || l.block != "" || !caps.Live {
+		return l, nil
 	}
-	p.Pending = e.pending(ctx)
-	p.Boundary = opjournal.TriNo
+	h, err := e.handle(e.target)
+	if err != nil {
+		l.pending = lanePendingUnknown
+		return l, nil
+	}
+	l.handle = h
+	l.pending = lanePending(h.PendingStatus(ctx))
+	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
-		p.Boundary = opjournal.TriYes
+		l.boundary = opjournal.TriYes
 	}
-	return p, nil
+	return l, nil
 }
 
 // caps are the runtime's capabilities for conv. Content is live only for a
@@ -162,14 +237,9 @@ func hostedElsewhere(stamp opjournal.HostStamp, gen int64) bool {
 	return stamp.Host != "" && stamp.Generation == gen && slices.Contains(stamp.Kinds, opjournal.KindMessage)
 }
 
-// pending is the pending interaction's request id, "" for none and
-// lanePendingUnknown when the look failed.
-func (e *conversationLaneExec) pending(ctx context.Context) string {
-	h, err := e.handle(e.target)
-	if err != nil {
-		return lanePendingUnknown
-	}
-	p, _, err := h.PendingStatus(ctx)
+// lanePending is the pending interaction's request id from a PendingStatus
+// answer, "" for none and lanePendingUnknown when the look failed.
+func lanePending(p *worker.PendingInteraction, _ bool, err error) string {
 	switch {
 	case err != nil:
 		return lanePendingUnknown
@@ -183,11 +253,20 @@ func (e *conversationLaneExec) pending(ctx context.Context) string {
 }
 
 // Deliver implements opjournal.Executor: one fenced live-only nudge of the
-// delivery's text, verbatim, under its delivery key.
+// delivery's text, verbatim, under its delivery key, through the handle its
+// probe resolved (resolved here, bounded, when it resolved none).
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
-	h, err := e.handle(e.target)
-	if err != nil {
-		return laneHandleError(err)
+	h := e.live
+	if h == nil {
+		hctx, cancel := context.WithTimeout(ctx, e.budget)
+		var err error
+		h, err = worker.ObserveBounded(hctx, laneDeliverHandleKey(e.deps.cityPath, e.info.ID), func(context.Context) (worker.Handle, error) {
+			return e.handle(e.target)
+		})
+		cancel()
+		if err != nil {
+			return laneHandleError(err)
+		}
 	}
 	fence := runtime.InputFence{}
 	if d.Fence.Token != "" {
@@ -289,4 +368,10 @@ func laneFenceMode(f runtime.InputFencing) opjournal.FenceMode {
 // wedged lane probe never blocks a lifecycle observation.
 func laneObservationKey(cityPath, sessionID string) string {
 	return "lane\x00" + cityPath + "\x00" + sessionID
+}
+
+// laneDeliverHandleKey keys a Deliver's bounded handle resolution, apart from
+// the probe's look.
+func laneDeliverHandleKey(cityPath, sessionID string) string {
+	return "lane-deliver\x00" + cityPath + "\x00" + sessionID
 }
