@@ -77,52 +77,60 @@ The 228 directly located farm skip sites are UNCHANGED. The remaining 67 rows re
 
 Evidence root: `/var/tmp/deploy-ga-y5ea0ng.jpmvva4v`. `test_log_dir: /var/tmp/deploy-ga-y5ea0ng.jpmvva4v/c3-run/evidence/remote/logs`; native raw logs: `c3-run/evidence/remote/floor-logs`. Preserve all logs. Record: `execution.json`, `artifact-verification.json`, `independent-verification.json`, `native-skip-proof.json`, `skip-site-proof.json`, `skip-supplemental-proof.json`, and `review-mutation-evidence.txt`.
 
-## Diff-owned tests by name
+## Result reader output
 
-- `TestAsyncStartFinalCommitStaleCleanup`: PASS
-- `TestCommitAsyncStart_StaleResultStopsUnattributedBeadScopedPoolRuntime`: PASS
-- `TestExecutePlannedStarts_BusySessionLockSkipsAtTheGate`: PASS
-- `TestExecutePlannedStarts_BusySessionStartsOnTheNextPassAfterRelease`: PASS
-- `TestExecutePlannedStarts_HolderReleasingWithinTheBoundStartsTheSessionInThePass`: PASS
-- `TestExecutePlannedStarts_LockTakenBetweenGateAndPrepareIsASkippedStart`: PASS
-- `TestExecutePlannedStarts_LockTakenBetweenGateAndPrepareReleasesTheProbeAndKeepsTheMarker`: PASS
-- `TestPoolSessionCreate_TeardownFailureHoldsTheSlot`: PASS
-- `TestReconcileSessionBeads_BusySessionLockDefersPendingCreateRollback`: PASS
-- `TestReconcileSessionBeads_BusySessionLockOverAtomicCloseStoreLeavesRowAndWaitsUntouched`: PASS
-- `TestRecoverRunningPendingCreate_BusySessionLockIsAnUnappliedRecovery`: PASS
-- `TestRollbackPendingCreateClearingClaimIsNoopOnAlreadyClosedBead`: PASS
-- `TestRollbackPendingCreateClearingClaimKeepsSessionNameWhenCloseFails`: PASS
-- `TestRollbackPendingCreateClearingClaimReturnsNilWhenTxFails`: PASS
-- `TestRollbackPendingCreateClearingClaimRunsRetiredCleanupWhenPostCloseFails`: PASS
-- `TestRollbackPendingCreateClearingClaimUsesSingleTransactionForAllWrites`: PASS
-- `TestRollbackPendingCreateFallsBackToTheTxWhenTheCloseIsRefused`: PASS
-- `TestRollbackPendingCreateIsNoopOnAlreadyClosedBead`: PASS
-- `TestRollbackPendingCreateLeavesAReopenedRowItsName`: PASS
-- `TestRollbackPendingCreateRefusesAStaleObservationBeforeWriting`: PASS
-- `TestRollbackPendingCreateRejectsStaleSnapshot`: PASS
-- `TestRollbackPendingCreateReleasesTheNameOnlyAfterTheClose`: PASS
-- `TestRollbackPendingCreateUnderRealConcurrentWritersNeverRestsClosedAwake`: PASS
-- `TestRollbackPendingCreateUsesSingleTransactionForAllWrites`: PASS
-- `TestStartCompletionRejectsRolledBackSnapshot`: PASS
-- `TestCommitStartedIfCurrentBoundsALosingFence`: PASS
-- `TestCommitStartedIfCurrentFencesAWriteAfterTheReread`: PASS
-- `TestCommitStartedIfCurrentRaceAgainstAKill`: PASS
-- `TestCommitStartedIfCurrentRedecidesPastAnUnrelatedWrite`: PASS
-- `TestCommitStartedIfCurrentRefusesOverAnOutOfBandKill`: PASS
-- `TestCommitStartedIfCurrentRequireModeFailsClosed`: PASS
-- `TestCommitStartedRefusesAnOperatorSuspendDuringTheStart`: PASS
-- `TestLeasedClosesRefuseALostLease`: PASS
-- `TestLeasedWritesRefuseALostLease`: PASS
-- `TestRollbackPendingCreateAtomicallyLeavesAReopenedRowItsName`: PASS
-- `TestRollbackPendingCreateAtomicallyReportsUnsupportedWithoutWriting`: PASS
-- `TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence`: PASS
-- `TestStartAndRollbackHoldMutationLockAcrossReadAndWrite`: PASS
-- `TestStoreLockedMethodsReturnBusyWithoutWriting`: PASS
-- `TestWithSessionMutationLockContextAbandonedWaiterNeverRuns`: PASS
-- `TestWithSessionMutationLockContextBusyAtDeadline`: PASS
-- `TestWithSessionMutationLockContextDoneContextBusyWhenHeld`: PASS
-- `TestWithSessionMutationLockContextDoneContextStillAcquiresFreeLock`: PASS
-- `TestWithSessionMutationLockContextFIFO`: PASS
-- `TestWithSessionMutationLockContextReturnsFnError`: PASS
-- `TestWithSessionMutationLockContextStress`: PASS
-- `TestWithSessionMutationLockContextUncontended`: PASS
+```text
+GATE_TEST_EVIDENCE logs_dir=/var/tmp/deploy-ga-y5ea0ng.jpmvva4v/c3-run/evidence/remote/logs logs=506 logs_with_results=440
+test_counts: PASS=115210 FAIL=0 SKIP=369
+  (top-level result lines, column 0, summed over the 506 logs; a test that several jobs run counts once per job; sub-tests are not counted)
+logs_without_results: floor-13.log floor-14.log floor-15.log unit-02e0324f1ef05430d7e4.log unit-04c4f9e4335a6f1c2dfa.log unit-0787047af2c4dad6aebc.log unit-0eb92a6bd00590d91db6.log unit-0f39cb7e4c03399a72c4.log unit-1a34395a607c0208a005.log unit-1e67f201b300dc5f9e78.log unit-21372f682c4033d14a80.log unit-22d5121476fcaa40b586.log (+54 more)
+diff_tests_executed:
+  TestAsyncStartFinalCommitStaleCleanup PASS (integration-packages-56f04454dd9158a9ee8a.log, unit-2ef13e1b6898c5544764.log)
+  TestCommitAsyncStart_StaleResultStopsUnattributedBeadScopedPoolRuntime PASS (integration-packages-12697e2ea0d32c278115.log, unit-493754ea2d5b4d8858c8.log)
+  TestExecutePlannedStarts_BusySessionLockSkipsAtTheGate PASS (integration-packages-b72a67a2f9444af705e3.log, unit-5a9df316125cd0aeff2e.log)
+  TestExecutePlannedStarts_BusySessionStartsOnTheNextPassAfterRelease PASS (integration-packages-f7fba3a97bc02cffff0b.log, unit-10cc7795c0ec199a5530.log)
+  TestExecutePlannedStarts_HolderReleasingWithinTheBoundStartsTheSessionInThePass PASS (integration-packages-9326181a736eb30b71ca.log, unit-4d20b3d28497f844aa39.log)
+  TestExecutePlannedStarts_LockTakenBetweenGateAndPrepareIsASkippedStart PASS (integration-packages-e5330b8c981927473156.log, unit-f679cd2551fcc64525aa.log)
+  TestExecutePlannedStarts_LockTakenBetweenGateAndPrepareReleasesTheProbeAndKeepsTheMarker PASS (integration-packages-56f04454dd9158a9ee8a.log, unit-2ef13e1b6898c5544764.log)
+  TestPoolSessionCreate_TeardownFailureHoldsTheSlot PASS (integration-packages-cb110414c557c0928e82.log, unit-cd6930bb0d0da8646500.log)
+  TestReconcileSessionBeads_BusySessionLockDefersPendingCreateRollback PASS (integration-packages-aa6cf5c138f0b61b866a.log, unit-23e7d9fc763496dd8095.log)
+  TestReconcileSessionBeads_BusySessionLockOverAtomicCloseStoreLeavesRowAndWaitsUntouched PASS (integration-packages-e4245ddf6a37030111bc.log, unit-64014bc0bb3833bc198c.log)
+  TestRecoverRunningPendingCreate_BusySessionLockIsAnUnappliedRecovery PASS (integration-packages-12697e2ea0d32c278115.log, unit-2bde55fab377f50b4739.log)
+  TestRollbackPendingCreateClearingClaimIsNoopOnAlreadyClosedBead PASS (integration-packages-e5330b8c981927473156.log, unit-f679cd2551fcc64525aa.log)
+  TestRollbackPendingCreateClearingClaimKeepsSessionNameWhenCloseFails PASS (integration-packages-12697e2ea0d32c278115.log, unit-2bde55fab377f50b4739.log)
+  TestRollbackPendingCreateClearingClaimReturnsNilWhenTxFails PASS (integration-packages-aa6cf5c138f0b61b866a.log, unit-23e7d9fc763496dd8095.log)
+  TestRollbackPendingCreateClearingClaimRunsRetiredCleanupWhenPostCloseFails PASS (integration-packages-9326181a736eb30b71ca.log, unit-4d20b3d28497f844aa39.log)
+  TestRollbackPendingCreateClearingClaimUsesSingleTransactionForAllWrites PASS (integration-packages-f7fba3a97bc02cffff0b.log, unit-10cc7795c0ec199a5530.log)
+  TestRollbackPendingCreateFallsBackToTheTxWhenTheCloseIsRefused PASS (integration-packages-bf8ed8ba46004086b3b9.log, unit-0e1499ad8e8a0a6b9d81.log)
+  TestRollbackPendingCreateIsNoopOnAlreadyClosedBead PASS (integration-packages-b72a67a2f9444af705e3.log, unit-5a9df316125cd0aeff2e.log)
+  TestRollbackPendingCreateLeavesAReopenedRowItsName PASS (integration-packages-56f04454dd9158a9ee8a.log, unit-2ef13e1b6898c5544764.log)
+  TestRollbackPendingCreateRefusesAStaleObservationBeforeWriting PASS (integration-packages-821a75e4a503601af052.log, unit-493754ea2d5b4d8858c8.log)
+  TestRollbackPendingCreateRejectsStaleSnapshot PASS (integration-packages-aa6cf5c138f0b61b866a.log, unit-23e7d9fc763496dd8095.log)
+  TestRollbackPendingCreateReleasesTheNameOnlyAfterTheClose PASS (integration-packages-12697e2ea0d32c278115.log, unit-2bde55fab377f50b4739.log)
+  TestRollbackPendingCreateUnderRealConcurrentWritersNeverRestsClosedAwake PASS (integration-packages-074fc6c34a1fb2577127.log, unit-3d6d3036a2f5902472b5.log)
+  TestRollbackPendingCreateUsesSingleTransactionForAllWrites PASS (integration-packages-830685c60d0c2dd88567.log, unit-cd6930bb0d0da8646500.log)
+  TestStartCompletionRejectsRolledBackSnapshot PASS (integration-packages-12697e2ea0d32c278115.log, unit-2bde55fab377f50b4739.log)
+  TestCommitStartedIfCurrentBoundsALosingFence PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestCommitStartedIfCurrentFencesAWriteAfterTheReread PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestCommitStartedIfCurrentRaceAgainstAKill PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestCommitStartedIfCurrentRedecidesPastAnUnrelatedWrite PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestCommitStartedIfCurrentRefusesOverAnOutOfBandKill PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestCommitStartedIfCurrentRequireModeFailsClosed PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestCommitStartedRefusesAnOperatorSuspendDuringTheStart PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestLeasedClosesRefuseALostLease PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestLeasedWritesRefuseALostLease PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestRollbackPendingCreateAtomicallyLeavesAReopenedRowItsName PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestRollbackPendingCreateAtomicallyReportsUnsupportedWithoutWriting PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestRollbackPendingCreateAtomicallyRetriesALostPostCloseFence PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestStartAndRollbackHoldMutationLockAcrossReadAndWrite PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestStoreLockedMethodsReturnBusyWithoutWriting PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextAbandonedWaiterNeverRuns PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextBusyAtDeadline PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextDoneContextBusyWhenHeld PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextDoneContextStillAcquiresFreeLock PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextFIFO PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextReturnsFnError PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextStress PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+  TestWithSessionMutationLockContextUncontended PASS (integration-packages-1a2f03374de01d151211.log, unit-723353f4f1923fba5e16.log)
+GATE_TEST_EVIDENCE_RESULT ok: 47 diff-owned tests verified by name
+```
