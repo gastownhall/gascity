@@ -2177,10 +2177,10 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mail
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 
 	// Load nudge state to protect live nudge IDs from being swept. A missing
-	// state file is not an error (LoadState returns empty state), so any error
+	// state file is not an error (the snapshot is empty), so any error
 	// here is a real read/parse failure: fail closed rather than sweeping with
 	// no live-ID protection, which could close beads for in-flight nudges.
-	nudgeState, stateErr := nudgequeue.LoadState(cityPath)
+	nudgeState, stateErr := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 	if stateErr != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", stateErr) //nolint:errcheck // best-effort stderr
 		return 1

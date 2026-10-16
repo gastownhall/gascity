@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"database/sql"
+	"database/sql/driver"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -705,6 +706,110 @@ func TestSQLiteStoreCloseStoreSerializesConcurrentCallers(t *testing.T) {
 	if got, want := fmt.Sprint(calls), "[stop read write]"; got != want {
 		t.Fatalf("concurrent close calls = %s, want %s", got, want)
 	}
+}
+
+// TestSQLiteStoreGetRacingCloseStoreReturnsAnError: CloseStore does not wait
+// for a read already in flight, so a Get whose row query holds a pooled
+// connection when the store closes finishes after it. It must report the
+// closed store's error, never dereference a released handle (ga-2mchg52: a
+// runtime lease's watch read panicked on a nil *sql.DB hydrating dependencies).
+func TestSQLiteStoreGetRacingCloseStoreReturnsAnError(t *testing.T) {
+	store := openSQLiteStoreForTest(t, t.TempDir())
+	created, err := store.Create(Bead{Title: "read while closing"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	gate := &queryGate{entered: make(chan struct{}), release: make(chan struct{})}
+	pool := store.readDB
+	store.readDB = sql.OpenDB(gatedConnector{driver: pool.Driver(), dsn: sqliteStoreDSN(store.path, false), gate: gate})
+	if err := pool.Close(); err != nil {
+		t.Fatalf("closing the original read pool: %v", err)
+	}
+
+	type outcome struct {
+		err      error
+		panicked any
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		var got outcome
+		defer func() {
+			got.panicked = recover()
+			done <- got
+		}()
+		_, got.err = store.Get(created.ID)
+	}()
+	select {
+	case <-gate.entered:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Get never reached its row query")
+	}
+	if err := store.CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	close(gate.release)
+	var got outcome
+	select {
+	case got = <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Get did not return after its row query was released")
+	}
+	if got.panicked != nil {
+		t.Fatalf("Get racing CloseStore panicked: %v", got.panicked)
+	}
+	if got.err == nil {
+		t.Fatal("Get racing CloseStore succeeded; want the closed store's error")
+	}
+	if _, err := store.Get(created.ID); !errors.Is(err, ErrStoreClosed) {
+		t.Fatalf("Get after CloseStore = %v, want ErrStoreClosed", err)
+	}
+}
+
+// queryGate holds the first query run through a gatedConn until release is
+// closed, so a test can act while that query owns its connection.
+type queryGate struct {
+	once    sync.Once
+	entered chan struct{}
+	release chan struct{}
+}
+
+func (g *queryGate) hold() {
+	g.once.Do(func() {
+		close(g.entered)
+		<-g.release
+	})
+}
+
+// gatedConnector opens the store's driver connections wrapped in gatedConn.
+type gatedConnector struct {
+	driver driver.Driver
+	dsn    string
+	gate   *queryGate
+}
+
+func (c gatedConnector) Connect(context.Context) (driver.Conn, error) {
+	conn, err := c.driver.Open(c.dsn)
+	if err != nil {
+		return nil, err
+	}
+	return gatedConn{Conn: conn, gate: c.gate}, nil
+}
+
+func (c gatedConnector) Driver() driver.Driver { return c.driver }
+
+// gatedConn runs each query through its gate before the driver sees it.
+type gatedConn struct {
+	driver.Conn
+	gate *queryGate
+}
+
+func (c gatedConn) QueryContext(ctx context.Context, query string, args []driver.NamedValue) (driver.Rows, error) {
+	q, ok := c.Conn.(driver.QueryerContext)
+	if !ok {
+		return nil, driver.ErrSkip
+	}
+	c.gate.hold()
+	return q.QueryContext(ctx, query, args)
 }
 
 func TestSQLiteStoreListAppliesResidualAssigneeFilterBeforeLimit(t *testing.T) {

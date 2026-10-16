@@ -13,7 +13,8 @@ import (
 // respond), TransportCapabilityProvider (SupportsTransport), SleepCapability,
 // IdleWaitProvider (WaitForIdle), IdleSnapshotProvider (SnapshotIdle),
 // SessionEventProvider (SubscribeSessionEvents), TurnEventProvider
-// (SubscribeTurnEvents), ProcessTableScanner (orphan reaping),
+// (SubscribeTurnEvents), TurnFenceProvider and TurnObservationProvider (turn
+// reads and the turn-scoped interrupt), ProcessTableScanner (orphan reaping),
 // LivenessObserverWithError and ListingAttestation — through to the
 // underlying *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
@@ -35,6 +36,8 @@ var (
 	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
 	_ runtime.TurnEventProvider           = (*seamBackedProvider)(nil)
+	_ runtime.TurnFenceProvider           = (*seamBackedProvider)(nil)
+	_ runtime.TurnObservationProvider     = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs an acp provider served through the seams.
@@ -90,6 +93,33 @@ func (s *seamBackedProvider) SubscribeSessionEvents(ctx context.Context) (<-chan
 // passthrough).
 func (s *seamBackedProvider) SubscribeTurnEvents(ctx context.Context) (<-chan runtime.TurnEvent, error) {
 	return s.raw.SubscribeTurnEvents(ctx)
+}
+
+// ObserveTurn implements [runtime.TurnFenceProvider] (non-seam passthrough).
+func (s *seamBackedProvider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	return s.raw.ObserveTurn(ctx, name)
+}
+
+// InterruptTurn implements [runtime.TurnFenceProvider] (non-seam passthrough).
+func (s *seamBackedProvider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	return s.raw.InterruptTurn(ctx, name, turnID)
+}
+
+// WaitTurnEnded implements [runtime.TurnFenceProvider] (non-seam passthrough).
+func (s *seamBackedProvider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	return s.raw.WaitTurnEnded(ctx, name, turnID, timeout)
+}
+
+// TurnCapabilities implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnCapabilities(name string) runtime.TurnCapabilities {
+	return s.raw.TurnCapabilities(name)
+}
+
+// TurnHistory implements [runtime.TurnObservationProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) TurnHistory(ctx context.Context, name string) (runtime.TurnHistory, error) {
+	return s.raw.TurnHistory(ctx, name)
 }
 
 // FindRuntimesBySessionID implements [runtime.ProcessTableScanner] (non-seam

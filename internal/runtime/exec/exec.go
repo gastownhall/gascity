@@ -583,7 +583,13 @@ func formatStartupWatchError(stderr string, err error) error {
 // auto-accepted — which is the safe asymmetry: the common startup case is
 // gated, and the rare mid-session re-surface (resume/reattach) never
 // auto-trusts an unverified import.
+//
+// exec cannot fence input, so a ctx-fenced call is refused before any peek
+// or key (runtime.RefuseUnfenceableCtx).
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p, name); err != nil {
+		return err
+	}
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
 		func(keys ...string) error { return p.SendKeys(name, keys...) },

@@ -56,6 +56,17 @@ type Item struct {
 	DeadAt        time.Time `json:"dead_at,omitempty"`
 }
 
+// Bucket names the queue bucket an item is in.
+type Bucket string
+
+// The buckets a queued item can be in. An item that has left the queue
+// (delivered, withdrawn, or aged out) is in no bucket.
+const (
+	BucketPending  Bucket = "pending"
+	BucketInFlight Bucket = "in_flight"
+	BucketDead     Bucket = "dead"
+)
+
 // State is the persisted nudge queue snapshot.
 type State struct {
 	Pending  []Item `json:"pending,omitempty"`

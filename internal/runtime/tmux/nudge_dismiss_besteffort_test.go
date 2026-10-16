@@ -22,7 +22,7 @@ func TestDismissMidSessionDialogBeforeNudge_PeekErrorIsSwallowed(t *testing.T) {
 	fe := &fakeExecutor{errs: []error{errors.New("capture-pane failed")}}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge(fakeAgentPane("agent-pane")); dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); dismissed {
 		t.Error("dismissed = true on peek error, want false")
 	}
 	// The peek failed, so no dismissal keystroke may be sent: exactly the one
@@ -47,7 +47,7 @@ func TestDismissMidSessionDialogBeforeNudge_SendErrorIsSwallowed(t *testing.T) {
 	}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge(fakeAgentPane("agent-pane")); dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); dismissed {
 		t.Error("dismissed = true on send error, want false")
 	}
 	// The chooser matched (capture-pane), then the first dismissal keystroke
@@ -81,7 +81,7 @@ func TestDismissMidSessionDialogBeforeNudge_UsesVisibleOnlyCapture(t *testing.T)
 	fe := &fakeExecutor{outs: []string{resumeDialogPane}}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge(fakeAgentPane("agent-pane")); !dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); !dismissed {
 		t.Fatal("dismissed = false, want true for a live resume dialog")
 	}
 	if len(fe.calls) == 0 {
@@ -103,7 +103,7 @@ func TestDismissMidSessionDialogBeforeNudge_NoDialogSendsNoKeys(t *testing.T) {
 	fe := &fakeExecutor{outs: []string{"❯ "}}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}
 
-	if dismissed := tm.dismissMidSessionDialogBeforeNudge(fakeAgentPane("agent-pane")); dismissed {
+	if dismissed := tm.dismissMidSessionDialogBeforeNudge(context.Background(), fakeAgentPane("agent-pane")); dismissed {
 		t.Error("dismissed = true on a plain idle prompt, want false")
 	}
 	if len(fe.calls) != 1 {

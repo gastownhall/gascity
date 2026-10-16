@@ -80,6 +80,7 @@ go_test(
     name = "core_test",
     srcs = [
         "cascade_nudge_script_test.go",
+        "cross_rig_deps_script_test.go",
         "escalate_script_test.go",
         "pack_assets_test.go",
         "pack_formulas_test.go",

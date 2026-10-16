@@ -301,6 +301,10 @@ func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
 	}
+	if errors.Is(err, ErrFenceMismatch) {
+		// A miss names a session, whose name may hold the phrases below.
+		return false
+	}
 	msg := err.Error()
 	return strings.Contains(msg, "session not found") ||
 		strings.Contains(msg, "not running") ||

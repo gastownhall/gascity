@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"testing"
@@ -147,4 +148,59 @@ func mustOpenSQLiteStoreForCapabilityTest(t *testing.T) beads.Store {
 	}
 
 	return store
+}
+
+// The policy wrapper opts in to guarded-batch discovery through
+// GuardedBatcherHandle, so beads.GuardedBatcherFor resolves through it to the
+// backing store's batcher. Both wrapper shapes are covered, plus the
+// production sandwich with the cache on top, and a batch applied through the
+// resolved batcher lands where the wrapper reads.
+func TestBeadPolicyStoreResolvesTheBackingGuardedBatcher(t *testing.T) {
+	cachedLeaf := beads.NewMemStore()
+	for _, tc := range []struct {
+		name    string
+		wrapped beads.Store
+	}{
+		{"policy store", wrapStoreWithBeadPolicies(beads.NewMemStore(), &config.City{})},
+		{"policy graph store", wrapStoreWithBeadPolicies(mustOpenSQLiteStoreForCapabilityTest(t), &config.City{})},
+		{"policy store over a cache", wrapStoreWithBeadPolicies(beads.NewCachingStoreForTest(cachedLeaf, nil), &config.City{})},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			batcher, ok := beads.GuardedBatcherFor(tc.wrapped)
+			if !ok {
+				t.Fatalf("GuardedBatcherFor(%T) = false over a store that applies guarded batches", tc.wrapped)
+			}
+			seed, err := tc.wrapped.Create(beads.Bead{Title: "seed"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			pinned := seed.ID + "-pinned"
+			res, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Items: []beads.GuardedItem{
+				{Create: &beads.Bead{ID: pinned, Title: "pinned"}},
+				{Update: &beads.GuardedUpdate{ID: seed.ID, ExpectedRevision: &seed.Revision, Opts: beads.UpdateOpts{Metadata: map[string]string{"k": "v"}}}},
+			}})
+			if err != nil {
+				t.Fatalf("ApplyGuarded: %v", err)
+			}
+			got, err := tc.wrapped.Get(seed.ID)
+			if err != nil {
+				t.Fatalf("Get through the wrapper: %v", err)
+			}
+			if got.Metadata["k"] != "v" || got.Revision != res.Revisions[seed.ID] {
+				t.Fatalf("wrapper reads metadata %v revision %d, want k=v at revision %d", got.Metadata, got.Revision, res.Revisions[seed.ID])
+			}
+			if _, err := tc.wrapped.Get(pinned); err != nil {
+				t.Fatalf("Get(%s) through the wrapper: %v", pinned, err)
+			}
+		})
+	}
+}
+
+// A policy wrapper over a store that cannot apply guarded batches reports no
+// capability, rather than resolving to a batcher that always refuses.
+func TestBeadPolicyStoreReportsNoGuardedBatcherOverAnIncapableBacking(t *testing.T) {
+	wrapped := wrapStoreWithBeadPolicies(storeWithoutBatchedDepRead{Store: beads.NewMemStore()}, &config.City{})
+	if batcher, ok := beads.GuardedBatcherFor(wrapped); ok {
+		t.Fatalf("GuardedBatcherFor = (%T, true) over a backing with no guarded batches", batcher)
+	}
 }

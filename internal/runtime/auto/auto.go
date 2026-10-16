@@ -57,6 +57,7 @@ var (
 	_ runtime.ServerLifecycleProvider         = (*Provider)(nil)
 	_ runtime.SessionRosterProvider           = (*Provider)(nil)
 	_ runtime.TurnEventProvider               = (*Provider)(nil)
+	_ runtime.TurnFenceProvider               = (*Provider)(nil)
 )
 
 // New creates a composite provider. defaultSP handles sessions not
@@ -490,6 +491,9 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 // ResetInterruptedTurn delegates to the routed backend when it supports
 // provider-native interrupted-turn discard semantics.
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
 		return rp.ResetInterruptedTurn(ctx, name)
 	}
@@ -499,6 +503,9 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 // ClearInput delegates to the routed backend when it can empty a session's
 // input box and confirm it is empty.
 func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
 		return cp.ClearInput(ctx, name, restoreWindow)
 	}
@@ -519,6 +526,33 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 // in-flight turn.
 func (p *Provider) TurnInterruptMode(name string) runtime.TurnInterruptMode {
 	return runtime.TurnInterruptModeFor(p.route(name), name)
+}
+
+// ObserveTurn delegates to the routed backend when it reports which turn is
+// in progress.
+func (p *Provider) ObserveTurn(ctx context.Context, name string) (runtime.TurnState, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.ObserveTurn(ctx, name)
+	}
+	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
+}
+
+// InterruptTurn delegates to the routed backend when it can interrupt a named
+// turn.
+func (p *Provider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.InterruptTurn(ctx, name, turnID)
+	}
+	return runtime.TurnInterrupt{}, runtime.ErrInteractionUnsupported
+}
+
+// WaitTurnEnded delegates to the routed backend when it can report that a
+// named turn ended.
+func (p *Provider) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	if tf, ok := p.route(name).(runtime.TurnFenceProvider); ok {
+		return tf.WaitTurnEnded(ctx, name, turnID, timeout)
+	}
+	return runtime.TurnState{}, runtime.ErrInteractionUnsupported
 }
 
 // WaitForInterruptBoundary delegates to the routed backend when it can confirm
@@ -551,6 +585,9 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 // DismissKnownDialogs delegates to the routed backend when it can dismiss
 // startup dialogs.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
 		return dp.DismissKnownDialogs(ctx, name, timeout)
 	}

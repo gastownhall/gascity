@@ -1,0 +1,903 @@
+### enqueue n-a with a store
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-a limit=21}
+op Create BEAD-1
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-a again is idempotent
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-a limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-b supersedes pending n-a
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-b limit=21}
+op Create BEAD-2
+op SetMetadataBatch BEAD-1
+op Close BEAD-1
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    }
+  ]
+}
+
+### claim n-b
+result: [n-b] err=<nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-a include_closed limit=21}
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    }
+  ]
+}
+
+### enqueue n-c supersedes in-flight n-b
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-c limit=21}
+op Create BEAD-3
+op List {label=nudge:n-a include_closed limit=21}
+op SetMetadataBatch BEAD-2
+op Close BEAD-2
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    }
+  ]
+}
+
+### enqueue n-z with the zero store
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-z limit=21}
+op Create BEAD-4
+op List {label=nudge:n-a include_closed limit=21}
+op List {label=nudge:n-b include_closed limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-z",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-z",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    }
+  ]
+}
+
+### enqueue n-old, already past its deadline
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-old limit=21}
+op Create BEAD-5
+op List {label=nudge:n-a include_closed limit=21}
+op List {label=nudge:n-b include_closed limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-old",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-old",
+      "created_at": "T-7",
+      "deliver_after": "T-7",
+      "expires_at": "T-8",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-z",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-z",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    }
+  ]
+}
+
+### enqueue n-d expires n-old in its prologue
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-d limit=21}
+op Create BEAD-6
+op SetMetadataBatch BEAD-5
+op Close BEAD-5
+op List {label=nudge:n-a include_closed limit=21}
+op List {label=nudge:n-b include_closed limit=21}
+op List {label=nudge:n-old include_closed limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-d",
+      "bead_id": "BEAD-6",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-d",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-z",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-z",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    },
+    {
+      "id": "n-old",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-old",
+      "created_at": "T-7",
+      "deliver_after": "T-7",
+      "expires_at": "T-8",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "expired",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-9"
+    }
+  ]
+}
+
+### drop n-z
+result: [n-z] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-a include_closed limit=21}
+op List {label=nudge:n-b include_closed limit=21}
+op List {label=nudge:n-old include_closed limit=21}
+op SetMetadataBatch BEAD-4
+op Close BEAD-4
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-d",
+      "bead_id": "BEAD-6",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-d",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    },
+    {
+      "id": "n-old",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-old",
+      "created_at": "T-7",
+      "deliver_after": "T-7",
+      "expires_at": "T-8",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "expired",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-9"
+    },
+    {
+      "id": "n-z",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-z",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-10",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-10"
+    }
+  ]
+}
+
+### enqueue dead n-z again leaves an open shadow
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-z limit=21}
+op Create BEAD-7
+op List {label=nudge:n-a include_closed limit=21}
+op List {label=nudge:n-b include_closed limit=21}
+op List {label=nudge:n-old include_closed limit=21}
+op List {label=nudge:n-z include_closed limit=21}
+op SetMetadataBatch BEAD-4
+op Close BEAD-4
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-d",
+      "bead_id": "BEAD-6",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-d",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    },
+    {
+      "id": "n-old",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-old",
+      "created_at": "T-7",
+      "deliver_after": "T-7",
+      "expires_at": "T-8",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "expired",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-9"
+    },
+    {
+      "id": "n-z",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-z",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-10",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-10"
+    }
+  ]
+}
+
+### enqueue n-e over an unreadable queue rolls back its shadow
+result: parse nudge queue: invalid character 'n' looking for beginning of object key string
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-e limit=21}
+op Create BEAD-8
+op SetMetadata BEAD-8
+op Close BEAD-8
+state.json:
+{not json
+
+### enqueue n-f whose shadow write fails
+result: injected shadow write failure
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-f limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-c",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-c",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-d",
+      "bead_id": "BEAD-6",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-d",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-a",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-a",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-3"
+    },
+    {
+      "id": "n-b",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-b",
+      "reference": {
+        "kind": "mail",
+        "id": "m1"
+      },
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "superseded",
+      "claimed_at": "T-4",
+      "lease_until": "T-5",
+      "dead_at": "T-6"
+    },
+    {
+      "id": "n-old",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-old",
+      "created_at": "T-7",
+      "deliver_after": "T-7",
+      "expires_at": "T-8",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "expired",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-9"
+    },
+    {
+      "id": "n-z",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-z",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-10",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-10"
+    }
+  ]
+}
+

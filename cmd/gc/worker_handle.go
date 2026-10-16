@@ -90,6 +90,9 @@ func workerFactoryWithStaleKeyDetectionWaiter(
 		StaleKeyDetectionWaiter: waiter,
 		Pricing:                 cfg.PricingRegistry(),
 		RuntimeLeaseTTL:         session.RuntimeLeaseTTLFor(cfg),
+		// The zero store resolves no class store: a deferred submit writes
+		// no shadow, so it opens nothing.
+		DeferredSubmits: openNudgeQueue(cityPath, beads.NudgesStore{}).Queue,
 	})
 }
 

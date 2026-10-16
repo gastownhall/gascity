@@ -26,6 +26,7 @@ func (s *Server) workerFactory(store beads.Store) (*worker.Factory, error) {
 		Pricing:               cfg.PricingRegistry(),
 		ActivityMemo:          s.activityMemo,
 		RuntimeLeaseTTL:       session.RuntimeLeaseTTLFor(cfg),
+		DeferredSubmits:       s.state.NudgeQueue(),
 	})
 }
 

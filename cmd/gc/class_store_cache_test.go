@@ -103,6 +103,13 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 		_, ok := beads.AtomicConditionalCloserFor(store)
 		return ok
 	},
+	// Handle-only, like CloseWithMetadataIfMatch: the cache exposes guarded
+	// batches through GuardedBatcherHandle only when its backing has them, so
+	// a cache over a bd store never advertises a batcher that always refuses.
+	"ApplyGuarded": func(store beads.Store) bool {
+		_, ok := beads.GuardedBatcherFor(store)
+		return ok
+	},
 	"SupportsEphemeralGraphApply": func(store beads.Store) bool {
 		applier, ok := beads.GraphApplyFor(store)
 		_, ephemeral := applier.(beads.EphemeralGraphApplyStore)

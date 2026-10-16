@@ -464,6 +464,28 @@ and keeps copying the whole work dir.
 - **Empty = unsupported**: `get-last-activity` returning empty stdout means
   the backend doesn't support activity tracking (zero time in Go).
 
+### Session identity
+
+The `env` object in the start config carries the session's identity:
+`GC_SESSION_ID`, `GC_INSTANCE_TOKEN` and `GC_RUNTIME_EPOCH`. When `get-meta`
+returns these keys from the moment `is-running` reports the session, the
+orchestrator can tell which session a running box belongs to. After an
+orchestrator restart it then adopts a session whose start was cut short,
+instead of failing it.
+
+A script whose `get-meta` answers them empty still works. If a session
+created with `gc session new` (or the API) fails to start, or its start is cut
+short, the orchestrator stops any box running under its name before it marks
+the session failed. A box that reports another session's `GC_SESSION_ID` is
+left alone.
+
+That teardown reads the identity keys first, so `get-meta` must print nothing
+and exit 0 both for an unset key and for a session that does not exist. A
+non-zero exit reads as "cannot tell": a failed `gc session new` or API session
+then stays open in `creating` until `get-meta` answers, or until an operator
+runs `gc session close`. A script that runs its backend's CLI under
+`set -e` should catch the "no such session" case and print nothing.
+
 ## Writing Your Own Script
 
 1. Start with `contrib/session-scripts/gc-session-screen` as a template.

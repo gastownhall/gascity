@@ -14,7 +14,9 @@
 // JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), the
 // t3bridge UI thread-metadata namespace (internal/runtime/t3bridge), and the
 // conversation operation journal's gc.op.* / gc.fact.* row namespace
-// (internal/opjournal, whose bead codec is the only reader and writer). Pack- and
+// (internal/opjournal, whose bead codec is the only reader and writer), and the
+// event-fact gc.ev.* and projector-checkpoint gc.evproj.* row namespaces
+// (internal/eventfact, likewise). Pack- and
 // prompt-private keys that no Go file reads stay open-world by design and are
 // intentionally NOT declared here (see KnownMetadataPrefixes for the dynamic
 // gc.var.<name> case).

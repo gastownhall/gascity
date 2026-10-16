@@ -483,44 +483,86 @@ var (
 	ErrTurnInterruptUnsupported = errors.New("session runtime cannot interrupt the running turn")
 )
 
+// ErrSessionMutationBusy reports that a context-aware acquire of a session's
+// mutation lock gave up while another holder still had it. fn never ran, so
+// the caller may retry the whole operation. The returned error also wraps the
+// context's own error.
+var ErrSessionMutationBusy = errors.New("session mutation lock busy")
+
+// sessionMutationLockEntry is one session's lock. sem is a channel of
+// capacity one, full while the lock is held, so a waiter can select against a
+// context; a sync.Mutex cannot be abandoned. refs counts holders and waiters
+// and is guarded by sessionMutationLocksMu.
 type sessionMutationLockEntry struct {
-	mu   sync.Mutex
+	sem  chan struct{}
 	refs int
 }
 
 var (
+	// sessionMutationLocksMu guards the sessionMutationLocks map and every
+	// entry's refs. It is bookkeeping only and is never held across a
+	// blocking operation.
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
 
 // WithSessionMutationLock serializes metadata mutations for one session bead.
+// It waits for the lock without bound; use WithSessionMutationLockContext to
+// bound the wait.
 func WithSessionMutationLock(id string, fn func() error) error {
 	return withSessionMutationLock(id, fn)
 }
 
-func withSessionMutationLock(id string, fn func() error) error {
-	lock := acquireSessionMutationLock(id)
+// WithSessionMutationLockContext is WithSessionMutationLock with a bounded
+// wait. It tries the lock first, so a free lock is acquired even when ctx is
+// already done; ctx bounds only the wait for a held lock, never fn. When ctx
+// ends while the lock is still held it returns an error wrapping both
+// ErrSessionMutationBusy and ctx.Err(), and fn has not run and never will.
+func WithSessionMutationLockContext(ctx context.Context, id string, fn func() error) error {
+	lock, err := acquireSessionMutationLockContext(ctx, id)
+	if err != nil {
+		return err
+	}
 	defer releaseSessionMutationLock(id, lock)
 	return fn()
 }
 
-func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
+func withSessionMutationLock(id string, fn func() error) error {
+	return WithSessionMutationLockContext(context.Background(), id, fn)
+}
+
+func acquireSessionMutationLockContext(ctx context.Context, id string) (*sessionMutationLockEntry, error) {
 	sessionMutationLocksMu.Lock()
 	lock := sessionMutationLocks[id]
 	if lock == nil {
-		lock = &sessionMutationLockEntry{}
+		lock = &sessionMutationLockEntry{sem: make(chan struct{}, 1)}
 		sessionMutationLocks[id] = lock
 	}
 	lock.refs++
 	sessionMutationLocksMu.Unlock()
 
-	lock.mu.Lock()
-	return lock
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	default:
+	}
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	case <-ctx.Done():
+		dropSessionMutationLockRef(id, lock)
+		return nil, fmt.Errorf("session %s: %w: %w", id, ErrSessionMutationBusy, ctx.Err())
+	}
 }
 
 func releaseSessionMutationLock(id string, lock *sessionMutationLockEntry) {
-	lock.mu.Unlock()
+	<-lock.sem
+	dropSessionMutationLockRef(id, lock)
+}
 
+// dropSessionMutationLockRef gives up one reference without touching sem and
+// deletes the entry when none remain.
+func dropSessionMutationLockRef(id string, lock *sessionMutationLockEntry) {
 	sessionMutationLocksMu.Lock()
 	lock.refs--
 	if lock.refs == 0 {
@@ -644,6 +686,9 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 // a delivery (ensureDeliverable), so a corpse a stale cache still shows
 // running is not taken for a live runtime to type into (J26 C2, mc-ir8qp).
 func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing, running bool) error {
+	// A start never runs under a caller's input fence: the fence names the
+	// incarnation this start may replace (FI9).
+	ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
 	if err := m.startRefusal(by, id, b); err != nil {
 		return err
 	}
@@ -1118,13 +1163,11 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 // runtime.WithNudgeDeliveryKey) to a provider that deduplicates keyed
 // deliveries. Immediate delivery through an ImmediateNudgeProvider goes out
 // unkeyed: NudgeNow takes no key.
+//
+// Under an input fence in ctx (runtime.WithInputFence) the runtime delivers
+// only to the incarnation it names, or refuses.
 func (m *Manager) nudgeContent(ctx context.Context, sessName string, content []runtime.ContentBlock, immediate bool) error {
-	if immediate {
-		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
-			return np.NudgeNow(sessName, content)
-		}
-	}
-	return runtime.NudgeWithDeliveryKey(ctx, m.sp, sessName, content)
+	return runtime.NudgeWithContext(ctx, m.sp, sessName, content, immediate)
 }
 
 func normalizeWaitIdleNudgeSource(source string) string {
@@ -1294,9 +1337,10 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil {
 			return err
 		}
-		if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
+		live, err := m.freshLiveness(sessName, processNames)
+		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
-			return nil
+			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
 		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err
@@ -1356,7 +1400,10 @@ func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resu
 
 // SendLiveOnly nudges the runtime only when the current session is already
 // running with its agent alive (by processNames; none reads alive). It never
-// resumes or restarts the session.
+// resumes or restarts the session. Under an input fence in ctx, a session it
+// finds not running, or with its agent exited, is a miss rather than
+// undelivered, and a liveness read that fails is runtime.ErrRuntimeUnavailable
+// (runtime.LivenessFenceMiss).
 func (m *Manager) SendLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
 	return m.sendLiveOnly(ctx, id, message, false, processNames)
 }
@@ -1416,33 +1463,44 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // interrupt neither way gets nothing sent and StopTurn returns
 // ErrTurnInterruptUnsupported.
 func (m *Manager) StopTurn(id string) error {
+	return m.stopTurn(context.Background(), id)
+}
+
+// stopTurn is StopTurn under ctx. Under an input fence in ctx every key and
+// interrupt it sends is fenced, and a runtime that cannot fence the session
+// is refused before anything is sent.
+func (m *Manager) stopTurn(ctx context.Context, id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
-		if !running {
+		_, fenced := runtime.InputFenceFrom(ctx)
+		if fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
+			return fmt.Errorf("stopping the turn of %s: %w", id, runtime.ErrInputFenceUnsupported)
+		}
+		if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
 			// No runtime means no turn to interrupt: stopTurnLocked sends
-			// nothing, so there is nothing to wait for either.
-			return nil
+			// nothing, so there is nothing to wait for either. A fenced stop
+			// reports what its read found: never success into none.
+			return err
 		}
 		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
 		interruptStartedAt := time.Now()
-		if err := m.stopTurnLocked(b, sessName, mode); err != nil {
+		if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 			return err
 		}
-		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName, mode); err != nil {
+		if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
 			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
 		}
-		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
+		if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
 		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.
-			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
+			if _, err := m.clearRestoredInputLocked(ctx, sessName); err != nil {
 				log.Printf("session: stopped the turn of %q but %v", sessName, err)
 			}
 		}

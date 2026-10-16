@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"crypto/sha256"
 	"errors"
 	"fmt"
@@ -883,9 +884,11 @@ func (t *Tmux) Respond(name string, response runtime.InteractionResponse) error 
 	// Exit copy-mode first if the pane is parked (the ga-c4w wheel binding),
 	// so the approval keystroke reaches the prompt instead of being swallowed
 	// by copy-mode.
-	t.cancelCopyModeIfParked(target)
+	t.cancelCopyModeIfParked(context.Background(), target)
 
-	// Send the keystroke once.
+	// Send the keystroke once. key is one digit from 1 to 9
+	// (approvalOptionKey), which tmux types as given, so unlike caller text it
+	// needs no runtime.TmuxLiteralArgs encoding (RUNTIME-CONTRACT-011).
 	if _, err := t.run("send-keys", "-t", target, "-l", key); err != nil {
 		if errors.Is(err, ErrSessionNotFound) {
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
