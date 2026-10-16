@@ -228,6 +228,13 @@ func doltServerHeadForCompactTest(t *testing.T, doltPath string, port int) strin
 // test sql-server and returns the CSV rows without the header.
 func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, query string) []string {
 	t.Helper()
+	return doltServerQueryDBForCompactTest(t, doltPath, port, "beads", query)
+}
+
+// doltServerQueryDBForCompactTest runs query against db on the test
+// sql-server and returns the CSV rows without the header.
+func doltServerQueryDBForCompactTest(t *testing.T, doltPath string, port int, db, query string) []string {
+	t.Helper()
 	ctx, cancel := doltCallContext(t)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, doltPath,
@@ -235,7 +242,7 @@ func doltServerQueryForCompactTest(t *testing.T, doltPath string, port int, quer
 		"--port", fmt.Sprintf("%d", port),
 		"--user", "root",
 		"--no-tls",
-		"--use-db", "beads",
+		"--use-db", db,
 		"sql", "-r", "csv", "-q", query,
 	)
 	cmd.Env = append(filteredEnv("DOLT_CLI_PASSWORD"), "DOLT_CLI_PASSWORD=", "NO_COLOR=1")

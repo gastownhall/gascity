@@ -367,11 +367,13 @@ If GC finishes but the size barely moves, the chunks are nearly all live
 
 `gc dolt compact` writes exact reason strings into
 `.gc/runtime/packs/dolt/compact-quarantine/<database>` when it detects
-possible writer interference before full GC. Operator dashboards and runbooks
+possible writer interference before full GC, or a database that compaction
+left unserved. Operator dashboards and runbooks
 should treat these strings as the current vocabulary:
 
 | Reason | Meaning |
 |--------|---------|
+| `live database unavailable after compaction` | After a flatten or GC, the database's data-dir entry was gone or the server no longer served it with a resolvable HEAD. The run stopped before any other database was touched. Restore the database before clearing the marker (`gc dolt compact --help`, "Live-database gate"). |
 | `post-flatten HEAD probe failed` | The compactor could not read the database HEAD after flatten. |
 | `post-flatten integrity check failed` | A post-flatten integrity check failed before recording a more specific reason. |
 | `post-flatten row count decreased` | A table lost rows after flatten. |

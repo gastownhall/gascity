@@ -104,6 +104,8 @@ go_test(
         "compact_backup_remotes_test.go",
         "compact_history_protection_real_dolt_test.go",
         "compact_history_protection_test.go",
+        "compact_live_database_real_dolt_test.go",
+        "compact_live_database_test.go",
         "compact_no_sync_test.go",
         "compact_notify_cadence_test.go",
         "compact_real_dolt_callbound_test.go",
