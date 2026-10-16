@@ -185,7 +185,14 @@ type InterruptRequest struct {
 	// it names (see runtime.InputFence). A runtime that cannot fence the
 	// session refuses with runtime.ErrInputFenceUnsupported before sending
 	// anything; a miss is a *runtime.FenceMismatchError, and a session that
-	// is not running is one finding it absent (both handles). It is a
+	// is not running, or has no session row, is one finding it absent (both
+	// handles). Past that the handles differ. A SessionHandle maps the
+	// liveness it reads before the stop as session.Manager.StopTurnFenced
+	// documents: an exited agent is a miss finding it dead, and a read that
+	// cannot answer is runtime.ErrRuntimeUnavailable. A RuntimeHandle
+	// takes no liveness read and leaves the verdict to the runtime's guard;
+	// tmux's checks the agent pane, not the agent process, so an interrupt
+	// into an exited agent whose pane lives on can return nil. It is a
 	// capability and never serialized.
 	Fence runtime.InputFence `json:"-"`
 }
@@ -220,9 +227,13 @@ type NudgeRequest struct {
 	// Fence, when set, delivers only to the incarnation it names (see
 	// runtime.InputFence): a miss is a *runtime.FenceMismatchError, and a
 	// runtime that cannot fence the session refuses with
-	// runtime.ErrInputFenceUnsupported unless AllowUnfenced. A fenced nudge
-	// must be live-only with default or immediate delivery
-	// (ErrFencedNudgeShape). It is a capability and never serialized.
+	// runtime.ErrInputFenceUnsupported unless AllowUnfenced. A session with
+	// no session row, or not running, is a miss finding it absent and one
+	// whose agent exited a miss finding it dead, where an unfenced nudge
+	// reports it undelivered; a liveness read that fails is
+	// runtime.ErrRuntimeUnavailable (both handles). A fenced nudge must be
+	// live-only with default or immediate delivery (ErrFencedNudgeShape). It
+	// is a capability and never serialized.
 	Fence runtime.InputFence `json:"-"`
 	// AllowUnfenced lets a fenced nudge to a runtime that cannot fence the
 	// session go out unfenced; the result then reports Unfenced.

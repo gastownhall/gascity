@@ -1295,9 +1295,10 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil {
 			return err
 		}
-		if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
+		live, err := m.freshLiveness(sessName, processNames)
+		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
-			return nil
+			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
 		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err
@@ -1357,7 +1358,10 @@ func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resu
 
 // SendLiveOnly nudges the runtime only when the current session is already
 // running with its agent alive (by processNames; none reads alive). It never
-// resumes or restarts the session.
+// resumes or restarts the session. Under an input fence in ctx, a session it
+// finds not running, or with its agent exited, is a miss rather than
+// undelivered, and a liveness read that fails is runtime.ErrRuntimeUnavailable
+// (runtime.LivenessFenceMiss).
 func (m *Manager) SendLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
 	return m.sendLiveOnly(ctx, id, message, false, processNames)
 }
@@ -1433,15 +1437,11 @@ func (m *Manager) stopTurn(ctx context.Context, id string) error {
 		if fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
 			return fmt.Errorf("stopping the turn of %s: %w", id, runtime.ErrInputFenceUnsupported)
 		}
-		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
-		if !running {
+		if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
 			// No runtime means no turn to interrupt: stopTurnLocked sends
 			// nothing, so there is nothing to wait for either. A fenced stop
-			// reports its incarnation absent: never success into none.
-			if fenced {
-				return &runtime.FenceMismatchError{Session: sessName, Found: runtime.FenceFoundAbsent}
-			}
-			return nil
+			// reports what its read found: never success into none.
+			return err
 		}
 		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
 		interruptStartedAt := time.Now()

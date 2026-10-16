@@ -355,10 +355,13 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // [runtime.TurnInterruptModeFor]. Only keystroke mode sends the
 // provider-specific keys (soft Escape, Ctrl-C fallback, input clear): a
 // protocol runtime drops keys and is interrupted through Interrupt alone.
-// Every input goes under the fence ctx carries, if any.
+// Every input goes under the fence ctx carries, if any. A session with no
+// turn to interrupt (stopFindsNoTurn) is sent nothing: under a fence its
+// fresh read decides the miss, as it may have stopped since its caller read
+// it running.
 func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
-	if State(b.Metadata["state"]) == StateSuspended || !m.sp.IsRunning(sessName) {
-		return nil
+	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
+		return err
 	}
 	switch mode {
 	case runtime.TurnInterruptProtocol:

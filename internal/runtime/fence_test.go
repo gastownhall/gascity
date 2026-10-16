@@ -293,3 +293,48 @@ func TestFakeNoneRefusesCtxFencedInput(t *testing.T) {
 		t.Fatalf("refused calls recorded: %+v", calls)
 	}
 }
+
+// Kills a fenced input that reports success, or nothing sent, into an
+// incarnation its fresh liveness read has ruled out: under a fence no session
+// is a miss finding it absent, an exited agent or a corpse one finding it
+// dead, and a read that cannot answer is ErrRuntimeUnavailable, not a miss
+// (never proof the incarnation is gone). Only an alive read passes; without
+// a fence every read passes, for the input's own handling.
+func TestLivenessFenceMiss(t *testing.T) {
+	fenced := runtime.WithInputFence(context.Background(), runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"})
+	alive := runtime.Liveness{Running: true, Alive: true}
+	for _, tc := range []struct {
+		name        string
+		live        runtime.Liveness
+		err         error
+		found       string // the miss's Found; "" for none
+		unavailable bool
+	}{
+		{name: "alive", live: alive},
+		{name: "absent", found: runtime.FenceFoundAbsent},
+		{name: "agent exited", live: runtime.Liveness{Running: true}, found: runtime.FenceFoundDead},
+		{name: "corpse", live: runtime.Liveness{Corpse: true}, found: runtime.FenceFoundDead},
+		{name: "unreadable", err: errors.New("tmux state refresh failed"), unavailable: true},
+		{name: "unavailable beside an alive view", live: alive, err: fmt.Errorf("probe: %w", runtime.ErrRuntimeUnavailable), unavailable: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := runtime.LivenessFenceMiss(context.Background(), "s", tc.live, tc.err); err != nil {
+				t.Errorf("unfenced = %v, want nil", err)
+			}
+			err := runtime.LivenessFenceMiss(fenced, "s", tc.live, tc.err)
+			var miss *runtime.FenceMismatchError
+			switch {
+			case tc.unavailable:
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, tc.err) || errors.Is(err, runtime.ErrFenceMismatch) {
+					t.Fatalf("fenced = %v, want ErrRuntimeUnavailable wrapping the read's error, not a miss", err)
+				}
+			case tc.found == "":
+				if err != nil {
+					t.Fatalf("fenced = %v, want nil", err)
+				}
+			case !errors.As(err, &miss) || miss.Session != "s" || miss.Found != tc.found || miss.Partial:
+				t.Fatalf("fenced = %v, want a non-partial miss of %q finding it %s", err, "s", tc.found)
+			}
+		})
+	}
+}

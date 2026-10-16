@@ -47,11 +47,11 @@ var _ runtime.FencedInputProvider = (*Provider)(nil)
 
 // InputFencing reports that tmux fences every session's input atomically:
 // each input command runs inside a tmux if-shell whose condition is the
-// pane's fence. It is a static trait and reads no tmux state. One path is
-// checked rather than atomic, and the trait does not express it: a detached
-// Gemini session's input through its hidden attach client is a PTY write,
-// preceded by a read that its active pane is the verified agent pane and
-// holds the fence (paneGuard.checkLive).
+// pane's fence. It is a static trait and reads no tmux state, so it reports
+// atomic for the one path that is checked, the exception InputFencingAtomic
+// names: a detached Gemini session's input through its hidden attach client
+// is a PTY write, preceded by a read that its active pane is the verified
+// agent pane and holds the fence (paneGuard.checkLive).
 func (p *Provider) InputFencing(string) runtime.InputFencing {
 	return runtime.InputFencingAtomic
 }

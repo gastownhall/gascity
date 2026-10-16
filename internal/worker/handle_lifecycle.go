@@ -384,7 +384,7 @@ func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (er
 			return err
 		}
 		if id == "" {
-			err = &runtime.FenceMismatchError{Session: firstNonEmpty(h.session.ExplicitName, h.session.Alias), Found: runtime.FenceFoundAbsent}
+			err = h.noRowFenceMiss()
 			return err
 		}
 		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
@@ -413,9 +413,9 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
-	// Refuse a malformed fenced request before ensureSessionID, which may
-	// create a session row.
-	if err = validateFencedNudge(req); err != nil {
+	// Refuse a malformed fenced request, or one with no session row to
+	// deliver into, before ensureSessionID, which may create a session row.
+	if err = h.fencedNudgeRefusal(req); err != nil {
 		return NudgeResult{}, err
 	}
 	id, err := h.ensureSessionID()
@@ -485,6 +485,25 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
 	}
+}
+
+// fencedNudgeRefusal is validateFencedNudge's refusal of req, or, for a
+// fenced req to a handle with no session row, a miss finding it absent: no
+// incarnation exists for the fence to name.
+func (h *SessionHandle) fencedNudgeRefusal(req NudgeRequest) error {
+	if err := validateFencedNudge(req); err != nil || req.Fence.IsZero() {
+		return err
+	}
+	if h.currentSessionID() == "" {
+		return h.noRowFenceMiss()
+	}
+	return nil
+}
+
+// noRowFenceMiss is a fenced input's miss on a handle with no session row,
+// named as the caller names the session: by explicit name, alias or template.
+func (h *SessionHandle) noRowFenceMiss() error {
+	return &runtime.FenceMismatchError{Session: firstNonEmpty(h.session.ExplicitName, h.session.Alias, h.session.Template), Found: runtime.FenceFoundAbsent}
 }
 
 // sentNudgeResult: a session that could not take the nudge now queued it.

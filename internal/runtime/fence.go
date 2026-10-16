@@ -139,7 +139,10 @@ type InputFencing string
 
 const (
 	// InputFencingAtomic means the check and the input are one runtime step:
-	// no other incarnation can receive a fenced input.
+	// no other incarnation can receive a fenced input, except on an input
+	// path the runtime documents as checked and takes by runtime state,
+	// which the static trait cannot report (tmux: a detached Gemini
+	// session's input through its hidden attach client).
 	InputFencingAtomic InputFencing = "atomic"
 	// InputFencingChecked means the runtime checks, then inputs: an
 	// incarnation started in between can receive the input.
@@ -289,6 +292,29 @@ func InputFenceFrom(ctx context.Context) (InputFence, bool) {
 	}
 	f, _ := ctx.Value(inputFenceContextKey{}).(InputFence)
 	return f, !f.IsZero()
+}
+
+// LivenessFenceMiss is what an input fenced by ctx reports when a fresh
+// liveness read of session name (live, err) rules its incarnation out before
+// anything is sent: a read that cannot answer is ErrRuntimeUnavailable, never
+// a miss; no session is a miss finding it absent; an exited agent or a
+// corpse is one finding it dead. It is nil when ctx carries no fence (the
+// input keeps its own handling) or the read finds the agent alive.
+func LivenessFenceMiss(ctx context.Context, name string, live Liveness, err error) error {
+	if _, fenced := InputFenceFrom(ctx); !fenced {
+		return nil
+	}
+	switch {
+	case err != nil && errors.Is(err, ErrRuntimeUnavailable):
+		return fmt.Errorf("session %q: %w", name, err)
+	case err != nil:
+		return fmt.Errorf("session %q: %w: %w", name, ErrRuntimeUnavailable, err)
+	case live.Running && live.Alive:
+		return nil
+	case live.Running || live.Corpse:
+		return &FenceMismatchError{Session: name, Found: FenceFoundDead}
+	}
+	return &FenceMismatchError{Session: name, Found: FenceFoundAbsent}
 }
 
 // fencedProvider is p's fenced input surface for session name under the

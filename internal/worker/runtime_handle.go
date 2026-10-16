@@ -327,6 +327,10 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 	// Decided on a fresh read, not the provider's cache: the tmux state
 	// cache can show a crashed agent alive for seconds after the crash.
 	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
+	// A fenced nudge reports what the read found instead of undelivered.
+	if err = runtime.LivenessFenceMiss(ctx, h.sessionName, live, liveErr); err != nil {
+		return NudgeResult{}, err
+	}
 	if liveErr != nil || live.Running && !live.Alive {
 		// A dead agent's pane takes nothing (mc-48az4): the caller queues it.
 		result = NudgeResult{Undelivered: NudgeUndeliveredAgentDead}

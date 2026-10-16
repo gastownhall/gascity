@@ -7,6 +7,7 @@ import (
 	"math/rand"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -118,10 +119,18 @@ var stopFamilies = []struct {
 
 func newFencedStopSession(t *testing.T, provider string, meta map[string]string, mode runtime.TurnInterruptMode) (*Manager, *runtime.Fake, Info, runtime.InputFence) {
 	t.Helper()
-	store := beads.NewMemStore()
 	sp := runtime.NewFake()
+	mgr, info, f := newFencedStopSessionOn(t, sp, sp, provider, meta, mode)
+	return mgr, sp, info, f
+}
+
+// newFencedStopSessionOn is newFencedStopSession with its manager on rt, a
+// runtime over sp that must behave as sp until the test changes it.
+func newFencedStopSessionOn(t *testing.T, rt runtime.Provider, sp *runtime.Fake, provider string, meta map[string]string, mode runtime.TurnInterruptMode) (*Manager, Info, runtime.InputFence) {
+	t.Helper()
+	store := beads.NewMemStore()
 	sp.TurnInterruptModeValue = mode
-	mgr := newTestManager(t, store, sp)
+	mgr := newTestManager(t, store, rt)
 	extra := map[string]string{"session_origin": "manual"}
 	for k, v := range meta {
 		extra[k] = v
@@ -139,7 +148,7 @@ func newFencedStopSession(t *testing.T, provider string, meta map[string]string,
 		sp.WaitForIdleSequence[info.SessionName] = []error{errors.New("not idle yet"), nil}
 	}
 	sp.Calls = nil
-	return mgr, sp, info, f
+	return mgr, info, f
 }
 
 // Kills a stop-turn path that sends any key or interrupt unfenced: for every
@@ -314,5 +323,201 @@ func TestStopTurnFencedOfStoppedSessionIsAbsent(t *testing.T) {
 	}
 	if err := mgr.StopTurn(info.ID); err != nil {
 		t.Fatalf("StopTurn of a stopped session = %v, want nil", err)
+	}
+}
+
+// dyingRuntime stops session dies when a stop reads its turn interrupt mode,
+// which a stop does only once it has read the session running, and before
+// its first input.
+type dyingRuntime struct {
+	*runtime.Fake
+	dies string
+}
+
+func (d *dyingRuntime) TurnInterruptMode(name string) runtime.TurnInterruptMode {
+	if name == d.dies {
+		d.dies = ""
+		_ = d.Stop(name)
+	}
+	return d.Fake.TurnInterruptMode(name)
+}
+
+// Kills a fenced stop that reports success into an incarnation that exits
+// between the stop's running check and its first input: for every family
+// and both interrupt modes, a session gone right after the stop reads it
+// running is a non-partial miss finding it absent, decided before anything
+// is sent; the unfenced stop of the same race stays nil.
+func TestStopTurnFencedOfADyingSessionIsAbsent(t *testing.T) {
+	for _, fam := range stopFamilies {
+		for _, mode := range []runtime.TurnInterruptMode{runtime.TurnInterruptKeystroke, runtime.TurnInterruptProtocol} {
+			t.Run(fam.name+"/"+string(mode), func(t *testing.T) {
+				rt := &dyingRuntime{Fake: runtime.NewFake()}
+				mgr, info, f := newFencedStopSessionOn(t, rt, rt.Fake, fam.provider, fam.meta, mode)
+				rt.dies = info.SessionName
+				err := mgr.StopTurnFenced(context.Background(), info.ID, f)
+				if rt.dies != "" {
+					t.Fatal("the stop never read the session running: the race was not run")
+				}
+				var miss *runtime.FenceMismatchError
+				if !errors.As(err, &miss) || miss.Session != info.SessionName || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
+					t.Fatalf("StopTurnFenced of a dying session = %v, want a non-partial miss finding it absent", err)
+				}
+				calls := rt.SnapshotCalls()
+				if sent := inputCalls(calls, info.SessionName); len(sent) != 0 {
+					t.Fatalf("a stop of a gone session sent %v", callMethods(sent))
+				}
+				if slices.ContainsFunc(calls, func(c runtime.Call) bool { return c.Method == "FenceMismatch" }) {
+					t.Fatal("the miss came from a fenced input sent into the gone session, not from the stop's read")
+				}
+
+				urt := &dyingRuntime{Fake: runtime.NewFake()}
+				umgr, uinfo, _ := newFencedStopSessionOn(t, urt, urt.Fake, fam.provider, fam.meta, mode)
+				urt.dies = uinfo.SessionName
+				if err := umgr.StopTurn(uinfo.ID); err != nil || urt.dies != "" {
+					t.Fatalf("StopTurn of a dying session = %v (race run: %v), want nil", err, urt.dies == "")
+				}
+			})
+		}
+	}
+}
+
+// Kills a fenced live-only send that reports nothing delivered, as if
+// unfenced, into an incarnation its fresh liveness read rules out: under a
+// fence, a stopped session is a miss finding it absent, an exited agent one
+// finding it dead, and a read that cannot answer is ErrRuntimeUnavailable,
+// with nothing sent; unfenced, each stays undelivered and nil.
+func TestFencedLiveOnlySendOfAGoneAgentMisses(t *testing.T) {
+	readErr := errors.New("tmux state refresh failed")
+	for _, tc := range []struct {
+		name  string
+		gone  func(rt *unreadableAfter, name string) error
+		found string // the miss's Found; "" for ErrRuntimeUnavailable
+	}{
+		{"stopped", func(rt *unreadableAfter, name string) error { return rt.Stop(name) }, runtime.FenceFoundAbsent},
+		{"agent exited", func(rt *unreadableAfter, name string) error { rt.Zombies[name] = true; return nil }, runtime.FenceFoundDead},
+		{"unreadable", func(rt *unreadableAfter, _ string) error { rt.err = readErr; return nil }, ""},
+	} {
+		for _, immediate := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/immediate=%v", tc.name, immediate), func(t *testing.T) {
+				rt := &unreadableAfter{Fake: runtime.NewFake()}
+				mgr, info, f := newFencedStopSessionOn(t, rt, rt.Fake, "claude", nil, runtime.TurnInterruptKeystroke)
+				if err := tc.gone(rt, info.SessionName); err != nil {
+					t.Fatal(err)
+				}
+				rt.Calls = nil
+				send := mgr.SendLiveOnly
+				if immediate {
+					send = mgr.SendImmediateLiveOnly
+				}
+				processNames := []string{"claude"}
+				delivered, err := send(runtime.WithInputFence(context.Background(), f), info.ID, "hi", processNames)
+				var miss *runtime.FenceMismatchError
+				switch {
+				case tc.found == "":
+					if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, readErr) || errors.Is(err, runtime.ErrFenceMismatch) {
+						t.Fatalf("fenced send = %v, %v; want ErrRuntimeUnavailable wrapping the read's error, not a miss", delivered, err)
+					}
+				case !errors.As(err, &miss) || miss.Session != info.SessionName || miss.Found != tc.found || miss.Partial:
+					t.Fatalf("fenced send = %v, %v; want a non-partial miss finding it %s", delivered, err, tc.found)
+				}
+				if delivered {
+					t.Fatal("a missed send reports delivered")
+				}
+				if sent := inputCalls(rt.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+					t.Fatalf("a send to a gone agent sent %v", callMethods(sent))
+				}
+				if delivered, err := send(context.Background(), info.ID, "hi", processNames); delivered || err != nil {
+					t.Fatalf("unfenced send = %v, %v; want undelivered, nil", delivered, err)
+				}
+			})
+		}
+	}
+}
+
+// unreadableAfter is a runtime whose fresh liveness read fails with err once
+// err is set.
+type unreadableAfter struct {
+	*runtime.Fake
+	err error
+}
+
+func (u *unreadableAfter) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	if u.err != nil {
+		return runtime.Liveness{}, u.err
+	}
+	return runtime.ObserveLivenessSince(u.Fake, name, processNames, since)
+}
+
+// staleCacheRuntime is unreadableAfter whose cached running read
+// (IsRunning) finds no session once cacheGone is set, as the tmux state
+// cache does past its stale window, while its fresh read still answers.
+type staleCacheRuntime struct {
+	unreadableAfter
+	cacheGone bool
+}
+
+func (s *staleCacheRuntime) IsRunning(name string) bool {
+	return !s.cacheGone && s.Fake.IsRunning(name)
+}
+
+// Kills a fenced stop that decides its incarnation absent from the runtime's
+// cached running read, which reads a live session not running: for every
+// family and both interrupt modes, a stop whose cache finds no session but
+// whose fresh read finds it alive sends the unfenced stop's inputs, each
+// fenced; one whose fresh read cannot answer is ErrRuntimeUnavailable, not a
+// miss, and one of an exited agent a miss finding it dead, not absent, each
+// with nothing sent. The unfenced stop still goes by the cache.
+func TestStopTurnFencedReadsLivenessFresh(t *testing.T) {
+	readErr := errors.New("tmux state refresh failed")
+	for _, fam := range stopFamilies {
+		for _, mode := range []runtime.TurnInterruptMode{runtime.TurnInterruptKeystroke, runtime.TurnInterruptProtocol} {
+			t.Run(fam.name+"/"+string(mode), func(t *testing.T) {
+				rt := &staleCacheRuntime{unreadableAfter: unreadableAfter{Fake: runtime.NewFake()}}
+				mgr, info, f := newFencedStopSessionOn(t, rt, rt.Fake, fam.provider, fam.meta, mode)
+				rt.cacheGone = true
+				if err := mgr.StopTurnFenced(context.Background(), info.ID, f); err != nil {
+					t.Fatalf("StopTurnFenced of a live session its cache misses = %v, want nil", err)
+				}
+				fenced := inputCalls(rt.SnapshotCalls(), info.SessionName)
+				umgr, usp, uinfo, _ := newFencedStopSession(t, fam.provider, fam.meta, mode)
+				if err := umgr.StopTurn(uinfo.ID); err != nil {
+					t.Fatalf("StopTurn: %v", err)
+				}
+				if want := callMethods(inputCalls(usp.SnapshotCalls(), uinfo.SessionName)); len(fenced) == 0 || !slices.Equal(callMethods(fenced), want) {
+					t.Fatalf("StopTurnFenced sent %v, want the unfenced stop's %v", callMethods(fenced), want)
+				}
+				for _, c := range fenced {
+					if c.Fence != f {
+						t.Errorf("%s(%s) carries %v, want the fence", c.Method, c.Message, c.Fence)
+					}
+				}
+
+				rt.err = readErr
+				rt.Calls = nil
+				err := mgr.StopTurnFenced(context.Background(), info.ID, f)
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, readErr) || errors.Is(err, runtime.ErrFenceMismatch) {
+					t.Fatalf("StopTurnFenced on a read that cannot answer = %v, want ErrRuntimeUnavailable wrapping the read's error, not a miss", err)
+				}
+				if sent := inputCalls(rt.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+					t.Fatalf("a stop whose read cannot answer sent %v", callMethods(sent))
+				}
+
+				rt.err = nil
+				rt.Zombies[info.SessionName] = true
+				var miss *runtime.FenceMismatchError
+				if err := mgr.StopTurnFenced(context.Background(), info.ID, f); !errors.As(err, &miss) || miss.Session != info.SessionName || miss.Found != runtime.FenceFoundDead || miss.Partial {
+					t.Fatalf("StopTurnFenced of an exited agent its cache misses = %v, want a non-partial miss finding it dead", err)
+				}
+				if sent := inputCalls(rt.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+					t.Fatalf("a stop of an exited agent sent %v", callMethods(sent))
+				}
+				if err := mgr.StopTurn(info.ID); err != nil {
+					t.Fatalf("StopTurn of a session its cache misses = %v, want nil", err)
+				}
+				if sent := inputCalls(rt.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+					t.Fatalf("the unfenced stop of a session its cache misses sent %v", callMethods(sent))
+				}
+			})
+		}
 	}
 }

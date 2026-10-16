@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -48,12 +49,40 @@ func (m *Manager) InputFencing(id string) (runtime.InputFencing, error) {
 // StopTurnFenced is StopTurn with every key and interrupt it sends fenced
 // to f's incarnation. A runtime that cannot fence the session is refused
 // with runtime.ErrInputFenceUnsupported before anything is sent, and a miss
-// is a *runtime.FenceMismatchError. Unlike StopTurn, a session that is not
-// running is a miss finding it absent (runtime.FenceFoundAbsent): a fenced
-// call never reports success into an incarnation that is not there.
+// is a *runtime.FenceMismatchError. Unlike StopTurn, which goes by the
+// runtime's IsRunning, it reads the session fresh before the stop and again
+// before its first input, and maps what it finds as
+// runtime.LivenessFenceMiss does: a session that is not running, or stops
+// before the first input, is a miss finding it absent
+// (runtime.FenceFoundAbsent), one whose agent exited a miss finding it dead,
+// and a read that cannot answer is runtime.ErrRuntimeUnavailable, never a
+// miss. A suspended row is a miss finding it absent, even while its runtime
+// is still stopping. A fenced call never reports success into an
+// incarnation that is not there.
 func (m *Manager) StopTurnFenced(ctx context.Context, id string, f runtime.InputFence) error {
 	if err := f.Validate(); err != nil {
 		return fmt.Errorf("stopping the turn of %s: %w", id, err)
 	}
 	return m.stopTurn(runtime.WithInputFence(ctx, f), id)
+}
+
+// stopFindsNoTurn reports whether a stop of sessName finds no turn to
+// interrupt and, if so, what the stop returns. A suspended row has no turn:
+// the stop returns nil, or under an input fence in ctx a miss finding it
+// absent. Unfenced, a runtime the provider's IsRunning reads not running has
+// no turn either, and the stop returns nil. Under a fence a fresh liveness
+// read decides instead, because the tmux state cache can read a live session
+// not running: a read that does not find the agent alive is no turn, and the
+// stop returns its runtime.LivenessFenceMiss.
+func (m *Manager) stopFindsNoTurn(ctx context.Context, b beads.Bead, sessName string) (bool, error) {
+	_, fenced := runtime.InputFenceFrom(ctx)
+	switch {
+	case State(b.Metadata["state"]) == StateSuspended:
+		return true, runtime.LivenessFenceMiss(ctx, sessName, runtime.Liveness{}, nil)
+	case !fenced:
+		return !m.sp.IsRunning(sessName), nil
+	}
+	live, err := m.freshLiveness(sessName, nil)
+	miss := runtime.LivenessFenceMiss(ctx, sessName, live, err)
+	return miss != nil, miss
 }

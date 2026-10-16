@@ -6,6 +6,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -15,7 +16,23 @@ import (
 // fencedSessionHandle is a started claude session handle and its fence.
 func fencedSessionHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string, runtime.InputFence) {
 	t.Helper()
-	handle, _, sp, manager := newTestSessionHandle(t, SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+	sp := runtime.NewFake()
+	handle, name, f := fencedSessionHandleOn(t, sp, sp, nil)
+	return handle, sp, name, f
+}
+
+// fencedSessionHandleOn is fencedSessionHandle with its manager on rt, a
+// runtime over sp, and the agent's processNames hinted.
+func fencedSessionHandleOn(t *testing.T, rt runtime.Provider, sp *runtime.Fake, processNames []string) (*SessionHandle, string, runtime.InputFence) {
+	t.Helper()
+	manager := sessionpkg.NewManagerWithOptions(beads.NewMemStore(), rt, sessionpkg.WithCityPath(t.TempDir()))
+	handle, err := NewSessionHandle(SessionHandleConfig{
+		Manager: manager,
+		Session: SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Hints: runtime.Config{ProcessNames: processNames}},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
 	if err := handle.Start(context.Background(), handleActor(t, handle, sessionpkg.ActorAgent)); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -28,23 +45,31 @@ func fencedSessionHandle(t *testing.T) (*SessionHandle, *runtime.Fake, string, r
 		t.Fatal("started session names no incarnation")
 	}
 	sp.Calls = nil
-	return handle, sp, info.SessionName, f
+	return handle, info.SessionName, f
 }
 
 func fencedRuntimeHandle(t *testing.T) (*RuntimeHandle, *runtime.Fake, runtime.InputFence) {
 	t.Helper()
 	sp := runtime.NewFake()
+	handle, f := fencedRuntimeHandleOn(t, sp, sp, nil)
+	return handle, sp, f
+}
+
+// fencedRuntimeHandleOn is fencedRuntimeHandle on rt, a runtime over sp,
+// reading the agent alive by processNames.
+func fencedRuntimeHandleOn(t *testing.T, rt runtime.Provider, sp *runtime.Fake, processNames []string) (*RuntimeHandle, runtime.InputFence) {
+	t.Helper()
 	f := runtime.InputFence{Generation: 4, Epoch: 2, Token: "rt-token"}
 	env := map[string]string{"GC_RUNTIME_EPOCH": "4", "GC_CONTINUATION_EPOCH": "2", "GC_INSTANCE_TOKEN": "rt-token"}
 	if err := sp.Start(context.Background(), "rt", runtime.Config{Env: env}); err != nil {
 		t.Fatal(err)
 	}
-	handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: sp, SessionName: "rt", ProviderName: "claude"})
+	handle, err := NewRuntimeHandle(RuntimeHandleConfig{Provider: rt, SessionName: "rt", ProviderName: "claude", ProcessNames: processNames})
 	if err != nil {
 		t.Fatal(err)
 	}
 	sp.Calls = nil
-	return handle, sp, f
+	return handle, f
 }
 
 func typedCalls(sp *runtime.Fake, name string) []runtime.Call {
@@ -311,5 +336,163 @@ func TestHandlesFencedInterruptOfStoppedSessionIsAbsent(t *testing.T) {
 				t.Fatalf("Interrupt = %v, want an absent miss", err)
 			}
 		})
+	}
+}
+
+// staleCacheFake is a runtime whose cached running read (IsRunning) finds
+// no session once stale is set, as the tmux state cache does past its stale
+// window, while its fresh read still answers.
+type staleCacheFake struct {
+	*runtime.Fake
+	stale bool
+}
+
+func (s *staleCacheFake) IsRunning(name string) bool {
+	return !s.stale && s.Fake.IsRunning(name)
+}
+
+func (s *staleCacheFake) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return runtime.ObserveLivenessSince(s.Fake, name, processNames, since)
+}
+
+// Kills a handle whose fenced interrupt decides absence from the runtime's
+// cached running read: with that read finding no session while a fresh one
+// finds it alive, both handles send the interrupt, every input carrying the
+// fence.
+func TestHandlesFencedInterruptReadsLivenessFresh(t *testing.T) {
+	ctx := context.Background()
+	for name, build := range map[string]func(t *testing.T) (interrupter, *runtime.Fake, string, runtime.InputFence){
+		"session": func(t *testing.T) (interrupter, *runtime.Fake, string, runtime.InputFence) {
+			rt := &staleCacheFake{Fake: runtime.NewFake()}
+			h, sess, f := fencedSessionHandleOn(t, rt, rt.Fake, nil)
+			rt.stale = true
+			return h, rt.Fake, sess, f
+		},
+		"runtime": func(t *testing.T) (interrupter, *runtime.Fake, string, runtime.InputFence) {
+			rt := &staleCacheFake{Fake: runtime.NewFake(), stale: true}
+			h, f := fencedRuntimeHandleOn(t, rt, rt.Fake, nil)
+			return h, rt.Fake, "rt", f
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h, sp, sess, f := build(t)
+			if err := h.Interrupt(ctx, InterruptRequest{Fence: f}); err != nil {
+				t.Fatalf("Interrupt(fence) of a live session its cache misses = %v, want nil", err)
+			}
+			calls := typedCalls(sp, sess)
+			if len(calls) == 0 {
+				t.Fatal("no input sent")
+			}
+			for _, c := range calls {
+				if c.Fence != f {
+					t.Errorf("%s carries %v, want the fence", c.Method, c.Fence)
+				}
+			}
+		})
+	}
+}
+
+// Both handles answer a fenced nudge they cannot deliver, by either live-only
+// delivery, with what they found rather than an undelivered result: a
+// session with no row, or not running, is a miss finding it absent (and the
+// session handle creates no row for it), one whose agent exited is a miss
+// finding it dead, and a liveness read that fails is
+// runtime.ErrRuntimeUnavailable, not a miss. Nothing is typed, and the same
+// nudge unfenced still reports it undelivered.
+func TestHandlesFencedNudgeOfAGoneSessionMisses(t *testing.T) {
+	type gone struct {
+		h     nudger
+		sp    *runtime.Fake
+		name  string // the session a miss names
+		f     runtime.InputFence
+		after func(t *testing.T)
+	}
+	agent := []string{"claude"}
+	stop := func(t *testing.T, sp *runtime.Fake, name string) {
+		t.Helper()
+		if err := sp.Stop(name); err != nil {
+			t.Fatal(err)
+		}
+	}
+	exit := func(_ *testing.T, sp *runtime.Fake, name string) { sp.Zombies[name] = true }
+	keep := func(*testing.T, *runtime.Fake, string) {}
+	readable := func(sp *runtime.Fake) runtime.Provider { return sp }
+	unreadable := func(sp *runtime.Fake) runtime.Provider { return freshErrFake{sp} }
+	session := func(rt func(*runtime.Fake) runtime.Provider, then func(*testing.T, *runtime.Fake, string)) func(*testing.T) gone {
+		return func(t *testing.T) gone {
+			sp := runtime.NewFake()
+			h, name, f := fencedSessionHandleOn(t, rt(sp), sp, agent)
+			then(t, sp, name)
+			return gone{h: h, sp: sp, name: name, f: f}
+		}
+	}
+	runtimeOnly := func(rt func(*runtime.Fake) runtime.Provider, then func(*testing.T, *runtime.Fake, string)) func(*testing.T) gone {
+		return func(t *testing.T) gone {
+			sp := runtime.NewFake()
+			h, f := fencedRuntimeHandleOn(t, rt(sp), sp, agent)
+			then(t, sp, "rt")
+			return gone{h: h, sp: sp, name: "rt", f: f}
+		}
+	}
+	withoutRow := func(t *testing.T) gone {
+		h, store, sp, _ := newTestSessionHandle(t, SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"})
+		return gone{h: h, sp: sp, name: "probe", f: runtime.InputFence{Generation: 1, Epoch: 1, Token: "t"}, after: func(t *testing.T) {
+			all, err := store.List(beads.ListQuery{AllowScan: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if id := h.currentSessionID(); id != "" || len(all) != 0 {
+				t.Fatalf("a fenced nudge with no row created session %q (%d beads)", id, len(all))
+			}
+		}}
+	}
+	for _, tc := range []struct {
+		name  string
+		build func(*testing.T) gone
+		found string // "" when the read cannot answer
+	}{
+		{"session without a row", withoutRow, runtime.FenceFoundAbsent},
+		{"session stopped", session(readable, stop), runtime.FenceFoundAbsent},
+		{"session agent exited", session(readable, exit), runtime.FenceFoundDead},
+		{"session unreadable", session(unreadable, keep), ""},
+		{"runtime stopped", runtimeOnly(readable, stop), runtime.FenceFoundAbsent},
+		{"runtime agent exited", runtimeOnly(readable, exit), runtime.FenceFoundDead},
+		{"runtime unreadable", runtimeOnly(unreadable, keep), ""},
+	} {
+		for _, delivery := range []NudgeDelivery{NudgeDeliveryDefault, NudgeDeliveryImmediate} {
+			t.Run(tc.name+"/"+string(delivery), func(t *testing.T) {
+				ctx := context.Background()
+				b := tc.build(t)
+				req := NudgeRequest{Text: "hi", Wake: NudgeWakeLiveOnly, Delivery: delivery, Fence: b.f}
+				res, err := b.h.Nudge(ctx, handleActor(t, b.h, sessionpkg.ActorAgent), req)
+				if res.Delivered {
+					t.Errorf("fenced nudge reported delivered: %+v", res)
+				}
+				var miss *runtime.FenceMismatchError
+				switch {
+				case tc.found == "":
+					if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) {
+						t.Fatalf("fenced nudge = %v, want ErrRuntimeUnavailable, not a miss", err)
+					}
+				case !errors.As(err, &miss) || miss.Found != tc.found || miss.Session != b.name || miss.Partial:
+					t.Fatalf("fenced nudge = %+v, %v; want a non-partial miss on %q finding it %s", res, err, b.name, tc.found)
+				}
+				for _, c := range b.sp.SnapshotCalls() {
+					switch c.Method {
+					case "Nudge", "NudgeNow", "SendKeys", "Interrupt", "ClearInput", "Start":
+						t.Fatalf("fenced nudge sent %s to %q", c.Method, c.Name)
+					}
+				}
+				if b.after != nil {
+					b.after(t)
+				}
+
+				b = tc.build(t)
+				req.Fence = runtime.InputFence{}
+				if res, err := b.h.Nudge(ctx, handleActor(t, b.h, sessionpkg.ActorAgent), req); err != nil || res.Delivered {
+					t.Fatalf("unfenced nudge = %+v, %v; want undelivered, no error", res, err)
+				}
+			})
+		}
 	}
 }
