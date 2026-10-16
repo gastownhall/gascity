@@ -15,14 +15,14 @@ package main
 // It runs one pass at boot whatever the gates say, which catches ops left
 // open after a gate was turned off, and then a pass every interval while any
 // of the three ops gates the controller latched at boot is not off, or while
-// the last pass left work: an op still within its finish_by, a retryable
-// read, open or close failure, or a truncated read. So with every gate off
-// (the rollback path, DES-O0API §12) the ops in flight at the restart are
-// still closed once their finish_by passes, and the loop then stops. A store
-// that cannot record ops at all (no conditional writes, no namespace) is not
-// left work with every gate off, or it would tick forever. A boot pass
-// skipped because the city is quiescent is retried on the ticker until it
-// runs.
+// the last pass left work: an op still within its finish_by, a full batch
+// that closed an op (more may wait behind it), a retryable read, open or
+// close failure, or a truncated read. So with every gate off (the rollback
+// path, DES-O0API §12) the ops in flight at the restart are still closed
+// once their finish_by passes, and the loop then stops. A store that cannot
+// record ops at all (no conditional writes, no namespace) is not left work
+// with every gate off, or it would tick forever. A boot pass skipped because
+// the city is quiescent is retried on the ticker until it runs.
 //
 // With every gate off a pass first asks the sessions store whether any op
 // row is submitted (opjournal.HasSubmittedOps, one keyed read of one row),
@@ -212,7 +212,11 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 	}
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)
-	left := stats.Pending > 0 || stats.Truncated
+	// A full batch may have ops behind it. It counts only when an op in it
+	// closed, so a batch whose every close fails for good cannot keep a
+	// gates-off ticker alive.
+	fullBatch := stats.Listed == opSweepLimit && stats.Closed+stats.Raced > 0
+	left := stats.Pending > 0 || stats.Truncated || fullBatch
 	if err != nil {
 		reason := legacyop.DegradeReason(err)
 		if stats.Failed == 0 {
