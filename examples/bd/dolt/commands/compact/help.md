@@ -16,13 +16,14 @@ an external endpoint. It finds database names in the city's and each rig's
 - **A rig pinned to another Dolt endpoint is skipped.** Its database lives on
   that endpoint, not on this server, and gc does not compact a server it does
   not manage. This covers `gc rig set-endpoint <rig> --external`, a rig that
-  runs its own Dolt (`--self`, or `[[rigs]] dolt_port`), and a rig that bd
+  runs its own Dolt (`--self`, or `[[rigs]] dolt_host`/`dolt_port`), and a rig that bd
   binds to a remote host. Compact logs the rig, its endpoint, and `— skip`,
   and the run does not fail.
 - **A same-named database on this server is not that rig's store.** It is
   usually the copy left behind when the rig moved. Compact leaves it alone,
-  `--only-db` included, and warns. Drop or archive the copy once you no longer
-  need it.
+  `--only-db` included, and warns, unless another rig on this server uses the
+  same database name; then that rig's database is compacted as usual. Drop or
+  archive a stale copy once you no longer need it.
 
 ## History protection
 
