@@ -81,6 +81,7 @@ go_test(
         "tail_test.go",
         "tail_usage_test.go",
         "testenv_import_test.go",
+        "tool_interrupt_test.go",
         "turns_claude_test.go",
         "turns_codex_test.go",
         "turns_follower_test.go",
