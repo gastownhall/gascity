@@ -94,6 +94,7 @@ go_test(
         "session_key_guard_test.go",
         "session_record_equiv_test.go",
         "sessionlog_adapter_test.go",
+        "sessionlog_claude_error_test.go",
         "sessionlog_pagination_test.go",
         "start_command_equiv_test.go",
         "structured_tool_test.go",

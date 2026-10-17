@@ -355,6 +355,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   operator, idle or `gc stop` suspend no longer counts as a rapid crash or
   churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
 
+- **A Claude API failure now shows as a provider error in structured session
+  history, not as an assistant reply.** Entries Claude flags with
+  `isApiErrorMessage` carry a `provider_error` system event (with Claude's
+  error code) and are projected as system messages; refusals and text that
+  merely quotes an API error stay replies. (thanks @csells)
+
 - **A Claude turn interrupted while a tool was running now reads as idle.**
   Claude writes `[Request interrupted by user for tool use]` for that case,
   which the transcript activity check did not recognize, so the session kept
