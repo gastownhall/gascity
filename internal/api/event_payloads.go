@@ -208,6 +208,18 @@ type RequestFailedPayload struct {
 // IsEventPayload marks RequestFailedPayload as an events.Payload variant.
 func (RequestFailedPayload) IsEventPayload() {}
 
+// RequestAcceptedPayload is emitted on request.accepted when the API accepts an
+// async session request and returns its 202. It marks the request as accepted
+// for the outcome lookup; the outcome itself arrives as request.result.* or
+// request.failed.
+type RequestAcceptedPayload struct {
+	RequestID string `json:"request_id" doc:"Correlation ID from the 202 response."`
+	Operation string `json:"operation" enum:"session.create,session.message,session.submit" doc:"Which operation was accepted."`
+}
+
+// IsEventPayload marks RequestAcceptedPayload as an events.Payload variant.
+func (RequestAcceptedPayload) IsEventPayload() {}
+
 // SupervisorStartedPayload classifies how the previous supervisor
 // instance exited, recorded once per supervisor startup. The cause is
 // derived from the clean-shutdown handoff token the previous instance's
@@ -814,6 +826,7 @@ func init() {
 	events.RegisterPayload(events.RequestResultRigCreate, RigCreateSucceededPayload{})
 	events.RegisterPayload(events.RigProvisionProgress, RigProvisionProgressPayload{})
 	events.RegisterPayload(events.RequestFailed, RequestFailedPayload{})
+	events.RegisterPayload(events.RequestAccepted, RequestAcceptedPayload{})
 
 	// Non-terminal city lifecycle events (diagnostics only).
 	events.RegisterPayload(events.CityCreated, CityLifecyclePayload{})

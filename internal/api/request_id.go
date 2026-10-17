@@ -105,6 +105,8 @@ func requestIDFromPayload(payload events.Payload) string {
 		return p.RequestID
 	case RequestFailedPayload:
 		return p.RequestID
+	case RequestAcceptedPayload:
+		return p.RequestID
 	default:
 		return ""
 	}

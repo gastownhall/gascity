@@ -231,6 +231,7 @@ var builtinAuthorship = map[string]Authorship{
 	RequestResultSessionSubmit:    AuthorController,
 	RequestResultRigCreate:        AuthorController,
 	RequestFailed:                 AuthorController,
+	RequestAccepted:               AuthorController,
 	RigProvisionProgress:          AuthorController,
 	ExtMsgBound:                   AuthorController,
 	ExtMsgUnbound:                 AuthorController,

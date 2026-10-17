@@ -143,6 +143,12 @@ makes them distinct.
 | `request.result.session.submit` | `SessionSubmitSucceededPayload` |
 | `request.failed` | `RequestFailedPayload` |
 
+Session requests also record a non-terminal `request.accepted`
+(`RequestAcceptedPayload`: `request_id`, `operation`) when the 202 is
+returned. It follows the 202's `event_cursor`, so a client resuming
+from that cursor sees it first. It is the marker the outcome lookup
+reads, never an outcome.
+
 ### Success payloads
 
 Each success payload carries `request_id` for correlation plus the
@@ -251,6 +257,66 @@ is an enum identifying which operation failed.
 | `POST /v0/city/{city}/session/{id}/messages` | `request.result.session.message` |
 | `POST /v0/city/{city}/session/{id}/submit` | `request.result.session.submit` |
 
+## Looking up an outcome
+
+A client that misses the terminal event (a dropped stream, a supervisor
+restart) can read the outcome of a session create, message or submit
+request by its `request_id`:
+
+```
+GET /v0/city/{cityName}/request/{requestId}
+```
+
+```json
+{
+  "request_id": "req-...",
+  "operation": "session.submit",
+  "state": "succeeded",
+  "event": {
+    "seq": 1043,
+    "type": "request.result.session.submit",
+    "ts": "...",
+    "actor": "api",
+    "subject": "gc-42",
+    "payload": { "request_id": "req-...", "session_id": "gc-42", "queued": false, "intent": "default" }
+  }
+}
+```
+
+| `state` | Meaning | `event` |
+|---------|---------|---------|
+| `pending` | The request is still running in the server that accepted it | absent |
+| `succeeded` | Its `request.result.session.*` event was recorded | that event |
+| `failed` | Its `request.failed` event was recorded | that event |
+| `outcome_unknown` | The server that accepted the request stopped (or lost the terminal event) before recording an outcome; the operation may or may not have taken effect | absent |
+
+`event` is the terminal event exactly as `/v0/city/{cityName}/events`
+and the event stream deliver it, so a client decodes it with the same
+code. An id this city never accepted, or one whose events have aged out
+of the retained log, is a 404 `request-not-found`. With no event
+provider the lookup answers 503, as the stream does.
+
+The outcome is derived from the persisted city event log, not from a
+second store. When it accepts a request the handler records a
+`request.accepted` marker (`{request_id, operation}`) before it returns
+the 202; the terminal event is the outcome. The lookup scans the log for
+the two events with that `request_id`, so the answer survives a missed
+event and a supervisor restart, and lasts as long as the log retains
+them. A process-wide in-flight registry separates the two cases with a
+marker and no terminal event: a request whose goroutine is still running
+is `pending`; one whose owner is gone is `outcome_unknown`. The registry
+is not per `Server`, because a city's `Server` is rebuilt when city
+state changes while its goroutines keep running.
+
+If the marker cannot be recorded (no event provider, or the log refuses
+an acknowledged append) the request is refused with 503 before any work
+starts, so every 202 hands out an id the lookup can resolve. A provider
+that cannot acknowledge appends (an exec script) gets a best-effort
+record.
+
+City create/unregister (supervisor stream) and `rig.create` (which has
+its own durable request record) are not covered by this lookup.
+
 ## Future: progress events
 
 The event type namespace is designed to grow. Future
@@ -281,7 +347,10 @@ giving clients real-time visibility into operation progress.
    matches:
    - `request.result.*` for success (typed per operation)
    - `request.failed` for failure (shared, `operation` enum)
-5. On success, the payload contains the full typed result.
+5. On success, the payload contains the full typed result. A
+   session-request client that lost the stream, or whose supervisor
+   restarted, reads the outcome from
+   `GET /v0/city/{cityName}/request/{requestId}` instead of waiting.
 
 `session.message` uses the same four-minute timeout on both sides of
 the API adapter: the server emits `request.failed` with

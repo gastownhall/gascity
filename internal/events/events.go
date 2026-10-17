@@ -347,6 +347,12 @@ const (
 	RequestResultSessionSubmit  = "request.result.session.submit"
 	RequestResultRigCreate      = "request.result.rig.create"
 	RequestFailed               = "request.failed"
+	// RequestAccepted records that the API accepted an async session request
+	// (session create, message or submit) and returned its 202. It is the
+	// durable marker the request-outcome lookup reads to tell an accepted
+	// request from an unknown id; it is not an outcome. The terminal outcome
+	// is a request.result.* or request.failed event with the same request_id.
+	RequestAccepted = "request.accepted"
 
 	// RigProvisionProgress reports one provisioning step of a server-side
 	// rig add (clone, beads-init, packs, config, routes). Non-terminal;
@@ -552,7 +558,7 @@ var KnownEventTypes = []string{
 	RequestResultCityCreate, RequestResultCityUnregister,
 	RequestResultSessionCreate, RequestResultSessionMessage,
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
-	RigProvisionProgress,
+	RequestAccepted, RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
 	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,

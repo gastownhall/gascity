@@ -117,30 +117,96 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	}
 }
 
+// Defines values for RequestAcceptedPayloadOperation.
+const (
+	RequestAcceptedPayloadOperationSessionCreate  RequestAcceptedPayloadOperation = "session.create"
+	RequestAcceptedPayloadOperationSessionMessage RequestAcceptedPayloadOperation = "session.message"
+	RequestAcceptedPayloadOperationSessionSubmit  RequestAcceptedPayloadOperation = "session.submit"
+)
+
+// Valid indicates whether the value is a known member of the RequestAcceptedPayloadOperation enum.
+func (e RequestAcceptedPayloadOperation) Valid() bool {
+	switch e {
+	case RequestAcceptedPayloadOperationSessionCreate:
+		return true
+	case RequestAcceptedPayloadOperationSessionMessage:
+		return true
+	case RequestAcceptedPayloadOperationSessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for RequestFailedPayloadOperation.
 const (
-	CityCreate     RequestFailedPayloadOperation = "city.create"
-	CityUnregister RequestFailedPayloadOperation = "city.unregister"
-	RigCreate      RequestFailedPayloadOperation = "rig.create"
-	SessionCreate  RequestFailedPayloadOperation = "session.create"
-	SessionMessage RequestFailedPayloadOperation = "session.message"
-	SessionSubmit  RequestFailedPayloadOperation = "session.submit"
+	RequestFailedPayloadOperationCityCreate     RequestFailedPayloadOperation = "city.create"
+	RequestFailedPayloadOperationCityUnregister RequestFailedPayloadOperation = "city.unregister"
+	RequestFailedPayloadOperationRigCreate      RequestFailedPayloadOperation = "rig.create"
+	RequestFailedPayloadOperationSessionCreate  RequestFailedPayloadOperation = "session.create"
+	RequestFailedPayloadOperationSessionMessage RequestFailedPayloadOperation = "session.message"
+	RequestFailedPayloadOperationSessionSubmit  RequestFailedPayloadOperation = "session.submit"
 )
 
 // Valid indicates whether the value is a known member of the RequestFailedPayloadOperation enum.
 func (e RequestFailedPayloadOperation) Valid() bool {
 	switch e {
-	case CityCreate:
+	case RequestFailedPayloadOperationCityCreate:
 		return true
-	case CityUnregister:
+	case RequestFailedPayloadOperationCityUnregister:
 		return true
-	case RigCreate:
+	case RequestFailedPayloadOperationRigCreate:
 		return true
+	case RequestFailedPayloadOperationSessionCreate:
+		return true
+	case RequestFailedPayloadOperationSessionMessage:
+		return true
+	case RequestFailedPayloadOperationSessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestOutcomeOperation.
+const (
+	SessionCreate  RequestOutcomeOperation = "session.create"
+	SessionMessage RequestOutcomeOperation = "session.message"
+	SessionSubmit  RequestOutcomeOperation = "session.submit"
+)
+
+// Valid indicates whether the value is a known member of the RequestOutcomeOperation enum.
+func (e RequestOutcomeOperation) Valid() bool {
+	switch e {
 	case SessionCreate:
 		return true
 	case SessionMessage:
 		return true
 	case SessionSubmit:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for RequestOutcomeState.
+const (
+	RequestOutcomeStateFailed         RequestOutcomeState = "failed"
+	RequestOutcomeStateOutcomeUnknown RequestOutcomeState = "outcome_unknown"
+	RequestOutcomeStatePending        RequestOutcomeState = "pending"
+	RequestOutcomeStateSucceeded      RequestOutcomeState = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the RequestOutcomeState enum.
+func (e RequestOutcomeState) Valid() bool {
+	switch e {
+	case RequestOutcomeStateFailed:
+		return true
+	case RequestOutcomeStateOutcomeUnknown:
+		return true
+	case RequestOutcomeStatePending:
+		return true
+	case RequestOutcomeStateSucceeded:
 		return true
 	default:
 		return false
@@ -512,19 +578,19 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 
 // Defines values for SlingChildOutcomeOutcome.
 const (
-	Failed  SlingChildOutcomeOutcome = "failed"
-	Routed  SlingChildOutcomeOutcome = "routed"
-	Skipped SlingChildOutcomeOutcome = "skipped"
+	SlingChildOutcomeOutcomeFailed  SlingChildOutcomeOutcome = "failed"
+	SlingChildOutcomeOutcomeRouted  SlingChildOutcomeOutcome = "routed"
+	SlingChildOutcomeOutcomeSkipped SlingChildOutcomeOutcome = "skipped"
 )
 
 // Valid indicates whether the value is a known member of the SlingChildOutcomeOutcome enum.
 func (e SlingChildOutcomeOutcome) Valid() bool {
 	switch e {
-	case Failed:
+	case SlingChildOutcomeOutcomeFailed:
 		return true
-	case Routed:
+	case SlingChildOutcomeOutcomeRouted:
 		return true
-	case Skipped:
+	case SlingChildOutcomeOutcomeSkipped:
 		return true
 	default:
 		return false
@@ -3343,6 +3409,18 @@ type Record struct {
 	SourcePid  *int64             `json:"source_pid,omitempty"`
 }
 
+// RequestAcceptedPayload defines model for RequestAcceptedPayload.
+type RequestAcceptedPayload struct {
+	// Operation Which operation was accepted.
+	Operation RequestAcceptedPayloadOperation `json:"operation"`
+
+	// RequestId Correlation ID from the 202 response.
+	RequestId string `json:"request_id"`
+}
+
+// RequestAcceptedPayloadOperation Which operation was accepted.
+type RequestAcceptedPayloadOperation string
+
 // RequestFailedPayload defines model for RequestFailedPayload.
 type RequestFailedPayload struct {
 	// ErrorCode Machine-readable error code.
@@ -3363,6 +3441,27 @@ type RequestFailedPayload struct {
 
 // RequestFailedPayloadOperation Which operation failed.
 type RequestFailedPayloadOperation string
+
+// RequestOutcome defines model for RequestOutcome.
+type RequestOutcome struct {
+	// Event Discriminated union of city event stream envelopes. Each variant constrains the envelope type and payload schema together.
+	Event *TypedEventStreamEnvelope `json:"event,omitempty"`
+
+	// Operation The operation that was accepted.
+	Operation RequestOutcomeOperation `json:"operation"`
+
+	// RequestId The request_id from the 202 response.
+	RequestId string `json:"request_id"`
+
+	// State pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+	State RequestOutcomeState `json:"state"`
+}
+
+// RequestOutcomeOperation The operation that was accepted.
+type RequestOutcomeOperation string
+
+// RequestOutcomeState pending: the request is still running. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+type RequestOutcomeState string
 
 // RigActionBody defines model for RigActionBody.
 type RigActionBody struct {
@@ -6706,6 +6805,22 @@ type TypedEventStreamEnvelopeProviderSwapped struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeRequestAccepted defines model for TypedEventStreamEnvelopeRequestAccepted.
+type TypedEventStreamEnvelopeRequestAccepted struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RequestAcceptedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeRequestFailed defines model for TypedEventStreamEnvelopeRequestFailed.
 type TypedEventStreamEnvelopeRequestFailed struct {
 	Actor            string                   `json:"actor"`
@@ -8492,6 +8607,23 @@ type TypedTaggedEventStreamEnvelopeProviderSwapped struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          NoPayload                `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeRequestAccepted defines model for TypedTaggedEventStreamEnvelopeRequestAccepted.
+type TypedTaggedEventStreamEnvelopeRequestAccepted struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          RequestAcceptedPayload   `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -11706,6 +11838,32 @@ func (t *EventPayload) FromRecord(v Record) error {
 
 // MergeRecord performs a merge with any union data inside the EventPayload, using the provided Record
 func (t *EventPayload) MergeRecord(v Record) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsRequestAcceptedPayload returns the union data inside the EventPayload as a RequestAcceptedPayload
+func (t EventPayload) AsRequestAcceptedPayload() (RequestAcceptedPayload, error) {
+	var body RequestAcceptedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromRequestAcceptedPayload overwrites any union data inside the EventPayload as the provided RequestAcceptedPayload
+func (t *EventPayload) FromRequestAcceptedPayload(v RequestAcceptedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeRequestAcceptedPayload performs a merge with any union data inside the EventPayload, using the provided RequestAcceptedPayload
+func (t *EventPayload) MergeRequestAcceptedPayload(v RequestAcceptedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -15933,6 +16091,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeProviderSwapped(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeRequestAccepted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestAccepted
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestAccepted() (TypedEventStreamEnvelopeRequestAccepted, error) {
+	var body TypedEventStreamEnvelopeRequestAccepted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeRequestAccepted overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeRequestAccepted
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeRequestAccepted(v TypedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeRequestAccepted performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeRequestAccepted
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeRequestAccepted(v TypedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeRequestFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeRequestFailed
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeRequestFailed() (TypedEventStreamEnvelopeRequestFailed, error) {
 	var body TypedEventStreamEnvelopeRequestFailed
@@ -17361,6 +17547,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedEventStreamEnvelopeProviderSwapped()
+	case "request.accepted":
+		return t.AsTypedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
 		return t.AsTypedEventStreamEnvelopeRequestFailed()
 	case "request.result.city.create":
@@ -19202,6 +19390,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeProv
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeRequestAccepted returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestAccepted
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestAccepted() (TypedTaggedEventStreamEnvelopeRequestAccepted, error) {
+	var body TypedTaggedEventStreamEnvelopeRequestAccepted
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeRequestAccepted overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeRequestAccepted
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeRequestAccepted(v TypedTaggedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeRequestAccepted performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeRequestAccepted
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeRequestAccepted(v TypedTaggedEventStreamEnvelopeRequestAccepted) error {
+	v.Type = "request.accepted"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeRequestFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeRequestFailed
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeRequestFailed() (TypedTaggedEventStreamEnvelopeRequestFailed, error) {
 	var body TypedTaggedEventStreamEnvelopeRequestFailed
@@ -20630,6 +20846,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeProjectIdentityStamped()
 	case "provider.swapped":
 		return t.AsTypedTaggedEventStreamEnvelopeProviderSwapped()
+	case "request.accepted":
+		return t.AsTypedTaggedEventStreamEnvelopeRequestAccepted()
 	case "request.failed":
 		return t.AsTypedTaggedEventStreamEnvelopeRequestFailed()
 	case "request.result.city.create":
@@ -21232,6 +21450,9 @@ type ClientInterface interface {
 
 	// GetV0CityByCityNameReadiness request
 	GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetRequestOutcome request
+	GetRequestOutcome(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// DeleteV0CityByCityNameRigByName request
 	DeleteV0CityByCityNameRigByName(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -23224,6 +23445,18 @@ func (c *Client) GetV0CityByCityNameProvidersPublic(ctx context.Context, cityNam
 
 func (c *Client) GetV0CityByCityNameReadiness(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameReadinessRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetRequestOutcome(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetRequestOutcomeRequest(c.Server, cityName, requestId)
 	if err != nil {
 		return nil, err
 	}
@@ -31450,6 +31683,47 @@ func NewGetV0CityByCityNameReadinessRequest(server string, cityName string, para
 	return req, nil
 }
 
+// NewGetRequestOutcomeRequest generates requests for GetRequestOutcome
+func NewGetRequestOutcomeRequest(server string, cityName string, requestId string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "requestId", requestId, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/request/%s", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewDeleteV0CityByCityNameRigByNameRequest generates requests for DeleteV0CityByCityNameRigByName
 func NewDeleteV0CityByCityNameRigByNameRequest(server string, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams) (*http.Request, error) {
 	var err error
@@ -35072,6 +35346,9 @@ type ClientWithResponsesInterface interface {
 	// GetV0CityByCityNameReadinessWithResponse request
 	GetV0CityByCityNameReadinessWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameReadinessParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameReadinessResponse, error)
 
+	// GetRequestOutcomeWithResponse request
+	GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error)
+
 	// DeleteV0CityByCityNameRigByNameWithResponse request
 	DeleteV0CityByCityNameRigByNameWithResponse(ctx context.Context, cityName string, name string, params *DeleteV0CityByCityNameRigByNameParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameRigByNameResponse, error)
 
@@ -38471,6 +38748,32 @@ func (r GetV0CityByCityNameReadinessResponse) StatusCode() int {
 	return 0
 }
 
+type GetRequestOutcomeResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *RequestOutcome
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetRequestOutcomeResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetRequestOutcomeResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteV0CityByCityNameRigByNameResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -41110,6 +41413,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameReadinessWithResponse(ctx conte
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameReadinessResponse(rsp)
+}
+
+// GetRequestOutcomeWithResponse request returning *GetRequestOutcomeResponse
+func (c *ClientWithResponses) GetRequestOutcomeWithResponse(ctx context.Context, cityName string, requestId string, reqEditors ...RequestEditorFn) (*GetRequestOutcomeResponse, error) {
+	rsp, err := c.GetRequestOutcome(ctx, cityName, requestId, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetRequestOutcomeResponse(rsp)
 }
 
 // DeleteV0CityByCityNameRigByNameWithResponse request returning *DeleteV0CityByCityNameRigByNameResponse
@@ -49024,6 +49336,60 @@ func ParseGetV0CityByCityNameReadinessResponse(rsp *http.Response) (*GetV0CityBy
 			return nil, err
 		}
 		response.ApplicationproblemJSON500 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetRequestOutcomeResponse parses an HTTP response from a GetRequestOutcomeWithResponse call
+func ParseGetRequestOutcomeResponse(rsp *http.Response) (*GetRequestOutcomeResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetRequestOutcomeResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest RequestOutcome
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
 
 	}
 

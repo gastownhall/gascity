@@ -396,6 +396,19 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		DefaultStatus: http.StatusAccepted,
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
+	cityRegister(sm, huma.Operation{
+		OperationID: "get-request-outcome",
+		Method:      http.MethodGet,
+		Path:        "/request/{requestId}",
+		Summary:     "Get the outcome of an async session request",
+		Description: "Reads the outcome of a session create, message or submit request by the request_id its 202 returned, " +
+			"so a client that missed the request.result.* or request.failed event (a dropped stream, a supervisor restart) can still learn it. " +
+			"The outcome is derived from the persisted city event log: it survives a supervisor restart and lasts as long as the log retains the request's events. " +
+			"pending means the request is still running; succeeded and failed carry the terminal event exactly as the event stream delivered it; " +
+			"outcome_unknown means the server that accepted the request stopped before recording an outcome, so the operation may or may not have taken effect. " +
+			"An id that was never accepted by this city, or whose events have aged out of the log, is a 404 request-not-found.",
+		Errors: []int{http.StatusNotFound, http.StatusServiceUnavailable},
+	}, (*Server).humaHandleRequestOutcome)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
