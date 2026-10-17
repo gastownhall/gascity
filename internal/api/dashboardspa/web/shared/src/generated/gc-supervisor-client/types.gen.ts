@@ -4737,6 +4737,102 @@ export type SessionTranscriptStructuredResponse = {
     template: string;
 };
 
+export type SessionTurnCapabilities = {
+    /**
+     * How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+     */
+    end: 'none' | 'boundary' | 'inferred' | 'recorded';
+    /**
+     * How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+     */
+    fence: 'none' | 'checked' | 'atomic';
+    /**
+     * How the runtime interrupts the session's turn. unsupported forces fence none.
+     */
+    interrupt: 'keystroke' | 'protocol' | 'unsupported';
+    /**
+     * How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+     */
+    link: 'none' | 'correlated' | 'exact';
+    /**
+     * Every turn since the last read can be recovered from the next one.
+     */
+    lossless: boolean;
+    /**
+     * How turn starts are known: recorded means every start carries its turn id.
+     */
+    start: 'none' | 'boundary' | 'recorded';
+};
+
+export type SessionTurnCurrent = {
+    /**
+     * The turn's id, as the source records it. Opaque; compare for equality only.
+     */
+    id: string;
+    /**
+     * When the turn started, at the source's precision; absent when unknown.
+     */
+    started_at?: string;
+};
+
+export type SessionTurnEnded = {
+    /**
+     * When the turn ended: the source's time, or the server's for an inferred end.
+     */
+    ended_at: string;
+    /**
+     * The turn's id, as the source records it. Opaque; compare for equality only.
+     */
+    id: string;
+    /**
+     * The end was inferred from the session going idle, not recorded.
+     */
+    inferred: boolean;
+    /**
+     * When the turn started, at the source's precision; absent when unknown.
+     */
+    started_at?: string;
+    /**
+     * How the turn ended: completed, cancelled or failed (the runtime's spelling); absent when the source closed it only because a newer turn started.
+     */
+    status?: string;
+};
+
+export type SessionTurnResponse = {
+    /**
+     * How far the source's answer can be trusted.
+     */
+    capabilities: SessionTurnCapabilities;
+    /**
+     * The turn in progress. Absent when no turn is running, or when the observation is not observed.
+     */
+    current?: SessionTurnCurrent;
+    /**
+     * Why the observation is not observed.
+     */
+    detail?: string;
+    /**
+     * What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+     */
+    observation: 'observed' | 'unavailable' | 'unsupported';
+    /**
+     * When the read was made, on the server's clock. Present only when observed.
+     */
+    observed_at?: string;
+    /**
+     * Turns that ended, newest first. A transcript source reports at most 8 from a bounded window, so a turn that ends between two reads can fall out of it unless capabilities.lossless is true.
+     */
+    recent?: Array<SessionTurnEnded> | null;
+    /**
+     * The resolved session id.
+     */
+    session_id: string;
+    /**
+     * Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+     */
+    source: 'protocol' | 'transcript' | 'none';
+};
+
 export type SessionUnknownStatePayload = {
     /**
      * False on the first-sight emission; true when re-emitted after the bead has sat unrecognized past the escalation threshold.
@@ -19197,6 +19293,56 @@ export type GetV0CityByCityNameSessionByIdTranscriptResponses = {
 };
 
 export type GetV0CityByCityNameSessionByIdTranscriptResponse = GetV0CityByCityNameSessionByIdTranscriptResponses[keyof GetV0CityByCityNameSessionByIdTranscriptResponses];
+
+export type GetV0CityByCityNameSessionByIdTurnData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/turn';
+};
+
+export type GetV0CityByCityNameSessionByIdTurnErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameSessionByIdTurnError = GetV0CityByCityNameSessionByIdTurnErrors[keyof GetV0CityByCityNameSessionByIdTurnErrors];
+
+export type GetV0CityByCityNameSessionByIdTurnResponses = {
+    /**
+     * OK
+     */
+    200: SessionTurnResponse;
+};
+
+export type GetV0CityByCityNameSessionByIdTurnResponse = GetV0CityByCityNameSessionByIdTurnResponses[keyof GetV0CityByCityNameSessionByIdTurnResponses];
 
 export type PostV0CityByCityNameSessionByIdUnpinData = {
     body?: never;

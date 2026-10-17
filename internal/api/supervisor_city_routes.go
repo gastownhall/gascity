@@ -377,6 +377,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/session/{id}", (*Server).humaHandleSessionGet, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/transcript", (*Server).humaHandleSessionTranscript, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/pending", (*Server).humaHandleSessionPending, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityGet(sm, "/session/{id}/turn", (*Server).humaHandleSessionTurn, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Reads the session's turn identity, read-only: where its turns are read from (source), how far that answer can be trusted (capabilities), and what one read saw now (observation, current, recent). "+
+			"A session whose turns cannot be identified answers 200 with source none and observation unsupported, never a 5xx; a source that cannot be read now answers 200 with observation unavailable, meaning its turns are unknown, not idle. "+
+			"A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop still interrupts whatever turn is current."))
 	cityGet(sm, "/pending", (*Server).humaHandleCityPending, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
 	cityPatch(sm, "/session/{id}", (*Server).humaHandleSessionPatch, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityPost(sm, "/session/{id}/permission-mode", (*Server).humaHandleSessionPermissionMode, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))

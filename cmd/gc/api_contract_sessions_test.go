@@ -139,6 +139,17 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 	}
 	h.sp.SetPendingInteraction(sess.SessionName, nil)
 
+	// Turn read: the harness runtime neither observes turns nor runs agents
+	// whose transcripts gc reads, so the session has no turn source, which is
+	// a 200 unsupported answer, never a 5xx. An unknown session is 404.
+	turn, err := c.GetV0CityByCityNameSessionByIdTurnWithResponse(ctx, city, sess.Id)
+	expectStatus(t, "session turn", turn, err, http.StatusOK)
+	if got := mustJSON(t, "session turn", turn.JSON200, turn); got.Source != "none" || got.Observation != "unsupported" || got.Current != nil || got.SessionId != sess.Id {
+		t.Fatalf("session turn = %s, want source none, observation unsupported", contractBody(turn))
+	}
+	noTurn, err := c.GetV0CityByCityNameSessionByIdTurnWithResponse(ctx, city, "gc-no-such-session")
+	expectStatus(t, "unknown session turn", noTurn, err, http.StatusNotFound)
+
 	perm, err := c.PostV0CityByCityNameSessionByIdPermissionModeWithResponse(ctx, city, sess.Id,
 		&genclient.PostV0CityByCityNameSessionByIdPermissionModeParams{XGCRequest: contractCSRF},
 		genclient.PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody{PermissionMode: "plan"})

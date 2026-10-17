@@ -2858,6 +2858,68 @@ export const zSessionTranscriptGetResponse = z.union([
     }).and(zSessionTranscriptStructuredResponse)
 ]);
 
+export const zSessionTurnCapabilities = z.object({
+    end: z.enum([
+        'none',
+        'boundary',
+        'inferred',
+        'recorded'
+    ]),
+    fence: z.enum([
+        'none',
+        'checked',
+        'atomic'
+    ]),
+    interrupt: z.enum([
+        'keystroke',
+        'protocol',
+        'unsupported'
+    ]),
+    link: z.enum([
+        'none',
+        'correlated',
+        'exact'
+    ]),
+    lossless: z.boolean(),
+    start: z.enum([
+        'none',
+        'boundary',
+        'recorded'
+    ])
+});
+
+export const zSessionTurnCurrent = z.object({
+    id: z.string(),
+    started_at: z.iso.datetime().optional()
+});
+
+export const zSessionTurnEnded = z.object({
+    ended_at: z.iso.datetime(),
+    id: z.string(),
+    inferred: z.boolean(),
+    started_at: z.iso.datetime().optional(),
+    status: z.string().optional()
+});
+
+export const zSessionTurnResponse = z.object({
+    capabilities: zSessionTurnCapabilities,
+    current: zSessionTurnCurrent.optional(),
+    detail: z.string().optional(),
+    observation: z.enum([
+        'observed',
+        'unavailable',
+        'unsupported'
+    ]),
+    observed_at: z.iso.datetime().optional(),
+    recent: z.array(zSessionTurnEnded).nullish(),
+    session_id: z.string(),
+    source: z.enum([
+        'protocol',
+        'transcript',
+        'none'
+    ])
+});
+
 export const zSessionUnknownStatePayload = z.object({
     escalated: z.boolean(),
     first_seen: z.string().optional(),
@@ -10083,6 +10145,16 @@ export const zGetV0CityByCityNameSessionByIdTranscriptQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameSessionByIdTranscriptResponse = zSessionTranscriptGetResponse;
+
+export const zGetV0CityByCityNameSessionByIdTurnPath = z.object({
+    cityName: z.string().min(1).regex(/\S/),
+    id: z.string()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameSessionByIdTurnResponse = zSessionTurnResponse;
 
 export const zPostV0CityByCityNameSessionByIdUnpinHeaders = z.object({
     'X-GC-Request': z.string().min(1)

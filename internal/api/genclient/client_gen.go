@@ -510,6 +510,156 @@ func (e SessionTranscriptRawResponseFormat) Valid() bool {
 	}
 }
 
+// Defines values for SessionTurnCapabilitiesEnd.
+const (
+	SessionTurnCapabilitiesEndBoundary SessionTurnCapabilitiesEnd = "boundary"
+	SessionTurnCapabilitiesEndInferred SessionTurnCapabilitiesEnd = "inferred"
+	SessionTurnCapabilitiesEndNone     SessionTurnCapabilitiesEnd = "none"
+	SessionTurnCapabilitiesEndRecorded SessionTurnCapabilitiesEnd = "recorded"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesEnd enum.
+func (e SessionTurnCapabilitiesEnd) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesEndBoundary:
+		return true
+	case SessionTurnCapabilitiesEndInferred:
+		return true
+	case SessionTurnCapabilitiesEndNone:
+		return true
+	case SessionTurnCapabilitiesEndRecorded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesFence.
+const (
+	SessionTurnCapabilitiesFenceAtomic  SessionTurnCapabilitiesFence = "atomic"
+	SessionTurnCapabilitiesFenceChecked SessionTurnCapabilitiesFence = "checked"
+	SessionTurnCapabilitiesFenceNone    SessionTurnCapabilitiesFence = "none"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesFence enum.
+func (e SessionTurnCapabilitiesFence) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesFenceAtomic:
+		return true
+	case SessionTurnCapabilitiesFenceChecked:
+		return true
+	case SessionTurnCapabilitiesFenceNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesInterrupt.
+const (
+	SessionTurnCapabilitiesInterruptKeystroke   SessionTurnCapabilitiesInterrupt = "keystroke"
+	SessionTurnCapabilitiesInterruptProtocol    SessionTurnCapabilitiesInterrupt = "protocol"
+	SessionTurnCapabilitiesInterruptUnsupported SessionTurnCapabilitiesInterrupt = "unsupported"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesInterrupt enum.
+func (e SessionTurnCapabilitiesInterrupt) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesInterruptKeystroke:
+		return true
+	case SessionTurnCapabilitiesInterruptProtocol:
+		return true
+	case SessionTurnCapabilitiesInterruptUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesLink.
+const (
+	SessionTurnCapabilitiesLinkCorrelated SessionTurnCapabilitiesLink = "correlated"
+	SessionTurnCapabilitiesLinkExact      SessionTurnCapabilitiesLink = "exact"
+	SessionTurnCapabilitiesLinkNone       SessionTurnCapabilitiesLink = "none"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesLink enum.
+func (e SessionTurnCapabilitiesLink) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesLinkCorrelated:
+		return true
+	case SessionTurnCapabilitiesLinkExact:
+		return true
+	case SessionTurnCapabilitiesLinkNone:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnCapabilitiesStart.
+const (
+	SessionTurnCapabilitiesStartBoundary SessionTurnCapabilitiesStart = "boundary"
+	SessionTurnCapabilitiesStartNone     SessionTurnCapabilitiesStart = "none"
+	SessionTurnCapabilitiesStartRecorded SessionTurnCapabilitiesStart = "recorded"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnCapabilitiesStart enum.
+func (e SessionTurnCapabilitiesStart) Valid() bool {
+	switch e {
+	case SessionTurnCapabilitiesStartBoundary:
+		return true
+	case SessionTurnCapabilitiesStartNone:
+		return true
+	case SessionTurnCapabilitiesStartRecorded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnResponseObservation.
+const (
+	SessionTurnResponseObservationObserved    SessionTurnResponseObservation = "observed"
+	SessionTurnResponseObservationUnavailable SessionTurnResponseObservation = "unavailable"
+	SessionTurnResponseObservationUnsupported SessionTurnResponseObservation = "unsupported"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnResponseObservation enum.
+func (e SessionTurnResponseObservation) Valid() bool {
+	switch e {
+	case SessionTurnResponseObservationObserved:
+		return true
+	case SessionTurnResponseObservationUnavailable:
+		return true
+	case SessionTurnResponseObservationUnsupported:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for SessionTurnResponseSource.
+const (
+	None       SessionTurnResponseSource = "none"
+	Protocol   SessionTurnResponseSource = "protocol"
+	Transcript SessionTurnResponseSource = "transcript"
+)
+
+// Valid indicates whether the value is a known member of the SessionTurnResponseSource enum.
+func (e SessionTurnResponseSource) Valid() bool {
+	switch e {
+	case None:
+		return true
+	case Protocol:
+		return true
+	case Transcript:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SlingChildOutcomeOutcome.
 const (
 	Failed  SlingChildOutcomeOutcome = "failed"
@@ -4989,6 +5139,99 @@ type SessionTranscriptStructuredResponse struct {
 	StructuredMessages []SessionStructuredMessage `json:"structured_messages"`
 	Template           string                     `json:"template"`
 }
+
+// SessionTurnCapabilities defines model for SessionTurnCapabilities.
+type SessionTurnCapabilities struct {
+	// End How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+	End SessionTurnCapabilitiesEnd `json:"end"`
+
+	// Fence How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+	Fence SessionTurnCapabilitiesFence `json:"fence"`
+
+	// Interrupt How the runtime interrupts the session's turn. unsupported forces fence none.
+	Interrupt SessionTurnCapabilitiesInterrupt `json:"interrupt"`
+
+	// Link How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+	Link SessionTurnCapabilitiesLink `json:"link"`
+
+	// Lossless Every turn since the last read can be recovered from the next one.
+	Lossless bool `json:"lossless"`
+
+	// Start How turn starts are known: recorded means every start carries its turn id.
+	Start SessionTurnCapabilitiesStart `json:"start"`
+}
+
+// SessionTurnCapabilitiesEnd How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+type SessionTurnCapabilitiesEnd string
+
+// SessionTurnCapabilitiesFence How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+type SessionTurnCapabilitiesFence string
+
+// SessionTurnCapabilitiesInterrupt How the runtime interrupts the session's turn. unsupported forces fence none.
+type SessionTurnCapabilitiesInterrupt string
+
+// SessionTurnCapabilitiesLink How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+type SessionTurnCapabilitiesLink string
+
+// SessionTurnCapabilitiesStart How turn starts are known: recorded means every start carries its turn id.
+type SessionTurnCapabilitiesStart string
+
+// SessionTurnCurrent defines model for SessionTurnCurrent.
+type SessionTurnCurrent struct {
+	// Id The turn's id, as the source records it. Opaque; compare for equality only.
+	Id string `json:"id"`
+
+	// StartedAt When the turn started, at the source's precision; absent when unknown.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+}
+
+// SessionTurnEnded defines model for SessionTurnEnded.
+type SessionTurnEnded struct {
+	// EndedAt When the turn ended: the source's time, or the server's for an inferred end.
+	EndedAt time.Time `json:"ended_at"`
+
+	// Id The turn's id, as the source records it. Opaque; compare for equality only.
+	Id string `json:"id"`
+
+	// Inferred The end was inferred from the session going idle, not recorded.
+	Inferred bool `json:"inferred"`
+
+	// StartedAt When the turn started, at the source's precision; absent when unknown.
+	StartedAt *time.Time `json:"started_at,omitempty"`
+
+	// Status How the turn ended: completed, cancelled or failed (the runtime's spelling); absent when the source closed it only because a newer turn started.
+	Status *string `json:"status,omitempty"`
+}
+
+// SessionTurnResponse defines model for SessionTurnResponse.
+type SessionTurnResponse struct {
+	Capabilities SessionTurnCapabilities `json:"capabilities"`
+	Current      *SessionTurnCurrent     `json:"current,omitempty"`
+
+	// Detail Why the observation is not observed.
+	Detail *string `json:"detail,omitempty"`
+
+	// Observation What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+	Observation SessionTurnResponseObservation `json:"observation"`
+
+	// ObservedAt When the read was made, on the server's clock. Present only when observed.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+
+	// Recent Turns that ended, newest first. A transcript source reports at most 8 from a bounded window, so a turn that ends between two reads can fall out of it unless capabilities.lossless is true.
+	Recent *[]SessionTurnEnded `json:"recent,omitempty"`
+
+	// SessionId The resolved session id.
+	SessionId string `json:"session_id"`
+
+	// Source Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+	Source SessionTurnResponseSource `json:"source"`
+}
+
+// SessionTurnResponseObservation What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+type SessionTurnResponseObservation string
+
+// SessionTurnResponseSource Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+type SessionTurnResponseSource string
 
 // SessionUnknownStatePayload defines model for SessionUnknownStatePayload.
 type SessionUnknownStatePayload struct {
@@ -21345,6 +21588,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameSessionByIdTranscript request
 	GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameSessionByIdTurn request
+	GetV0CityByCityNameSessionByIdTurn(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// PostV0CityByCityNameSessionByIdUnpin request
 	PostV0CityByCityNameSessionByIdUnpin(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -23704,6 +23950,18 @@ func (c *Client) PostV0CityByCityNameSessionByIdSuspend(ctx context.Context, cit
 
 func (c *Client) GetV0CityByCityNameSessionByIdTranscript(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameSessionByIdTranscriptRequest(c.Server, cityName, id, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameSessionByIdTurn(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameSessionByIdTurnRequest(c.Server, cityName, id)
 	if err != nil {
 		return nil, err
 	}
@@ -33463,6 +33721,47 @@ func NewGetV0CityByCityNameSessionByIdTranscriptRequest(server string, cityName 
 	return req, nil
 }
 
+// NewGetV0CityByCityNameSessionByIdTurnRequest generates requests for GetV0CityByCityNameSessionByIdTurn
+func NewGetV0CityByCityNameSessionByIdTurnRequest(server string, cityName string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/turn", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewPostV0CityByCityNameSessionByIdUnpinRequest generates requests for PostV0CityByCityNameSessionByIdUnpin
 func NewPostV0CityByCityNameSessionByIdUnpinRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams) (*http.Request, error) {
 	var err error
@@ -35183,6 +35482,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameSessionByIdTranscriptWithResponse request
 	GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx context.Context, cityName string, id string, params *GetV0CityByCityNameSessionByIdTranscriptParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTranscriptResponse, error)
+
+	// GetV0CityByCityNameSessionByIdTurnWithResponse request
+	GetV0CityByCityNameSessionByIdTurnWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTurnResponse, error)
 
 	// PostV0CityByCityNameSessionByIdUnpinWithResponse request
 	PostV0CityByCityNameSessionByIdUnpinWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdUnpinParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdUnpinResponse, error)
@@ -39352,6 +39654,33 @@ func (r GetV0CityByCityNameSessionByIdTranscriptResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameSessionByIdTurnResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *SessionTurnResponse
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameSessionByIdTurnResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameSessionByIdTurnResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type PostV0CityByCityNameSessionByIdUnpinResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -41462,6 +41791,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTranscriptWithRespon
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp)
+}
+
+// GetV0CityByCityNameSessionByIdTurnWithResponse request returning *GetV0CityByCityNameSessionByIdTurnResponse
+func (c *ClientWithResponses) GetV0CityByCityNameSessionByIdTurnWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdTurnResponse, error) {
+	rsp, err := c.GetV0CityByCityNameSessionByIdTurn(ctx, cityName, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameSessionByIdTurnResponse(rsp)
 }
 
 // PostV0CityByCityNameSessionByIdUnpinWithResponse request returning *PostV0CityByCityNameSessionByIdUnpinResponse
@@ -51056,6 +51394,67 @@ func ParseGetV0CityByCityNameSessionByIdTranscriptResponse(rsp *http.Response) (
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
 		var dest SessionTranscriptGetResponse
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameSessionByIdTurnResponse parses an HTTP response from a GetV0CityByCityNameSessionByIdTurnWithResponse call
+func ParseGetV0CityByCityNameSessionByIdTurnResponse(rsp *http.Response) (*GetV0CityByCityNameSessionByIdTurnResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameSessionByIdTurnResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest SessionTurnResponse
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

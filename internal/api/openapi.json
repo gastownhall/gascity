@@ -11443,6 +11443,182 @@
         "title": "Structured session transcript response",
         "type": "object"
       },
+      "SessionTurnCapabilities": {
+        "additionalProperties": false,
+        "properties": {
+          "end": {
+            "description": "How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.",
+            "enum": [
+              "none",
+              "boundary",
+              "inferred",
+              "recorded"
+            ],
+            "type": "string"
+          },
+          "fence": {
+            "description": "How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.",
+            "enum": [
+              "none",
+              "checked",
+              "atomic"
+            ],
+            "type": "string"
+          },
+          "interrupt": {
+            "description": "How the runtime interrupts the session's turn. unsupported forces fence none.",
+            "enum": [
+              "keystroke",
+              "protocol",
+              "unsupported"
+            ],
+            "type": "string"
+          },
+          "link": {
+            "description": "How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.",
+            "enum": [
+              "none",
+              "correlated",
+              "exact"
+            ],
+            "type": "string"
+          },
+          "lossless": {
+            "description": "Every turn since the last read can be recovered from the next one.",
+            "type": "boolean"
+          },
+          "start": {
+            "description": "How turn starts are known: recorded means every start carries its turn id.",
+            "enum": [
+              "none",
+              "boundary",
+              "recorded"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "start",
+          "end",
+          "fence",
+          "link",
+          "lossless",
+          "interrupt"
+        ],
+        "type": "object"
+      },
+      "SessionTurnCurrent": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "description": "The turn's id, as the source records it. Opaque; compare for equality only.",
+            "type": "string"
+          },
+          "started_at": {
+            "description": "When the turn started, at the source's precision; absent when unknown.",
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id"
+        ],
+        "type": "object"
+      },
+      "SessionTurnEnded": {
+        "additionalProperties": false,
+        "properties": {
+          "ended_at": {
+            "description": "When the turn ended: the source's time, or the server's for an inferred end.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "id": {
+            "description": "The turn's id, as the source records it. Opaque; compare for equality only.",
+            "type": "string"
+          },
+          "inferred": {
+            "description": "The end was inferred from the session going idle, not recorded.",
+            "type": "boolean"
+          },
+          "started_at": {
+            "description": "When the turn started, at the source's precision; absent when unknown.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "status": {
+            "description": "How the turn ended: completed, cancelled or failed (the runtime's spelling); absent when the source closed it only because a newer turn started.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "ended_at",
+          "inferred"
+        ],
+        "type": "object"
+      },
+      "SessionTurnResponse": {
+        "additionalProperties": false,
+        "properties": {
+          "capabilities": {
+            "$ref": "#/components/schemas/SessionTurnCapabilities",
+            "description": "How far the source's answer can be trusted."
+          },
+          "current": {
+            "$ref": "#/components/schemas/SessionTurnCurrent",
+            "description": "The turn in progress. Absent when no turn is running, or when the observation is not observed."
+          },
+          "detail": {
+            "description": "Why the observation is not observed.",
+            "type": "string"
+          },
+          "observation": {
+            "description": "What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).",
+            "enum": [
+              "observed",
+              "unavailable",
+              "unsupported"
+            ],
+            "type": "string"
+          },
+          "observed_at": {
+            "description": "When the read was made, on the server's clock. Present only when observed.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "recent": {
+            "description": "Turns that ended, newest first. A transcript source reports at most 8 from a bounded window, so a turn that ends between two reads can fall out of it unless capabilities.lossless is true.",
+            "items": {
+              "$ref": "#/components/schemas/SessionTurnEnded"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "session_id": {
+            "description": "The resolved session id.",
+            "type": "string"
+          },
+          "source": {
+            "description": "Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.",
+            "enum": [
+              "protocol",
+              "transcript",
+              "none"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "source",
+          "capabilities",
+          "observation"
+        ],
+        "type": "object"
+      },
       "SessionUnknownStatePayload": {
         "additionalProperties": false,
         "properties": {
@@ -49923,6 +50099,144 @@
           }
         },
         "summary": "Get v0 city by city name session by ID transcript"
+      }
+    },
+    "/v0/city/{cityName}/session/{id}/turn": {
+      "get": {
+        "description": "Reads the session's turn identity, read-only: where its turns are read from (source), how far that answer can be trusted (capabilities), and what one read saw now (observation, current, recent). A session whose turns cannot be identified answers 200 with source none and observation unsupported, never a 5xx; a source that cannot be read now answers 200 with observation unavailable, meaning its turns are unknown, not idle. A closed or unknown session is 404. The read aims nothing at a turn: POST /session/{id}/stop still interrupts whatever turn is current.",
+        "operationId": "get-v0-city-by-city-name-session-by-id-turn",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Session ID, alias, or runtime session_name.",
+            "in": "path",
+            "name": "id",
+            "required": true,
+            "schema": {
+              "description": "Session ID, alias, or runtime session_name.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SessionTurnResponse"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Cache-Age-S": {
+                "schema": {
+                  "description": "Age in seconds of the CachingStore snapshot that served this response (0 if not applicable).",
+                  "format": "double",
+                  "type": "number"
+                }
+              },
+              "X-GC-Index": {
+                "schema": {
+                  "description": "City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event.",
+                  "format": "int64",
+                  "minimum": 0,
+                  "type": "integer"
+                }
+              },
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "409": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Conflict",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name session by ID turn"
       }
     },
     "/v0/city/{cityName}/session/{id}/unpin": {
