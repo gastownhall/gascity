@@ -740,8 +740,8 @@ test-bd-cli-contract-home-isolation:
 ## on the source-built BD_CURRENT_REF cell. That is no longer true as of
 ## BD_VERSION=v1.3.0, which carries the flags, so the row now runs on every
 ## cell rather than skipping on most. Kept separate anyway: it is the only
-## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
-## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
+## contract that needs a real CAS-capable bd; BD_PREV_VERSION (v1.3.0) carries
+## the flags too now that the floor no longer predates them. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
 ## skip into a failure, so a cell cannot pass while proving nothing.
 ##
 ## The existence preflight closes the other way this cell can pass having proven

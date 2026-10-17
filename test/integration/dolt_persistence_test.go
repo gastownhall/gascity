@@ -41,11 +41,11 @@ import (
 
 // bdPersistenceOptInEnv gates this suite. It only passes against a bd that
 // carries the startup-import guard (gastownhall/beads@1cf8337); against an
-// unguarded bd it reproduces the destructive import and fails by design. CI
-// still exercises unguarded builds — deps.env pins BD_PREV_VERSION=v1.0.4 for
-// the cross-version contract matrix — so the suite stays opt-in rather than
-// auto-enumerated into the rest-full shards. Flip this on in the same change
-// that raises every bd pin the shards use past 1cf8337.
+// unguarded bd it reproduces the destructive import and fails by design. It
+// stayed opt-in while deps.env pinned BD_PREV_VERSION=v1.0.4, an unguarded
+// build. Every bd pin is now v1.3.0 or newer, which carries 1cf8337, so the
+// remaining step is to auto-enumerate this suite into the rest-full shards;
+// that is a separate change.
 const bdPersistenceOptInEnv = "GC_INTEGRATION_BD_PERSISTENCE"
 
 var doltPersistenceWorkspaceCounter atomic.Int64

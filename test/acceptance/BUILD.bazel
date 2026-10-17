@@ -266,10 +266,10 @@ go_variant_test(
     name = "bd_cli_contract_prev_test",
     size = "large",
     args = [BD_CLI_CONTRACT_RUN],
-    data = ["@bd_bin_v1_0_4//:bd"],
+    data = ["@bd_bin_v1_3_0//:bd"],
     env = {
-        "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_0_4//:bd)",
-        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_0_4//:bd)",
+        "GC_ACCEPTANCE_BD_BIN": "$(rootpath @bd_bin_v1_3_0//:bd)",
+        "GC_TEST_TOOL_PATHS": "$(rootpath @bd_bin_v1_3_0//:bd)",
     },
     gotags = ["acceptance_bd_contract"],
     test = ":acceptance_test",

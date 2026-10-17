@@ -12,15 +12,8 @@ import (
 //
 // The release is a compare-and-swap: clear an in-progress assignment only while
 // the bead still carries the expected assignee. It used to be assembled as raw
-// SQL — `UPDATE issues SET status='open', assignee='' WHERE id=… AND
-// status='in_progress' AND assignee=…` — and the verdict was read out of
-// rows_affected. That had three costs: the statement had to be built by
-// concatenating hand-escaped MySQL string literals, `bd sql` is rejected outright
-// in embedded mode (so the path needed a second implementation shelling directly
-// to `dolt sql`), and a CAS that matches zero rows is indistinguishable from one
-// that could not run.
-//
-// bd now expresses the same two preconditions natively:
+// SQL (`bd sql`, and in embedded mode the `dolt sql` CLI) with the verdict read
+// out of rows_affected. bd now expresses the same two preconditions natively:
 //
 //	bd update <id> --if-assignee <expected> --if-status in_progress \
 //	               --status open --assignee ""
@@ -31,17 +24,27 @@ import (
 // whole reason to prefer this verb: the load-bearing branch stops depending on
 // message text.
 //
-// The raw-SQL path stays as the fallback, selected by a per-store latch the
-// first time bd rejects the flag as unknown. What reaches it is the
-// contract-tested minimum: deps.env BD_PREV_VERSION (1.0.4) predates
-// beads#5008, so a store opened against that bd latches and stays there.
-//
-// The installable default does not reach it. deps.env BD_VERSION is
-// v1.3.1, cut from beads main past beads#5008, so on a stock install the
-// VERB is the live path and the fallback serves the floor alone. The verb is
-// also exercised against the source-built deps.env BD_CURRENT_REF bd
-// (make test-bd-conditional-release-contract) — now where the contract is
-// homed by choice, not the only cell that can run it.
+// The verb is the only path. The raw-SQL fallback for a bd without the flags
+// was deleted when gc's minimum supported bd moved to
+// BdConditionalReleaseMinVersion; such a bd now gets an error wrapping
+// ErrConditionalReleaseUnsupported, latched per store the first time bd
+// rejects the flag as unknown. The verb is exercised against a real bd by
+// make test-bd-conditional-release-contract.
+
+// BdConditionalReleaseMinVersion is the first tested bd release carrying the
+// --if-assignee/--if-status preconditions (beads#5008). bd 1.2.0 and 1.2.1 had
+// them but were accidental, untested releases, and bd 1.2.2 re-released the
+// 1.1.2 code without them, so the floor is 1.3.0. cmd/gc's bdMinVersion may
+// not drop below it (scripts/bd_version_pin_test.go).
+const BdConditionalReleaseMinVersion = "1.3.0"
+
+// errBdLacksConditionalRelease is ReleaseIfCurrent's typed refusal for a bd
+// below BdConditionalReleaseMinVersion. It wraps
+// ErrConditionalReleaseUnsupported, never a raw SQL path.
+func errBdLacksConditionalRelease() error {
+	return fmt.Errorf("bd release-if-current: bd on PATH lacks --if-assignee/--if-status; gc requires bd >= %s: %w",
+		BdConditionalReleaseMinVersion, ErrConditionalReleaseUnsupported)
+}
 
 // bdCASPreconditionExitCode is bd's dedicated exit status for a rejected
 // --if-assignee / --if-status precondition: nothing was written, and the verdict
@@ -60,8 +63,8 @@ func (s *BdStore) conditionalReleaseUnsupported() bool {
 }
 
 // latchConditionalReleaseUnsupported records that bd does not understand the
-// conditional-release flags, sending every later release straight to the SQL
-// fallback.
+// conditional-release flags, so every later release gets the typed refusal
+// without another failed subprocess.
 func (s *BdStore) latchConditionalReleaseUnsupported() {
 	s.condReleaseMu.Lock()
 	defer s.condReleaseMu.Unlock()
@@ -72,15 +75,15 @@ func (s *BdStore) latchConditionalReleaseUnsupported() {
 // verb, after checking that id names exactly the bead bd resolves
 // (releaseIDCollision).
 //
-// handled=false means this bd does not support the verb and the caller must take
-// the raw-SQL fallback; it is the ONLY value that causes a fallback, so a real
-// backend failure can never be mistaken for an old bd.
+// handled=false means this bd does not support the verb, and the caller refuses
+// with a typed error; it is the ONLY value that does, so a real backend failure
+// can never be mistaken for an old bd.
 func (s *BdStore) releaseIfCurrentViaBdVerb(id, expectedAssignee string) (released, handled bool, err error) {
 	if collision := s.releaseIDCollision(id); collision != nil {
 		return false, true, collision
 	}
 	// --assignee "" is how bd clears an assignment; the paired --status open
-	// completes the same swap the SQL statement performed, and both --if-* flags
+	// completes the swap, and both --if-* flags
 	// carry the preconditions bd now evaluates server-side.
 	out, runErr := s.runBDTransientWriteOutput(
 		"update", id,
@@ -102,9 +105,9 @@ func (s *BdStore) releaseIfCurrentViaBdVerb(id, expectedAssignee string) (releas
 		return false, false, nil
 	}
 	if isBdIssueNotFound(runErr) {
-		// A bead this store cannot resolve can hold no assignment, which is the
-		// same verdict the SQL statement reached by matching zero rows. Kept so
-		// the observable contract does not change with the backend verb.
+		// A bead this store cannot resolve can hold no assignment, so the
+		// verdict is "not held", the same one the retired SQL statement reached
+		// by matching zero rows.
 		return false, true, nil
 	}
 	return false, true, runErr
@@ -128,9 +131,6 @@ func (s *BdStore) releaseIfCurrentViaBdVerb(id, expectedAssignee string) (releas
 // verb reaches the same "not held" verdict anyway), and a failed read falls
 // through rather than converting a broken read into a refused write — the
 // fail-open tradeoff cmd_bd.go's pre-flight guard documents.
-//
-// Only the verb path needs this; the raw-SQL fallback still matches id
-// literally.
 func (s *BdStore) releaseIDCollision(id string) error {
 	if _, err := s.Get(id); errors.Is(err, ErrIDCollision) {
 		return fmt.Errorf("refusing to release %q: %w", id, err)

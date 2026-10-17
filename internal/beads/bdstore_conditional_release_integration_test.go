@@ -78,17 +78,18 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 // BD_VERSION is v1.3.0, which carries the flags, so the shards that
 // install BD_VERSION could run this row too. It stays here as the single home
 // for the contract, and this cell sets requireConditionalReleaseEnv so every
-// exit short of a full run is a failure (conditionalReleaseUnprovable). A bd at
-// the floor (BD_PREV_VERSION, 1.0.4) still cannot run it, and still skips.
+// exit short of a full run is a failure (conditionalReleaseUnprovable). The
+// floor (BD_PREV_VERSION, v1.3.0) carries the flags too; only an off-pin bd
+// older than the supported floor skips.
 func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 	store, scope := newConditionalIntegrationBdStore(t)
 	if !bdParsesConditionalReleaseFlags(t, scope) {
 		conditionalReleaseUnprovable(t, "installed bd does not advertise --if-assignee/--if-status "+
-			"(pre-beads#5008): the store latches to the raw-SQL fallback, which embedded mode rejects "+
-			"outright, so this row cannot exercise the verb at all. Both deps.env BD_VERSION "+
-			"(v1.3.0) and BD_CURRENT_REF carry the flags, so a bd this old is the floor "+
-			"(BD_PREV_VERSION, 1.0.4) or something off-pin; the row is homed on the source-built "+
-			"BD_CURRENT_REF cell (make test-bd-conditional-release-contract).")
+			"(pre-beads#5008): ReleaseIfCurrent refuses it with ErrConditionalReleaseUnsupported, "+
+			"so this row cannot exercise the verb at all. deps.env BD_PREV_VERSION, BD_VERSION and "+
+			"BD_CURRENT_REF all carry the flags, so a bd this old is below the supported 1.3.0 "+
+			"floor and off-pin; the row is homed on the BD_CURRENT_REF cell "+
+			"(make test-bd-conditional-release-contract).")
 	}
 
 	created, err := store.Create(beads.Bead{Title: "conditional release row", Type: "task"})
