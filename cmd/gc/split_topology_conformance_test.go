@@ -258,7 +258,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 	// every leg and counts them, which is what makes "the tick cannot see it"
 	// different from "nothing can".
 	if e.split {
-		report := newRouteRecoveryLane().backstopLeg(planeLeg{label: "city", store: e.work})
+		report := newRouteRecoveryLane().backstopLeg(planeLeg{label: "city", store: e.work, runtimeUnreadable: true})
 		if report.offPlaneRouted == 0 {
 			t.Errorf("the convergence lane reported no off-plane routed work for %s, which the runtime plane just refused; a bead no reader counts is D6 with extra steps", hqWork.ID)
 		}
