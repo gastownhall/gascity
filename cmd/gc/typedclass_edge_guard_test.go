@@ -169,6 +169,14 @@ var typedClassCodecCensus = map[string]map[string]int{
 		// typing is a separate out-of-budget W-sync wave (see tickfeed-design §3
 		// W-unexport).
 		"cmd/gc/session_beads.go": 1,
+		// usage_compute's closed-session backstop (#6672) lists closed session beads
+		// (Status closed, IncludeClosed) and reads the usage interval markers raw
+		// (awake_started_at, usage_compute_emitted_at, closed_at/slept_at) before
+		// handing each bead to the existing processSessionBead terminal path.
+		// session.Info carries none of those markers, so the front door cannot serve
+		// this read yet; tracked here as a sanctioned fold-in pending the same
+		// W-sync typing wave as session_beads.
+		"cmd/gc/usage_compute.go": 1,
 	},
 	// ResolveSessionBeadByExactID( is now all-zero in the interior: the
 	// worker-boundary resolve+construct site moved to ResolveSessionRecordByExactID

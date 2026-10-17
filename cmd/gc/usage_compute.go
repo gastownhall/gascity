@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -47,9 +48,10 @@ const liveModelSweepMinInterval = 30 * time.Second
 // non-running lifecycle endpoint the controller's open-bead scan can observe:
 // idle-sleep (asleep), controller drain (drained), retirement (archived),
 // operator suspend (suspended), and crash-loop quarantine (quarantined). A
-// session closed directly from active without first passing through one of
-// these open states is the known v0 scan limitation (see
-// engdocs/design/usage-facts-v0.md).
+// CLOSED session bead is compute-terminal whatever its state code (see
+// isComputeTerminalBead): a session closed straight from active never passes
+// through one of these open states, and is settled from the closed bead by
+// emitDueComputeFacts's closed-session lanes instead.
 func isComputeTerminalState(state string) bool {
 	switch session.State(strings.TrimSpace(state)) {
 	case session.StateAsleep, session.StateDrained, session.StateArchived,
@@ -58,6 +60,27 @@ func isComputeTerminalState(state string) bool {
 	}
 	return false
 }
+
+// isComputeTerminalBead reports whether a fetched session bead's awake interval
+// has ended. A closed bead always has: the close arms (drain-ack, stale/dead
+// runtime, orphaned, duplicate, reconfigured, suspended, pool drain deadline)
+// stamp their own state code, which isComputeTerminalState need not know.
+func isComputeTerminalBead(b beads.Bead) bool {
+	return b.Status == "closed" || isComputeTerminalState(b.Metadata["state"])
+}
+
+// closedUsageBackstopWindow bounds the periodic closed-session usage scan to
+// sessions closed this recently. It is the recovery horizon for a close the
+// controller did not observe leaving the open snapshot (a crash between the
+// close and the next pass, or a close written by another process).
+const closedUsageBackstopWindow = 24 * time.Hour
+
+// closedUsageBackstopScanInterval floors how often that scan runs. Closes the
+// controller observes are settled on the very next pass by the
+// usageUnsettledOpen diff, so the scan only covers the unobserved remainder and
+// need not run every tick; it lists closed session beads, whose count grows
+// with the city's history, so it stays off the per-tick path.
+const closedUsageBackstopScanInterval = 10 * time.Minute
 
 // isLiveModelSweepState reports whether a session is currently awake and may
 // still append model invocations to its transcript. It is deliberately
@@ -120,9 +143,21 @@ func emitComputeFactForBead(ctx context.Context, sink usage.Sink, store beads.St
 	// time rather than the reconcile tick's now — more accurate, and the After
 	// guard still rejects a slept_at carried over from a PRIOR awake interval
 	// (archive and quarantine exits still don't refresh it). Otherwise use now.
+	//
+	// A closed session without a usable slept_at ends at closed_at instead: the
+	// closed-session lanes may settle it a tick, or up to
+	// closedUsageBackstopWindow, after the close, and now would bill that delay
+	// as wall time.
 	end := now
+	endFromSleep := false
 	if sleptRaw := strings.TrimSpace(meta["slept_at"]); sleptRaw != "" {
 		if t, perr := time.Parse(time.RFC3339, sleptRaw); perr == nil && t.After(startedAt) {
+			end = t
+			endFromSleep = true
+		}
+	}
+	if !endFromSleep && bead.Status == "closed" {
+		if t, ok := sessionBeadClosedAt(bead); ok && t.After(startedAt) && t.Before(now) {
 			end = t
 		}
 	}
@@ -282,7 +317,13 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			return
 		}
 		state := b.Metadata["state"]
-		if isLiveModelSweepState(state) {
+		closed := b.Status == "closed"
+		if closed {
+			// The epoch is over for good; drop its live-sweep memo so a closed
+			// session does not hold one for the process lifetime.
+			cr.liveSweepMemos.Delete(b.ID)
+		}
+		if !closed && isLiveModelSweepState(state) {
 			// Routed off the FRESH bead, so a session that woke since the snapshot
 			// lands here too — and on the boot pass it is skipped just like a
 			// snapshot-live one.
@@ -295,7 +336,7 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// the window since the snapshot was taken must not mint a tiny-wall fact for its
 		// just-STARTED interval and suppress the real end-of-interval emission. Best-
 		// effort accounting, the same NDI class as the sync-tail re-list delta.
-		if !isComputeTerminalState(state) {
+		if !isComputeTerminalBead(b) {
 			return
 		}
 		awakeStart := strings.TrimSpace(b.Metadata["awake_started_at"])
@@ -332,6 +373,49 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 		// sweep.
 		emitComputeFactForBead(ctx, sink, store, b, runtimeKind, cr.cityName, now, logf, sweepSettled)
 	}
+	open := make(map[string]struct{}, len(sessions))
+	unsettled := make(map[string]struct{})
+	for _, info := range sessions {
+		open[info.ID] = struct{}{}
+		if usageIntervalUnsettled(info) {
+			unsettled[info.ID] = struct{}{}
+		}
+	}
+	// Closed-since-last-pass lane. Sessions closed straight from active (the
+	// drain-ack close and every other close arm) leave the open snapshot in the
+	// tick that closes them, so the open-set scan below never sees them in a
+	// compute-terminal state. Any id whose interval was still unsettled on the
+	// previous pass and is no longer open is fetched and, if closed, settled
+	// here: the terminal model sweep bills the trailing usage the live lane had
+	// not reached yet, and the compute fact ends at closed_at. Cost is one Get
+	// per session that left the open set, which is zero on a quiet tick.
+	settled := make(map[string]struct{})
+	for id := range cr.usageUnsettledOpen {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, still := open[id]; still {
+			continue
+		}
+		b, err := store.Get(id)
+		if err != nil {
+			if !errors.Is(err, beads.ErrNotFound) {
+				logf("usage: loading closed session %s for usage facts failed: %v", id, err)
+				unsettled[id] = struct{}{} // retry next pass
+			}
+			continue
+		}
+		if b.Status != "closed" {
+			continue // left the snapshot for another reason; the open lane owns it
+		}
+		processSessionBead(b)
+		settled[id] = struct{}{}
+	}
+	cr.usageUnsettledOpen = unsettled
+	if !bootReconcile && now.Sub(cr.closedUsageScanAt) >= closedUsageBackstopScanInterval {
+		cr.closedUsageScanAt = now
+		cr.settleRecentlyClosedSessionUsage(ctx, store, now, settled, logf, processSessionBead)
+	}
 	for _, info := range sessions {
 		// A canceled tick (controller shutdown, reconcile deadline) stops here
 		// rather than working through the rest of the fleet: every remaining
@@ -349,6 +433,68 @@ func (cr *CityRuntime) emitDueComputeFacts(ctx context.Context, sessions []sessi
 			continue
 		}
 		processSessionBead(b)
+	}
+}
+
+// usageIntervalUnsettled reports whether an open session has an awake interval
+// whose compute fact has not been committed: exactly the sessions whose close
+// the closed-since-last-pass lane must settle.
+func usageIntervalUnsettled(info session.Info) bool {
+	start := strings.TrimSpace(info.AwakeStartedAt)
+	return start != "" && strings.TrimSpace(info.UsageComputeEmittedAt) != start
+}
+
+// sessionBeadClosedAt is when a closed session bead was closed: the closed_at
+// stamped by session.ClosePatch, else the bead's UpdatedAt.
+func sessionBeadClosedAt(b beads.Bead) (time.Time, bool) {
+	if raw := strings.TrimSpace(b.Metadata["closed_at"]); raw != "" {
+		if t, err := time.Parse(time.RFC3339, raw); err == nil {
+			return t, true
+		}
+	}
+	if !b.UpdatedAt.IsZero() {
+		return b.UpdatedAt.UTC(), true
+	}
+	return time.Time{}, false
+}
+
+// settleRecentlyClosedSessionUsage is the backstop for closes the
+// closed-since-last-pass lane cannot see: a controller restart between a close
+// and the next pass, or a close written by another process while the session
+// was not in this controller's unsettled set. It lists closed session beads and
+// settles any closed within closedUsageBackstopWindow whose interval is still
+// unaccounted. The list is the scan's whole cost (the store has no closed-at
+// range filter), which is why it runs on closedUsageBackstopScanInterval rather
+// than every tick.
+func (cr *CityRuntime) settleRecentlyClosedSessionUsage(
+	ctx context.Context,
+	store beads.Store,
+	now time.Time,
+	skip map[string]struct{},
+	logf func(string, ...any),
+	process func(beads.Bead),
+) {
+	closed, err := session.ListAllSessionBeads(store, beads.ListQuery{Status: "closed", IncludeClosed: true})
+	if err != nil {
+		logf("usage: listing closed sessions for the usage backstop failed: %v", err)
+		return
+	}
+	cutoff := now.Add(-closedUsageBackstopWindow)
+	for _, b := range closed {
+		if ctx.Err() != nil {
+			return
+		}
+		if _, done := skip[b.ID]; done || b.Status != "closed" || b.Metadata == nil {
+			continue
+		}
+		start := strings.TrimSpace(b.Metadata["awake_started_at"])
+		if start == "" || strings.TrimSpace(b.Metadata[usageComputeEmittedAtKey]) == start {
+			continue
+		}
+		if closedAt, ok := sessionBeadClosedAt(b); !ok || closedAt.Before(cutoff) {
+			continue
+		}
+		process(b)
 	}
 }
 
