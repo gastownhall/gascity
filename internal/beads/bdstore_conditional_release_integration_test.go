@@ -61,10 +61,7 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 }
 
 // TestBdStoreReleaseIfCurrentAgainstRealBd executes the conditional-release CAS
-// against a REAL bd binary in EMBEDDED mode — the mode where `bd sql` is
-// rejected outright ("'bd sql' is not yet supported in embedded mode"), so the
-// raw-SQL path this conversion replaces could only reach it by shelling
-// separately to `dolt sql`.
+// against a REAL bd binary in EMBEDDED mode.
 //
 // It is the authoritative guard for the two facts the unit tests can only
 // assume about bd: that the flag spelling still exists, and that a rejected
@@ -75,7 +72,7 @@ func conditionalReleaseUnprovable(t *testing.T, format string, args ...any) {
 //
 // It is homed on the contract matrix's "current" cell, whose bd is built from
 // deps.env BD_CURRENT_REF. That is a choice, not a capability limit: deps.env
-// BD_VERSION is v1.3.0, which carries the flags, so the shards that
+// BD_VERSION is v1.3.1, which carries the flags, so the shards that
 // install BD_VERSION could run this row too. It stays here as the single home
 // for the contract, and this cell sets requireConditionalReleaseEnv so every
 // exit short of a full run is a failure (conditionalReleaseUnprovable). The
@@ -234,11 +231,10 @@ func TestBdStoreReleaseIfCurrentAgainstRealBd(t *testing.T) {
 //
 // The signal is POSITIVE — the flags appear in `bd update --help`, the same
 // shape the production four-verb probe uses for --if-revision
-// (conditionalWritesCapable). Deciding from an error string instead cannot work
-// here: on a flagless bd the store latches to the raw-SQL path, embedded mode
-// rejects `bd sql`, and the dolt fallback then SUCCEEDS with released=false for
-// a wisp (it names the `issues` table), so no error ever surfaces to classify
-// and the row hard-fails instead of skipping.
+// (conditionalWritesCapable) — so the skip decision never rests on the code
+// under test. Skipping on ReleaseIfCurrent's own
+// ErrConditionalReleaseUnsupported would let a misread unknown-flag error skip
+// the row this test exists to run.
 func bdParsesConditionalReleaseFlags(t *testing.T, scope string) bool {
 	t.Helper()
 	out, err := newConditionalIntegrationRunner(t, scope)(scope, "bd", "update", "--help")

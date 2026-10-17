@@ -2141,6 +2141,7 @@ go_test(
         "//internal/convoy",
         "//internal/coordclass",
         "//internal/credentialprovider",
+        "//internal/deps",
         "//internal/dispatch",
         "//internal/docgen",
         "//internal/doctor",

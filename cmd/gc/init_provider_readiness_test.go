@@ -746,9 +746,8 @@ func TestCheckHardDependenciesRequiresBd13ForPendingProviderScope(t *testing.T) 
 	}
 }
 
-// A ready city used to keep a lower compatibility floor than a pending
-// provider-owned rig. The init floor is now the same 1.3.0, so bd 1.2.2 is
-// refused either way, and the refusal names 1.3.0.
+// A ready city and a pending provider-owned rig share the 1.3.0 floor, so
+// bd 1.2.2 is refused either way, and the refusal names 1.3.0.
 func TestCheckHardDependenciesRequiresBd13ForPendingProviderRig(t *testing.T) {
 	for _, tc := range []struct {
 		name           string

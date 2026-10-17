@@ -9,11 +9,10 @@ import (
 )
 
 // The --beads-transport help — and docs/reference/cli.md, which is generated
-// from it — used to describe two bd floors: 1.3.0 for a fresh provider-owned
-// init and the older bdMinVersion for the legacy `--dolt-host` alias, which
-// journals no initializing ownership record. The init floor is now 1.3.0 too,
-// so there is no alias exception left to describe, and the help must not
-// advertise the retired 1.0.4 floor.
+// from it — states the one bd floor the code enforces: bdMinVersion covers a
+// fresh provider-owned init and the legacy `--dolt-host` alias alike (the alias
+// journals no initializing ownership record, so no higher floor applies to it).
+// The help names no alias exception and no older floor such as 1.0.4.
 func TestBeadsTransportHelpMatchesTheBdVersionFloorTheCodeEnforces(t *testing.T) {
 	usage := beadsTransportFlagUsage(t)
 

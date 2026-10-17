@@ -68,10 +68,9 @@ key and ignores the whole file, and Gas City honors only the first
 occurrence, so the scope stays opted out and the file is still removed. Do
 not use `explicit` at city scope; it is a rig-only endpoint origin and fails
 canonical validation.
-bd 1.0.4, which Gas City no longer supports, re-imported a present
-`issues.jsonl` on every write and re-applied the retained rows over newer
-Dolt data (`sa-41j3kp`). bd 1.0.5 and later, including the supported 1.3.0
-floor, import it only into an empty database.
+Every supported `bd` (1.3.0 or newer) imports a present `issues.jsonl` only
+into an empty database, so the retained file is never re-applied over
+existing Dolt data.
 
 The opt-out buys retention, not freshness. Gas City still forces
 `BD_EXPORT_AUTO=false` on its own `bd` calls — `gc bd`, controllers,

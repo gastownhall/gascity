@@ -2837,8 +2837,8 @@ func TestDoBdReleaseIfCurrentUpdatesOnlyMatchingAssignment(t *testing.T) {
 // TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL is the CLI twin of the
 // store-level floor: a bd below 1.3.0 rejects the conditional-release flags,
 // and the command must fail with the typed refusal naming the floor. It must
-// never reach `bd sql` (or, on this embedded-Dolt rig, the `dolt sql` CLI),
-// which is what the deleted fallback did.
+// never reach `bd sql` (or, on this embedded-Dolt rig, the `dolt sql` CLI): no
+// release path writes the row behind bd's back.
 func TestDoBdReleaseIfCurrentRefusesAnOldBdWithoutSQL(t *testing.T) {
 	clearInheritedBeadsEnv(t)
 	origCityFlag := cityFlag

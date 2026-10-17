@@ -109,8 +109,8 @@ func isReleaseVerb(args []string) bool {
 	return false
 }
 
-// TestReleaseIfCurrentPrefersTheNativeVerb pins the exact argv, because the
-// whole conversion is "stop assembling SQL, state the two preconditions".
+// TestReleaseIfCurrentPrefersTheNativeVerb pins the exact argv: the release
+// states its two preconditions to bd and assembles no SQL.
 func TestReleaseIfCurrentPrefersTheNativeVerb(t *testing.T) {
 	runner := &releaseVerbRunner{}
 	s := beads.NewBdStore("/city", runner.run)
@@ -196,8 +196,9 @@ func TestReleaseIfCurrentPreconditionMissDoesNotClassifyOnMessageText(t *testing
 	})
 }
 
-// TestReleaseIfCurrentTreatsAnUnresolvableIDAsNotHeld keeps the observable
-// contract the raw-SQL path had, where an absent bead matched zero rows.
+// TestReleaseIfCurrentTreatsAnUnresolvableIDAsNotHeld pins the verdict for an
+// absent bead: it holds no assignment, so the answer is "not held", not an
+// error.
 //
 // The fixture is bd's measured wording and exit status for an id that resolves
 // to nothing (`bd update tst-nosuchbead --status open` → exit 1, `Error
@@ -230,9 +231,7 @@ func TestReleaseIfCurrentTreatsAnUnresolvableIDAsNotHeld(t *testing.T) {
 // resolver prefix/substring-matches an id with no exact hit, so handing it
 // through unverified releases a bead the caller never named — and reports
 // success. The CAS preconditions are no defense, because bd evaluates them
-// against the bead it resolved, and one worker commonly holds several. The
-// statement this verb replaced matched `WHERE id = <literal>` and was therefore
-// exact by construction.
+// against the bead it resolved, and one worker commonly holds several.
 func TestReleaseIfCurrentRefusesAFuzzyIDCollision(t *testing.T) {
 	runner := &releaseVerbRunner{
 		// bd resolved a LONGER id — the gcy-g4o shape ("gcy-dv7" →
@@ -305,9 +304,9 @@ func TestReleaseIfCurrentSurfacesInfraFailuresAsErrors(t *testing.T) {
 // TestReleaseIfCurrentOnOldBdIsTypedNotSQL pins the bd 1.3.0 floor: a bd that
 // predates the conditional-release flags (beads#5008) gets a typed refusal that
 // wraps ErrConditionalReleaseUnsupported and names the floor. It must never
-// reach a raw `bd sql` statement or the Dolt CLI, which is what the deleted
-// fallback did. Callers read ErrConditionalReleaseUnsupported as "take the
-// fenced recheck path", the same answer a store with no conditional release
+// reach a raw `bd sql` statement or the Dolt CLI: no release path writes the
+// row behind bd's back. Callers read ErrConditionalReleaseUnsupported as "take
+// the fenced recheck path", the same answer a store with no conditional release
 // gives.
 func TestReleaseIfCurrentOnOldBdIsTypedNotSQL(t *testing.T) {
 	for _, tc := range []struct {
@@ -315,7 +314,7 @@ func TestReleaseIfCurrentOnOldBdIsTypedNotSQL(t *testing.T) {
 		metadata string
 	}{
 		{name: "server"},
-		// An embedded-Dolt scope used to reach the `dolt sql` CLI fallback.
+		// An embedded-Dolt scope must not reach the `dolt sql` CLI either.
 		{name: "embedded dolt", metadata: `{"backend":"dolt","dolt_mode":"embedded","dolt_database":"beads"}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

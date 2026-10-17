@@ -270,9 +270,10 @@ check reports `bd X is too old (need >= 1.3.0)`.
 
 1.3.0 is the first tested release with the `bd update --if-assignee
 --if-status` conditional release, which Gas City uses to release a stale
-work assignment without clobbering a concurrent re-claim. Gas City no longer
-falls back to raw SQL for an older `bd`: a `bd` without those flags gets a
-typed "conditional assignment release unsupported" error. A 1.2.x version
+work assignment without clobbering a concurrent re-claim. A `bd` without
+those flags gets a typed "conditional assignment release unsupported" error,
+and Gas City releases no stale assignment through it: work orphaned by a dead
+session stays assigned to that session until you upgrade `bd`. A 1.2.x version
 number is not enough: bd 1.2.0 and 1.2.1 were accidental, untested releases,
 and bd 1.2.2 re-released the 1.1.2 code without the flags. Check your
 version:

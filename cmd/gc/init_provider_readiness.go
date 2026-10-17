@@ -663,8 +663,8 @@ const (
 	doltMinVersion = doltversion.ManagedMin // sql-server features used by gc-beads-bd
 	// bdMinVersion is the minimum supported bd (deps.env BD_PREV_VERSION). It
 	// is 1.3.0 because BdStore.ReleaseIfCurrent needs bd's --if-assignee /
-	// --if-status preconditions and no longer has a raw-SQL fallback; 1.3.0 is
-	// the first tested release carrying them (bd 1.2.2 re-released 1.1.2).
+	// --if-status preconditions and has no path without them; 1.3.0 is the
+	// first tested release carrying them (bd 1.2.2 re-released 1.1.2).
 	// It may not drop below beads.BdConditionalReleaseMinVersion.
 	bdMinVersion = "1.3.0"
 	// Fresh provider-owned scopes use bd's persisted ownership and transport

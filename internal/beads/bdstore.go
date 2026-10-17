@@ -1793,8 +1793,7 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // preconditions server-side and reports a failed one as exit 13 having written
 // nothing (bdstore_conditional_release.go). A bd predating the flags
 // (beads#5008, first shipped in a tested release as bd 1.3.0, the supported
-// floor) gets an error wrapping ErrConditionalReleaseUnsupported: gc no longer
-// carries a raw-SQL fallback for it. Callers treat
+// floor) gets an error wrapping ErrConditionalReleaseUnsupported. Callers treat
 // ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
 // (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb path never
 // returns it for a precondition miss.
@@ -2419,13 +2418,15 @@ func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) (
 	}, args...)
 }
 
-// runBDTransientReleaseOutput runs a revision-aware release UPDATE, retrying
+// runBDTransientReleaseOutput runs an assignment-guarded write (the
+// --if-status/--if-assignee update behind UpdateIfAssignment), retrying
 // ordinary serialization conflicts but never replaying an ambiguous write.
 // Unlike a create there is no stable id to make the write idempotent: the
-// release matches on status+assignee and installs a fresh token, so replaying
-// one that may already have committed could stomp a same-assignee reclaim that
-// landed in between. Same ambiguity guard as an id-less create, named for the
-// release path it protects.
+// guard matches on status+assignee, so replaying one that may already have
+// committed could stomp a same-assignee reclaim that landed in between. Same
+// ambiguity guard as an id-less create. ReleaseIfCurrent's bd verb has the
+// same hazard but does not use this runner yet: releaseIfCurrentViaBdVerb
+// still runs through runBDTransientWriteOutput (ga-7ryjc6).
 func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
 	return s.runBDTransientWriteOutputWhen(func(err error) bool {
 		return isBdTransientWriteError(err) && !isBdAmbiguousWriteError(err)

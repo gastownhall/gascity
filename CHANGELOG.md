@@ -18,9 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bd 1.2.0 and 1.2.1 were accidental, untested releases, and bd 1.2.2
   re-released the 1.1.2 code without the flags. The raw-SQL fallback (`bd sql`,
   and the `dolt sql` CLI on embedded Dolt) that served older bd is deleted, so
-  gc no longer bypasses bd with direct SQL for old-bd compatibility; a bd
+  gc no longer bypasses bd with direct SQL for old-bd compatibility. A bd
   without the flags now gets a typed "conditional assignment release
-  unsupported" error, and callers take their existing fenced recheck path.
+  unsupported" error, and gc releases no stale assignment through it: the
+  fenced fallback cannot guard its write on that bd either, so it refuses,
+  and orphaned work stays assigned to its dead session until bd is upgraded.
   The default `beads.bd_compatibility` (`bd-1.0.4` semantics) is unchanged.
   Upgrade with `brew upgrade beads` or from
   https://github.com/gastownhall/beads/releases.

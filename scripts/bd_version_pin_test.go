@@ -119,29 +119,33 @@ func TestBDVersionPins(t *testing.T) {
 			bdVersion, bdPrev)
 	}
 
-	// The init floor is what makes ReleaseIfCurrent's typed refusal safe: the
-	// raw-SQL release fallback is gone, so every supported bd must carry the
-	// conditional-release flags (beads#5008). bd 1.2.2 re-released the 1.1.2
-	// code, so the first tested release with the flags is 1.3.0, and the
-	// floor may not drop below it. The typed refusal names the same const.
+	// The init floor is what makes ReleaseIfCurrent's typed refusal safe:
+	// ReleaseIfCurrent has no path without bd's conditional-release flags
+	// (beads#5008), so every supported bd must carry them. bd 1.2.2
+	// re-released the 1.1.2 code, so the first tested release with the flags
+	// is 1.3.0, and the floor may not drop below it. The typed refusal names
+	// the same const.
 	condReleaseFloor := extractGoStringConst(t, root, "internal/beads/bdstore_conditional_release.go", "BdConditionalReleaseMinVersion")
 	if condReleaseFloor == "" {
 		t.Fatal("internal/beads/bdstore_conditional_release.go missing BdConditionalReleaseMinVersion const")
 	}
 	if deps.CompareVersions(bdMin, condReleaseFloor) < 0 {
-		t.Fatalf("bdMinVersion (%q) is below BdConditionalReleaseMinVersion (%q); a supported bd would hit ReleaseIfCurrent's old-bd refusal, and there is no SQL fallback any more",
+		t.Fatalf("bdMinVersion (%q) is below BdConditionalReleaseMinVersion (%q); a supported bd would hit ReleaseIfCurrent's old-bd refusal and release no stale assignment",
 			bdMin, condReleaseFloor)
 	}
 
 	// The ready-projection feature floor (#3135's regressing surface) must
-	// exist. It used to have to be strictly newer than the init floor; since
-	// the init floor moved to 1.3.0 every supported bd satisfies it, and the
-	// runtime gate in bdstore_ready_projection.go stays only as a guard for an
-	// unsupported bd. It must still not exceed the init floor's reach: a gate
-	// above the newest matrix cell would refuse every supported bd.
+	// exist, and every supported bd must satisfy it, so the runtime gate in
+	// bdstore_ready_projection.go only ever refuses an unsupported bd. A floor
+	// above bdMinVersion would refuse the ready projection on the
+	// minimum-supported matrix cell, the #3135 failure mode; a floor above the
+	// newest matrix cell would refuse every supported bd.
 	readyFloor := extractGoStringConst(t, root, "internal/beads/bdstore_ready_projection.go", "bdReadyProjectionMinVersion")
 	if readyFloor == "" {
 		t.Fatal("internal/beads/bdstore_ready_projection.go missing bdReadyProjectionMinVersion const")
+	}
+	if deps.CompareVersions(readyFloor, bdMin) > 0 {
+		t.Fatalf("bdReadyProjectionMinVersion (%q) is newer than bdMinVersion (%q); the minimum-supported bd could not serve the ready projection", readyFloor, bdMin)
 	}
 	if deps.CompareVersions(readyFloor, bdCurrent) > 0 {
 		t.Fatalf("bdReadyProjectionMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could serve the ready projection", readyFloor, bdCurrent)
@@ -168,9 +172,9 @@ func TestBDVersionPins(t *testing.T) {
 
 	// The bd_compatibility config enum selects which bd CLI semantics gc relies
 	// on (bd-1.0.4 history-backed ready vs bd-1.0.5 ready flags). It is a
-	// behavior selector, not a support floor, so it no longer mirrors the init
-	// floor; its default is unchanged by the floor raise. The ready-projection
-	// floor must still be one of its members.
+	// behavior selector, not a support floor, so neither its members nor its
+	// default track the init floor. The ready-projection floor must still be
+	// one of its members.
 	cfg := readFile(t, root, "internal/config/config.go")
 	if member := "enum=bd-" + readyFloor; !strings.Contains(cfg, member) {
 		t.Fatalf("internal/config/config.go bd_compatibility enum missing %q (ready floor %s)", member, readyFloor)

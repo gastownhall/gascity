@@ -34,8 +34,8 @@ as a selector-driven one, because both journal a pending ownership record and
 touching the store: `missing required dependencies: bd (found vX, need
 v1.3.0+)`. There is no silent fallback to the legacy path. The legacy
 `--dolt-host` alias used without `--beads-transport`/`--beads-target` journals
-no ownership record, but it no longer escapes the floor either: the general
-init floor (`bdMinVersion`) is also 1.3.0. `beads.bd_compatibility` in `city.toml` is a different knob: it
+no ownership record, and the general init floor (`bdMinVersion`, also 1.3.0)
+applies to it. `beads.bd_compatibility` in `city.toml` is a different knob: it
 selects which bd CLI *semantics* gc relies on at runtime and does not lower or
 raise this init floor.
 
