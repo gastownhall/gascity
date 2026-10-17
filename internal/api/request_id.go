@@ -9,6 +9,7 @@ import (
 	"strconv"
 
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 func newRequestID() (string, error) {
@@ -130,23 +131,25 @@ func (s *Server) emitSessionCreateFailedFor(requestID, sessionID, errorCode, err
 }
 
 // emitSessionMessageSucceeded records a request.result.session.message event.
-func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome) {
+// op is the operation the request was recorded as, nil when it was not.
+func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome, op *ConversationOp) {
 	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
 		RequestID:          requestID,
 		SessionID:          sessionID,
 		Queued:             out.Queued,
 		WillStart:          out.willStart,
 		WillNotStartReason: out.willNotStartReason,
+		Op:                 op,
 	})
 }
 
 // emitSessionMessageFailed records a request.failed event for session.message.
-func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage string) {
-	s.emitRequestFailed(requestID, RequestOperationSessionMessage, errorCode, errorMessage)
+func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage string, op *ConversationOp) {
+	s.emitRequestFailedOp(requestID, RequestOperationSessionMessage, errorCode, errorMessage, op)
 }
 
 // emitSessionSubmitSucceeded records a request.result.session.submit event.
-func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string) {
+func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string, op *ConversationOp) {
 	s.emitAsyncResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
 		RequestID:          requestID,
 		SessionID:          sessionID,
@@ -154,12 +157,35 @@ func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out mes
 		Intent:             intent,
 		WillStart:          out.willStart,
 		WillNotStartReason: out.willNotStartReason,
+		Interrupt:          submitInterruptWire(out.Interrupt),
+		Op:                 op,
 	})
 }
 
 // emitSessionSubmitFailed records a request.failed event for session.submit.
-func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage string) {
-	s.emitRequestFailed(requestID, RequestOperationSessionSubmit, errorCode, errorMessage)
+func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage string, op *ConversationOp) {
+	s.emitRequestFailedOp(requestID, RequestOperationSessionSubmit, errorCode, errorMessage, op)
+}
+
+// emitRequestFailedOp records a request.failed event carrying the operation
+// the failed request was recorded as; a nil op is the legacy payload.
+func (s *Server) emitRequestFailedOp(requestID, operation, errorCode, errorMessage string, op *ConversationOp) {
+	s.emitAsyncResult(events.RequestFailed, "", RequestFailedPayload{
+		RequestID:    requestID,
+		Operation:    operation,
+		ErrorCode:    errorCode,
+		ErrorMessage: errorMessage,
+		Op:           op,
+	})
+}
+
+// submitInterruptWire projects a turn-fenced interrupt_now's report onto the
+// submit result; nil when no fence ran.
+func submitInterruptWire(r *session.TurnInterruptReport) *SessionSubmitInterrupt {
+	if r == nil {
+		return nil
+	}
+	return &SessionSubmitInterrupt{Outcome: string(r.Outcome), TurnID: r.TurnID, Degradation: r.Degradation}
 }
 
 // emitRigCreateSucceeded records a request.result.rig.create event — the

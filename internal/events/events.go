@@ -503,6 +503,14 @@ const (
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
 
+	// OpsRecordingDegraded fires when the API or the controller's op
+	// sweeper cannot record or close operation-journal ops under an ops gate
+	// (ops.content, ops.control, ops.lifecycle) that is auto or require: in
+	// auto the request ran unrecorded or its op stayed open, in require it
+	// was refused. Latched by the emitter to at most one event per (gate,
+	// surface, stage, reason) per ten minutes per process (DES-O0API D13).
+	OpsRecordingDegraded = "ops.recording_degraded"
+
 	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
 	// recompute over one bd-backed scope as a one-shot upgrade step: the
 	// first start under a bd version the scope has not been repaired with.
@@ -599,6 +607,7 @@ var KnownEventTypes = []string{
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
+	OpsRecordingDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,

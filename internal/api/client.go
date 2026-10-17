@@ -30,6 +30,8 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -1466,8 +1468,22 @@ func (c *Client) SendSessionMessage(id, message string) error {
 
 // SubmitSession sends a semantic submit request to a session. The id may
 // be either a bead ID or a resolvable session alias/name. Internally
-// handles the async protocol: POST → 202 + request_id → SSE event.
+// handles the async protocol: POST → 202 + request_id → SSE event. It sends
+// no Idempotency-Key.
 func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
+	return c.submitSession(id, message, intent, "")
+}
+
+// SubmitSessionWithKey is SubmitSession under an Idempotency-Key: a retry
+// with the same key against the same session gets the first request's
+// outcome instead of a second delivery. A replay of a request that already
+// finished is answered from the 202's stored outcome without waiting on the
+// event stream. An empty key sends none, as SubmitSession does.
+func (c *Client) SubmitSessionWithKey(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
+	return c.submitSession(id, message, intent, key)
+}
+
+func (c *Client) submitSession(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
 	}
@@ -1479,7 +1495,11 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		i := genclient.SubmitIntent(intent)
 		body.Intent = &i
 	}
-	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, nil, body)
+	var params *genclient.SubmitSessionParams
+	if key != "" {
+		params = &genclient.SubmitSessionParams{XGCRequest: "true", IdempotencyKey: &key}
+	}
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, params, body)
 	if err != nil {
 		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("request failed: %w", err)}
 	}
@@ -1491,6 +1511,9 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	}
 	if resp.JSON202 == nil {
 		return SessionSubmitResponse{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	if out, done, err := replayedSubmitOutcome(resp.JSON202, intent); done {
+		return out, err
 	}
 	requestID := resp.JSON202.RequestId
 
@@ -1517,6 +1540,32 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		Queued: p.Queued,
 		Intent: session.SubmitIntent(p.Intent),
 	}, nil
+}
+
+// replayedSubmitOutcome answers a 202 that replays a finished submit from the
+// stored outcome it carries (DES-O0API §6.5): done is false for any other 202,
+// which the caller resolves on the event stream. intent is the request's: a
+// replay's op does not carry it on the wire.
+func replayedSubmitOutcome(body *genclient.AsyncAcceptedBody, intent session.SubmitIntent) (SessionSubmitResponse, bool, error) {
+	if body.Replayed == nil || !*body.Replayed || body.Op == nil || body.Op.Outcome == nil ||
+		body.Op.Status != genclient.ConversationOpStatus(opjournal.StatusClosed) {
+		return SessionSubmitResponse{}, false, nil
+	}
+	op := body.Op
+	outcome := opjournal.Outcome{Arm: opjournal.Arm(op.Outcome.Arm)}
+	if op.Outcome.Reason != nil {
+		outcome.Reason = *op.Outcome.Reason
+	}
+	arm, reason := outcome.Effective()
+	if arm != opjournal.ArmSucceeded {
+		return SessionSubmitResponse{}, true, fmt.Errorf("submit failed: %s: %s",
+			messageReplayErrorCode(RequestOperationSessionSubmit, reason), replayedFailureMessage(op.Id, arm, reason))
+	}
+	queued := op.Outcome.Via != nil && *op.Outcome.Via == legacyop.ViaLegacyQueued
+	if intent == "" {
+		intent = session.SubmitIntentDefault
+	}
+	return SessionSubmitResponse{Status: "accepted", ID: op.Conversation, Queued: queued, Intent: intent}, true, nil
 }
 
 // SlingRequest carries the parameters of a sling mutation for Client.Sling.

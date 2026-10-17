@@ -99,6 +99,99 @@ func (e ConversationKind) Valid() bool {
 	}
 }
 
+// Defines values for ConversationOpKind.
+const (
+	ConversationOpKindClose     ConversationOpKind = "close"
+	ConversationOpKindCreate    ConversationOpKind = "create"
+	ConversationOpKindInterrupt ConversationOpKind = "interrupt"
+	ConversationOpKindKill      ConversationOpKind = "kill"
+	ConversationOpKindMessage   ConversationOpKind = "message"
+	ConversationOpKindRespond   ConversationOpKind = "respond"
+	ConversationOpKindRestart   ConversationOpKind = "restart"
+	ConversationOpKindResume    ConversationOpKind = "resume"
+	ConversationOpKindSuspend   ConversationOpKind = "suspend"
+	ConversationOpKindWake      ConversationOpKind = "wake"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpKind enum.
+func (e ConversationOpKind) Valid() bool {
+	switch e {
+	case ConversationOpKindClose:
+		return true
+	case ConversationOpKindCreate:
+		return true
+	case ConversationOpKindInterrupt:
+		return true
+	case ConversationOpKindKill:
+		return true
+	case ConversationOpKindMessage:
+		return true
+	case ConversationOpKindRespond:
+		return true
+	case ConversationOpKindRestart:
+		return true
+	case ConversationOpKindResume:
+		return true
+	case ConversationOpKindSuspend:
+		return true
+	case ConversationOpKindWake:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpStatus.
+const (
+	ConversationOpStatusAccepted  ConversationOpStatus = "accepted"
+	ConversationOpStatusClosed    ConversationOpStatus = "closed"
+	ConversationOpStatusExecuting ConversationOpStatus = "executing"
+	ConversationOpStatusSettling  ConversationOpStatus = "settling"
+	ConversationOpStatusSubmitted ConversationOpStatus = "submitted"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpStatus enum.
+func (e ConversationOpStatus) Valid() bool {
+	switch e {
+	case ConversationOpStatusAccepted:
+		return true
+	case ConversationOpStatusClosed:
+		return true
+	case ConversationOpStatusExecuting:
+		return true
+	case ConversationOpStatusSettling:
+		return true
+	case ConversationOpStatusSubmitted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpOutcomeArm.
+const (
+	ConversationOpOutcomeArmCanceled  ConversationOpOutcomeArm = "canceled"
+	ConversationOpOutcomeArmFailed    ConversationOpOutcomeArm = "failed"
+	ConversationOpOutcomeArmSkipped   ConversationOpOutcomeArm = "skipped"
+	ConversationOpOutcomeArmSucceeded ConversationOpOutcomeArm = "succeeded"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpOutcomeArm enum.
+func (e ConversationOpOutcomeArm) Valid() bool {
+	switch e {
+	case ConversationOpOutcomeArmCanceled:
+		return true
+	case ConversationOpOutcomeArmFailed:
+		return true
+	case ConversationOpOutcomeArmSkipped:
+		return true
+	case ConversationOpOutcomeArmSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for EventRotateArchiveCompressionStatus.
 const (
 	EventRotateArchiveCompressionStatusComplete EventRotateArchiveCompressionStatus = "complete"
@@ -111,6 +204,90 @@ func (e EventRotateArchiveCompressionStatus) Valid() bool {
 	case EventRotateArchiveCompressionStatusComplete:
 		return true
 	case EventRotateArchiveCompressionStatusPending:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OpsRecordingDegradedPayloadGate.
+const (
+	OpsContent   OpsRecordingDegradedPayloadGate = "ops.content"
+	OpsControl   OpsRecordingDegradedPayloadGate = "ops.control"
+	OpsLifecycle OpsRecordingDegradedPayloadGate = "ops.lifecycle"
+)
+
+// Valid indicates whether the value is a known member of the OpsRecordingDegradedPayloadGate enum.
+func (e OpsRecordingDegradedPayloadGate) Valid() bool {
+	switch e {
+	case OpsContent:
+		return true
+	case OpsControl:
+		return true
+	case OpsLifecycle:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OpsRecordingDegradedPayloadMode.
+const (
+	OpsRecordingDegradedPayloadModeAuto    OpsRecordingDegradedPayloadMode = "auto"
+	OpsRecordingDegradedPayloadModeRequire OpsRecordingDegradedPayloadMode = "require"
+)
+
+// Valid indicates whether the value is a known member of the OpsRecordingDegradedPayloadMode enum.
+func (e OpsRecordingDegradedPayloadMode) Valid() bool {
+	switch e {
+	case OpsRecordingDegradedPayloadModeAuto:
+		return true
+	case OpsRecordingDegradedPayloadModeRequire:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OpsRecordingDegradedPayloadStage.
+const (
+	OpsRecordingDegradedPayloadStageAdopt   OpsRecordingDegradedPayloadStage = "adopt"
+	OpsRecordingDegradedPayloadStageClose   OpsRecordingDegradedPayloadStage = "close"
+	OpsRecordingDegradedPayloadStageOpen    OpsRecordingDegradedPayloadStage = "open"
+	OpsRecordingDegradedPayloadStagePropose OpsRecordingDegradedPayloadStage = "propose"
+	OpsRecordingDegradedPayloadStageSweep   OpsRecordingDegradedPayloadStage = "sweep"
+)
+
+// Valid indicates whether the value is a known member of the OpsRecordingDegradedPayloadStage enum.
+func (e OpsRecordingDegradedPayloadStage) Valid() bool {
+	switch e {
+	case OpsRecordingDegradedPayloadStageAdopt:
+		return true
+	case OpsRecordingDegradedPayloadStageClose:
+		return true
+	case OpsRecordingDegradedPayloadStageOpen:
+		return true
+	case OpsRecordingDegradedPayloadStagePropose:
+		return true
+	case OpsRecordingDegradedPayloadStageSweep:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for OpsRecordingDegradedPayloadSurface.
+const (
+	Api        OpsRecordingDegradedPayloadSurface = "api"
+	Controller OpsRecordingDegradedPayloadSurface = "controller"
+)
+
+// Valid indicates whether the value is a known member of the OpsRecordingDegradedPayloadSurface enum.
+func (e OpsRecordingDegradedPayloadSurface) Valid() bool {
+	switch e {
+	case Api:
+		return true
+	case Controller:
 		return true
 	default:
 		return false
@@ -149,19 +326,19 @@ func (e RequestFailedPayloadOperation) Valid() bool {
 
 // Defines values for RigCreateResponseBodyStatus.
 const (
-	Accepted RigCreateResponseBodyStatus = "accepted"
-	Created  RigCreateResponseBodyStatus = "created"
-	Exists   RigCreateResponseBodyStatus = "exists"
+	RigCreateResponseBodyStatusAccepted RigCreateResponseBodyStatus = "accepted"
+	RigCreateResponseBodyStatusCreated  RigCreateResponseBodyStatus = "created"
+	RigCreateResponseBodyStatusExists   RigCreateResponseBodyStatus = "exists"
 )
 
 // Valid indicates whether the value is a known member of the RigCreateResponseBodyStatus enum.
 func (e RigCreateResponseBodyStatus) Valid() bool {
 	switch e {
-	case Accepted:
+	case RigCreateResponseBodyStatusAccepted:
 		return true
-	case Created:
+	case RigCreateResponseBodyStatusCreated:
 		return true
-	case Exists:
+	case RigCreateResponseBodyStatusExists:
 		return true
 	default:
 		return false
@@ -477,6 +654,33 @@ func (e SessionStructuredToolErrorCategory) Valid() bool {
 	}
 }
 
+// Defines values for SessionSubmitInterruptOutcome.
+const (
+	SessionSubmitInterruptOutcomeNoTurn      SessionSubmitInterruptOutcome = "no_turn"
+	SessionSubmitInterruptOutcomeSettled     SessionSubmitInterruptOutcome = "settled"
+	SessionSubmitInterruptOutcomeStale       SessionSubmitInterruptOutcome = "stale"
+	SessionSubmitInterruptOutcomeUnavailable SessionSubmitInterruptOutcome = "unavailable"
+	SessionSubmitInterruptOutcomeUnsettled   SessionSubmitInterruptOutcome = "unsettled"
+)
+
+// Valid indicates whether the value is a known member of the SessionSubmitInterruptOutcome enum.
+func (e SessionSubmitInterruptOutcome) Valid() bool {
+	switch e {
+	case SessionSubmitInterruptOutcomeNoTurn:
+		return true
+	case SessionSubmitInterruptOutcomeSettled:
+		return true
+	case SessionSubmitInterruptOutcomeStale:
+		return true
+	case SessionSubmitInterruptOutcomeUnavailable:
+		return true
+	case SessionSubmitInterruptOutcomeUnsettled:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for SessionTranscriptConversationResponseFormat.
 const (
 	SessionTranscriptConversationResponseFormatConversation SessionTranscriptConversationResponseFormat = "conversation"
@@ -590,25 +794,25 @@ func (e StatusConditionalWriteStoreVerdictProbe) Valid() bool {
 
 // Defines values for StatusConditionalWritesEffective.
 const (
-	StatusConditionalWritesEffectiveActive         StatusConditionalWritesEffective = "active"
-	StatusConditionalWritesEffectiveDegraded       StatusConditionalWritesEffective = "degraded"
-	StatusConditionalWritesEffectiveFailClosed     StatusConditionalWritesEffective = "fail_closed"
-	StatusConditionalWritesEffectiveOff            StatusConditionalWritesEffective = "off"
-	StatusConditionalWritesEffectivePendingRestart StatusConditionalWritesEffective = "pending_restart"
+	Active         StatusConditionalWritesEffective = "active"
+	Degraded       StatusConditionalWritesEffective = "degraded"
+	FailClosed     StatusConditionalWritesEffective = "fail_closed"
+	Off            StatusConditionalWritesEffective = "off"
+	PendingRestart StatusConditionalWritesEffective = "pending_restart"
 )
 
 // Valid indicates whether the value is a known member of the StatusConditionalWritesEffective enum.
 func (e StatusConditionalWritesEffective) Valid() bool {
 	switch e {
-	case StatusConditionalWritesEffectiveActive:
+	case Active:
 		return true
-	case StatusConditionalWritesEffectiveDegraded:
+	case Degraded:
 		return true
-	case StatusConditionalWritesEffectiveFailClosed:
+	case FailClosed:
 		return true
-	case StatusConditionalWritesEffectiveOff:
+	case Off:
 		return true
-	case StatusConditionalWritesEffectivePendingRestart:
+	case PendingRestart:
 		return true
 	default:
 		return false
@@ -680,16 +884,16 @@ func (e SubmitIntent) Valid() bool {
 
 // Defines values for SupervisorRequestPayloadPhase.
 const (
-	Complete SupervisorRequestPayloadPhase = "complete"
-	Start    SupervisorRequestPayloadPhase = "start"
+	SupervisorRequestPayloadPhaseComplete SupervisorRequestPayloadPhase = "complete"
+	SupervisorRequestPayloadPhaseStart    SupervisorRequestPayloadPhase = "start"
 )
 
 // Valid indicates whether the value is a known member of the SupervisorRequestPayloadPhase enum.
 func (e SupervisorRequestPayloadPhase) Valid() bool {
 	switch e {
-	case Complete:
+	case SupervisorRequestPayloadPhaseComplete:
 		return true
-	case Start:
+	case SupervisorRequestPayloadPhaseStart:
 		return true
 	default:
 		return false
@@ -818,16 +1022,16 @@ func (e TranscriptProvenance) Valid() bool {
 
 // Defines values for UsageBodySource.
 const (
-	LocalEstimate UsageBodySource = "local_estimate"
-	Unavailable   UsageBodySource = "unavailable"
+	UsageBodySourceLocalEstimate UsageBodySource = "local_estimate"
+	UsageBodySourceUnavailable   UsageBodySource = "unavailable"
 )
 
 // Valid indicates whether the value is a known member of the UsageBodySource enum.
 func (e UsageBodySource) Valid() bool {
 	switch e {
-	case LocalEstimate:
+	case UsageBodySourceLocalEstimate:
 		return true
-	case Unavailable:
+	case UsageBodySourceUnavailable:
 		return true
 	default:
 		return false
@@ -1247,7 +1451,14 @@ type AsyncAcceptedBody struct {
 	// EventCursor City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
 	EventCursor string `json:"event_cursor"`
 
-	// RequestId Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
+	// IdempotencyKey The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+	Op             *ConversationOp `json:"op,omitempty"`
+
+	// Replayed True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor.
+	Replayed *bool `json:"replayed,omitempty"`
+
+	// RequestId Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
 	RequestId string `json:"request_id"`
 
 	// Status Async request status.
@@ -1700,6 +1911,49 @@ type ConversationGroupRecord struct {
 
 // ConversationKind Shape of a conversation.
 type ConversationKind string
+
+// ConversationOp defines model for ConversationOp.
+type ConversationOp struct {
+	// Attempt Executions after the first (an adopted orphan).
+	Attempt *int64 `json:"attempt,omitempty"`
+
+	// Conversation Session (conversation) id the operation targets.
+	Conversation string `json:"conversation"`
+
+	// Id Operation id. Equals request_id on async responses.
+	Id string `json:"id"`
+
+	// Kind Operation kind.
+	Kind    ConversationOpKind     `json:"kind"`
+	Outcome *ConversationOpOutcome `json:"outcome,omitempty"`
+
+	// Status Operation status. A legacy-executed operation stays submitted until it closes.
+	Status ConversationOpStatus `json:"status"`
+}
+
+// ConversationOpKind Operation kind.
+type ConversationOpKind string
+
+// ConversationOpStatus Operation status. A legacy-executed operation stays submitted until it closes.
+type ConversationOpStatus string
+
+// ConversationOpOutcome defines model for ConversationOpOutcome.
+type ConversationOpOutcome struct {
+	// Arm Outcome arm.
+	Arm ConversationOpOutcomeArm `json:"arm"`
+
+	// Degradation How a succeeded operation fell short of its policy, e.g. unfenced_interrupt.
+	Degradation *string `json:"degradation,omitempty"`
+
+	// Reason Why a failed or skipped operation ended (open vocabulary; refused:<why> names a refusal).
+	Reason *string `json:"reason,omitempty"`
+
+	// Via How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).
+	Via *string `json:"via,omitempty"`
+}
+
+// ConversationOpOutcomeArm Outcome arm.
+type ConversationOpOutcomeArm string
 
 // ConversationRef defines model for ConversationRef.
 type ConversationRef struct {
@@ -2824,6 +3078,39 @@ type OKWithIDResponseBody struct {
 	Status string `json:"status"`
 }
 
+// OpsRecordingDegradedPayload defines model for OpsRecordingDegradedPayload.
+type OpsRecordingDegradedPayload struct {
+	// Detail The store error's text, at most 512 bytes.
+	Detail *string `json:"detail,omitempty"`
+
+	// Gate The ops rollout gate whose recording degraded.
+	Gate OpsRecordingDegradedPayloadGate `json:"gate"`
+
+	// Mode The gate's resolved mode.
+	Mode OpsRecordingDegradedPayloadMode `json:"mode"`
+
+	// Reason Reason class: conditional_writes_unsupported, type_unregistered, no_namespace, store_error or contention.
+	Reason string `json:"reason"`
+
+	// Stage The recording step that failed.
+	Stage OpsRecordingDegradedPayloadStage `json:"stage"`
+
+	// Surface Which producer degraded: the API server or the controller's op sweeper.
+	Surface OpsRecordingDegradedPayloadSurface `json:"surface"`
+}
+
+// OpsRecordingDegradedPayloadGate The ops rollout gate whose recording degraded.
+type OpsRecordingDegradedPayloadGate string
+
+// OpsRecordingDegradedPayloadMode The gate's resolved mode.
+type OpsRecordingDegradedPayloadMode string
+
+// OpsRecordingDegradedPayloadStage The recording step that failed.
+type OpsRecordingDegradedPayloadStage string
+
+// OpsRecordingDegradedPayloadSurface Which producer degraded: the API server or the controller's op sweeper.
+type OpsRecordingDegradedPayloadSurface string
+
 // OptionChoiceDTO defines model for OptionChoiceDTO.
 type OptionChoiceDTO struct {
 	Label string `json:"label"`
@@ -3442,7 +3729,8 @@ type RequestFailedPayload struct {
 	ErrorCode string `json:"error_code"`
 
 	// ErrorMessage Human-readable error description.
-	ErrorMessage string `json:"error_message"`
+	ErrorMessage string          `json:"error_message"`
+	Op           *ConversationOp `json:"op,omitempty"`
 
 	// Operation Which operation failed.
 	Operation RequestFailedPayloadOperation `json:"operation"`
@@ -3930,6 +4218,8 @@ type SessionMessageInputBody struct {
 
 // SessionMessageSucceededPayload defines model for SessionMessageSucceededPayload.
 type SessionMessageSucceededPayload struct {
+	Op *ConversationOp `json:"op,omitempty"`
+
 	// Queued True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
 	Queued bool `json:"queued"`
 
@@ -4999,10 +5289,27 @@ type SessionSubmitInputBody struct {
 	Resume *bool `json:"resume,omitempty"`
 }
 
+// SessionSubmitInterrupt defines model for SessionSubmitInterrupt.
+type SessionSubmitInterrupt struct {
+	// Degradation unfenced_interrupt when the runtime accepted the interrupt without fencing it to that turn.
+	Degradation *string `json:"degradation,omitempty"`
+
+	// Outcome settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent.
+	Outcome SessionSubmitInterruptOutcome `json:"outcome"`
+
+	// TurnId The turn the interrupt targeted, when one was sighted.
+	TurnId *string `json:"turn_id,omitempty"`
+}
+
+// SessionSubmitInterruptOutcome settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent.
+type SessionSubmitInterruptOutcome string
+
 // SessionSubmitSucceededPayload defines model for SessionSubmitSucceededPayload.
 type SessionSubmitSucceededPayload struct {
 	// Intent Resolved submit intent (default, follow_up, interrupt_now).
-	Intent string `json:"intent"`
+	Intent    string                  `json:"intent"`
+	Interrupt *SessionSubmitInterrupt `json:"interrupt,omitempty"`
+	Op        *ConversationOp         `json:"op,omitempty"`
 
 	// Queued Whether the message was queued for later delivery.
 	Queued bool `json:"queued"`
@@ -6669,6 +6976,22 @@ type TypedEventStreamEnvelopeMoleculeResolved struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOpsRecordingDegraded defines model for TypedEventStreamEnvelopeOpsRecordingDegraded.
+type TypedEventStreamEnvelopeOpsRecordingDegraded struct {
+	Actor            string                      `json:"actor"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          OpsRecordingDegradedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedEventStreamEnvelopeOrderCompleted defines model for TypedEventStreamEnvelopeOrderCompleted.
@@ -8569,6 +8892,23 @@ type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOpsRecordingDegraded defines model for TypedTaggedEventStreamEnvelopeOpsRecordingDegraded.
+type TypedTaggedEventStreamEnvelopeOpsRecordingDegraded struct {
+	Actor            string                      `json:"actor"`
+	City             string                      `json:"city"`
+	DependsOnStepIds *[]string                   `json:"depends_on_step_ids,omitempty"`
+	Message          *string                     `json:"message,omitempty"`
+	Payload          OpsRecordingDegradedPayload `json:"payload"`
+	RunId            *string                     `json:"run_id,omitempty"`
+	Seq              int64                       `json:"seq"`
+	SessionId        *string                     `json:"session_id,omitempty"`
+	StepId           *string                     `json:"step_id,omitempty"`
+	Subject          *string                     `json:"subject,omitempty"`
+	Ts               time.Time                   `json:"ts"`
+	Type             string                      `json:"type"`
+	Workflow         *WorkflowEventProjection    `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeOrderCompleted defines model for TypedTaggedEventStreamEnvelopeOrderCompleted.
@@ -11916,6 +12256,32 @@ func (t *EventPayload) FromNoPayload(v NoPayload) error {
 
 // MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
 func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOpsRecordingDegradedPayload returns the union data inside the EventPayload as a OpsRecordingDegradedPayload
+func (t EventPayload) AsOpsRecordingDegradedPayload() (OpsRecordingDegradedPayload, error) {
+	var body OpsRecordingDegradedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOpsRecordingDegradedPayload overwrites any union data inside the EventPayload as the provided OpsRecordingDegradedPayload
+func (t *EventPayload) FromOpsRecordingDegradedPayload(v OpsRecordingDegradedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOpsRecordingDegradedPayload performs a merge with any union data inside the EventPayload, using the provided OpsRecordingDegradedPayload
+func (t *EventPayload) MergeOpsRecordingDegradedPayload(v OpsRecordingDegradedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16127,6 +16493,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMoleculeResolved
 	return err
 }
 
+// AsTypedEventStreamEnvelopeOpsRecordingDegraded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOpsRecordingDegraded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOpsRecordingDegraded() (TypedEventStreamEnvelopeOpsRecordingDegraded, error) {
+	var body TypedEventStreamEnvelopeOpsRecordingDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOpsRecordingDegraded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOpsRecordingDegraded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOpsRecordingDegraded(v TypedEventStreamEnvelopeOpsRecordingDegraded) error {
+	v.Type = "ops.recording_degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOpsRecordingDegraded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOpsRecordingDegraded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOpsRecordingDegraded(v TypedEventStreamEnvelopeOpsRecordingDegraded) error {
+	v.Type = "ops.recording_degraded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeOrderCompleted returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOrderCompleted
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOrderCompleted() (TypedEventStreamEnvelopeOrderCompleted, error) {
 	var body TypedEventStreamEnvelopeOrderCompleted
@@ -17959,6 +18353,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
+	case "ops.recording_degraded":
+		return t.AsTypedEventStreamEnvelopeOpsRecordingDegraded()
 	case "order.completed":
 		return t.AsTypedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":
@@ -19596,6 +19992,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMolec
 // MergeTypedTaggedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMoleculeResolved
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMoleculeResolved(v TypedTaggedEventStreamEnvelopeMoleculeResolved) error {
 	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOpsRecordingDegraded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOpsRecordingDegraded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOpsRecordingDegraded() (TypedTaggedEventStreamEnvelopeOpsRecordingDegraded, error) {
+	var body TypedTaggedEventStreamEnvelopeOpsRecordingDegraded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOpsRecordingDegraded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOpsRecordingDegraded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOpsRecordingDegraded(v TypedTaggedEventStreamEnvelopeOpsRecordingDegraded) error {
+	v.Type = "ops.recording_degraded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOpsRecordingDegraded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOpsRecordingDegraded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOpsRecordingDegraded(v TypedTaggedEventStreamEnvelopeOpsRecordingDegraded) error {
+	v.Type = "ops.recording_degraded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -21438,6 +21862,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
+	case "ops.recording_degraded":
+		return t.AsTypedTaggedEventStreamEnvelopeOpsRecordingDegraded()
 	case "order.completed":
 		return t.AsTypedTaggedEventStreamEnvelopeOrderCompleted()
 	case "order.failed":

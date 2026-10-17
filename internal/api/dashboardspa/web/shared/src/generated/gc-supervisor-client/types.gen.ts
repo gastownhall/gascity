@@ -271,7 +271,19 @@ export type AsyncAcceptedBody = {
      */
     event_cursor: string;
     /**
-     * Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
+     * The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.
+     */
+    idempotency_key?: string;
+    /**
+     * The operation the request was recorded as.
+     */
+    op?: ConversationOp;
+    /**
+     * True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor.
+     */
+    replayed?: boolean;
+    /**
+     * Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
      */
     request_id: string;
     /**
@@ -755,6 +767,52 @@ export type ConversationGroupRecord = {
  */
 export type ConversationKind = 'dm' | 'room' | 'thread';
 
+export type ConversationOp = {
+    /**
+     * Executions after the first (an adopted orphan).
+     */
+    attempt?: number;
+    /**
+     * Session (conversation) id the operation targets.
+     */
+    conversation: string;
+    /**
+     * Operation id. Equals request_id on async responses.
+     */
+    id: string;
+    /**
+     * Operation kind.
+     */
+    kind: 'message' | 'interrupt' | 'respond' | 'create' | 'wake' | 'suspend' | 'resume' | 'restart' | 'kill' | 'close';
+    /**
+     * Present when status is closed.
+     */
+    outcome?: ConversationOpOutcome;
+    /**
+     * Operation status. A legacy-executed operation stays submitted until it closes.
+     */
+    status: 'submitted' | 'accepted' | 'executing' | 'settling' | 'closed';
+};
+
+export type ConversationOpOutcome = {
+    /**
+     * Outcome arm.
+     */
+    arm: 'succeeded' | 'failed' | 'skipped' | 'canceled';
+    /**
+     * How a succeeded operation fell short of its policy, e.g. unfenced_interrupt.
+     */
+    degradation?: string;
+    /**
+     * Why a failed or skipped operation ended (open vocabulary; refused:<why> names a refusal).
+     */
+    reason?: string;
+    /**
+     * How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).
+     */
+    via?: string;
+};
+
 export type ConversationRef = {
     account_id: string;
     conversation_id: string;
@@ -955,7 +1013,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -2093,6 +2151,33 @@ export type OkWithIdResponseBody = {
     status: string;
 };
 
+export type OpsRecordingDegradedPayload = {
+    /**
+     * The store error's text, at most 512 bytes.
+     */
+    detail?: string;
+    /**
+     * The ops rollout gate whose recording degraded.
+     */
+    gate: 'ops.content' | 'ops.control' | 'ops.lifecycle';
+    /**
+     * The gate's resolved mode.
+     */
+    mode: 'auto' | 'require';
+    /**
+     * Reason class: conditional_writes_unsupported, type_unregistered, no_namespace, store_error or contention.
+     */
+    reason: string;
+    /**
+     * The recording step that failed.
+     */
+    stage: 'open' | 'propose' | 'close' | 'adopt' | 'sweep';
+    /**
+     * Which producer degraded: the API server or the controller's op sweeper.
+     */
+    surface: 'api' | 'controller';
+};
+
 export type OptionChoiceDto = {
     label: string;
     value: string;
@@ -2784,6 +2869,10 @@ export type RequestFailedPayload = {
      */
     error_message: string;
     /**
+     * The operation the failed request was recorded as, when it was.
+     */
+    op?: ConversationOp;
+    /**
      * Which operation failed.
      */
     operation: 'city.create' | 'city.unregister' | 'session.create' | 'session.message' | 'session.submit' | 'rig.create';
@@ -3382,6 +3471,10 @@ export type SessionMessageInputBody = {
 };
 
 export type SessionMessageSucceededPayload = {
+    /**
+     * The operation the request was recorded as, when it was; on a replay of a finished request the will_start fields are absent.
+     */
+    op?: ConversationOp;
     /**
      * True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
      */
@@ -4679,11 +4772,34 @@ export type SessionSubmitInputBody = {
     resume?: boolean;
 };
 
+export type SessionSubmitInterrupt = {
+    /**
+     * unfenced_interrupt when the runtime accepted the interrupt without fencing it to that turn.
+     */
+    degradation?: string;
+    /**
+     * settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent.
+     */
+    outcome: 'settled' | 'no_turn' | 'stale' | 'unsettled' | 'unavailable';
+    /**
+     * The turn the interrupt targeted, when one was sighted.
+     */
+    turn_id?: string;
+};
+
 export type SessionSubmitSucceededPayload = {
     /**
      * Resolved submit intent (default, follow_up, interrupt_now).
      */
     intent: string;
+    /**
+     * What an interrupt_now did about the running turn, on a runtime that reports turns. Absent when no turn fence ran.
+     */
+    interrupt?: SessionSubmitInterrupt;
+    /**
+     * The operation the request was recorded as, when it was; on a replay of a finished request the will_start and interrupt fields are absent.
+     */
+    op?: ConversationOp;
     /**
      * Whether the message was queued for later delivery.
      */
@@ -5761,6 +5877,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'ops.recording_degraded';
+} & TypedEventStreamEnvelopeOpsRecordingDegraded) | ({
     type: 'order.completed';
 } & TypedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -6871,6 +6989,24 @@ export type TypedEventStreamEnvelopeMoleculeResolved = {
     subject?: string;
     ts: string;
     type: 'molecule.resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope ops.recording_degraded
+ */
+export type TypedEventStreamEnvelopeOpsRecordingDegraded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpsRecordingDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'ops.recording_degraded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8068,6 +8204,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'ops.recording_degraded';
+} & TypedTaggedEventStreamEnvelopeOpsRecordingDegraded) | ({
     type: 'order.completed';
 } & TypedTaggedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -9233,6 +9371,25 @@ export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
     subject?: string;
     ts: string;
     type: 'molecule.resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope ops.recording_degraded
+ */
+export type TypedTaggedEventStreamEnvelopeOpsRecordingDegraded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpsRecordingDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'ops.recording_degraded';
     workflow?: WorkflowEventProjection;
 };
 

@@ -370,7 +370,7 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 	if err != nil {
 		return MessageResult{}, err
 	}
-	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred}
+	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred, Interrupt: outcome.Interrupt}
 	return result, nil
 }
 

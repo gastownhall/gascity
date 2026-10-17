@@ -21,7 +21,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -736,14 +738,16 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 	return &SessionSubmitOutput{Body: accepted}, nil
 }
 
-// acceptSessionSubmit validates the submit target, starts the asynchronous
-// delivery, and returns the 202 body.
+// acceptSessionSubmit validates the submit target, records the request as a
+// message op under the ops.content gate (session_ops.go), starts the
+// asynchronous delivery, and returns the 202 body.
 func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
+	conv, err := s.sessionTargetDeliverable(ctx, store.Store, input.ID)
+	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
@@ -762,32 +766,73 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		intent = session.SubmitIntentDefault
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
-	}
+	// The cursor is captured before admission and before the goroutine: a
+	// fast terminal event, or a replay's re-emitted one, lands after it.
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
+	opReq := &messageOpRequest{
+		target: input.ID, conv: conv, key: input.IdempotencyKey, text: input.Body.Message,
+		intent: intent, operation: RequestOperationSessionSubmit,
+	}
+	adm, replay, err := s.admitMessageOp(ctx, store.Store, opReq, eventCursor)
+	if err != nil {
+		return asyncAcceptedBody{}, err
+	}
+	if replay != nil {
+		return *replay, nil
+	}
+	handedOff := false
+	defer releaseOnPanic(adm, &handedOff)
+	reqID, reqIDErr := messageRequestID(adm)
+	if reqIDErr != nil {
+		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
+	}
+	body := acceptedMessageBody(adm, reqID, eventCursor)
+	adm.Accept(body)
+
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
+	// Require delivers to the op's conversation: the op is the request.
+	// Otherwise the delivery re-resolves the target, as it always has.
+	deliverTo := ""
+	if adm.Recorded && s.ops.content.Mode == gate.Require {
+		deliverTo = opReq.conv
+	}
+	handedOff = true
 	go func() {
-		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionSubmit)
-		id, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store.Store, sessionTarget)
-		if err != nil {
-			s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error())
-			return
+		defer s.recoverMessageOp(adm, reqID, RequestOperationSessionSubmit)
+		id := deliverTo
+		if id == "" {
+			resolved, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store.Store, sessionTarget)
+			if err != nil {
+				op := s.finishMessageOp(adm, messageOpResult(false, err, nil))
+				s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error(), op)
+				return
+			}
+			id = resolved
+			noteTargetMoved(adm, id)
 		}
 		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, resume)
+		op := s.finishMessageOp(adm, messageOpResult(outcome.Queued, submitErr, outcome.Interrupt))
 		if submitErr != nil {
-			s.emitSessionSubmitFailed(reqID, sessionSubmitFailureCode(submitErr), submitErr.Error())
+			s.emitSessionSubmitFailed(reqID, sessionSubmitFailureCode(submitErr), submitErr.Error(), op)
 		} else {
-			s.emitSessionSubmitSucceeded(reqID, id, outcome, string(intent))
+			s.emitSessionSubmitSucceeded(reqID, id, outcome, string(intent), op)
 		}
 	}()
 
-	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
+	return body, nil
+}
+
+// recoverMessageOp turns a panic in a message delivery goroutine into a
+// closed op and a request.failed{internal_error} event carrying it.
+func (s *Server) recoverMessageOp(adm *legacyop.Admission, requestID, operation string) {
+	if r := recover(); r != nil {
+		op := s.finishMessageOp(adm, messageOpResult(false, fmt.Errorf("panic: %v", r), nil))
+		s.emitRequestFailedOp(requestID, operation, "internal_error", fmt.Sprintf("panic: %v", r), op)
+	}
 }
 
 // --- Session Messages ---
@@ -807,14 +852,16 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 	return &SessionMessageOutput{Body: accepted}, nil
 }
 
-// acceptSessionMessage validates the message target, starts the asynchronous
-// delivery, and returns the 202 body.
+// acceptSessionMessage validates the message target, records the request as
+// a message op under the ops.content gate (session_ops.go), starts the
+// asynchronous delivery, and returns the 202 body.
 func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
 	}
-	if err := s.sessionTargetDeliverable(ctx, store.Store, input.ID); err != nil {
+	conv, err := s.sessionTargetDeliverable(ctx, store.Store, input.ID)
+	if err != nil {
 		if errors.Is(err, session.ErrSessionNotFound) {
 			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
 		}
@@ -828,18 +875,41 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 		return asyncAcceptedBody{}, err
 	}
 
-	reqID, reqIDErr := newRequestID()
-	if reqIDErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
-	}
+	// The cursor is captured before admission and before the goroutine; see
+	// acceptSessionSubmit.
 	eventCursor, cursorErr := s.currentCityEventCursor()
 	if cursorErr != nil {
 		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
 	}
+	opReq := &messageOpRequest{
+		target: input.ID, conv: conv, key: input.IdempotencyKey, text: input.Body.Message,
+		intent: session.SubmitIntentDefault, operation: RequestOperationSessionMessage,
+	}
+	adm, replay, err := s.admitMessageOp(ctx, store.Store, opReq, eventCursor)
+	if err != nil {
+		return asyncAcceptedBody{}, err
+	}
+	if replay != nil {
+		return *replay, nil
+	}
+	handedOff := false
+	defer releaseOnPanic(adm, &handedOff)
+	reqID, reqIDErr := messageRequestID(adm)
+	if reqIDErr != nil {
+		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
+	}
+	body := acceptedMessageBody(adm, reqID, eventCursor)
+	adm.Accept(body)
+
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
+	deliverTo := ""
+	if adm.Recorded && s.ops.content.Mode == gate.Require {
+		deliverTo = opReq.conv
+	}
+	handedOff = true
 	go func() {
-		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
+		defer s.recoverMessageOp(adm, reqID, RequestOperationSessionMessage)
 
 		type messageResult struct {
 			sessionID string
@@ -869,10 +939,15 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 					sendResult(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
 				}
 			}()
-			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, sessionTarget)
-			if err != nil {
-				sendResult(messageResult{errorCode: "resolve_failed", err: err})
-				return
+			id := deliverTo
+			if id == "" {
+				resolved, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, sessionTarget)
+				if err != nil {
+					sendResult(messageResult{errorCode: "resolve_failed", err: err})
+					return
+				}
+				id = resolved
+				noteTargetMoved(adm, id)
 			}
 			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
 			if err != nil {
@@ -886,35 +961,34 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 			sendResult(messageResult{sessionID: id, outcome: outcome})
 		}()
 
+		// emit closes the op from the result, then emits its terminal event.
+		emit := func(result messageResult) {
+			terminalEmitted.Store(true)
+			op := s.finishMessageOp(adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
+			if result.err != nil {
+				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error(), op)
+				return
+			}
+			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome, op)
+		}
 		timer := time.NewTimer(sessionMessageAsyncTimeout)
 		defer timer.Stop()
 		select {
 		case result := <-resultCh:
-			terminalEmitted.Store(true)
-			if result.err != nil {
-				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
-				return
-			}
-			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome)
+			emit(result)
 		case <-timer.C:
 			cancel()
 			select {
 			case result := <-resultCh:
-				terminalEmitted.Store(true)
-				if result.err != nil {
-					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
-					return
-				}
-				s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome)
+				emit(result)
 				return
 			default:
 			}
-			terminalEmitted.Store(true)
-			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
+			emit(messageResult{errorCode: "timeout", err: messageTimeoutError{}})
 		}
 	}()
 
-	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil
+	return body, nil
 }
 
 // --- Session Stop ---

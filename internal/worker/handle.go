@@ -168,6 +168,9 @@ type MessageResult struct {
 	Queued bool `json:"queued"`
 	// Deferred: the actor queued it (session.SubmitOutcome.Deferred).
 	Deferred bool `json:"-"`
+	// Interrupt is what an interrupt_now did about the running turn
+	// (session.SubmitOutcome.Interrupt); nil when no turn fence ran.
+	Interrupt *sessionpkg.TurnInterruptReport `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.

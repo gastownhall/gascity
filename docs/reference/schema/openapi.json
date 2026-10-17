@@ -849,8 +849,20 @@
             "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.",
             "type": "string"
           },
+          "idempotency_key": {
+            "description": "The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.",
+            "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the request was recorded as."
+          },
+          "replayed": {
+            "description": "True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor.",
+            "type": "boolean"
+          },
           "request_id": {
-            "description": "Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
+            "description": "Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
             "type": "string"
           },
           "status": {
@@ -2121,6 +2133,93 @@
         ],
         "type": "string"
       },
+      "ConversationOp": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "description": "Executions after the first (an adopted orphan).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "conversation": {
+            "description": "Session (conversation) id the operation targets.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Operation id. Equals request_id on async responses.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Operation kind.",
+            "enum": [
+              "message",
+              "interrupt",
+              "respond",
+              "create",
+              "wake",
+              "suspend",
+              "resume",
+              "restart",
+              "kill",
+              "close"
+            ],
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ConversationOpOutcome",
+            "description": "Present when status is closed."
+          },
+          "status": {
+            "description": "Operation status. A legacy-executed operation stays submitted until it closes.",
+            "enum": [
+              "submitted",
+              "accepted",
+              "executing",
+              "settling",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "conversation",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ConversationOpOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "arm": {
+            "description": "Outcome arm.",
+            "enum": [
+              "succeeded",
+              "failed",
+              "skipped",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "degradation": {
+            "description": "How a succeeded operation fell short of its policy, e.g. unfenced_interrupt.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why a failed or skipped operation ended (open vocabulary; refused:\u003cwhy\u003e names a refusal).",
+            "type": "string"
+          },
+          "via": {
+            "description": "How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm"
+        ],
+        "type": "object"
+      },
       "ConversationRef": {
         "additionalProperties": false,
         "properties": {
@@ -2539,15 +2638,18 @@
               "urn:gascity:error:idempotency-mismatch",
               "urn:gascity:error:internal",
               "urn:gascity:error:invalid-cursor",
+              "urn:gascity:error:invalid-idempotency-key",
               "urn:gascity:error:invalid-request",
               "urn:gascity:error:mail-not-found",
               "urn:gascity:error:method-not-allowed",
               "urn:gascity:error:not-implemented",
+              "urn:gascity:error:op-journal-unavailable",
               "urn:gascity:error:operation-in-progress",
               "urn:gascity:error:order-not-found",
               "urn:gascity:error:pack-credential-required",
               "urn:gascity:error:pack-not-found",
               "urn:gascity:error:patch-not-found",
+              "urn:gascity:error:payload-too-large",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
               "urn:gascity:error:run-not-found",
@@ -2589,15 +2691,18 @@
               "urn:gascity:error:idempotency-mismatch",
               "urn:gascity:error:internal",
               "urn:gascity:error:invalid-cursor",
+              "urn:gascity:error:invalid-idempotency-key",
               "urn:gascity:error:invalid-request",
               "urn:gascity:error:mail-not-found",
               "urn:gascity:error:method-not-allowed",
               "urn:gascity:error:not-implemented",
+              "urn:gascity:error:op-journal-unavailable",
               "urn:gascity:error:operation-in-progress",
               "urn:gascity:error:order-not-found",
               "urn:gascity:error:pack-credential-required",
               "urn:gascity:error:pack-not-found",
               "urn:gascity:error:patch-not-found",
+              "urn:gascity:error:payload-too-large",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
               "urn:gascity:error:run-not-found",
@@ -2742,6 +2847,9 @@
           },
           {
             "$ref": "#/components/schemas/NoPayload"
+          },
+          {
+            "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
           },
           {
             "$ref": "#/components/schemas/OrderInapplicablePayload"
@@ -5205,6 +5313,63 @@
         ],
         "type": "object"
       },
+      "OpsRecordingDegradedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "description": "The store error's text, at most 512 bytes.",
+            "type": "string"
+          },
+          "gate": {
+            "description": "The ops rollout gate whose recording degraded.",
+            "enum": [
+              "ops.content",
+              "ops.control",
+              "ops.lifecycle"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "description": "The gate's resolved mode.",
+            "enum": [
+              "auto",
+              "require"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason class: conditional_writes_unsupported, type_unregistered, no_namespace, store_error or contention.",
+            "type": "string"
+          },
+          "stage": {
+            "description": "The recording step that failed.",
+            "enum": [
+              "open",
+              "propose",
+              "close",
+              "adopt",
+              "sweep"
+            ],
+            "type": "string"
+          },
+          "surface": {
+            "description": "Which producer degraded: the API server or the controller's op sweeper.",
+            "enum": [
+              "api",
+              "controller"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "gate",
+          "mode",
+          "surface",
+          "stage",
+          "reason"
+        ],
+        "type": "object"
+      },
       "OptionChoiceDTO": {
         "additionalProperties": false,
         "properties": {
@@ -7021,6 +7186,10 @@
             "description": "Human-readable error description.",
             "type": "string"
           },
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the failed request was recorded as, when it was."
+          },
           "operation": {
             "description": "Which operation failed.",
             "enum": [
@@ -8098,6 +8267,10 @@
       "SessionMessageSucceededPayload": {
         "additionalProperties": false,
         "properties": {
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the request was recorded as, when it was; on a replay of a finished request the will_start fields are absent."
+          },
           "queued": {
             "description": "True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.",
             "type": "boolean"
@@ -11412,12 +11585,48 @@
         ],
         "type": "object"
       },
+      "SessionSubmitInterrupt": {
+        "additionalProperties": false,
+        "properties": {
+          "degradation": {
+            "description": "unfenced_interrupt when the runtime accepted the interrupt without fencing it to that turn.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent.",
+            "enum": [
+              "settled",
+              "no_turn",
+              "stale",
+              "unsettled",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          "turn_id": {
+            "description": "The turn the interrupt targeted, when one was sighted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SessionSubmitSucceededPayload": {
         "additionalProperties": false,
         "properties": {
           "intent": {
             "description": "Resolved submit intent (default, follow_up, interrupt_now).",
             "type": "string"
+          },
+          "interrupt": {
+            "$ref": "#/components/schemas/SessionSubmitInterrupt",
+            "description": "What an interrupt_now did about the running turn, on a runtime that reports turns. Absent when no turn fence ran."
+          },
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the request was recorded as, when it was; on a replay of a finished request the will_start and interrupt fields are absent."
           },
           "queued": {
             "description": "Whether the message was queued for later delivery.",
@@ -13176,6 +13385,7 @@
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
+            "ops.recording_degraded": "#/components/schemas/TypedEventStreamEnvelopeOpsRecordingDegraded",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
@@ -13401,6 +13611,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOpsRecordingDegraded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
@@ -15048,6 +15261,7 @@
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
                 "beads.blocked.recomputed",
+                "ops.recording_degraded",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -16836,6 +17050,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOpsRecordingDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "ops.recording_degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope ops.recording_degraded",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderCompleted": {
@@ -20316,6 +20587,7 @@
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
+            "ops.recording_degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpsRecordingDegraded",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
@@ -20541,6 +20813,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpsRecordingDegraded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
@@ -22283,6 +22558,7 @@
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
                 "beads.blocked.recomputed",
+                "ops.recording_degraded",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -24196,6 +24472,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOpsRecordingDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "ops.recording_degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope ops.recording_degraded",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderCompleted": {
