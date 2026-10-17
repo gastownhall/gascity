@@ -94,6 +94,9 @@ func ValidateSkillCollisions(cfg *config.City) []SkillCollision {
 		if vendor == "" {
 			vendor = cfg.Workspace.Provider
 		}
+		if family := config.BuiltinFamily(vendor, cfg.Providers); family != "" {
+			vendor = family
+		}
 		sink, ok := materialize.VendorSink(vendor)
 		if !ok {
 			continue
