@@ -391,14 +391,15 @@ func resolveMoleculeRootViaRoutedBridge(workStore, graphStore beads.Store, assig
 }
 
 // claimableBridgeSources returns, in order, the open routed candidates that
-// carry a molecule_id and that a claim could take now: not deferred, and with
-// every ready-blocking dependency satisfied. Readiness is read only for the
-// candidates that would bridge.
+// carry a molecule_id and that a claim could take now: not deferred, not on a
+// dispatch hold (beadmeta.HasDispatchHold, the hook's isHeldHookCandidate), and
+// with every ready-blocking dependency satisfied. Readiness is read only for
+// the candidates that would bridge.
 func claimableBridgeSources(store beads.Store, candidates []beads.Bead) []beads.Bead {
 	now := time.Now()
 	var sources []beads.Bead
 	for _, c := range candidates {
-		if strings.TrimSpace(c.Metadata[beadmeta.MoleculeIDMetadataKey]) == "" || beads.IsDeferred(c, now) {
+		if strings.TrimSpace(c.Metadata[beadmeta.MoleculeIDMetadataKey]) == "" || beads.IsDeferred(c, now) || beadmeta.HasDispatchHold(c.Labels) {
 			continue
 		}
 		sources = append(sources, c)

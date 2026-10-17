@@ -191,7 +191,7 @@ func TestStepReminderSkipsARoutedBeadStillBlocked(t *testing.T) {
 
 // A routed bead is checked the way bd ready checks it: a closed blocker
 // satisfies it, one closed with gc.work_outcome=blocked does not, and a
-// deferred bead is not offered at all.
+// deferred or dispatch-held bead is not offered at all.
 func TestStepReminderRoutedBridgeOffersOnlyWhatAClaimCouldTake(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -210,6 +210,16 @@ func TestStepReminderRoutedBridgeOffersOnlyWhatAClaimCouldTake(t *testing.T) {
 			p.row(t, planBlocker).Status = "closed"
 			until := time.Now().Add(24 * time.Hour)
 			p.row(t, planContent).DeferUntil = &until
+		}},
+		{name: "content held external", want: noReminder, adjust: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+			content := p.row(t, planContent)
+			content.Labels = append(content.Labels, beadmeta.HoldExternalLabel)
+		}},
+		{name: "content held mayor", want: noReminder, adjust: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+			content := p.row(t, planContent)
+			content.Labels = append(content.Labels, beadmeta.HoldMayorLabel)
 		}},
 	}
 	for _, tc := range cases {
