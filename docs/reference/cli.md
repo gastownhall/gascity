@@ -3025,6 +3025,8 @@ Use --rig to disambiguate same-name orders in different rigs.
 Use --var key=value (repeatable) to pass args to the order: formula orders
 receive them as formula vars, exec orders as environment variables. A param
 declared required in [order.params] must be supplied or the run fails.
+An order whose requires_backend does not name its scope's backend is
+refused; --force runs it anyway.
 
 ```
 gc order run <name> [flags]
@@ -3032,6 +3034,7 @@ gc order run <name> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--force` | bool |  | run an order even when its requires_backend rules out its scope's backend |
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 | `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |

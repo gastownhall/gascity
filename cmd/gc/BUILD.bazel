@@ -1546,6 +1546,7 @@ go_test(
         "oneshot_by_id_routes_test.go",
         "oneshot_class_routes_test.go",
         "order_args_channel_test.go",
+        "order_backend_followup_test.go",
         "order_backend_test.go",
         "order_cursor_bound_test.go",
         "order_dispatch_bench_test.go",

@@ -40,6 +40,14 @@ func (m *memoryOrderDispatcher) Dispatch(ctx context.Context, req orderdispatch.
 	if err != nil {
 		return orderdispatch.DispatchResult{ScopedName: scoped}, fmt.Errorf("resolving store target for %s: %w", scoped, err)
 	}
+	// An order its scope's backend rules out is refused here exactly as the
+	// tick loop skips it: before any store is opened or bead written.
+	if a.RequiresBackend != nil {
+		if backend := orderScopeBackendFn(m.cityPath, target.ScopeRoot); !a.AppliesToBackend(backend) {
+			m.reportInapplicable(a, target, backend)
+			return orderdispatch.DispatchResult{ScopedName: scoped, Rejected: true, Reason: orderInapplicableReason(a, backend)}, nil
+		}
+	}
 	store, err := m.storeFn(target)
 	if err != nil {
 		return orderdispatch.DispatchResult{ScopedName: scoped}, fmt.Errorf("opening store for %s: %w", scoped, err)
