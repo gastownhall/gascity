@@ -72,6 +72,10 @@ type Provider struct {
 	watchers     map[string]context.CancelFunc
 	recentStarts map[string]time.Time
 
+	// fenceChecked is a test seam run between a fenced operation's read of
+	// the thread and its dispatch.
+	fenceChecked func(name string)
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
@@ -1737,8 +1741,15 @@ func deliveryIDNamespace(city string) string {
 const t3TimeLayout = "2006-01-02T15:04:05.000Z"
 
 func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
+	return p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+}
+
+// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx. ids are
+// reused by every retry; beforeRetry, when set, must pass before each
+// transient retry.
+func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) error {
 	now := time.Now().UTC().Format(t3TimeLayout)
-	return p.rpcDispatchCommand(map[string]interface{}{
+	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", map[string]interface{}{
 		"type":      "thread.turn.start",
 		"commandId": ids.commandID,
 		"threadId":  threadID,
@@ -1755,7 +1766,8 @@ func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids
 		"runtimeMode":     "full-access",
 		"interactionMode": "default",
 		"createdAt":       now,
-	})
+	}, beforeRetry)
+	return err
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
@@ -2801,6 +2813,13 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 			fmt.Fprintf(os.Stderr, "t3bridge: Start(%s) reuse decision=%s thread=%s\n", name, reuse.Decision, existingBinding.ThreadID) //nolint:errcheck
 			projectID = existingBinding.ProjectID
 			threadID = existingBinding.ThreadID
+			// The thread records the new incarnation before anything stops or
+			// rebinds it: until then its gc.sessionEnv proves the previous
+			// incarnation, and a fence check against it would pass for input
+			// meant for the session being replaced.
+			if err := p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, buildThreadEnv(cfg.Env))); err != nil {
+				return fail(fmt.Errorf("t3bridge: record incarnation on reused thread %s: %w", threadID, err))
+			}
 			if reuse.Decision == ReuseDecisionRebind {
 				_ = p.dispatchThreadModelSelection(threadID, providerName, modelName)
 			}
@@ -2817,7 +2836,6 @@ func (p *Provider) Start(_ context.Context, name string, cfg runtime.Config) err
 				Model:       modelName,
 			}
 			p.setRecentStart(name, time.Now())
-			_ = p.dispatchThreadMeta(threadID, buildGCMetadata(envelope, providerName, buildThreadEnv(cfg.Env)))
 			if worktreePath != "" {
 				_ = p.rpcUpdateThreadMeta(threadID, worktreeBranch, worktreePath)
 			}
@@ -3129,6 +3147,18 @@ func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string
 	if err != nil {
 		return err
 	}
+	return p.nudgeThread(name, thread, binding, content, key)
+}
+
+// nudgeThread starts a turn carrying content on the thread bound to name, as
+// read: thread and its binding. A non-empty key derives the turn's T3 ids.
+func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) error {
+	return p.nudgeThreadFor(context.Background(), name, thread, binding, content, key, nil)
+}
+
+// nudgeThreadFor is nudgeThread bounded by ctx, with beforeRetry gating each
+// transient retry of the turn start.
+func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) error {
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
 		return nil
@@ -3146,7 +3176,7 @@ func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string
 	if key != "" {
 		ids = deriveDeliveryIDs(meta["gc.city"], binding.ThreadID, key)
 	}
-	if err := p.dispatchTurnStart(binding.ThreadID, text, provider, model, ids); err != nil {
+	if err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry); err != nil {
 		if isT3Rejection(err) {
 			return fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
 		}
