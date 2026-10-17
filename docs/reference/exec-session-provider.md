@@ -187,6 +187,7 @@ Capabilities:
 | `report-attachment` | `is-attached <name>` is called and trusted; without it, sessions always read as detached and `is-attached` is never invoked. Because the op is declared, its exit 2 is a failure like any other non-zero exit, not the "unknown op" sentinel. Also required for full idle sleep (see [Idle sleep](#idle-sleep)). |
 | `report-activity` | `get-last-activity <name>` results are treated as meaningful for idle/health decisions. Report the time of the agent's last output. For a tmux-in-box runtime that is the newest `#{window_activity}` of the session's windows: `#{session_activity}` does not advance while no client is attached. Also required for full idle sleep. |
 | `proc.exec` | The `exec` op's process exit code carries the in-box command's exit code, so an exec-op exit of 2 is read as the command's own exit 2 rather than the "unknown op" sentinel (`ErrExecUnsupported`). Lets the carrier drive input/output over `exec`; without it, gc uses the dedicated driving ops (the fallback path). Also required for full idle sleep. |
+| `input-fence` | With `proc.exec`, declares that the box's tmux can hold an input fence, so gc sends nudges, keys and interrupts only to the agent incarnation they are meant for (see [Fenced input over `exec`](#fenced-input-over-exec)). Without it, gc touches no fence in the box, and a fenced request to the runtime is refused (`ErrInputFenceUnsupported`); unfenced input is unaffected. |
 | `proc.provision` | The script implements the box-without-agent `provision` op (see Operations), so the controller provisions the box, then launches the agent over `exec` (the un-weld). Without it, `start` provisions and launches in one op. |
 | `proc.stream` | Reserved (connection-plane family, parallel to `env.*`): declares the persistent bidirectional `stream` connection op (ACP over a stream, tmux pipe-pane). Sets `CanStream`. The `stream` op and its capability-gated conformance entry land with the connection rewrite. |
 | `tty.attach` | Reserved: declares an interactive PTY `attach` connection op. Sets `CanAttachTTY`. |
@@ -260,6 +261,50 @@ stays awake and destructive actions on it are held.
 interactive_resume = "10m"   # interactive sessions: needs sleep_capability = full
 noninteractive = "60s"
 ```
+
+### Fenced input over `exec`
+
+A runtime that declares both `proc.exec` and `input-fence` takes fenced
+input: gc sends a nudge, keys or an interrupt only to the agent incarnation it
+is meant for. The fence is the pane option `@gc_fence` on the agent pane of
+the in-box tmux session `main`, and gc manages it over `exec`. Declare
+`input-fence` only for a runtime that:
+
+- **Runs tmux 3.0 or later in the box.** gc sets and clears the fence with
+  `set-option -p` (pane options), which older tmux rejects. With older tmux
+  every `start` fails and the box is torn down, and a separable launch fails
+  as a whole, because gc appends the fence command to the launch's own tmux
+  command list.
+- **Has the `main` session when `start` returns.** gc publishes the fence
+  right after `start`. A publish that fails fails the start and tears the box
+  down, unless the box was running before the attempt.
+- **Provides `sh` in the box.** gc reads the fence, sends guarded input and
+  loads nudge text into a tmux buffer through short `sh -c` scripts.
+
+A runtime that declares `proc.exec` without `input-fence` starts and takes
+unfenced input as usual: gc touches no fence in its box, and refuses only a
+fenced request to it.
+
+Before a `start` of a box that may already be running, gc reads and clears
+the pane's fence, so a start that reuses the pane never leaves the previous
+incarnation's fence on it. When `start`, or the fence publish after it, then
+fails and the box stays up (it reports that the session already exists, or
+`is-running` said it was running before the attempt), gc puts the fence back
+on the same pane, as long as the pane's root process is unchanged and no
+other fence has been set since.
+
+Fenced input sends nothing until tmux in the box answers the fence read. A
+live tmux server without the `main` session or its agent pane answers that
+the session is absent. A command the box does not answer, because the `exec`
+op fails (its own non-zero exit) or tmux in the box fails (no server, a
+missing tmux, a socket it cannot reach), is an outage
+(`ErrRuntimeUnavailable`), unless `is-running` then answers `false`, which
+makes it an absent session. Either way, a failure after part of the input
+went in (nudge text without its Enter) reports the input as partly
+delivered. An `exec` op that is [canceled](#cancellation) or cannot be run at
+all is an outage too, without asking `is-running`, and it does not say
+whether part of the input went in before it stopped. A pane started before gc
+published fences takes no fenced input until its agent is relaunched.
 
 ### Start Config (JSON on stdin)
 
