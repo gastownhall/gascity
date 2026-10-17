@@ -33,6 +33,10 @@ type Entry struct {
 	Type    string `json:"type"`    // user, assistant, system, tool_use, tool_result, progress, result, file-history-snapshot
 	Subtype string `json:"subtype"` // compact_boundary, init, status, etc. (system entries only)
 
+	// IsAPIErrorMessage marks Claude-generated provider failures, not model replies.
+	IsAPIErrorMessage bool            `json:"isApiErrorMessage,omitempty"`
+	APIError          json.RawMessage `json:"error,omitempty"`
+
 	// Content
 	Message     json.RawMessage `json:"message"` // {role, content} for user/assistant
 	SystemEvent *SystemEvent    `json:"systemEvent,omitempty"`

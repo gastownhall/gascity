@@ -674,6 +674,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// store — so doing it for every order costs the tick nothing and gives the
 	// parallel pass its complete work list.
 	candidates := make([]*orderDispatchCandidate, 0, total)
+	// scopeBackends memoizes each scope's backend for this tick: resolving it
+	// reads the scope's metadata and, when that names none, city.toml.
+	scopeBackends := make(map[string]string)
 	for offset := 0; offset < total; offset++ {
 		idx := (start + offset) % total
 		a := m.aa[idx]
@@ -691,7 +694,12 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		// dispatched there, and never counted as a failure: it is reported
 		// once as inapplicable and skipped before any store is opened.
 		if a.RequiresBackend != nil {
-			if backend := orderScopeBackend(cityPath, target.ScopeRoot); !a.AppliesToBackend(backend) {
+			backend, ok := scopeBackends[target.ScopeRoot]
+			if !ok {
+				backend = orderScopeBackendFn(cityPath, target.ScopeRoot)
+				scopeBackends[target.ScopeRoot] = backend
+			}
+			if !a.AppliesToBackend(backend) {
 				m.reportInapplicable(a, target, backend)
 				continue
 			}

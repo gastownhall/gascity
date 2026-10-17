@@ -441,8 +441,10 @@ empty list, fails validation. Omit the key and the order runs on every backend.
 For a scope whose store uses a backend the order does not name, gc never
 dispatches it. It records one `order.inapplicable` event per controller boot,
 and `gc order list` and `gc doctor` show the order as
-`inapplicable (backend http)`. An inapplicable order is not a failure and is
-never counted as a stale order.
+`inapplicable (backend http)`. `gc order check` shows it as inapplicable and
+never due, a webhook that targets it is rejected, and `gc order run` refuses it
+unless you pass `--force`. An inapplicable order is not a failure and is never
+counted as a stale order.
 
 ## Rig-scoped orders
 
