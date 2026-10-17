@@ -3,7 +3,9 @@ package acp
 import (
 	"context"
 	"errors"
+	"net"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -116,8 +118,8 @@ func TestACPRespawnBetweenCheckAndSendIsRefused(t *testing.T) {
 		}
 		err := call(name, first)
 		var miss *runtime.FenceMismatchError
-		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead {
-			t.Fatalf("%s across a respawn = %v, want a miss finding the checked incarnation dead", op, err)
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead || miss.Partial {
+			t.Fatalf("%s across a respawn = %v, want a whole miss finding the checked incarnation dead (nothing was sent)", op, err)
 		}
 		time.Sleep(200 * time.Millisecond)
 		if out, _ := p.Peek(name, 0); strings.Contains(out, "stale") {
@@ -142,5 +144,130 @@ func TestACPFencedInputToAnotherOwnerIsUnproven(t *testing.T) {
 	var miss *runtime.FenceMismatchError
 	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundUnproven {
 		t.Fatalf("InterruptFenced from another provider = %v, want an unproven miss", err)
+	}
+}
+
+// Kills a fenced interrupt that reports a miss for an interrupt that reached
+// the checked agent: session/cancel was written to it, and the agent then
+// exited before the settle wait ended. The interrupt landed, so the call
+// succeeds as the unfenced one does.
+func TestACPFencedInterruptThatReachedTheAgentSucceeds(t *testing.T) {
+	env := fenceEnv("1", "tok")
+	env["GC_ON_CANCEL"] = "ignore"
+	f := startInterruptFake(t, 50*time.Millisecond, env)
+	fence, _ := runtime.InputFenceFromEnv(env)
+	f.hold(t)
+	sc := f.conn(t)
+	sc.beforeTurnSignal = func() {
+		waitUntil(t, "the fake to log session/cancel", func() bool { return f.countMethod(t, "session/cancel") == 1 })
+		_ = sc.cmd.Process.Kill()
+		waitExited(t, sc)
+	}
+	if err := f.p.InterruptFenced(context.Background(), f.name, fence); err != nil {
+		t.Fatalf("InterruptFenced = %v, want nil: session/cancel reached the checked agent", err)
+	}
+}
+
+// fencedTestConn installs a hand-built connection for name holding fence f,
+// with stdin as its agent's input.
+func fencedTestConn(p *Provider, name string, f runtime.InputFence, stdin *closedPipeStdin) *sessionConn {
+	sc := newSessionConn(nil, stdin, nil, 100, nil)
+	sc.sessionID = "session-1"
+	sc.fence = f.Digest()
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+	return sc
+}
+
+// Kills a fenced op that sends into an agent that has exited, or a fenced
+// nudge that reports success when the agent exits before the prompt is
+// written (Nudge's best-effort nil): each is a whole miss finding the
+// incarnation dead.
+func TestACPFencedInputToAnExitedAgentIsADeadMiss(t *testing.T) {
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	wantDead := func(t *testing.T, label string, err error) {
+		t.Helper()
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead || miss.Partial {
+			t.Fatalf("%s = %v, want a whole miss finding the incarnation dead", label, err)
+		}
+	}
+
+	t.Run("exited before the check", func(t *testing.T) {
+		p := NewProviderWithDir(shortTempDir(t), Config{})
+		name := testName()
+		sc := fencedTestConn(p, name, fence, &closedPipeStdin{writeCalled: make(chan struct{})})
+		close(sc.done)
+		ctx := context.Background()
+		wantDead(t, "nudge", p.NudgeFenced(ctx, name, runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}))
+		wantDead(t, "keys", p.SendKeysFenced(ctx, name, fence, "Enter"))
+		wantDead(t, "interrupt", p.InterruptFenced(ctx, name, fence))
+	})
+
+	t.Run("exited while queued for the prompt", func(t *testing.T) {
+		p := NewProviderWithDir(shortTempDir(t), Config{})
+		name := testName()
+		sc := fencedTestConn(p, name, fence, &closedPipeStdin{writeCalled: make(chan struct{})})
+		p.fenceChecked = func(string) {
+			sc.nudgeMu.Lock()
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				close(sc.done)
+				sc.nudgeMu.Unlock()
+			}()
+		}
+		wantDead(t, "nudge", p.NudgeFenced(context.Background(), name, runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}))
+	})
+
+	t.Run("output drained", func(t *testing.T) {
+		p := NewProviderWithDir(shortTempDir(t), Config{StopGrace: 2 * time.Second})
+		name := testName()
+		sc := fencedTestConn(p, name, fence, &closedPipeStdin{writeCalled: make(chan struct{})})
+		p.fenceChecked = func(string) {
+			sc.mu.Lock()
+			sc.drained = true
+			sc.mu.Unlock()
+			go func() {
+				time.Sleep(50 * time.Millisecond)
+				close(sc.done)
+			}()
+		}
+		wantDead(t, "nudge", p.NudgeFenced(context.Background(), name, runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}))
+	})
+
+	t.Run("exited during the write", func(t *testing.T) {
+		p := NewProviderWithDir(shortTempDir(t), Config{NudgeBusyTimeout: 2 * time.Second})
+		name := testName()
+		stdin := &closedPipeStdin{writeCalled: make(chan struct{})}
+		sc := fencedTestConn(p, name, fence, stdin)
+		go func() {
+			<-stdin.writeCalled
+			close(sc.done)
+		}()
+		wantDead(t, "nudge", p.NudgeFenced(context.Background(), name, runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}))
+	})
+}
+
+// Kills a fenced op that reads a control socket it cannot probe as absent:
+// a session this provider does not own whose socket dial fails with EACCES
+// cannot be told apart from a live one, so the op is ErrRuntimeUnavailable,
+// never a miss.
+func TestACPFencedInputWithAnUnprobeableSocketIsUnavailable(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{})
+	p.dial = func(string, string, time.Duration) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.EACCES}
+	}
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	ctx := context.Background()
+	name := testName()
+	for op, err := range map[string]error{
+		"nudge":     p.NudgeFenced(ctx, name, runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}),
+		"keys":      p.SendKeysFenced(ctx, name, fence, "Enter"),
+		"interrupt": p.InterruptFenced(ctx, name, fence),
+	} {
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) {
+			t.Errorf("%s = %v, want ErrRuntimeUnavailable", op, err)
+		}
 	}
 }

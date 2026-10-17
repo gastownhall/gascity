@@ -415,14 +415,6 @@ func (sc *sessionConn) writeMessage(data []byte) error {
 	return sc.writeMessageCapturing(nil, data, nil)
 }
 
-// writeMessageUnlessClosed is writeMessage for a message that is stale once
-// closed has closed: it then writes and captures nothing and returns nil.
-// closed is checked with stdinMu held, so no other stdin write can come
-// between that check and this write.
-func (sc *sessionConn) writeMessageUnlessClosed(closed <-chan struct{}, data []byte) error {
-	return sc.writeMessageCapturing(closed, data, nil)
-}
-
 // writeMessageCapturing writes one encoded JSON-RPC message to the agent's
 // stdin. Every stdin write goes through writeStdinLocked, so each one is
 // captured, and captured in wire order: the out record is queued under stdinMu before the

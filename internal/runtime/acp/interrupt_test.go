@@ -406,7 +406,7 @@ func TestInterruptCancelNeverFollowsTheNextPrompt(t *testing.T) {
 					t.Fatal("next turn never completed")
 				}
 			}
-			sc.cancelTurn(f.name, sessionID, idleCh, nil)
+			sc.cancelTurn(f.name, sessionID, idleCh, nil, nil)
 			if tc.next == "hold" {
 				endTurnBySIGINT(t, sc)
 			}
