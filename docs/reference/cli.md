@@ -484,6 +484,11 @@ Delegates to the provider's lifecycle health operation. For exec
 providers (including bd/dolt), the script handles multi-tier checking
 and recovery internally. For the file provider, always succeeds (no-op).
 
+For bd (dolt), a server that answers SQL is not enough: the city's
+database must be in the server catalog (and, for a gc-managed server,
+on disk), its default branch head must resolve, and a sample write and
+read against it must succeed. Any failure reports unhealthy.
+
 Also used by the beads-health system order for periodic monitoring.
 
 ```

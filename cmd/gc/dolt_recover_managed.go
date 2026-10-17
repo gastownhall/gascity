@@ -34,10 +34,8 @@ type managedDoltRecoveryOps struct {
 
 func defaultManagedDoltRecoveryOps() managedDoltRecoveryOps {
 	return managedDoltRecoveryOps{
-		queryProbe: managedDoltQueryProbe,
-		healthCheck: func(host, port, user string) (managedDoltSQLHealthReport, error) {
-			return managedDoltHealthCheck(host, port, user, true)
-		},
+		queryProbe:  managedDoltQueryProbe,
+		healthCheck: managedDoltHealthCheck,
 		stop: func(cityPath, port string) (managedDoltStopReport, error) {
 			return stopManagedDoltProcessWithOptions(cityPath, port, false)
 		},
