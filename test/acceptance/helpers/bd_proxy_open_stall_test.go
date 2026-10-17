@@ -53,7 +53,7 @@ func TestInitRecoveringBDProxyOpenStall(t *testing.T) {
 
 	// run drives initRecoveringBDProxyOpenStall over scripted attempts and
 	// records every call it makes, in order.
-	run := func(attempts []error, outs []string, armed bool, resetErr error) (string, error, []string) {
+	run := func(attempts []error, outs []string, armed bool, resetErr error) (string, []string, error) {
 		var calls []string
 		n := 0
 		out, err := initRecoveringBDProxyOpenStall(
@@ -67,11 +67,11 @@ func TestInitRecoveringBDProxyOpenStall(t *testing.T) {
 			func() error { calls = append(calls, "reset"); return resetErr },
 			func(string) { calls = append(calls, "report") },
 		)
-		return out, err, calls
+		return out, calls, err
 	}
 
 	t.Run("retries once from a reset city", func(t *testing.T) {
-		out, err, calls := run([]error{errExit, nil}, []string{stallOut, "ok"}, true, nil)
+		out, calls, err := run([]error{errExit, nil}, []string{stallOut, "ok"}, true, nil)
 		if err != nil || out != "ok" {
 			t.Fatalf("got (%q, %v), want (ok, nil)", out, err)
 		}
@@ -81,7 +81,7 @@ func TestInitRecoveringBDProxyOpenStall(t *testing.T) {
 	})
 	t.Run("returns the retry's failure and stops there", func(t *testing.T) {
 		second := errors.New("exit status 1 (second)")
-		out, err, calls := run([]error{errExit, second}, []string{stallOut, stallOut + "again"}, true, nil)
+		out, calls, err := run([]error{errExit, second}, []string{stallOut, stallOut + "again"}, true, nil)
 		if !errors.Is(err, second) || out != stallOut+"again" {
 			t.Fatalf("got (%q, %v), want the second attempt's result", out, err)
 		}
@@ -90,26 +90,26 @@ func TestInitRecoveringBDProxyOpenStall(t *testing.T) {
 		}
 	})
 	t.Run("does not retry another failure", func(t *testing.T) {
-		_, err, calls := run([]error{errExit}, []string{"Error: database not found"}, true, nil)
+		_, calls, err := run([]error{errExit}, []string{"Error: database not found"}, true, nil)
 		if !errors.Is(err, errExit) || strings.Join(calls, ",") != "init" {
 			t.Fatalf("got err %v after calls %v, want the first failure after init alone", err, calls)
 		}
 	})
 	t.Run("does not retry a success that mentions the text", func(t *testing.T) {
-		_, err, calls := run([]error{nil}, []string{stallOut}, true, nil)
+		_, calls, err := run([]error{nil}, []string{stallOut}, true, nil)
 		if err != nil || strings.Join(calls, ",") != "init" {
 			t.Fatalf("got err %v after calls %v, want success after init alone", err, calls)
 		}
 	})
 	t.Run("does not retry when disarmed", func(t *testing.T) {
-		out, err, calls := run([]error{errExit}, []string{stallOut}, false, nil)
+		out, calls, err := run([]error{errExit}, []string{stallOut}, false, nil)
 		if !errors.Is(err, errExit) || out != stallOut || strings.Join(calls, ",") != "init,armed" {
 			t.Fatalf("got (%q, %v) after calls %v, want the first failure, unretried", out, err, calls)
 		}
 	})
 	t.Run("a reset error fails without a retry", func(t *testing.T) {
 		resetErr := errors.New("still running")
-		_, err, calls := run([]error{errExit}, []string{stallOut}, true, resetErr)
+		_, calls, err := run([]error{errExit}, []string{stallOut}, true, resetErr)
 		if !errors.Is(err, errExit) || !errors.Is(err, resetErr) || strings.Join(calls, ",") != "init,armed,report,reset" {
 			t.Fatalf("got err %v after calls %v, want both errors and no second init", err, calls)
 		}
