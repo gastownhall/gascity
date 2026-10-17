@@ -93,7 +93,8 @@ bazel test --config=integration //internal/runtime/tmux:tmux_test
 ```
 
 `//test/integration` itself gates only through the `integration-smoke`
-lane (`bazel test --config=integration-smoke //test/integration:integration_test`):
+lane (`bazel test --config=integration //test/integration:integration_smoke_test`,
+a `go_variant_test` over `integration_test` whose `args` carries the filter):
 the bdstore and REST smoke tests `scripts/test-integration-shard` names. The
 full suite runs evidence-only on pushes until its flaky tests are fixed.
 
@@ -1065,7 +1066,8 @@ seeing it, and it is how the last two rollovers got "fixed".
 
 ## Checked source-level resource ratchets
 
-`test/test-resources.toml` is the checked P0.4 resource ledger. It scans tracked
+`test/test-resources.toml` is the checked P0.4 resource ledger, and
+`test/test-resource-counts.toml` holds its counts. The ledger scans tracked
 Go source through parsed syntax and import identity, while only `*_test.go`
 files contribute resource occurrences. The raw audit and source-debt rows
 freeze process, sleep, environment, CWD, slow-process, HTTP test-server, and
@@ -1076,9 +1078,12 @@ Exact Medium rows name a repository-relative directory, package clause,
 top-level runnable owner, and resource list. Small-debt rows apply those exact
 owners without weakening the raw anti-growth ratchets.
 
-The Go-owned `bootstrapPolicy` pins every row's ceiling, historical totals,
-owner, invariant, resource owner, migration, and expiry. Ordinary source
-growth fails against that ceiling, and TOML-only normalization, relabeling, or
+The Go-owned `bootstrapPolicy` (`internal/testpolicy/resourcecensus/policy.go`)
+pins every row's scope, resource, historical totals, owner, invariant,
+resource owner, migration, and expiry. It stores no counts: the ceilings are
+the per-file records of the generated `test/test-resource-counts.toml`, one
+record per file and resource that a counted row governs. Ordinary source
+growth fails against those records, and TOML-only normalization, relabeling, or
 metadata edits fail against the policy before the live census is compared.
 
 Changing `bootstrapPolicy` together with the TOML and generated table is an
@@ -1146,9 +1151,8 @@ and `net.ListenUnix`; packet constructors `net.ListenPacket`, `net.ListenUDP`,
 and direct `syscall.Listen`. The tmux catalog recognizes canonical `test/tmuxtest`
 namespace/lifecycle helpers, imported `internal/runtime/tmux` production
 constructors, and literal `os/exec` tmux commands and probes. Its untagged
-source census is 6 calls in 2 files, all owned by exact Medium `TestMain`
-rows; build-tagged calls remain E1 Large inventory rather than being relabeled
-Medium. `NewSocketParentDir`, `HoldAliveSentinel`, and the PID-directory
+source census is owned by exact Medium `TestMain` rows; build-tagged calls
+remain E1 Large inventory rather than being relabeled Medium. `NewSocketParentDir`, `HoldAliveSentinel`, and the PID-directory
 helpers remain part of the separate shared-host resource tail. Direct
 `syscall.Socket`/`Bind` setup calls remain outside this catalog.
 
@@ -1162,10 +1166,9 @@ or import-identified calls to `internal/runtime/runtimecapability.Run` and
 `test/acceptance/helpers.WriteSupervisorConfig`. Same-package identity requires
 the exact directory, package clause, receiverless function declaration, and
 name; lexical shadows, same-named function values, wrong directories/packages,
-and foreign imports do not count. Its untagged source and Small-debt census is
-38 calls in 13 files. The 20 tagged calls in 10 files stay in E1 Large
-inventory, with no Medium exemption, for 58 calls in 23 files across all
-tracked test source.
+and foreign imports do not count. Its untagged source and Small-debt census,
+and the tagged calls that stay in E1 Large inventory with no Medium
+exemption, are the records of `test/test-resource-counts.toml`.
 
 `net.FileListener`/`FilePacketConn` descriptor duplication, method-backed
 `acp.(*Provider).Start` and `subprocess.(*Provider).Start` listeners,
@@ -1252,9 +1255,9 @@ all-source audit while staying outside untagged and Small debt.
 <!-- BEGIN CHECKED TEST RESOURCE LEDGER -->
 | Ledger kind | Source scope | Resource baseline | Tracking owner | Invariant / resource owner | Migration | Expiry |
 | --- | --- | --- | --- | --- | --- | --- |
-| Audit baseline | all tracked test source | fixed_sleep: 495 calls / 184 files (historical regex census: 447 / 157) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
-| Audit baseline | all tracked test source | listener_helper: 60 calls / 24 files | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
-| Audit baseline | all tracked test source | subprocess: 749 calls / 227 files (historical regex census: 495 / 135) | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | fixed_sleep | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
+| Audit baseline | all tracked test source | listener_helper | ga-cp3hwi | all-source listener-helper call/file totals cannot drift without an explicit checked policy update; ga-cp3hwi owns this all-source audit; tagged calls stay Large and receive no Medium exemption | P0.4c-listener-helper | 2026-10-31 |
+| Audit baseline | all tracked test source | subprocess | ga-cp3hwi | tracked test source totals remain visible as audit evidence; ga-cp3hwi owns this point-in-time source census | P0.4a | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedLifecycleUsesBdBoundary: subprocess | ga-p9iuv.30 | the provider-owned script boundary proof is a checked Medium subprocess owner; the test executes the copied provider script only with a test-owned BD executable and verifies its lifecycle delegation without a host service | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses: slow_process_gate, subprocess | ga-p9iuv.30 | the provider-owned BD lifecycle proof is a checked Medium process owner; the test runs the pinned real bd direct and proxied lifecycles under deadlines, records only provider-published identities, and stops its own scope before asserting those children are absent | GC6011 | 2026-10-31 |
 | Medium owner | `cmd/gc` package `main` | TestGcBeadsBdReadyScopeLifecycleReadsItsPersistedTopology: subprocess | ga-p9iuv.30 | the ready-scope topology boundary proof is a checked Medium subprocess owner; the test executes the shipped provider script once per init shape with a test-owned BD executable and a scope built from files alone, so no Dolt, no bd and no host service are involved | GC6011 | 2026-10-31 |
@@ -1281,30 +1284,30 @@ all-source audit while staying outside untagged and Small debt.
 | Medium owner | `scripts` package `scripts_test` | TestGoModDownloadRetryScriptRetriesTransientFailures: subprocess | ga-cp3hwi | the CI go mod download retry proof is a checked Medium subprocess owner; the one bash subprocess per case is confined to TestGoModDownloadRetryScriptRetriesTransientFailures, which exists to run .github/scripts/go-mod-download-retry.sh against a PATH-injected fake go: the retry loop and GOPROXY selection are shell, so only a real shell run can prove a transient proxy error is retried and a persistent one fails | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestGoModVerifyCacheDetectsTamperedModules: subprocess | ga-cp3hwi | the CI Go module cache verification proof is a checked Medium subprocess owner; the go and bash subprocesses are confined to TestGoModVerifyCacheDetectsTamperedModules, which exists to run .github/scripts/go-mod-download-retry.sh and .github/scripts/go-mod-verify-cache.sh with the real go command against a file:// module proxy and an isolated module cache, then tamper with the cached zip: the claim under test is the go command's own trust of a cached .ziphash, so only the real go command can prove the verify step catches what it accepts | P0.4b | 2026-10-31 |
 | Medium owner | `scripts` package `scripts_test` | TestProviderOverridesAndSuiteContractsCrossMakeIsolation: subprocess | ga-cp3hwi | Make/provider and suite-contract proof is a checked Medium owner; the six isolated Make invocations are confined to TestProviderOverridesAndSuiteContractsCrossMakeIsolation | P0.1 | 2026-10-31 |
-| Small debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 284 / 43) | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
-| Small debt ratchet | `cmd/gc` untagged test source | environment: 119 calls / 16 files (historical regex census: 4348 / 200) | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
-| Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 60 calls / 25 files (historical regex census: 75 / 25) | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Small debt ratchet | all untagged test source | fixed_sleep: 318 calls / 123 files (historical regex census: 287 / 113) | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
-| Small debt ratchet | all untagged test source | http_test_server: 318 calls / 66 files (historical regex census: 300 / 66) | ga-cp3hwi | untagged Small HTTP test server call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
-| Small debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged Small listener-helper call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-31 |
-| Small debt ratchet | all untagged test source | net_listen: 95 calls / 36 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
-| Small debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
-| Small debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged Small packet-listener call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
-| Small debt ratchet | all untagged test source | subprocess: 471 calls / 137 files (historical regex census: 394 / 105) | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-31 |
-| Small debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
-| Small debt ratchet | all untagged test source | tmux: 3 calls / 2 files (historical regex census: 1 / 1) | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions must lower this baseline; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-31 |
-| Source debt ratchet | `cmd/gc` untagged test source | cwd: 176 calls / 17 files (historical regex census: 98 / 13) | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-31 |
-| Source debt ratchet | `cmd/gc` untagged test source | environment: 124 calls / 16 files (historical regex census: 3960 / 184) | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions must lower this baseline; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
-| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate: 61 calls / 25 files (historical regex census: 78 / 27) | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions must lower this baseline; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | fixed_sleep: 318 calls / 123 files (historical regex census: 295 / 114) | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions must lower this baseline; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | http_test_server: 319 calls / 67 files (historical regex census: 255 / 56) | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions must lower this baseline; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
-| Source debt ratchet | all untagged test source | listener_helper: 39 calls / 13 files | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions must lower this baseline; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
-| Source debt ratchet | all untagged test source | net_listen: 97 calls / 37 files (historical regex census: 92 / 34) | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
-| Source debt ratchet | all untagged test source | net_listen_config: 1 calls / 1 files | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
-| Source debt ratchet | all untagged test source | net_listen_packet: 3 calls / 2 files | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions must lower this baseline; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
-| Source debt ratchet | all untagged test source | subprocess: 500 calls / 152 files (historical regex census: 380 / 98) | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions must lower this baseline; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
-| Source debt ratchet | all untagged test source | syscall_listen: 1 calls / 1 files | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions must lower this baseline; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-31 |
-| Source debt ratchet | all untagged test source | tmux: 9 calls / 4 files (historical regex census: 7 / 3) | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions must lower this baseline; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-31 |
+| Small debt ratchet | `cmd/gc` untagged test source | cwd | ga-cp3hwi | untagged Small cmd/gc cwd call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners restore or eliminate every cwd mutation | D5/D6 | 2026-10-31 |
+| Small debt ratchet | `cmd/gc` untagged test source | environment | ga-cp3hwi | untagged Small cmd/gc environment call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners restore or eliminate every process-environment mutation | D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | `cmd/gc` untagged test source | slow_process_gate | ga-cp3hwi | untagged Small cmd/gc slow-process marker totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each non-Medium marked caller retains an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | fixed_sleep | ga-cp3hwi | untagged Small fixed-sleep call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners replace elapsed wall time with lifecycle signals | W1-W5 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | http_test_server | ga-cp3hwi | untagged Small HTTP test server call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners move server-backed tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
+| Small debt ratchet | all untagged test source | listener_helper | ga-cp3hwi | untagged Small listener-helper call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners replace helper-backed listeners or declare exact isolated ownership | P0.4c-listener-helper | 2026-10-31 |
+| Small debt ratchet | all untagged test source | net_listen | ga-cp3hwi | untagged Small stream-listener call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners move stream-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
+| Small debt ratchet | all untagged test source | net_listen_config | ga-cp3hwi | untagged Small net.ListenConfig listener call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners move ListenConfig-backed tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
+| Small debt ratchet | all untagged test source | net_listen_packet | ga-cp3hwi | untagged Small packet-listener call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners move packet-listener tests to exact Medium ownership or replace the listener | P0.4c-listener | 2026-10-31 |
+| Small debt ratchet | all untagged test source | subprocess | ga-cp3hwi | untagged Small subprocess call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners remove or replace each process call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Small debt ratchet | all untagged test source | syscall_listen | ga-cp3hwi | untagged Small syscall.Listen call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners move syscall-backed listener tests to exact Medium ownership or replace the listener | P0.4c | 2026-10-31 |
+| Small debt ratchet | all untagged test source | tmux | ga-cp3hwi | untagged Small tmux dependency call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; non-Medium lexical owners replace tmux with a fake executor or declare exact isolated ownership | P0.4c-tmux | 2026-10-31 |
+| Source debt ratchet | `cmd/gc` untagged test source | cwd | ga-cp3hwi | untagged cmd/gc cwd call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; cmd/gc callers restore or eliminate every recognized cwd mutation | D5/D6 | 2026-10-31 |
+| Source debt ratchet | `cmd/gc` untagged test source | environment | ga-cp3hwi | untagged cmd/gc environment call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; cmd/gc callers restore or eliminate every recognized process-environment mutation | D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | `cmd/gc` untagged test source | slow_process_gate | ga-cp3hwi | untagged cmd/gc slow-process marker totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; the helper definition and every marked caller retain an explicit process-suite migration owner | D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | fixed_sleep | ga-cp3hwi | untagged fixed-sleep call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test replaces elapsed wall time with its lifecycle signal | W1-W5 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | http_test_server | ga-cp3hwi | untagged HTTP test server call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test closes its loopback server and removes duplicate server-backed coverage | P0.4c | 2026-10-31 |
+| Source debt ratchet | all untagged test source | listener_helper | ga-cp3hwi | untagged listener-helper call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test replaces helper-backed listeners or moves the retained boundary to exact Medium ownership | P0.4c-listener-helper | 2026-10-31 |
+| Source debt ratchet | all untagged test source | net_listen | ga-cp3hwi | untagged stream-listener call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test closes its stream listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
+| Source debt ratchet | all untagged test source | net_listen_config | ga-cp3hwi | untagged net.ListenConfig listener call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test closes its configured listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
+| Source debt ratchet | all untagged test source | net_listen_packet | ga-cp3hwi | untagged packet-listener call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test closes its packet listener and removes duplicate listener-backed coverage | P0.4c-listener | 2026-10-31 |
+| Source debt ratchet | all untagged test source | subprocess | ga-cp3hwi | untagged subprocess call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each process-owning test removes or replaces its source call site | D1/D2/D5/D6/E6 | 2026-10-31 |
+| Source debt ratchet | all untagged test source | syscall_listen | ga-cp3hwi | untagged syscall.Listen call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test closes its listening file descriptor and removes duplicate listener-backed coverage | P0.4c | 2026-10-31 |
+| Source debt ratchet | all untagged test source | tmux | ga-cp3hwi | untagged tmux dependency call/file totals cannot grow; reductions are banked by regenerating test/test-resource-counts.toml; each owning test confines tmux processes and sockets to its isolated namespace and cleanup | P0.4c-tmux | 2026-10-31 |
 
 | Reviewed hermetic body | Effective runnable size | Medium reason | Retained real composition owner |
 | --- | --- | --- | --- |
@@ -1313,6 +1316,44 @@ all-source audit while staying outside untagged and Small debt.
 | `cmd/gc` package `main` — TestDoSessionWake_PokesManagedControllerAfterStateChange | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWake_PokesManagedControllerAndRequestsSuspendedStart |
 | `cmd/gc` package `main` — TestPrepareWaitWakeState_ResolvesRigDependencyBeads | medium | package TestMain mutates process state | `cmd/gc` package `main` — TestCmdSessionWait_AllowsRigDependencyBeads |
 <!-- END CHECKED TEST RESOURCE LEDGER -->
+
+### Updating the resource census
+
+The generated table above lists the policy rows and their owners but no counts.
+The counts are in `test/test-resource-counts.toml`, a generated file of
+`[[count]]` records (path, resource, calls, plus `medium` and `tagged` where
+they apply). Never edit it by hand. When a test change moves a count, regenerate
+with:
+
+```bash
+go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+```
+
+`-update` checks the policy rows first, then rewrites the counts file and the
+generated table above, and writes nothing when the bytes already match. It banks
+growth as readily as shrinkage, by design: the diff of
+`test/test-resource-counts.toml` is the review surface, and each changed line is
+a ceiling change a reviewer can read. A reduction must be banked too, because a
+stale file fails the census check.
+
+Two branches that change different test files merge as plain text. Two
+branches that change the same file's count conflict in the counts file, or fail
+the census after the merge; both are resolved the same way. On a rebase or
+merge conflict:
+
+1. discard your edits to `bootstrapPolicy`, to the count fields of
+   `test/test-resources.toml` and to the generated table, taking main's
+   versions;
+2. re-apply any `[[medium]]` or `[[reviewed_hermetic_body]]` row you added by
+   hand, in both `policy.go` and `test/test-resources.toml`, keeping each list
+   sorted by package directory, package name, then owner;
+3. run the `-update` command above; and
+4. commit `test/test-resource-counts.toml`. Never hand-merge it: take main's
+   copy and regenerate.
+
+A ledger that still carries a leftover per-row count from before policy version
+3 fails to parse with a message naming the key. Delete the key and regenerate;
+the count it held now lives in the counts file.
 
 ## Five test categories, clear boundaries
 

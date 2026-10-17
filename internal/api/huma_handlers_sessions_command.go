@@ -1126,9 +1126,9 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 	if err != nil {
 		return nil, humaSessionManagerError(err)
 	}
-	// Nudge withdrawal reads the nudges class, so it sources the typed
-	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
+	// The city's nudge queue withdraws the nudges and closes their shadows in
+	// the nudges class.
+	if err := s.withdrawQueuedWaitNudges(closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
@@ -1195,9 +1195,9 @@ func (s *Server) wakeSession(ctx context.Context, target string) (string, error)
 		// handler's writeStoreError.)
 		return "", humaStoreError(err)
 	}
-	// Nudge withdrawal reads the nudges class, so it sources the typed
-	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), res.NudgeIDs); err != nil {
+	// The city's nudge queue withdraws the nudges and closes their shadows in
+	// the nudges class.
+	if err := s.withdrawQueuedWaitNudges(res.NudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// RAW SessionNameMetadata (not Info.SessionName, which falls back to

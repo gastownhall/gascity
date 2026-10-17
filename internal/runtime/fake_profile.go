@@ -45,6 +45,7 @@ type ProfileBackend interface {
 	DeadRuntimeSessionChecker
 	DialogProvider
 	EnvironmentBatchProvider
+	FencedInputProvider
 	FreshLivenessObserver
 	IdleSnapshotProvider
 	IdleWaitProvider
@@ -68,6 +69,7 @@ type ProfileBackend interface {
 	SessionRosterProvider
 	TurnEventProvider
 	TurnFenceProvider
+	TurnObservationProvider
 	UnattendedSessionStopper
 }
 
@@ -78,13 +80,13 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
-		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
+		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed, localTranscriptTrait{}}
 	case ProfileHerdr:
-		return herdrProfile{core, b, b, b, b, b}
+		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
@@ -92,7 +94,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -105,6 +107,9 @@ type (
 	transportTrait     struct{}                  // acp's
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
 	turnInterruptTrait struct{ m TurnInterruptMode }
+	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
+	// agent runs on this host.
+	localTranscriptTrait struct{}
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
@@ -114,6 +119,8 @@ func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return
 func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
 func (freshTrait) LivenessReadsFresh() bool { return true }
+
+func (localTranscriptTrait) LocalTranscripts() bool { return true }
 
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
@@ -147,6 +154,7 @@ type (
 		DeadRuntimeSessionChecker
 		DialogProvider
 		EnvironmentBatchProvider
+		FencedInputProvider
 		FreshLivenessObserver
 		IdleSnapshotProvider
 		IdleWaitProvider
@@ -167,6 +175,7 @@ type (
 		SessionRosterProvider
 		UnattendedSessionStopper
 		sleepTrait
+		localTranscriptTrait
 	}
 	acpProfile struct {
 		Provider
@@ -178,10 +187,13 @@ type (
 		ProcessTableScanner
 		SessionEventProvider
 		TurnEventProvider
+		TurnFenceProvider
+		TurnObservationProvider
 		freshTrait
 		sidecarTrait
 		sleepTrait
 		transportTrait
+		localTranscriptTrait
 	}
 	subprocessProfile struct {
 		Provider
@@ -191,6 +203,7 @@ type (
 		freshTrait
 		sidecarTrait
 		sleepTrait
+		localTranscriptTrait
 	}
 	herdrProfile struct {
 		Provider
@@ -199,6 +212,7 @@ type (
 		LivenessObserver
 		ServerLifecycleProvider
 		SessionEventProvider
+		localTranscriptTrait
 	}
 	k8sProfile struct {
 		Provider
@@ -226,10 +240,27 @@ type (
 		LivenessObserverWithError
 		SessionBindingProvider
 		TurnFenceProvider
+		TurnObservationProvider
 		sleepTrait
 		turnInterruptTrait
 	}
 )
+
+// t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
+// trait the profile answers itself; a test pins it to production.
+var t3bridgeTurnCapabilities = TurnCapabilities{
+	Start:    TurnStartRecorded,
+	End:      TurnEndRecorded,
+	Fence:    TurnFenceChecked,
+	Link:     TurnLinkCorrelated,
+	Lossless: false,
+}
+
+// TurnCapabilities implements [TurnObservationProvider] with t3bridge's
+// static row; TurnHistory stays forwarded to the backend.
+func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
+	return t3bridgeTurnCapabilities
+}
 
 // FullFake is a [Fake] implementing every [ProfileBackend] interface, the
 // ones Fake lacks answered from its session state.
@@ -516,6 +547,55 @@ func (f FullFake) readTurnLocked(name string) (st TurnState, exhausted bool, err
 		f.TurnScripts[name] = script[1:]
 	}
 	return TurnState{TurnID: script[0]}, len(script) == 1, nil
+}
+
+// TurnCapabilities implements [TurnObservationProvider] from the fake's
+// TurnCapabilityScripts, normalized as [TurnCapabilitiesFor] reports them, so
+// an unscripted session reads as the canonical nothing.
+func (f FullFake) TurnCapabilities(name string) TurnCapabilities {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return popScript(f.TurnCapabilityScripts, name).Normalized()
+}
+
+// TurnHistory implements [TurnObservationProvider]: the next TurnHistoryErrors
+// entry, else the next TurnHistoryScripts entry, stamped now when it carries
+// no ObservedAt. A broken fake's read fails.
+func (f FullFake) TurnHistory(ctx context.Context, name string) (TurnHistory, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "TurnHistory", Name: name})
+	if err := ctx.Err(); err != nil {
+		return TurnHistory{}, err
+	}
+	if f.broken {
+		return TurnHistory{}, ErrRuntimeUnavailable
+	}
+	if errs := f.TurnHistoryErrors[name]; len(errs) > 0 {
+		f.TurnHistoryErrors[name] = errs[1:]
+		if errs[0] != nil {
+			return TurnHistory{}, errs[0]
+		}
+	}
+	h := popScript(f.TurnHistoryScripts, name)
+	if h.ObservedAt.IsZero() {
+		h.ObservedAt = time.Now()
+	}
+	return h, nil
+}
+
+// popScript returns name's next scripted entry, the zero value when it has
+// none, and keeps the last entry to repeat. The caller holds the fake's lock.
+func popScript[T any](scripts map[string][]T, name string) T {
+	script := scripts[name]
+	if len(script) == 0 {
+		var zero T
+		return zero
+	}
+	if len(script) > 1 {
+		scripts[name] = script[1:]
+	}
+	return script[0]
 }
 
 func (f FullFake) record(method, name string) {

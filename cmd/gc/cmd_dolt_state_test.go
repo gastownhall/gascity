@@ -377,6 +377,175 @@ func TestChooseManagedDoltPortUsesCanonicalSeedForSymlinkedCityPath(t *testing.T
 	}
 }
 
+// TestChooseManagedDoltPortKeepsOwnServerPortWhenDialsFail pins that a
+// restart's port pick does not walk past the port the city's own live server
+// holds just because a dial to it fails. The listener never accepts, so once
+// its backlog is full every new dial times out while the process still holds
+// the port, the same view a client has when the host is out of ephemeral ports.
+func TestChooseManagedDoltPortKeepsOwnServerPortWhenDialsFail(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	server := startTCPListenerProcessInDir(t, port, layout.DataDir)
+
+	addr := net.JoinHostPort("127.0.0.1", strconv.Itoa(port))
+	saturated := false
+	for i := 0; i < 64; i++ {
+		conn, err := net.DialTimeout("tcp", addr, 300*time.Millisecond)
+		if err != nil {
+			saturated = true
+			break
+		}
+		t.Cleanup(func() { _ = conn.Close() })
+	}
+	if !saturated {
+		t.Skip("listener backlog never filled, so dials to the server still succeed")
+	}
+
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want the port its own live server holds (%d)", got, port)
+	}
+}
+
+// TestChooseManagedDoltPortKeepsOwnServerPortBeforeItListens covers a server
+// that is alive and running in the city's data dir but has not bound its port
+// yet, as during startup.
+func TestChooseManagedDoltPortKeepsOwnServerPortBeforeItListens(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	server := startLockedDelayedTCPListenerProcessInDir(t, filepath.Join(t.TempDir(), "start.lock"), port, layout.DataDir, time.Minute)
+	t.Cleanup(func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	})
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want its own live server's port %d", got, port)
+	}
+}
+
+// TestChooseManagedDoltPortKeepsPublishedHintPortBeforeItsServerListens covers
+// the branch with no provider state file, where the published state names the
+// city's own live server and that server has not bound its port yet.
+func TestChooseManagedDoltPortKeepsPublishedHintPortBeforeItsServerListens(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	server := startLockedDelayedTCPListenerProcessInDir(t, filepath.Join(t.TempDir(), "start.lock"), port, layout.DataDir, time.Minute)
+	t.Cleanup(func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	})
+	if err := writeDoltRuntimeStateFile(managedDoltStatePath(cityPath), doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile(published): %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != strconv.Itoa(port) {
+		t.Fatalf("chooseManagedDoltPort = %q, want the published hint's port %d", got, port)
+	}
+	if _, err := os.Stat(stateFile); !os.IsNotExist(err) {
+		t.Fatalf("provider state was written for a server no dial reached: %v", err)
+	}
+}
+
+// TestChooseManagedDoltPortSkipsStatePortHeldByAnotherProcess pins the other
+// side: when a different process holds the state port, the city's own live
+// server does not make that port reusable.
+func TestChooseManagedDoltPortSkipsStatePortHeldByAnotherProcess(t *testing.T) {
+	skipWithoutProcessInspection(t)
+	cityPath := t.TempDir()
+	clearManagedDoltRuntimeEnvForTest(t)
+	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")
+	layout, err := resolveManagedDoltRuntimeLayout(cityPath)
+	if err != nil {
+		t.Fatalf("resolveManagedDoltRuntimeLayout: %v", err)
+	}
+	port := reserveRandomTCPPort(t)
+	startTCPListenerProcess(t, port)
+	server := startLockedDelayedTCPListenerProcessInDir(t, filepath.Join(t.TempDir(), "start.lock"), reserveRandomTCPPort(t), layout.DataDir, time.Minute)
+	t.Cleanup(func() {
+		_ = server.Process.Kill()
+		_ = server.Wait()
+	})
+	if err := writeDoltRuntimeStateFile(stateFile, doltRuntimeState{
+		Running:   true,
+		PID:       server.Process.Pid,
+		Port:      port,
+		DataDir:   layout.DataDir,
+		StartedAt: time.Now().UTC().Format(time.RFC3339),
+	}); err != nil {
+		t.Fatalf("writeDoltRuntimeStateFile: %v", err)
+	}
+	t.Setenv("GC_DOLT_PORT", "4406")
+
+	got, err := chooseManagedDoltPort(cityPath, stateFile)
+	if err != nil {
+		t.Fatalf("chooseManagedDoltPort: %v", err)
+	}
+	if got != "4406" {
+		t.Fatalf("chooseManagedDoltPort = %q, want the GC_DOLT_PORT fallback 4406 for a port another process holds", got)
+	}
+}
+
 func TestDoltStateAllocatePortCmdReusesLiveProviderState(t *testing.T) {
 	cityPath := t.TempDir()
 	stateFile := filepath.Join(t.TempDir(), "dolt-provider-state.json")

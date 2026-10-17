@@ -2975,7 +2975,7 @@ func commitStartResultTraced(
 		logLifecycleOutcome(stderr, "start", wave, name, tp.TemplateName, "runtime_mcp_snapshot_failed", result.started, result.finished, err, result.phases)
 		return startCommitFailed
 	}
-	applied, err := sessFront.CommitStartedIfCurrentUnder(info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
+	applied, err := sessFront.CommitStartedIfCurrentUnder(context.Background(), info, metadata, result.prepared.candidate.lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator's suspend landed while the start ran (CONTRACT S1
 		// v5.6, §12.2 row 65): nothing commits, the in-flight lease is still
@@ -3572,7 +3572,7 @@ func recoverRunningPendingCreate(
 		// session in, as every confirmed start does.
 		RuntimeBinding: startedRuntimeBinding(context.Background(), cityPath, sp, prepared.candidate.name()),
 	})
-	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
+	applied, err := sessionFrontDoor(store).CommitStartedIfCurrentUnder(context.Background(), prepared.candidate.info, metadata, lease, sessionpkg.StartCommitRefusingHolds())
 	if errors.Is(err, sessionpkg.ErrStartCommitHeld) {
 		// An operator suspended the row before its start committed (CONTRACT
 		// S1 v5.6, §12.2 row 65): the heal never stamps the start over the
@@ -3889,14 +3889,14 @@ func rollbackPendingCreateClears(info sessionpkg.Info, sessFront *sessionpkg.Sto
 	for k, v := range failedCreateClosePatch(info, now) {
 		closePatch[k] = v
 	}
-	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(info, closePatch, postCloseClears)
+	applied, postClosed, txErr := sessFront.RollbackPendingCreateAtomically(context.Background(), info, closePatch, postCloseClears)
 	if !applied && beads.IsConditionalWriteUnsupported(txErr) {
 		// No atomic close on this store (BdStore, exec, plain MemStore, a legacy
 		// sqlite layout), or it refused at call time and wrote nothing: keep the
 		// historical Tx. Tx has no read operation, so hold the same per-session
 		// lock used by start completion and preWakeCommit across the fresh read
 		// AND the transaction.
-		applied, txErr = sessFront.WithPendingCreateRollback(info, func() error {
+		applied, txErr = sessFront.WithPendingCreateRollback(context.Background(), info, func() error {
 			return store.Tx(commitMsg, func(tx beads.Tx) error {
 				if err := tx.SetMetadataBatch(info.ID, preCloseClears); err != nil {
 					return err

@@ -26,7 +26,8 @@
 // ready-excluded, rows carry no gc.routed_to, and an op's assignee is only ever
 // a lane lease <lane>@<conversation>#<gen>#<nonce>@<deadline>, so ops never
 // reach Ready or work queries. A lease is at most 255 runes, bd's assignee
-// limit. Fields live in gc.op.* metadata. Type "op" is
+// limit, and a conversation id at most 161 bytes, so that the longest lane
+// lease fits. Fields live in gc.op.* metadata. Type "op" is
 // coordclass.ControllerOwned (decided in OJ-2a, before any producer writes a
 // row): the generic bead API never writes an op or fact row; only this
 // package's store, through the producers' and lanes' verbs, does.
@@ -46,10 +47,66 @@
 // the journal reads closed failed{closed_externally}, and the next Close,
 // Cancel or Transition stores that outcome. A closed op has one outcome: arm
 // succeeded|failed|skipped|canceled plus an open reason; an unknown failed or
-// skipped reason reads failed{other}. O1 lanes Take with a guarded update
-// expecting assignee "" (or the expired lease) and finish with one update that
-// closes op and bead expecting their own lease; until bd batch guards exist the
-// revision CAS subsumes both.
+// skipped reason reads failed{other}. The conversation lane takes and
+// settles ops only through guarded batches (beads.GuardedBatcher); see
+// "Conversation lane" below.
+//
+// # Conversation lane
+//
+// ConversationLane.Pass is the conversation lane's core (DES-O1 §4, OJ-10).
+// A pass reads the conversation's open ops (ListOpenTolerant, quarantining
+// what it cannot decode), its runtime row and each after target; closes what
+// the rules decide (planRules: cancel, deadlines, poison at MaxFailures,
+// stale scope, failed dependencies, a closed conversation); and, when a Take
+// is possible, probes the executor and takes one batch (planTake):
+// control before content (I10), urgent content before normal, ordered by
+// OrderKey with a per-principal client_seq fix-up, at most one prompt,
+// MaxBatchOps ops and MaxBatchPayload bytes. Take is one guarded batch: the
+// runtime row's lease cell, seq and incarnation plus every op's lease,
+// attempt, lane_seq and delivery key, so one Take is in flight per
+// conversation (I3) and a stale read loses its batch (I9); an attempt that
+// loses a race re-reads the conversation and probes again. No effect runs
+// before the Take is known durable (I5); an unknown batch error is resolved
+// by re-reading the lease and then each op, retrying a failed read on
+// Done's backoff while the lease lasts, and the Take goes on with the
+// ops as re-read (an op that closed in that window is dropped and the rest
+// are released without the effect). Done is one guarded batch that accepts
+// (the delivery record and the turn link CorrelateTurn decides), releases
+// (with retry_at, failures and maybe_delivered) or rejects; after a refusal
+// or an unknown error it re-reads every row it still has to write. Only a
+// missing or unknown ack makes a Delivered result Unknown: once the runtime
+// acked, a defect in another recording field is clamped or dropped, the
+// outcome records DegradationExecutorContract and Pass returns the breach,
+// so the effect never runs again for it.
+//
+// A content op whose lease expired is re-taken with its delivery key, so a
+// deduplicating runtime replays it; on any other runtime the redelivery
+// ends with RedeliveryNote (D-NOTE). A control op carries no key; Op.ID is
+// its idempotency key. A released op is re-keyed only when the runtime
+// refused its key on its last attempt (L3), and a runtime refuses only a
+// key that never landed (Rejected), so the send under the new key is no
+// duplicate. Delivery keys are
+// <head op id>:<the head's lane_seq at the minting Take>. A deduplicating
+// runtime gets a maybe-delivered group whole or not at all (a member that
+// closed leaves it; a member that cannot go yet, including one the rules
+// keep out of its class, such as one whose after target cannot be read on
+// that pass, holds the head as a replay_group waiter), so every send under a
+// key is a subset of every earlier send under it (L2); any other runtime may
+// get a group in parts. A replay group whose open members are all
+// after_turn riders goes without a starter. A fresh op the probe rules out
+// closes (if_idle while busy: skipped{busy}; steer with fallback_fail, or a
+// respond the runtime cannot perform: failed{unsupported}); an op that may
+// have been delivered (a re-take, or one released after an Unknown result)
+// waits instead, busy or unsupported, to be replayed, and start_by bounds
+// the wait (failed{deadline_in_flight}). An after_unreadable wait names
+// the cause in its Detail; it retries after TransientBackoffBase when the
+// store failed to read the target, and waits with no timer, as after_pending
+// does, when the target was read but does not decode. An incarnation wait
+// (the view is behind the runtime row, or the probe's fence disagrees with
+// it) retries after TransientBackoffBase too: nothing rings when they agree.
+// A pass's Next is never the instant it planned at. Delivered text names
+// no identifier (I14). A lane store must apply guarded batches
+// (NewLaneStore); there is no production caller until OJ-12.
 //
 // # Executor and open rows
 //

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"testing"
 	"time"
@@ -22,7 +23,7 @@ func TestLeasedWritesRefuseALostLease(t *testing.T) {
 	if ok, err := f.front.ApplyPatchIfLifecycleUnchangedUnder(snapshot, MetadataPatch{"generation": "2"}, stale); !ok || err != nil {
 		t.Fatalf("PreWake under the lease = %v, %v", ok, err)
 	}
-	if ok, err := f.front.CommitStartedIfCurrentUnder(snapshot, MetadataPatch{"started_config_hash": "h1"}, stale); !ok || err != nil {
+	if ok, err := f.front.CommitStartedIfCurrentUnder(context.Background(), snapshot, MetadataPatch{"started_config_hash": "h1"}, stale); !ok || err != nil {
 		t.Fatalf("commit under the lease = %v, %v", ok, err)
 	}
 	onHost(t, "host-a")
@@ -34,7 +35,7 @@ func TestLeasedWritesRefuseALostLease(t *testing.T) {
 	if ok, err := f.front.ApplyPatchIfLifecycleUnchangedUnder(snapshot, MetadataPatch{"generation": "3"}, stale); ok || err != nil {
 		t.Fatalf("PreWake under a lost lease = %v, %v; want refused", ok, err)
 	}
-	if ok, err := f.front.CommitStartedIfCurrentUnder(snapshot, MetadataPatch{"started_config_hash": "h2"}, stale); ok || err != nil {
+	if ok, err := f.front.CommitStartedIfCurrentUnder(context.Background(), snapshot, MetadataPatch{"started_config_hash": "h2"}, stale); ok || err != nil {
 		t.Fatalf("commit under a lost lease = %v, %v; want refused", ok, err)
 	}
 	if meta := f.meta(t); meta["generation"] != "2" || meta["started_config_hash"] != "h1" {

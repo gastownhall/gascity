@@ -49,6 +49,59 @@ when the context ends. Take the bound from the caller's own context.
   observes the same session must derive the key the same way, or the
   one-in-flight limit no longer holds. `cmd/gc` derives it in
   `postStartObservationKey`.
+- `worker.ObserveShared` is the form for reads several callers make of one key
+  at once (turn reads: `CurrentTurn`, `WatchTurns` and its session reload, the
+  idle overlay). A call
+  made while an observation of the key is outstanding waits for that answer
+  within its own context instead of getting `ErrObservationOutstanding`, so
+  concurrent healthy readers all get the answer and a wedged session still
+  leaks one goroutine. A key is observed through one form, never both, and
+  with one type: a joiner of another type's observation gets an unavailable
+  error, not its answer. Turn keys (`turnObservationKey`) name the city
+  directory and the session, for a `SessionHandle` and a `RuntimeHandle` alike
+  (`RuntimeHandleConfig.CityPath`).
+
+## Turn sources
+
+A session's turns come from the routed runtime's protocol, else from the
+transcript of its current conversation, else nowhere (`TurnCapabilities`).
+The transcript tier is composed from fixed traits only: the routed backend
+runs the agent on this host (`runtime.LocalTranscriptProvider`), the session
+has a work directory, and the family has an exact by-key transcript lookup
+(`session.HasKeyedTranscriptLookup`). The read resolves only the file the
+session key finds and that records that conversation, never the work-directory
+fallback `Manager.TranscriptPath` serves for history. A session without a key
+yet, or whose transcript is not written yet, reads as
+`runtime.ErrRuntimeUnavailable`, not as a different capability.
+`TurnCapabilities.Replace` is internal/session's answer
+(`session.RuntimeTurnTraits.Replace`): what interrupt_now does to the
+session's turn, decided by the predicates interrupt_now runs on. The worker
+never derives it from a family table. A `RuntimeHandle` has no deliver-now,
+so it reports `none`.
+
+Identity is judged per turn, not from sessionlog's `MissingIDs`
+(`turnHistoryFromScan`). A turn without an id whose start lies inside the scan
+is `runtime.ErrTurnIdentityUnsupported`. A scan that begins inside a turn (a
+window cut in its tail, or a Claude conversation opening with a turn run from
+queued input) is the window, not the family: the head end is dropped, and an
+open head turn reads as unavailable. `WatchTurns` republishes an error when its
+class changes, so a consumer hears unsupported or not found mid-streak. Every
+watch read, protocol or transcript and whatever woke it, reloads the session
+first, so a session whose row closes reads as not found from the next read on,
+even while its runtime still answers or its transcript is still written. A
+read's session reload and runtime probes (the protocol history, the idle
+snapshot) run within `turnWatchReadBound` and through `ObserveShared`, so a
+stalled store or runtime probe reads as unavailable and never holds a watch
+past its context. A transcript read's file I/O (resolving the transcript,
+`os.Stat`, the follower's read) takes no context: a hung filesystem holds a
+transcript watch, and its close on cancel, until that I/O returns.
+
+The transcript tier is never `Lossless`: a read reports at most
+`sessionlog.MaxRecentTurns` ended turns from a bounded window, so turns that
+end between two reads can fall out of it. `CurrentTurn` scans the transcript's
+last 16 MiB (`sessionlog.ScanTurns`) while `WatchTurns` folds what was appended
+since its last rescan (`sessionlog.TurnFollower`), so the two can disagree
+about a turn that began before that window.
 
 ## Codex activity
 

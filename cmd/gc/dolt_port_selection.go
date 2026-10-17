@@ -56,6 +56,9 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 				return strconv.Itoa(repaired.Port), nil
 			}
 		}
+		if liveOwnedDoltRuntimeState(state, cityPath) {
+			return strconv.Itoa(state.Port), nil
+		}
 	} else if !os.IsNotExist(err) {
 		return "", fmt.Errorf("read provider runtime state: %w", err)
 	} else if hint, found, hintErr := readPublishedDoltRuntimeStateHint(cityPath); hintErr == nil && found {
@@ -70,12 +73,29 @@ func chooseManagedDoltPort(cityPath, stateFile string) (string, error) {
 			}
 			return strconv.Itoa(repaired.Port), nil
 		}
+		if liveOwnedDoltRuntimeState(hint, cityPath) {
+			return strconv.Itoa(hint.Port), nil
+		}
 	}
 	if envPort != "" {
 		return envPort, nil
 	}
 	seed := deterministicManagedDoltPortSeed(cityPath)
 	return strconv.Itoa(nextAvailableManagedDoltPort(seed)), nil
+}
+
+// liveOwnedDoltRuntimeState reports whether state still names the city's own
+// managed Dolt: the recorded process is alive, is this city's server, and no
+// other process holds the port. Unlike validDoltRuntimeState it does not dial
+// the port. A restart stops that server before it binds, so its port is the
+// one to reuse, and a dial can fail while the server is healthy, for example
+// when the host has run out of ephemeral ports.
+func liveOwnedDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
+	layout, ok := validDoltRuntimeStateIdentity(state, cityPath)
+	if !ok || !pidAlive(state.PID) {
+		return false
+	}
+	return managedDoltRuntimeProcessOwned(state, layout)
 }
 
 func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, state doltRuntimeState) (doltRuntimeState, bool) {
