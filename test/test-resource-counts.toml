@@ -1914,6 +1914,18 @@ resource = "subprocess"
 calls = 1
 
 [[count]]
+path = "internal/doctor/rig_store_binding_check_integration_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/doctor/rig_store_binding_check_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
 path = "internal/events/events_test.go"
 resource = "fixed_sleep"
 calls = 2

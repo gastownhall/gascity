@@ -186,6 +186,10 @@ func (c *RigPathCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the
 // `gc start` warm-up scan.
+func (c *RigStoreBindingCheck) WarmupEligible() bool { return false }
+
+// WarmupEligible returns false; this check is not part of the
+// `gc start` warm-up scan.
 func (c *RigWorktreesCheck) WarmupEligible() bool { return false }
 
 // WarmupEligible returns false; this check is not part of the

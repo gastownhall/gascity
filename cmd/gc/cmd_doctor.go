@@ -25,10 +25,11 @@ import (
 )
 
 var (
-	newDoctorDoltServerCheck    = doctor.NewDoltServerCheck
-	newDoctorRigDoltServerCheck = doctor.NewRigDoltServerCheck
-	newDoctorDoltBackupCheck    = doctor.NewDoltBackupCheck
-	newDoctorDoltLocalOnlyCheck = doctor.NewDoltLocalOnlyRemoteCheck
+	newDoctorDoltServerCheck      = doctor.NewDoltServerCheck
+	newDoctorRigDoltServerCheck   = doctor.NewRigDoltServerCheck
+	newDoctorRigStoreBindingCheck = doctor.NewRigStoreBindingCheck
+	newDoctorDoltBackupCheck      = doctor.NewDoltBackupCheck
+	newDoctorDoltLocalOnlyCheck   = doctor.NewDoltLocalOnlyRemoteCheck
 )
 
 func newDoctorCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -596,6 +597,15 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			}
 			register(newDoctorRigDoltServerCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks))
 			if storeOK {
+				// Store-binding check: unlike the dolt-server check above, this
+				// never skips based on endpoint origin (explicit vs inherited).
+				// It queries the rig's configured database directly, which is
+				// what catches a database missing from an otherwise-reachable
+				// shared endpoint. Same managed-bd-store-contract/SkipRigDoltChecks
+				// gate as the dolt-server check, since it needs the same
+				// connection setup; registered inside storeOK so an outage the
+				// preflight already reported is not repeated per rig.
+				register(storeGate.Check(newDoctorRigStoreBindingCheck(cityPath, rig, !rigUsesManagedBdStoreContract(cityPath, rig) || opts.SkipRigDoltChecks), rigScope, rigLabel))
 				register(storeGate.Check(doctor.NewCustomTypesCheck(rig.Path, rig.Name, doctorScopeBdBinary(cityPath, rig.Path)), rigScope, rigLabel))
 				register(storeGate.Check(newHoldLabelConventionsCheck(rig.Path, rig.Name, storeFactory), rigScope, rigLabel))
 			}

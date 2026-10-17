@@ -42,6 +42,7 @@ go_library(
         "pack_checks.go",
         "pre_start_scripts_check.go",
         "proxied_provider.go",
+        "rig_store_binding_check.go",
         "select.go",
         "skill_checks.go",
         "skill_dangling_sink_check.go",
@@ -62,6 +63,7 @@ go_library(
         "//internal/citylayout",
         "//internal/config",
         "//internal/deps",
+        "//internal/doltauth",
         "//internal/doltversion",
         "//internal/events",
         "//internal/formula",
@@ -82,6 +84,7 @@ go_library(
         "//internal/workdir",
         "//internal/workspacesvc",
         "@com_github_burntsushi_toml//:toml",
+        "@com_github_go_sql_driver_mysql//:mysql",
         "@in_gopkg_yaml_v3//:yaml_v3",
     ],
 )
@@ -135,6 +138,7 @@ go_test(
         "migrated_proxied_city_test.go",
         "pack_checks_test.go",
         "pre_start_scripts_check_test.go",
+        "rig_store_binding_check_integration_test.go",
         "select_test.go",
         "skill_checks_test.go",
         "skill_dangling_sink_check_test.go",
@@ -165,6 +169,7 @@ go_test(
         "//internal/suspensionstate",
         "//internal/testenv",
         "//internal/testutil",
+        "@com_github_go_sql_driver_mysql//:mysql",
     ],
 )
 

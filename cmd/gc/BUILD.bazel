@@ -1386,6 +1386,7 @@ go_test(
         "dolt_lifecycle_race_test.go",
         "dolt_mode_configstate_test.go",
         "dolt_port_live_test.go",
+        "dolt_port_selection_test.go",
         "dolt_preflight_cleanup_test.go",
         "dolt_process_inspection_test.go",
         "dolt_project_id_apply_test.go",
