@@ -443,8 +443,11 @@ dispatches it. It records one `order.inapplicable` event per controller boot,
 and `gc order list` and `gc doctor` show the order as
 `inapplicable (backend http)`. `gc order check` shows it as inapplicable and
 never due, a webhook that targets it is rejected, and `gc order run` refuses it
-unless you pass `--force`. An inapplicable order is not a failure and is never
-counted as a stale order.
+unless you pass `--force`. The HTTP API's order check
+(`GET /v0/city/{cityName}/orders/check`) does not apply this gate yet: it still
+evaluates the order's trigger and can report the order as due, though gc never
+dispatches it. An inapplicable order is not a failure and is never counted as a
+stale order.
 
 ## Rig-scoped orders
 
