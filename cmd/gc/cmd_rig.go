@@ -1268,8 +1268,11 @@ func cmdRigRemove(rigName string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc rig remove: retiring provider scope ownership: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	// Write updated config.
-	if err := config.WriteCityAndRigSiteBindingsForEditRemovingRigs(fsys.OSFS{}, tomlPath, cfg, rigName); err != nil {
+	// Write updated config. Surgical removal (#7899): delete the removed
+	// rig's and its swept blocks' byte spans instead of re-serializing the
+	// whole file, so existing city.toml comments survive — the removal
+	// counterpart of the surgical append gc rig add has used since #3414.
+	if err := config.RemoveRigAndWriteSiteBindingsForEdit(fsys.OSFS{}, tomlPath, cfg, rigName, removedMonitors); err != nil {
 		fmt.Fprintf(stderr, "gc rig remove: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
