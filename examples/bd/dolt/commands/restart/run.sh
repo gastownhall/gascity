@@ -52,6 +52,7 @@ esac
 CITY_RUNTIME_DIR="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
 PACK_STATE_DIR="${GC_PACK_STATE_DIR:-$CITY_RUNTIME_DIR/packs/dolt}"
 LOG_FILE="${GC_DOLT_LOG_FILE:-$PACK_STATE_DIR/dolt.log}"
+DATA_DIR="${GC_DOLT_DATA_DIR:-}"
 BD_SCRIPT_DIR="$(CDPATH= cd -- "$(dirname "$GC_BEADS_BD_SCRIPT")" && pwd)"
 if [ ! -f "$BD_SCRIPT_DIR/dolt-enospc.sh" ]; then
   # GC_BEADS_BD_SCRIPT may be the stable city shim; the helper ships next
@@ -64,7 +65,8 @@ fi
 if recovery_should_skip_due_to_enospc; then
   if [ "$force_restart" != "true" ]; then
     echo "gc dolt restart: recent Dolt log shows ENOSPC; refusing restart because it can amplify recovery writes" >&2
-    echo "  free disk space, then run gc dolt restart --force only if a restart is still required" >&2
+    echo "  free disk space; the refusal lifts once the Dolt data dir has GC_DOLT_WARN_FREE_BYTES (default 2 GiB) free" >&2
+    echo "  run gc dolt restart --force only if a restart is required before then" >&2
     exit 1
   fi
   echo "gc dolt restart: --force set; restarting despite recent ENOSPC evidence" >&2
