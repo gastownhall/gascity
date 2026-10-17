@@ -275,20 +275,24 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 // the way the work ledger's does. See class_store_emit.go and
 // class_store_cache.go.
 //
-// On a worker site cityPath is read: a class whose binding no descriptor
-// ledger serves (a SQLite or file binding, or one the bundle did not carry)
-// resolves to a refused store, because the box holds no copy of it that is
-// the city's (DES-CN §4.4).
+// On a worker site cityPath is read: a class whose binding is not named as the
+// descriptor ledger binding that lists it resolves to a refused store, because
+// the box holds no copy of it that is the city's (DES-CN §4.4). The refusal is
+// standing, as the funnel's is (workerSiteStorageRefusal). Only the binding
+// name is compared (workerSiteClassRefusal).
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
 	_ = rec
 	store, relocated := routes.storeFor(coordclassFor(class))
+	// This agrees with the funnel's Classes.BindingFor only because the one
+	// served split shape, storageSplitWhole, relocates every class to the one
+	// routes.binding; a per-class shape must name the class's own binding here.
 	binding := config.StorageWorkBinding
 	if relocated {
 		binding = routes.binding
 	}
 	if refusal := workerSiteClassRefusal(cityPath, class, binding); refusal != nil {
-		return refusedClassStore{err: refusal}
+		return refusedClassStore{err: standingStorageRefusal{err: refusal}}
 	}
 	if relocated {
 		return store

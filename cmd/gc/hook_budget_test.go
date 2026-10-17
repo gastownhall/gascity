@@ -559,12 +559,13 @@ func assertHookBudgetGolden(t *testing.T, goldenDir, scenario string, f hookBudg
 
 // TestHookRequestBudgetOnAWorkerSite runs every hook scenario, and the hook
 // claim's continuation nudge, in a city a worker-site descriptor attached to a
-// remote controller. Each sends its ledger exactly what it sends in the same
-// city on the Local plane, and none dials through the gc socket seam: the hook
-// verbs reach the controller only through pokeController (the claim
-// continuation) and the nudge wake ping (every queue write), and both
-// short-circuit in a box. The test writes only the descriptor, so each
-// command's own resolution finds the worker site.
+// remote controller. Each hook scenario sends its ledger exactly what it sends
+// in the same city on the Local plane; the continuation nudge sends nothing,
+// since a box queues no nudge text (hookContinuationNudgeEnqueue). None dials
+// through the gc socket seam: the hook verbs reach the controller only through
+// pokeController (the claim continuation) and the nudge wake ping (every queue
+// write), and both short-circuit in a box. The test writes only the
+// descriptor, so each command's own resolution finds the worker site.
 //
 // The fixture's work store is the file provider. A connect-path box never has
 // one (CN-3b's mint refuses a work binding on [beads] provider file or exec:,
@@ -579,6 +580,9 @@ func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
 		// dialsLocally marks a scenario that dials on the Local plane, which
 		// proves the counter is wired to the dials it reaches.
 		dialsLocally bool
+		// siteSendsNothing marks a scenario whose worker-site arm returns
+		// before it opens a store, so the site sends nothing, not the same.
+		siteSendsNothing bool
 	}
 	var scenarios []siteScenario
 	for _, sc := range hookBudgetScenarios() {
@@ -591,7 +595,8 @@ func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
 			hookContinuationNudgeEnqueue(hookBudgetIdentity)
 			return 0
 		},
-		dialsLocally: true,
+		dialsLocally:     true,
+		siteSendsNothing: true,
 	})
 
 	measure := func(t *testing.T, sc siteScenario, workerSite bool) (beadstest.WireCost, int32) {
@@ -619,7 +624,12 @@ func TestHookRequestBudgetOnAWorkerSite(t *testing.T) {
 				t.Fatal("the Local plane dialed nothing; the counter is not wired to this scenario's dials")
 			}
 			site, dials := measure(t, sc, true)
-			if site.Requests != local.Requests || site.Opens != local.Opens {
+			switch {
+			case sc.siteSendsNothing:
+				if site.Requests != 0 || site.Opens != 0 {
+					t.Errorf("worker site: %d requests over %d opens, want none", site.Requests, site.Opens)
+				}
+			case site.Requests != local.Requests || site.Opens != local.Opens:
 				t.Errorf("worker site: %d requests over %d opens, local: %d over %d; want the same", site.Requests, site.Opens, local.Requests, local.Opens)
 			}
 			if dials != 0 {

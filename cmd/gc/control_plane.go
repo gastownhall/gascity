@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/connect"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
 
@@ -99,6 +100,57 @@ var errWorkerSiteNoController = errors.New("worker site: no controller or superv
 // errWorkerSiteRefusesController refuses a command that would run a city
 // controller or the supervisor inside a box.
 var errWorkerSiteRefusesController = errors.New("worker site: this city directory is attached to a remote controller (.gc/control-plane.toml), so it cannot run a controller or supervisor here")
+
+// errWorkerSiteResetNeedsController refuses gc session reset on a worker site
+// before it writes anything. Clearing a named session's respawn breaker goes
+// over the controller socket, and rolling back a stuck create needs a runtime
+// observation that the guard cannot make.
+var errWorkerSiteResetNeedsController = errors.New("worker site: reset needs the controller, which does not run in this box; nothing was recorded, so run it where the controller runs")
+
+// errWorkerSiteDeliveryNeedsController refuses gc session nudge and gc session
+// submit on a worker site before they resolve the target or write anything.
+// The guard types into no runtime, and the box's nudge queue is a local file
+// the remote controller never reads, so no delivery mode reaches the session.
+var errWorkerSiteDeliveryNeedsController = errors.New("worker site: delivering text to a session needs the controller's runtime or nudge queue, and this box holds neither; nothing was recorded, so send it as mail (gc mail send) or run it where the controller runs")
+
+// errWorkerSiteDrainNeedsController refuses gc runtime drain and gc runtime
+// undrain on a worker site before they resolve the target or write anything.
+// The agent learns of a drain from the runtime drain flag, which only the
+// controller's runtime holds. The row's operator mark only explains an ack
+// (A11 reads it, and nothing else does), so a mark written here alone would
+// drain nothing.
+var errWorkerSiteDrainNeedsController = errors.New("worker site: drain and undrain set and clear the runtime drain flag the agent reads, and only the controller's runtime holds it; nothing was recorded, so run it where the controller runs")
+
+// errWorkerSiteHandoffTargetNeedsController refuses gc handoff --target on a
+// worker site before it resolves the target or sends its mail. A handoff to
+// another session stops that session's runtime, which only the controller can
+// do, and the guard cannot tell whether that runtime is live.
+var errWorkerSiteHandoffTargetNeedsController = errors.New("worker site: a handoff to another session stops its runtime, which only the controller can do; nothing was recorded, so send the handoff as mail (gc mail send) or run it where the controller runs")
+
+// workerSiteNudgeNotQueuedNotice opens what a courtesy nudge (gc sling's "Work
+// slung", gc mail's new-mail notice) says on a worker site in place of
+// queuing its text (workerSiteNudgeNotice). The routed bead or the mail is on
+// the ledger either way, and the session's wake is the one signal the box
+// records for it.
+const workerSiteNudgeNotQueuedNotice = "worker site: the nudge text was not queued, because this box's nudge queue is a local file the remote controller does not read"
+
+// workerSiteNudgeNotice is a courtesy nudge's worker-site notice once
+// requestWorkerSiteNudgeWake reported outcome. Only a recorded wake reaches
+// the remote controller, so only then does it promise that controller's
+// reconcile.
+func workerSiteNudgeNotice(outcome session.WakeRequestOutcome) string {
+	if outcome == session.WakeRecorded {
+		return workerSiteNudgeNotQueuedNotice + "; the remote controller acts on the recorded wake at its next reconcile"
+	}
+	return workerSiteNudgeNotQueuedNotice + "; no wake was recorded"
+}
+
+// errWorkerSiteNotifyNotDelivered is gc mail's new-mail notice on a worker
+// site when it recorded no wake: the recipient is held, needs no wake, or has
+// no session bead. The recipient's wake is the only notice a box leaves, so
+// the recipient was not notified, and gc mail reports notified false. The
+// mail is on the ledger either way.
+var errWorkerSiteNotifyNotDelivered = errors.New(workerSiteNudgeNotQueuedNotice + "; no wake was recorded, so the recipient was not notified, and the mail waits on the ledger")
 
 // errWorkerSiteLocalState refuses a read of controller-local state on a
 // worker site. what names the state, such as "events" or "sessions store".
@@ -210,12 +262,12 @@ func onWorkerSite(cityPath string) bool {
 	return err != nil || plane.Worker()
 }
 
-// workerSiteClassRefusal returns the refusal for class on a worker site when
-// the binding it resolves to is not the binding of the descriptor ledger that
-// lists the class: a SQLite binding, a binding the bundle did not carry, or a
-// box [storage] that disagrees with the bundle. A descriptor that cannot be
-// used is itself the refusal. It returns nil on the Local plane and for the
-// class's own ledger binding.
+// workerSiteClassRefusal returns the refusal for class on a worker site unless
+// the binding it resolves to has the name of the descriptor ledger binding
+// that lists the class. Only the name is compared, not the provider or the
+// endpoint: a box binding of that name opens whatever its own [storage]
+// configures. A descriptor that cannot be used is itself the refusal. It
+// returns nil on the Local plane.
 func workerSiteClassRefusal(cityPath, class, binding string) error {
 	if cityPath == "" {
 		return nil
@@ -286,7 +338,12 @@ func dialCitySocket(cityPath, path string, timeout time.Duration) (net.Conn, err
 }
 
 // controlPlaneExemptCommands are the top-level commands that run with a
-// malformed descriptor, because they read the file themselves.
+// malformed descriptor: the exemption spares them the descriptor error, not
+// the fail-closed worker-site marking (fillControlPlane). doctor runs
+// regardless of the descriptor so that a box can be diagnosed; it does not
+// read the file itself. version and help need no city. connect, the
+// descriptor's writer, arrives with CN-2; when it does, it gets a run-level
+// case in TestControlPlaneGateExemptsOnlyTheCommandsThatReadTheFile.
 var controlPlaneExemptCommands = map[string]bool{
 	"connect": true,
 	"doctor":  true,
@@ -331,7 +388,8 @@ func withAdvisoryControlPlane(ctx resolvedContext, err error) (resolvedContext, 
 
 // fillControlPlane fills a local context's Plane from planeOf. A descriptor
 // that cannot be read or decoded fails the resolution unless the command is
-// exempt.
+// exempt. planeOf runs before the exemption is consulted, so withControlPlane
+// marks an exempt invocation too: the exemption spares it only the refusal.
 func fillControlPlane(ctx resolvedContext, err error, planeOf func(cityPath string) (controlPlane, error)) (resolvedContext, error) {
 	if err != nil || ctx.Remote != nil || ctx.CityPath == "" {
 		return ctx, err
@@ -430,4 +488,12 @@ func noteWorkerSitePoke(stderr io.Writer, command string, err error) bool {
 	}
 	fmt.Fprintf(stderr, "%s: %v\n", command, err) //nolint:errcheck // best-effort stderr
 	return true
+}
+
+// controllerWillReconcile reports whether a controller will act on a durable
+// session write after a poke that returned pokeErr: the poke reached one, or
+// cityPath is a worker site, whose remote controller acts at its next
+// reconcile and which no poke ever reaches.
+func controllerWillReconcile(cityPath string, pokeErr error) bool {
+	return pokeErr == nil || onWorkerSite(cityPath)
 }

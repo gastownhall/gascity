@@ -117,16 +117,71 @@ seams consult it:
   resolved; both refuse with `errWorkerSiteNoController`. The controller-stop
   client fails closed on that refusal (`controllerStopOutcomeInvalid`): a
   box has no controller socket, and its absence is no proof that the remote
-  controller is gone. `pokeController`, `reloadControllerConfig`,
-  `pokeControlDispatch` and `cityUsesManagedReconciler` short-circuit
-  before reaching a sender.
+  controller is gone. `pokeController`, `pokeControllerForRestart`,
+  `reloadControllerConfig`, `pokeControlDispatch` and `enqueueController`
+  return `errWorkerSiteNoController` without reaching a sender, and
+  `cityUsesManagedReconciler` answers managed without a dial.
+- Session commands key their worker-site arm on the site, not on a nil poke
+  (`controllerWillReconcile`), because no poke succeeds in a box.
+  `gc session new` and the named and template materializers create a
+  deferred session and print the `errWorkerSiteNoController` notice instead
+  of enqueueing it; `gc session new` does not attach. They check a
+  session's transport against configuration alone
+  (`validateSessionTransportAt`): the remote controller's runtime routes the
+  session, not the box's guard, so ACP sessions are recorded too.
+  `gc session suspend` writes the operator hold and reports managed mode.
+  `gc session reset` refuses before it writes
+  (`errWorkerSiteResetNeedsController`): its breaker clear needs the
+  controller socket.
+- `gc runtime request-restart` and a self `gc handoff` record the restart as
+  the session bead's marker (`restart_requested` and
+  `continuation_reset_pending`), which both reconcilers read. The guard holds
+  no runtime flag to set (`restartFlagNotApplicable`), so on a box the marker
+  is the whole request and is mandatory for every session, not only a pinned
+  one. A handoff by a named session the controller does not restart clears
+  only that marker. `gc runtime drain` and `undrain` refuse before they
+  resolve the target or write anything (`errWorkerSiteDrainNeedsController`):
+  the agent learns of a drain from the runtime drain flag, which only the
+  controller's runtime holds, and the row's operator mark only explains an
+  ack. `gc handoff --target` refuses the same way
+  (`errWorkerSiteHandoffTargetNeedsController`): it stops the target's
+  runtime.
+- A poke that follows a recorded change prints the `errWorkerSiteNoController`
+  notice in place of its poke-failed warning (`noteWorkerSitePoke`): session
+  wake, wait, pin and unpin, `gc sling`'s pool wake poke, `gc convoy poke`,
+  `gc runtime drain-ack`, `gc runtime request-restart` and a self
+  `gc handoff`. None claims it poked a controller.
+- No nudge text leaves a box. The queue `openNudgeQueue` builds is the
+  box-local state file, which the remote controller never reads, and the
+  guard types into no runtime. `gc session nudge` and `gc session submit`
+  refuse before they resolve the target or write anything
+  (`errWorkerSiteDeliveryNeedsController`): `gc session wake` records the
+  wake, and `gc mail send` carries the text. The courtesy nudges of
+  `gc sling` and mail notify queue nothing and start no poller: they record
+  only the session's wake (`requestWorkerSiteNudgeWake`, never over an
+  operator hold), since the routed bead or the mail is on the ledger either
+  way, and their notice (`workerSiteNudgeNotice`) promises the remote
+  controller's reconcile only when a wake was recorded. Mail notify that
+  records none (a held or running recipient, or one with no session bead)
+  returns `errWorkerSiteNotifyNotDelivered`, so `gc mail` reports `notified`
+  false. The hook-claim continuation self-nudge
+  (`hookContinuationNudgeEnqueue`) queues nothing. This holds until
+  `openNudgeQueue` can select the beads queue (ga-w0hgvz), which CN-3b's
+  mint requires of a connect-path box.
+- The session catalog (`workerSessionCatalogWithConfig`) reports the
+  persisted state: the guard's `IsRunning` is not the remote runtime's
+  liveness, so the live overlay would show every active session asleep.
 - Fallback reads of controller-local state refuse with
-  `errWorkerSiteLocalState`: the local events log, and any class whose
+  `errWorkerSiteLocalState`: the local events log, which holds only what the
+  box wrote (`gc events`, and `gc analyze-reliability` on the city it
+  resolves; a file named by `--events` is still read), and any class whose
   configured binding is not the binding of the descriptor ledger whose
-  `classes` list it. The one-shot storage funnel (`resolveCLIStorageRoutes`)
-  takes that verdict before it opens or creates a binding, as a standing
-  refusal, so the by-id resolver and the graph binding refuse too while work
-  ids still resolve to work.
+  `classes` list it. `gc status`' store-health block opens no events log on
+  a box (`openStoreHealthEvents`), so it reports no last maintenance. The
+  one-shot storage funnel (`resolveCLIStorageRoutes`) takes that verdict
+  before it opens or creates a binding, as a standing refusal, so the by-id
+  resolver and the graph binding refuse too while work ids still resolve to
+  work.
 - `gc start`, `gc restart`, `gc stop`, `gc register` (and `gc init`'s
   registration), `gc supervisor run`, `start` and `install` refuse with
   `errWorkerSiteRefusesController`, and the supervisor's per-city start
@@ -136,25 +191,36 @@ seams consult it:
   its error, retries it on the init-failure backoff, and fails a pending
   `city.create` request with `city_init_failed`.
 - Under v2 the drain-ack's row commit is the ack; the guard's refusal to
-  mirror it into the env flag is a warning. Under legacy there is no in-box
-  drain-ack (D-DRAINACK) and the guard's refusal stays loud.
+  mirror it into the env flag is a warning, and it reports that the remote
+  controller stops the session at its next reconcile. Under legacy there is
+  no in-box drain-ack (D-DRAINACK) and the guard's refusal stays loud.
 
 Not covered here: a work store on `[beads] provider = "file"` or `exec:`
 opens on a worker site. No connect-path box has one, because CN-3b's mint
-refuses such a work binding (`mint_binding_unreachable`).
+refuses such a work binding (`mint_binding_unreachable`). The class check
+compares binding names only, not provider or endpoint: a box `[storage]`
+binding that carries a descriptor ledger's name opens whatever the box
+configures for it, a local SQLite file or a managed bd that starts a local
+Dolt server included. CN-3b's mint is what keeps a box's bindings on the
+descriptor ledgers.
 
 New code on a worker-reachable path must take these seams, not dial or
 construct a provider directly. These still dial directly and are converted
 by CN-1b2:
 
 - `sendControllerCommandWithTimeouts` (`cmd/gc/controller.go`), and with it
-  `controllerAlive` and `enqueueController`'s keyed send. On a worker site
-  today that dial is reached by `gc session nudge` to a dormant target,
-  `gc session wait --sleep` and `gc sling` to an asleep target.
+  the callers that send through it directly, such as `controllerAlive`.
 - `supervisorAliveAtPathUntil`, `stopSupervisorViaSocketJSON` and
   `reloadSupervisorJSON` (`cmd/gc/cmd_supervisor.go`). The last two sit
   behind `runningSupervisorSocket`'s probe, as does `reloadSupervisorNoWait`,
   whose own dial already goes through `dialGCSocket`.
+
+CN-1b2 also converts the commands that still open the box's own events log
+as the city's, which `gc events` refuses (`refuseLocalEventsOnWorkerSite`):
+`gc order check` and `gc order run`, whose event gates and cursors read it
+(`openCityEventsProvider`, `cmd/gc/cmd_order.go`), and the
+`gc convoy control --serve` watcher (`openCityEventsReader`,
+`cmd/gc/dispatch_runtime.go`).
 
 Worker sites exist in production only once the sidecar is written (CN-2),
 which waits for CN-1b2.

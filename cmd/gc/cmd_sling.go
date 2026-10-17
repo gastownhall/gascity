@@ -1579,7 +1579,9 @@ func doSlingNudge(a *config.Agent, cityName, cityPath string, cfg *config.City,
 		// No running config session — poke controller for immediate wake.
 		// Key-less (allocator): the wake is template demand, not a session.
 		if err := pokeController(cityPath); err != nil {
-			fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			if !noteWorkerSitePoke(stderr, "gc sling", err) {
+				fmt.Fprintf(stderr, "No running sessions for %q; poke failed: %v\n", a.QualifiedName(), err) //nolint:errcheck // best-effort
+			}
 		} else {
 			fmt.Fprintf(stdout, "No running sessions for %q — poked controller for wake\n", a.QualifiedName()) //nolint:errcheck // best-effort
 		}
@@ -1682,8 +1684,24 @@ func buildSlingNudgeTarget(agent config.Agent, cityName, cityPath string, cfg *c
 	})
 }
 
+// deliverSlingNudge nudges a running target, or queues the nudge for an asleep
+// one and pokes the controller to wake it. On a worker site it queues nothing,
+// since the box's nudge queue is a local file the remote controller never
+// reads, and records the session's wake instead (requestWorkerSiteNudgeWake);
+// its notice says whether it recorded one.
 func deliverSlingNudge(target nudgeTarget, sp runtime.Provider, store beads.Store, cityPath string, stdout, stderr io.Writer) {
 	const msg = "Work slung. Check your hook."
+	if onWorkerSite(target.cityPath) {
+		outcome, err := requestWorkerSiteNudgeWake(target, store)
+		fmt.Fprintf(stderr, "gc sling: %s\n", workerSiteNudgeNotice(outcome)) //nolint:errcheck // best-effort
+		switch {
+		case err != nil:
+			fmt.Fprintf(stderr, "warning: bead routed but wake failed: %v\n", err) //nolint:errcheck // best-effort
+		case outcome == session.WakeRecorded:
+			fmt.Fprintf(stdout, "Session %q is asleep — recorded a wake for the remote controller\n", target.agent.QualifiedName()) //nolint:errcheck // best-effort
+		}
+		return
+	}
 	// Session observation/handle and the last-nudge-delivered stamp route to the
 	// session coordination-class store (derived from the target's cfg+cityPath); the
 	// queued-nudge enqueue below stays on the passed store (nudges class). Identity

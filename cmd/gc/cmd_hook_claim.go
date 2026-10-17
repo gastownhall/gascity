@@ -3023,10 +3023,13 @@ func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
 // error is swallowed so a nudge-queue failure never blocks the claim.
 // ACP sessions: maybeStartNudgePoller is a no-op for acp transport; configure
 // daemon.nudge_dispatcher = "supervisor" for reliable queued delivery.
+// On a worker site it queues nothing and starts no poller: the box's nudge
+// queue is a local file the remote controller never reads, and the claimed
+// work is on the ledger either way.
 // See writeHookClaimWorkResultForBead for the call site.
 func hookContinuationNudgeEnqueue(assignee string) {
 	cityPath, err := resolveCity()
-	if err != nil {
+	if err != nil || onWorkerSite(cityPath) {
 		return
 	}
 	// Load cfg so maybeStartNudgePoller can skip the sidecar when the city

@@ -281,6 +281,15 @@ func cmdRuntimeDrain(args []string, jsonOutput bool, stdout, stderr io.Writer) i
 		fmt.Fprintln(stderr, "gc runtime drain: missing session alias or ID") //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc runtime drain: %v\n", errWorkerSiteDrainNeedsController) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	target, err := resolveSessionRuntimeTarget(args[0], stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -435,6 +444,15 @@ its operator drain mark.`,
 func cmdRuntimeUndrain(args []string, jsonOutput bool, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, "gc runtime undrain: missing session alias or ID") //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc runtime undrain: %v\n", errWorkerSiteDrainNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	target, err := resolveSessionRuntimeTarget(args[0], stderr)
@@ -1019,20 +1037,29 @@ func controllerRestartTimeout(cfg *config.City) time.Duration {
 // restart-requested flag, so for pinned sessions persistRestart (which lands
 // continuation_reset_pending, the explicit-reset escape hatch) is mandatory
 // rather than best-effort. See sessionRestartableByController.
+//
+// On a worker site the guard holds no runtime flag to set, so that marker is
+// the whole request and is mandatory for every session: the remote
+// controller's reconciler reads it at its next reconcile, and no poke reaches
+// that controller from the box.
 func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned bool, rec events.Recorder,
 	targetName, sn, cityPath string, stdout, stderr io.Writer,
 ) int {
+	markerRequired, subject := pinned, "pinned session"
 	if err := dops.setRestartRequested(sn); err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !restartFlagNotApplicable(err) {
+			fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		markerRequired, subject = true, "worker-site session"
 	}
-	if pinned {
+	if markerRequired {
 		if persistRestart == nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: pinned session %q has no restart persistence available; not requesting restart\n", sn) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc runtime request-restart: %s %q has no restart persistence available; not requesting restart\n", subject, sn) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		if err := persistRestart(); err != nil {
-			fmt.Fprintf(stderr, "gc runtime request-restart: could not persist restart marker for pinned session %q; not requesting restart: %v\n", sn, err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc runtime request-restart: could not persist restart marker for %s %q; not requesting restart: %v\n", subject, sn, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	} else if persistRestart != nil {
@@ -1051,11 +1078,23 @@ func doRuntimeRequestRestart(dops drainOps, persistRestart func() error, pinned 
 
 	// Name-only key: sn is authoritative here, while GC_SESSION_ID can be stale.
 	if err := pokeControllerForRestart(cityPath, reconcilekey.SessionNamed(sn)); err != nil {
-		fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
+		if !noteWorkerSitePoke(stderr, "gc runtime request-restart", err) {
+			fmt.Fprintf(stderr, "gc runtime request-restart: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		fmt.Fprint(stdout, "Restart requested; the remote controller restarts this session at its next reconcile.\n") //nolint:errcheck // best-effort stdout
+		return 0
 	}
 	fmt.Fprint(stdout, "Restart requested; controller notified for immediate reconcile.\n") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// restartFlagNotApplicable reports whether err is a worker site's guard
+// refusing the runtime restart flag. The box holds no runtime to set it on or
+// clear it from; the bead restart marker, which the remote controller's
+// reconciler reads, is the whole request there.
+func restartFlagNotApplicable(err error) bool {
+	return errors.Is(err, guard.ErrControllerOwnedRuntime)
 }
 
 // waitForControllerRestart polls until the controller accepts the stop
@@ -1238,8 +1277,11 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 		// The ack is in force; only the runtime's view of it lags.
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
+	workerSite := false
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
-		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		if workerSite = noteWorkerSitePoke(stderr, "gc runtime drain-ack", err); !workerSite {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
+		}
 	}
 	if jsonOutput {
 		if err := writeCLIJSONLine(stdout, runtimeActionJSON{
@@ -1254,6 +1296,10 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 			fmt.Fprintf(stderr, "gc runtime drain-ack: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		return 0
+	}
+	if workerSite {
+		fmt.Fprintln(stdout, "Drain acknowledged. The remote controller stops this session at its next reconcile.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
