@@ -86,6 +86,7 @@ go_test(
         "pack_formulas_test.go",
         "pack_orders_test.go",
         "pack_prompt_bead_ids_test.go",
+        "reaper_deleted_count_test.go",
         "testenv_import_test.go",
     ],
     data = glob(
