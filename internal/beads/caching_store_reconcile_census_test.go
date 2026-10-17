@@ -117,6 +117,8 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"onChange":      true, "problemf": true, "problemLog": true,
 		"lastReconcileLogAt": true, "primeMu": true, "primeRunning": true,
 		"primeCycle": true, "lastFullPrimeStartedAt": true, "primeRetryDelay": true,
+		// Only full prime writes this cadence anchor; the merge seam does not.
+		"primedAt":    true,
 		"lifecycleMu": true, "lifecycleWG": true, "cancelFn": true, "stopCh": true,
 		"stopped": true, "latencyWindow": true, "latencyDriverActive": true,
 		"applyEventBeforeCommitForTest": true,

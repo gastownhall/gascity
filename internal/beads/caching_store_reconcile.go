@@ -287,9 +287,14 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 		return 0
 	}
 
+	// Only full scans anchor the cadence. Using lastFreshAt here lets steady
+	// writes or absorbed events postpone the first reconcile indefinitely.
 	lastFullScanAt := c.stats.LastReconcileAt
 	if lastFullScanAt.IsZero() {
-		lastFullScanAt = c.lastFreshAt
+		lastFullScanAt = c.primedAt
+	}
+	if lastFullScanAt.IsZero() {
+		return 0
 	}
 	dueAt := lastFullScanAt.Add(clock.Backstop(c.adaptiveIntervalLocked()))
 	if !now.Before(dueAt) {
