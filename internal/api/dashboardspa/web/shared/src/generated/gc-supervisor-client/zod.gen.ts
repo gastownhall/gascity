@@ -969,6 +969,13 @@ export const zOrderHistoryListBody = z.object({
     entries: z.array(zOrderHistoryEntry).nullable()
 });
 
+export const zOrderInapplicablePayload = z.object({
+    backend: z.string(),
+    order_name: z.string(),
+    requires_backend: z.array(z.string()).nullable(),
+    scope: z.string()
+});
+
 export const zOrderResponse = z.object({
     capture_output: z.boolean(),
     check: z.string().optional(),
@@ -3480,6 +3487,7 @@ export const zEventPayload = z.union([
     zMailEventPayload,
     zMoleculeResolvedPayload,
     zNoPayload,
+    zOrderInapplicablePayload,
     zOrderSkippedPayload,
     zOrderSuppressedPayload,
     zOutboundChannelMismatchPayload,
@@ -4654,6 +4662,24 @@ export const zTypedEventStreamEnvelopeOrderFired = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope order.inapplicable
+ */
+export const zTypedEventStreamEnvelopeOrderInapplicable = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zOrderInapplicablePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('order.inapplicable'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope order.skipped
  */
 export const zTypedEventStreamEnvelopeOrderSkipped = z.object({
@@ -5598,6 +5624,7 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
+    zTypedEventStreamEnvelopeOrderInapplicable.extend({ type: z.literal('order.inapplicable') }),
     zTypedEventStreamEnvelopeOrderSkipped.extend({ type: z.literal('order.skipped') }),
     zTypedEventStreamEnvelopeOrderSuppressed.extend({ type: z.literal('order.suppressed') }),
     zTypedEventStreamEnvelopeProjectIdentityStamped.extend({ type: z.literal('project.identity.stamped') }),
@@ -6761,6 +6788,25 @@ export const zTypedTaggedEventStreamEnvelopeOrderFired = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope order.inapplicable
+ */
+export const zTypedTaggedEventStreamEnvelopeOrderInapplicable = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zOrderInapplicablePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('order.inapplicable'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope order.skipped
  */
 export const zTypedTaggedEventStreamEnvelopeOrderSkipped = z.object({
@@ -7754,6 +7800,7 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeOrderCompleted.extend({ type: z.literal('order.completed') }),
     zTypedTaggedEventStreamEnvelopeOrderFailed.extend({ type: z.literal('order.failed') }),
     zTypedTaggedEventStreamEnvelopeOrderFired.extend({ type: z.literal('order.fired') }),
+    zTypedTaggedEventStreamEnvelopeOrderInapplicable.extend({ type: z.literal('order.inapplicable') }),
     zTypedTaggedEventStreamEnvelopeOrderSkipped.extend({ type: z.literal('order.skipped') }),
     zTypedTaggedEventStreamEnvelopeOrderSuppressed.extend({ type: z.literal('order.suppressed') }),
     zTypedTaggedEventStreamEnvelopeProjectIdentityStamped.extend({ type: z.literal('project.identity.stamped') }),
