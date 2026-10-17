@@ -36,14 +36,15 @@ also reports a clean merge with the reviewed source. The suite evidence belongs
 to the pinned merge above, not to that newer main. Merge-time validation belongs
 to MPR and the repository's merge queue.
 
+test_counts: PASS=116418 FAIL=1 SKIP=373
+diff_tests_executed: none (no diff-owned tests)
+test_log_dir: /var/tmp/deploy-ga-81zad89.dqNMn8lE/c3-run/evidence/remote/logs
 test_cmd_scope: full-suite
 test_exec_mode: remote-exec
 fallback_reason: none
 waiver_ref: none (gascity has no waiver path)
 ci_lane_run: n/a (no CI-config change in this diff)
 owned_topup: none needed; computed diff-owned test list is empty
-diff_tests_executed: none (no diff-owned tests)
-test_log_dir: /var/tmp/deploy-ga-81zad89.dqNMn8lE/c3-run/evidence/remote/logs
 test_exec_bep: /var/tmp/deploy-ga-81zad89.dqNMn8lE/c3-run/evidence/remote/{unit,acceptance,integration-packages,integration-full}.bep.json
 
 The suite started through `gate-criterion3.sh` after the fast lane passed, as a
