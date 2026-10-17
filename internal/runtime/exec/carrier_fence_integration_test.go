@@ -1,6 +1,6 @@
 //go:build integration
 
-package runtime
+package exec
 
 import (
 	"context"
@@ -12,9 +12,11 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-// localBox is an ExecProvider whose box is a private tmux server on this
+// localBox is a runtime.ExecProvider whose box is a private tmux server on this
 // host: every argv runs locally with "tmux" resolving to a wrapper that pins
 // the server to its own -L socket. beforeGuard, when set, runs once before
 // the first guarded (if-shell) command.
@@ -103,25 +105,25 @@ func (b *localBox) paneHas(want string) bool {
 func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 	box := newLocalBox(t)
 	box.mustTmux("new-session", "-d", "-s", "main", "-x", "200", "-y", "20", "cat")
-	c := NewTmuxCarrier(box, "main")
-	first := InputFence{Generation: 1, Epoch: 1, Token: "first"}
+	c := runtime.NewTmuxCarrier(box, "main")
+	first := runtime.InputFence{Generation: 1, Epoch: 1, Token: "first"}
 	if err := c.PublishInputFence(context.Background(), "s", first); err != nil {
 		t.Fatalf("PublishInputFence: %v", err)
 	}
 	ctx := context.Background()
-	if err := c.NudgeFenced(ctx, "s", TextContent("-x it's; done; a\\b c\\tz"), first); err != nil {
+	if err := c.NudgeFenced(ctx, "s", runtime.TextContent("-x it's; done; a\\b c\\tz"), first); err != nil {
 		t.Fatalf("NudgeFenced under the pane's fence: %v", err)
 	}
 	if !box.paneHas("-x it's; done; a\\b c\\tz") {
 		t.Fatalf("pane = %q, want the text byte for byte", box.mustTmux("capture-pane", "-p", "-t", "main"))
 	}
 
-	second := InputFence{Generation: 2, Epoch: 1, Token: "second"}
+	second := runtime.InputFence{Generation: 2, Epoch: 1, Token: "second"}
 	box.beforeGuard = func() {
-		box.mustTmux(append([]string{"respawn-pane", "-k", "-t", "main", "cat", ";"}, TmuxPublishInputFenceArgs("main", second)...)...)
+		box.mustTmux(append([]string{"respawn-pane", "-k", "-t", "main", "cat", ";"}, runtime.TmuxPublishInputFenceArgs("main", second)...)...)
 	}
-	err := c.NudgeFenced(ctx, "s", TextContent("stale"), first)
-	var miss *FenceMismatchError
+	err := c.NudgeFenced(ctx, "s", runtime.TextContent("stale"), first)
+	var miss *runtime.FenceMismatchError
 	if !errors.As(err, &miss) || miss.Found != second.Digest() || miss.Partial {
 		t.Fatalf("NudgeFenced after a respawn = %v, want a whole miss finding the new incarnation", err)
 	}
@@ -132,7 +134,7 @@ func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 	if buffers := strings.TrimSpace(box.mustTmux("list-buffers", "-F", "#{buffer_name}")); buffers != "" {
 		t.Fatalf("buffers left after the miss: %q", buffers)
 	}
-	if err := c.NudgeFenced(ctx, "s", TextContent("fresh"), second); err != nil || !box.paneHas("fresh") {
+	if err := c.NudgeFenced(ctx, "s", runtime.TextContent("fresh"), second); err != nil || !box.paneHas("fresh") {
 		t.Fatalf("NudgeFenced under the new fence = %v, want delivered", err)
 	}
 }
@@ -144,19 +146,19 @@ func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 func TestCarrierFencedInputRealTmuxServerGoneIsAbsent(t *testing.T) {
 	box := newLocalBox(t)
 	box.mustTmux("new-session", "-d", "-s", "main", "-x", "200", "-y", "20", "cat")
-	c := NewTmuxCarrier(box, "main")
-	f := InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	c := runtime.NewTmuxCarrier(box, "main")
+	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
 	if err := c.PublishInputFence(context.Background(), "s", f); err != nil {
 		t.Fatalf("PublishInputFence: %v", err)
 	}
 	box.beforeGuard = func() { box.mustTmux("kill-server") }
 	err := c.SendKeysFenced(context.Background(), "s", f, "Enter")
-	var miss *FenceMismatchError
-	if !errors.As(err, &miss) || miss.Found != FenceFoundAbsent || miss.Partial {
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
 		t.Fatalf("SendKeysFenced after the server died = %v, want a whole miss finding the pane absent", err)
 	}
-	err = c.NudgeFenced(context.Background(), "s", TextContent("hi"), f)
-	if !errors.As(err, &miss) || miss.Found != FenceFoundAbsent || miss.Partial {
+	err = c.NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), f)
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
 		t.Fatalf("NudgeFenced with no server = %v, want a whole miss finding the pane absent", err)
 	}
 }

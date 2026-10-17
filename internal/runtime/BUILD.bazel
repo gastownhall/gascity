@@ -58,7 +58,6 @@ go_test(
         "attach_observer_test.go",
         "beacon_test.go",
         "capacity_test.go",
-        "carrier_fence_integration_test.go",
         "carrier_fence_test.go",
         "carrier_test.go",
         "composite_forwarding_test.go",
