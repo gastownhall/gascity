@@ -2911,6 +2911,44 @@ func TestRestampWorkBeadRoutingCollapsesPoolInstanceResolvedViaResolveAgent(t *t
 	}
 }
 
+// TestRestampWorkBeadRoutingClearsStaleRoutedTo guards a work bead that was
+// routed by a plain sling before a graph.v2 wrap: the wrap must drop the
+// source's claim-semantics gc.routed_to (the executable step supplies demand)
+// while keeping the observability route in gc.execution_routed_to.
+func TestRestampWorkBeadRoutingClearsStaleRoutedTo(t *testing.T) {
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "polecat", MaxActiveSessions: intPtr(4)}},
+	}
+	store := beads.NewMemStore()
+	bead, err := store.Create(beads.Bead{
+		Title:    "work",
+		Type:     "task",
+		Status:   "open",
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "polecat"},
+	})
+	if err != nil {
+		t.Fatalf("store.Create: %v", err)
+	}
+
+	deps := SlingDeps{Store: store, Cfg: cfg}
+	result := &SlingResult{}
+	restampWorkBeadRouting(deps, bead.ID, cfg.Agents[0], result)
+
+	if len(result.MetadataErrors) != 0 {
+		t.Fatalf("MetadataErrors = %v, want none", result.MetadataErrors)
+	}
+	after, err := store.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("store.Get: %v", err)
+	}
+	if got := after.Metadata[beadmeta.RoutedToMetadataKey]; got != "" {
+		t.Fatalf("gc.routed_to = %q, want empty (stale route would double-count demand)", got)
+	}
+	if got := after.Metadata[beadmeta.ExecutionRoutedToMetadataKey]; got != "polecat" {
+		t.Fatalf("gc.execution_routed_to = %q, want polecat", got)
+	}
+}
+
 func TestSlingAttachGraphFormulaEmitsCurrentExecutionFacts(t *testing.T) {
 	formulaDir := t.TempDir()
 	writeGraphV2ConvoyFormula(t, formulaDir)
