@@ -25,6 +25,11 @@ const interruptSIGINTAttempts = 2
 // after each fallback SIGINT. A variable so tests can shorten it.
 var interruptSIGINTWait = time.Second
 
+// interruptCancelWriteWait bounds how long a fenced interrupt that finds its
+// agent exited waits for a session/cancel write still in progress to finish,
+// to learn whether it reached the agent. A variable so tests can shorten it.
+var interruptCancelWriteWait = time.Second
+
 // cancelTimeout returns the session/cancel settle bound.
 func (c *Config) cancelTimeout() time.Duration {
 	if c.CancelTimeout <= 0 {
@@ -55,13 +60,16 @@ func (sc *sessionConn) interrupt(name string, cancelTimeout time.Duration) error
 	return err
 }
 
-// interruptReporting is interrupt that also reports whether session/cancel or
-// a SIGINT reached the agent: written to its stdin or delivered to its
-// process group. Canceled permission replies do not count.
-func (sc *sessionConn) interruptReporting(name string, cancelTimeout time.Duration) (bool, error) {
+// interruptReporting is interrupt that also reports what reached the agent:
+// session/cancel written to its stdin or a SIGINT delivered to its process
+// group. Canceled permission replies do not count. It does not wait for a
+// session/cancel write still in progress, so it stays bounded when the agent
+// has stopped reading its stdin; interruptDelivery.reached does that wait,
+// with its own bound, for a caller that needs the answer.
+func (sc *sessionConn) interruptReporting(name string, cancelTimeout time.Duration) (interruptDelivery, error) {
 	if sc.cmd == nil {
 		// Startup sentinel: no agent process yet, so no turn to cancel.
-		return false, nil
+		return interruptDelivery{}, nil
 	}
 	sc.mu.Lock()
 	sc.ensureIdleChannelLocked()
@@ -78,17 +86,42 @@ func (sc *sessionConn) interruptReporting(name string, cancelTimeout time.Durati
 		if len(replies) > 0 {
 			go sc.writePermissionReplies(replies)
 		}
-		return false, nil
+		return interruptDelivery{}, nil
 	}
 
-	var sent atomic.Bool
-	err := sc.cancelAndSettle(name, sessionID, idleCh, replies, cancelTimeout, &sent)
-	// A session/cancel write still in progress completes under stdinMu; one
-	// not yet begun finds the turn ended, or the agent's stdin closed, and
-	// writes nothing.
-	sc.stdinMu.Lock()
-	sc.stdinMu.Unlock() //nolint:staticcheck // an empty critical section: the barrier is the point
-	return sent.Load(), err
+	d := interruptDelivery{sent: new(atomic.Bool)}
+	cancelDone, err := sc.cancelAndSettle(name, sessionID, idleCh, replies, cancelTimeout, d.sent)
+	d.cancelDone = cancelDone
+	return d, err
+}
+
+// interruptDelivery is what an interrupt sent to the agent. sent records a
+// written session/cancel or a delivered SIGINT; cancelDone closes once the
+// goroutine writing session/cancel has finished. Both are nil when the
+// interrupt started no cancel.
+type interruptDelivery struct {
+	sent       *atomic.Bool
+	cancelDone <-chan struct{}
+}
+
+// reached reports whether session/cancel or a SIGINT reached the agent. A
+// session/cancel write still in progress decides the answer, so reached
+// waits for it, up to bound: a write the agent stopped reading would
+// otherwise hold the caller indefinitely.
+func (d interruptDelivery) reached(bound time.Duration) bool {
+	if d.sent == nil {
+		return false
+	}
+	if d.sent.Load() || d.cancelDone == nil {
+		return d.sent.Load()
+	}
+	timer := time.NewTimer(bound)
+	defer timer.Stop()
+	select {
+	case <-d.cancelDone:
+	case <-timer.C:
+	}
+	return d.sent.Load()
 }
 
 // interruptTurn is interrupt aimed at turn turnID. In one critical section of
@@ -124,7 +157,7 @@ func (sc *sessionConn) interruptTurn(name, turnID string, cancelTimeout time.Dur
 
 	replies := encodeCanceledReplies(outstanding)
 	go func() {
-		if err := sc.cancelAndSettle(name, sessionID, idleCh, replies, cancelTimeout, nil); err != nil {
+		if _, err := sc.cancelAndSettle(name, sessionID, idleCh, replies, cancelTimeout, nil); err != nil {
 			fmt.Fprintf(os.Stderr, "acp: interrupt of turn %q: %v\n", turnID, err)
 		}
 	}()
@@ -140,24 +173,29 @@ func (sc *sessionConn) interruptTurn(name, turnID string, cancelTimeout time.Dur
 // request ids and may arrive after the turn ends, as they do on a natural end.
 // What the agent does with a SIGINT it received during the turn is up to the
 // agent. sent, when set, records that session/cancel or a SIGINT reached the
-// agent.
-func (sc *sessionConn) cancelAndSettle(name, sessionID string, idleCh <-chan struct{}, replies [][]byte, cancelTimeout time.Duration, sent *atomic.Bool) error {
+// agent. The returned channel closes once the replies and session/cancel
+// have been written or abandoned; cancelAndSettle itself never waits for it.
+func (sc *sessionConn) cancelAndSettle(name, sessionID string, idleCh <-chan struct{}, replies [][]byte, cancelTimeout time.Duration, sent *atomic.Bool) (<-chan struct{}, error) {
 	// A goroutine writes the replies and the cancel, so the wait below stays
 	// bounded even if the agent has stopped reading its stdin.
-	go sc.cancelTurn(name, sessionID, idleCh, replies, sent)
+	cancelDone := make(chan struct{})
+	go func() {
+		defer close(cancelDone)
+		sc.cancelTurn(name, sessionID, idleCh, replies, sent)
+	}()
 
 	if sc.waitTurnSettled(name, idleCh, cancelTimeout) {
-		return nil
+		return cancelDone, nil
 	}
 	for attempt := 0; attempt < interruptSIGINTAttempts; attempt++ {
 		if !sc.signalTurn(idleCh, sent) {
-			return nil
+			return cancelDone, nil
 		}
 		if sc.waitTurnSettled(name, idleCh, interruptSIGINTWait) {
-			return nil
+			return cancelDone, nil
 		}
 	}
-	return fmt.Errorf("%w: ACP session %q still in its turn %s after session/cancel and %s after each of %d SIGINTs",
+	return cancelDone, fmt.Errorf("%w: ACP session %q still in its turn %s after session/cancel and %s after each of %d SIGINTs",
 		runtime.ErrInterruptNotSettled, name, cancelTimeout, interruptSIGINTWait, interruptSIGINTAttempts)
 }
 

@@ -3,8 +3,11 @@ package acp
 import (
 	"context"
 	"errors"
+	"io"
 	"net"
+	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -270,4 +273,163 @@ func TestACPFencedInputWithAnUnprobeableSocketIsUnavailable(t *testing.T) {
 			t.Errorf("%s = %v, want ErrRuntimeUnavailable", op, err)
 		}
 	}
+}
+
+// busyFencedConn installs a hand-built connection for name holding fence f,
+// in a turn, with stdin as its agent's input. Its cmd never ran, so it has
+// no process group to signal.
+func busyFencedConn(p *Provider, name string, f runtime.InputFence, stdin io.WriteCloser) *sessionConn {
+	sc := newSessionConn(exec.Command("true"), stdin, nil, 100, nil)
+	sc.sessionID = "session-1"
+	sc.fence = f.Digest()
+	sc.mu.Lock()
+	sc.markBusyLocked(1)
+	sc.mu.Unlock()
+	p.mu.Lock()
+	p.conns[name] = sc
+	p.mu.Unlock()
+	return sc
+}
+
+// gatedStdin is an agent stdin whose writes block until release closes and
+// then succeed. writeCalled closes on the first write.
+type gatedStdin struct {
+	writeCalled chan struct{}
+	release     chan struct{}
+	once        sync.Once
+}
+
+func newGatedStdin() *gatedStdin {
+	return &gatedStdin{writeCalled: make(chan struct{}), release: make(chan struct{})}
+}
+
+func (g *gatedStdin) Write(p []byte) (int, error) {
+	g.once.Do(func() { close(g.writeCalled) })
+	<-g.release
+	return len(p), nil
+}
+
+func (*gatedStdin) Close() error { return nil }
+
+// Kills a fenced interrupt that succeeds when the checked agent exited
+// during the interrupt and nothing reached it: its session/cancel write
+// failed and no SIGINT was sent. That is a whole miss finding it dead.
+func TestACPFencedInterruptThatSentNothingToAnExitingAgentIsADeadMiss(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{CancelTimeout: protocolUnitWait})
+	name := testName()
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	stdin := &closedPipeStdin{writeCalled: make(chan struct{})}
+	sc := busyFencedConn(p, name, fence, stdin)
+	go func() {
+		<-stdin.writeCalled
+		close(sc.done)
+	}()
+	err := p.InterruptFenced(context.Background(), name, fence)
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead || miss.Partial {
+		t.Fatalf("InterruptFenced = %v, want a whole miss finding the incarnation dead", err)
+	}
+}
+
+// Kills a fenced interrupt that decides its result before a session/cancel
+// write in progress has finished: the agent exits while the write is on its
+// way, the write then completes, and the cancel reached the agent, so the
+// call succeeds.
+func TestACPFencedInterruptCountsACancelWriteThatFinishesAfterTheExit(t *testing.T) {
+	p := NewProviderWithDir(shortTempDir(t), Config{CancelTimeout: protocolUnitWait})
+	name := testName()
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	stdin := newGatedStdin()
+	sc := busyFencedConn(p, name, fence, stdin)
+	go func() {
+		<-stdin.writeCalled
+		close(sc.done)
+		time.Sleep(50 * time.Millisecond)
+		close(stdin.release)
+	}()
+	if err := p.InterruptFenced(context.Background(), name, fence); err != nil {
+		t.Fatalf("InterruptFenced = %v, want nil: session/cancel reached the agent", err)
+	}
+}
+
+// Kills a fenced interrupt that waits without bound for a session/cancel
+// write the exited agent will never take: the wait ends after
+// interruptCancelWriteWait and the call is a dead miss.
+func TestACPFencedInterruptBoundsTheWaitForAStuckCancelWrite(t *testing.T) {
+	old := interruptCancelWriteWait
+	interruptCancelWriteWait = 50 * time.Millisecond
+	t.Cleanup(func() { interruptCancelWriteWait = old })
+	p := NewProviderWithDir(shortTempDir(t), Config{CancelTimeout: protocolUnitWait})
+	name := testName()
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	stdin := newGatedStdin()
+	t.Cleanup(func() { close(stdin.release) })
+	sc := busyFencedConn(p, name, fence, stdin)
+	go func() {
+		<-stdin.writeCalled
+		close(sc.done)
+	}()
+	done := make(chan error, 1)
+	go func() { done <- p.InterruptFenced(context.Background(), name, fence) }()
+	select {
+	case err := <-done:
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead {
+			t.Fatalf("InterruptFenced = %v, want a dead miss", err)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("InterruptFenced still waiting on a stuck session/cancel write")
+	}
+}
+
+// Kills a fenced interrupt that ignores a delivered SIGINT: session/cancel
+// never reached the agent (the turn had ended when it would have been
+// written), the SIGINT did and the agent exited on it. The interrupt reports
+// that delivery, and the fenced call succeeds.
+func TestACPFencedInterruptDeliveredOnlyBySIGINTSucceeds(t *testing.T) {
+	sigintOnly := func(t *testing.T) (*interruptFake, *sessionConn, runtime.InputFence) {
+		t.Helper()
+		env := fenceEnv("1", "tok")
+		env["GC_ON_CANCEL"] = "ignore"
+		env["GC_SIGINT"] = "exit"
+		f := startInterruptFake(t, 50*time.Millisecond, env)
+		fence, _ := runtime.InputFenceFromEnv(env)
+		f.hold(t)
+		sc := f.conn(t)
+		sc.beforeTurnCancel = func() {
+			<-sc.done
+			sc.waitIdle(protocolUnitWait)
+		}
+		return f, sc, fence
+	}
+	wantSIGINTOnly := func(t *testing.T, f *interruptFake) {
+		t.Helper()
+		if n := f.countMethod(t, "session/cancel"); n != 0 {
+			t.Fatalf("session/cancel count = %d, want 0: only the SIGINT may reach the agent", n)
+		}
+		if n := f.countSIGINT(t); n != 1 {
+			t.Fatalf("SIGINT count = %d, want 1", n)
+		}
+	}
+
+	t.Run("reported", func(t *testing.T) {
+		f, sc, _ := sigintOnly(t)
+		delivery, err := sc.interruptReporting(f.name, 50*time.Millisecond)
+		if err != nil {
+			t.Fatalf("interruptReporting: %v", err)
+		}
+		waitExited(t, sc)
+		if !delivery.reached(protocolUnitWait) {
+			t.Fatal("delivery.reached = false, want true: the SIGINT reached the agent")
+		}
+		wantSIGINTOnly(t, f)
+	})
+
+	t.Run("fenced", func(t *testing.T) {
+		f, _, fence := sigintOnly(t)
+		if err := f.p.InterruptFenced(context.Background(), f.name, fence); err != nil {
+			t.Fatalf("InterruptFenced = %v, want nil: the SIGINT reached the checked agent", err)
+		}
+		wantSIGINTOnly(t, f)
+	})
 }

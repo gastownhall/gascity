@@ -85,7 +85,10 @@ func (p *Provider) SendKeysFenced(_ context.Context, name string, fence runtime.
 // process fence names. An interrupt that reached that process (session/cancel
 // written or SIGINT delivered) succeeds even if the process then exits, as a
 // delivered Ctrl-C does on tmux. One that sent nothing because the process
-// had exited is a whole miss finding it dead.
+// had exited is a whole miss finding it dead. Telling the two apart waits
+// for a session/cancel write still in progress, up to
+// interruptCancelWriteWait: the agent has exited, so its stdin no longer
+// holds that write.
 func (p *Provider) InterruptFenced(_ context.Context, name string, fence runtime.InputFence) error {
 	sc, err := p.fencedConn(name, fence)
 	if err != nil {
@@ -94,11 +97,11 @@ func (p *Provider) InterruptFenced(_ context.Context, name string, fence runtime
 	if !sc.alive() {
 		return &runtime.FenceMismatchError{Session: name, Found: runtime.FenceFoundDead}
 	}
-	sent, err := sc.interruptReporting(name, p.cfg.cancelTimeout())
+	delivery, err := sc.interruptReporting(name, p.cfg.cancelTimeout())
 	if err != nil {
 		return err
 	}
-	if !sent && !sc.alive() {
+	if !sc.alive() && !delivery.reached(interruptCancelWriteWait) {
 		return &runtime.FenceMismatchError{Session: name, Found: runtime.FenceFoundDead}
 	}
 	return nil
