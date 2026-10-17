@@ -1612,3 +1612,42 @@ func TestFormulaCookAttachHelpDoesNotClaimParentChild(t *testing.T) {
 		t.Fatalf("gc formula cook --help does not clarify that --attach is not a parent-child relationship; Long=%q", cmd.Long)
 	}
 }
+
+// TestFormulaCookAttachAppliesRootMetaOnBothCompilerArms (GH#7309): --meta
+// writes to the cooked root bead whether or not --attach is set. Both attach
+// arms return before the shared parseMetadataArgs/SetMetadataBatch block the
+// standalone path uses, at the bottom of newFormulaCookCmd's RunE — so a
+// caller attaching a sub-workflow had no way to stamp its root with the
+// worktree/review-bead/base-sha/head-sha metadata the flag is documented to
+// set ("set root bead metadata after cook"), even though the exact same
+// --meta flags work on a standalone (non-attach) cook of the same formula.
+func TestFormulaCookAttachAppliesRootMetaOnBothCompilerArms(t *testing.T) {
+	for _, formulaName := range []string{"legacy-work", "graph-work"} {
+		t.Run(formulaName, func(t *testing.T) {
+			cityDir := oneShotCookCity(t)
+			store, err := openStoreAtForCity(cityDir, cityDir)
+			if err != nil {
+				t.Fatalf("open store: %v", err)
+			}
+			source, err := store.Create(beads.Bead{Title: "attach target", Type: "task"})
+			if err != nil {
+				t.Fatalf("create attach bead: %v", err)
+			}
+
+			res := cookFormula(t, formulaName, "--attach", source.ID,
+				"--meta", "work_dir=/tmp/cook-repro-worktree",
+				"--meta", "review_work_bead=fixture-bead")
+
+			root, err := store.Get(res.RootID)
+			if err != nil {
+				t.Fatalf("get cooked root %s: %v", res.RootID, err)
+			}
+			if got := root.Metadata["work_dir"]; got != "/tmp/cook-repro-worktree" {
+				t.Errorf("root %s metadata[work_dir] = %q, want %q (attach dropped --meta)", res.RootID, got, "/tmp/cook-repro-worktree")
+			}
+			if got := root.Metadata["review_work_bead"]; got != "fixture-bead" {
+				t.Errorf("root %s metadata[review_work_bead] = %q, want %q (attach dropped --meta)", res.RootID, got, "fixture-bead")
+			}
+		})
+	}
+}
