@@ -48,8 +48,8 @@ running the latched mode. An unknown value refuses to start the city.
 Since the cutover (C9), a city that selects `v2` latches it from config
 alone, and its passes act. The latch still refuses v2 when the composed
 config enables a feature v2 defers (`v2LatchRefusals`: the identity
-circuit breaker, `depends_on`, `scale_check`, `max_session_age`, the stall
-timeouts, chat auto-suspend, an unadmitted runtime), and a city whose class
+circuit breaker, `depends_on`, `max_session_age`, the stall timeouts,
+chat auto-suspend, an unadmitted runtime), and a city whose class
 stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
 remove the key to run legacy.
 

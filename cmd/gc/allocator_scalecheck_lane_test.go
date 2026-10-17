@@ -63,11 +63,11 @@ func scaleCheckCity() *config.City {
 	}
 }
 
-// newScaleCheckSourceLane returns a lane whose only source is the
-// scale_check one (no city store, so no leg), running checks with a scripted
-// runner and a probe env that fails for the noenv pool.
-func newScaleCheckSourceLane(cfg *config.City, checks *scriptedScaleChecks) (*externalReadsLane, *atomic.Int64) {
-	lane, wakes := newTestBackstopLane(externalReadsEnv{CityName: "city", Cfg: cfg})
+// newScaleCheckSourceLane returns a lane over the city at cityPath whose only
+// source is the scale_check one (no city store, so no leg), running checks
+// with a scripted runner and a probe env that fails for the noenv pool.
+func newScaleCheckSourceLane(cityPath string, cfg *config.City, checks *scriptedScaleChecks) (*externalReadsLane, *atomic.Int64) {
+	lane, wakes := newTestBackstopLane(externalReadsEnv{CityPath: cityPath, CityName: "city", Cfg: cfg})
 	lane.runner = checks.run
 	lane.queryEnv = func(_ string, _ *config.City, agent *config.Agent) (map[string]string, error) {
 		if agent.Name == "noenv" {
@@ -96,7 +96,7 @@ func scaleCheckSource(rec *externalReadsRecording) (sourceResult, bool) {
 // ended.
 func TestExternalReadsScaleCheckSourcePartialOnErrorAndEnvFailure(t *testing.T) {
 	checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
-	lane, wakes := newScaleCheckSourceLane(scaleCheckCity(), checks)
+	lane, wakes := newScaleCheckSourceLane("", scaleCheckCity(), checks)
 	maxAge := 3 * backstopTestInterval
 
 	if !lane.recording().scaleCheck(censusNow).partial("ok") {
@@ -163,6 +163,51 @@ func TestExternalReadsScaleCheckSourceSkipsSuspendedRigs(t *testing.T) {
 	env.SuspendedRigPaths = nil
 	if r := runCustomScaleChecks(env, checks.run, noProbeEnv, io.Discard); checks.runs != 1 || r.Counts["r1/rigged"] != 2 {
 		t.Fatalf("resumed rig: runs=%d counts=%v, want r1/rigged=2", checks.runs, r.Counts)
+	}
+}
+
+// Kills custom scale_checks running in a suspended city (POOL-001: legacy's
+// demand pass returns before them, and the decide reads no scale_check while
+// the city is suspended), and a lane that keeps them off after resume. A
+// suspended pass runs none and publishes no scale_check source, so the result
+// read before the suspension is not served after it; the first pass after
+// resume runs them again.
+func TestExternalReadsScaleCheckSourceSkippedWhileCitySuspended(t *testing.T) {
+	for _, tc := range suspendCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			cityPath := t.TempDir()
+			cfg := scaleCheckCity()
+			checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
+			lane, _ := newScaleCheckSourceLane(cityPath, cfg, checks)
+			if !passAndJoin(ctx, at(lane, censusNow)) {
+				t.Fatal("pass before suspending declined")
+			}
+			if checks.runs != 3 {
+				t.Fatalf("before suspending: ran %d checks, want 3 (ok, fails, named)", checks.runs)
+			}
+			tc.suspend(t, cfg, cityPath)
+			if !passAndJoin(ctx, at(lane, censusNow.Add(time.Second))) {
+				t.Fatal("a pass declined while the city is suspended")
+			}
+			if checks.runs != 3 {
+				t.Errorf("suspended pass ran %d checks, want none", checks.runs-3)
+			}
+			if src, ok := scaleCheckSource(lane.recording()); ok {
+				t.Errorf("suspended pass published a scale_check source %+v, want none", src)
+			}
+			tc.resume(t, cfg, cityPath)
+			resumed := censusNow.Add(2 * time.Second)
+			if !passAndJoin(ctx, at(lane, resumed)) {
+				t.Fatal("pass after resume declined")
+			}
+			if checks.runs != 6 {
+				t.Errorf("pass after resume ran %d checks, want 3", checks.runs-3)
+			}
+			if r := lane.recording().scaleCheck(resumed); r.partial("ok") || r.Counts["ok"] != 3 {
+				t.Errorf("after resume: scale_check result %+v, want ok trusted at 3", r)
+			}
+		})
 	}
 }
 

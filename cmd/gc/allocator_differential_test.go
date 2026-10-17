@@ -351,7 +351,9 @@ func diffRecording(t *testing.T, c diffCity, cityPath string, store beads.Store)
 	}
 }
 
-// diffScaleCheckFreshFor is the recording's freshness: 3 × a 20s patrol.
+// diffScaleCheckFreshFor is the recording's freshness: 3 × a nominal 20s
+// patrol. The lane's is 3 × its configured patrol; every fixture's age is
+// relative to this value, so the 20s itself is arbitrary.
 const diffScaleCheckFreshFor = externalReadsFreshPatrols * 20 * time.Second
 
 // allocInputsOf is the decide's inputs from a gathered World.
