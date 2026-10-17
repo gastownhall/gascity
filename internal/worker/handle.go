@@ -110,6 +110,7 @@ type Handle interface {
 	InteractionHandle
 	PeekHandle
 	LiveObservationHandle
+	TurnHandle
 }
 
 // Phase captures the worker-level lifecycle state surfaced by [Handle.State].
@@ -459,6 +460,8 @@ type SessionHandle struct {
 	sidecarRetryID        string
 	sidecarRetryAttempts  int
 	sidecarRetryScheduled bool
+	// turns is the turn-observation state (turn.go).
+	turns turnObservation
 }
 
 var (
@@ -470,6 +473,8 @@ var (
 	_ InteractionHandle     = (*SessionHandle)(nil)
 	_ PeekHandle            = (*SessionHandle)(nil)
 	_ LiveObservationHandle = (*SessionHandle)(nil)
+	_ TurnHandle            = (*SessionHandle)(nil)
+	_ TurnHandle            = (*RuntimeHandle)(nil)
 )
 
 type historyGeneration struct {

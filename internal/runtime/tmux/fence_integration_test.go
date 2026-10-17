@@ -205,27 +205,50 @@ func TestFencedNudgeRealTmuxAdoptsUnfencedPane(t *testing.T) {
 // "\;", a format, shell syntax, a tab, a newline and UTF-8.
 const fenceTextE4 = "it's \"q\" a;b c\\;d #{pane_id} $HOME ~ {} %if \tTAB\nLF ünï 日本"
 
-// Fenced text arrives byte for byte (E4), a trailing ";" included, which the
-// unfenced send-keys -l path drops (E5, a follow-up bug).
+// Text arrives byte for byte (E4), fenced and unfenced alike: a trailing ";",
+// ";;" or "\;" and a leading "-" included, which tmux's argument parser would
+// otherwise read as a separator or a flag (E5).
 func TestFencedNudgeRealTmuxTextIsByteExact(t *testing.T) {
 	p := fenceTestProvider(t, "fx")
 	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "token-x"}
-	for _, text := range []string{fenceTextE4, fenceTextE4 + ";", "x;"} {
-		name := "gc-fence-exact-" + strconv.Itoa(len(text))
+	texts := []string{fenceTextE4, fenceTextE4 + ";", ";", "x;", "x;;", `x\;`, "-x", "-l", "- item"}
+	deliveries := []struct {
+		name string
+		send func(name, text string) error
+	}{
+		{"fenced", func(name, text string) error {
+			return p.NudgeFenced(context.Background(), name, runtime.TextContent(text), immediate(f))
+		}},
+		{"nudge", func(name, text string) error { return p.NudgeNow(name, runtime.TextContent(text)) }},
+		{"debounced", func(name, text string) error { return p.tm.SendKeysDebounced(name, text, 0) }},
+	}
+	for _, d := range deliveries {
+		// One session per delivery: each text ends the segment its Enter
+		// ends (a nudge clears the input line with C-u before it types).
+		name := "gc-fence-exact-" + d.name
 		file := startRawCat(t, p, name, f, nil)
-		if err := p.NudgeFenced(context.Background(), name, runtime.TextContent(text), immediate(f)); err != nil {
-			t.Fatalf("NudgeFenced(%q) = %v", text, err)
+		var sent []string
+		for _, text := range texts {
+			if err := d.send(name, text); err != nil {
+				t.Errorf("%s(%q) = %v", d.name, text, err)
+				continue
+			}
+			sent = append(sent, text)
+			n := len(sent)
+			waitTyped(t, file, func(got string) bool { return strings.Count(got, "\r") >= n })
 		}
-		waitTyped(t, file, func(got string) bool { return strings.HasSuffix(got, text+"\r") })
-	}
-	// E5: the unfenced path loses a trailing ";" today.
-	name := "gc-fence-exact-unfenced"
-	file := startRawCat(t, p, name, f, nil)
-	if err := p.NudgeNow(name, runtime.TextContent("x;")); err != nil {
-		t.Fatal(err)
-	}
-	if got := waitTyped(t, file, containsFn("\r")); strings.HasSuffix(got, "x;\r") {
-		t.Logf("unfenced send-keys -l kept the trailing ';' (%q): E5 is fixed, update this test", got)
+		got := strings.Split(strings.TrimSuffix(typedSoFar(file), "\r"), "\r")
+		if len(got) != len(sent) {
+			t.Errorf("%s typed %q, want %d lines %q", d.name, got, len(sent), sent)
+			continue
+		}
+		for i, text := range sent {
+			// Exact: only a nudge's C-u (\x15) may precede the text, so a
+			// stray "\" or "--" typed in front of it fails.
+			if strings.TrimLeft(got[i], "\x15") != text {
+				t.Errorf("%s(%q) typed %q", d.name, text, got[i])
+			}
+		}
 	}
 }
 

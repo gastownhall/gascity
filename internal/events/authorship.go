@@ -223,6 +223,7 @@ var builtinAuthorship = map[string]Authorship{
 	OrderCompleted:                AuthorController,
 	OrderSuppressed:               AuthorController,
 	OrderSkipped:                  AuthorController,
+	OrderInapplicable:             AuthorController,
 	RequestResultCityCreate:       AuthorController,
 	RequestResultCityUnregister:   AuthorController,
 	RequestResultSessionCreate:    AuthorController,

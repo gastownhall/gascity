@@ -1856,7 +1856,7 @@ func (t *Tmux) sendKeysDebouncedTo(session, target, keys string, debounceMs int)
 	// agent that never actually responds. See discountPokeActivity.
 	t.recordPoke(session)
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", target, "-l", keys); err != nil {
+	if _, err := t.run(append([]string{"send-keys", "-t", target, "-l"}, runtime.TmuxLiteralArgs(keys)...)...); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -2485,7 +2485,7 @@ func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
 	if len(text) > maxSendKeysLiteralLen {
 		return t.pasteLiteralText(ctx, target, text)
 	}
-	_, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "-l", text)
+	_, err := t.runCtx(ctx, append([]string{"send-keys", "-t", paneTarget(target), "-l"}, runtime.TmuxLiteralArgs(text)...)...)
 	if isCommandTooLongError(err) {
 		return t.pasteLiteralText(ctx, target, text)
 	}

@@ -18,6 +18,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime/debug"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -4763,14 +4764,23 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				selfClaimed := claimErr == nil && claimed != "" && claimed == decision.AssignedWorkBeadID
 				if !selfClaimed {
 					// A stale currently_processing_bead_id pointer must not force
-					// a cycle when the previous bead is still open (defer to a
-					// later tick) or when this incarnation's awake_started_at is
-					// already after the previous bead's closed_at (already fresh —
-					// the stamp below just hasn't caught up yet). Fail toward the
-					// pre-existing cycle behavior on any lookup or parse error.
+					// a cycle when the previous bead is still open AND still
+					// assigned to this session (defer to a later tick) or when
+					// this incarnation's awake_started_at is already after the
+					// previous bead's closed_at (already fresh — the stamp below
+					// just hasn't caught up yet). Fail toward the pre-existing
+					// cycle behavior on any lookup or parse error. ga-pvjbx3 Q3
+					// narrows only the open-previous-bead deferral: once that bead
+					// has been handed to another agent (or unassigned), its
+					// eventual close has no relationship to this session's current
+					// work, so it no longer gates the decision and the claim and
+					// anchor checks below decide. The closed-previous-bead
+					// deferral keys on closed_at alone, whoever the bead was
+					// assigned to.
+					topo := residencyTopologyForCity(cityPath, cfg, store, rigStores)
 					if prev := strings.TrimSpace(info.CurrentlyProcessingBeadID); prev != "" {
-						prevOpen, prevClosedAt, err := prevAssignedBeadStatus(residencyTopologyForCity(cityPath, cfg, store, rigStores), prev)
-						if err == nil && prevOpen {
+						prevOpen, prevAssignee, prevClosedAt, err := prevAssignedBeadStatus(topo, prev)
+						if err == nil && prevOpen && slices.Contains(sessionAssignmentIdentifiersForConfigInfo(info, cfg), prevAssignee) {
 							continue
 						}
 						if err == nil && !prevOpen {
@@ -4779,6 +4789,33 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 						}
+					}
+					// ga-pvjbx3 Q1: anchor-agnostic existence check. assignedAnchor's
+					// own fallback can discard every candidate but one, so comparing
+					// the anchor against current_claim_bead_id checks the wrong bead
+					// when this session's real self-claim is a different, legitimate
+					// candidate. A fresh, uncached read for ANY in_progress work still
+					// assigned to this session — independent of which bead the anchor
+					// resolved to — is the correct discriminator. A scan that cannot
+					// read a store cannot rule a claim out, so it retains the session
+					// (the progress-stall recycle above does the same) instead of
+					// reading the failure as "no claim" and killing in-flight work.
+					hasClaim, err := sessionHasFreshInProgressClaim(sw, info)
+					if err != nil {
+						fmt.Fprintf(stderr, "session reconciler: deferring fresh cycle for %s after claim-scan failure: %v\n", name, err) //nolint:errcheck
+						continue
+					}
+					if hasClaim {
+						continue
+					}
+					// ga-pvjbx3 Q2: the anchor itself may have closed since the
+					// stale tick-start snapshot was taken. Cycling onto an anchor
+					// that is already closed on a live read is pure loss, so
+					// re-check it before killing. Failing to read it falls through
+					// to the cycle: Q1 just established a complete scan with no
+					// claim, so the cycle costs no in-flight work.
+					if terminal, err := freshAnchorBeadTerminal(topo, decision.AssignedWorkBeadID); err == nil && terminal {
+						continue
 					}
 					if ran, fold := cycleAliveSessionForFreshReassign(cityPath, infoByID[target.info.ID], target.tp, sp, store, cfg, cb, name, decision.AssignedWorkBeadID, clk.Now(), stdout, stderr, trace); ran {
 						if fold != nil {

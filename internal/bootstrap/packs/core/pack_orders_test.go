@@ -434,3 +434,22 @@ func TestConvoyAutocloseBackstopOrder(t *testing.T) {
 		t.Errorf("timeout %s is not shorter than interval %s, so a run still going could overlap the next", timeout, interval)
 	}
 }
+
+// The core reaper and jsonl-export orders read through `gc bd sql`, which an
+// http-served store refuses. Until they move onto served verbs they declare
+// every backend but http, so gc reports them inapplicable on an http scope and
+// keeps running them everywhere else.
+func TestCoreSQLOrdersDeclareRequiresBackendExceptHTTP(t *testing.T) {
+	for _, file := range []string{"reaper.toml", "jsonl-export.toml"} {
+		o := readOrder(t, file)
+		if err := orders.Validate(o); err != nil {
+			t.Fatalf("%s: %v", file, err)
+		}
+		if got := strings.Join(o.RequiresBackend, ","); got != "dolt,doltlite,postgres" {
+			t.Errorf("%s requires_backend = %q, want dolt,doltlite,postgres", file, got)
+		}
+		if o.AppliesToBackend("http") {
+			t.Errorf("%s must not apply to an http scope", file)
+		}
+	}
+}

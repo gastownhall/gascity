@@ -1,4 +1,5 @@
 load("@rules_go//go:def.bzl", "go_test")
+load("//tools/bazel/rules:go_variant_test.bzl", "go_variant_test")
 
 # gazelle:build_tags integration
 
@@ -147,6 +148,24 @@ go_test(
         "@com_github_stretchr_testify//assert",
         "@com_github_stretchr_testify//require",
     ],
+)
+
+# bazel.yml's gating integration-smoke lane (GA-1, item 5 ga-spec.md
+# scripts/ga/*): the bdstore and REST smoke subset of integration_test
+# (scripts/test-integration-shard's bdstore_tests + rest_smoke_tests,
+# scripts/bazel_integration_smoke_test.go keeps this filter equal to that
+# list). A go_variant_test rather than a global --test_filter, so a future
+# union of this lane with integration-packages (one bazel invocation) does
+# not filter packages' tests away too: --test_filter is global, args is
+# per-target. No gotags: the wrapped test keeps its own select() over
+# //:gotags_integration, so the variant's compile and link actions are
+# byte-identical to integration_test's own.
+go_variant_test(
+    name = "integration_smoke_test",
+    args = ["-test.run=^(TestBdStoreConformance|TestBdStoreDeleteBatchOrphansExternalDependents|TestBdStoreMailWispInsert|TestPinnedBdStoreCommandRunnerReportsSilentFallback|TestPinnedBdStoreCommandRunnerUsesExactEnvironmentAndKeepsStdoutJSON|TestE2E_WorkspaceDefaults|TestE2E_Hook_WithWork|TestE2E_MultiAgent_PoolAndFixed|TestGastown_ControllerStartStop|TestGastown_PipelineHumanToWorker|TestGraphWorkflowSuccessPath|TestIntegrationEnvForIsolatesHome|TestIsolatedEnvRootsKeepGCOffTheRealHome|TestStandaloneBDEnvForDirIsolatesHome)$$"],
+    shard_count = 14,
+    tags = ["manual"],
+    test = ":integration_test",
 )
 
 # The shard placement guard (scripts/integration_shards_test.go) reads this

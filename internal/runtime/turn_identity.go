@@ -223,3 +223,45 @@ func TurnCapabilitiesFor(p Provider, name string) TurnCapabilities {
 	}
 	return tp.TurnCapabilities(name).Normalized()
 }
+
+// LocalTranscriptProvider is an optional extension for runtimes that run the
+// agent on this host, so the transcript the agent writes lands on this host's
+// filesystem, where gc can read it for turns (X11 §3.2: the transcript tiers
+// need the reader on the transcript's host). A runtime that runs the agent
+// elsewhere (a pod, a remote host, an exec script's own box) does not
+// implement it. Composites do not either: the trait is read on the routed
+// leaf ([LocalTranscriptsFor]).
+type LocalTranscriptProvider interface {
+	LocalTranscripts() bool
+}
+
+// LocalTranscriptsFor reports whether the backend serving session name runs
+// the agent on this host: the leaf [ResolveBackend] names implements
+// [LocalTranscriptProvider] and says so. A backend that does not declare it
+// is taken to be remote, so a transcript that happens to resolve here is
+// never read as its session's.
+func LocalTranscriptsFor(p Provider, name string) bool {
+	leaf, _, _ := ResolveBackend(p, name)
+	lt, ok := leaf.(LocalTranscriptProvider)
+	return ok && lt.LocalTranscripts()
+}
+
+// IdleSnapshotsFor reports whether the backend serving session name takes
+// idle snapshots: the leaf [ResolveBackend] names is an
+// [IdleSnapshotProvider]. It takes none, so it costs no runtime call.
+func IdleSnapshotsFor(p Provider, name string) bool {
+	leaf, _, _ := ResolveBackend(p, name)
+	_, ok := leaf.(IdleSnapshotProvider)
+	return ok
+}
+
+// InterruptedTurnResetsFor reports whether the backend serving session name
+// discards an interrupted turn: the leaf [ResolveBackend] names is an
+// [InterruptedTurnResetProvider]. Composites forward the reset to that leaf,
+// so it is the one whose answer counts. It resets nothing, so it costs no
+// runtime call.
+func InterruptedTurnResetsFor(p Provider, name string) bool {
+	leaf, _, _ := ResolveBackend(p, name)
+	_, ok := leaf.(InterruptedTurnResetProvider)
+	return ok
+}

@@ -12,6 +12,7 @@ go_library(
         "events.go",
         "interrupt.go",
         "lifecycle_lock.go",
+        "local_transcripts.go",
         "permission.go",
         "proctable.go",
         "protocol.go",

@@ -93,7 +93,8 @@ bazel test --config=integration //internal/runtime/tmux:tmux_test
 ```
 
 `//test/integration` itself gates only through the `integration-smoke`
-lane (`bazel test --config=integration-smoke //test/integration:integration_test`):
+lane (`bazel test --config=integration //test/integration:integration_smoke_test`,
+a `go_variant_test` over `integration_test` whose `args` carries the filter):
 the bdstore and REST smoke tests `scripts/test-integration-shard` names. The
 full suite runs evidence-only on pushes until its flaky tests are fixed.
 

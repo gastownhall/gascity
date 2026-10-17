@@ -483,44 +483,86 @@ var (
 	ErrTurnInterruptUnsupported = errors.New("session runtime cannot interrupt the running turn")
 )
 
+// ErrSessionMutationBusy reports that a context-aware acquire of a session's
+// mutation lock gave up while another holder still had it. fn never ran, so
+// the caller may retry the whole operation. The returned error also wraps the
+// context's own error.
+var ErrSessionMutationBusy = errors.New("session mutation lock busy")
+
+// sessionMutationLockEntry is one session's lock. sem is a channel of
+// capacity one, full while the lock is held, so a waiter can select against a
+// context; a sync.Mutex cannot be abandoned. refs counts holders and waiters
+// and is guarded by sessionMutationLocksMu.
 type sessionMutationLockEntry struct {
-	mu   sync.Mutex
+	sem  chan struct{}
 	refs int
 }
 
 var (
+	// sessionMutationLocksMu guards the sessionMutationLocks map and every
+	// entry's refs. It is bookkeeping only and is never held across a
+	// blocking operation.
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
 
 // WithSessionMutationLock serializes metadata mutations for one session bead.
+// It waits for the lock without bound; use WithSessionMutationLockContext to
+// bound the wait.
 func WithSessionMutationLock(id string, fn func() error) error {
 	return withSessionMutationLock(id, fn)
 }
 
-func withSessionMutationLock(id string, fn func() error) error {
-	lock := acquireSessionMutationLock(id)
+// WithSessionMutationLockContext is WithSessionMutationLock with a bounded
+// wait. It tries the lock first, so a free lock is acquired even when ctx is
+// already done; ctx bounds only the wait for a held lock, never fn. When ctx
+// ends while the lock is still held it returns an error wrapping both
+// ErrSessionMutationBusy and ctx.Err(), and fn has not run and never will.
+func WithSessionMutationLockContext(ctx context.Context, id string, fn func() error) error {
+	lock, err := acquireSessionMutationLockContext(ctx, id)
+	if err != nil {
+		return err
+	}
 	defer releaseSessionMutationLock(id, lock)
 	return fn()
 }
 
-func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
+func withSessionMutationLock(id string, fn func() error) error {
+	return WithSessionMutationLockContext(context.Background(), id, fn)
+}
+
+func acquireSessionMutationLockContext(ctx context.Context, id string) (*sessionMutationLockEntry, error) {
 	sessionMutationLocksMu.Lock()
 	lock := sessionMutationLocks[id]
 	if lock == nil {
-		lock = &sessionMutationLockEntry{}
+		lock = &sessionMutationLockEntry{sem: make(chan struct{}, 1)}
 		sessionMutationLocks[id] = lock
 	}
 	lock.refs++
 	sessionMutationLocksMu.Unlock()
 
-	lock.mu.Lock()
-	return lock
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	default:
+	}
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	case <-ctx.Done():
+		dropSessionMutationLockRef(id, lock)
+		return nil, fmt.Errorf("session %s: %w: %w", id, ErrSessionMutationBusy, ctx.Err())
+	}
 }
 
 func releaseSessionMutationLock(id string, lock *sessionMutationLockEntry) {
-	lock.mu.Unlock()
+	<-lock.sem
+	dropSessionMutationLockRef(id, lock)
+}
 
+// dropSessionMutationLockRef gives up one reference without touching sem and
+// deletes the entry when none remain.
+func dropSessionMutationLockRef(id string, lock *sessionMutationLockEntry) {
 	sessionMutationLocksMu.Lock()
 	lock.refs--
 	if lock.refs == 0 {

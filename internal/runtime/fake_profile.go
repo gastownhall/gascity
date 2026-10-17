@@ -80,13 +80,13 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
-		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed}
+		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed, localTranscriptTrait{}}
 	case ProfileHerdr:
-		return herdrProfile{core, b, b, b, b, b}
+		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
@@ -94,7 +94,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -107,6 +107,9 @@ type (
 	transportTrait     struct{}                  // acp's
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
 	turnInterruptTrait struct{ m TurnInterruptMode }
+	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
+	// agent runs on this host.
+	localTranscriptTrait struct{}
 )
 
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
@@ -116,6 +119,8 @@ func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return
 func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
 func (freshTrait) LivenessReadsFresh() bool { return true }
+
+func (localTranscriptTrait) LocalTranscripts() bool { return true }
 
 func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 
@@ -170,6 +175,7 @@ type (
 		SessionRosterProvider
 		UnattendedSessionStopper
 		sleepTrait
+		localTranscriptTrait
 	}
 	acpProfile struct {
 		Provider
@@ -187,6 +193,7 @@ type (
 		sidecarTrait
 		sleepTrait
 		transportTrait
+		localTranscriptTrait
 	}
 	subprocessProfile struct {
 		Provider
@@ -196,6 +203,7 @@ type (
 		freshTrait
 		sidecarTrait
 		sleepTrait
+		localTranscriptTrait
 	}
 	herdrProfile struct {
 		Provider
@@ -204,6 +212,7 @@ type (
 		LivenessObserver
 		ServerLifecycleProvider
 		SessionEventProvider
+		localTranscriptTrait
 	}
 	k8sProfile struct {
 		Provider
@@ -231,10 +240,27 @@ type (
 		LivenessObserverWithError
 		SessionBindingProvider
 		TurnFenceProvider
+		TurnObservationProvider
 		sleepTrait
 		turnInterruptTrait
 	}
 )
+
+// t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
+// trait the profile answers itself; a test pins it to production.
+var t3bridgeTurnCapabilities = TurnCapabilities{
+	Start:    TurnStartRecorded,
+	End:      TurnEndRecorded,
+	Fence:    TurnFenceChecked,
+	Link:     TurnLinkCorrelated,
+	Lossless: false,
+}
+
+// TurnCapabilities implements [TurnObservationProvider] with t3bridge's
+// static row; TurnHistory stays forwarded to the backend.
+func (t3bridgeProfile) TurnCapabilities(string) TurnCapabilities {
+	return t3bridgeTurnCapabilities
+}
 
 // FullFake is a [Fake] implementing every [ProfileBackend] interface, the
 // ones Fake lacks answered from its session state.

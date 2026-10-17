@@ -239,7 +239,7 @@ func (m *fenceModel) input(args []string) (string, error) {
 			delete(m.buffers, name)
 		}
 		evs = append(evs, "text:"+text)
-		forward = append(forward, []string{"send-keys", "-t", target, "-l", text})
+		forward = append(forward, append([]string{"send-keys", "-t", target, "-l"}, runtime.TmuxLiteralArgs(text)...))
 	} else {
 		in, err := parseInputCommand(args)
 		if err != nil {
@@ -756,8 +756,11 @@ func TestFencedInputUnderAnotherFenceSendsNothing(t *testing.T) {
 
 // For a matching fence the pane receives exactly what the unfenced call
 // types, with literal text arriving by buffer instead of send-keys -l (E4).
-// The model types send-keys -l text as given; real tmux drops a trailing ";"
-// from it (E5), which TestFencedNudgeRealTmuxTextIsByteExact pins.
+// The model and the simulated Claude pane read send-keys -l text as tmux does
+// (runtime.TmuxLiteralText, which refuses text the E5 encoding did not
+// produce), so both arms must deliver the scenario's text and leave the pane
+// with the same submitted messages and draft; TestFencedNudgeRealTmuxTextIsByteExact
+// pins the same on real tmux.
 func TestFencedInputMatchesUnfencedInputEvents(t *testing.T) {
 	unfenced := map[string]func(p *Provider) error{
 		"claude short immediate": func(p *Provider) error {
@@ -792,6 +795,22 @@ func TestFencedInputMatchesUnfencedInputEvents(t *testing.T) {
 			_, want, _ := um.snapshot()
 			if !slices.Equal(got, want) {
 				t.Fatalf("fenced input %q\nunfenced input %q", got, want)
+			}
+			if !slices.Contains(want, sc.want) {
+				t.Errorf("unfenced input %q, want it to include %q", want, sc.want)
+			}
+			fp, fok := fm.inner.(*fakeClaudePane)
+			up, uok := um.inner.(*fakeClaudePane)
+			if !fok || !uok {
+				return
+			}
+			fSubmitted, fDraft := fp.state()
+			uSubmitted, uDraft := up.state()
+			if !slices.Equal(fSubmitted, uSubmitted) || fDraft != uDraft {
+				t.Errorf("fenced pane submitted %q, draft %q; unfenced pane submitted %q, draft %q", fSubmitted, fDraft, uSubmitted, uDraft)
+			}
+			if text, ok := strings.CutPrefix(sc.want, "text:"); ok && !slices.Contains(uSubmitted, text) {
+				t.Errorf("unfenced pane submitted %q, want it to include %q", uSubmitted, text)
 			}
 		})
 	}
