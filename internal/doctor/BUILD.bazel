@@ -139,6 +139,7 @@ go_test(
         "pack_checks_test.go",
         "pre_start_scripts_check_test.go",
         "rig_store_binding_check_integration_test.go",
+        "rig_store_binding_check_test.go",
         "select_test.go",
         "skill_checks_test.go",
         "skill_dangling_sink_check_test.go",
