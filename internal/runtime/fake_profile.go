@@ -94,7 +94,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -240,6 +240,7 @@ type (
 	}
 	t3bridgeProfile struct {
 		Provider
+		FencedInputProvider
 		KeyedNudgeProvider
 		LivenessObserverWithError
 		SessionBindingProvider
@@ -258,6 +259,10 @@ func (acpProfile) InputFencing(string) InputFencing { return InputFencingChecked
 // InputFencing is subprocess's fixed trait: checked (the fence against the
 // live child's recorded digest, then that child).
 func (subprocessProfile) InputFencing(string) InputFencing { return InputFencingChecked }
+
+// InputFencing is t3bridge's fixed trait: checked (the fence against the
+// thread binding's recorded incarnation, then that thread by id).
+func (t3bridgeProfile) InputFencing(string) InputFencing { return InputFencingChecked }
 
 // t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
 // trait the profile answers itself; a test pins it to production.

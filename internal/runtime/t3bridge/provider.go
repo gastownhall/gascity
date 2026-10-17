@@ -72,6 +72,10 @@ type Provider struct {
 	watchers     map[string]context.CancelFunc
 	recentStarts map[string]time.Time
 
+	// fenceChecked is a test seam run between a fenced operation's read of
+	// the thread and its dispatch.
+	fenceChecked func(name string)
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
@@ -3129,6 +3133,12 @@ func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string
 	if err != nil {
 		return err
 	}
+	return p.nudgeThread(name, thread, binding, content, key)
+}
+
+// nudgeThread starts a turn carrying content on the thread bound to name, as
+// read: thread and its binding. A non-empty key derives the turn's T3 ids.
+func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) error {
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
 		return nil
