@@ -42,6 +42,17 @@ type Carrier interface {
 	Interrupt(ctx context.Context, name string) error
 	// ClearScrollback clears the session's scrollback history.
 	ClearScrollback(ctx context.Context, name string) error
+
+	// NudgeFenced delivers content as Nudge does, only to the incarnation
+	// fence names (RUNTIME-CONTRACT-009): a miss is a *FenceMismatchError.
+	NudgeFenced(ctx context.Context, name string, content []ContentBlock, fence InputFence) error
+	// SendKeysFenced sends keys as SendKeys does, only to fence's incarnation.
+	SendKeysFenced(ctx context.Context, name string, fence InputFence, keys ...string) error
+	// InterruptFenced interrupts as Interrupt does, only fence's incarnation.
+	InterruptFenced(ctx context.Context, name string, fence InputFence) error
+	// PublishInputFence records fence as the incarnation the session's
+	// agent now runs, so fenced input to it can be proven.
+	PublishInputFence(ctx context.Context, name string, fence InputFence) error
 }
 
 // tmuxCarrier drives a tmux session living inside the box by issuing tmux
@@ -65,11 +76,11 @@ func NewTmuxCarrier(conn ExecProvider, target string) Carrier {
 }
 
 // tmux runs `tmux <args...>` in the box over the connection and returns its
-// standard output. A non-zero command exit is reported via err only when the
-// connection itself surfaces it; callers that are best-effort discard err.
-func (c *tmuxCarrier) tmux(ctx context.Context, name string, args ...string) ([]byte, error) {
-	out, _, err := c.conn.Exec(ctx, name, append([]string{"tmux"}, args...))
-	return out, err
+// standard output and exit code. A non-zero command exit is reported via err
+// only when the connection itself surfaces it; callers that are best-effort
+// discard err.
+func (c *tmuxCarrier) tmux(ctx context.Context, name string, args ...string) ([]byte, int, error) {
+	return c.conn.Exec(ctx, name, append([]string{"tmux"}, args...))
 }
 
 func (c *tmuxCarrier) Nudge(ctx context.Context, name string, content []ContentBlock) error {
@@ -82,10 +93,10 @@ func (c *tmuxCarrier) Nudge(ctx context.Context, name string, content []ContentB
 	// If typing fails, the error surfaces and Enter is skipped: the caller
 	// learns delivery failed (the pane may hold a half-typed, unsubmitted line).
 	// [TmuxLiteralArgs] keeps the text byte-exact (E5).
-	if _, err := c.tmux(ctx, name, append([]string{"send-keys", "-t", c.target, "-l"}, TmuxLiteralArgs(message)...)...); err != nil {
+	if _, _, err := c.tmux(ctx, name, append([]string{"send-keys", "-t", c.target, "-l"}, TmuxLiteralArgs(message)...)...); err != nil {
 		return err
 	}
-	_, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "Enter")
+	_, _, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "Enter")
 	return err
 }
 
@@ -95,7 +106,7 @@ func (c *tmuxCarrier) SendKeys(ctx context.Context, name string, keys ...string)
 	if len(keys) == 0 {
 		return nil
 	}
-	_, err := c.tmux(ctx, name, append([]string{"send-keys", "-t", c.target}, keys...)...)
+	_, _, err := c.tmux(ctx, name, append([]string{"send-keys", "-t", c.target}, keys...)...)
 	return err
 }
 
@@ -104,7 +115,7 @@ func (c *tmuxCarrier) Peek(ctx context.Context, name string, lines int) (string,
 	if lines > 0 {
 		start = "-" + strconv.Itoa(lines)
 	}
-	out, err := c.tmux(ctx, name, "capture-pane", "-t", c.target, "-p", "-S", start)
+	out, _, err := c.tmux(ctx, name, "capture-pane", "-t", c.target, "-p", "-S", start)
 	if err != nil {
 		return "", err
 	}
@@ -112,11 +123,11 @@ func (c *tmuxCarrier) Peek(ctx context.Context, name string, lines int) (string,
 }
 
 func (c *tmuxCarrier) Interrupt(ctx context.Context, name string) error {
-	_, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "C-c")
+	_, _, err := c.tmux(ctx, name, "send-keys", "-t", c.target, "C-c")
 	return err
 }
 
 func (c *tmuxCarrier) ClearScrollback(ctx context.Context, name string) error {
-	_, err := c.tmux(ctx, name, "clear-history", "-t", c.target)
+	_, _, err := c.tmux(ctx, name, "clear-history", "-t", c.target)
 	return err
 }
