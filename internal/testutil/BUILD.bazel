@@ -3,7 +3,6 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "testutil",
     srcs = [
-        "dolt.go",
         "failure_artifacts.go",
         "flock_linux.go",
         "git.go",

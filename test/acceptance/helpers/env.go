@@ -12,6 +12,7 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/testutil"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // supervisorIsolatedHomeEnv is gc's opt-in (cmd/gc supervisorIsolatedHomeEnv)
@@ -157,12 +158,17 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// ambient identity made that a coin flip: green on a developer box, red on a
 	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
 	// never writes host Dolt state; test/integration seeds the same config. It
-	// also turns dolt's usage metrics off, so no dolt the suite runs calls
-	// eventsapi.dolthub.com.
-	if err := testutil.SeedDoltGlobalConfig(gcHome); err != nil {
-		panic(fmt.Sprintf("acceptance: %v", err))
+	// also turns dolt's version check and usage metrics off, so no dolt the
+	// suite runs calls the network.
+	if err := dolttest.WriteGlobalConfig(gcHome); err != nil {
+		panic(fmt.Sprintf("acceptance: seeding dolt global config under %s: %v", gcHome, err))
 	}
 	e.vars["DOLT_ROOT_PATH"] = gcHome
+	// A child gets only the variables listed here, so the process-wide
+	// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets does not reach it, and
+	// the seeded metrics.disabled stops dolt sending metrics, not forking the
+	// detached send-metrics process that would.
+	e.vars[dolttest.DisableEventFlushVar] = dolttest.DisableEventFlushValue
 
 	// The Makefile points GIT_CONFIG_GLOBAL at scripts/test-gitconfig-path, but a
 	// caller that runs `go test -tags acceptance_a` directly supplies no seed at

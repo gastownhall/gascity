@@ -32,6 +32,7 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
+	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
@@ -985,8 +986,8 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
 			return
 		}
-		if err := writeTestDoltIdentity(homeDir); err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
+		if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write template dolt global config: %w", err)
 			return
 		}
 		env := waitTestEnv(map[string]string{
@@ -3745,8 +3746,8 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeTestDoltIdentity: %v", err)
+	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
+		t.Fatalf("dolttest.WriteGlobalConfig: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
@@ -3825,8 +3826,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := writeTestDoltIdentity(homeDir); err != nil {
-		t.Fatalf("writeTestDoltIdentity: %v", err)
+	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
+		t.Fatalf("dolttest.WriteGlobalConfig: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)

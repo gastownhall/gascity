@@ -14,6 +14,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // blockedRepairFixture is a real embedded bd store whose is_blocked column
@@ -56,7 +57,7 @@ func newBlockedRepairFixture(t *testing.T, bdPath string, overBlock bool) blocke
 	if err := writeTestGitIdentity(home); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeTestDoltIdentity(home); err != nil {
+	if err := dolttest.WriteGlobalConfig(home); err != nil {
 		t.Fatal(err)
 	}
 	run := beads.ExecCommandRunnerWithEnvWithoutAmbientBeads(map[string]string{

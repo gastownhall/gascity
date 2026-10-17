@@ -6,6 +6,11 @@
 //
 // Discovery is Linux-only via /proc and a no-op elsewhere, mirroring the
 // scan test/integration already uses (readProcessSnapshot); CI runs on Linux.
+//
+// It is also where the dolt global config that every real-dolt test seeds
+// lives (GlobalConfigJSON, WriteGlobalConfig), together with the unroutable
+// proxy that reproduces a slow network deterministically
+// (UnroutableHTTPSProxyEnv). See globalconfig.go.
 package dolttest
 
 import (

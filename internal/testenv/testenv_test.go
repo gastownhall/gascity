@@ -80,6 +80,17 @@ func TestMetricsOptOutVarsAreLeakVectors(t *testing.T) {
 	}
 }
 
+// TestInitDisablesDoltEventFlush verifies init() sets DOLT_DISABLE_EVENT_FLUSH
+// for every go-test binary. dolt forks a detached `dolt send-metrics` after
+// each command unless the variable is present, whatever metrics.disabled says,
+// so a test that runs dolt, directly or through gc or bd, inherits the switch
+// from the process instead of from a per-test Setenv.
+func TestInitDisablesDoltEventFlush(t *testing.T) {
+	if got := os.Getenv("DOLT_DISABLE_EVENT_FLUSH"); got != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q after testenv init, want %q", got, "1")
+	}
+}
+
 // TestInitPassthroughPreservesNamed verifies that GC_TESTENV_PASSTHROUGH
 // preserves the named leak-vector vars, scrubs the rest, and unsets itself.
 func TestInitPassthroughPreservesNamed(t *testing.T) {
@@ -145,6 +156,7 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 		for _, name := range testenv.LeakVectorVars {
 			lines = append(lines, name+"="+os.Getenv(name))
 		}
+		lines = append(lines, "DOLT_DISABLE_EVENT_FLUSH="+os.Getenv("DOLT_DISABLE_EVENT_FLUSH"))
 		os.Stdout.WriteString(strings.Join(lines, "\n") + "\n") //nolint:errcheck
 		os.Exit(0)
 	}
@@ -175,6 +187,11 @@ func TestInitSkipsScrubInTestscriptSubcommandMode(t *testing.T) {
 		if !strings.Contains(got, name+"=kept-"+name) {
 			t.Errorf("%s was scrubbed but should survive in subcommand mode; child output:\n%s", name, got)
 		}
+	}
+	// Testscript owns the env of the gc or bd it re-invokes, so init() must not
+	// decide dolt's behavior for it either.
+	if !strings.Contains(got, "DOLT_DISABLE_EVENT_FLUSH=\n") {
+		t.Errorf("init() set DOLT_DISABLE_EVENT_FLUSH in subcommand mode; child output:\n%s", got)
 	}
 }
 
