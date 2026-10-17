@@ -1,12 +1,21 @@
 # Git-template remedy, round two — ga-fxx13mj
 
-Publication stage: **authorized draft only**. All Linux prerequisites passed.
-The final release verdict is pending actual required PR CI and current-head
-review. This intermediate record does not grant deploy clearance. The mayor's
-sequencing disposition gm-wisp-1dmr8mi permits exactly one draft PR at the
-reviewed source plus this record; it stays draft, with no clearance status or
-merge-request, until the remaining exact-head requirements pass. The final
-binary verdict will be recorded only when the full gate is decidable.
+**Verdict:** **PASS**
+
+Initial publication/CI head: 7855aa5be2e51ba2a7c5a3fdf36d0e8b7814e6f1.
+PR: https://github.com/gastownhall/gascity/pull/8068.
+Initial exact-head CI verified at 2026-10-17T18:13:35.096557+00:00: every required check passed.
+
+This final gate-record-only commit follows mayor disposition gm-wisp-k5bu801.
+The completed Linux evidence carries over with the sole-file delta proof;
+no local suite is rerun. After this commit, every required GitHub job must also
+pass on its new exact head, Windows included, before readiness and clearance.
+The PR stays draft and clearance stays absent until that condition holds.
+
+Final-record delta from 7855aa5be2e51ba2a7c5a3fdf36d0e8b7814e6f1: only
+release-gates/ga-fxx13mj-git-template-round2-gate.md. The exact resulting
+commit SHA and live git diff --stat proof are recorded on ga-fxx13mj;
+any other path invalidates this carryover and requires a full gate.
 
 ## Source and authority
 
@@ -44,11 +53,11 @@ binary verdict will be recorded only when the full gate is decidable.
 
 | # | Criterion | Result and evidence |
 |---|---|---|
-| 1 | Independent review | PASS for exact source: ga-tq3w74p and verified immutable report; publication-head verification remains required. |
-| 2 | Acceptance | Source acceptance PASS; publication/CI/clearance clauses remain pending. Matrix below. |
-| 3 | Tests | Linux full-suite PASS; required PR CI, including Windows, remains pending. No final criterion-3 or release signoff yet. |
+| 1 | Independent review | PASS: ga-tq3w74p covers exact source; verified publication-head delta is the gate record alone. Mayor gm-wisp-9t9hoi2 confirms no additional review scope; MPR follows clearance. |
+| 2 | Acceptance | PASS: preserved source contracts, one verified PR with original credit, all required current-head CI green; merge and landing guards remain explicitly reserved. |
+| 3 | Tests | PASS: fresh full-scope Linux evidence and every required initial publication-head CI result. Final-record-only Linux carryover is explicitly authorized; new exact-head CI must also pass before clearance. |
 | 4 | High-severity findings | PASS: zero unresolved blocking/HIGH findings in independent source review. |
-| 5 | Clean branch | PASS checked before cutting the isolated branch; check again after the gate-record commit and before clearance. |
+| 5 | Clean branch | PASS: clean tracked/untracked status verified at the publication head after normal pre-commit and pre-push checks. |
 | 6 | Build, vet and merge state | PASS: canonical clean merge built //cmd/gc:gc_test and whole-tree make vet/nogo; C6_COMPLETE and detached complete1/1 failed0 retained. |
 | 7 | Single feature theme | PASS: central verified test Git-template installation, its boundary propagation and census-neutral helper reuse. |
 
@@ -177,22 +186,51 @@ native floor: LOAD_GATE_SUMMARY threshold=15 waited_seconds=1801 wait_timed_out=
 
 ## Required publication-head CI
 
-Derived from the pinned current workflows and main rules:
+Every row below has terminal SUCCESS and GitHub check-run head_sha equal to
+7855aa5be2e51ba2a7c5a3fdf36d0e8b7814e6f1. Current workflow path filters and main rules were read live.
+The Windows job ran on blacksmith-4vcpu-windows-2025 while the PR was draft;
+both the credential-provider unit contract and Windows Job Object descendant
+cleanup steps actually succeeded. Bazel includes unit, acceptance,
+integration-packages and integration-smoke. All four required CodeQL analyses
+succeeded. No failing, cancelled, timed-out or action-required check was present.
 
-- CI: Runner policy, Detect changes, Credential provider / Windows process
-  tree (internal/testenv/** and internal/testutil/** match its filter), Check
-  and CI / required.
-- Bazel: unit, acceptance, integration-packages and integration-smoke, fanned
-  into bazel test (side-by-side); BUILD files in sync.
-- CodeQL: Analyze (actions), Analyze (go), Analyze (javascript-typescript)
-  and Analyze (python).
+| Required job | Result | Actual evidence |
+|---|---|---|
+| Runner policy | SUCCESS | [job 117466292821](https://github.com/gastownhall/gascity/actions/runs/39056794406/job/117466292821) |
+| Runner policy | SUCCESS | [job 117466292725](https://github.com/gastownhall/gascity/actions/runs/39056794317/job/117466292725) |
+| Runner policy | SUCCESS | [job 117466292450](https://github.com/gastownhall/gascity/actions/runs/39056794330/job/117466292450) |
+| Runner policy | SUCCESS | [job 117466292430](https://github.com/gastownhall/gascity/actions/runs/39056794329/job/117466292430) |
+| Runner policy | SUCCESS | [job 117466292352](https://github.com/gastownhall/gascity/actions/runs/39056794287/job/117466292352) |
+| Detect changes | SUCCESS | [job 117466346892](https://github.com/gastownhall/gascity/actions/runs/39056794406/job/117466346892) |
+| Credential provider / Windows process tree | SUCCESS | [job 117466394404](https://github.com/gastownhall/gascity/actions/runs/39056794406/job/117466394404) |
+| Check | SUCCESS | [job 117466678797](https://github.com/gastownhall/gascity/actions/runs/39056794406/job/117466678797) |
+| CI / required | SUCCESS | [job 117466716867](https://github.com/gastownhall/gascity/actions/runs/39056794406/job/117466716867) |
+| bazel / unit | SUCCESS | [job 117466334941](https://github.com/gastownhall/gascity/actions/runs/39056794297/job/117466334941) |
+| bazel / acceptance | SUCCESS | [job 117466335042](https://github.com/gastownhall/gascity/actions/runs/39056794297/job/117466335042) |
+| bazel / integration-packages | SUCCESS | [job 117466334876](https://github.com/gastownhall/gascity/actions/runs/39056794297/job/117466334876) |
+| bazel / integration-smoke | SUCCESS | [job 117466334936](https://github.com/gastownhall/gascity/actions/runs/39056794297/job/117466334936) |
+| bazel test (side-by-side) | SUCCESS | [job 117466943256](https://github.com/gastownhall/gascity/actions/runs/39056794297/job/117466943256) |
+| BUILD files in sync | SUCCESS | [job 117466334899](https://github.com/gastownhall/gascity/actions/runs/39056794297/job/117466334899) |
+| Analyze (actions) | SUCCESS | [job 117466346665](https://github.com/gastownhall/gascity/actions/runs/39056794330/job/117466346665) |
+| Analyze (go) | SUCCESS | [job 117466346608](https://github.com/gastownhall/gascity/actions/runs/39056794330/job/117466346608) |
+| Analyze (javascript-typescript) | SUCCESS | [job 117466346621](https://github.com/gastownhall/gascity/actions/runs/39056794330/job/117466346621) |
+| Analyze (python) | SUCCESS | [job 117466346634](https://github.com/gastownhall/gascity/actions/runs/39056794330/job/117466346634) |
 
-No draft exclusion appears on the Windows job. Its **actual** execution must
-still be verified after opening. If it does not run, stop and notify mayor;
-never mark ready to trigger it. Any required red uses the attribution protocol;
-a diff-owned red fails, and a publication head move requires a new gate.
-Clearance remains absent and merge-request unrouted until every required
-exact-head job and review requirement is satisfied. Merge belongs to MPR.
+Full exact-head proof: /var/tmp/deploy-ga-fxx13mj.fresh.0fg4gsp_/required-ci-pass.json
+(SHA256 6e7e4c2c6d3b75ffe07c839414c77c2cd64e8b5e0ee22fb356df21cf2492709e).
+
+The publication head retains the exact independently reviewed source in its
+ancestry and its net delta adds only the gate record. Mayor clarification gm-wisp-9t9hoi2
+confirms this satisfies source review; the standard GitHub review is MPR's after
+clearance. The normal pre-commit Bazel docsync target actually passed; the
+normal pre-push passed all 283 targets (246 executed, remaining cached), a
+supplemental hook result separate from the 490 forced Linux gate results.
+
+Next authorized release sequence: ready, exact-head deploy clearance, verified
+merge-request to mayor, then MPR review/merge. Mayor gm-wisp-k5bu801 authorizes this one final gate-record-only seam with
+Linux carryover and fresh exact-head CI. Every other head move requires a new
+gate; no source update is silently covered by this verdict. Actual main
+landing and delivery/tracker/landing-guard closure remain the mayor's work.
 
 ## Immutable provenance and retained evidence
 
