@@ -184,7 +184,7 @@ func TestInputFencingByProductionBackend(t *testing.T) {
 			unfenced++
 		}
 	}
-	if unfenced > maxUnfencedBackends {
-		t.Errorf("%d production backends cannot fence input, more than the ratchet's %d", unfenced, maxUnfencedBackends)
+	if unfenced != maxUnfencedBackends {
+		t.Errorf("%d production backends cannot fence input, want the ratchet's %d: lower it when a backend gains a fence, never raise it", unfenced, maxUnfencedBackends)
 	}
 }
