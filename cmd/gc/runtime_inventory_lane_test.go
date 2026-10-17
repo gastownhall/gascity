@@ -423,6 +423,39 @@ func TestInventoryLane_NestedCompositeListsEachLeafOnce(t *testing.T) {
 	}
 }
 
+// Kills: a listed name the inventory omits read as gone or dead. The tmux
+// inventory omits a session whose line it cannot parse; the name stays
+// listed, its facts are unknown (or the last pass's, until they age out),
+// and its siblings are enriched as usual.
+func TestInventoryLane_OmittedNameIsUnknownNotDead(t *testing.T) {
+	sp := newScriptedInventoryProvider("gc-a", "gc-b", "gc-new")
+	delete(sp.inventory, "gc-new")
+	cr := inventoryLaneTestRuntime(t, sp, nil)
+	clk := &clock.Fake{Time: obsTestEpoch}
+	useInventoryClock(cr, clk)
+	runTestInventoryPass(cr)
+
+	sp.mu.Lock()
+	delete(sp.inventory, "gc-a")
+	sp.mu.Unlock()
+	clk.Advance(inventoryLaneInterval)
+	runTestInventoryPass(cr)
+
+	snap := cr.inventoryLane.cache.Snapshot()
+	for name, want := range map[string]ObsFact{"gc-a": ObsYes, "gc-b": ObsYes, "gc-new": ObsUnknown} {
+		obs := snap.ByName[name]
+		if obs.Listed.Value != ObsYes {
+			t.Errorf("%s listed = %v, want yes", name, obs.Listed.Value)
+		}
+		if obs.Running.Value != want || obs.ProcessAlive.Value == ObsNo {
+			t.Errorf("%s running = %v, process alive = %v; want running %v and never a death", name, obs.Running.Value, obs.ProcessAlive.Value, want)
+		}
+	}
+	if got, at := snap.ByName["gc-a"].Running.ObservedAt, obsTestEpoch; !got.Equal(at) {
+		t.Errorf("gc-a running observed at %v, want the first pass's %v (not refreshed by the pass that omitted it)", got, at)
+	}
+}
+
 // Kills: a stale owner after a respawn. Each incarnation's identity is read,
 // and the legacy owner fact is derived from that read.
 func TestInventoryLane_AttributionOncePerIncarnation(t *testing.T) {

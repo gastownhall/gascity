@@ -14,7 +14,11 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
-func inventoryLines(lines ...string) string { return strings.Join(lines, "\n") }
+// inventoryLines renders runtimeInventoryFormat lines as tmux prints them:
+// each line ends with the terminator field.
+func inventoryLines(lines ...string) string {
+	return strings.Join(lines, "\t"+runtimeInventoryEnd+"\n") + "\t" + runtimeInventoryEnd
+}
 
 func runtimeInventoryFrom(t *testing.T, fe *fakeExecutor) (map[string]runtime.InventoryEntry, error) {
 	t.Helper()
@@ -134,22 +138,95 @@ func TestTmuxRuntimeInventory_NoServerIsError(t *testing.T) {
 	}
 }
 
-// Kills: a malformed pane line dropped silently. Dropping the only live pane
-// of a session would report that session as all-dead.
-func TestTmuxRuntimeInventory_MalformedLineIsError(t *testing.T) {
-	for _, bad := range []string{
-		"s\t$1\t1700000001\t0\t0.1",
-		"s\t$1\t1700000001\t0\tx.0\t0\t101\t1700000100\t",
-		"\t$1\t1700000001\t0\t0.1\t0\t101",
-		"s\t$1\t1700000001\t0\t0.1\t0\t101", // short in a required field, not just the marker
+// Kills: one malformed line costing the whole inventory (mc-ym1u4: every
+// tmux seat liveness-unknown), and a malformed line costing less than its
+// whole session. Each line is parsed on its own; a session with a malformed
+// line is omitted, every line of it, so it is never folded from the panes
+// that did parse: dropping its only live pane would read it all-dead. An
+// omitted name is unread, not gone. The others read exactly as without it.
+func TestTmuxRuntimeInventory_MalformedLineCostsOnlyItsSession(t *testing.T) {
+	end := "\t" + runtimeInventoryEnd
+	good := []string{
+		"a\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t" + end,
+		"b\t$2\t1700000002\t1\t0.0\t1\t201\t1700000100\t" + end,
+		"b\t$2\t1700000002\t1\t0.1\t0\t202\t1700000100\t" + end,
+	}
+	// s's corpse pane parses; its live pane is the malformed line.
+	sCorpse := "s\t$9\t1700000009\t0\t0.0\t1\t900\t1700000100\t" + end
+	act := time.Unix(1700000100, 0)
+	want := map[string]runtime.InventoryEntry{
+		"a": {Incarnation: "$1:1700000001:101", DeadKnown: true, AttachedKnown: true, ActivityKnown: true, LastActivity: act},
+		"b": {Incarnation: "$2:1700000002:201", DeadKnown: true, AttachedKnown: true, Attached: true, ActivityKnown: true, LastActivity: act},
+	}
+	for _, tc := range []struct{ name, bad string }{
+		{"missing field", "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100" + end},
+		{"trailing empty field trimmed, no terminator", "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100"},
+		{"terminator cut short", "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t\tgc-"},
+		{"embedded tab in the name", "s\tx\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t" + end},
+		{"embedded newline in the name", "s\nx\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t" + end},
+		{"extra trailing field", "s\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t" + end + "\t"},
+		{"malformed pane index", "s\t$9\t1700000009\t0\tx.1\t0\t901\t1700000100\t" + end},
 	} {
-		got, err := runtimeInventoryFrom(t, &fakeExecutor{out: inventoryLines(
-			"s\t$1\t1700000001\t0\t0.0\t1\t100\t1700000100\t",
-			bad,
-		)})
-		if err == nil {
-			t.Errorf("RuntimeInventory with line %q = %#v, want an error", bad, got)
+		for _, order := range []string{"bad line first", "bad line last"} {
+			t.Run(tc.name+"/"+order, func(t *testing.T) {
+				lines := append([]string{tc.bad, sCorpse}, good...)
+				if order == "bad line last" {
+					lines = append(append([]string{sCorpse}, good...), tc.bad)
+				}
+				got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.Join(lines, "\n")})
+				if err != nil {
+					t.Fatalf("RuntimeInventory: %v, want the well-formed sessions", err)
+				}
+				for name, w := range want {
+					if got[name] != w {
+						t.Errorf("%s = %#v, want %#v", name, got[name], w)
+					}
+				}
+				if e, ok := got["s"]; ok {
+					t.Errorf("s = %#v, want it omitted (unknown), not read from the panes that parsed", e)
+				}
+			})
 		}
+	}
+
+	// A line with no name attributes to no session and costs none.
+	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.Join(append([]string{"\t$9\t1700000009\t0\t0.1\t0\t901\t1700000100\t" + end}, good...), "\n")})
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("RuntimeInventory with a nameless line = %#v, %v; want %#v", got, err, want)
+	}
+}
+
+// Kills: an inventory whose every line is malformed (a tmux that prints the
+// format differently) reported as an empty fleet with no error.
+func TestTmuxRuntimeInventory_NothingParsedIsError(t *testing.T) {
+	got, err := runtimeInventoryFrom(t, &fakeExecutor{out: "s\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t"})
+	if err == nil || got != nil {
+		t.Fatalf("RuntimeInventory = %#v, %v; want nil and an error", got, err)
+	}
+}
+
+// Kills: a malformed line that goes unlogged, or logs once per pass. The
+// first malformed read logs; later ones within inventoryMalformedLogEvery
+// are counted and reported by the next line.
+func TestTmuxRuntimeInventory_MalformedLinesLogRateLimited(t *testing.T) {
+	var logged []string
+	p := NewProviderWithConfig(Config{})
+	p.logf = func(format string, args ...any) { logged = append(logged, fmt.Sprintf(format, args...)) }
+	p.tm.exec = &fakeExecutor{out: inventoryLines("a\t$1\t1700000001\t0\t0.0\t0\t101\t1700000100\t") + "\nbad"}
+	for range 3 {
+		if _, err := p.RuntimeInventory(context.Background()); err != nil {
+			t.Fatalf("RuntimeInventory: %v", err)
+		}
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], `"bad"`) {
+		t.Fatalf("logged %q, want one line naming the malformed line", logged)
+	}
+	p.inventoryMalformedLog.at = p.inventoryMalformedLog.at.Add(-inventoryMalformedLogEvery)
+	if _, err := p.RuntimeInventory(context.Background()); err != nil {
+		t.Fatalf("RuntimeInventory: %v", err)
+	}
+	if len(logged) != 2 || !strings.Contains(logged[1], "2 more since") {
+		t.Fatalf("logged %q, want a second line counting the 2 suppressed reads", logged)
 	}
 }
 
@@ -497,7 +574,7 @@ func TestTmuxAttributionEnvironment_MatchesGetMeta(t *testing.T) {
 func TestTmuxRuntimeInventory_ActivityDiscountsAPoke(t *testing.T) {
 	prior, poke := time.Unix(1700000000, 0), time.Now().Add(-time.Hour).Truncate(time.Second)
 	p := NewProviderWithConfig(Config{})
-	p.tm.exec = &fakeExecutor{out: fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t%d\t", poke.Unix())}
+	p.tm.exec = &fakeExecutor{out: inventoryLines(fmt.Sprintf("s\t$1\t1700000001\t0\t0.0\t0\t101\t%d\t", poke.Unix()))}
 	p.tm.pokeMu.Lock()
 	if p.tm.pokes == nil {
 		p.tm.pokes = map[string]pokeInfo{}
@@ -529,18 +606,19 @@ func TestTmuxRuntimeInventory_ReadsTheRestartMarker(t *testing.T) {
 	if !got["asked"].RestartRequested || got["quiet"].RestartRequested {
 		t.Fatalf("RestartRequested asked=%t quiet=%t, want only asked", got["asked"].RestartRequested, got["quiet"].RestartRequested)
 	}
-	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}") {
+	if !strings.HasSuffix(runtimeInventoryFormat, "\t#{@GC_RESTART_REQUESTED}\t"+runtimeInventoryEnd) {
 		t.Fatalf("format %q does not read the marker's option", runtimeInventoryFormat)
 	}
 }
 
-// Regression (#7871): the real executor returns strings.TrimSpace(stdout),
-// and tmux ends every line with the marker field, so an unmarked LAST session
-// arrives with its trailing tab trimmed away: eight fields, not nine. That
-// line must still read as an unmarked session rather than fail the whole
-// inventory (which left every tmux seat liveness-unknown). The fixtures are
-// tmux's raw stdout, trimmed exactly as realExecutor trims it.
-// Kills: a parser that needs the empty trailing marker's tab.
+// Regression (#7871): the real executor returns strings.TrimSpace(stdout).
+// Before the terminator field, tmux ended every line with the marker field,
+// so an unmarked LAST session arrived with its trailing tab trimmed away and
+// failed the whole inventory (which left every tmux seat liveness-unknown).
+// The terminator ends every line now, so trimming cannot change a line's
+// field count. The fixtures are tmux's raw stdout, trimmed exactly as
+// realExecutor trims it.
+// Kills: a parser that misreads an unmarked last session.
 func TestTmuxRuntimeInventory_ExecutorTrimmedEmptyMarker(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
@@ -569,7 +647,8 @@ func TestTmuxRuntimeInventory_ExecutorTrimmedEmptyMarker(t *testing.T) {
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.TrimSpace(tc.stdout)})
+			stdout := inventoryLines(strings.Split(strings.TrimSuffix(tc.stdout, "\n"), "\n")...) + "\n"
+			got, err := runtimeInventoryFrom(t, &fakeExecutor{out: strings.TrimSpace(stdout)})
 			if err != nil {
 				t.Fatalf("RuntimeInventory: %v", err)
 			}
