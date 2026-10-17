@@ -28,6 +28,9 @@ const (
 	CodeCityMismatch Code = "connect_city_mismatch"
 	// CodeControllerHost means the city directory belongs to a controller host.
 	CodeControllerHost Code = "connect_controller_host"
+	// CodeStorageMismatch means the box's [storage] assigns a class to a
+	// different binding than the bundle's ledger for it.
+	CodeStorageMismatch Code = "connect_storage_mismatch"
 )
 
 // Environment refusals.
@@ -92,7 +95,7 @@ const CodeNotConnected Code = "connect_not_connected"
 func Codes() []Code {
 	return []Code{
 		CodeBundleInvalid, CodeBundleVersion, CodeContractUnsupported, CodeBundleInsecureFile,
-		CodeNoCity, CodeCityMismatch, CodeControllerHost,
+		CodeNoCity, CodeCityMismatch, CodeControllerHost, CodeStorageMismatch,
 		CodeCompetingSelector, CodeIdentityIncomplete, CodeIdentityMismatch,
 		CodeSessionConflict, CodeGenerationStale, CodeCohostedSession,
 		CodeWorkspaceUnexpected, CodeWorkspaceUnproven, CodeWorkspaceProjectMismatch,

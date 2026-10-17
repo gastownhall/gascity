@@ -40,6 +40,10 @@ Violating any fails the build; full rationale is in the architecture docs.
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Nudge queue through State.** The API writes the city's nudge
+  queue only through `State.NudgeQueue`; only `seededState` builds a
+  `nudgequeue.StateFileQueue`. Enforced by
+  `TestAPIReachesTheNudgeQueueOnlyThroughState`.
 
 ## Configuration publication
 

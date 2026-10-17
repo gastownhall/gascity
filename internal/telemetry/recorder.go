@@ -77,6 +77,9 @@ type recorderInstruments struct {
 
 	// Operation journal recording (O0 shadow ops)
 	opsRecordTotal metric.Int64Counter
+
+	// Turn-fenced deliver-now (SESSION-RUNTIME-020)
+	turnInterruptTotal metric.Int64Counter
 }
 
 var (
@@ -186,6 +189,11 @@ func initInstruments() {
 		// Operation journal recording
 		inst.opsRecordTotal, _ = m.Int64Counter("gc.ops.record.total",
 			metric.WithDescription("Total operation-journal recording steps by kind, surface, stage and result"),
+		)
+
+		// Turn-fenced deliver-now
+		inst.turnInterruptTotal, _ = m.Int64Counter("gc.session.turn_interrupts.total",
+			metric.WithDescription("Total turn-fenced deliver-now requests by outcome, degradation and message disposition"),
 		)
 	})
 }
@@ -715,5 +723,31 @@ func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecorde
 			attribute.String("result", result),
 			attribute.String("unrecorded_reason", unrecordedReason),
 		),
+	)
+}
+
+// RecordTurnInterrupt records one turn-fenced deliver-now
+// (gc.session.turn_interrupts.total and a session.turn_interrupt log event).
+// outcome is settled, no_turn, stale, unsettled or unavailable; degradation is
+// unfenced_interrupt or empty; disposition is delivered, queued, deferred or
+// failed. The metric labels are only these closed tokens, so the label set
+// stays bounded; the session and turn ride the log event alone, and no
+// message text is recorded.
+func RecordTurnInterrupt(ctx context.Context, sessionName, turnID, outcome, degradation, disposition string, err error) {
+	initInstruments()
+	inst.turnInterruptTotal.Add(ctx, 1,
+		metric.WithAttributes(
+			attribute.String("outcome", outcome),
+			attribute.String("degradation", degradation),
+			attribute.String("message_disposition", disposition),
+		),
+	)
+	emit(ctx, "session.turn_interrupt", severity(err),
+		attribute.String("session", sessionName),
+		attribute.String("turn", turnID),
+		attribute.String("outcome", outcome),
+		attribute.String("degradation", degradation),
+		attribute.String("message_disposition", disposition),
+		errKV(err),
 	)
 }

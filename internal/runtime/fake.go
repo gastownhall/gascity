@@ -47,6 +47,7 @@ type Fake struct {
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
 	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
+	InputFencingValue       InputFencing      // reported by InputFencing; empty reads as atomic
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
@@ -77,6 +78,29 @@ type Fake struct {
 	// ListingUnattested makes Fake.ListRunningComplete report false, modeling
 	// a provider whose ListRunning may omit live sessions.
 	ListingUnattested bool
+	// TurnScripts script a FullFake's TurnFenceProvider by session name. Every
+	// turn read (ObserveTurn, InterruptTurn's fence read, each WaitTurnEnded
+	// read) takes the next entry, and the last entry repeats; "" means no turn.
+	// A session with no script has no turn in progress.
+	TurnScripts map[string][]string
+	// TurnReadErrors fail turn reads by session name, in order. A nil entry
+	// reads the script.
+	TurnReadErrors map[string][]error
+	// InterruptTurnErrors fail InterruptTurn after a matching fence read.
+	InterruptTurnErrors map[string]error
+	// FencedTurnInterrupts makes InterruptTurn answer Fenced: true.
+	FencedTurnInterrupts bool
+	// TurnCapabilityScripts script a FullFake's TurnCapabilities by session
+	// name. Each call takes the next entry, and the last entry repeats. A
+	// session with no script reports nothing on every axis.
+	TurnCapabilityScripts map[string][]TurnCapabilities
+	// TurnHistoryScripts script a FullFake's TurnHistory by session name. Each
+	// read takes the next entry, and the last entry repeats. A session with no
+	// script has no current or recent turn.
+	TurnHistoryScripts map[string][]TurnHistory
+	// TurnHistoryErrors fail TurnHistory reads by session name, in order. A
+	// nil entry reads the script.
+	TurnHistoryErrors map[string][]error
 }
 
 var (
@@ -84,6 +108,7 @@ var (
 	_ RelaunchProvider    = (*Fake)(nil)
 	_ ListingAttestation  = (*Fake)(nil)
 	_ InputClearProvider  = (*Fake)(nil)
+	_ FencedInputProvider = (*Fake)(nil)
 
 	_ AttachmentObserverWithError = (*Fake)(nil)
 )
@@ -98,12 +123,20 @@ type Call struct {
 	// DeliveryKey is set for a Nudge delivered through
 	// [KeyedNudgeProvider.NudgeKeyed] (a [FullFake]'s).
 	DeliveryKey string
-	Key         string // only set for meta calls
-	Value       string // only set for SetMeta calls
-	Src         string // only set for CopyTo calls
-	Dst         string // only set for CopyTo calls
-	RequestID   string // only set for Respond calls
-	Action      string // only set for Respond calls
+	// Key is set for meta calls, and for a [FullFake]'s turn-fence calls to
+	// the turn they name (empty for ObserveTurn and TurnHistory).
+	Key string
+	// Value is set for SetMeta calls, and for a [FullFake]'s InterruptTurn to
+	// what it did: sent, not_current or error.
+	Value     string
+	Src       string // only set for CopyTo calls
+	Dst       string // only set for CopyTo calls
+	RequestID string // only set for Respond calls
+	Action    string // only set for Respond calls
+	// Fence is set for a call made under an input fence: a fenced nudge,
+	// keys or interrupt, a ctx-fenced ClearInput, DismissKnownDialogs or
+	// ResetInterruptedTurn, and a refused one (Method "FenceMismatch").
+	Fence InputFence
 }
 
 // FakeExecResult configures one [Fake.Exec] outcome.
@@ -273,10 +306,16 @@ func (f *Fake) Interrupt(name string) error {
 }
 
 // DismissKnownDialogs records the call and returns the configured result.
-func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.Duration) error {
+// Under a ctx input fence it is refused, unrecorded, unless the fence matches
+// (see checkFenceLocked).
+func (f *Fake) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "DismissKnownDialogs", Name: name, Value: timeout.String()})
+	fence, err := f.ctxFenceLocked(ctx, name)
+	if err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "DismissKnownDialogs", Name: name, Value: timeout.String(), Fence: fence})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
@@ -286,11 +325,16 @@ func (f *Fake) DismissKnownDialogs(_ context.Context, name string, timeout time.
 	return nil
 }
 
-// ResetInterruptedTurn records the call and returns the configured result.
-func (f *Fake) ResetInterruptedTurn(_ context.Context, name string) error {
+// ResetInterruptedTurn records the call and returns the configured result,
+// honoring a ctx input fence as DismissKnownDialogs does.
+func (f *Fake) ResetInterruptedTurn(ctx context.Context, name string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "ResetInterruptedTurn", Name: name})
+	fence, err := f.ctxFenceLocked(ctx, name)
+	if err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "ResetInterruptedTurn", Name: name, Fence: fence})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
@@ -320,11 +364,15 @@ func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since ti
 }
 
 // ClearInput records the call (the restore window in Value) and returns the
-// configured result.
-func (f *Fake) ClearInput(_ context.Context, name string, restoreWindow time.Duration) error {
+// configured result, honoring a ctx input fence as DismissKnownDialogs does.
+func (f *Fake) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
-	f.Calls = append(f.Calls, Call{Method: "ClearInput", Name: name, Value: restoreWindow.String()})
+	fence, err := f.ctxFenceLocked(ctx, name)
+	if err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "ClearInput", Name: name, Value: restoreWindow.String(), Fence: fence})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
@@ -902,6 +950,124 @@ func (f *Fake) RunLive(name string, _ Config) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.Calls = append(f.Calls, Call{Method: "RunLive", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	return nil
+}
+
+// InputFencing returns the configured input fencing, atomic when unset. It
+// records no call: like TurnInterruptMode it reports a fixed trait.
+func (f *Fake) InputFencing(string) InputFencing {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inputFencingLocked()
+}
+
+func (f *Fake) inputFencingLocked() InputFencing {
+	if f.InputFencingValue == "" {
+		return InputFencingAtomic
+	}
+	return f.InputFencingValue
+}
+
+// checkFenceLocked compares fence with the incarnation name's start
+// environment names (InputFenceFromEnv of its Config.Env). A fence that names
+// no incarnation is ErrInvalidInputFence; a fake configured as
+// InputFencingNone refuses with ErrInputFenceUnsupported. A miss (no session,
+// a zombie, an env with no token, another incarnation) records a
+// "FenceMismatch" call and returns a *FenceMismatchError. The caller holds
+// f.mu.
+func (f *Fake) checkFenceLocked(name string, fence InputFence) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	if f.inputFencingLocked() == InputFencingNone {
+		return fmt.Errorf("session %q: %w", name, ErrInputFenceUnsupported)
+	}
+	found := FenceFoundAbsent
+	if cfg, ok := f.sessions[name]; ok {
+		live, proven := InputFenceFromEnv(cfg.Env)
+		switch {
+		case f.Zombies[name]:
+			found = FenceFoundDead
+		case !proven:
+			found = FenceFoundUnproven
+		case live == fence:
+			return nil
+		default:
+			found = live.Digest()
+		}
+	}
+	f.Calls = append(f.Calls, Call{Method: "FenceMismatch", Name: name, Fence: fence})
+	return &FenceMismatchError{Session: name, Found: found}
+}
+
+// ctxFenceLocked applies the input fence ctx carries; a fake configured as
+// InputFencingNone refuses it with ErrInputFenceUnsupported rather than run
+// unfenced. It returns the fence applied, zero when none. The caller holds
+// f.mu.
+func (f *Fake) ctxFenceLocked(ctx context.Context, name string) (InputFence, error) {
+	fence, ok := InputFenceFrom(ctx)
+	if !ok {
+		return InputFence{}, nil
+	}
+	return fence, f.checkFenceLocked(name, fence)
+}
+
+// NudgeFenced implements [FencedInputProvider]: when n.Fence matches it
+// records a Nudge (NudgeNow when n.Immediate) carrying the fence and the
+// delivery key, and answers as [Fake.Nudge] does; otherwise see
+// checkFenceLocked.
+func (f *Fake) NudgeFenced(_ context.Context, name string, content []ContentBlock, n FencedNudge) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, n.Fence); err != nil {
+		return err
+	}
+	method := "Nudge"
+	if n.Immediate {
+		method = "NudgeNow"
+	}
+	f.Calls = append(f.Calls, Call{
+		Method:      method,
+		Name:        name,
+		Message:     FlattenText(content),
+		Content:     content,
+		DeliveryKey: n.DeliveryKey,
+		Fence:       n.Fence,
+	})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.NudgeErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// SendKeysFenced implements [FencedInputProvider]: SendKeys under fence.
+func (f *Fake) SendKeysFenced(_ context.Context, name string, fence InputFence, keys ...string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, fence); err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "SendKeys", Name: name, Message: strings.Join(keys, " "), Fence: fence})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	return nil
+}
+
+// InterruptFenced implements [FencedInputProvider]: Interrupt under fence.
+func (f *Fake) InterruptFenced(_ context.Context, name string, fence InputFence) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, fence); err != nil {
+		return err
+	}
+	f.Calls = append(f.Calls, Call{Method: "Interrupt", Name: name, Fence: fence})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}

@@ -11,6 +11,12 @@ go_library(
         "fact_write.go",
         "id.go",
         "kind.go",
+        "lane.go",
+        "lane_done.go",
+        "lane_plan.go",
+        "lane_store.go",
+        "lane_take.go",
+        "lane_text.go",
         "lease.go",
         "op.go",
         "order.go",
@@ -25,6 +31,7 @@ go_library(
     deps = [
         "//internal/beads",
         "//internal/clock",
+        "//internal/promptsafe",
     ],
 )
 
@@ -38,6 +45,14 @@ go_test(
         "gen_test.go",
         "id_test.go",
         "kind_test.go",
+        "lane_done_test.go",
+        "lane_harness_test.go",
+        "lane_plan_test.go",
+        "lane_property_test.go",
+        "lane_replay_test.go",
+        "lane_store_test.go",
+        "lane_take_done_test.go",
+        "lane_text_test.go",
         "lease_order_test.go",
         "runtime_row_test.go",
         "store_test.go",
@@ -46,8 +61,13 @@ go_test(
         "turn_fold_test.go",
         "turn_link_test.go",
     ],
-    # TestTurnFoldIsStdlibOnly parses the fold's source.
-    data = ["turn_fold.go"],
+    # TestTurnFoldIsStdlibOnly parses the fold's source,
+    # TestOwnIDFamiliesCoverEveryInfix parses every source file, and the lane
+    # text tests read their goldens.
+    data = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ) + glob(["testdata/**"]),
     embed = [":opjournal"],
     deps = [
         "//internal/beadmeta",

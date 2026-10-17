@@ -53,3 +53,12 @@ the only route. `TestMakePrimaryTargetsRunBazel` in `scripts/` pins this.
 `.githooks/lib/push-suite.sh` runs `bazel test //...` at push time. Its
 `make test-fast-parallel` fallback prints a banner with the reason, because
 that suite is not what CI enforces; `GC_PREPUSH_SUITE=go` opts in explicitly.
+`auto` also falls back when a loader probe says the host cannot resolve the
+ICU runtime `MODULE.bazel`'s sysroot pins, or cannot say. The docs side of
+`.githooks/pre-commit` makes the same choice between `make check-docs` and
+`make check-docs-go` (`GC_PRECOMMIT_DOCS=auto|bazel|go`), again behind a
+banner. One shared decision, `.githooks/lib/local-runtime.sh`, serves both
+hooks; it derives the soname list from a single ICU-major constant, and
+`TestBazelLocalRuntimePinMatchesProbe` fails when that constant, the
+`MODULE.bazel` pin and `engdocs/bazel-quickstart.md` disagree. Only `auto`
+probes: an explicit mode is never replaced.

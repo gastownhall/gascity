@@ -59,8 +59,9 @@ import (
 // the departing seat's own identifiers, read off its session bead or derived
 // from config for it. That is this city's own provenance, so they are exempt
 // and not gated. Outside Go, the core pack's orphan-sweep.sh order makes the
-// same release decision in shell and is not guarded: it still releases a
-// foreign <rig>/<name> claim (#5955).
+// same release decision in shell and asks `gc agent is-foreign`, which applies
+// this gate to every identity shape without the shape exemption, because the
+// order has no route filter (claimIdentityProvenance, #5955).
 //
 // The orphan-close release (releaseConfirmedOrphanSessionWork) has no gate of
 // its own, deliberately. It releases only under identifiers read off this

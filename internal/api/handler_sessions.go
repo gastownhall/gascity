@@ -412,9 +412,9 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	// Nudge withdrawal reads the nudges class, so it sources the typed
-	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
+	// The city's nudge queue withdraws the nudges and closes their shadows in
+	// the nudges class.
+	if err := s.withdrawQueuedWaitNudges(closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
@@ -506,9 +506,9 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	// Nudge withdrawal reads the nudges class, so it sources the typed
-	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), res.NudgeIDs); err != nil {
+	// The city's nudge queue withdraws the nudges and closes their shadows in
+	// the nudges class.
+	if err := s.withdrawQueuedWaitNudges(res.NudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// Clear in-memory crash tracker so the reconciler doesn't immediately
