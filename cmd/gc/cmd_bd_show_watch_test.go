@@ -494,3 +494,108 @@ func TestGcBdShowWatchSurfacesDoltStartConflictHintOnce(t *testing.T) {
 		t.Fatalf("conflict hint printed %d times, want 1:\n%s", got, stderr.String())
 	}
 }
+
+// httpShowWatchTestCity is a city whose store is served over bd's http
+// backend: the scope's metadata names backend "http" and no storage fields.
+func httpShowWatchTestCity(t *testing.T) string {
+	t.Helper()
+	cityPath, _ := proxiedEnvTestCity(t)
+	writeScopeBeadsMetadata(t, cityPath, `{"database":"beads","backend":"http"}`)
+	return cityPath
+}
+
+// On an http scope `gc bd show <id> --watch` is served by gc's poller, as on a
+// proxied scope: enterprise bd refuses --watch against an HTTP workspace, and
+// OSS bd would poll the server every 2s. bd never receives --watch, and gc
+// polls at the remote interval rather than bd's.
+func TestGcBdShowWatchServesRemoteScopes(t *testing.T) {
+	cityPath := httpShowWatchTestCity(t)
+	logPath, statusPath := showWatchFakeBdSetup(t, cityPath)
+
+	origInterval, origRemote, origCtx := bdShowWatchInterval, bdShowWatchRemoteInterval, bdShowWatchContext
+	t.Cleanup(func() {
+		bdShowWatchInterval, bdShowWatchRemoteInterval, bdShowWatchContext = origInterval, origRemote, origCtx
+	})
+	// The local interval is left far too long to reach a redraw in the test:
+	// only the remote interval can drive it.
+	bdShowWatchInterval = time.Hour
+	remoteAsked := false
+	bdShowWatchRemoteInterval = func() time.Duration {
+		remoteAsked = true
+		return 20 * time.Millisecond
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	bdShowWatchContext = func() (context.Context, context.CancelFunc) { return ctx, func() {} }
+
+	stdout, stderr := newSyncBuffer(), newSyncBuffer()
+	done := make(chan int, 1)
+	go func() { done <- doBd([]string{"show", "mp-1", "--watch"}, stdout, stderr) }()
+
+	waitForText(t, stdout, "mp-1 · hello [open]", 1)
+	if err := os.WriteFile(statusPath, []byte("closed"), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	waitForText(t, stdout, "mp-1 · hello [closed]", 1)
+	// A second change is redrawn too: the poller keeps running.
+	if err := os.WriteFile(statusPath, []byte("open"), 0o644); err != nil { //nolint:gosec // fixture
+		t.Fatal(err)
+	}
+	waitForText(t, stdout, "mp-1 · hello [open]", 2)
+	cancel()
+	select {
+	case code := <-done:
+		if code != 0 {
+			t.Fatalf("doBd = %d, want 0; stderr=%q", code, stderr.String())
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("gc bd show --watch did not stop on cancel")
+	}
+	if !remoteAsked {
+		t.Fatal("an http scope's watch did not use the remote poll interval")
+	}
+	log, err := os.ReadFile(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(log), "--watch") {
+		t.Fatalf("bd was handed --watch on an http scope:\n%s", log)
+	}
+}
+
+// A rig with no metadata of its own inherits its city's http backend, and so
+// its watch is served by gc too; a rig with its own Dolt metadata does not.
+func TestBdScopeUsesRemoteBackendInheritsCityHTTP(t *testing.T) {
+	cityPath := httpShowWatchTestCity(t)
+	bare := filepath.Join(cityPath, "rigs", "bare")
+	if err := os.MkdirAll(bare, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if !bdScopeUsesRemoteBackend(cityPath, cityPath) {
+		t.Fatal("http city scope not remote")
+	}
+	if !bdScopeUsesRemoteBackend(cityPath, bare) {
+		t.Fatal("rig without metadata did not inherit the city's http backend")
+	}
+	own := filepath.Join(cityPath, "rigs", "own")
+	writeScopeBeadsMetadata(t, own, `{"database":"dolt","backend":"dolt","dolt_database":"own"}`)
+	if bdScopeUsesRemoteBackend(cityPath, own) {
+		t.Fatal("rig with its own dolt metadata reported remote")
+	}
+	doltCity, _ := proxiedEnvTestCity(t)
+	if bdScopeUsesRemoteBackend(doltCity, doltCity) {
+		t.Fatal("dolt city reported remote")
+	}
+}
+
+// A remote watch never polls faster than once every 10s: that is one served
+// read per watcher per 10s, where bd's own watch would poll every 2s. The
+// jitter only ever lengthens it, by at most 20%.
+func TestRemoteShowWatchIntervalIsBounded(t *testing.T) {
+	for range 1000 {
+		got := bdShowWatchRemoteInterval()
+		if got < 10*time.Second || got > 12*time.Second {
+			t.Fatalf("remote watch interval = %v, want within [10s, 12s]", got)
+		}
+	}
+}
