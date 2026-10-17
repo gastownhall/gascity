@@ -6,6 +6,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/suspensionstate"
 )
 
 // The LEG-SET half of reader agreement.
@@ -368,5 +370,69 @@ func TestAssignedWorkCensusKeepsTheLedgerLegUnderTheDescriptor(t *testing.T) {
 	// narrows nothing.
 	if runtime := e.runtimeDemandLegs(t); len(runtime) >= len(census) {
 		t.Fatalf("routed demand reads %d legs and the census %d; the two planes are not distinguishable here", len(runtime), len(census))
+	}
+}
+
+// TestDemandAndClaimAgreeOnTheSuspensionFrame is the suspension row this
+// property was missing (ga-028k7): its other fixtures pass no suspension, so
+// they could not see that the census framed out a suspended rig while the
+// claim reader still opened and served it. With one rig suspended the two
+// readers must still read the same legs in the same order, and that set must
+// be every SERVING store — the suspended rig's in neither, the city store and
+// the binding in both.
+func TestDemandAndClaimAgreeOnTheSuspensionFrame(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		split bool
+	}{
+		{name: "T0-single-store-with-rigs", split: false},
+		{name: "T2-whole-split-with-rigs", split: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newLegAgreementEnv(t, tc.split, "alpha", "bravo", "charlie")
+			suspended := true
+			if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, e.cityPath, "bravo", &suspended); err != nil {
+				t.Fatalf("suspending bravo: %v", err)
+			}
+
+			candidates, err := censusStoreCandidates(e.cityPath, e.cfg, e.leading(), e.rigs, buildSuspendedRigPathsForCity(e.cfg, e.cityPath), censusRefBare)
+			if err != nil {
+				t.Fatalf("censusStoreCandidates: %v", err)
+			}
+			demand := make([]beads.Store, 0, len(candidates))
+			for _, c := range candidates {
+				demand = append(demand, c.store)
+			}
+
+			serving, err := readyServingRigs(e.cfg, e.cityPath)
+			if err != nil {
+				t.Fatalf("readyServingRigs: %v", err)
+			}
+			claimRigs := make(map[string]beads.Store, len(serving))
+			for _, rig := range serving {
+				claimRigs[rig.Name] = e.rigs[rig.Name]
+			}
+			legs, err := readyFederationLegsOverBinding(e.cityName, e.work, claimRigs, e.binding)
+			if err != nil {
+				t.Fatalf("readyFederationLegsOverBinding: %v", err)
+			}
+			claim := make([]beads.Store, 0, len(legs))
+			for _, l := range legs {
+				claim = append(claim, l.store)
+			}
+
+			if !sameStoreSequence(demand, claim) {
+				t.Fatalf("with bravo suspended, demand reads %d legs and the claim reader %d, or they disagree about the order: a row in a leg only one side reads is counted-but-unclaimable or claimable-but-uncounted", len(demand), len(claim))
+			}
+			var want []beads.Store
+			for _, store := range e.allLegs() {
+				if store != e.rigs["bravo"] {
+					want = append(want, store)
+				}
+			}
+			if !sameStoreSequence(claim, want) {
+				t.Fatalf("the agreed frame has %d legs, want the %d serving stores: the suspended rig in neither reader, the city store and the binding in both", len(claim), len(want))
+			}
+		})
 	}
 }

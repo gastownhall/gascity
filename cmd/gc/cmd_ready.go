@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"slices"
@@ -218,7 +219,13 @@ store answered first.
 
 Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
---include-ephemeral is passed.`,
+--include-ephemeral is passed.
+
+Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
+suspended_on_start and not resumed. Their agents claim nothing and the
+controller counts no demand in them, so this reads the same rigs the controller
+does; their work comes back when the rig is resumed. The city store and a
+relocated graph store are always read.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdReady(opts, stdout, stderr) != 0 {
@@ -263,44 +270,102 @@ func registerReadyFlags(cmd *cobra.Command, opts *readyOpts, includeEphemeral, j
 }
 
 func cmdReady(opts readyOpts, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation. Every store open
+	// below resolves its own inputs — the pinned bd, the storage binding env —
+	// and each of those composed the city config again, once per rig: 22 loads
+	// for one `gc ready` on a six-rig bd-backed city. They are all answering for
+	// the config this command is about to load, so the memo serves them from it
+	// (see invocationConfigMemo for what callers may and may not touch).
+	defer beginInvocationConfigMemo()()
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cfg, err := loadCityConfig(cityPath, stderr)
+	// Under `gc hook` a split city's work query runs inside one ready session,
+	// which already holds this city's opened legs (ready_session.go).
+	if code, served := readyThroughSession(cityPath, opts, stdout, stderr); served {
+		return code
+	}
+	// One answer, then the process exits, which releases the stores it opened.
+	legs, _, err := openReadyLegs(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	rigStores, err := readyRigLegStores(cfg, cityPath)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	legs, err := readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
-	if err != nil {
-		// A refused city: the plan carries the refusal that names the remedy, and
-		// a work-only answer here is a short array indistinguishable from "no
-		// work" for every work query this reader backs.
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	items, err := readyBeadsForOpts(legs, opts)
-	if err != nil {
-		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
-		return 1
-	}
-	if err := writeJSON(stdout, items); err != nil {
+	if err := writeReadyAnswer(stdout, legs, opts); err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	return 0
+}
+
+// openReadyLegs loads the city's config and opens every leg `gc ready`
+// federates: the city store, the serving rigs' stores and the relocated
+// binding. It is the whole cost of a `gc ready` before its first read, and a
+// ready session pays it once for every question its work query asks.
+//
+// owned is what this call opened, and is the caller's to close: the city store
+// and every serving rig's store, a rig keyed under the city's name included,
+// though it is left out of the legs (rigLegsExcludingCityName). It is not every
+// leg's store: the relocated binding's leg is borrowed from the process-lived
+// cliStorageRoutes memo, which owns that store and closes it at exit
+// (closeCLIStorageRoutes), and borrowers close what they opened, not what they
+// hold. An error return leaves nothing open.
+//
+// residency:allow — owned is a close list, not a residency answer: the handles
+// this call opened, returned so the caller can release them. No read goes
+// through it; every read takes the legs readyFederationLegs plans.
+func openReadyLegs(cityPath string, stderr io.Writer) (legs []readyLeg, owned []beads.Store, err error) {
+	defer beginInvocationConfigMemo()()
+	cfg, err := loadCityConfig(cityPath, stderr)
+	if err != nil {
+		return nil, nil, err
+	}
+	cityStore, err := openCityStoreAtWithConfig(cityPath, cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	owned = []beads.Store{cityStore} // residency:allow — the close list of what this call opened; reads take the planned legs
+	rigStores, err := readyRigLegStores(cfg, cityPath)
+	if err != nil {
+		closeReadyStores(owned) //nolint:errcheck // best-effort: the failed open is the error
+		return nil, nil, err
+	}
+	for _, store := range rigStores {
+		owned = append(owned, store)
+	}
+	// A refused city fails the plan here: the plan carries the refusal that
+	// names the remedy, and a work-only answer would be a short array
+	// indistinguishable from "no work" for every work query this reader backs.
+	legs, err = readyFederationLegs(cityPath, loadedCityName(cfg, cityPath), cfg, cityStore, rigStores)
+	if err != nil {
+		closeReadyStores(owned) //nolint:errcheck // best-effort: the refusal is the error
+		return nil, nil, err
+	}
+	return legs, owned, nil
+}
+
+// closeReadyStores closes every one of stores, past any that fails to close,
+// and reports the failures together.
+func closeReadyStores(stores []beads.Store) error {
+	var errs []error
+	for _, store := range stores {
+		if err := closeBeadStoreHandle(store); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
+}
+
+// writeReadyAnswer reads the legs for opts and writes the answer: the JSON
+// array the generated work queries decode.
+func writeReadyAnswer(w io.Writer, legs []readyLeg, opts readyOpts) error {
+	items, err := readyBeadsForOpts(legs, opts)
+	if err != nil {
+		return err
+	}
+	return writeJSON(w, items)
 }
 
 // readyBeadsForOpts is the whole reader as a pure function of the legs and the

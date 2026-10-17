@@ -18,14 +18,16 @@ package main
 // CLI == API rather than an invented oracle:
 //
 //   - Legs, in order: the city store, then the rigs by name ascending, then the
-//     relocated graph store LAST.
+//     relocated graph store LAST. (Here the rigs are the SERVING rigs; see the
+//     serving-frame divergence below.)
 //   - Within a leg: whatever order that leg's own Ready reader emits. That is
 //     canonical (priority, created_at, id) for a caching-wrapped work store and
 //     for the canonical relocated binding (beads.SQLiteStore) alike.
-//   - Dedupe: the FIRST leg to return an id wins. The graph leg runs last, so a
-//     bead co-resident in the work store and the binding — the documented steady
-//     state of a migrated city, where `gc storage migrate` preserves ids and
-//     never deletes back — resolves to the work store's row on both surfaces.
+//   - Dedupe: the FIRST leg to return an id wins. The graph leg is merged last,
+//     so a bead co-resident in the work store and the binding — the documented
+//     steady state of a migrated city, where `gc storage migrate` preserves ids
+//     and never deletes back — resolves to the work store's row on both
+//     surfaces.
 //
 // # Where this deliberately diverges: no partial tier
 //
@@ -57,6 +59,26 @@ package main
 // API. Promoting it to an error is a defensible product decision, but it is a
 // behavior change that has to land on BOTH surfaces at once.
 //
+// # Where this deliberately diverges: the serving frame
+//
+// The rig legs are the SERVING rigs only — the frame the controller's census
+// reads (servingRigStores) — so a suspended rig is neither opened nor read. The
+// API still federates every rig its controller holds open, suspended ones
+// included (ga-h07n0z). Here the census side of reader agreement wins: a row in
+// a suspended rig is one no demand counts and no agent of that rig may claim,
+// so serving it made the claim reader and the census disagree (ga-028k7), and
+// opening the rig woke the Dolt the controller had retired for it, on every
+// claim. See readyServingRigs for why nothing routed is stranded by it.
+//
+// # Legs are opened and read concurrently, and merged by position
+//
+// The serving rigs are opened at most readyLegFanOut at a time, then the legs
+// read at most readyLegFanOut at a time (readLegsConcurrently). Neither changes
+// an answer: every result is kept at its leg's index and merged in leg order,
+// so first-leg-wins dedupe, the merged order, and which failing leg an error
+// names are exactly what a leg-after-leg reader produced. What changes is the
+// cost: a federated read waits for its slowest leg instead of the sum of them.
+//
 // # Every leg answers the SAME question
 //
 // The legs are not wrapped alike. A work store sits behind cmd/gc's bead-policy
@@ -84,9 +106,11 @@ package main
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
 
@@ -210,8 +234,26 @@ func readyLegLabel(ref storeref.StoreRef) string {
 	}
 }
 
-// readyRigLegStores opens the rig legs, failing the whole query when any BOUND
-// rig's store cannot be opened.
+// readyLegFanOut bounds how many legs `gc ready` opens at once, and then how
+// many it reads at once.
+//
+// Both phases are latency-bound, not CPU-bound: a rig open is a `bd context`
+// subprocess plus a round of schema probes against its server, and a leg read
+// is one query. A walk that does them one after another makes every work-query
+// tier pay their SUM; on maintainer-city that was six rig opens at ~1.75s each
+// before the first read, on every one of the five-to-eight `gc ready` calls a
+// fresh seat's claim makes. The bound keeps a many-rig city from opening a
+// connection storm against one Dolt server: legs past it wait for a slot.
+const readyLegFanOut = 8
+
+// readyRigStoreOpener builds the opener `gc ready` opens each serving rig's
+// store with: the one-shot opener over the config this invocation loaded. A
+// variable so tests can see which rig stores a read opens, and how often.
+var readyRigStoreOpener = oneShotRigStoreOpener
+
+// readyRigLegStores opens the rig legs of the serving frame (readyServingRigs),
+// at most readyLegFanOut at once, failing the whole query when any of those
+// rigs' stores cannot be opened.
 //
 // This is the OPEN end of the fail-loud rule federateBeadLegs applies at the read
 // end, and the two are the same rule for the same reason: a leg missing from the
@@ -221,19 +263,84 @@ func readyLegLabel(ref storeref.StoreRef) string {
 // process whose job is to keep supervising the rigs that are up. Wiring `gc
 // ready` to that policy is what let a dead rig produce exit 0 and a short array.
 //
-// Every dead rig is named, not just the first: unlike a read, the opens have all
-// already happened by here, so reporting one and discarding the rest would throw
-// away diagnosis already paid for.
+// Every dead rig is named, in config order, not just the first: unlike a read,
+// the opens have all already happened by here, so reporting one and discarding
+// the rest would throw away diagnosis already paid for. The stores that did
+// open are closed, since a failed query hands back none of them.
+//
+// A suspended rig is not in the frame, so it is never opened and its store
+// being down cannot fail the query; see readyServingRigs.
 func readyRigLegStores(cfg *config.City, cityPath string) (map[string]beads.Store, error) {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
+	rigs, err := readyServingRigs(cfg, cityPath)
+	if err != nil {
+		return nil, err
+	}
+	stores, failures := openStandaloneRigStores(rigs, cityPath, readyRigStoreOpener(cfg), readyLegFanOut)
 	if len(failures) == 0 {
 		return stores, nil
+	}
+	for _, store := range stores {
+		closeBeadStoreHandle(store) //nolint:errcheck // best-effort: the failed opens are the error
 	}
 	errs := make([]error, 0, len(failures))
 	for _, f := range failures {
 		errs = append(errs, fmt.Errorf("rig %q store: %w", f.rig, f.err))
 	}
 	return nil, errors.Join(errs...)
+}
+
+// readyServingRigs is the rig half of the frame `gc ready` federates: the
+// configured rigs that are not suspended, in config order. Over a readable
+// suspension state it is the frame the controller's census reads
+// (servingRigStores), by the same rule — suspendedRigPathsWithState over the
+// effective suspension state, the runtime `gc rig suspend` / `gc rig resume`
+// override layered on suspended_on_start — so the reader a seat claims through
+// and the census that minted the seat agree about which rigs exist
+// (TestReadyServingFrameIsTheCensusFrame). Over an unreadable one they part:
+// the census's loader (buildSuspendedRigPathsForCity) drops the error and
+// falls back to the authored defaults, where this fails the query (below).
+//
+// # Why a suspended rig is outside the frame
+//
+// Suspension is quiescence (beads_quiescence.go): a suspended rig's agents are
+// not started and `gc hook` refuses them, the controller counts no demand in
+// its store and stops the Dolt it owns, and every periodic reader — rig
+// caches, demand, order tracking, the convoy check, /status — skips it. So no
+// seat is ever minted for a row in it, and the rows a running seat would see
+// there are routed to agents that cannot run. Reading it anyway made every
+// claim and every scale_check probe pay for its open, and woke a retired
+// scope's proxy and Dolt on each of them.
+//
+// Nothing routed is stranded by the skip. The city store and every relocated
+// binding are not rigs and are always read, so routed graph work — every
+// rig's steps, a suspended rig's included — stays visible. What a suspended
+// rig's own store holds is paused with it and comes back on `gc rig resume`
+// (TestReadyServesNoWorkFromASuspendedRigUntilItResumes): the same work the
+// census already leaves alone, which the reader now leaves alone too.
+//
+// # An unreadable suspension state fails the query
+//
+// Guessing the frame is wrong in both directions: reading every rig wakes the
+// suspended ones, and falling back to the authored suspended_on_start defaults
+// drops a rig resumed at runtime from an array that has nowhere to say it is
+// short. `gc hook` refuses on the same file for the same reason.
+func readyServingRigs(cfg *config.City, cityPath string) ([]config.Rig, error) {
+	if cfg == nil || len(cfg.Rigs) == 0 {
+		return nil, nil
+	}
+	st, err := loadSuspensionState(fsys.OSFS{}, cityPath)
+	if err != nil {
+		return nil, fmt.Errorf("reading the rig suspension state: %w", err)
+	}
+	suspended := suspendedRigPathsWithState(cfg, st)
+	serving := make([]config.Rig, 0, len(cfg.Rigs))
+	for _, rig := range cfg.Rigs {
+		if suspended[filepath.Clean(rig.Path)] {
+			continue
+		}
+		serving = append(serving, rig)
+	}
+	return serving, nil
 }
 
 // relocatedGraphLegFrom is the identity gate over an already-resolved binding:
@@ -294,28 +401,32 @@ func federateListBeads(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, error)
 // carry a map it discards. The merge rule is the same one federateBeadLegs
 // applies — first leg to return an id wins — restated here rather than shared,
 // because sharing it would mean threading a per-leg callback through the read
-// closure that federateBeadLegs deliberately keeps store-shaped.
+// closure that federateBeadLegs deliberately keeps store-shaped. The reads
+// themselves do share readLegsConcurrently, which has no such shape to keep.
 func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bead, map[string]readyLeg, error) {
+	results := readLegsConcurrently(legs, func(store beads.Store) ([]beads.Bead, error) {
+		return store.List(q)
+	})
+	if err := firstLegError(legs, results); err != nil {
+		return nil, nil, err
+	}
 	var merged []beads.Bead
 	owner := make(map[string]readyLeg)
-	for _, leg := range legs {
-		rows, err := leg.store.List(q)
-		if err != nil {
-			return nil, nil, fmt.Errorf("%s store: %w", leg.label, err)
-		}
-		for _, b := range rows {
+	for i, res := range results {
+		for _, b := range res.rows {
 			if _, seen := owner[b.ID]; seen {
 				continue
 			}
-			owner[b.ID] = leg
+			owner[b.ID] = legs[i]
 			merged = append(merged, b)
 		}
 	}
 	return merged, owner, nil
 }
 
-// federateBeadLegs runs read against every leg in order and merges the results,
-// deduped by id with the FIRST leg to return an id winning.
+// federateBeadLegs runs read against every leg, at most readyLegFanOut at once,
+// and merges the results deduped by id with the FIRST leg to return an id
+// winning — first by POSITION in legs, not by which read finished first.
 //
 // Any leg error — including a partial read, which beads reports as an error
 // carrying rows — aborts the whole federation, ESCALATING the plan's
@@ -323,14 +434,14 @@ func federateListBeadsWithOwner(legs []readyLeg, q beads.ListQuery) ([]beads.Bea
 // nowhere to say "this is short", so a degraded leg here would be served as a
 // short array indistinguishable from "no work".
 func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) ([]beads.Bead, error) {
+	results := readLegsConcurrently(legs, read)
+	if err := firstLegError(legs, results); err != nil {
+		return nil, err
+	}
 	var merged []beads.Bead
 	seen := make(map[string]bool)
-	for _, leg := range legs {
-		rows, err := read(leg.store)
-		if err != nil {
-			return nil, fmt.Errorf("%s store: %w", leg.label, err)
-		}
-		for _, b := range rows {
+	for _, res := range results {
+		for _, b := range res.rows {
 			if seen[b.ID] {
 				continue
 			}
@@ -339,4 +450,42 @@ func federateBeadLegs(legs []readyLeg, read func(beads.Store) ([]beads.Bead, err
 		}
 	}
 	return merged, nil
+}
+
+// legReadResult is one leg's read, kept at that leg's index so every merge is
+// ordered by leg position whatever order the reads finished in.
+type legReadResult struct {
+	rows []beads.Bead
+	err  error
+}
+
+// readLegsConcurrently runs read against every leg, at most readyLegFanOut at
+// once (boundedFanOut), and returns each leg's outcome at that leg's index.
+//
+// Every leg is a DISTINCT store — the plan dedupes legs by store identity — so
+// no two reads here share a store, and each writes only its own slot. Reads
+// against different stores are what the controller's census already does
+// concurrently. Every leg is read even when an earlier one fails: the reads
+// have no side effects, and firstLegError picks the error a sequential reader
+// would have stopped at.
+func readLegsConcurrently(legs []readyLeg, read func(beads.Store) ([]beads.Bead, error)) []legReadResult {
+	results := make([]legReadResult, len(legs))
+	boundedFanOut(len(legs), readyLegFanOut, func(i int) {
+		rows, err := read(legs[i].store)
+		results[i] = legReadResult{rows: rows, err: err}
+	})
+	return results
+}
+
+// firstLegError returns the error of the first leg, by POSITION, whose read
+// failed, labeled with that leg. First by position rather than first to fail
+// is deliberate: it is the leg a sequential reader would have hit and stopped
+// at, so the error names the same leg however the reads raced.
+func firstLegError(legs []readyLeg, results []legReadResult) error {
+	for i, res := range results {
+		if res.err != nil {
+			return fmt.Errorf("%s store: %w", legs[i].label, res.err)
+		}
+	}
+	return nil
 }

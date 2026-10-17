@@ -1,0 +1,42 @@
+# gc hook runs a split city's generated work query inside `gc internal
+# ready-session`. Every `gc ready` the query asks is answered from ONE opened
+# set of stores, and every answer is exactly what `gc ready` prints alone.
+
+[!linux] skip 'ready sessions need abstract unix sockets'
+
+env GC_SESSION=fake
+env GC_BEADS=file
+env GC_DOLT=skip
+
+exec gc init $WORK/city
+mkdir $WORK/city/rigs/alpha
+mkdir $WORK/city/rigs/beta
+cd $WORK/city/rigs/alpha
+exec gc rig add .
+cd $WORK/city/rigs/beta
+exec gc rig add .
+
+cd $WORK/city
+exec bd create 'city work'
+cd $WORK/city/rigs/alpha
+exec bd create 'alpha work'
+cd $WORK/city
+
+# The answers gc ready gives on its own.
+exec gc ready --json
+cp stdout want-ready.json
+exec gc ready --status open --json
+cp stdout want-open.json
+
+# The same questions, asked by a work query inside one session: the session
+# opens the stores once and answers all three.
+env GC_DEBUG=1
+exec gc internal ready-session -- sh -c 'gc ready --json > got-ready.json && gc ready --status open --json > got-open.json && gc ready --json --limit 1 > got-limit.json'
+stderr -count=1 'gc ready session: opened [0-9]+ legs'
+stderr -count=3 'answered by the work query.s ready session'
+cmp got-ready.json want-ready.json
+cmp got-open.json want-open.json
+grep 'city work|alpha work' got-limit.json
+
+# The query's own exit status is the wrapper's.
+! exec gc internal ready-session -- sh -c 'exit 7'

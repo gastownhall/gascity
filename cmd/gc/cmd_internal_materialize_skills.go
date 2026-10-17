@@ -27,6 +27,7 @@ func newInternalCmd(stdout, stderr io.Writer) *cobra.Command {
 	cmd.AddCommand(newInternalMaterializeSkillsCmd(stdout, stderr))
 	cmd.AddCommand(newInternalProjectMCPCmd(stdout, stderr))
 	cmd.AddCommand(newInternalBeadsCredentialCmd(stdout, stderr))
+	cmd.AddCommand(newInternalReadySessionCmd(stdout, stderr))
 	return cmd
 }
 

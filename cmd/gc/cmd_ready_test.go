@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -1150,8 +1151,12 @@ func TestGcReadySteerDescribesTheFlagsItActuallyAccepts(t *testing.T) {
 // never stated one. The work legs' bead-policy layer then rewrote the zero value
 // to TierBoth and the unwrapped class leg took it literally, so the merged answer
 // was two different questions and nothing on any path could say so.
+//
+// The legs share one recorder and are read concurrently, so every append holds
+// the recorder's lock.
 type readyTierRecordingStore struct {
 	beads.Store
+	mu         *sync.Mutex
 	readyTiers *[]beads.TierMode
 	listTiers  *[]beads.TierMode
 }
@@ -1161,12 +1166,16 @@ func (s readyTierRecordingStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead,
 	if len(query) > 0 {
 		q = query[0]
 	}
+	s.mu.Lock()
 	*s.readyTiers = append(*s.readyTiers, q.TierMode)
+	s.mu.Unlock()
 	return s.Store.Ready(query...)
 }
 
 func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	s.mu.Lock()
 	*s.listTiers = append(*s.listTiers, query.TierMode)
+	s.mu.Unlock()
 	return s.Store.List(query)
 }
 
@@ -1181,15 +1190,16 @@ func (s readyTierRecordingStore) List(query beads.ListQuery) ([]beads.Bead, erro
 // rewrite. Both arms are covered, because they build different query types.
 func TestReadyStatesTheSameTierOnEveryLeg(t *testing.T) {
 	var readyTiers, listTiers []beads.TierMode
+	var recorded sync.Mutex
 	legs := []readyLeg{
 		readyTestLeg("city", readyTierRecordingStore{
-			Store: splittest.NewWorkStore(t, "gc"), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewWorkStore(t, "gc"), mu: &recorded, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 		readyTestLeg("rig frontend", readyTierRecordingStore{
-			Store: splittest.NewWorkStore(t, "ra"), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewWorkStore(t, "ra"), mu: &recorded, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 		readyTestLeg("graph", readyTierRecordingStore{
-			Store: splittest.NewClassStore(t, config.BeadClassGraph), readyTiers: &readyTiers, listTiers: &listTiers,
+			Store: splittest.NewClassStore(t, config.BeadClassGraph), mu: &recorded, readyTiers: &readyTiers, listTiers: &listTiers,
 		}),
 	}
 

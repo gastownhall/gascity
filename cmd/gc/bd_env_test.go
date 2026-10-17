@@ -5722,6 +5722,108 @@ func TestMirrorBeadsDoltScopeEnvReadsAmbientTLSViaNativeOpenGuard(t *testing.T) 
 	}
 }
 
+// stubAmbientNativeDoltOpenEnv replaces the guarded ambient reader with one that
+// answers from ambient, the restored ambient environment. Paired with t.Setenv
+// of a different value, standing in for the transient projection a concurrent
+// scope's native open holds in the process env, it shows which read an env build
+// took: a bare os.Getenv sees the projection, the guarded read sees ambient.
+func stubAmbientNativeDoltOpenEnv(t *testing.T, ambient map[string]string) {
+	t.Helper()
+	orig := ambientNativeDoltOpenEnv
+	ambientNativeDoltOpenEnv = func(key string) string { return ambient[key] }
+	t.Cleanup(func() { ambientNativeDoltOpenEnv = orig })
+}
+
+// TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard pins that every
+// ambient BEADS_* fallback on the scope env-build path reads through the
+// native-open env guard. gc ready opens its rig stores concurrently, and a
+// native open projects its scope's socket, credential command and credentials
+// file into the process env under nativeDoltOpenEnvMu for the whole library
+// open. A bare os.Getenv in a second scope's concurrent env build would adopt
+// the first scope's endpoint or credentials. Each case holds another scope's
+// projection in the process env and asserts the build carries this scope's own
+// ambient value, or nothing when there is none.
+func TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard(t *testing.T) {
+	const (
+		otherSocket    = "/run/other-rig/dolt.sock"
+		operatorSocket = "/run/operator/dolt.sock"
+		otherHelper    = "/run/other-rig/credential-helper"
+		operatorHelper = "/opt/operator/credential-helper"
+	)
+	type ambientCase struct{ name, value string }
+	writeCredentials := func(t *testing.T, password string) string {
+		t.Helper()
+		path := filepath.Join(t.TempDir(), "credentials")
+		if err := os.WriteFile(path, []byte("[127.0.0.1:3307]\npassword="+password+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		return path
+	}
+	for _, ambient := range []ambientCase{{"no ambient socket", ""}, {"ambient socket", operatorSocket}} {
+		t.Run("external override/"+ambient.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", otherSocket)
+			t.Setenv("GC_DOLT_HOST", "")
+			t.Setenv("GC_DOLT_PORT", "")
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_SERVER_SOCKET": ambient.value})
+			target, ok := externalDoltEnvOverrideTarget()
+			if ok != (ambient.value != "") || target.Socket != ambient.value {
+				t.Fatalf("externalDoltEnvOverrideTarget() = %+v, %v; want socket %q (another scope's projected socket is not an override)", target, ok, ambient.value)
+			}
+		})
+		t.Run("pending provider endpoint/"+ambient.name, func(t *testing.T) {
+			t.Setenv("BEADS_DOLT_SERVER_SOCKET", otherSocket)
+			t.Setenv("GC_DOLT_HOST", "")
+			t.Setenv("GC_DOLT_PORT", "")
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_SERVER_SOCKET": ambient.value})
+			env := map[string]string{}
+			applyPendingProviderExternalEndpoint(t.TempDir(), providerScopeIntent{}, env)
+			if got := env["BEADS_DOLT_SERVER_SOCKET"]; got != ambient.value {
+				t.Fatalf("BEADS_DOLT_SERVER_SOCKET = %q, want %q (another scope's projected socket is not a retry input)", got, ambient.value)
+			}
+		})
+	}
+	for _, ambient := range []ambientCase{{"no ambient helper", ""}, {"ambient helper", operatorHelper}} {
+		t.Run("credential command/"+ambient.name, func(t *testing.T) {
+			t.Setenv("GC_DOLT_CRED_CMD", "")
+			t.Setenv("BEADS_DOLT_CREDENTIAL_COMMAND", otherHelper)
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_DOLT_CREDENTIAL_COMMAND": ambient.value})
+			hostedEnv := map[string]string{}
+			if err := applyHostedBeadsCredentialEnv(hostedEnv, t.TempDir()); err != nil {
+				t.Fatal(err)
+			}
+			mirroredEnv := map[string]string{}
+			mirrorBeadsDoltServerEnv(mirroredEnv, false)
+			for name, env := range map[string]map[string]string{"applyHostedBeadsCredentialEnv": hostedEnv, "mirrorBeadsDoltServerEnv": mirroredEnv} {
+				if got := env["BEADS_DOLT_CREDENTIAL_COMMAND"]; got != ambient.value {
+					t.Errorf("%s: BEADS_DOLT_CREDENTIAL_COMMAND = %q, want %q (another scope's projected helper is not this scope's)", name, got, ambient.value)
+				}
+			}
+		})
+	}
+	for _, ambient := range []ambientCase{{"no ambient credentials file", ""}, {"ambient credentials file", "operator"}} {
+		t.Run("scoped auth/"+ambient.name, func(t *testing.T) {
+			t.Setenv("HOME", t.TempDir())
+			t.Setenv("GC_DOLT_USER", "")
+			t.Setenv("GC_DOLT_PASSWORD", "")
+			t.Setenv("BEADS_DOLT_PASSWORD", "")
+			t.Setenv("BEADS_CREDENTIALS_FILE", writeCredentials(t, "other-rig-secret"))
+			ambientFile, wantPassword := "", ""
+			if ambient.value != "" {
+				ambientFile, wantPassword = writeCredentials(t, "operator-secret"), "operator-secret"
+			}
+			stubAmbientNativeDoltOpenEnv(t, map[string]string{"BEADS_CREDENTIALS_FILE": ambientFile})
+			env := map[string]string{"GC_DOLT_HOST": "127.0.0.1", "GC_DOLT_PORT": "3307"}
+			applyResolvedDoltAuthEnv(env, t.TempDir(), "root")
+			if got := env["BEADS_CREDENTIALS_FILE"]; got != ambientFile {
+				t.Errorf("BEADS_CREDENTIALS_FILE = %q, want %q", got, ambientFile)
+			}
+			if got := env["GC_DOLT_PASSWORD"]; got != wantPassword {
+				t.Errorf("GC_DOLT_PASSWORD = %q, want %q (resolved from another scope's projected credentials file)", got, wantPassword)
+			}
+		})
+	}
+}
+
 // TestBeadsDoltServerTLSIsPassthroughNotProjected documents the intentional
 // separation: BEADS_DOLT_SERVER_TLS is an ambient hosted-gateway credential
 // passthrough (preserved for gc-spawned bd via preserveHostedBeadsCredentialEnv),

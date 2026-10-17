@@ -4822,9 +4822,9 @@ type rigStoreOpenFailure struct {
 	err error
 }
 
-// openStandaloneRigStores opens the work store of every BOUND rig in cfg,
-// returning them keyed by rig name plus the rigs that failed to open, in cfg
-// order.
+// openStandaloneRigStores opens the work store of every BOUND rig in rigs,
+// returning them keyed by rig name plus the rigs that failed to open, in the
+// order rigs lists them.
 //
 // It deliberately does NOT decide what a failure means, because the two callers
 // disagree and both are right. The controller (buildStandaloneRigStores) warns
@@ -4833,14 +4833,21 @@ type rigStoreOpenFailure struct {
 // operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
 // query: its entire output is a JSON array with nowhere to say it is short.
 //
-// open is how each rig store is opened; see rigStoreOpener.
-func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpener) (map[string]beads.Store, []rigStoreOpenFailure) {
-	if cfg == nil || len(cfg.Rigs) == 0 {
-		return nil, nil
-	}
-	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	var failures []rigStoreOpenFailure
-	for _, rig := range cfg.Rigs {
+// Nor does it decide WHICH rigs to open: the caller hands it the rig list. The
+// controller hands it every configured rig; `gc ready` hands it only the
+// serving frame (readyServingRigs).
+//
+// open is how each rig store is opened; see rigStoreOpener. At most parallelism
+// opens run at once (boundedFanOut): each open is a preflight subprocess and a
+// round of schema probes, so a walk that opens rigs one after another makes its
+// caller wait for the sum of them. A parallelism of 1 is that walk, unchanged —
+// in order, on the caller's goroutine — which is what every caller except `gc
+// ready` keeps (sequentialRigStoreOpens). Results land in per-rig slots and are
+// assembled in rig order, so neither the map nor the failure list depends on
+// which open finished first.
+func openStandaloneRigStores(rigs []config.Rig, cityPath string, open rigStoreOpener, parallelism int) (map[string]beads.Store, []rigStoreOpenFailure) {
+	bound := make([]config.Rig, 0, len(rigs))
+	for _, rig := range rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
 		// openStoreAtForCity would silently fall back to the city
@@ -4849,17 +4856,44 @@ func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpe
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := open(rig.Path, cityPath)
-		if err != nil {
-			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
+		bound = append(bound, rig)
+	}
+	if len(bound) == 0 {
+		return nil, nil
+	}
+	opened := make([]beads.Store, len(bound))
+	openErrs := make([]error, len(bound))
+	boundedFanOut(len(bound), parallelism, func(i int) {
+		opened[i], openErrs[i] = open(bound[i].Path, cityPath)
+	})
+	stores := make(map[string]beads.Store, len(bound))
+	var failures []rigStoreOpenFailure
+	for i, rig := range bound {
+		if openErrs[i] != nil {
+			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: openErrs[i]})
 			continue
 		}
-		stores[rig.Name] = store
+		stores[rig.Name] = opened[i]
 	}
 	if len(stores) == 0 {
 		return nil, failures
 	}
 	return stores, failures
+}
+
+// sequentialRigStoreOpens is the parallelism every rig-store walk but `gc
+// ready`'s keeps: one open at a time, in config order, on the caller's
+// goroutine. The controller's opens run on its reload path under
+// CityRuntime.safeTick, and none of the other one-shot callers is on a claim's
+// critical path.
+const sequentialRigStoreOpens = 1
+
+// cityRigs is cfg's configured rigs, or none for a nil cfg.
+func cityRigs(cfg *config.City) []config.Rig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Rigs
 }
 
 // rigStoreOpener opens the bead store of one rig of the city at cityPath.
@@ -4883,7 +4917,7 @@ func oneShotRigStoreOpener(cfg *config.City) rigStoreOpener {
 // continues past rigs it cannot open, and every open re-resolves the city
 // config from disk.
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, openStoreAtForCity)
+	stores, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, openStoreAtForCity, sequentialRigStoreOpens)
 	return reportStandaloneRigStoreFailures(stores, failures, stderr)
 }
 
@@ -4896,7 +4930,7 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 // same cfg.Rigs through the same openStandaloneRigStores enumeration and differs
 // only in the opener it hands that walk, so it adds no store-enumeration logic.
 func buildStandaloneRigStoresWithConfig(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
+	stores, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, oneShotRigStoreOpener(cfg), sequentialRigStoreOpens)
 	return reportStandaloneRigStoreFailures(stores, failures, stderr)
 }
 
