@@ -6,6 +6,7 @@ package orders
 
 import (
 	"fmt"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -107,6 +108,15 @@ type Order struct {
 	// environment. Env is supported only for exec orders; controller-
 	// owned routing and identity keys are rejected before dispatch.
 	Env map[string]string `toml:"env,omitempty"`
+	// RequiresBackend restricts the order to bead scopes whose store uses one
+	// of the named backends: "dolt", "doltlite", "postgres" or "http". Empty
+	// (the default) means the order runs on every backend. An order whose work
+	// only makes sense against a Dolt server (dolt health, backups, compaction)
+	// declares ["dolt"]; the dispatcher then never runs it for a scope on any
+	// other backend and reports it as inapplicable rather than failed. Any
+	// other value, or an empty list, fails validation. An older gc that does
+	// not know the key ignores it and keeps dispatching the order.
+	RequiresBackend []string `toml:"requires_backend,omitempty"`
 	// Params declares the named arguments this order accepts through the
 	// dispatch args channel (webhook rules and `gc order run --var`). A param
 	// marked required must be present in the dispatch vars or the order refuses
@@ -160,6 +170,7 @@ type orderDecode struct {
 	ReservedDispatch bool                  `toml:"reserved_dispatch,omitempty"`
 	Env              map[string]string     `toml:"env,omitempty"`
 	Params           map[string]OrderParam `toml:"params,omitempty"`
+	RequiresBackend  []string              `toml:"requires_backend,omitempty"`
 	SkipAliases      []string              `toml:"skip_aliases,omitempty"`
 }
 
@@ -188,6 +199,7 @@ func (d orderDecode) normalized() Order {
 		ReservedDispatch: d.ReservedDispatch,
 		Env:              d.Env,
 		Params:           d.Params,
+		RequiresBackend:  d.RequiresBackend,
 		skipAliases:      d.SkipAliases,
 	}
 }
@@ -216,6 +228,22 @@ func (a *Order) IsExec() bool {
 // pack. The default (empty Scope) is rig-scoped.
 func (a *Order) IsCityScoped() bool {
 	return a.Scope == "city"
+}
+
+// RequiresBackendValues returns the backend names requires_backend accepts,
+// in documentation order.
+func RequiresBackendValues() []string {
+	return []string{"dolt", "doltlite", "postgres", "http"}
+}
+
+// AppliesToBackend reports whether the order may run for a bead scope whose
+// store uses backend. An order that declares no requires_backend applies to
+// every backend; one that does applies only to the backends it names.
+func (a *Order) AppliesToBackend(backend string) bool {
+	if a.RequiresBackend == nil {
+		return true
+	}
+	return slices.Contains(a.RequiresBackend, backend)
 }
 
 // TimeoutOrDefault returns the order's configured timeout, or the
@@ -260,6 +288,25 @@ func Parse(data []byte) (Order, error) {
 	return af.Order.normalized(), nil
 }
 
+// validateRequiresBackend rejects a requires_backend list that is empty or
+// names anything but a known backend. A misspelled backend would otherwise make
+// the order silently inapplicable everywhere.
+func validateRequiresBackend(a Order) error {
+	if a.RequiresBackend == nil {
+		return nil
+	}
+	if len(a.RequiresBackend) == 0 {
+		return fmt.Errorf("order %q: requires_backend must name at least one backend (want any of %s), or be omitted", a.Name, strings.Join(RequiresBackendValues(), ", "))
+	}
+	known := RequiresBackendValues()
+	for _, backend := range a.RequiresBackend {
+		if !slices.Contains(known, backend) {
+			return fmt.Errorf("order %q: unknown requires_backend %q (want any of %s)", a.Name, backend, strings.Join(known, ", "))
+		}
+	}
+	return nil
+}
+
 // Validate checks an Order for structural correctness based on its trigger type.
 func Validate(a Order) error {
 	// formula XOR exec — exactly one required.
@@ -288,6 +335,9 @@ func Validate(a Order) error {
 		if strings.TrimSpace(name) == "" {
 			return fmt.Errorf("order %q: param name is required", a.Name)
 		}
+	}
+	if err := validateRequiresBackend(a); err != nil {
+		return err
 	}
 	// Scope, if set, must be a known value. Empty defaults to rig-scoped.
 	switch a.Scope {

@@ -122,6 +122,7 @@ go_test(
         "pull_remote_selection_test.go",
         "pull_test.go",
         "recover_host_test.go",
+        "requires_backend_test.go",
         "restart_test.go",
         "runtime_bounded_test.go",
         "sql_test.go",

@@ -58,6 +58,7 @@ go_test(
         "amp_reader_test.go",
         "antigravity_reader_test.go",
         "auggie_reader_test.go",
+        "claude_project_slug_test.go",
         "codex_batch_test.go",
         "codex_reader_test.go",
         "codex_usage_test.go",
