@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "cutover.go",
         "exec.go",
+        "fence.go",
         "handshake.go",
         "idle.go",
         "json.go",
@@ -26,6 +27,8 @@ go_test(
         "capacity_test.go",
         "cutover_test.go",
         "exec_connection_test.go",
+        "exec_fence_integration_test.go",
+        "exec_fence_test.go",
         "exec_reuse_test.go",
         "exec_test.go",
         "handshake_test.go",

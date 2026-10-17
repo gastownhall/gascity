@@ -232,6 +232,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
+	p.publishInputFence(ctx, name, cfg)
 	p.publishReadyPrompt(ctx, name, cfg)
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {
@@ -329,6 +330,10 @@ func (p *Provider) launchAgent(ctx context.Context, name string, cfg runtime.Con
 	} else {
 		argv = []string{"tmux", "new-session", "-d", "-s", execTmuxSession, command}
 	}
+	// The agent pane's fence changes in the same tmux command list that
+	// launches the agent, so no input fenced for another incarnation is
+	// let through between them.
+	argv = append(argv, p.launchFenceArgs(name, cfg)...)
 	if _, code, err := p.Exec(ctx, name, argv); err != nil {
 		return fmt.Errorf("exec provider: launching agent in %q: %w", name, err)
 	} else if code != 0 {
@@ -584,15 +589,25 @@ func formatStartupWatchError(stderr string, err error) error {
 // gated, and the rare mid-session re-surface (resume/reattach) never
 // auto-trusts an unverified import.
 //
-// exec cannot fence input, so a ctx-fenced call is refused before any peek
-// or key (runtime.RefuseUnfenceableCtx).
+// Under a ctx input fence, a pack that cannot fence refuses before any peek
+// or key (runtime.RefuseUnfenceableCtx); one that can proves the fence
+// before the first peek and sends every dialog key through the carrier
+// guard.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	if err := runtime.RefuseUnfenceableCtx(ctx, p, name); err != nil {
 		return err
 	}
+	sendKeys := func(keys ...string) error { return p.SendKeys(name, keys...) }
+	if f, ok := runtime.InputFenceFrom(ctx); ok {
+		// No keys: the fence read alone.
+		if err := p.SendKeysFenced(ctx, name, f); err != nil {
+			return err
+		}
+		sendKeys = func(keys ...string) error { return p.SendKeysFenced(ctx, name, f, keys...) }
+	}
 	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
-		func(keys ...string) error { return p.SendKeys(name, keys...) },
+		sendKeys,
 	)
 }
 

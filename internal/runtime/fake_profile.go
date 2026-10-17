@@ -90,7 +90,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
-		return execProfile{core, b, b, b, b, timed, probeBudgetTrait{}}
+		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
@@ -105,7 +105,7 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
-	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
@@ -127,8 +127,9 @@ func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
 
 // profileCapabilities are each backend's static capabilities; subprocess
-// has none. exec's come from its script's handshake, so its profile has
-// none, as an exec provider has before one.
+// has none. exec's come from its script's handshake: the profile is a pack
+// declaring the exec connection (proc.exec) alone, which reports none of
+// these and fences input atomically through the tmux carrier.
 var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileTmux:     {CanReportAttachment: true, CanReportActivity: true},
 	ProfileACP:      {CanReportActivity: true},
@@ -224,6 +225,7 @@ type (
 		Provider
 		AttachmentObserverWithError
 		DialogProvider
+		FencedInputProvider
 		IdleWaitProvider
 		RelaunchProvider
 		sleepTrait
