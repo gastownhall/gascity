@@ -10,6 +10,7 @@ import (
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/materialize"
 )
 
 func writeMCPSource(t *testing.T, path string, body string) {
@@ -492,5 +493,68 @@ url = "http://localhost:3100/mcp/kb"
 	}
 	if got := targets[0].Agents; len(got) != 1 || got[0] != "claude" {
 		t.Fatalf("target agents = %+v, want [claude]", got)
+	}
+}
+
+func TestBuildStage1MCPTargetsAntigravityAllowsEmptyAndMatchingPeers(t *testing.T) {
+	cityPath := t.TempDir()
+	homeDir := t.TempDir()
+	restoreHome := materialize.SetUserHomeDirForTest(func() (string, error) { return homeDir, nil })
+	defer restoreHome()
+
+	mcpFile := filepath.Join(cityPath, "mcp", "notes.toml")
+	writeMCPSource(t, mcpFile, `
+name = "notes"
+command = "uvx"
+args = ["notes-mcp"]
+`)
+
+	cfg := &config.City{
+		Workspace:  config.Workspace{Provider: "antigravity"},
+		Providers:  builtinProviderAliasesForTest("antigravity"),
+		Session:    config.SessionConfig{Provider: "tmux"},
+		PackMCPDir: filepath.Join(cityPath, "mcp"),
+		Agents: []config.Agent{
+			{Name: "mayor", Scope: "city", Provider: "antigravity"},
+			{Name: "devops", Scope: "city", Provider: "antigravity"},
+			{Name: "worker", Scope: "city", Provider: "antigravity"},
+		},
+	}
+
+	targets, err := buildStage1MCPTargets(cityPath, cfg, stubLookPath, io.Discard)
+	if err != nil {
+		t.Fatalf("buildStage1MCPTargets: %v", err)
+	}
+	if len(targets) != 1 {
+		t.Fatalf("stage1 targets len = %d, want 1: %+v", len(targets), targets)
+	}
+	target := targets[0]
+	if target.Projection.Provider != "antigravity" {
+		t.Fatalf("projection provider = %q, want antigravity", target.Projection.Provider)
+	}
+	wantTarget := filepath.Join(homeDir, ".gemini", "config", "mcp_config.json")
+	if target.Projection.Target != wantTarget {
+		t.Fatalf("target = %q, want %q", target.Projection.Target, wantTarget)
+	}
+
+	var stderr bytes.Buffer
+	if err := runStage1MCPProjection(cityPath, cfg, stubLookPath, &stderr); err != nil {
+		t.Fatalf("runStage1MCPProjection: %v", err)
+	}
+
+	data, err := os.ReadFile(wantTarget)
+	if err != nil {
+		t.Fatalf("ReadFile(%s): %v", wantTarget, err)
+	}
+	var doc map[string]any
+	if err := json.Unmarshal(data, &doc); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	mcpServers, ok := doc["mcpServers"].(map[string]any)
+	if !ok {
+		t.Fatalf("mcpServers missing: %+v", doc)
+	}
+	if _, ok := mcpServers["notes"]; !ok {
+		t.Fatalf("notes server missing: %+v", mcpServers)
 	}
 }
