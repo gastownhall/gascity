@@ -93,8 +93,9 @@ func (p *Provider) requireLiveSession(name string, thread map[string]interface{}
 
 // refence is the check a fenced dispatch to threadID passes before each
 // transient retry: a fresh read still binds name to threadID under f with a
-// live session. Its failure is ErrRuntimeUnavailable, not a miss: the failed
-// attempt may have reached T3.
+// live session. Its failure is ErrRuntimeUnavailable and never a miss, so
+// the miss it found is reported as text only: the failed attempt may have
+// reached T3.
 func (p *Provider) refence(name string, f runtime.InputFence, threadID string) func(context.Context) error {
 	return func(ctx context.Context) error {
 		thread, binding, err := p.readFencedThread(ctx, name, f)
@@ -105,7 +106,7 @@ func (p *Provider) refence(name string, f runtime.InputFence, threadID string) f
 			err = p.requireLiveSession(name, thread)
 		}
 		if err != nil {
-			return fmt.Errorf("%w: re-checking the fence of %q before a retry (an earlier attempt may have reached t3): %w", runtime.ErrRuntimeUnavailable, name, err)
+			return fmt.Errorf("%w: re-checking the fence of %q before a retry (an earlier attempt may have reached t3): %s", runtime.ErrRuntimeUnavailable, name, err.Error())
 		}
 		return nil
 	}

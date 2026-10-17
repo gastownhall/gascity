@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -239,7 +240,8 @@ func TestT3StartReuseFailsWhenTheIncarnationCannotBeRecorded(t *testing.T) {
 // Kills a fenced nudge that starts a turn on a thread whose T3 session the
 // fresh read shows stopped: T3 would relaunch a provider for an incarnation
 // that is gone, so the nudge is a miss finding it dead and dispatches
-// nothing. A legacy session status within the start grace still delivers.
+// nothing. A legacy session status (none, gone) is dead too, except within
+// the start grace, where it still delivers.
 func TestT3FencedNudgeRefusesAStoppedSession(t *testing.T) {
 	server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "stopped", t3FenceEnv(t3Fence)))
 	p := newTurnFenceTestProvider(t, server)
@@ -251,6 +253,24 @@ func TestT3FencedNudgeRefusesAStoppedSession(t *testing.T) {
 	if got := server.commandTypes(); len(got) != 0 {
 		t.Fatalf("dispatched %v to a stopped session", got)
 	}
+
+	server.setSnapshots(fencedSnapshot(t, "thread-1", "none", t3FenceEnv(t3Fence)))
+	if err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence}); !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead {
+		t.Fatalf("NudgeFenced of a legacy status outside the start grace = %v, want a miss finding it dead", err)
+	}
+	if got := server.commandTypes(); len(got) != 0 {
+		t.Fatalf("dispatched %v to a legacy status outside the start grace", got)
+	}
+	p.setRecentStart(turnFenceSession, time.Now())
+	if err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence}); err != nil {
+		t.Fatalf("NudgeFenced of a legacy status within the start grace = %v, want delivered", err)
+	}
+	if got := server.commandPayloads("thread.turn.start"); len(got) != 1 {
+		t.Fatalf("turn starts = %d within the start grace, want 1", len(got))
+	}
+	p.clearRecentStart(turnFenceSession)
+	server = newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "weird", t3FenceEnv(t3Fence)))
+	p = newTurnFenceTestProvider(t, server)
 
 	server.setSnapshots(fencedSnapshot(t, "thread-1", "weird", t3FenceEnv(t3Fence)))
 	if err := p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence}); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
@@ -303,6 +323,62 @@ func TestT3FencedNudgeRetryRechecksTheFence(t *testing.T) {
 	}
 	if got := server.commandPayloads("thread.turn.interrupt"); len(got) != 1 {
 		t.Fatalf("interrupts = %d, want the first attempt only", len(got))
+	}
+}
+
+// Kills a fenced retry whose re-check accepts a binding the first attempt
+// was not checked against: the session rebound to another thread under the
+// same fence, or the same thread whose session stopped between attempts.
+// Either way the retry is withheld and the call reports it cannot tell.
+func TestT3FencedRetryNeedsTheSameThreadAndALiveSession(t *testing.T) {
+	for label, snapshot := range map[string]func() map[string]interface{}{
+		"rebound to another thread": func() map[string]interface{} {
+			return fencedSnapshot(t, "thread-2", "ready", t3FenceEnv(t3Fence))
+		},
+		"session stopped": func() map[string]interface{} {
+			return fencedSnapshot(t, "thread-1", "stopped", t3FenceEnv(t3Fence))
+		},
+	} {
+		t.Run(label, func(t *testing.T) {
+			for op, call := range map[string]struct {
+				command string
+				run     func(*Provider) error
+			}{
+				"nudge": {"thread.turn.start", func(p *Provider) error {
+					return p.NudgeFenced(t.Context(), turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence, DeliveryKey: "k1"})
+				}},
+				"interrupt": {"thread.turn.interrupt", func(p *Provider) error {
+					return p.InterruptFenced(t.Context(), turnFenceSession, t3Fence)
+				}},
+			} {
+				server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(t3Fence)))
+				p := newTurnFenceTestProvider(t, server)
+				server.dropNextCommand()
+				server.setCommandHook(func(map[string]interface{}) { server.setSnapshots(snapshot()) })
+				err := call.run(p)
+				if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) {
+					t.Fatalf("%s = %v, want ErrRuntimeUnavailable", op, err)
+				}
+				if got := server.commandPayloads(call.command); len(got) != 1 {
+					t.Fatalf("%s: %s commands = %d, want the first attempt only", op, call.command, len(got))
+				}
+			}
+		})
+	}
+}
+
+// Kills a fenced interrupt that drops the caller's ctx: a ctx that ends
+// after the fence check sends no interrupt.
+func TestT3FencedInterruptHonorsTheCallersContext(t *testing.T) {
+	server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(t3Fence)))
+	p := newTurnFenceTestProvider(t, server)
+	ctx, cancel := context.WithCancel(t.Context())
+	p.fenceChecked = func(string) { cancel() }
+	if err := p.InterruptFenced(ctx, turnFenceSession, t3Fence); !errors.Is(err, context.Canceled) {
+		t.Fatalf("InterruptFenced with ctx canceled after the check = %v, want context.Canceled", err)
+	}
+	if got := server.commandPayloads("thread.turn.interrupt"); len(got) != 0 {
+		t.Fatalf("interrupts = %d after ctx ended, want none", len(got))
 	}
 }
 
