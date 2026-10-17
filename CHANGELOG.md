@@ -353,8 +353,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **Claude transcripts are found again for work directories with underscores,
   spaces or other punctuation.** Current Claude Code names a project
-  directory by replacing every non-alphanumeric character with `-`; Gas City
-  only replaced `/` and `.`, so history, resume-key probes and activity missed
+  directory by replacing every UTF-16 code unit outside `[A-Za-z0-9]` with
+  `-`; Gas City only replaced `/` and `.`, so history, resume-key probes and activity missed
   the transcript. Both spellings are now searched. (thanks @csells)
 
 - **The Dolt compactor docs no longer claim it only rewrites history this

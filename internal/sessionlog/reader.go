@@ -1682,9 +1682,9 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		// Current Claude versions replace every non-alphanumeric byte,
-		// underscores included. Keep the legacy spelling as a candidate for
-		// transcripts written earlier.
+		// Current Claude versions replace every UTF-16 code unit outside
+		// [A-Za-z0-9] with "-", underscores included. Keep the legacy
+		// spelling as a candidate for transcripts written earlier.
 		for _, slug := range []string{claudeSanitizedProjectSlug(path), ProjectSlug(path)} {
 			if seenSlugs[slug] {
 				continue
