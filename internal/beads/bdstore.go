@@ -3075,6 +3075,99 @@ func (s *BdStore) listByTier(query ListQuery) ([]Bead, error) {
 }
 
 func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
+	// Two or more Assignees has no single bd-list flag to carry it (--assignee
+	// takes one value): bdServerQueryForAssignees falls back to an unpredicated
+	// scan of every row of the type for bdListRequiresClientLimit to force
+	// unbounded, which a route like "rig/agent" with two spellings turns into
+	// a full-type scan on every read (GH#7794). Fan out to one predicated read
+	// per assignee instead.
+	//
+	// Not for TierWisps: that tier always merges this leg with a second,
+	// independently-fetched ephemeral leg (listWispsTier), which still falls
+	// back to a scan for multiple assignees on its own bd-query path — fixing
+	// only this leg would not avoid the overall scan for that tier, so it
+	// stays out of scope here (same TierWisps carve-out
+	// bdListRequiresClientLimit already documents).
+	if query.Assignee == "" && len(query.Assignees) >= 2 && query.TierMode != TierWisps {
+		return s.listViaBDListFannedOutByAssignee(query)
+	}
+	result, partialErr, err := s.fetchViaBDList(query)
+	if err != nil {
+		return nil, err
+	}
+	filtered := applyListQuery(result, query)
+	if partialErr != nil {
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("bd list: %w", partialErr.Err)
+		}
+		// Surface partial-parse outcomes so callers can distinguish a complete
+		// list from one that silently dropped entries. Treating a partial list
+		// as authoritative has driven a runaway cache-reconcile loop in the
+		// past (synthesizing bead.closed for beads that were merely dropped
+		// by parseIssuesTolerant).
+		return filtered, partialErr
+	}
+	return filtered, nil
+}
+
+// listViaBDListFannedOutByAssignee serves a List query with two or more
+// Assignees as N independently-predicated `bd list --assignee=X` reads
+// instead of the unpredicated full-type scan bdServerQueryForAssignees falls
+// back to (GH#7794). Each read reuses fetchViaBDList with a single Assignee,
+// so every other filter keeps the exact bd-side semantics it already has for
+// one assignee; Limit is forced to 0 on each so applyListQuery below — the
+// only place that can limit correctly across assignees — sees every
+// candidate row from every one of them, the same unbounded-fetch discipline
+// bdListRequiresClientLimit already applies to the single full-scan read this
+// replaces. Beads are single-assignee, so the N result sets cannot overlap
+// and need no dedup.
+//
+// Results are concatenated in query.Assignees order before that shared
+// filter/sort/limit pass. For an explicit Sort, that pass sorts the combined
+// set into the requested order regardless of fan-out order. For SortDefault
+// it does not — sortBeadsForQuery is a no-op for SortDefault, same as it
+// already is for mergeListTierResults' own cross-read merge of the
+// listViaBDList and listEphemeral legs — so a SortDefault, Limit-bounded
+// multi-assignee read returns whichever assignees are earliest in
+// query.Assignees first, not a true recency merge across all of them. That
+// is the existing, already-accepted shape of this tradeoff elsewhere in this
+// file, not a new one.
+func (s *BdStore) listViaBDListFannedOutByAssignee(query ListQuery) ([]Bead, error) {
+	var (
+		merged  []Bead
+		partial *PartialResultError
+	)
+	for _, assignee := range query.Assignees {
+		single := query
+		single.Assignees = nil
+		single.Assignee = assignee
+		single.Limit = 0
+		rows, perCallPartial, err := s.fetchViaBDList(single)
+		if err != nil {
+			return nil, err
+		}
+		merged = append(merged, rows...)
+		if perCallPartial != nil && partial == nil {
+			partial = perCallPartial
+		}
+	}
+	filtered := applyListQuery(merged, query)
+	if partial != nil {
+		if len(filtered) == 0 {
+			return nil, fmt.Errorf("bd list: %w", partial.Err)
+		}
+		return filtered, partial
+	}
+	return filtered, nil
+}
+
+// fetchViaBDList runs `bd list` for query and returns the raw rows (before
+// applyListQuery's client-side filter/sort/limit) plus a partial-parse error
+// if parseIssuesTolerant dropped any. Split out of listViaBDList so the
+// assignee fan-out above can combine several independently-predicated reads'
+// raw rows before a single applyListQuery pass runs over all of them,
+// instead of each read sorting and limiting on its own.
+func (s *BdStore) fetchViaBDList(query ListQuery) ([]Bead, *PartialResultError, error) {
 	serverQuery, clientFilteredAssignees := bdServerQueryForAssignees(query)
 	limit := serverQuery.Limit
 	if bdListRequiresClientLimit(query, serverQuery, clientFilteredAssignees) {
@@ -3123,7 +3216,7 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 
 	out, err := s.runBDTransientRead(args...)
 	if err != nil {
-		return nil, fmt.Errorf("bd list: %w", err)
+		return nil, nil, fmt.Errorf("bd list: %w", err)
 	}
 	issues, parseErr := parseIssuesTolerant(extractJSON(out))
 	// Latched from what bd RETURNED, before applyListQuery: a store that
@@ -3135,19 +3228,10 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 		result[i] = issues[i].toBead()
 	}
 	s.noteInlineDependencyProjection(issues, result)
-	filtered := applyListQuery(result, query)
 	if parseErr != nil {
-		if len(filtered) == 0 {
-			return nil, fmt.Errorf("bd list: %w", parseErr)
-		}
-		// Surface partial-parse outcomes so callers can distinguish a complete
-		// list from one that silently dropped entries. Treating a partial list
-		// as authoritative has driven a runaway cache-reconcile loop in the
-		// past (synthesizing bead.closed for beads that were merely dropped
-		// by parseIssuesTolerant).
-		return filtered, &PartialResultError{Op: "bd list", Err: parseErr}
+		return result, &PartialResultError{Op: "bd list", Err: parseErr}, nil
 	}
-	return filtered, nil
+	return result, nil, nil
 }
 
 func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssignees bool) bool {
