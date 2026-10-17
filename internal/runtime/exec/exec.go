@@ -363,6 +363,9 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	// session's own repository; an import that escapes the repo (a third-party
 	// or system path) is left for a human rather than auto-trusted.
 	trustRoot := runtime.WithTrustedImportRoot(runtime.WorkspaceImportTrustRoot(ctx, cfg.WorkDir))
+	// ctx carries the session's startup deadline, which the peek watch for a
+	// late Codex dialog may spend a share of.
+	sessionStart := runtime.WithSessionStartDeadline()
 	snapshots, closeWatch, ok, err := p.startStartupWatch(ctx, name, startupWatchFirstEventTimeout())
 	if err != nil {
 		return err
@@ -382,7 +385,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 			return runtime.AcceptStartupDialogs(ctx,
 				func(lines int) (string, error) { return p.Peek(name, lines) },
 				func(keys ...string) error { return p.SendKeys(name, keys...) },
-				trustRoot,
+				trustRoot, sessionStart,
 			)
 		}
 	}
@@ -390,7 +393,7 @@ func (p *Provider) dismissStartupDialogs(ctx context.Context, name string, cfg r
 	return runtime.AcceptStartupDialogs(ctx,
 		func(lines int) (string, error) { return p.Peek(name, lines) },
 		func(keys ...string) error { return p.SendKeys(name, keys...) },
-		trustRoot,
+		trustRoot, sessionStart,
 	)
 }
 
