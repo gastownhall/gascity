@@ -86,12 +86,21 @@ type SessionReconcilerTraceCycle struct {
 	pendingDropped     map[string]int
 	templatesTouched   map[string]struct{}
 	detailedTemplates  map[string]struct{}
-	decisionCounts     map[string]int
-	operationCounts    map[string]int
-	mutationCounts     map[string]int
-	reasonCounts       map[string]int
-	outcomeCounts      map[string]int
-	autoArmsTriggered  int
+	// capRejectionReasons records, per template, which cap (workspace/rig/
+	// agent) refused new demand this tick in computePoolDesiredStatesAt. It
+	// is populated unconditionally via RecordCapRejectionReason, independent
+	// of detail-arm state, so recordReconcileTraceInputs's per-template
+	// summary can label a capped pool correctly instead of the misleading
+	// "no_demand" it reads when only desired/pool_desired/open counts are
+	// consulted (gascity#8013). RecordDecision's own detail-gated record of
+	// the same rejection is unchanged by this field.
+	capRejectionReasons map[string]TraceReasonCode
+	decisionCounts      map[string]int
+	operationCounts     map[string]int
+	mutationCounts      map[string]int
+	reasonCounts        map[string]int
+	outcomeCounts       map[string]int
+	autoArmsTriggered   int
 	// durationClock measures demand-pass sub-phase and store-read durations
 	// (see recordDemandSubPhase). Nil means the real clock; tests inject a
 	// fake so the durations those records carry are exact. The demand pass
@@ -680,6 +689,37 @@ func (c *SessionReconcilerTraceCycle) RecordSessionResult(template, sessionName 
 		}
 	}
 	c.addRecord(rec)
+}
+
+// RecordCapRejectionReason records, for one template, the specific cap that
+// refused new demand this tick (gascity#8013). Unlike RecordDecision, it
+// never stashes or drops on an unarmed template: the per-template summary in
+// recordReconcileTraceInputs needs this reason on every tick to avoid
+// mislabeling a capped pool as no_demand, not only when detail tracing
+// happens to be armed for it. It carries no payload and does not affect
+// RecordDecision's own detail-gated record of the same rejection.
+func (c *SessionReconcilerTraceCycle) RecordCapRejectionReason(template string, reason TraceReasonCode) {
+	if c == nil || template == "" || reason == "" {
+		return
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.capRejectionReasons == nil {
+		c.capRejectionReasons = make(map[string]TraceReasonCode)
+	}
+	c.capRejectionReasons[template] = reason
+}
+
+// CapRejectionReason returns the cap reason RecordCapRejectionReason recorded
+// for template this tick, if any.
+func (c *SessionReconcilerTraceCycle) CapRejectionReason(template string) (TraceReasonCode, bool) {
+	if c == nil {
+		return "", false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	reason, ok := c.capRejectionReasons[template]
+	return reason, ok
 }
 
 func (c *SessionReconcilerTraceCycle) RecordDecision(site TraceSiteCode, reason TraceReasonCode, outcome TraceOutcomeCode, template, sessionName string, fields map[string]any) {
