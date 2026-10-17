@@ -16,12 +16,14 @@ package main
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -188,6 +190,31 @@ func TestFreshCycleRepro_IncarnationStartedAfterCloseUnderOtherAssigneeDefers(t 
 	reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
 
 	assertNotCycled(t, env, session, sessionName, "this incarnation started after ga-prev closed, whoever it was assigned to (row C)")
+}
+
+// An open previous bead still owned by this session defers row A even when its
+// stored assignee has surrounding whitespace. The anchor exists only in the
+// tick snapshot, so neither a live claim nor a closed anchor can mask row A.
+func TestFreshCycleRepro_OpenPreviousBeadWithPaddedAssigneeStillDefers(t *testing.T) {
+	for _, tc := range []struct{ name, assignee string }{
+		{"exact", "witness"},
+		{"padded with spaces", "  witness  "},
+		{"trailing newline", "witness\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env, session, sessionName := freshCycleReproEnv(t, map[string]string{
+				sessionpkg.CurrentBeadIDKey: "ga-prev",
+				"awake_started_at":          time.Now().UTC().Add(-time.Hour).Format(time.RFC3339Nano),
+			})
+			rig := reproMemStore()
+			reproCreate(t, rig, beads.Bead{ID: "ga-prev", Title: "open, still this session's", Type: "task", Status: "open", Assignee: tc.assignee})
+			anchor := beads.Bead{ID: "ga-new", Title: "new", Type: "task", Status: "in_progress", Assignee: "witness"}
+
+			reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
+
+			assertNotCycled(t, env, session, sessionName, "ga-prev is open and still assigned to this session after trimming the stored assignee (row A)")
+		})
+	}
 }
 
 // Q3, negative: row A defers only while the previous bead is still assigned to
@@ -407,6 +434,95 @@ func TestFreshCycleRepro_ExternalHandoffThroughPrimedCacheDoesNotDefer(t *testin
 			reconcileFreshCycleRepro(env, []beads.Bead{session}, []beads.Bead{anchor}, map[string]beads.Store{"gascity": rig})
 
 			assertCycled(t, env, session, "ga-prev was handed to another agent by a process the cache never saw, so the live assignee is no longer this session and row A must not defer")
+		})
+	}
+}
+
+// primedFreshCycleLeg models a rig's primed cache, optionally beneath the
+// bead-policy wrapper used by the controller.
+func primedFreshCycleLeg(t *testing.T, backing beads.Store, withPolicy bool) beads.Store {
+	t.Helper()
+	cached := beads.NewCachingStore(backing, nil)
+	if err := cached.PrimeActive(); err != nil {
+		t.Fatalf("priming the cache: %v", err)
+	}
+	if withPolicy {
+		return wrapStoreWithBeadPolicies(cached, nil)
+	}
+	return cached
+}
+
+// A previous bead closed externally must report terminal with its close time,
+// even when the controller's cache still serves the open row.
+func TestPrevAssignedBeadStatus_BypassesPrimedCacheOnExternalClose(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		withPolicy bool
+	}{
+		{"bare cache", false},
+		{"policy over cache", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			backing := reproMemStore()
+			reproCreate(t, backing, beads.Bead{ID: "ga-prev", Title: "previous", Type: "task", Status: "open", Assignee: "witness"})
+			leg := primedFreshCycleLeg(t, backing, tc.withPolicy)
+			if before, err := leg.Get("ga-prev"); err != nil || before.Status != "open" {
+				t.Fatalf("precondition: previous bead = %+v, err = %v; want open", before, err)
+			}
+			reproCloseForReal(t, backing, "ga-prev")
+			if stale, err := leg.Get("ga-prev"); err != nil || stale.Status != "open" {
+				t.Fatalf("control: cached bead = %+v, err = %v; want stale open row", stale, err)
+			}
+
+			open, assignee, closedAt, err := prevAssignedBeadStatus(residencyTopologyForCity("", nil, leg, nil), "ga-prev")
+
+			if err != nil || open || closedAt.IsZero() {
+				t.Fatalf("open = %v, assignee = %q, closedAt = %v, err = %v; want terminal with a close time", open, assignee, closedAt, err)
+			}
+		})
+	}
+}
+
+// The previous bead's assignee is returned trimmed for literal comparison
+// against the session's assignment identifiers.
+func TestPrevAssignedBeadStatus_TrimsAssignee(t *testing.T) {
+	backing := reproMemStore()
+	reproCreate(t, backing, beads.Bead{ID: "ga-prev", Title: "previous", Type: "task", Status: "open", Assignee: "  rig/worker \t"})
+	if raw, err := backing.Get("ga-prev"); err != nil || raw.Assignee != "  rig/worker \t" {
+		t.Fatalf("precondition: stored bead = %+v, err = %v; want padded assignee", raw, err)
+	}
+
+	open, assignee, _, err := prevAssignedBeadStatus(residencyTopologyForCity("", nil, backing, nil), "ga-prev")
+
+	if err != nil || !open || assignee != "rig/worker" {
+		t.Fatalf("open = %v, assignee = %q, err = %v; want open with trimmed assignee", open, assignee, err)
+	}
+}
+
+// A rig-prefixed id missing from every candidate leg must return ErrNotFound,
+// rather than dereferencing the absent owner store.
+func TestPrevAssignedBeadStatus_MissingFromEveryLegReturnsNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		withPolicy bool
+	}{
+		{"bare cache", false},
+		{"policy over cache", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			work := reproMemStore()
+			rig := primedFreshCycleLeg(t, reproMemStore(), tc.withPolicy)
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Rigs:      []config.Rig{{Name: "gascity", Prefix: "ga"}},
+			}
+			topo := residencyTopologyForCity("", cfg, work, map[string]beads.Store{"gascity": rig})
+
+			open, assignee, closedAt, err := prevAssignedBeadStatus(topo, "ga-gone")
+
+			if !errors.Is(err, beads.ErrNotFound) || open || assignee != "" || !closedAt.IsZero() {
+				t.Fatalf("open = %v, assignee = %q, closedAt = %v, err = %v; want (false, empty, zero, ErrNotFound)", open, assignee, closedAt, err)
+			}
 		})
 	}
 }
