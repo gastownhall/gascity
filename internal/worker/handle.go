@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -431,12 +432,21 @@ type SessionHandleConfig struct {
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+	// ResolveBead reads one work bead by id, wherever it lives. Usage
+	// attribution uses it to find the formula the session's acting bead was
+	// compiled from. Nil leaves facts unattributed.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to. Nil is
+	// valid and resolves on every batch.
+	FormulaMemo *FormulaNameMemo
 }
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
 	mu             sync.Mutex
 	manager        *sessionpkg.Manager
+	resolveBead    func(id string) (beads.Bead, error)
+	formulaMemo    *FormulaNameMemo
 	adapter        SessionLogAdapter
 	recorder       events.Recorder
 	usageSink      usage.Sink

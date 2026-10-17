@@ -33,6 +33,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -281,6 +282,12 @@ type CityRuntime struct {
 	transcriptMetaMu      sync.Mutex
 	transcriptMetaStarted bool
 	transcriptMetaDone    chan struct{}
+
+	// formulaNameMemo is the process-lifetime memo of acting bead id to formula
+	// name for usage attribution, built once through formulaMemoOnce. Neither
+	// field is guarded by transcriptMetaMu.
+	formulaMemoOnce sync.Once
+	formulaNameMemo *worker.FormulaNameMemo
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool

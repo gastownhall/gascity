@@ -96,6 +96,11 @@ func PromptHash(prompt string) string {
 // work bead. ComputeAwakeSet uses it to detect when an alive session has been
 // reassigned to a different bead — the trigger for a fresh-wake conversation
 // cycle under wake_mode=fresh.
+//
+// Usage attribution is a second consumer: the worker reads it to find the
+// formula a session's facts belong to. It is a single-valued pointer meaning
+// "the last bead the controller stamped", so it survives that bead's close and
+// a sleep.
 const CurrentBeadIDKey = "currently_processing_bead_id"
 
 var freshWakeConversationResetKeys = []string{

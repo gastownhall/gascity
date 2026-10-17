@@ -133,3 +133,9 @@ hook must not make an unchanged transcript appear to be a different stream.
 The one exception is a provider with a session-id flag whose start the Manager
 launched without its key: its identity takes the key once one is written,
 normally by the provider's hook.
+
+## Injected lookups
+
+The worker reads work beads and other state it does not own through lookups
+injected as func values (for example `FactoryConfig.ResolveBead`), and never
+enumerates stores itself.
