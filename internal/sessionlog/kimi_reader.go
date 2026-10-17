@@ -175,11 +175,11 @@ func findKimiSessionFilesIn(root, workHash string) []kimiContextCandidate {
 }
 
 func findKimiSessionFilesInVisited(root, workHash string, visited map[string]bool) []kimiContextCandidate {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	canonical := canonicalKimiSessionRoot(root)
+	if canonical == "" || visited[canonical] {
 		return nil
 	}
-	visited[root] = true
+	visited[canonical] = true
 
 	workRoot := filepath.Join(root, workHash)
 	files := kimiContextFiles(workRoot)
@@ -206,11 +206,11 @@ func findKimiSessionFileByIDIn(root, workHash, sessionID string) string {
 }
 
 func findKimiSessionFileByIDInVisited(root, workHash, sessionID string, visited map[string]bool) string {
-	root = canonicalKimiSessionRoot(root)
-	if root == "" || visited[root] {
+	canonical := canonicalKimiSessionRoot(root)
+	if canonical == "" || visited[canonical] {
 		return ""
 	}
-	visited[root] = true
+	visited[canonical] = true
 
 	path := kimiTranscriptPath(filepath.Join(root, workHash), sessionID)
 	info, err := os.Stat(path)
