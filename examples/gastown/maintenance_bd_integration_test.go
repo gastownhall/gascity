@@ -3,6 +3,7 @@
 package gastown_test
 
 import (
+	"bufio"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -14,6 +15,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/pidutil"
 )
 
 // These tests drive the shipped maintenance orders against REAL bd scopes of
@@ -113,12 +116,18 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 	return c
 }
 
-func (c *bdTopologyCity) run(t *testing.T, dir string, extra []string, name string, args ...string) (string, error) {
-	t.Helper()
+// command builds a command that runs in dir with the fixture's isolated
+// environment plus extra.
+func (c *bdTopologyCity) command(dir string, extra []string, name string, args ...string) *exec.Cmd {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
 	cmd.Env = append(append([]string{}, c.env...), extra...)
-	out, err := cmd.CombinedOutput()
+	return cmd
+}
+
+func (c *bdTopologyCity) run(t *testing.T, dir string, extra []string, name string, args ...string) (string, error) {
+	t.Helper()
+	out, err := c.command(dir, extra, name, args...).CombinedOutput()
 	return string(out), err
 }
 
@@ -171,7 +180,9 @@ func (c *bdTopologyCity) addScope(t *testing.T, name, db, prefix string, proxied
 		out, err := retryOnBdProxyStartTimeout(
 			func() (string, error) { return c.run(t, dir, c.scopeEnv(s), c.bd, args...) },
 			func() error {
-				c.signalScopeProcesses(s, syscall.SIGKILL)
+				if stuck := signalAndWait(c.ownedScopeProcesses(s), syscall.SIGKILL, bdStopKillGrace); len(stuck) > 0 {
+					return fmt.Errorf("bd processes %v outlived SIGKILL", scopePIDs(stuck))
+				}
 				return os.RemoveAll(filepath.Join(dir, ".beads"))
 			},
 		)
@@ -289,32 +300,145 @@ func shellSingleQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-// stopProcesses kills the bd proxies and Dolt children this fixture's proxied
-// scopes started, found through their own pidfiles.
+// bdStopTermGrace and bdStopKillGrace bound how long the fixture waits for its
+// bd proxies and Dolt backends to exit after TERM and, for any that outlast it,
+// after KILL. They only cap a wedged process; a normal shutdown returns as soon
+// as the processes are gone.
+const (
+	bdStopTermGrace = 30 * time.Second
+	bdStopKillGrace = 10 * time.Second
+)
+
+// scopeProcess is a process a proxied scope's pid records name, pinned to the
+// start time it had when its ownership was verified, so a pid recycled by an
+// unrelated process is neither awaited nor signaled.
+type scopeProcess struct {
+	pid       int
+	startTime string
+}
+
+func (p scopeProcess) alive() bool { return pidutil.AliveWithStartTime(p.pid, p.startTime) }
+
+// stopProcesses terminates the bd proxies and Dolt backends this fixture's
+// proxied scopes started, found through their own pidfiles, and returns only
+// once they have exited. t.TempDir removes the fixture right after this runs,
+// and a Dolt backend still shutting down keeps writing noms files into the tree
+// being removed, which fails the removal with "directory not empty".
 func (c *bdTopologyCity) stopProcesses() {
+	var procs []scopeProcess
 	for _, s := range c.scopes {
 		if s.proxied {
-			c.signalScopeProcesses(s, syscall.SIGTERM)
+			procs = append(procs, c.ownedScopeProcesses(s)...)
 		}
+	}
+	if stuck := terminateProcesses(procs, bdStopTermGrace, bdStopKillGrace); len(stuck) > 0 {
+		c.t.Errorf("bd processes %v outlived SIGKILL; removing the fixture directory would race them", scopePIDs(stuck))
 	}
 }
 
-// signalScopeProcesses signals the processes a proxied scope's pid records
-// name: the proxy (proxy.pid) and its dolt backend (proxy-child.pid).
-func (c *bdTopologyCity) signalScopeProcesses(s bdTopologyScope, sig syscall.Signal) {
+// ownedScopeProcesses returns the live processes a proxied scope's pid records
+// name -- the proxy (proxy.pid) and its dolt backend (proxy-child.pid) -- that
+// are verifiably the scope's own: a record outlives its process, so a pid whose
+// argv does not carry the scope's proxy root belongs to someone else and is
+// left alone.
+func (c *bdTopologyCity) ownedScopeProcesses(s bdTopologyScope) []scopeProcess {
+	root := filepath.Join(s.dir, ".beads", "dolt")
+	roots := []string{root}
+	if resolved, err := filepath.EvalSymlinks(root); err == nil && resolved != root {
+		roots = append(roots, resolved)
+	}
+	var procs []scopeProcess
 	for _, name := range []string{"proxy.pid", "proxy-child.pid"} {
-		data, err := os.ReadFile(filepath.Join(s.dir, ".beads", "dolt", name))
+		data, err := os.ReadFile(filepath.Join(root, name))
 		if err != nil {
 			continue
 		}
 		var rec struct {
 			PID int `json:"pid"`
 		}
-		if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 {
+		if json.Unmarshal(data, &rec) != nil || rec.PID <= 1 || !pidutil.Alive(rec.PID) {
 			continue
 		}
-		_ = syscall.Kill(rec.PID, sig)
+		argv, err := pidutil.Cmdline(rec.PID)
+		if err != nil || !argvMentionsAnyDir(argv, roots) {
+			c.t.Logf("%s names pid %d, which is not a process of %s (argv %q, err %v); leaving it alone", name, rec.PID, root, argv, err)
+			continue
+		}
+		startTime, err := pidutil.StartTime(rec.PID)
+		if err != nil {
+			continue
+		}
+		procs = append(procs, scopeProcess{pid: rec.PID, startTime: startTime})
 	}
+	return procs
+}
+
+// argvMentionsAnyDir reports whether an argument of argv names one of dirs or
+// a path beneath it (`--root <dir>`, `--config=<dir>/config.yaml`).
+func argvMentionsAnyDir(argv, dirs []string) bool {
+	for _, arg := range argv {
+		for _, dir := range dirs {
+			if strings.Contains(arg+"/", dir+"/") {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// terminateProcesses sends TERM to procs and waits up to termGrace for them to
+// exit, then sends KILL to those still running and waits up to killGrace. It
+// returns the processes that outlived both.
+func terminateProcesses(procs []scopeProcess, termGrace, killGrace time.Duration) []scopeProcess {
+	running := signalAndWait(procs, syscall.SIGTERM, termGrace)
+	if len(running) == 0 {
+		return nil
+	}
+	return signalAndWait(running, syscall.SIGKILL, killGrace)
+}
+
+// signalAndWait sends sig to every running process in procs and waits up to
+// grace for all of them to exit. It returns the ones still running. The
+// processes are not this one's children, so their exit is observed by polling.
+func signalAndWait(procs []scopeProcess, sig syscall.Signal, grace time.Duration) []scopeProcess {
+	for _, p := range procs {
+		if p.alive() {
+			_ = syscall.Kill(p.pid, sig)
+		}
+	}
+	running := func() []scopeProcess {
+		var alive []scopeProcess
+		for _, p := range procs {
+			if p.alive() {
+				alive = append(alive, p)
+			}
+		}
+		return alive
+	}
+	poll := time.NewTicker(25 * time.Millisecond)
+	defer poll.Stop()
+	deadline := time.NewTimer(grace)
+	defer deadline.Stop()
+	for {
+		alive := running()
+		if len(alive) == 0 {
+			return nil
+		}
+		select {
+		case <-poll.C:
+		case <-deadline.C:
+			return running()
+		}
+	}
+}
+
+// scopePIDs lists the pids of procs for failure messages.
+func scopePIDs(procs []scopeProcess) []int {
+	pids := make([]int, len(procs))
+	for i, p := range procs {
+		pids[i] = p.pid
+	}
+	return pids
 }
 
 // bdProxyStartTimeout is how bd reports a proxied first start that missed its
@@ -732,5 +856,112 @@ func TestReaperOwnerProtectionOnRealBd(t *testing.T) {
 	}
 	if strings.Contains(string(calls), "ESCALATION") && strings.Contains(string(calls), ids["heldOverBlocked"]) {
 		t.Fatalf("a held wisp was escalated:\n%s", calls)
+	}
+}
+
+// startFakeScopeProcess starts a stand-in for a bd proxy or its Dolt backend: a
+// shell that carries `--root <root>` in its argv the way bd's processes do,
+// announces readiness once its TERM trap is installed, and on TERM runs
+// onTerm (an empty onTerm ignores TERM). The test process is its parent and
+// reaps it, so the pid is a live, non-zombie process until it really exits.
+func (c *bdTopologyCity) startFakeScopeProcess(t *testing.T, root, onTerm string) int {
+	t.Helper()
+	cmd := c.command("", nil, "sh", "-c", fmt.Sprintf("trap %s TERM; echo ready; while :; do sleep 0.05; done", shellSingleQuote(onTerm)), "sh", "--root", root)
+	out, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatalf("start fake scope process: %v", err)
+	}
+	reaped := make(chan struct{})
+	go func() {
+		_ = cmd.Wait()
+		close(reaped)
+	}()
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		<-reaped
+	})
+	if line, err := bufio.NewReader(out).ReadString('\n'); err != nil || strings.TrimSpace(line) != "ready" {
+		t.Fatalf("fake scope process did not install its TERM trap: %q, %v", line, err)
+	}
+	return cmd.Process.Pid
+}
+
+// writeFakePIDRecord publishes pid the way bd's proxy does: a JSON record at
+// <root>/<name>.
+func writeFakePIDRecord(t *testing.T, root, name string, pid int) {
+	t.Helper()
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, name), []byte(fmt.Sprintf(`{"pid":%d,"schema":2}`, pid)), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// TestStopProcessesAwaitsDelayedShutdown pins the cleanup ordering the reaper
+// fixtures depend on: t.TempDir removes the city right after stopProcesses
+// returns, so a Dolt backend that is still shutting down (flushing noms files)
+// would fail the removal with "directory not empty". The proxy exits at once
+// and the backend takes a second to shut down.
+func TestStopProcessesAwaitsDelayedShutdown(t *testing.T) {
+	scope := bdTopologyScope{dir: filepath.Join(t.TempDir(), "city"), proxied: true}
+	root := filepath.Join(scope.dir, ".beads", "dolt")
+	c := &bdTopologyCity{t: t, scopes: []bdTopologyScope{scope}}
+	proxy := c.startFakeScopeProcess(t, root, "exit 0")
+	backend := c.startFakeScopeProcess(t, root, "sleep 1; exit 0")
+	writeFakePIDRecord(t, root, "proxy.pid", proxy)
+	writeFakePIDRecord(t, root, "proxy-child.pid", backend)
+
+	c.stopProcesses()
+
+	for name, pid := range map[string]int{"proxy": proxy, "backend": backend} {
+		if pidutil.Alive(pid) {
+			t.Errorf("%s (pid %d) is still running after stopProcesses returned", name, pid)
+		}
+	}
+}
+
+// TestOwnedScopeProcessesSkipsProcessesOfOtherScopes keeps the fixture's
+// cleanup scoped to its own processes: a pid record that names a process which
+// does not carry the scope's proxy root in its argv (a recycled pid, a stale
+// record) is never returned, so it is never signaled or awaited.
+func TestOwnedScopeProcessesSkipsProcessesOfOtherScopes(t *testing.T) {
+	scope := bdTopologyScope{dir: filepath.Join(t.TempDir(), "city"), proxied: true}
+	root := filepath.Join(scope.dir, ".beads", "dolt")
+	c := &bdTopologyCity{t: t, scopes: []bdTopologyScope{scope}}
+	own := c.startFakeScopeProcess(t, root, "exit 0")
+	stranger := c.startFakeScopeProcess(t, filepath.Join(t.TempDir(), "elsewhere"), "exit 0")
+	writeFakePIDRecord(t, root, "proxy.pid", own)
+	writeFakePIDRecord(t, root, "proxy-child.pid", stranger)
+
+	got := scopePIDs(c.ownedScopeProcesses(scope))
+
+	if len(got) != 1 || got[0] != own {
+		t.Fatalf("owned processes = %v, want only the scope's own pid %d (not %d, which names another scope)", got, own, stranger)
+	}
+}
+
+// TestTerminateProcessesEscalatesToKill covers a backend that ignores TERM: it
+// is killed once the TERM grace runs out, and the call still returns only after
+// it has exited.
+func TestTerminateProcessesEscalatesToKill(t *testing.T) {
+	root := filepath.Join(t.TempDir(), ".beads", "dolt")
+	c := &bdTopologyCity{t: t}
+	stubborn := c.startFakeScopeProcess(t, root, "")
+	startTime, err := pidutil.StartTime(stubborn)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	stuck := terminateProcesses([]scopeProcess{{pid: stubborn, startTime: startTime}}, 200*time.Millisecond, 10*time.Second)
+
+	if len(stuck) != 0 {
+		t.Fatalf("processes %v outlived SIGKILL", scopePIDs(stuck))
+	}
+	if pidutil.Alive(stubborn) {
+		t.Fatalf("pid %d is still running after terminateProcesses returned", stubborn)
 	}
 }
