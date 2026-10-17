@@ -4363,6 +4363,7 @@ gc session close <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
 
 ## gc session kill
 
@@ -4393,6 +4394,7 @@ gc session kill <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired |
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
 
 ## gc session list
 
@@ -4595,6 +4597,7 @@ gc session reset <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
 
 ## gc session submit
 
@@ -4634,6 +4637,7 @@ gc session suspend <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
 
 ## gc session unpin
 
@@ -4689,6 +4693,7 @@ gc session wake mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
 
 ## gc shell
 
