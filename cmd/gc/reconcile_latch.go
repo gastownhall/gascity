@@ -41,14 +41,11 @@ func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []
 	if cfg.Daemon.SessionCircuitBreaker {
 		out = append(out, latchRefusal{"the identity circuit breaker", "[daemon] session_circuit_breaker = true", "PAR-BRK"})
 	}
-	var dependsOn, scaleCheck, maxAge []string
+	var dependsOn, maxAge []string
 	for i := range cfg.Agents {
 		a := &cfg.Agents[i]
 		if len(a.DependsOn) > 0 {
 			dependsOn = append(dependsOn, a.QualifiedName())
-		}
-		if strings.TrimSpace(a.ScaleCheck) != "" {
-			scaleCheck = append(scaleCheck, a.QualifiedName())
 		}
 		if a.MaxSessionAgeDuration() > 0 {
 			maxAge = append(maxAge, a.QualifiedName())
@@ -59,7 +56,6 @@ func v2LatchRefusals(cfg *config.City, lookupEnv func(string) (string, bool)) []
 		key, feature, parityPR string
 	}{
 		{dependsOn, "depends_on", "dependency-gated wakes and floors", "PAR-DEP"},
-		{scaleCheck, "scale_check", "custom scale_check demand", "PAR-SC"},
 		{maxAge, "max_session_age", "max-age restarts", "PAR-AGE"},
 	} {
 		if len(c.agents) > 0 {
