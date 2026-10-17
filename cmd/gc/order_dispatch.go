@@ -329,6 +329,13 @@ type memoryOrderDispatcher struct {
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
 	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// inapplicableReported holds the orders this controller boot has already
+	// reported as inapplicable, so each is announced once rather than on every
+	// tick or webhook delivery. Created on first use (inapplicableReports) and
+	// guarded by cacheMu. The set locks itself, so dispatchers share it:
+	// carryInapplicableReportsFrom hands it across dispatcher rebuilds, and the
+	// controller's webhook adapter hands every per-delivery dispatcher the same set.
+	inapplicableReported *inapplicableReportSet
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -669,6 +676,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// store — so doing it for every order costs the tick nothing and gives the
 	// parallel pass its complete work list.
 	candidates := make([]*orderDispatchCandidate, 0, total)
+	// scopeBackends memoizes each scope's backend for this tick: resolving it
+	// reads the scope's metadata and, when that names none, city.toml.
+	scopeBackends := make(map[string]string)
 	for offset := 0; offset < total; offset++ {
 		idx := (start + offset) % total
 		a := m.aa[idx]
@@ -681,6 +691,20 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
+		}
+		// An order that requires a backend its scope does not use is never
+		// dispatched there, and never counted as a failure: it is reported
+		// once as inapplicable and skipped before any store is opened.
+		if a.RequiresBackend != nil {
+			backend, ok := scopeBackends[target.ScopeRoot]
+			if !ok {
+				backend = orderScopeBackendFn(cityPath, target.ScopeRoot)
+				scopeBackends[target.ScopeRoot] = backend
+			}
+			if !a.AppliesToBackend(backend) {
+				m.reportInapplicable(a, target, backend)
+				continue
+			}
 		}
 
 		storeKey := orderStoreTargetKey(target)
@@ -1509,6 +1533,82 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 			m.lastRunCache[key] = last
 		}
 	}
+}
+
+// inapplicableReportSet is the set of orders already reported as
+// inapplicable, keyed by scoped name and backend. Its zero value is ready to
+// use and it is safe for concurrent use, so dispatchers that each live for
+// less than a controller boot can share one.
+type inapplicableReportSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// claim marks key reported and reports whether this is its first report.
+func (r *inapplicableReportSet) claim(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, seen := r.seen[key]; seen {
+		return false
+	}
+	if r.seen == nil {
+		r.seen = make(map[string]struct{})
+	}
+	r.seen[key] = struct{}{}
+	return true
+}
+
+// inapplicableReports returns the dispatcher's report set, creating it on
+// first use.
+func (m *memoryOrderDispatcher) inapplicableReports() *inapplicableReportSet {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.inapplicableReported == nil {
+		m.inapplicableReported = &inapplicableReportSet{}
+	}
+	return m.inapplicableReported
+}
+
+// reportInapplicable records one order.inapplicable event for an order its
+// scope's backend rules out, the first time this controller boot sees that
+// order on that backend.
+func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execStoreTarget, backend string) {
+	scoped := a.ScopedName()
+	if !m.inapplicableReports().claim(scoped + "\x00" + backend) {
+		return
+	}
+
+	scope := "city"
+	if target.ScopeKind == "rig" && target.RigName != "" {
+		scope = "rig:" + target.RigName
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderInapplicable,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: fmt.Sprintf("%s: requires backend %s; %s scope uses %s, so it is not dispatched there",
+			orderInapplicableLabel(backend), strings.Join(a.RequiresBackend, " or "), scope, backend),
+		Payload: events.OrderInapplicablePayloadJSON(events.OrderInapplicablePayload{
+			OrderName:       scoped,
+			Scope:           scope,
+			Backend:         backend,
+			RequiresBackend: append([]string(nil), a.RequiresBackend...),
+		}),
+	})
+}
+
+// carryInapplicableReportsFrom hands this dispatcher the report set of a
+// previous one, so a reload or rescan does not announce again an order the
+// previous one already reported: the report is once per controller boot. Call
+// before this dispatcher reports anything; a set it already holds is replaced.
+func (m *memoryOrderDispatcher) carryInapplicableReportsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	reports := prev.inapplicableReports()
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.inapplicableReported = reports
 }
 
 // gateBackoffActive reports whether the named order is in a gate-timeout

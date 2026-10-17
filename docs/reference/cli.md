@@ -340,11 +340,16 @@ filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show &lt;id&gt;
---watch" (or "show --current --watch", or the "view" alias) on a scope that
-uses bd's proxied-server transport (the default for a new city), where bd
-refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
-seconds and redraws when the bead's status or update time changes, until
-Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+--watch" (or "show --current --watch", or the "view" alias) is served by gc
+on two kinds of scope: one that uses bd's proxied-server transport (the
+default for a new city), where bd refuses watch mode, and one whose store bd
+reaches over http, where enterprise bd refuses it and OSS bd would poll the
+shared server every 2 seconds. gc re-runs "bd show" every 2 seconds on a
+proxied scope and every 10 to 12 seconds on an http scope, and redraws when
+the bead's status or update time changes, until Ctrl+C. A failing read is
+reported once, with bd's error; the last view stays up and the wait between
+reads doubles, up to 5 minutes, until a read succeeds, which is reported
+too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
@@ -3025,6 +3030,8 @@ Use --rig to disambiguate same-name orders in different rigs.
 Use --var key=value (repeatable) to pass args to the order: formula orders
 receive them as formula vars, exec orders as environment variables. A param
 declared required in [order.params] must be supplied or the run fails.
+An order whose requires_backend does not name its scope's backend is
+refused; --force runs it anyway.
 
 ```
 gc order run <name> [flags]
@@ -3032,6 +3039,7 @@ gc order run <name> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--force` | bool |  | run an order even when its requires_backend rules out its scope's backend |
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 | `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |

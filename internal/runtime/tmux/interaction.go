@@ -780,6 +780,38 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 		runtime.ErrPendingInteraction, name, approvalPromptText(approval), "tmux-"+approvalHash(approval))
 }
 
+// cancelClaudeApproval cancels a Claude permission prompt on session name's
+// agent pane with Escape, the key the prompt offers ("Esc to cancel"). Ctrl-C
+// does not dismiss the prompt, and stopping a turn must never pick one of its
+// numbered options. handled reports that Interrupt is done: a prompt was
+// canceled or the session is gone. A pane that cannot be read is not
+// handled: the error is returned for the caller to log, and the caller
+// interrupts with Ctrl-C as it did before it looked.
+func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled bool, err error) {
+	target, err := t.agentPaneTarget(name)
+	if err == nil {
+		var approval *parsedApproval
+		approval, err = t.approvalInPane(target)
+		if err == nil && (approval == nil || approval.Codex) {
+			return false, nil
+		}
+	}
+	if err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return true, absorbGone(ctx, err)
+		}
+		return false, fmt.Errorf("looking for a permission prompt: %w", err)
+	}
+	t.cancelCopyModeIfParked(ctx, target)
+	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {
+		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
+			return true, absorbGone(ctx, err)
+		}
+		return true, fmt.Errorf("canceling the permission prompt of %q: %w", name, err)
+	}
+	return true, nil
+}
+
 // approvalInPane returns the approval prompt target's agent pane shows, or
 // nil. A Codex overlay is read again from a capture that comes with the
 // pane's geometry, which says where Codex wrapped its rows and whether the

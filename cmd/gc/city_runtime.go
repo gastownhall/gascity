@@ -2012,8 +2012,8 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 }
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
-// warm last-run data, active gate-backoff state, and open-work suppression
-// streaks from the outgoing dispatcher so a rebuild (reload or rescan) reuses
+// warm last-run data, active gate-backoff state, open-work suppression
+// streaks and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
@@ -2022,6 +2022,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryInapplicableReportsFrom(prev)
 		}
 	}
 	cr.od = next
@@ -3333,6 +3334,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
@@ -4197,6 +4199,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }

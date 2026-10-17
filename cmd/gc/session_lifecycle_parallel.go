@@ -39,6 +39,11 @@ const (
 	// preparation stays chunked so flapping dependencies are observed between batches.
 	defaultStartDependencyRecheckBatchSize = 3
 
+	// defaultStartPrepareBudget bounds the time one planner call spends in
+	// prepareStartCandidateForCity, summed over its candidates. The controller
+	// reconcile sites opt in with withPrepareBudget.
+	defaultStartPrepareBudget = 60 * time.Second
+
 	// Stops and interrupts are teardown paths, so their parallelism is not
 	// derived from the wake budget used for starts.
 	defaultMaxParallelStopsPerWave = 3
@@ -417,7 +422,11 @@ type startExecutionOptions struct {
 	// performs the closes. Safe to defer: the closes already fail closed and are
 	// deferred under storeQueryPartial today.
 	deferSessionClosesOnBoot bool
-	readyAssignedFlags       []bool
+	// prepareBudget caps the cumulative time one planner call spends preparing
+	// candidates; once spent, the remaining candidates defer to the next tick.
+	// Zero or negative leaves prepare unbounded.
+	prepareBudget      time.Duration
+	readyAssignedFlags []bool
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -560,6 +569,15 @@ func withEndpointCapacityGuard(guard *endpointCapacityGuard) startExecutionOptio
 func withOnDeathGate(gate *onDeathGate) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.onDeathGate = gate
+	}
+}
+
+// withPrepareBudget caps the cumulative time one planner call spends in
+// prepareStartCandidateForCity. Zero or negative (or the option omitted)
+// leaves prepare unbounded.
+func withPrepareBudget(d time.Duration) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.prepareBudget = d
 	}
 }
 
@@ -2907,10 +2925,28 @@ func confirmPendingStart(currentState string) bool {
 //
 // It deliberately does NOT drive StartsAwakeInterval: re-confirming an
 // already-awake runtime must not reset its in-flight awake interval, so that
-// epoch stays keyed on confirmPendingStart alone.
+// epoch is keyed on startOpensAwakeInterval instead.
 func confirmStartCommitState(currentState string) bool {
 	return confirmPendingStart(currentState) ||
 		sessionpkg.State(strings.TrimSpace(currentState)) == sessionpkg.StateAwake
+}
+
+// startOpensAwakeInterval reports whether committing a confirmed start must
+// stamp a fresh awake_started_at epoch. A start out of a pending state always
+// does. So does a start committed onto a live bead that has no interval still
+// being accounted (no epoch, or one the compute lane has already recorded):
+// heal projects awake as soon as the runtime is observed, while the claimed
+// Start is still in flight, so a live state at commit does not prove an
+// interval is open. An open interval's epoch is never replaced. Residual: the
+// compute lane records the epoch only once its model sweep settles, so a
+// heal-raced re-wake before then keeps the previous interval's epoch and the
+// sink's first-wins dedupe drops the new interval's wall time (ga-d8ikk3).
+func startOpensAwakeInterval(info sessionpkg.Info) bool {
+	if confirmPendingStart(info.MetadataState) {
+		return true
+	}
+	epoch := strings.TrimSpace(info.AwakeStartedAt)
+	return epoch == "" || strings.TrimSpace(info.UsageComputeEmittedAt) == epoch
 }
 
 func commitStartResultTraced(
@@ -3092,11 +3128,12 @@ func startCommitPatch(prepared *preparedStart, info sessionpkg.Info, now time.Ti
 		ConfirmState:            confirmStartCommitState(info.MetadataState),
 		ClearSleepReason:        info.SleepReason != "",
 		ClearPendingCreateClaim: shouldRollbackPendingCreateInfo(info),
-		// A confirmed transition out of a dormant/creating state opens a new
-		// awake interval — stamp a fresh compute-usage epoch for it. Keyed on
-		// confirmPendingStart, not confirmStartCommitState: an already-awake
-		// bead keeps its in-flight interval (mirrors recoverRunningPendingCreate).
-		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
+		// A confirmed start opens a new awake interval, including one whose
+		// bead heal already marked awake mid-start. Keyed on
+		// startOpensAwakeInterval, not confirmStartCommitState: an already-awake
+		// bead with an interval still open keeps its epoch (mirrors
+		// recoverRunningPendingCreate).
+		StartsAwakeInterval: startOpensAwakeInterval(info),
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
@@ -3561,10 +3598,10 @@ func recoverRunningPendingCreate(
 		// at this point the claim is guaranteed to be set — hard-code the
 		// clear rather than re-evaluating the same predicate.
 		ClearPendingCreateClaim: true,
-		// Recovering an already-awake runtime must not reset the in-flight
-		// awake interval, so key the fresh epoch on a genuine dormant/creating
-		// start only — not the StateAwake re-confirmation above.
-		StartsAwakeInterval: confirmPendingStart(info.MetadataState),
+		// Recovering an already-awake runtime must not reset an in-flight
+		// awake interval, but a start whose commit never landed has none to
+		// keep, so stamp one unless an open interval is already on the bead.
+		StartsAwakeInterval: startOpensAwakeInterval(info),
 		Now:                 now,
 		PrimedAt:            primedAt,
 		PromptHash:          promptHash,
@@ -4455,6 +4492,62 @@ func rollbackPendingCreateClearingClaim(info sessionpkg.Info, sessFront *session
 	return batch
 }
 
+// prepareMeter charges the time one planner call spends in
+// prepareStartCandidateForCity against the call's prepare budget. A limit of
+// zero or less never defers.
+type prepareMeter struct {
+	limit   time.Duration
+	clk     clock.Clock
+	spent   time.Duration
+	began   time.Time
+	summary bool
+}
+
+// now reads the meter's clock, falling back to the wall clock when it has none.
+func (m *prepareMeter) now() time.Time {
+	if m.clk == nil {
+		return time.Now()
+	}
+	return m.clk.Now()
+}
+
+// begin starts timing one prepare.
+func (m *prepareMeter) begin() {
+	if m.limit > 0 {
+		m.began = m.now()
+	}
+}
+
+// end charges the prepare begin started, a failed one included. A clock that
+// moved backwards charges nothing.
+func (m *prepareMeter) end() {
+	if m.limit > 0 {
+		m.spent += max(0, m.now().Sub(m.began))
+	}
+}
+
+// deferIfSpent reports whether the budget is spent and, if so, defers the
+// candidate: it logs and traces the deferral, and logs one summary line the
+// first time in a planner call. The deferral happens before any slot, lease,
+// ticket, breaker accounting or write.
+func (m *prepareMeter) deferIfSpent(stderr io.Writer, trace *sessionReconcilerTraceCycle, wave int, candidate startCandidate, cfg *config.City) bool {
+	if m.limit <= 0 || m.spent < m.limit {
+		return false
+	}
+	if !m.summary {
+		m.summary = true
+		fmt.Fprintf(stderr, "session reconciler: prepare budget exhausted (spent=%s, budget=%s); deferring the remaining starts to the next tick\n", m.spent.Round(time.Millisecond), m.limit) //nolint:errcheck // best-effort stderr
+	}
+	logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), string(TraceOutcomeDeferredByPrepareBudget), time.Time{}, time.Time{}, nil)
+	if trace != nil {
+		trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonPrepareBudgetSpent, TraceOutcomeDeferredByPrepareBudget, candidate.tp.TemplateName, candidate.name(), traceRecordPayload{
+			"spent_ms":  m.spent.Milliseconds(),
+			"budget_ms": m.limit.Milliseconds(),
+		})
+	}
+	return true
+}
+
 func executePlannedStartsTraced(
 	ctx context.Context,
 	candidates []startCandidate,
@@ -4540,6 +4633,7 @@ func executePlannedStartsTraced(
 		}
 	}()
 	wakeCount := 0
+	prepareSpend := &prepareMeter{limit: startOpts.prepareBudget, clk: clk}
 	for wave := 0; wave <= maxWave; wave++ {
 		if ctx != nil && ctx.Err() != nil {
 			return wakeCount
@@ -4610,6 +4704,11 @@ func executePlannedStartsTraced(
 					if trace != nil {
 						trace.RecordDecision(TraceSiteLifecycleStartRun, TraceReasonOnDeathHookPending, TraceOutcomeDeferredByOnDeathHook, candidate.tp.TemplateName, candidate.name(), nil)
 					}
+					continue
+				}
+				// A planner call that has spent its prepare budget defers the
+				// rest before any slot, lease, ticket, breaker accounting or write.
+				if prepareSpend.deferIfSpent(stderr, trace, wave, candidate, cfg) {
 					continue
 				}
 				var release func()
@@ -4749,7 +4848,9 @@ func executePlannedStartsTraced(
 						continue
 					}
 				}
+				prepareSpend.begin()
 				item, err := prepareStartCandidateForCity(candidate, cityPath, cityName, cfg, sp, store, clk, stderr, startOpts.workDirResolver, startOpts.dispatchOptionSources)
+				prepareSpend.end()
 				if err != nil {
 					// A PreWake refused because the row moved (or the lease was
 					// taken over) is no restart and leaves the row's in-flight

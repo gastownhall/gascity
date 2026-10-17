@@ -486,7 +486,12 @@ const operatorSuspendAttempts = 8
 // attempt writes nothing and returns an error to retry. It returns what it
 // wrote, for a failed stop's rollback.
 func (s *Store) OperatorSuspend(id string, now time.Time) (DispositionWrite, error) {
-	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, operatorSuspendLife, now)
+	return s.operatorSuspend(id, now, operatorSuspendLife)
+}
+
+// operatorSuspend is OperatorSuspend with life as the suspend's lifecycle.
+func (s *Store) operatorSuspend(id string, now time.Time, life DispositionLife) (DispositionWrite, error) {
+	w, err := s.ApplyDispositionFresh(id, ActorOperator, DispEvent{Kind: EvSuspend}, life, now)
 	switch {
 	case err != nil:
 		return DispositionWrite{}, err
@@ -505,6 +510,17 @@ func operatorSuspendLife(Disposition, Disposition, Info) MetadataPatch {
 	patch["state"] = string(StateSuspended)
 	patch["slept_at"] = ""
 	patch["sleep_reason"] = ""
+	return patch
+}
+
+// operatorSuspendStopLife is the lifecycle of an operator's suspend that
+// stops the runtime itself (Manager.Suspend): operatorSuspendLife, with the
+// wake stamp cleared in the same write, so the runtime's death is no rapid
+// crash or churn of that wake, which would discard the conversation the next
+// wake resumes. A managed suspend leaves the stamp to its drain.
+func operatorSuspendStopLife(was, next Disposition, info Info) MetadataPatch {
+	patch := operatorSuspendLife(was, next, info)
+	patch["last_woke_at"] = ""
 	return patch
 }
 

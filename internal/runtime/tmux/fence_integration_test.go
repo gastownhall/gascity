@@ -196,7 +196,7 @@ func TestFencedNudgeRealTmuxAdoptsUnfencedPane(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if r, ok := parseFenceRead(out); !ok || r.own() != f.Digest() {
+	if r, ok := parseFenceRead(out); !ok || r.Own() != f.Digest() {
 		t.Fatalf("pane fence after adoption = %q, want own %s", out, f.Digest())
 	}
 }

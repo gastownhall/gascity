@@ -124,7 +124,7 @@ func repairedManagedDoltRuntimeState(_ string, layout managedDoltRuntimeLayout, 
 	if managedPID <= 0 || managedPID != holderPID {
 		return doltRuntimeState{}, false
 	}
-	if !managedDoltTCPReachable("127.0.0.1", port) {
+	if !managedDoltPortReachableOrHeldBy(port, holderPID) {
 		return doltRuntimeState{}, false
 	}
 	repaired := state

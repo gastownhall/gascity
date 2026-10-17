@@ -82,19 +82,19 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileTmux:
 		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
-		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed, localTranscriptTrait{}}
+		return subprocessProfile{core, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, localTranscriptTrait{}}
 	case ProfileHerdr:
 		return herdrProfile{core, b, b, b, b, b, localTranscriptTrait{}}
 	case ProfileK8s:
 		return k8sProfile{core, b, b, timed}
 	case ProfileExec:
-		return execProfile{core, b, b, b, b, timed, probeBudgetTrait{}}
+		return execProfile{core, b, b, b, b, b, timed, probeBudgetTrait{}}
 	case ProfileSSH:
 		return sshProfile{core, b, timed}
 	case ProfileT3Bridge:
-		return t3bridgeProfile{core, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
+		return t3bridgeProfile{core, b, b, b, b, b, b, timed, turnInterruptTrait{TurnInterruptProtocol}}
 	}
 	panic(fmt.Sprintf("runtime: unknown profile %d", p))
 }
@@ -105,7 +105,7 @@ type (
 	freshTrait         struct{}                  // acp and subprocess probe their control socket on every read
 	sidecarTrait       struct{}                  // acp and subprocess keep identity in a local sidecar
 	transportTrait     struct{}                  // acp's
-	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without a handshake, as the profile has none
+	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
@@ -127,8 +127,10 @@ func (sidecarTrait) LocalIdentitySidecar() bool { return true }
 func (transportTrait) SupportsTransport(transport string) bool { return transport == "acp" }
 
 // profileCapabilities are each backend's static capabilities; subprocess
-// has none. exec's come from its script's handshake, so its profile has
-// none, as an exec provider has before one.
+// has none. exec's come from its script's handshake: the profile is a pack
+// declaring the exec connection and input fencing (proc.exec, input-fence)
+// alone, which reports none of these and fences input atomically through
+// the tmux carrier.
 var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileTmux:     {CanReportAttachment: true, CanReportActivity: true},
 	ProfileACP:      {CanReportActivity: true},
@@ -179,6 +181,7 @@ type (
 	}
 	acpProfile struct {
 		Provider
+		FencedInputProvider
 		IdleSnapshotProvider
 		IdleWaitProvider
 		InteractionProvider
@@ -197,6 +200,7 @@ type (
 	}
 	subprocessProfile struct {
 		Provider
+		FencedInputProvider
 		ListingAttestation
 		LivenessObserverWithError
 		ProcessTableScanner
@@ -224,6 +228,7 @@ type (
 		Provider
 		AttachmentObserverWithError
 		DialogProvider
+		FencedInputProvider
 		IdleWaitProvider
 		RelaunchProvider
 		sleepTrait
@@ -236,6 +241,7 @@ type (
 	}
 	t3bridgeProfile struct {
 		Provider
+		FencedInputProvider
 		KeyedNudgeProvider
 		LivenessObserverWithError
 		SessionBindingProvider
@@ -245,6 +251,19 @@ type (
 		turnInterruptTrait
 	}
 )
+
+// InputFencing is acp's fixed trait: checked (the fence against the live
+// process's recorded digest, then its own connection). The fenced input
+// methods stay forwarded to the backend.
+func (acpProfile) InputFencing(string) InputFencing { return InputFencingChecked }
+
+// InputFencing is subprocess's fixed trait: checked (the fence against the
+// live child's recorded digest, then that child).
+func (subprocessProfile) InputFencing(string) InputFencing { return InputFencingChecked }
+
+// InputFencing is t3bridge's fixed trait: checked (the fence against the
+// thread binding's recorded incarnation, then that thread by id).
+func (t3bridgeProfile) InputFencing(string) InputFencing { return InputFencingChecked }
 
 // t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
 // trait the profile answers itself; a test pins it to production.
