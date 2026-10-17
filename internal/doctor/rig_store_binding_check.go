@@ -170,16 +170,23 @@ func (c *RigStoreBindingCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("rig %q: read export baseline: %v", c.rig.Name, err)
 		return r
 	}
+	return judgeRigStoreBinding(r, c.rig.Name, target.Database, addr, exportPath, liveCount, liveNewest)
+}
+
+// judgeRigStoreBinding compares what the live store holds against the rig's
+// most recent accepted export (exportPath, "" when there is none) and fills
+// in r.
+func judgeRigStoreBinding(r *CheckResult, rigName, database, addr, exportPath string, liveCount int, liveNewest sql.NullTime) *CheckResult {
 	if exportPath == "" {
 		r.Status = StatusOK
-		r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues (no export baseline to compare)", c.rig.Name, target.Database, addr, liveCount)
+		r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues (no export baseline to compare)", rigName, database, addr, liveCount)
 		return r
 	}
 
 	stats, err := readRigExportStats(exportPath)
 	if err != nil {
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("rig %q: read export baseline %s: %v", c.rig.Name, exportPath, err)
+		r.Message = fmt.Sprintf("rig %q: read export baseline %s: %v", rigName, exportPath, err)
 		return r
 	}
 	r.Details = append(r.Details, fmt.Sprintf("export baseline: %s (%d issues)", filepath.Base(exportPath), stats.lines))
@@ -187,9 +194,9 @@ func (c *RigStoreBindingCheck) Run(_ *CheckContext) *CheckResult {
 	if stats.lines > 0 && liveCount*100 < stats.lines*rigStoreBindingMinRetentionPct {
 		r.Status = StatusError
 		if liveCount == 0 {
-			r.Message = fmt.Sprintf("rig %q: database %q on %s has an empty issues table but the last accepted export (%s) has %d issues", c.rig.Name, target.Database, addr, filepath.Base(exportPath), stats.lines)
+			r.Message = fmt.Sprintf("rig %q: database %q on %s has an empty issues table but the last accepted export (%s) has %d issues", rigName, database, addr, filepath.Base(exportPath), stats.lines)
 		} else {
-			r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues, below %d%% of the last accepted export's %d (%s)", c.rig.Name, target.Database, addr, liveCount, rigStoreBindingMinRetentionPct, stats.lines, filepath.Base(exportPath))
+			r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues, below %d%% of the last accepted export's %d (%s)", rigName, database, addr, liveCount, rigStoreBindingMinRetentionPct, stats.lines, filepath.Base(exportPath))
 		}
 		r.FixHint = "restore the database from backup or investigate the store collapse before trusting doctor OK"
 		return r
@@ -197,13 +204,13 @@ func (c *RigStoreBindingCheck) Run(_ *CheckContext) *CheckResult {
 
 	if !stats.newest.IsZero() && !liveNewest.Time.After(stats.newest) {
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("rig %q: database %q on %s has not advanced past the last accepted export (%s, newest %s); live store looks frozen", c.rig.Name, target.Database, addr, filepath.Base(exportPath), stats.newest.Format(time.RFC3339))
+		r.Message = fmt.Sprintf("rig %q: database %q on %s has not advanced past the last accepted export (%s, newest %s); live store looks frozen", rigName, database, addr, filepath.Base(exportPath), stats.newest.Format(time.RFC3339))
 		r.FixHint = "confirm writes are actually reaching this rig's live store, not silently landing elsewhere"
 		return r
 	}
 
 	r.Status = StatusOK
-	r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues (export baseline %d)", c.rig.Name, target.Database, addr, liveCount, stats.lines)
+	r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues (export baseline %d)", rigName, database, addr, liveCount, stats.lines)
 	return r
 }
 

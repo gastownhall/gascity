@@ -138,6 +138,7 @@ go_test(
         "migrated_proxied_city_test.go",
         "pack_checks_test.go",
         "pre_start_scripts_check_test.go",
+        "rig_store_binding_baseline_test.go",
         "rig_store_binding_check_integration_test.go",
         "rig_store_binding_check_test.go",
         "select_test.go",
