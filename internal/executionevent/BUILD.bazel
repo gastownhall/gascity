@@ -20,6 +20,7 @@ go_test(
         "completed_fact_index_test.go",
         "completed_fact_warm_tail_test.go",
         "completion_converged_stamp_test.go",
+        "completion_step_listing_test.go",
         "completion_sweep_path_test.go",
         "lifecycle_test.go",
         "projector_test.go",

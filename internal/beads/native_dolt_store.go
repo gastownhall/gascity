@@ -3475,6 +3475,11 @@ func nativeCreatedLimitPushdown(query ListQuery) int {
 	if query.SeekAfter != nil || !query.UpdatedBefore.IsZero() || len(query.Assignees) > 0 {
 		return 0
 	}
+	// The backing's HasMetadataKey admits a key set to the empty string, which
+	// ApplyListQuery then drops, so a backing limit could cut matching rows.
+	if query.HasMetadataKey != "" {
+		return 0
+	}
 	switch query.Sort {
 	case SortCreatedAsc:
 		// The backing renders created-asc ties as `id ASC`, matching the
@@ -3528,6 +3533,7 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 		SortBy:              sortBy,
 		SortDesc:            sortDesc,
 		MetadataFields:      query.Metadata,
+		HasMetadataKey:      query.HasMetadataKey,
 		CreatedBefore:       zeroTimePtr(query.CreatedBefore),
 		IncludeDependencies: true,
 	}

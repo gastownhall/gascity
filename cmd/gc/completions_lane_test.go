@@ -63,7 +63,7 @@ func TestCompletionsLaneSweepCadenceReplacesTriggerNameGating(t *testing.T) {
 	if _, due := lane.sweepDue(now); !due {
 		t.Fatal("a lane that has never swept is not due; nothing has converged yet")
 	}
-	lane.noteSweepChunk(now, backstopReasonStartup, 0, 0, 0, true)
+	lane.noteSweepChunk(now, backstopReasonStartup, 0, 0, 0, 0, 0, true)
 	if _, due := lane.sweepDue(now.Add(time.Minute)); due {
 		t.Fatal("the sweep is due a minute after a full one; the cadence gate is not gating")
 	}
@@ -83,7 +83,7 @@ func TestCompletionsLaneSweepCadenceReplacesTriggerNameGating(t *testing.T) {
 // dropped root is a lifecycle gap nothing else is looking for.
 func TestCompletionsLaneOverflowForcesTheSweep(t *testing.T) {
 	lane := newCompletionsLane()
-	lane.noteSweepChunk(time.Now(), backstopReasonStartup, 0, 0, 0, true)
+	lane.noteSweepChunk(time.Now(), backstopReasonStartup, 0, 0, 0, 0, 0, true)
 	for i := range completionsCandidateCap + 1 {
 		lane.observe(events.Event{Type: events.ExecutionStepCompleted, RunID: overflowBeadID(i)})
 	}
@@ -92,7 +92,7 @@ func TestCompletionsLaneOverflowForcesTheSweep(t *testing.T) {
 	}
 	// Control: below the cap the lane keeps its candidates and stays un-forced.
 	small := newCompletionsLane()
-	small.noteSweepChunk(time.Now(), backstopReasonStartup, 0, 0, 0, true)
+	small.noteSweepChunk(time.Now(), backstopReasonStartup, 0, 0, 0, 0, 0, true)
 	small.observe(events.Event{Type: events.ExecutionStepCompleted, RunID: "gcg-root-a"})
 	if _, due := small.sweepDue(time.Now()); due {
 		t.Fatal("a single named root forced the sweep; overflow is not what the assertion above measured")
@@ -150,18 +150,18 @@ func TestCompletionsSweepSummaryAccumulatesAcrossChunks(t *testing.T) {
 	lane := newCompletionsLane()
 	now := time.Now()
 
-	if _, done := lane.noteSweepChunk(now, backstopReasonCadence, 1, 2, 0, false); done {
+	if _, done := lane.noteSweepChunk(now, backstopReasonCadence, 1, 2, 0, 1, 1, false); done {
 		t.Fatal("an incomplete chunk closed the sweep")
 	}
-	if _, done := lane.noteSweepChunk(now.Add(time.Second), backstopReasonCadence, 2, 3, 0, false); done {
+	if _, done := lane.noteSweepChunk(now.Add(time.Second), backstopReasonCadence, 2, 3, 0, 2, 0, false); done {
 		t.Fatal("a second incomplete chunk closed the sweep")
 	}
-	total, done := lane.noteSweepChunk(now.Add(2*time.Second), backstopReasonCadence, 1, 1, 0, true)
+	total, done := lane.noteSweepChunk(now.Add(2*time.Second), backstopReasonCadence, 1, 1, 0, 0, 0, true)
 	if !done {
 		t.Fatal("the completing chunk did not close the sweep")
 	}
-	if total.Emitted != 4 || total.Roots != 6 {
-		t.Fatalf("sweep totals = %+v, want 4 facts over 6 roots (the sum of all three chunks)", total)
+	if total.Emitted != 4 || total.Roots != 6 || total.Settled != 3 || total.StepListFailures != 1 {
+		t.Fatalf("sweep totals = %+v, want 4 facts over 6 roots, 3 settled, 1 failed step listing (the sum of all three chunks)", total)
 	}
 	if total.Elapsed < 2*time.Second {
 		t.Fatalf("sweep elapsed = %s, want at least the 2s the chunks spanned", total.Elapsed)
@@ -169,9 +169,9 @@ func TestCompletionsSweepSummaryAccumulatesAcrossChunks(t *testing.T) {
 
 	// Control: the accumulators reset, so the NEXT sweep reports its own totals
 	// rather than the running total since boot.
-	second, done := lane.noteSweepChunk(now.Add(3*time.Second), backstopReasonCadence, 5, 5, 0, true)
-	if !done || second.Emitted != 5 || second.Roots != 5 {
-		t.Fatalf("second sweep totals = %+v (done=%t), want 5 facts over 5 roots", second, done)
+	second, done := lane.noteSweepChunk(now.Add(3*time.Second), backstopReasonCadence, 5, 5, 0, 0, 0, true)
+	if !done || second.Emitted != 5 || second.Roots != 5 || second.Settled != 0 || second.StepListFailures != 0 {
+		t.Fatalf("second sweep totals = %+v (done=%t), want 5 facts over 5 roots, none settled, no failed listing", second, done)
 	}
 }
 
@@ -340,7 +340,7 @@ func TestCompletionsSweepReportsWhyItWasDue(t *testing.T) {
 	if reason, due := lane.sweepDue(now); !due || reason != backstopReasonStartup {
 		t.Fatalf("a fresh lane is due=%t reason=%q, want due with reason %q", due, reason, backstopReasonStartup)
 	}
-	if _, done := lane.noteSweepChunk(now, backstopReasonStartup, 1, 1, 0, true); !done {
+	if _, done := lane.noteSweepChunk(now, backstopReasonStartup, 1, 1, 0, 0, 0, true); !done {
 		t.Fatal("the completing chunk did not close the sweep")
 	}
 	at, reason, ran := lane.lastSweep()
@@ -357,7 +357,7 @@ func TestCompletionsSweepReportsWhyItWasDue(t *testing.T) {
 	if !due || gapReason != backstopReasonCursorGap {
 		t.Fatalf("after a feed gap due=%t reason=%q, want due with reason %q", due, gapReason, backstopReasonCursorGap)
 	}
-	lane.noteSweepChunk(now.Add(time.Second), gapReason, 0, 0, 0, true)
+	lane.noteSweepChunk(now.Add(time.Second), gapReason, 0, 0, 0, 0, 0, true)
 	if _, reason, _ = lane.lastSweep(); reason != backstopReasonCursorGap {
 		t.Fatalf("lastSweep reason after a gap-driven sweep = %q, want %q", reason, backstopReasonCursorGap)
 	}
@@ -404,7 +404,7 @@ func TestCompletionsLaneForceBeforeFirstSweepStaysStartup(t *testing.T) {
 	// cleared together, so a LATER gap is correctly reported as a cursor gap —
 	// the startup precedence applies only to the first sweep, it is not a
 	// permanent override of the gap reason.
-	lane.noteSweepChunk(now, reason, 0, 0, 0, true)
+	lane.noteSweepChunk(now, reason, 0, 0, 0, 0, 0, true)
 	lane.force()
 	if r, due := lane.sweepDue(now.Add(time.Second)); !due || r != backstopReasonCursorGap {
 		t.Fatalf("a gap after the first sweep is due=%t reason=%q, want due with reason %q", due, r, backstopReasonCursorGap)

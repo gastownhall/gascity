@@ -117,9 +117,18 @@ type ListQuery struct {
 	// into its backend returns a superset, which ApplyListQuery/Matches then cut
 	// exactly — so the RESULT is always exact and only the pushdown is
 	// best-effort. It counts as a filter, so an IDs query needs no AllowScan.
-	IDs           []string
-	Metadata      map[string]string
-	CreatedBefore time.Time
+	IDs      []string
+	Metadata map[string]string
+	// HasMetadataKey matches beads whose metadata carries this key with a
+	// non-empty value, whatever the value is. It is the key-only form of
+	// Metadata, for a reader that needs every row carrying a key in one read
+	// instead of one read per value (bd list --has-metadata-key). A backend
+	// that pushes it down may return rows whose value is empty (bd's check is
+	// "set", not "non-empty"), and one that cannot push it returns a superset;
+	// Matches cuts both exactly, so no backend may apply a native row limit
+	// before it. It counts as a filter.
+	HasMetadataKey string
+	CreatedBefore  time.Time
 	// UpdatedBefore matches beads whose UpdatedAt is before this timestamp.
 	// Legacy beads with zero UpdatedAt fall back to CreatedAt. Purge callers
 	// using CachingStore must also set Live: true to avoid stale cached timestamps.
@@ -131,6 +140,11 @@ type ListQuery struct {
 	// caller does not need labels for change detection. Stores that cannot
 	// omit labels may ignore it.
 	SkipLabels bool
+	// SkipText tells backing stores that the caller reads none of a bead's
+	// free-form text (description, design, acceptance criteria, notes), so a
+	// store may return it empty (bd list --brief). Stores that cannot omit it
+	// may ignore it. A row read this way is never installed in a cache.
+	SkipText bool
 	// Live bypasses CachingStore and reads from the backing store. Other Store
 	// implementations ignore it. Use it only for lifecycle gates that must
 	// observe external mutations immediately.
@@ -222,6 +236,7 @@ func (q ListQuery) HasFilter() bool {
 		q.ParentID != "" ||
 		len(q.IDs) > 0 ||
 		len(q.Metadata) > 0 ||
+		q.HasMetadataKey != "" ||
 		!q.CreatedBefore.IsZero() ||
 		!q.UpdatedBefore.IsZero() ||
 		q.SeekAfter != nil
@@ -295,6 +310,9 @@ func (q ListQuery) Matches(b Bead) bool {
 		}
 	}
 	if len(q.Metadata) > 0 && !matchesMetadata(b, q.Metadata) {
+		return false
+	}
+	if q.HasMetadataKey != "" && b.Metadata[q.HasMetadataKey] == "" {
 		return false
 	}
 	if !q.CreatedBefore.IsZero() && !b.CreatedAt.Before(q.CreatedBefore) {

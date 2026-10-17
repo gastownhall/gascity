@@ -138,7 +138,7 @@ func (s *DoltliteReadStore) countDurableWisps(ctx context.Context, query ListQue
 
 // doltliteCountSupported reports whether Count can answer query exactly.
 func doltliteCountSupported(query ListQuery) bool {
-	if len(query.Metadata) > 0 {
+	if len(query.Metadata) > 0 || query.HasMetadataKey != "" {
 		return false
 	}
 	if query.TierMode != TierIssues {
