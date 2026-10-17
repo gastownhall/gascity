@@ -1468,7 +1468,7 @@ func resolvedRuntimeCityDoltTargetContext(ctx context.Context, cityPath string, 
 		return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
 	}
 	if allowRecovery {
-		if err := healthBeadsProviderContext(ctx, cityPath, false); err == nil {
+		if err := governedManagedDoltHealth(ctx, cityPath); err == nil {
 			resetRecoveryCache()
 			if port := recoveredManagedDoltPort(); port != "" {
 				return contract.DoltConnectionTarget{Host: defaultManagedDoltHost, Port: port}, true, nil
@@ -1721,7 +1721,7 @@ func bdCommandRunnerWithManagedRetryErr(cityPath string, envFn func(dir string) 
 			return out, err
 		}
 		if bdTransportRecoverableError(cityPath, dir, env, err) {
-			if recErr := recoverManagedBDCommand(cityPath); recErr != nil {
+			if recErr := governedManagedRecover(cityPath); recErr != nil {
 				return out, err
 			}
 		}
