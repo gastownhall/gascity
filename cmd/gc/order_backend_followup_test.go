@@ -6,7 +6,9 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -142,6 +144,45 @@ func TestOrderDispatchSeamRejectsInapplicableOrder(t *testing.T) {
 	m2.drain(context.Background())
 }
 
+// The controller's webhook adapter builds a dispatcher per delivery, and a
+// refused delivery is re-sent on every sender retry: an inapplicable order is
+// still announced once per controller boot, and each order once. Deliveries
+// arrive concurrently, one HTTP handler goroutine each.
+func TestWebhookDispatcherReportsInapplicableOrderOncePerBoot(t *testing.T) {
+	ep := events.NewFake()
+	cs := &controllerState{
+		cityPath:  orderBackendTestCity(t, `{"database":"beads","backend":"http"}`),
+		cfg:       &config.City{Workspace: config.Workspace{Name: "t"}},
+		eventProv: ep,
+	}
+	hook := orders.Order{Name: "dolt-hook", Trigger: "webhook", Exec: "true", RequiresBackend: []string{"dolt"}}
+	doltSync := orders.Order{Name: "dolt-sync", Trigger: "webhook", Exec: "true", RequiresBackend: []string{"dolt"}}
+	var wg sync.WaitGroup
+	for i, a := range []orders.Order{hook, hook, hook, doltSync, doltSync} {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res, err := cs.WebhookDispatcher().Dispatch(context.Background(), orderdispatch.DispatchRequest{Order: a})
+			if err != nil || !res.Rejected || res.Fired {
+				t.Errorf("delivery %d = %+v, %v; want rejected and not fired", i, res, err)
+			}
+		}()
+	}
+	wg.Wait()
+	reported, err := ep.List(events.Filter{Type: events.OrderInapplicable})
+	if err != nil {
+		t.Fatal(err)
+	}
+	subjects := make([]string, 0, len(reported))
+	for _, e := range reported {
+		subjects = append(subjects, e.Subject)
+	}
+	slices.Sort(subjects)
+	if got, want := strings.Join(subjects, ","), "dolt-hook,dolt-sync"; got != want {
+		t.Fatalf("order.inapplicable subjects across 5 deliveries = %q, want %q", got, want)
+	}
+}
+
 // orderRunHTTPCity is an http city with one manual Dolt-only exec order that
 // leaves a marker when it runs.
 func orderRunHTTPCity(t *testing.T) (marker string) {
@@ -242,6 +283,22 @@ func TestOrderCheckReportsInapplicableOrders(t *testing.T) {
 	}
 	if got := payload.Orders[0]; got.Due || got.Inapplicable != "backend http" || got.Reason != "inapplicable (backend http)" {
 		t.Fatalf("row = %+v, want inapplicable backend http", got)
+	}
+
+	// Preflight still runs for an inapplicable order: an [order.env] override
+	// of a controller-owned key is a config error whatever the backend.
+	invalid := []orders.Order{{
+		Name: "dolt-only", Trigger: "condition", Check: "exit 0", Exec: "true",
+		RequiresBackend: []string{"dolt"}, Env: map[string]string{"BEADS_DIR": "/elsewhere"},
+	}}
+	for _, jsonOutput := range []bool{false, true} {
+		var out, errOut bytes.Buffer
+		if code := doOrderCheckWithStoresResolverScopedJSON(cityPath, &config.City{}, invalid, time.Now(), nil, resolve, jsonOutput, &out, &errOut); code != 1 {
+			t.Fatalf("json=%v: exit = %d, want 1", jsonOutput, code)
+		}
+		if !strings.Contains(errOut.String(), `controller-owned env key "BEADS_DIR"`) {
+			t.Fatalf("json=%v: stderr = %q, want the env override error; stdout = %q", jsonOutput, errOut.String(), out.String())
+		}
 	}
 }
 
