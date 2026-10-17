@@ -345,6 +345,18 @@ type AgentVisibilityWaiter interface {
 	WaitForAgentVisibility(ctx context.Context, qualifiedName string) error
 }
 
+// SessionKillHooks is an optional capability of the State whose process runs
+// the city's controller: the effects of an operator kill (`gc session kill`,
+// the API session kill) that only the controller's process holds. A State
+// without it kills without them.
+type SessionKillHooks interface {
+	// ResetSessionCircuitBreaker clears a configured named session's respawn
+	// circuit breaker, so the controller can revive the killed session.
+	ResetSessionCircuitBreaker(sessionID, identity string) error
+	// RecordSessionKillStop records the kill's stop metric.
+	RecordSessionKillStop(info session.Info)
+}
+
 // StateMutator extends State with write operations for mutation endpoints.
 type StateMutator interface {
 	State

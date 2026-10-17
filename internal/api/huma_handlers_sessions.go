@@ -10,6 +10,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // Session handler shared helpers. Handler methods now live in
@@ -62,6 +63,10 @@ func humaSessionManagerError(err error) error {
 		// Not retryable as is: the kept conversation's resume failed, and the
 		// message names the explicit reset that starts the session fresh.
 		return apierr.SessionConflict.Msg("conversation_retained: " + err.Error())
+	case errors.As(err, new(*worker.LiveSubagentsError)):
+		// Not retryable as is: the kill would destroy live background
+		// subagents; force overrides the refusal.
+		return apierr.SessionConflict.Msg("live_subagents: " + err.Error())
 	case errors.Is(err, session.ErrSessionClosed), errors.Is(err, session.ErrResumeRequired), errors.Is(err, session.ErrSessionKillPending):
 		return apierr.SessionConflict.Msg("conflict: " + err.Error())
 	case errors.Is(err, session.ErrSessionActive), errors.Is(err, session.ErrSessionInactive):

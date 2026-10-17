@@ -3449,6 +3449,21 @@ func (cs *controllerState) Enqueue(keys ...reconcilekey.Key) {
 	cs.wakeOf().Enqueue(wakeReasonAPI, keys...)
 }
 
+// ResetSessionCircuitBreaker clears a configured named session's respawn
+// circuit breaker after an API kill (api.SessionKillHooks): the clear the
+// controller socket performs for `gc session kill`, in this process.
+func (cs *controllerState) ResetSessionCircuitBreaker(sessionID, identity string) error {
+	return resetSessionCircuitBreakerState(cs.SessionsBeadStore().Store, sessionID, identity, defaultSessionCircuitBreaker())
+}
+
+// RecordSessionKillStop records an API kill's stop metric, as `gc session
+// kill` does (api.SessionKillHooks).
+func (cs *controllerState) RecordSessionKillStop(info session.Info) {
+	recordSessionKillStop(info, nil, cs.Config())
+}
+
+var _ api.SessionKillHooks = (*controllerState)(nil)
+
 // WaitForSessionCommandable waits until the controller has reconciled an async
 // session create into a lifecycle state that can accept normal commands.
 func (cs *controllerState) WaitForSessionCommandable(ctx context.Context, sessionID string) (session.Info, error) {

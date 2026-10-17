@@ -2,10 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
-	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -87,13 +87,9 @@ func (s *Server) handleSessionKill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	handle, err := s.workerHandleForSession(store.Store, id)
-	if err != nil {
-		writeSessionManagerError(w, err)
-		return
-	}
-	// Under the kill fence, as `gc session kill` (see Manager.KillFenced).
-	if err := s.sessionManager(store.Store).KillFenced(r.Context(), s.actor(session.ActorOperator), id, handle.Kill); err != nil {
+	force, _ := strconv.ParseBool(r.URL.Query().Get("force"))
+	// The kill is `gc session kill`'s (Server.killSession).
+	if err := s.killSession(r.Context(), store.Store, id, force); err != nil {
 		writeSessionManagerError(w, err)
 		return
 	}

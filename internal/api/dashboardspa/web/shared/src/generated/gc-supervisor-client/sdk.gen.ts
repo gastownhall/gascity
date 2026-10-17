@@ -1020,6 +1020,8 @@ export const postV0CityByCityNameSessionByIdClose = <ThrowOnError extends boolea
 
 /**
  * Post v0 city by city name session by ID kill
+ *
+ * Force-kills the session's runtime without discarding its work, as `gc session kill` does: the session is left asleep with sleep_reason killed, a configured named session's respawn circuit breaker is cleared, the controller is asked to reconcile the session, and session.stopped and worker.operation are recorded. A closed session, or one whose runtime is already gone, reports ok. 409 live_subagents refuses a kill that would destroy live background subagents and names them; force overrides it. 409 session_starting is retryable: another holder has the runtime lease.
  */
 export const postV0CityByCityNameSessionByIdKill = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdKillData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdKillResponses, PostV0CityByCityNameSessionByIdKillErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/kill', ...options });
 

@@ -964,8 +964,8 @@ func (s *Server) humaHandleSessionStop(_ context.Context, input *SessionControlI
 // --- Session Kill ---
 
 // humaHandleSessionKill is the Huma-typed handler for POST /v0/session/{id}/kill.
-
-func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput) (*OKWithIDResponse, error) {
+// The kill is `gc session kill`'s (Server.killSession).
+func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionKillInput) (*OKWithIDResponse, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")
@@ -976,11 +976,7 @@ func (s *Server) humaHandleSessionKill(_ context.Context, input *SessionIDInput)
 		return nil, humaResolveError(err)
 	}
 
-	// Under the kill fence, as `gc session kill`: without it the controller
-	// reads the kill as a crash (heal, accrual, a same-pass restart).
-	mgr := s.sessionManager(store.Store)
-	kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, id) }
-	if err := mgr.KillFenced(context.Background(), s.actor(session.ActorOperator), id, kill); err != nil {
+	if err := s.killSession(context.Background(), store.Store, id, input.Force); err != nil {
 		// A closed session, or one whose runtime is already gone, is already
 		// killed: report the outcome rather than an error.
 		if errors.Is(err, session.ErrSessionClosed) || errors.Is(err, session.ErrSessionInactive) {

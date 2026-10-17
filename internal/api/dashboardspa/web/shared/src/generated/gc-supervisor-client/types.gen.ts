@@ -18262,7 +18262,12 @@ export type PostV0CityByCityNameSessionByIdKillData = {
          */
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Kill even when the session has live background subagents, or past a hung holder of its runtime lease whose record expired, as gc session kill --force does.
+         */
+        force?: boolean;
+    };
     url: '/v0/city/{cityName}/session/{id}/kill';
 };
 

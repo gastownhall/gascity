@@ -9838,6 +9838,10 @@ export const zPostV0CityByCityNameSessionByIdKillPath = z.object({
     id: z.string()
 });
 
+export const zPostV0CityByCityNameSessionByIdKillQuery = z.object({
+    force: z.boolean().optional()
+});
+
 /**
  * OK
  */

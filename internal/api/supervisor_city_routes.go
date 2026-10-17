@@ -397,7 +397,10 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Errors:        []int{http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionMessage)
 	cityPost(sm, "/session/{id}/stop", (*Server).humaHandleSessionStop, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusNotImplemented, http.StatusServiceUnavailable))
-	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	cityPost(sm, "/session/{id}/kill", (*Server).humaHandleSessionKill, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
+		describes("Force-kills the session's runtime without discarding its work, as `gc session kill` does: the session is left asleep with sleep_reason killed, a configured named session's respawn circuit breaker is cleared, the controller is asked to reconcile the session, and session.stopped and worker.operation are recorded. "+
+			"A closed session, or one whose runtime is already gone, reports ok. "+
+			"409 live_subagents refuses a kill that would destroy live background subagents and names them; force overrides it. 409 session_starting is retryable: another holder has the runtime lease."))
 	cityPost(sm, "/session/{id}/reset", (*Server).humaHandleSessionReset, errorStatuses(http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Requests a fresh restart of an existing session: the session bead is kept, and the controller restarts the runtime on the next continuation epoch, so the provider starts a new conversation instead of resuming the previous one. "+
 			"The call records the request and pokes the controller; it returns before the restart happens. A closed session returns 409. "+
