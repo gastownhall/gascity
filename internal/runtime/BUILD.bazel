@@ -103,6 +103,7 @@ go_test(
         "staging_skip_mergeable_test.go",
         "staging_test.go",
         "testenv_import_test.go",
+        "tmux_fence_test.go",
         "tmux_literal_test.go",
         "turn_events_merge_test.go",
         "turn_identity_test.go",
