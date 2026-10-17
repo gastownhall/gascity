@@ -172,3 +172,15 @@ func managedDoltDialFailedLocally(err error) bool {
 	}
 	return false
 }
+
+// managedDoltPortReachableOrHeldBy reports whether port answers a dial from
+// this host. When the dial failed before it left this host, it reports whether
+// pid is the port's listener instead, since that failure says nothing about the
+// server.
+func managedDoltPortReachableOrHeldBy(port string, pid int) bool {
+	err := managedDoltTCPProbe("127.0.0.1", port)
+	if err == nil {
+		return true
+	}
+	return managedDoltDialFailedLocally(err) && pid > 0 && findPortHolderPID(port, pid) == pid
+}

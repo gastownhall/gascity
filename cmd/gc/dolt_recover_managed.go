@@ -126,11 +126,7 @@ func recoverManagedDoltProcessWithOps(cityPath, host, port, user, logLevel strin
 		if alternatePort := recoverManagedDoltObservedPort(cityPath, port); alternatePort != "" {
 			observePort = alternatePort
 		}
-		if reuse := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); reuse && recoverManagedDoltShouldReuseExisting(report.Port, port) {
-			if !report.ReadyInconclusive {
-				report.Ready = true
-				report.Healthy = true
-			}
+		if ready := observeExistingManagedDoltForRecovery(cityPath, host, observePort, user, recoverManagedDoltExistingObserveTimeout(timeout), &report); ready && recoverManagedDoltShouldReuseExisting(report.Port, port) {
 			if err := ops.publish(cityPath); err != nil {
 				return report, fmt.Errorf("publish managed dolt runtime state: %w", err)
 			}
@@ -363,9 +359,12 @@ func waitForManagedDoltLifecycleOrReady(cityPath, host, port, user string, timeo
 	deadline := time.Now().Add(timeout)
 	for {
 		if report != nil {
-			if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); ready {
+			// Only a measured server lets a contended recovery skip the lock;
+			// an unmeasured one may be the server the lock holder is replacing.
+			if ready := observeExistingManagedDoltForRecovery(cityPath, host, port, user, time.Second, report); ready && !report.ReadyInconclusive {
 				return true, false, nil
 			}
+			report.ReadyInconclusive = false
 		}
 		locked, err := tryManagedDoltLifecycleLock(lockFile)
 		if err != nil {
