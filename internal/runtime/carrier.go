@@ -8,17 +8,21 @@ import (
 // Carrier drives the high-level session interactions — input delivery, output
 // capture, interrupt, scrollback — over a connection to the box, separating
 // HOW an interaction is realized from the connection that reaches the box. Its
-// scope is exactly those four driving verbs; liveness, attachment, activity,
-// and metadata stay provider-specific, and higher-level orchestration
-// (startup-dialog acceptance, no-wait nudge, wait-for-idle) is composed ABOVE a
-// Carrier out of Peek/SendKeys, not added to it.
+// scope is those four driving verbs plus their fenced forms
+// (RUNTIME-CONTRACT-009); liveness, attachment, activity, and metadata stay
+// provider-specific, and higher-level orchestration (startup-dialog
+// acceptance, no-wait nudge, wait-for-idle) is composed ABOVE a Carrier out of
+// Peek/SendKeys (or FencedKeys), not added to it.
 //
-// Every op returns the underlying transport error verbatim. Whether a failure
-// is fatal or best-effort is the PROVIDER facade's policy: a provider decides
-// per verb which errors to discard when it delegates here (e.g. Kubernetes
-// treats a missing pod as a no-op for SendKeys but propagates a genuine
-// transport failure to a live pod, and propagates both for Nudge) — the
-// Carrier itself never swallows.
+// Every unfenced op returns the underlying transport error verbatim. Whether a
+// failure is fatal or best-effort is the PROVIDER facade's policy: a provider
+// decides per verb which errors to discard when it delegates here (e.g.
+// Kubernetes treats a missing pod as a no-op for SendKeys but propagates a
+// genuine transport failure to a live pod, and propagates both for Nudge) —
+// the Carrier itself never swallows. The fenced ops classify instead: a miss
+// is a *FenceMismatchError, a transport failure wraps ErrRuntimeUnavailable
+// (or ErrInputFenceUnsupported without the exec op), and deleting a staged
+// paste buffer after a failure is best-effort.
 //
 // The tmux carrier ([NewTmuxCarrier]) realizes these verbs by issuing tmux
 // commands over an [ExecProvider]. It is the shared driver for tmux-in-a-box
