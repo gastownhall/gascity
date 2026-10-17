@@ -259,7 +259,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator fresh restart", "continuation_reset_pending restart_requested", []string{"internal/session/manager.go:Manager.RequestFreshRestart"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.RequestFreshRestart(id)) }},
-		{"operator suspend", "held_until runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.Suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) {
+		{"operator suspend", "held_until last_woke_at runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.Suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
 		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {

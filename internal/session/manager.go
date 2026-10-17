@@ -1459,31 +1459,22 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			return err
 		}
 
-		// Every intent clears the wake stamp before the runtime goes: a tick
+		// Every intent clears last_woke_at before the runtime goes: a tick
 		// that sees the dead runtime would otherwise classify this deliberate
 		// stop as a rapid crash or churn of that wake and discard the
-		// conversation the next wake resumes. A failed stop restores it.
-		lastWokeAt := b.Metadata["last_woke_at"]
-		if err := m.moveWakeStamp(id, lastWokeAt, ""); err != nil {
-			return fmt.Errorf("clearing wake stamp for suspend: %w", err)
-		}
-		restoreWake := func(err error) error {
-			if rbErr := m.moveWakeStamp(id, "", lastWokeAt); rbErr != nil {
-				return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
-			}
-			return err
-		}
+		// conversation the next wake resumes.
 
 		// An operator's suspend is the disposition's Suspend cell, fenced,
 		// and written BEFORE the runtime goes: the user hold keeps legacy's
 		// assigned-work wake and its heartbeat crash recovery from undoing it,
 		// so a tick between the write and the stop drains the row instead of
-		// restarting it. It supersedes any pending wake request (D7). A failed
-		// stop restores the row.
+		// restarting it. It supersedes any pending wake request (D7) and
+		// clears the wake stamp in the same write. A failed stop restores the
+		// row, the stamp with it.
 		if intent == suspendIntentOperator {
-			suspended, err := m.PersistedStore().OperatorSuspend(id, m.now())
+			suspended, err := m.PersistedStore().operatorSuspend(id, m.now(), operatorSuspendStopLife)
 			if err != nil {
-				return restoreWake(fmt.Errorf("updating suspension state: %w", err))
+				return fmt.Errorf("updating suspension state: %w", err)
 			}
 			if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
 				// The runtime is still live: restore what the suspend wrote, as
@@ -1496,13 +1487,23 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 				if rbErr := m.rollbackSuspend(id, suspended); rbErr != nil {
 					return fmt.Errorf("%w (restoring the row: %w)", err, rbErr)
 				}
-				return restoreWake(err)
+				return err
 			}
 			return nil
 		}
 
+		// The soft and sweep suspends write their state after the stop, so
+		// the stamp is cleared first, whatever stamp the row carries by then.
+		// A failed stop restores the stamp it cleared.
+		cleared, err := m.clearWakeStamp(id)
+		if err != nil {
+			return fmt.Errorf("clearing wake stamp for suspend: %w", err)
+		}
 		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
-			return restoreWake(err)
+			if rbErr := m.restoreWakeStamp(id, cleared); rbErr != nil {
+				return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
+			}
+			return err
 		}
 
 		// Update state and suspension timestamp together so stores with a
@@ -1525,17 +1526,39 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 	})
 }
 
-// moveWakeStamp writes last_woke_at=to, fenced on a fresh read, only while the
-// row still reads from: a stamp written since (a new wake) stands. from==to
-// writes nothing.
-func (m *Manager) moveWakeStamp(id, from, to string) error {
-	if from == to {
-		return nil
-	}
-	moved := false
+// clearWakeStamp clears last_woke_at, fenced on a fresh read, and returns
+// the stamp it cleared ("" when the row carried none). A stamp written since
+// the caller's read is the one cleared, so the stop that follows never runs
+// with a wake stamp set. Every attempt lost to a concurrent writer returns an
+// error and clears nothing: the caller must not stop the runtime.
+func (m *Manager) clearWakeStamp(id string) (string, error) {
+	cleared := ""
+	err := m.updateWakeStamp(id, func(current string) (string, bool) {
+		cleared = current
+		return "", current != ""
+	})
+	return cleared, err
+}
+
+// restoreWakeStamp puts back the stamp clearWakeStamp cleared, fenced on a
+// fresh read, only while the row still carries none: a stamp written since
+// (a new wake) stands.
+func (m *Manager) restoreWakeStamp(id, stamp string) error {
+	err := m.updateWakeStamp(id, func(current string) (string, bool) {
+		return stamp, stamp != "" && current == ""
+	})
+	return err
+}
+
+// updateWakeStamp writes the last_woke_at next decides from the row's current
+// stamp, fenced on a fresh read. next returning false writes nothing. Every
+// attempt lost to a concurrent writer is an error.
+func (m *Manager) updateWakeStamp(id string, next func(current string) (string, bool)) error {
+	decided := false
 	wrote, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
-		if p.Metadata["last_woke_at"] != from {
-			moved = true
+		to, write := next(p.Metadata["last_woke_at"])
+		decided = !write
+		if !write {
 			return nil
 		}
 		return MetadataPatch{"last_woke_at": to}
@@ -1543,7 +1566,7 @@ func (m *Manager) moveWakeStamp(id, from, to string) error {
 	if err != nil {
 		return err
 	}
-	if !wrote && !moved {
+	if !wrote && !decided {
 		return fmt.Errorf("session %q: wake stamp lost to concurrent writes; retry", id)
 	}
 	return nil

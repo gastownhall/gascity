@@ -2,10 +2,14 @@ package main
 
 import (
 	"context"
+	"fmt"
+	"maps"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -81,6 +85,65 @@ func TestSuspendPreservesConversationThroughExitReconciliation(t *testing.T) {
 					}
 				}
 			})
+		}
+	}
+}
+
+// TestSuspendIsNoExitForV2Decide is the v2 controller's side of the same
+// contract: decideRow (the dead-runtime heal, armDeadRuntimeHeal's
+// deadRuntimePatch, among its arms) over the row each suspend intent left,
+// its runtime gone, inside the rapid-crash and churn windows, accrues no wake
+// failure or churn and keeps the conversation key, whether the row is wanted
+// awake or asleep.
+func TestSuspendIsNoExitForV2Decide(t *testing.T) {
+	const key = "conversation-to-resume"
+	for _, in := range []struct {
+		name  string
+		kind  session.ActorKind
+		soft  bool
+		sweep bool
+	}{
+		{name: "operator", kind: session.ActorOperator},
+		{name: "idle", kind: session.ActorOperator, soft: true},
+		{name: "shutdown sweep", sweep: true},
+	} {
+		for _, age := range []time.Duration{stabilityThreshold / 3, stabilityThreshold + time.Minute} {
+			for _, desired := range []desire{desireWake, desireSleep} {
+				t.Run(fmt.Sprintf("%s/%s/%v", in.name, age, desired), func(t *testing.T) {
+					store := censusStore(sessionRow("gc-1", "template", "worker", "state", "awake", "session_name", "s-gc-1",
+						"generation", "3", "provider", "claude", "session_origin", "ephemeral", "session_key", key, "started_config_hash", "h-1",
+						"wake_attempts", "0", "churn_count", "0", "last_woke_at", gatherNow.Add(-age).Format(time.RFC3339)))
+					sp := runtime.NewFake()
+					if err := sp.Start(context.Background(), "s-gc-1", runtime.Config{}); err != nil {
+						t.Fatal(err)
+					}
+					city := t.TempDir()
+					by := session.Actor{Kind: session.ActorSweep}
+					if !in.sweep {
+						by = testActorIn(t, in.kind, city)
+					}
+					mgr := session.NewManagerWithOptions(store, sp, session.WithClock(&clock.Fake{Time: gatherNow}), session.WithCityPath(city))
+					if err := mgr.Suspend(context.Background(), by, "gc-1", in.soft); err != nil {
+						t.Fatalf("Suspend: %v", err)
+					}
+					row, err := store.Get("gc-1")
+					if err != nil {
+						t.Fatal(err)
+					}
+					w, a := rowWorld(t, row)
+					k := rowKeyOf("gc-1")
+					a.Snapshot.Entries[k].Liveness = livenessGone
+					a.Snapshot.Entries[k].Desired = desired
+					it, _ := decideRow(w, a, k)
+					after := it.Patch.Apply(maps.Clone(row.Metadata))
+					if after["session_key"] != key || after["continuation_reset_pending"] == "true" {
+						t.Fatalf("v2 %s (%s) over the suspended row lost the conversation: patch %v", it.Kind, it.Reason, it.Patch)
+					}
+					if after["wake_attempts"] != "0" || after["churn_count"] != "0" {
+						t.Fatalf("v2 %s (%s) counted the suspend: wake_attempts=%q churn_count=%q", it.Kind, it.Reason, after["wake_attempts"], after["churn_count"])
+					}
+				})
+			}
 		}
 	}
 }
