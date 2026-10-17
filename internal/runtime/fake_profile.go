@@ -82,7 +82,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	case ProfileTmux:
 		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}}
 	case ProfileACP:
-		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
+		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
 		return subprocessProfile{core, b, b, b, freshTrait{}, sidecarTrait{}, timed, localTranscriptTrait{}}
 	case ProfileHerdr:
@@ -180,6 +180,7 @@ type (
 	}
 	acpProfile struct {
 		Provider
+		FencedInputProvider
 		IdleSnapshotProvider
 		IdleWaitProvider
 		InteractionProvider
@@ -247,6 +248,11 @@ type (
 		turnInterruptTrait
 	}
 )
+
+// InputFencing is acp's fixed trait: checked (the fence against the live
+// process's recorded digest, then its own connection). The fenced input
+// methods stay forwarded to the backend.
+func (acpProfile) InputFencing(string) InputFencing { return InputFencingChecked }
 
 // t3bridgeTurnCapabilities is t3bridge's static T3 V1 row (X11 §5.1), a fixed
 // trait the profile answers itself; a test pins it to production.
