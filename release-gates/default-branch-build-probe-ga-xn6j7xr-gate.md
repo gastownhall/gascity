@@ -70,12 +70,12 @@
 |---|---|---:|---:|---:|---:|
 | unit | `make check` | 69262 | 0 | 256 | 371 |
 | acceptance | `bazel test $BAZEL_FLAGS --config=acceptance //test/acceptance:acceptance_test //test/acceptance:acceptance_solo_tests` | 410 | 0 | 13 | 24 |
-| integration-packages | `bazel test $BAZEL_FLAGS --config=integration //test:integration_packages` | 47021 | 0 | 73 | 81 |
+| integration-packages | `bazel test $BAZEL_FLAGS --config=integration //test:integration_packages` | 47020 | 0 | 73 | 81 |
 | integration-full | `bazel test $BAZEL_FLAGS --config=integration --test_arg=-test.v //test/integration:integration_test` | 189 | 0 | 14 | 14 |
 | Native floor | computed environment top-ups + fixed floor | 21 | 0 | 14 | n/a |
 | Total | top-level result events across 506 retained logs | 116902 | 0 | 370 | 490 |
 
-Counts sum executions per job, not distinct tests; subtests are excluded. The by-name tool reports 440 logs with result lines; other logs include policy/build/self-test output. Unit process omissions were exercised by integration-packages; TestTutorial01 explicitly PASS there. Of the unit SKIP names, 122 have a PASS in integration-packages.
+Counts use gate-test-evidence.py's result parser and sum executions per job, not distinct tests; subtests are excluded. An interleaved partial result line in integration-packages is excluded by that parser. The by-name tool reports 440 logs with result lines; other logs include policy/build/self-test output. Unit process omissions were exercised by integration-packages; TestTutorial01 explicitly PASS there. Of the unit SKIP names, 122 have a PASS in integration-packages.
 
 skip_justification: Remaining skips are unchanged live-service/optional-backend journeys, fixture inputs, platform/permission cases, harness helpers and placeholders. Remote environment omissions received all prescribed native top-ups. The 14 remaining native top-level SKIPs are replay/simulation inputs unset (2), optional br absent (1), live herdr journeys disabled (7), and tmux user-binding context unavailable (4); PostgreSQL subtests also need an optional DSN. They neither add nor modify these skip conditions, and no diff-owned test skips. The affected fake-git leaf/helper/template tests all execute. Complete named reasons are retained in the inventories and logs, rather than representing skips as passes.
 
