@@ -784,8 +784,9 @@ func (t *Tmux) checkNoApprovalPromptIn(name, target string) error {
 // agent pane with Escape, the key the prompt offers ("Esc to cancel"). Ctrl-C
 // does not dismiss the prompt, and stopping a turn must never pick one of its
 // numbered options. handled reports that Interrupt is done: a prompt was
-// canceled, the session is gone, or the pane could not be read, in which
-// case nothing is sent, because the look cannot rule a prompt out.
+// canceled or the session is gone. A pane that cannot be read is not
+// handled: the error is returned for the caller to log, and the caller
+// interrupts with Ctrl-C as it did before it looked.
 func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled bool, err error) {
 	target, err := t.agentPaneTarget(name)
 	if err == nil {
@@ -799,7 +800,7 @@ func (t *Tmux) cancelClaudeApproval(ctx context.Context, name string) (handled b
 		if errors.Is(err, ErrSessionNotFound) || errors.Is(err, ErrNoServer) {
 			return true, absorbGone(ctx, err)
 		}
-		return true, fmt.Errorf("looking for a permission prompt before interrupting %q: %w", name, err)
+		return false, fmt.Errorf("looking for a permission prompt: %w", err)
 	}
 	t.cancelCopyModeIfParked(ctx, target)
 	if err := t.sendKeysRawCtx(ctx, target, "Escape"); err != nil {

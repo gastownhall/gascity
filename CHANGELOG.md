@@ -354,8 +354,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Stopping a Claude turn that is waiting on a permission prompt now cancels
   the prompt.** The tmux interrupt sent Ctrl-C, which leaves Claude's prompt
   up; it now sends Escape (the prompt's own cancel key) when a prompt is on
-  screen, never a numbered option, and sends nothing when it cannot read the
-  pane. (thanks @csells)
+  screen, never a numbered option. When it cannot read the pane it logs a
+  warning and sends Ctrl-C as before. (thanks @csells)
 
 - **The Dolt compactor docs no longer claim it only rewrites history this
   city grew.** The `gc-compact-base` watermark is a position, not an author:

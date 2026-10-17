@@ -333,8 +333,16 @@ func (p *Provider) Interrupt(name string) error {
 // session or server is reported (paneGuard.gone), never absorbed.
 func (p *Provider) interrupt(ctx context.Context, name string) error {
 	if p.tm.isClaudeTarget(name) {
-		if handled, err := p.tm.cancelClaudeApproval(ctx, name); handled {
+		handled, err := p.tm.cancelClaudeApproval(ctx, name)
+		if handled {
 			return err
+		}
+		if err != nil {
+			logf := p.logf
+			if logf == nil {
+				logf = log.Printf
+			}
+			logf("tmux: interrupting %q with Ctrl-C without knowing whether a permission prompt is up: %v", name, err)
 		}
 	}
 	if p.tm.requiresHiddenAttachedInterrupt(name) && !p.tm.IsSessionAttached(name) {

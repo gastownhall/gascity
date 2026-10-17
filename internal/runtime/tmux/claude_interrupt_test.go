@@ -2,7 +2,9 @@ package tmux
 
 import (
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 )
 
@@ -39,19 +41,26 @@ func TestClaudeInterruptWithoutPromptSendsCtrlC(t *testing.T) {
 	}
 }
 
-// A pane that cannot be read may be showing a prompt: nothing is sent and
-// the failure is reported.
-func TestClaudeInterruptSendsNothingWhenThePaneCannotBeRead(t *testing.T) {
+// A pane that cannot be read falls back to the Ctrl-C interrupt and logs
+// why it could not look for a prompt first.
+func TestClaudeInterruptFallsBackToCtrlCWhenThePaneCannotBeRead(t *testing.T) {
 	pane := newFakeClaudePane("")
+	pane.busy = true
 	pane.captureErr = errors.New("capture-pane: timed out")
 	pane.captureErrOnCapture = 1
+	var logged []string
+	p := &Provider{tm: newFakeClaudeTmux(pane), logf: func(format string, args ...any) {
+		logged = append(logged, fmt.Sprintf(format, args...))
+	}}
 
-	err := (&Provider{tm: newFakeClaudeTmux(pane)}).Interrupt(pane.sessionName)
-	if !errors.Is(err, pane.captureErr) {
-		t.Fatalf("Interrupt = %v, want the capture error", err)
+	if err := p.Interrupt(pane.sessionName); err != nil {
+		t.Fatalf("Interrupt = %v, want the Ctrl-C fallback to succeed", err)
 	}
-	if len(pane.keys) != 0 || len(pane.promptKeys) != 0 {
-		t.Fatalf("sent keys %q / %q without seeing the pane", pane.keys, pane.promptKeys)
+	if !slices.Equal(pane.keys, []string{"C-c"}) {
+		t.Fatalf("keys = %q, want exactly C-c", pane.keys)
+	}
+	if len(logged) != 1 || !strings.Contains(logged[0], "capture-pane: timed out") {
+		t.Fatalf("logged %q, want one warning naming the capture error", logged)
 	}
 }
 
