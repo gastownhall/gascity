@@ -54,11 +54,13 @@ func startStandaloneBdDoltLikeProcess(t *testing.T, dataDir string) *exec.Cmd {
 	if err := os.MkdirAll(dataDir, 0o700); err != nil {
 		t.Fatalf("MkdirAll(dataDir): %v", err)
 	}
-	fifo := filepath.Join(dataDir, "sql-server")
-	if err := syscall.Mkfifo(fifo, 0o600); err != nil {
-		t.Fatalf("Mkfifo(sql-server): %v", err)
+	if err := os.WriteFile(filepath.Join(dataDir, "sql-server"), []byte("read _ < keepalive\n"), 0o600); err != nil {
+		t.Fatalf("WriteFile(sql-server): %v", err)
 	}
-	cmd := exec.Command("bash", "-c", `exec -a dolt cat sql-server -- --data-dir "$1"`, "fake-dolt", dataDir)
+	if err := syscall.Mkfifo(filepath.Join(dataDir, "keepalive"), 0o600); err != nil {
+		t.Fatalf("Mkfifo(keepalive): %v", err)
+	}
+	cmd := exec.Command("bash", "-c", `exec -a dolt sh sql-server -- --data-dir "$1"`, "fake-dolt", dataDir)
 	cmd.Dir = dataDir
 	cmd.Stdout = io.Discard
 	cmd.Stderr = io.Discard
