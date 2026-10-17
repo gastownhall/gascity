@@ -291,7 +291,6 @@ func (s *seededState) Enqueue(...reconcilekey.Key) {}
 func (s *seededState) ServiceRegistry() workspacesvc.Registry   { return nil }
 func (s *seededState) ExtMsgServices() *extmsg.Services         { return s.extmsgSvc }
 func (s *seededState) AdapterRegistry() *extmsg.AdapterRegistry { return s.adapterReg }
-func (s *seededState) MaintenanceLoop() MaintenanceProvider     { return nil }
 
 // ApplyStartupPrompt returns hints unchanged: a seeded city renders no startup
 // prompts.

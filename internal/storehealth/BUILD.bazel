@@ -10,7 +10,6 @@ go_library(
     visibility = ["//:__subpackages__"],
     deps = [
         "//internal/beads/contract",
-        "//internal/events",
         "//internal/fsys",
     ],
 )
@@ -24,7 +23,6 @@ go_test(
     ],
     embed = [":storehealth"],
     deps = [
-        "//internal/events",
         "//internal/testenv",
     ],
 )

@@ -23,35 +23,9 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
-	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
-
-// MaintenanceProvider is the subset of supervisor.StoreMaintenanceLoop that
-// the API layer consumes. Defining it here keeps handlers from importing
-// the full supervisor runtime and lets tests substitute a fake without
-// wiring a real loop goroutine. The concrete *supervisor.StoreMaintenanceLoop
-// satisfies this interface directly — no adapter is required.
-type MaintenanceProvider interface {
-	// LastRunAt returns the start time of the most recent maintenance
-	// run, or the zero value when none has completed.
-	LastRunAt() time.Time
-
-	// History returns a copy of the bounded run history in chronological
-	// order (oldest first).
-	History() []supervisor.MaintenanceRun
-
-	// InFlightStart reports the start time of the currently in-flight run
-	// and whether one is running. Non-blocking — safe to call from the
-	// /status handler while a real cycle holds the lease for minutes.
-	InFlightStart() (time.Time, bool)
-
-	// TriggerNow runs one maintenance cycle synchronously. When the lease
-	// is held it returns *supervisor.MaintenanceInProgressError so the
-	// POST handler can translate to 409 Conflict.
-	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
-}
 
 // NudgeQueue is the part of the city's nudge queue the API writes through:
 // the deferred submit a session cannot take yet, and the withdrawal of a
@@ -187,12 +161,6 @@ type State interface {
 	// AdapterRegistry returns the external messaging adapter registry, or
 	// nil when external messaging is not enabled.
 	AdapterRegistry() *extmsg.AdapterRegistry
-
-	// MaintenanceLoop returns the Dolt store-maintenance loop when
-	// [maintenance.dolt] enabled=true in city.toml, or nil otherwise.
-	// Handlers treat nil as "feature disabled" and respond with a typed
-	// 503 so the CLI can print a useful message.
-	MaintenanceLoop() MaintenanceProvider
 
 	// ApplyStartupPrompt returns hints with the startup prompt of the session
 	// described by info delivered for a launch that resumes it: the prompt rides

@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"io/fs"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
@@ -26,6 +27,15 @@ func repoRoot() string {
 	}
 	_, filename, _, _ := runtime.Caller(0)
 	return filepath.Join(filepath.Dir(filename), "..", "..")
+}
+
+// gitIgnored reports whether name (a top-level directory name) is ignored by
+// the repo's .gitignore rules. Used by TestDocDirCoverage to automatically
+// skip gitignored scratch directories without requiring manual maintenance of
+// docTreeIgnored for every new type of local workspace directory.
+func gitIgnored(root, name string) bool {
+	cmd := exec.Command("git", "-C", root, "check-ignore", "--quiet", name)
+	return cmd.Run() == nil
 }
 
 var (
@@ -800,12 +810,6 @@ func TestNoKnownStaleDocReferences(t *testing.T) {
 		"session.Fake",
 		"agent.Fake",
 		"internal/dolt/",
-		// The [maintenance.dolt] loop is observe-only (no backup snapshot,
-		// no CALL DOLT_GC); the public reference must not claim otherwise
-		// (#7995). The second phrase is the old `gc maintenance` summary in
-		// docs/reference/cli.md.
-		"CALL DOLT_GC + backup snapshot",
-		"Dolt store maintenance (gc + snapshot)",
 	}
 
 	var hits []string
@@ -860,6 +864,9 @@ func TestDocDirCoverage(t *testing.T) {
 			continue
 		}
 		if known[name] {
+			continue
+		}
+		if gitIgnored(root, name) {
 			continue
 		}
 		dirPath := filepath.Join(root, name)

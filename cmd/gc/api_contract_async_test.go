@@ -87,17 +87,6 @@ var contractAsyncCases = []contractAsyncCase{
 		run:         contractAsyncRunCancel,
 	},
 	{
-		operationID: "trigger-maintenance-dolt-gc",
-		terminal:    "explicit refusal: a file-backed city has no Dolt store, so the trigger answers the documented 503 (no 202, no orphaned run; the Dolt-backed 202 run body is owned by internal/api TestHumaHandleMaintenanceTriggerDoltGC_WaitSuccess)",
-		run: func(t *testing.T, h *contractHarness) {
-			resp, err := h.client.TriggerMaintenanceDoltGcWithResponse(h.ctx, contractCityName,
-				&genclient.TriggerMaintenanceDoltGcParams{XGCRequest: contractCSRF})
-			expectStatus(t, "trigger dolt gc", resp, err, http.StatusServiceUnavailable)
-			status, err := h.client.GetV0CityByCityNameMaintenanceStatusWithResponse(h.ctx, contractCityName)
-			expectStatus(t, "maintenance status", status, err, http.StatusOK, http.StatusServiceUnavailable)
-		},
-	},
-	{
 		operationID: "post-v0-city",
 		terminal:    "explicit refusal: a single-city controller mux has no city initializer, so create answers the documented 501 (the supervisor path is owned by TestGCLiveContract_BeadsAndEvents)",
 		run: func(t *testing.T, h *contractHarness) {

@@ -20,8 +20,7 @@ import (
 // under the log's lock, so auto-stamped records are in order, but it keeps a
 // caller-supplied Ts, and some producers record a moment they observed
 // earlier: endpointCapacityGuard.flush records each breaker transition at the
-// end of a reconcile tick with the transition's own time, and
-// StoreMaintenanceLoop records a run at its FinishedAt. A backward step of the
+// end of a reconcile tick with the transition's own time. A backward step of the
 // wall clock the records are stamped from does the same to every record after
 // it.
 //

@@ -275,7 +275,7 @@ func TestCacheFreshnessHeadersOnEveryCachedReadType(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: now}))
 
-	fs := maintenanceTestState(t, &fakeMaintenanceLoop{})
+	fs := newFakeState(t)
 	wait := subSecondWaitBead("w-1", now.Add(-time.Hour))
 	fs.cityBeadStore = stubLivenessReporter{
 		Store: beads.NewMemStoreFrom(1, []beads.Bead{wait}, nil),
@@ -307,12 +307,6 @@ func TestCacheFreshnessHeadersOnEveryCachedReadType(t *testing.T) {
 	if got, ok := rigs["X-Gc-Cache-Refresh"]; ok {
 		t.Errorf("GET /rigs X-GC-Cache-Refresh = %q, want it omitted", got)
 	}
-	maint := cacheHeadersOf(t, h, fs, "/maintenance/status")
-	for _, name := range []string{"X-GC-Cache-Refresh-Interval-S", "X-GC-Cache-Refresh"} {
-		if got := maint.Values(name); len(got) != 0 {
-			t.Errorf("GET /maintenance/status %s = %q, want it omitted", name, got)
-		}
-	}
 }
 
 // backdateSavedStatus moves the build time of the /status body srv saved d
@@ -338,11 +332,10 @@ func setCitySuspendedForTest(t *testing.T, cityPath string, suspended bool) {
 	}
 }
 
-// GET /rigs and GET /maintenance/status report no cache age, however old the
-// city store's cache is. Their bodies come from config, the suspension state,
-// runtime probes and the supervisor's maintenance loop, not from the bead
-// cache, so its age says nothing about them, and a CLI that saw it would print
-// its cache-age footer over output that never came from the
+// GET /rigs reports no cache age, however old the city store's cache is. Its
+// body comes from config, the suspension state and runtime probes, not from the
+// bead cache, so its age says nothing about it, and a CLI that saw it would
+// print its cache-age footer over output that never came from the
 // cache. Neither does GET /status on a suspended city, whose body is built
 // without reading any bead store. GET /beads, which is read from the cache, is
 // the control: it reports the same store's age, as GET /status does once the
@@ -351,14 +344,14 @@ func TestReadsNotServedFromTheBeadCacheReportNoCacheAge(t *testing.T) {
 	now := time.Date(2026, 7, 8, 12, 0, 0, 0, time.UTC)
 	t.Cleanup(SetLivenessClockForTest(&clock.Fake{Time: now}))
 
-	fs := maintenanceTestState(t, &fakeMaintenanceLoop{})
+	fs := newFakeState(t)
 	fs.cityBeadStore = stubLivenessReporter{Store: beads.NewMemStore(), live: true, lastFresh: now.Add(-45 * time.Second)}
 	h := newTestCityHandler(t, fs)
 
 	if age := cacheAgeOf(t, h, fs, "/beads"); age != 45 {
 		t.Fatalf("precondition: GET /beads X-GC-Cache-Age-S = %v, want 45, the city store's cache age", age)
 	}
-	for _, path := range []string{"/rigs", "/maintenance/status"} {
+	for _, path := range []string{"/rigs"} {
 		hdr := cacheHeadersOf(t, h, fs, path)
 		if age := cacheAgeIn(t, path, hdr); age != 0 {
 			t.Errorf("GET %s X-GC-Cache-Age-S = %v, want 0: its body is not read from the bead cache", path, age)

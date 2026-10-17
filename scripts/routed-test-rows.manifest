@@ -15,7 +15,6 @@ cmd/gc/cmd_beads_test.go
 cmd/gc/cmd_citystatus_test.go
 cmd/gc/cmd_convoy_test.go
 cmd/gc/cmd_mail_test.go
-cmd/gc/cmd_maintenance_test.go
 cmd/gc/cmd_order_test.go
 cmd/gc/cmd_rig_test.go
 cmd/gc/cmd_session_test.go

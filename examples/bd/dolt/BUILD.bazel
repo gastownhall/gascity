@@ -148,7 +148,6 @@ go_test(
         ["**"],
         exclude = ["BUILD.bazel"],
     ) + [
-        "//:engdocs_dolt_maintenance",
         "//:go.mod",
         "//examples/bd:assets/scripts/dolt-enospc.sh",
         "//examples/bd:assets/scripts/dolt-fsync-stall.sh",

@@ -738,12 +738,11 @@ func frozenComputeStoreHealth(ctx context.Context, s *Server) (*StatusStoreHealt
 	if err != nil {
 		return nil, err
 	}
-	lastAt, lastStatus := storehealth.LastMaintenance(s.state.EventProvider())
 	// countBeadStoreRows returns an error (handled above) rather than a
 	// fabricated count on every failure path, and refuses a zero the store's
 	// own row witness contradicts, so rows here is a count this process holds
 	// no evidence against. That is what the true below asserts.
-	h := storehealth.Compute(cityPath, size, rows, true, lastAt, lastStatus)
+	h := storehealth.Compute(cityPath, size, rows, true)
 	return statusStoreHealthFromDomain(h), nil
 }
 

@@ -262,8 +262,7 @@ func (cr *CityRuntime) recoverUnroutedWorkRoutesDelta() routeRecoveryReport {
 //
 // The sweeps are minutes of sequential remote reads on a large city — together
 // 88% of a 373s tick before this slice and its predecessor — so they run off the
-// tick's critical path, the same shape as the bead-event watcher and the
-// store-maintenance loop. A nil provider leaves every lane sweep-only, which the
+// tick's critical path, the same shape as the bead-event watcher. A nil provider leaves every lane sweep-only, which the
 // feed records by declaring a gap.
 func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Provider) {
 	route := cr.routeRecoveryLaneOf()

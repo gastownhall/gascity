@@ -48,8 +48,6 @@ var routedReadRegistry = map[string]routedReadRegistration{
 	"wait list":     {equivalenceTest: "TestWaitListRouteEquivalence"},
 
 	"convoy check":        {exemptReason: "always reads the live local store because it may close convoys; it never takes the API route"},
-	"maintenance dolt-gc": {exemptReason: "API-only: the supervisor runs the collection and there is no local route"},
-	"maintenance status":  {exemptReason: "API-only: the maintenance ring buffer lives in the supervisor and there is no local route"},
 	"nudge-dispatch-tick": {exemptReason: "controller-internal dispatch tick, not a user command; prints nothing"},
 	"step-reminder":       {exemptReason: "hook step lookup injected into an agent turn as text, not a user read with a JSON contract"},
 }

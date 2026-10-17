@@ -56,9 +56,8 @@ func apiClient(cityPath string) *api.Client {
 
 // supervisorFallthroughAPIClient resolves an API client the way apiClient
 // does, for callers whose local fallback is missing or prohibitively
-// expensive: maintenance commands have no local fallback at all, and
-// `gc status`'s local fallback re-opens the full local bead/dolt store and
-// rescans event archives to rebuild store health — far more expensive than
+// expensive: `gc status`'s local fallback re-opens the full local bead/dolt
+// store and rescans event archives to rebuild store health — far more expensive than
 // the supervisor's answer from its warm caches (ra-r9hm6v: ~9.5s local CPU
 // vs ~0.35s for a saved response, and ~3.65s for the build `gc status`
 // waits for, #5028). Where apiClient returns nil for its caller's local
@@ -84,7 +83,7 @@ func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
 // "grant-required" without resolving the supervisor client: that client mints
 // no grant, so the supervisor would refuse the mutation with a 401 no caller
 // falls back from. A supervisor that requires only read grants still gets the
-// mutation, which its read gate passes through. `gc maintenance dolt-gc` is
+// mutation, which its read gate passes through. The `gc extmsg` verbs are
 // that mutation.
 func supervisorFallthroughMutationAPIClient(cityPath string) (*api.Client, string) {
 	if c := routeAPIClient(cityPath, apiRoutePreferSupervisorMutation); c != nil {

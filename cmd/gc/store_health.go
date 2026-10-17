@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storehealth"
 )
 
@@ -23,12 +22,10 @@ const statusStoreHealthTimeout = time.Second
 
 // storeHealthFromInputs assembles a CLI-facing *StoreHealth from the raw
 // measurements. rowsMeasured distinguishes a real liveRows count from a
-// count that failed or timed out — see storehealth.Compute. LastGCAt is
-// serialized as RFC3339 UTC when present; when the maintenance log is
-// empty, LastGCAt and LastGCStatus are omitted (json:"omitempty").
-func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsMeasured bool, lastGCAt time.Time, lastGCStatus string) *StoreHealth {
-	h := storehealth.Compute(cityPath, sizeBytes, liveRows, rowsMeasured, lastGCAt, lastGCStatus)
-	out := &StoreHealth{
+// count that failed or timed out — see storehealth.Compute.
+func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsMeasured bool) *StoreHealth {
+	h := storehealth.Compute(cityPath, sizeBytes, liveRows, rowsMeasured)
+	return &StoreHealth{
 		Path:            h.Path,
 		SizeBytes:       h.SizeBytes,
 		LiveRows:        h.LiveRows,
@@ -37,22 +34,16 @@ func storeHealthFromInputs(cityPath string, sizeBytes int64, liveRows int, rowsM
 		Warning:         h.Warning,
 		ThresholdMB:     h.ThresholdMB,
 	}
-	if !h.LastGCAt.IsZero() {
-		out.LastGCAt = h.LastGCAt.UTC().Format(time.RFC3339)
-		out.LastGCStatus = h.LastGCStatus
-	}
-	return out
 }
 
-// collectStoreHealth measures the Dolt store at cityPath and the latest
-// maintenance event via ep, returning a populated *StoreHealth.
-// liveRowCount provides the live row count and whether it was actually
-// measured; callers without a store pass nil and the count is unmeasured.
-func collectStoreHealth(cityPath string, store beads.Store, ep events.Provider) *StoreHealth {
+// collectStoreHealth measures the Dolt store at cityPath and returns a
+// populated *StoreHealth. liveRowCount provides the live row count and
+// whether it was actually measured; callers without a store pass nil and
+// the count is unmeasured.
+func collectStoreHealth(cityPath string, store beads.Store) *StoreHealth {
 	size := storehealth.WalkSize(storehealth.StorePath(cityPath))
 	rows, measured := liveRowCount(store)
-	lastAt, lastStatus := storehealth.LastMaintenance(ep)
-	return storeHealthFromInputs(cityPath, size, rows, measured, lastAt, lastStatus)
+	return storeHealthFromInputs(cityPath, size, rows, measured)
 }
 
 // liveRowCount returns the number of beads known to store and whether that
@@ -130,12 +121,9 @@ func renderStoreHealthBlock(w io.Writer, h *StoreHealth) {
 		fmt.Fprintf(w, "  Live rows:   %d\n", h.LiveRows) //nolint:errcheck // best-effort stdout
 		suffix := ""
 		if h.Warning {
-			suffix = "  \u26a0 maintenance overdue"
+			suffix = "  \u26a0 size-to-row ratio exceeds threshold"
 		}
 		fmt.Fprintf(w, "  Ratio:       %.1f MB/row  (threshold %.1f MB/row)%s\n", h.RatioMB, h.ThresholdMB, suffix) //nolint:errcheck // best-effort stdout
-	}
-	if h.LastGCAt != "" {
-		fmt.Fprintf(w, "  Last GC:     %s (%s)\n", h.LastGCAt, h.LastGCStatus) //nolint:errcheck // best-effort stdout
 	}
 }
 

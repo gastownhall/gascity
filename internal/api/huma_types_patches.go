@@ -259,9 +259,9 @@ type StatusSessionCountsDetail struct {
 	Suspended int `json:"suspended" doc:"Number of suspended sessions."`
 }
 
-// StatusStoreHealth summarizes the Dolt bead store's on-disk footprint
-// and last maintenance run. Surfaced by GET /v0/status for operator
-// dashboards; see ADR 0002 / bead ga-d5y design D9.
+// StatusStoreHealth summarizes the Dolt bead store's on-disk footprint.
+// Surfaced by GET /v0/status for operator dashboards.
+// Warning is set when the size-to-row ratio exceeds the threshold.
 type StatusStoreHealth struct {
 	Path      string `json:"path" doc:"On-disk path of the Dolt store."`
 	SizeBytes int64  `json:"size_bytes" doc:"Total bytes of the store directory."`
@@ -276,10 +276,8 @@ type StatusStoreHealth struct {
 	// nobody took.
 	RowsMeasured bool    `json:"rows_measured" doc:"True when live_rows is a real count. False means the count failed, timed out, or was never taken, and both live_rows and ratio_mb_per_row are meaningless."`
 	RatioMB      float64 `json:"ratio_mb_per_row" doc:"Derived megabytes per retained row, including open and closed beads. Zero and meaningless unless rows_measured is true."`
-	Warning      bool    `json:"warning" doc:"True when maintenance is overdue. Meaningless unless rows_measured is true."`
+	Warning      bool    `json:"warning" doc:"True when the size-to-row ratio exceeds the threshold. Meaningless unless rows_measured is true."`
 	ThresholdMB  float64 `json:"threshold_mb_per_row" doc:"Ratio threshold; a ratio above this trips warning."`
-	LastGCAt     string  `json:"last_gc_at,omitempty" doc:"RFC3339 timestamp of last maintenance run."`
-	LastGCStatus string  `json:"last_gc_status,omitempty" doc:"Status of last maintenance run ('success' or 'failed')."`
 }
 
 // Session types moved to huma_types_sessions.go.

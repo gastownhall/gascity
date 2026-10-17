@@ -488,14 +488,6 @@
             "threshold_mb_per_row": {
               "type": "number",
               "description": "Ratio threshold above which warning trips."
-            },
-            "last_gc_at": {
-              "type": "string",
-              "description": "RFC3339 time of the last maintenance run, when one is recorded."
-            },
-            "last_gc_status": {
-              "type": "string",
-              "description": "Outcome of the last maintenance run (success or failed), when one is recorded."
             }
           }
         }

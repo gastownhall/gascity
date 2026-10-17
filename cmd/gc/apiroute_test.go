@@ -64,7 +64,6 @@ func TestStandaloneControllerClient(t *testing.T) {
 // before any probe. The supervisor fall-through for a live controller of
 // unknown mode with no [api] port is scoped to the
 // supervisorFallthroughAPIClient callers — see
-// TestMaintenanceAPIClientRoutesToSupervisor and
 // TestCityStatusAPIClientRoutesToSupervisor. (gascity ga-tp7, #5262)
 func TestAPIClientRouting(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
@@ -228,122 +227,6 @@ func TestAPIClientRouting(t *testing.T) {
 	})
 }
 
-// TestMaintenanceAPIClientRoutesToSupervisor proves the maintenance-scoped
-// fall-through: when the controller socket is alive with an unknown hosting
-// mode (a supervisor predating identify) and the city omits a standalone [api]
-// port, or when the supervisor hosting the city requires city grants,
-// maintenanceAPIClient routes to the supervisor-managed client (maintenance
-// has no local fallback), where general commands' apiClient returns nil. A
-// controller that identifies as standalone is never sent to the supervisor,
-// and the supervisor-managed client is resolved at most once. The fall-through
-// never consults the supervisor's grant requirement. (gascity ga-tp7)
-func TestMaintenanceAPIClientRoutesToSupervisor(t *testing.T) {
-	sentinel := api.NewClient("http://supervisor.sentinel:1")
-	origIdentity, origSup, origGrants := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook, apiRouteSupervisorGrantsHook
-	t.Cleanup(func() {
-		apiRouteControllerIdentityHook = origIdentity
-		apiRouteSupervisorClientHook = origSup
-		apiRouteSupervisorGrantsHook = origGrants
-	})
-	apiRouteSupervisorGrantsHook = func() bool {
-		t.Errorf("supervisor grant requirement consulted on the fall-through path")
-		return true
-	}
-
-	t.Run("alive-no-api-port-routes-to-supervisor", func(t *testing.T) {
-		t.Setenv("GC_NO_API", "")
-		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
-		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != sentinel {
-			t.Fatalf("maintenanceAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
-		}
-		if reason != "" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want empty", reason)
-		}
-	})
-
-	t.Run("escape-hatch-skips-supervisor", func(t *testing.T) {
-		t.Setenv("GC_NO_API", "1")
-		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
-		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil under GC_NO_API", c)
-		}
-		if reason != "escape-hatch" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"escape-hatch\"", reason)
-		}
-	})
-
-	t.Run("supervisor-hosted-requiring-grants-routes-to-supervisor", func(t *testing.T) {
-		// Maintenance has no local fallback, so it asks a supervisor that
-		// requires city grants and reports its refusal like any API error.
-		t.Setenv("GC_NO_API", "")
-		apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
-			return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
-		}
-		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != sentinel {
-			t.Fatalf("maintenanceAPIClient client = %p, want supervisor sentinel %p", c, sentinel)
-		}
-		if reason != "" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want empty", reason)
-		}
-	})
-
-	t.Run("standalone-no-api-port-skips-supervisor", func(t *testing.T) {
-		// A controller that identifies as standalone serves only its own [api]
-		// port; the supervisor does not host its city.
-		t.Setenv("GC_NO_API", "")
-		apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
-			return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingStandalone}
-		}
-		apiRouteSupervisorClientHook = func(string) *api.Client {
-			t.Errorf("supervisor client consulted for a controller that identifies as standalone")
-			return sentinel
-		}
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil (standalone controller without an [api] port)", c)
-		}
-		if reason != "controller-down" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"controller-down\"", reason)
-		}
-	})
-
-	t.Run("supervisor-hosted-supervisor-unavailable-resolves-once", func(t *testing.T) {
-		// With no supervisor-managed client the answer is nil after a single
-		// resolution, never a second identify/registry/ListCities round, and the
-		// city's [api] bind (which the supervisor ignores) is not the reason.
-		t.Setenv("GC_NO_API", "")
-		apiRouteControllerIdentityHook = func(string) controllerIdentityReply {
-			return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
-		}
-		resolutions := 0
-		apiRouteSupervisorClientHook = func(string) *api.Client {
-			resolutions++
-			return nil
-		}
-		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n[api]\nport = 9443\nbind = \"0.0.0.0\"\n")
-		c, reason := maintenanceAPIClient(dir)
-		if c != nil {
-			t.Fatalf("maintenanceAPIClient client = %p, want nil (no supervisor-managed client)", c)
-		}
-		if resolutions != 1 {
-			t.Fatalf("supervisor client resolved %d times, want 1", resolutions)
-		}
-		if reason != "controller-down" {
-			t.Fatalf("maintenanceAPIClient reason = %q, want \"controller-down\"", reason)
-		}
-	})
-}
-
 // TestAPIClientFallbackReason covers the reason apiClient's callers log for its
 // nil, read from the hosting mode the controller socket reports: a standalone
 // controller's read-only [api] bind is "non-loopback-bind", a supervisor-hosted
@@ -390,11 +273,10 @@ func TestAPIClientFallbackReason(t *testing.T) {
 // city.toml). That nil forced every `gc status` invocation onto the local
 // fallback (open the bead/dolt store, rescan event archives to rebuild store
 // health), measured at ~9.5s of CPU on a 26-agent/1.2GB city versus ~0.35s
-// for the supervisor's already-cached response. cityStatusAPIClient now
-// shares supervisorFallthroughAPIClient with maintenanceAPIClient, so it
-// must resolve the supervisor client in that same shape (a live controller of
-// unknown hosting mode, no [api] port) instead of nil, and for a
-// supervisor-hosted city whether or not it sets an [api] port.
+// for the supervisor's already-cached response. cityStatusAPIClient now uses
+// supervisorFallthroughAPIClient, so it must resolve the supervisor client in
+// that shape (a live controller of unknown hosting mode, no [api] port) instead
+// of nil, and for a supervisor-hosted city whether or not it sets an [api] port.
 func TestCityStatusAPIClientRoutesToSupervisor(t *testing.T) {
 	sentinel := api.NewClient("http://supervisor.sentinel:1")
 	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
@@ -638,4 +520,101 @@ func TestMailCheckInjectProbesOnlyAStandaloneController(t *testing.T) {
 	if c, reason := mailCheckClient(dir, false); c != sentinel {
 		t.Fatalf("mailCheckClient(plain) = (%p, %q), want the supervisor-managed client", c, reason)
 	}
+}
+
+// TestSupervisorFallthroughMutationAPIClientGrantGated proves a mutation with
+// no local fallback never dials a supervisor-hosted city's supervisor that
+// requires city write grants: that client mints no grant, so the supervisor
+// would refuse the mutation with a 401 no caller falls back from. The
+// resolver returns (nil, "grant-required") without resolving the supervisor
+// client. A supervisor that requires no grants, or only read grants (its read
+// gate passes a mutation through), and a live controller predating identify,
+// still route to the supervisor-managed client.
+func TestSupervisorFallthroughMutationAPIClientGrantGated(t *testing.T) {
+	sentinel := api.NewClient("http://supervisor.sentinel:1")
+	origIdentity, origSup := apiRouteControllerIdentityHook, apiRouteSupervisorClientHook
+	origGrants, origWriteGrants := apiRouteSupervisorGrantsHook, apiRouteSupervisorWriteGrantsHook
+	t.Cleanup(func() {
+		apiRouteControllerIdentityHook = origIdentity
+		apiRouteSupervisorClientHook = origSup
+		apiRouteSupervisorGrantsHook = origGrants
+		apiRouteSupervisorWriteGrantsHook = origWriteGrants
+	})
+	supervisorHosted := func(string) controllerIdentityReply {
+		return controllerIdentityReply{PID: 4242, HostingMode: controllerHostingSupervisor}
+	}
+	// A mutation is decided by the write-grant requirement alone; the
+	// read-or-write requirement is apiClient's.
+	apiRouteSupervisorGrantsHook = func() bool {
+		t.Errorf("read-or-write grant requirement consulted for a mutation")
+		return true
+	}
+
+	t.Run("write-grants-required-skips-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client {
+			t.Errorf("supervisor client resolved for a supervisor that requires city write grants")
+			return sentinel
+		}
+		apiRouteSupervisorWriteGrantsHook = func() bool { return true }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := supervisorFallthroughMutationAPIClient(dir)
+		if c != nil || reason != "grant-required" {
+			t.Fatalf("supervisorFallthroughMutationAPIClient = (%p, %q), want (nil, \"grant-required\")", c, reason)
+		}
+	})
+
+	t.Run("grants-not-required-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		apiRouteSupervisorWriteGrantsHook = func() bool { return false }
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := supervisorFallthroughMutationAPIClient(dir)
+		if c != sentinel || reason != "" {
+			t.Fatalf("supervisorFallthroughMutationAPIClient = (%p, %q), want (supervisor sentinel %p, \"\")", c, reason, sentinel)
+		}
+	})
+
+	t.Run("read-grants-only-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		useReadAuthOnlySupervisor(t)
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := supervisorFallthroughMutationAPIClient(dir)
+		if c != sentinel || reason != "" {
+			t.Fatalf("supervisorFallthroughMutationAPIClient = (%p, %q), want (supervisor sentinel %p, \"\") for a supervisor that gates only reads", c, reason, sentinel)
+		}
+	})
+
+	t.Run("read-grants-only-supervisor-unavailable-is-controller-down", func(t *testing.T) {
+		// With no supervisor-managed client, a supervisor that gates only
+		// reads is not the reason the mutation cannot run.
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = supervisorHosted
+		apiRouteSupervisorClientHook = func(string) *api.Client { return nil }
+		useReadAuthOnlySupervisor(t)
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := supervisorFallthroughMutationAPIClient(dir)
+		if c != nil || reason != "controller-down" {
+			t.Fatalf("supervisorFallthroughMutationAPIClient = (%p, %q), want (nil, \"controller-down\")", c, reason)
+		}
+	})
+
+	t.Run("unknown-hosting-no-api-port-routes-to-supervisor", func(t *testing.T) {
+		t.Setenv("GC_NO_API", "")
+		apiRouteControllerIdentityHook = func(string) controllerIdentityReply { return controllerIdentityReply{PID: 4242} }
+		apiRouteSupervisorClientHook = func(string) *api.Client { return sentinel }
+		apiRouteSupervisorWriteGrantsHook = func() bool {
+			t.Errorf("write-grant requirement consulted for a controller of unknown hosting mode")
+			return true
+		}
+		dir := writeCityTOMLForRoute(t, t.TempDir(), "name = \"t\"\n")
+		c, reason := supervisorFallthroughMutationAPIClient(dir)
+		if c != sentinel || reason != "" {
+			t.Fatalf("supervisorFallthroughMutationAPIClient = (%p, %q), want (supervisor sentinel %p, \"\")", c, reason, sentinel)
+		}
+	})
 }

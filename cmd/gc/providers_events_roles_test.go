@@ -81,9 +81,6 @@ func TestEventsOpenerRoles(t *testing.T) {
 			useCityForEventsTest(t, cityDir)
 			return workflowServeOpenEventsProvider(io.Discard)
 		}},
-		{name: "gc status store health", want: roleReader, open: func(_ *testing.T, cityDir string) (any, error) {
-			return defaultOpenStoreHealthEvents(cityDir, io.Discard), nil
-		}},
 		{name: "reader by name", want: roleReader, open: func(_ *testing.T, cityDir string) (any, error) {
 			return newEventsReaderForName("", cityEventsPath(cityDir), io.Discard)
 		}},

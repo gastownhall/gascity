@@ -2621,7 +2621,6 @@ func startOneCity(
 		cs.startAutocloseSweep(cityCtx)
 		cs.startOpSweep(cityCtx)
 		cs.startConversationLaneHost(cityCtx, wiring.mode)
-		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
 
