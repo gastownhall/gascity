@@ -1474,6 +1474,126 @@ func TestTerminateExitsCleanly(t *testing.T) {
 	}
 }
 
+// workdirOf returns the scratch dir of the adapter process pid, or "" when it
+// has none. The adapter keeps it at $XDG_STATE_HOME/gascity/zcode/work/<host>/<pid>.
+func (h *harness) workdirOf(pid int) string {
+	h.t.Helper()
+	matches, err := filepath.Glob(filepath.Join(h.env["XDG_STATE_HOME"], "gascity", "zcode", "work", "*", fmt.Sprint(pid)))
+	if err != nil {
+		h.t.Fatalf("glob workdir: %v", err)
+	}
+	switch len(matches) {
+	case 0:
+		return ""
+	case 1:
+		return matches[0]
+	default:
+		h.t.Fatalf("pid %d owns %d workdirs: %q", pid, len(matches), matches)
+		return ""
+	}
+}
+
+// mustWorkdir is workdirOf for a live adapter, which always has one.
+func (h *harness) mustWorkdir(s *session) string {
+	h.t.Helper()
+	dir := h.workdirOf(s.cmd.Process.Pid)
+	if dir == "" {
+		h.t.Fatalf("adapter pid %d has no workdir under the zcode work root", s.cmd.Process.Pid)
+	}
+	return dir
+}
+
+func TestTerminateRemovesTheWorkdir(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.waitForOutput("zcode-repl ready", adapterWaitBudget)
+	dir := h.mustWorkdir(s)
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatalf("stat workdir: %v", err)
+	}
+	// It holds the prompt and the reply in plaintext.
+	if perm := info.Mode().Perm(); perm != 0o700 {
+		t.Fatalf("workdir mode = %o, want 700", perm)
+	}
+	s.signal(syscall.SIGTERM)
+	if _, code := s.wait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("workdir %s survived a TERM (stat err = %v)", dir, err)
+	}
+}
+
+// A SIGKILL runs no trap: tmux escalates to it when a TERM goes unanswered,
+// and a TERM can go unanswered with a partial line pending. The next adapter
+// to start on the host — any seat, not just this one — removes the dead
+// process's workdir, prompt and reply included.
+func TestAKilledAdaptersWorkdirIsRemovedByTheNextStart(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	s := h.start()
+	s.send("first turn")
+	s.waitForTurns(1)
+	s.sendRaw("a partial line, no newline")
+	dir := h.mustWorkdir(s)
+	if _, err := os.Stat(filepath.Join(dir, "prompt.txt")); err != nil {
+		t.Fatalf("the turn's prompt is not in the workdir: %v", err)
+	}
+	s.signal(syscall.SIGKILL)
+	s.wait()
+	if _, err := os.Stat(dir); err != nil {
+		t.Fatalf("a SIGKILL ran cleanup, so this test proves nothing: %v", err)
+	}
+
+	h.env["GC_SESSION"] = "another-seat"
+	next := h.start()
+	next.waitForOutput("zcode-repl ready", adapterWaitBudget)
+	if _, err := os.Stat(dir); !os.IsNotExist(err) {
+		t.Fatalf("killed adapter's workdir %s survived the next start (stat err = %v)", dir, err)
+	}
+	h.mustWorkdir(next)
+	if _, code := next.closeAndWait(); code != 0 {
+		t.Fatalf("exit code = %d, want 0", code)
+	}
+}
+
+// The sweep removes only the dirs of processes that are gone: a second seat
+// starting on the host leaves a running adapter's workdir, and its turns,
+// alone.
+func TestARunningAdaptersWorkdirSurvivesAnotherStart(t *testing.T) {
+	t.Parallel()
+
+	h := newHarness(t, nil)
+	first := h.start()
+	first.waitForOutput("zcode-repl ready", adapterWaitBudget)
+	dir := h.mustWorkdir(first)
+
+	h.env["GC_SESSION"] = "another-seat"
+	second := h.start()
+	second.waitForOutput("zcode-repl ready", adapterWaitBudget)
+	if _, err := os.Stat(filepath.Join(dir, "turn.py")); err != nil {
+		t.Fatalf("a second start swept a running adapter's workdir: %v", err)
+	}
+	if h.mustWorkdir(second) == dir {
+		t.Fatalf("two running adapters share workdir %s", dir)
+	}
+
+	first.send("still mine")
+	first.waitForTurns(1)
+	if strings.Contains(first.output(), "zcode-repl error") {
+		t.Fatalf("first adapter's turn failed after the second start:\n%s", first.output())
+	}
+	for _, s := range []*session{first, second} {
+		if _, code := s.closeAndWait(); code != 0 {
+			t.Fatalf("exit code = %d, want 0", code)
+		}
+	}
+}
+
 // Behavior 8: sid persistence across restarts, with the unvalidated gate.
 func TestSidRoundTripsAcrossRestarts(t *testing.T) {
 	t.Parallel()
