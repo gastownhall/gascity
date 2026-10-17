@@ -38,6 +38,7 @@ go_library(
         "staging.go",
         "startup_hints.go",
         "tmux_agent_pane.go",
+        "tmux_fence.go",
         "tmux_literal.go",
         "turn_events.go",
         "turn_events_merge.go",
