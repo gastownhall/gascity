@@ -118,7 +118,7 @@ func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 
 	second := InputFence{Generation: 2, Epoch: 1, Token: "second"}
 	box.beforeGuard = func() {
-		box.mustTmux(append(append([]string{"respawn-pane", "-k", "-t", "main", "cat", ";"}, TmuxPublishInputFenceArgs("main", second)...))...)
+		box.mustTmux(append([]string{"respawn-pane", "-k", "-t", "main", "cat", ";"}, TmuxPublishInputFenceArgs("main", second)...)...)
 	}
 	err := c.NudgeFenced(ctx, "s", TextContent("stale"), first)
 	var miss *FenceMismatchError
