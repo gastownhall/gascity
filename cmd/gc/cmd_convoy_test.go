@@ -1175,7 +1175,9 @@ func TestConvoyCheckAcrossStores(t *testing.T) {
 // timer as the core pack's convoy-autoclose-backstop order, so its store
 // list leaves the suspended rigs out, as the order-tracking sweep's does
 // (TestOrderTrackingSweepTargetsSkipSuspendedRigs). A store the city or an
-// awake rig also reads stays in, and the interactive readers keep every store.
+// awake rig also reads stays in, and the fan-out readers (gc convoy list,
+// gc workflow delete) keep every store. By-id resolution leaves suspended rigs
+// out too; see TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened.
 func TestConvoyCheckStoreCandidatesSkipSuspendedRigs(t *testing.T) {
 	t.Setenv("GC_BEADS", "bd")
 	t.Setenv("GC_SUSPENDED", "")
@@ -1197,7 +1199,180 @@ func TestConvoyCheckStoreCandidatesSkipSuspendedRigs(t *testing.T) {
 		t.Fatalf("skipped rigs = %v, want %v", skipped, want)
 	}
 	if all := convoyStoreCandidates(cfg, "/city", ""); !slices.Contains(all, "/rigs/beta") {
-		t.Fatalf("the interactive readers' candidates lost the suspended rig's store: %v", all)
+		t.Fatalf("the fan-out readers' candidates lost the suspended rig's store: %v", all)
+	}
+}
+
+// suspendedRigByIDCity is a city with an awake rig (alpha, prefix "al"), a
+// suspended rig with a store of its own (beta, prefix "be"), and a suspended
+// rig sharing alpha's store (gamma). Each named store is a memstore keyed by
+// its directory; opened records every directory the resolver opens.
+func suspendedRigByIDCity(t *testing.T) (cfg *config.City, stores map[string]*beads.MemStore, opened *[]string, openStore func(string) (beads.Store, error)) {
+	t.Helper()
+	t.Setenv("GC_BEADS", "bd")
+	t.Setenv("GC_SUSPENDED", "")
+	cfg = &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Rigs: []config.Rig{
+			{Name: "alpha", Path: "/rigs/alpha", Prefix: "al"},
+			{Name: "beta", Path: "/rigs/beta", Prefix: "be", SuspendedOnStart: true},
+			{Name: "gamma", Path: "/rigs/alpha", Prefix: "ga", SuspendedOnStart: true},
+		},
+	}
+	stores = map[string]*beads.MemStore{}
+	for _, dir := range []string{"/city", "/rigs/alpha", "/rigs/beta"} {
+		store := beads.NewMemStore()
+		store.HonorExplicitIDs = true
+		stores[dir] = store
+	}
+	opened = &[]string{}
+	openStore = func(dir string) (beads.Store, error) {
+		*opened = append(*opened, dir)
+		store, ok := stores[dir]
+		if !ok {
+			t.Fatalf("unexpected store dir %q", dir)
+		}
+		return store, nil
+	}
+	return cfg, stores, opened, openStore
+}
+
+// TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened: by-id resolution
+// is a periodic reader too (bd's on-close autoclose, the supervisor's sweep,
+// execution-fact emission, convoy status run by orders), and on a bd-owned
+// proxied rig any read of the store restarts the pair the controller stopped
+// when the rig was suspended. So the uniqueness probe leaves a suspended rig's
+// store unopened, even when it holds the same id; awake stores are still
+// probed in full.
+func TestResolveOwningStoreDirLeavesSuspendedRigStoresUnopened(t *testing.T) {
+	cfg, stores, opened, openStore := suspendedRigByIDCity(t)
+	if _, err := stores["/rigs/alpha"].Create(beads.Bead{ID: "al-7", Title: "awake work"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stores["/rigs/beta"].Create(beads.Bead{ID: "al-7", Title: "a copy only a probe of the suspended rig would see"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store, dir, err := resolveOwningStoreDir("al-7", cfg, "/city", openStore)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir: %v", err)
+	}
+	if store != stores["/rigs/alpha"] || dir != "/rigs/alpha" {
+		t.Fatalf("resolved to %q, want /rigs/alpha", dir)
+	}
+	if slices.Contains(*opened, "/rigs/beta") {
+		t.Fatalf("opened %v: the suspended rig's store was opened to answer for an id it does not own", *opened)
+	}
+	if want := []string{"/rigs/alpha", "/city"}; !slices.Equal(*opened, want) {
+		t.Fatalf("opened %v, want every awake store %v", *opened, want)
+	}
+}
+
+// TestResolveOwningStoreDirStillProbesAwakeStoresForUniqueness: leaving the
+// suspended stores out does not weaken the uniqueness contract among the
+// awake ones.
+func TestResolveOwningStoreDirStillProbesAwakeStoresForUniqueness(t *testing.T) {
+	cfg, stores, _, openStore := suspendedRigByIDCity(t)
+	for _, dir := range []string{"/city", "/rigs/alpha"} {
+		if _, err := stores[dir].Create(beads.Bead{ID: "al-7", Title: "one of two awake copies"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	_, _, err := resolveOwningStoreDir("al-7", cfg, "/city", openStore)
+	if err == nil || !strings.Contains(err.Error(), "exists in multiple stores") {
+		t.Fatalf("resolveOwningStoreDir = %v, want the uniqueness refusal", err)
+	}
+}
+
+// TestResolveOwningStoreDirReadsASuspendedRigForItsOwnID: an id whose prefix
+// routes to a suspended rig is a question about that rig's bead, so its store
+// is read. Only the probes for ids that route elsewhere are left out.
+func TestResolveOwningStoreDirReadsASuspendedRigForItsOwnID(t *testing.T) {
+	cfg, stores, _, openStore := suspendedRigByIDCity(t)
+	if _, err := stores["/rigs/beta"].Create(beads.Bead{ID: "be-3", Title: "suspended rig work"}); err != nil {
+		t.Fatal(err)
+	}
+
+	store, dir, err := resolveOwningStoreDir("be-3", cfg, "/city", openStore)
+	if err != nil {
+		t.Fatalf("resolveOwningStoreDir: %v", err)
+	}
+	if store != stores["/rigs/beta"] || dir != "/rigs/beta" {
+		t.Fatalf("resolved to %q, want /rigs/beta", dir)
+	}
+}
+
+// byIDSuspendedRigCity is a file-store city with an awake rig (ops) and a
+// suspended rig (dormant), each holding a bead under one ops id. A by-id
+// resolution that probed the suspended rig would refuse the id as ambiguous;
+// one that leaves it alone answers from ops.
+func byIDSuspendedRigCity(t *testing.T) (cityDir string, id string) {
+	t.Helper()
+	cityDir = convoyCheckRigCity(t, `
+[[rigs]]
+name = "ops"
+path = "ops"
+prefix = "OP"
+
+[[rigs]]
+name = "dormant"
+path = "dormant"
+prefix = "DM"
+`, "ops", "dormant")
+	ops, err := openScopeLocalFileStoreForCity(filepath.Join(cityDir, "ops"), cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bead, err := ops.Create(beads.Bead{Title: "ops task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Minting under ops' prefix is how the dormant rig comes to hold the
+	// same id: two ledgers disagreeing, which only a probe of it would see.
+	dormant, err := beads.OpenFileStore(fsys.OSFS{}, filepath.Join(cityDir, "dormant", ".gc", "beads.json"), beads.WithFileStoreIDPrefix("OP"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twin, err := dormant.Create(beads.Bead{Title: "dormant task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if twin.ID != bead.ID {
+		t.Fatalf("the fixture minted %s and %s; the collision needs one id", bead.ID, twin.ID)
+	}
+	suspended := true
+	if err := suspensionstate.SetRigSuspended(fsys.OSFS{}, cityDir, "dormant", &suspended); err != nil {
+		t.Fatal(err)
+	}
+	return cityDir, bead.ID
+}
+
+// TestAutocloseOwningStoreLeavesASuspendedRigUnprobed covers the background
+// by-id callers: bd's on-close autoclose hooks and the supervisor's autoclose
+// sweep resolve through autocloseOwningStore, and execution-fact emission
+// falls back to it on a primary-store miss.
+func TestAutocloseOwningStoreLeavesASuspendedRigUnprobed(t *testing.T) {
+	cityDir, id := byIDSuspendedRigCity(t)
+
+	store, dir, ok := autocloseOwningStore(id, cityDir)
+	if !ok {
+		t.Fatalf("autocloseOwningStore(%s) found no owner; the suspended rig's copy was probed", id)
+	}
+	if want := filepath.Join(cityDir, "ops"); !samePath(dir, want) {
+		t.Fatalf("autocloseOwningStore(%s) dir = %q, want %q", id, dir, want)
+	}
+	if got, err := store.Get(id); err != nil || got.Title != "ops task" {
+		t.Fatalf("owning store Get(%s) = %+v, %v; want the ops copy", id, got, err)
+	}
+
+	emit := executionEmitStore(beads.NewMemStore(), cityDir)
+	got, err := emit.Get(id)
+	if err != nil {
+		t.Fatalf("executionEmitStore Get(%s) on a primary miss: %v", id, err)
+	}
+	if got.Title != "ops task" {
+		t.Fatalf("executionEmitStore Get(%s) = %q, want the ops copy", id, got.Title)
 	}
 }
 
