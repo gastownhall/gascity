@@ -2,6 +2,7 @@ package subprocess
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"syscall"
@@ -72,17 +73,24 @@ func (p *Provider) SendKeysFenced(_ context.Context, name string, fence runtime.
 
 // InterruptFenced sends SIGINT, as Interrupt does, to the process group of
 // the child fence names, re-checking right before the signal that the child
-// has not exited.
+// has not exited. A child that has exited, whether the provider has observed
+// it or the signal finds it gone, is a miss finding it dead.
 func (p *Provider) InterruptFenced(_ context.Context, name string, fence runtime.InputFence) error {
 	sc, err := p.fencedConn(name, fence)
 	if err != nil {
 		return err
 	}
 	if !sc.alive() {
+		// Reaped: its process group id may already name another process.
 		return &runtime.FenceMismatchError{Session: name, Found: runtime.FenceFoundDead}
 	}
-	if err := runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT); err != nil {
+	err = runtime.SignalProcessGroup(sc.cmd, syscall.SIGINT)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, os.ErrProcessDone), errors.Is(err, syscall.ESRCH):
+		return &runtime.FenceMismatchError{Session: name, Found: runtime.FenceFoundDead}
+	default:
 		return fmt.Errorf("interrupting %q: %w", name, err)
 	}
-	return nil
 }

@@ -3,6 +3,9 @@ package subprocess
 import (
 	"context"
 	"errors"
+	"net"
+	"os/exec"
+	"syscall"
 	"testing"
 	"time"
 
@@ -108,5 +111,69 @@ func waitNotRunning(t *testing.T, p *Provider, name string) {
 			t.Fatalf("%s still running after a fenced interrupt", name)
 		}
 		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// fencedTestConn installs a hand-built child for name holding fence f: a
+// process that has already exited and been waited for, whose exit the
+// provider has (doneClosed) or has not yet observed.
+func fencedTestConn(t *testing.T, p *Provider, name string, f runtime.InputFence, doneClosed bool) {
+	t.Helper()
+	cmd := exec.Command("true")
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("running a short-lived child: %v", err)
+	}
+	sc := &sessionConn{cmd: cmd, done: make(chan struct{}), reaped: make(chan struct{}), fence: f.Digest()}
+	if doneClosed {
+		close(sc.done)
+	}
+	p.mu.Lock()
+	p.procs[name] = sc
+	p.mu.Unlock()
+}
+
+// Kills a fenced op that acts on a child that has exited: one whose exit the
+// provider observed is a whole miss finding it dead for every op, and an
+// interrupt whose signal finds the child already gone (the exit not yet
+// observed) is the same miss, never an untyped signal error.
+func TestSubprocessFencedInputToAnExitedChildIsADeadMiss(t *testing.T) {
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	ctx := context.Background()
+	wantDead := func(t *testing.T, label string, err error) {
+		t.Helper()
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundDead || miss.Partial {
+			t.Fatalf("%s = %v, want a whole miss finding the incarnation dead", label, err)
+		}
+	}
+
+	p := newTestProvider(t)
+	fencedTestConn(t, p, "sp-exited", fence, true)
+	wantDead(t, "nudge", p.NudgeFenced(ctx, "sp-exited", runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}))
+	wantDead(t, "keys", p.SendKeysFenced(ctx, "sp-exited", fence, "Enter"))
+	wantDead(t, "interrupt", p.InterruptFenced(ctx, "sp-exited", fence))
+
+	fencedTestConn(t, p, "sp-unreaped", fence, false)
+	wantDead(t, "interrupt of an unobserved exit", p.InterruptFenced(ctx, "sp-unreaped", fence))
+}
+
+// Kills a fenced op that reads a control socket it cannot probe as absent: a
+// session this provider does not own whose socket dial fails with EACCES is
+// ErrRuntimeUnavailable, never a miss.
+func TestSubprocessFencedInputWithAnUnprobeableSocketIsUnavailable(t *testing.T) {
+	p := newTestProvider(t)
+	p.ops.dial = func(string, string, time.Duration) (net.Conn, error) {
+		return nil, &net.OpError{Op: "dial", Net: "unix", Err: syscall.EACCES}
+	}
+	fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	ctx := context.Background()
+	for op, err := range map[string]error{
+		"nudge":     p.NudgeFenced(ctx, "sp-eacces", runtime.TextContent("hi"), runtime.FencedNudge{Fence: fence}),
+		"keys":      p.SendKeysFenced(ctx, "sp-eacces", fence, "Enter"),
+		"interrupt": p.InterruptFenced(ctx, "sp-eacces", fence),
+	} {
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) {
+			t.Errorf("%s = %v, want ErrRuntimeUnavailable", op, err)
+		}
 	}
 }
