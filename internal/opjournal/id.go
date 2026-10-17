@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"unicode"
@@ -21,7 +22,9 @@ const (
 
 // Field limits.
 const (
-	maxConversationLen = 200
+	// maxConversationLen leaves room in bd's assignee limit for the longest
+	// lane lease around the id; a byte count bounds the rune count.
+	maxConversationLen = maxLeaseLen - maxLaneLeaseOverhead
 	maxPrincipalLen    = 256
 	maxClientKeyLen    = 512
 	maxActorLen        = 64
@@ -29,11 +32,23 @@ const (
 	maxTokenLen        = 128
 )
 
+// The id families this package mints itself. ownIDFamilies is the one list of
+// them: PinnedID refuses each, and every <family>IDInfix of this package is
+// "-" + one of them + "-" (TestOwnIDFamiliesCoverEveryInfix), so a family
+// added here is reserved by adding it to the list.
+const (
+	opIDFamily      = "op"
+	factIDFamily    = "fact"
+	runtimeIDFamily = "rt"
+)
+
+var ownIDFamilies = []string{opIDFamily, factIDFamily, runtimeIDFamily}
+
 // opIDInfix and factIDInfix separate the mint prefix from the hash. They keep
 // pinned ids out of SQLite's numeric sequence parsing.
 const (
-	opIDInfix   = "-op-"
-	factIDInfix = "-fact-"
+	opIDInfix   = "-" + opIDFamily + "-"
+	factIDInfix = "-" + factIDFamily + "-"
 )
 
 var (
@@ -85,6 +100,45 @@ func opIDSuffix(conversation, principal, clientKey string) string {
 	return hash16(opIDTag, conversation, principal, clientKey)
 }
 
+// pinnedIDFamilyRe is the shape of an id family: the infix between the mint
+// prefix and the hash.
+var pinnedIDFamilyRe = regexp.MustCompile(`^[a-z][a-z0-9]{0,15}$`)
+
+// PinnedID returns <prefix>-<family>-<hash>, the pinned id shape every
+// journal row shares, for a row family another package owns (the event-fact
+// and projector-checkpoint rows of internal/eventfact). hash is the lowercase
+// unpadded base32 of the first 16 bytes of sha256(lp(tag) lp(field)...), lp a
+// uvarint length prefix: 26 characters of [a-z2-7], the scheme DeriveID,
+// FactID and RuntimeRowID use. prefix is the mint prefix of the store that
+// holds the row, refused as DeriveID refuses it. family ([a-z][a-z0-9]*, at
+// most 16 bytes) keeps each family's ids disjoint from every other family's;
+// the families this package mints itself (op, fact, rt) are refused, so no
+// other package can mint an id in them. tag is the family's domain tag, a
+// "gascity/<name>/v<n>" string no other scheme uses (eventfact's are
+// "gascity/event-fact/v1" and "gascity/event-projector/v1"); fields are
+// hashed exactly as given, and validating them is the caller's job.
+func PinnedID(prefix, family, tag string, fields ...string) (string, error) {
+	if err := validatePrefix(prefix); err != nil {
+		return "", err
+	}
+	switch {
+	case !pinnedIDFamilyRe.MatchString(family):
+		return "", invalidf("id family %q is not [a-z][a-z0-9]* of at most 16 bytes", family)
+	case slices.Contains(ownIDFamilies, family):
+		return "", invalidf("id family %q is minted only by this package", family)
+	case tag == "":
+		return "", invalidf("id tag is empty")
+	}
+	return prefix + "-" + family + "-" + hash16(tag, fields...), nil
+}
+
+// ValidateClientKey refuses a client key Propose would refuse: empty, longer
+// than 512 bytes, not UTF-8, with a control character, or with leading or
+// trailing space. Producers check a supplied key with it before proposing.
+func ValidateClientKey(key string) error {
+	return validateText("client key", key, maxClientKeyLen)
+}
+
 // InterruptKey is the client key of an interrupt that targets one turn of one
 // session: stop:<gen>:<turn>. Two stops of the same turn collapse into one op.
 // A producer without a turn uses its own unique key instead, because a
@@ -101,7 +155,9 @@ func InterruptKey(gen int64, turn string) (string, error) {
 
 // RespondKey is the client key of a respond to one interaction of one
 // session: respond:<gen>:<request_id>. The generation is part of the key
-// because some runtimes derive request ids from content.
+// because some runtimes derive request ids from content. It is unused: in O0
+// respond ops are keyed by the client key, and OJ-16 keys them by the
+// interaction occurrence.
 func RespondKey(gen int64, requestID string) (string, error) {
 	if gen < 1 {
 		return "", invalidf("respond key: generation %d must be >= 1", gen)

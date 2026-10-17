@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"log"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -2694,7 +2693,7 @@ func validDoltRuntimeState(state doltRuntimeState, cityPath string) bool {
 	if !ok || !pidAlive(state.PID) {
 		return false
 	}
-	if !doltPortReachable(strconv.Itoa(state.Port)) {
+	if !managedDoltPortReachableOrHeldBy(strconv.Itoa(state.Port), state.PID) {
 		return false
 	}
 	return managedDoltRuntimeProcessOwned(state, layout)
@@ -2738,12 +2737,7 @@ func doltPortReachable(port string) bool {
 	if strings.TrimSpace(port) == "" {
 		return false
 	}
-	conn, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 250*time.Millisecond)
-	if err != nil {
-		return false
-	}
-	_ = conn.Close()
-	return true
+	return managedDoltTCPReachable("127.0.0.1", port)
 }
 
 // writeDoltPortFile writes the managed Dolt port into dir/.beads/dolt-server.port.

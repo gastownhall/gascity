@@ -166,6 +166,72 @@ var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
 // "absent by construction", never "unverifiable".
 var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
 
+// ErrMetadataNotMirrored reports that SetMeta or RemoveMeta changed the stored
+// value, which is in force, but the runtime could not reflect the change onto
+// its own view of the session (a UI projection). A caller that needs only the
+// value in force may treat the change as done and report the error as a
+// warning.
+var ErrMetadataNotMirrored = errors.New("session metadata changed but not mirrored by the runtime")
+
+// MetadataNotMirroredError is the error a runtime returns when SetMeta or
+// RemoveMeta changed the stored value but could not reflect the change onto its
+// own view of the session. It matches [ErrMetadataNotMirrored] and unwraps to
+// Cause, so errors.Is still finds the reason (for example
+// [ErrRuntimeUnavailable]).
+type MetadataNotMirroredError struct {
+	Session string
+	Key     string
+	Cause   error
+}
+
+// Error implements error.
+func (e *MetadataNotMirroredError) Error() string {
+	msg := fmt.Sprintf("%s: %s for %q", ErrMetadataNotMirrored, e.Key, e.Session)
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+
+// Is reports whether target is [ErrMetadataNotMirrored].
+func (e *MetadataNotMirroredError) Is(target error) bool {
+	return target == ErrMetadataNotMirrored
+}
+
+// Unwrap returns the reason the change could not be mirrored.
+func (e *MetadataNotMirroredError) Unwrap() error {
+	return e.Cause
+}
+
+// OnlyMetadataNotMirrored reports whether err consists solely of mirror
+// failures: every value landed, and only the runtime's own view of it lags.
+// It descends errors.Join and single-error wraps. A [MetadataNotMirroredError]
+// anywhere on that path settles its branch regardless of its cause, and so
+// does [ErrMetadataNotMirrored] itself. Any other multi-error wrap must consist
+// solely of mirror failures in every member.
+func OnlyMetadataNotMirrored(err error) bool {
+	switch e := err.(type) { //nolint:errorlint // walks the error tree by hand: every member of a join must be a mirror failure, which errors.Is cannot express
+	case nil:
+		return false
+	case *MetadataNotMirroredError:
+		return true
+	case interface{ Unwrap() []error }:
+		members := e.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !OnlyMetadataNotMirrored(member) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return OnlyMetadataNotMirrored(e.Unwrap())
+	}
+	return err == ErrMetadataNotMirrored //nolint:errorlint // a leaf of the hand walk above; errors.Is would re-descend what the walk already split
+}
+
 // ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
 // list-running answered exit 2). It is never a complete empty list.
 var ErrListUnsupported = errors.New("runtime does not implement session listing")
@@ -234,6 +300,10 @@ func wrapsJoin(err error) bool {
 func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
+	}
+	if errors.Is(err, ErrFenceMismatch) {
+		// A miss names a session, whose name may hold the phrases below.
+		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "session not found") ||
@@ -389,12 +459,17 @@ type Provider interface {
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
 	// the named session. Best-effort: returns nil if the session doesn't
-	// exist. Used for graceful shutdown before Stop. A provider with a
-	// protocol-level cancel may instead wait a bounded time for the
-	// interrupted turn to end and return [ErrInterruptNotSettled] if it
-	// does not. That wait blocks the caller for up to the provider's whole
-	// bound (ACP: cancel_timeout plus two 1s SIGINT waits, 12s by default),
-	// and any lock the caller holds across the call is held that long too.
+	// exist and the provider can safely treat that as a no-op. Providers
+	// that interrupt through a runtime they observe rather than own return
+	// [ErrSessionNotFound] when it shows no live session and
+	// [ErrRuntimeUnavailable] when they cannot read it, so callers do not
+	// mistake a no-op for an interrupt. Used for graceful shutdown before
+	// Stop. A provider with a protocol-level cancel may instead wait a
+	// bounded time for the interrupted turn to end and return
+	// [ErrInterruptNotSettled] if it does not. That wait blocks the caller
+	// for up to the provider's whole bound (ACP: cancel_timeout plus two 1s
+	// SIGINT waits, 12s by default), and any lock the caller holds across
+	// the call is held that long too.
 	Interrupt(name string) error
 
 	// IsRunning reports whether the named provider runtime exists. It does not
@@ -702,6 +777,11 @@ type InventoryEntry struct {
 	// batch. LastActivity is meaningless unless ActivityKnown.
 	ActivityKnown bool
 	LastActivity  time.Time
+	// RestartRequested reports the session's restart marker
+	// (GC_RESTART_REQUESTED, which `gc runtime request-restart` and
+	// `gc handoff` set) as the batched read sees it. On tmux it is the
+	// marker's user-option mirror (#{@GC_RESTART_REQUESTED}).
+	RestartRequested bool
 }
 
 // EnvironmentBatchProvider is an optional extension exposing a single-exec
@@ -925,8 +1005,9 @@ type LiveRuntime struct {
 // provider lacks the capability.
 type ProcessTableScanner interface {
 	// FindRuntimesBySessionID returns live agent root processes carrying
-	// GC_SESSION_ID equal to id. If id is empty, it returns all live agent root
-	// processes with any GC_SESSION_ID set.
+	// GC_SESSION_ID equal to id. If id is empty, it returns the orphan sweep's
+	// candidates: live agent roots with any GC_SESSION_ID set that were
+	// reparented to init or the user subreaper (proctable.OrphanCandidate).
 	//
 	// Best-effort implementations may return both partial results and a non-nil
 	// error; callers should proceed with any returned results.

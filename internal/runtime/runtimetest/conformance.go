@@ -434,6 +434,86 @@ func RunLifecycleTestsWithOptions(t *testing.T, newSession Factory, opts Options
 			}
 		}
 	})
+
+	// --- Group 7: Fenced input (optional capability) ---
+
+	runFencedInputTests(t, newSession, opts)
+}
+
+// fencedStart starts name with an injected incarnation identity and
+// returns its fence. It skips when sp cannot fence name's input.
+func fencedStart(t *testing.T, opts Options, sp runtime.Provider, name string, cfg runtime.Config) runtime.InputFence {
+	t.Helper()
+	if runtime.InputFencingFor(sp, name) == runtime.InputFencingNone {
+		t.Skip("provider cannot fence session input")
+	}
+	fence := runtime.InputFence{Generation: 2, Epoch: 3, Token: "conformance-" + name}
+	env := make(map[string]string, len(cfg.Env)+3)
+	for k, v := range cfg.Env {
+		env[k] = v
+	}
+	env[runtime.RuntimeEpochEnv] = "2"
+	env[runtime.ContinuationEpochEnv] = "3"
+	env[runtime.InstanceTokenEnv] = fence.Token
+	cfg.Env = env
+	startOrSkip(t, opts, sp, name, cfg, "Start fenced session")
+	return fence
+}
+
+// runFencedInputTests is the fenced-input group: a provider that can fence a
+// session's input (runtime.FencedInputProvider) delivers under the fence of
+// the incarnation it started, and refuses every input under another fence or
+// to a session it does not host.
+func runFencedInputTests(t *testing.T, newSession Factory, opts Options) {
+	t.Helper()
+
+	t.Run("FencedInput_MatchingFenceDelivers", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		fence := fencedStart(t, opts, sp, name, cfg)
+		fp := sp.(runtime.FencedInputProvider)
+		ctx := context.Background()
+		if err := fp.NudgeFenced(ctx, name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true}); err != nil {
+			t.Errorf("NudgeFenced under the session's fence: %v", err)
+		}
+		if err := fp.SendKeysFenced(ctx, name, fence, "Enter"); err != nil {
+			t.Errorf("SendKeysFenced under the session's fence: %v", err)
+		}
+	})
+
+	t.Run("FencedInput_MismatchedFenceRefusesEveryInput", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		fence := fencedStart(t, opts, sp, name, cfg)
+		fp := sp.(runtime.FencedInputProvider)
+		ctx := context.Background()
+		other := fence
+		other.Token += "-other"
+		for op, err := range map[string]error{
+			"NudgeFenced":     fp.NudgeFenced(ctx, name, runtime.TextContent("hello"), runtime.FencedNudge{Fence: other, Immediate: true}),
+			"SendKeysFenced":  fp.SendKeysFenced(ctx, name, other, "Enter"),
+			"InterruptFenced": fp.InterruptFenced(ctx, name, other),
+		} {
+			if !errors.Is(err, runtime.ErrFenceMismatch) || runtime.IsSessionGone(err) {
+				t.Errorf("%s under another fence = %v, want ErrFenceMismatch, not gone", op, err)
+			}
+		}
+	})
+
+	// Self-contained: a sibling session keeps the runtime up, so the probe
+	// asks a live runtime about a name it does not host. With no runtime
+	// server at all a provider answers ErrRuntimeUnavailable instead
+	// (FencedInputProvider), which this case does not test.
+	t.Run("FencedInput_AbsentSessionRefuses", func(t *testing.T) {
+		sp, cfg, name := newSession(t)
+		_ = fencedStart(t, opts, sp, name, cfg)
+		absent := name + "-absent"
+		fp := sp.(runtime.FencedInputProvider)
+		fence := runtime.InputFence{Generation: 1, Epoch: 1, Token: "conformance-absent"}
+		err := fp.NudgeFenced(context.Background(), absent, runtime.TextContent("hello"), runtime.FencedNudge{Fence: fence, Immediate: true})
+		var miss *runtime.FenceMismatchError
+		if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent {
+			t.Errorf("NudgeFenced to a session never started = %v, want a mismatch finding %s", err, runtime.FenceFoundAbsent)
+		}
+	})
 }
 
 func startOrSkip(t *testing.T, opts Options, sp runtime.Provider, name string, cfg runtime.Config, label string) {
@@ -667,8 +747,8 @@ func RunSessionTests(t *testing.T, sp runtime.Provider, cfg runtime.Config, name
 	})
 
 	t.Run("Interrupt_MissingSession", func(t *testing.T) {
-		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil {
-			t.Errorf("Interrupt on missing session should not error: %v", err)
+		if err := sp.Interrupt("nonexistent-conformance-session"); err != nil && !errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Errorf("Interrupt on missing session error = %v, want nil or ErrSessionNotFound", err)
 		}
 	})
 

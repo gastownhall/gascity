@@ -4,6 +4,7 @@ import (
 	"errors"
 	"net/http"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -59,6 +60,12 @@ func writeSessionManagerError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "session_stopping", err.Error())
 	case errors.Is(err, session.ErrNotSession):
 		writeError(w, http.StatusBadRequest, "invalid", err.Error())
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// Retryable: the runtime could not be observed, so nothing was done.
+		writeError(w, http.StatusServiceUnavailable, "runtime_unavailable", err.Error())
+	case errors.Is(err, runtime.ErrNudgeRejected):
+		// The runtime refused the turn in its current state: nothing was delivered.
+		writeError(w, http.StatusConflict, "nudge_rejected", err.Error())
 	default:
 		writeStoreError(w, err)
 	}

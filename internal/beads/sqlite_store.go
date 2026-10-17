@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
@@ -235,6 +236,7 @@ type SQLiteStore struct {
 	recoveredHighWater         sqliteSequenceHighWater
 	sequenceFloorBeforePersist func() // test-only seam for the serialized floor critical section.
 	closeMu                    sync.Mutex
+	closed                     atomic.Bool  // set by CloseStore; ensureOpen refuses once it is
 	closeReadDB                func() error // test-only seam; production falls back to readDB.Close.
 	closeWriteDB               func() error // test-only seam; production falls back to db.Close.
 	readOnly                   bool
@@ -558,12 +560,15 @@ func (s *SQLiteStore) StoreHealthPath() string {
 	return s.path
 }
 
-// ensureOpen reports ErrStoreClosed once CloseStore has released the store's
-// database handles. Every exported method that reaches a handle starts with
-// it, so a use-after-close returns an error instead of dereferencing nil;
-// methods that only delegate inherit the guard from the method they call.
+// ensureOpen reports ErrStoreClosed once CloseStore has run. Every exported
+// method that reaches a handle starts with it, so a use-after-close returns an
+// error instead of reaching a closed handle; methods that only delegate inherit
+// the guard from the method they call. CloseStore closes the handles but never
+// clears them: a call already past this check when the store closes reads its
+// handle again later (Get's dependency hydration is a second query), and gets
+// the closed handle's error, never a nil dereference.
 func (s *SQLiteStore) ensureOpen() error {
-	if s == nil || s.db == nil || s.readDB == nil {
+	if s == nil || s.closed.Load() || s.db == nil || s.readDB == nil {
 		return fmt.Errorf("sqlite store: %w", ErrStoreClosed)
 	}
 	return nil
@@ -582,13 +587,16 @@ func (s *SQLiteStore) Ping() error {
 
 // CloseStore stops the background retention sweeper and closes both the write
 // and read database connections. Idempotent — safe to call multiple times.
-// Every other method reports ErrStoreClosed once it has run.
+// Every other method reports ErrStoreClosed once it has run. It does not wait
+// for calls already in flight: they finish on the closed handles, which it
+// keeps rather than clears (see ensureOpen).
 func (s *SQLiteStore) CloseStore() error {
 	if s == nil {
 		return nil
 	}
 	s.closeMu.Lock()
 	defer s.closeMu.Unlock()
+	s.closed.Store(true)
 
 	if s.retentionStop != nil {
 		s.retentionStop()
@@ -611,7 +619,6 @@ func (s *SQLiteStore) CloseStore() error {
 			errs = append(errs, err)
 		} else {
 			s.closeReadDB = nil
-			s.readDB = nil
 		}
 	}
 	if s.closeWriteDB != nil || s.db != nil {
@@ -625,7 +632,6 @@ func (s *SQLiteStore) CloseStore() error {
 			errs = append(errs, err)
 		} else {
 			s.closeWriteDB = nil
-			s.db = nil
 		}
 	}
 	return errors.Join(errs...)

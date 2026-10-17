@@ -1943,3 +1943,35 @@ func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ runtime.Provider = (*Provider)(nil)
+
+// exec cannot fence input, so a ctx-fenced DismissKnownDialogs is refused
+// before the script runs at all, directly and through the seam-backed
+// wrapper (RUNTIME-CONTRACT-009). Unfenced, it still runs the script to peek.
+func TestDismissKnownDialogsRefusesCtxFence(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := writeScript(t, dir, `echo "$1" >> `+calls+`
+echo "$ "
+`)
+	fenced := runtime.WithInputFence(context.Background(), runtime.InputFence{Generation: 1, Epoch: 1, Token: "t"})
+	for name, p := range map[string]runtime.DialogProvider{
+		"raw":         NewProvider(script),
+		"seam-backed": NewSeamBacked(script).(runtime.DialogProvider),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = os.Remove(calls)
+			if err := p.DismissKnownDialogs(fenced, "sess", time.Second); !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+				t.Fatalf("fenced DismissKnownDialogs = %v, want ErrInputFenceUnsupported", err)
+			}
+			if data, err := os.ReadFile(calls); err == nil {
+				t.Fatalf("script ran %q under a fence", data)
+			}
+			if err := p.DismissKnownDialogs(context.Background(), "sess", 200*time.Millisecond); err != nil {
+				t.Fatalf("unfenced DismissKnownDialogs = %v", err)
+			}
+			if data, _ := os.ReadFile(calls); len(data) == 0 {
+				t.Fatal("unfenced DismissKnownDialogs never ran the script, want a peek")
+			}
+		})
+	}
+}

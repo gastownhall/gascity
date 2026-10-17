@@ -1435,16 +1435,22 @@ func preservesGraphActionTypes(recipe *formula.Recipe) bool {
 	return root.Metadata[beadmeta.AttemptMetadataKey] != "" && root.Metadata[beadmeta.StepRefMetadataKey] != ""
 }
 
-// refuseSessionSteps refuses a recipe a step of which would make a
-// controller-owned row (coordclass.ControllerOwned: a session row by type or
-// the gc:session label, a substituted variable's included, a startup-health
-// episode or a convergence root), before anything is written: only its
-// owner mints one (mc-okw9n, mc-lp7zb, architecture B). The compile refuses
-// the literal marks (formula.Validate).
+// refuseSessionSteps refuses a recipe a step of which would make an owned
+// row, a substituted variable's included, before anything is written: a
+// controller-owned row (coordclass.ControllerOwned: a session row, a
+// startup-health episode, a convergence root) or a coordination row
+// (coordclass.CoordinationOwned: a mail message, a session wait, a queued
+// nudge, an order's run record, an extmsg row). Only its owner mints one
+// (mc-okw9n, mc-lp7zb, architecture B, the #7766 review). The compile
+// refuses the literal marks (formula.Validate).
 func refuseSessionSteps(steps []formula.RecipeStep, vars map[string]string) error {
 	for _, step := range steps {
-		if b := stepToBead(step, vars, nil); coordclass.ControllerOwned(b) {
+		b := stepToBead(step, vars, nil)
+		switch {
+		case coordclass.ControllerOwned(b):
 			return fmt.Errorf("formula step %q would make a controller-owned row (type %q, labels %v: a session row, a startup-health episode or a convergence root), which only its owner creates", step.ID, b.Type, b.Labels)
+		case coordclass.CoordinationOwned(b):
+			return fmt.Errorf("formula step %q would make a coordination row (type %q, labels %v: a mail message, a session wait, a queued nudge, an order's run record or an extmsg row), which only its owning route creates", step.ID, b.Type, b.Labels)
 		}
 	}
 	return nil

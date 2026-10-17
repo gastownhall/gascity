@@ -62,6 +62,7 @@ func (g *opGen) op() Op {
 	op := Op{
 		Conversation: pick(r, []string{"gc-1", "gc-a3f8e", "my-city-x9", "conv_" + fmt.Sprint(r.IntN(1e6))}),
 		Kind:         kind,
+		Executor:     pick(r, executors),
 		SchemaRev:    SchemaRev,
 		ClientKey:    g.text(30),
 		Producer: Producer{
@@ -84,6 +85,12 @@ func (g *opGen) op() Op {
 			Wake:          pick(r, []Wake{WakeIfNeeded, WakeLiveOnly}),
 			Role:          pick(r, []Role{RolePrompt, RoleNotice}),
 			OnUnsupported: pick(r, []Fallback{FallbackBoundary, FallbackFail}),
+		}
+		if op.Policy.Message.When == WhenNow && r.IntN(2) == 0 {
+			op.Policy.Message.NowGeneration = 1 + r.Int64N(100)
+			if r.IntN(2) == 0 {
+				op.Policy.Message.NowTurn = g.text(10)
+			}
 		}
 	case KindInterrupt:
 		op.Policy.Interrupt.OnFailure = pick(r, []OnFailure{OnFailureFail, OnFailureRestart})
@@ -130,10 +137,12 @@ func (g *opGen) op() Op {
 		statuses = append(statuses, StatusExecuting)
 	}
 	op.Status = pick(r, statuses)
-	op.ArrivalSeq = r.Uint64N(1 << 50)
+	if op.Executor.Legacy() && op.Status != StatusClosed {
+		op.Status = StatusSubmitted // a legacy op stays submitted until it closes
+	}
 	op.LaneSeq = r.Uint64N(1 << 50)
 	op.Attempt = r.IntN(6)
-	if spec.Lane == LaneConversation && op.Status != StatusClosed && r.IntN(2) == 0 {
+	if spec.Lane == LaneConversation && op.Executor == ExecutorLane && op.Status != StatusClosed && r.IntN(2) == 0 {
 		op.Lease = Lease{
 			Lane: string(spec.Lane), Conversation: op.Conversation,
 			Generation: 1 + r.Int64N(50), Nonce: "n" + fmt.Sprint(r.IntN(1e9)), Deadline: g.time(),
@@ -152,8 +161,53 @@ func (g *opGen) op() Op {
 		op.Transitions = append(op.Transitions, Transition{Status: pick(r, statuses), At: g.time(), By: g.text(10)})
 	}
 	op.ID, _ = DeriveID(pick(r, []string{"gc", "gcs", "my-city"}), op.Conversation, op.Producer.Principal, op.ClientKey)
+	g.laneFields(&op, spec)
 	op.PayloadDigest = RequestDigest(op)
 	return op
+}
+
+// laneFields gives a conversation-lane lane op random lane bookkeeping and, on
+// a succeeded outcome, a random delivery record and turn link.
+func (g *opGen) laneFields(op *Op, spec Spec) {
+	r := g.r
+	if op.Executor != ExecutorLane || spec.Lane != LaneConversation {
+		return
+	}
+	if r.IntN(2) == 0 {
+		op.RetryAt = g.time()
+	}
+	op.Failures = r.IntN(6)
+	if op.Attempt > 0 {
+		op.MaybeDelivered = r.IntN(op.Attempt + 1)
+	}
+	if r.IntN(2) == 0 {
+		op.DeliveryKey = pick(r, []string{op.ID, g.opID()}) + ":" + fmt.Sprint(1+r.IntN(1000))
+	}
+	if r.IntN(2) == 0 {
+		op.LastError = pick(r, []string{"lease_expired", "transient: pane busy " + g.text(20), "unknown: 日本語 🙂"})
+	}
+	if op.Outcome.Arm != ArmSucceeded || r.IntN(4) == 0 {
+		return
+	}
+	res := &op.Outcome.Result
+	res.Delivery = RecordedDelivery{
+		Seq: 1 + r.Uint64N(1<<40), At: g.time(),
+		Ack: pick(r, []AckKind{AckDelivered, AckDeliveredUnobserved, AckInBand}),
+	}
+	if r.IntN(2) == 0 {
+		res.Delivery.MessageID = g.text(20)
+		res.Delivery.MessageAt = g.time()
+	}
+	res.TurnLink = pick(r, []LinkConfidence{"", LinkExact, LinkCorrelated, LinkAmbiguous, LinkNone})
+	if res.TurnLink == "" {
+		return
+	}
+	res.TurnBasis = pick(r, []LinkBasis{BasisRuntimeTurn, BasisHistoryDiff, BasisNoSource, "a_newer_basis"})
+	if res.TurnLink == LinkNone {
+		res.Turn = ""
+	} else if res.Turn == "" {
+		res.Turn = g.text(10)
+	}
 }
 
 func (g *opGen) outcome(op *Op) Outcome {

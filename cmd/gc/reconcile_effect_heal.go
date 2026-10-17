@@ -64,9 +64,9 @@ func healCause(v txView) string {
 	switch rt := v.RT; {
 	case rt.Class == rtUnsupported:
 		return causeLivenessUnsupported
-	case v.It.Reason == decideAwakeHeal && (!rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent):
+	case (v.It.Reason == decideAwakeHeal || v.It.Reason == decideSatisfiedWake) && (!rt.Alive() || compareIdentity(v.Row, rt.Identity) != identityCurrent):
 		return causeRuntimeNotOwn
-	case v.It.Reason == decideAwakeHeal:
+	case v.It.Reason == decideAwakeHeal || v.It.Reason == decideSatisfiedWake:
 	case rt.Class == rtUnknown:
 		return causeLivenessUnknown
 	case v.It.Reason == decideSquatterHeal && !squatterProven(v.Row, rt):

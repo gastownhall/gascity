@@ -483,44 +483,86 @@ var (
 	ErrTurnInterruptUnsupported = errors.New("session runtime cannot interrupt the running turn")
 )
 
+// ErrSessionMutationBusy reports that a context-aware acquire of a session's
+// mutation lock gave up while another holder still had it. fn never ran, so
+// the caller may retry the whole operation. The returned error also wraps the
+// context's own error.
+var ErrSessionMutationBusy = errors.New("session mutation lock busy")
+
+// sessionMutationLockEntry is one session's lock. sem is a channel of
+// capacity one, full while the lock is held, so a waiter can select against a
+// context; a sync.Mutex cannot be abandoned. refs counts holders and waiters
+// and is guarded by sessionMutationLocksMu.
 type sessionMutationLockEntry struct {
-	mu   sync.Mutex
+	sem  chan struct{}
 	refs int
 }
 
 var (
+	// sessionMutationLocksMu guards the sessionMutationLocks map and every
+	// entry's refs. It is bookkeeping only and is never held across a
+	// blocking operation.
 	sessionMutationLocksMu sync.Mutex
 	sessionMutationLocks   = map[string]*sessionMutationLockEntry{}
 )
 
 // WithSessionMutationLock serializes metadata mutations for one session bead.
+// It waits for the lock without bound; use WithSessionMutationLockContext to
+// bound the wait.
 func WithSessionMutationLock(id string, fn func() error) error {
 	return withSessionMutationLock(id, fn)
 }
 
-func withSessionMutationLock(id string, fn func() error) error {
-	lock := acquireSessionMutationLock(id)
+// WithSessionMutationLockContext is WithSessionMutationLock with a bounded
+// wait. It tries the lock first, so a free lock is acquired even when ctx is
+// already done; ctx bounds only the wait for a held lock, never fn. When ctx
+// ends while the lock is still held it returns an error wrapping both
+// ErrSessionMutationBusy and ctx.Err(), and fn has not run and never will.
+func WithSessionMutationLockContext(ctx context.Context, id string, fn func() error) error {
+	lock, err := acquireSessionMutationLockContext(ctx, id)
+	if err != nil {
+		return err
+	}
 	defer releaseSessionMutationLock(id, lock)
 	return fn()
 }
 
-func acquireSessionMutationLock(id string) *sessionMutationLockEntry {
+func withSessionMutationLock(id string, fn func() error) error {
+	return WithSessionMutationLockContext(context.Background(), id, fn)
+}
+
+func acquireSessionMutationLockContext(ctx context.Context, id string) (*sessionMutationLockEntry, error) {
 	sessionMutationLocksMu.Lock()
 	lock := sessionMutationLocks[id]
 	if lock == nil {
-		lock = &sessionMutationLockEntry{}
+		lock = &sessionMutationLockEntry{sem: make(chan struct{}, 1)}
 		sessionMutationLocks[id] = lock
 	}
 	lock.refs++
 	sessionMutationLocksMu.Unlock()
 
-	lock.mu.Lock()
-	return lock
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	default:
+	}
+	select {
+	case lock.sem <- struct{}{}:
+		return lock, nil
+	case <-ctx.Done():
+		dropSessionMutationLockRef(id, lock)
+		return nil, fmt.Errorf("session %s: %w: %w", id, ErrSessionMutationBusy, ctx.Err())
+	}
 }
 
 func releaseSessionMutationLock(id string, lock *sessionMutationLockEntry) {
-	lock.mu.Unlock()
+	<-lock.sem
+	dropSessionMutationLockRef(id, lock)
+}
 
+// dropSessionMutationLockRef gives up one reference without touching sem and
+// deletes the entry when none remain.
+func dropSessionMutationLockRef(id string, lock *sessionMutationLockEntry) {
 	sessionMutationLocksMu.Lock()
 	lock.refs--
 	if lock.refs == 0 {
@@ -636,17 +678,28 @@ func (m *Manager) startRefusal(by Actor, id string, b beads.Bead) error {
 }
 
 func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing bool) error {
+	return m.ensureRunningOn(ctx, by, id, b, sessName, resumeCommand, hints, replacing, m.sp.IsRunning(sessName))
+}
+
+// ensureRunningOn is ensureRunning with whether sessName's runtime runs
+// already read: the provider's IsRunning for ensureRunning, a fresh read for
+// a delivery (ensureDeliverable), so a corpse a stale cache still shows
+// running is not taken for a live runtime to type into (J26 C2, mc-ir8qp).
+func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config, replacing, running bool) error {
+	// A start never runs under a caller's input fence: the fence names the
+	// incarnation this start may replace (FI9).
+	ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
 	if err := m.startRefusal(by, id, b); err != nil {
 		return err
 	}
 	// Only an operator's own resume consumes an operator's hold (CONTRACT
 	// v5.9 D8 rule 1); any other caller queues instead.
-	if !replacing && m.queueFor(b.Metadata, sessName, by) {
+	if !replacing && m.queueForRunning(b.Metadata, running, by) {
 		return fmt.Errorf("%w: %s", ErrResumeHeld, id)
 	}
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
-	if State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName) {
+	if State(b.Metadata["state"]) != StateSuspended && running {
 		if b.Metadata["transport"] == "" && transportVerified {
 			m.persistTransport(id, b.Metadata["provider"], transport)
 		}
@@ -662,7 +715,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 			defer release()
 			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b, false); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false, nil); err != nil {
 			return err
 		}
 		return nil
@@ -747,6 +800,7 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
+	converged := false
 	// An operator's resume of a row the operator holds consumes the hold, but
 	// only once the runtime is up (resume_user_hold.go).
 	var consume Decided
@@ -766,10 +820,11 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		switch {
 		// A capacity refusal is also a startup death, but the endpoint refused
 		// the launch: that says nothing about the resume key, so it falls
 		// through to the plain failure below instead of the stale-key recovery.
-		if errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err) {
+		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
 			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
 			if retryErr != nil {
 				return retryErr
@@ -785,10 +840,14 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 				return fmt.Errorf("resuming session: %w", err)
 			}
 			started = retried
-		} else if !errors.Is(err, runtime.ErrSessionExists) || !m.sp.IsRunning(sessName) {
+		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
 			// Another caller may have resumed the same session after we loaded the
-			// bead but before we reached Start. If the runtime is already up, treat
-			// the resume as converged and only persist active state below.
+			// bead but before we reached Start, or a resume of ours came up but
+			// returned before confirming it (the canceled stale-key wait below).
+			// The runtime is already up, so the resume converged: persist active
+			// state below, with the binding of the runtime it converged on.
+			converged = true
+		default:
 			if unroute != nil {
 				unroute()
 			}
@@ -808,7 +867,8 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
 			// sees the suspended-state bead, attempts sp.Start, gets
-			// ErrSessionExists (IsRunning=true), and persists "active".
+			// ErrSessionExists (IsRunning=true), and persists "active"
+			// with the runtime's binding.
 			if unroute != nil {
 				unroute()
 			}
@@ -828,14 +888,19 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 	if err := m.syncStoredMCPServers(id, &b, cfg.MCPServers); err != nil {
 		return fmt.Errorf("%w: %w", ErrStateSync, err)
 	}
+	var binding MetadataPatch
+	if started || converged {
+		binding = m.startedRuntimeBindingPatch(sessName)
+	}
 	if consumes {
-		var clears MetadataPatch
+		clears := MetadataPatch{}
 		if started {
 			clears = restartStopRequestClears(b.Metadata)
 		}
+		maps.Copy(clears, binding)
 		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b, started); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started, binding); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -849,22 +914,28 @@ func (m *Manager) ensureRunning(ctx context.Context, by Actor, id string, b bead
 // fresh read of an unsuspended row's runtime: a live pane whose agent is
 // dead, or a runtime the read cannot vouch for, is ErrAgentDead, so the
 // caller queues the text rather than type it into a pane it would be lost
-// with (mc-48az4, mc-wdjni). The read refreshes a caching provider, so
-// ensureRunning's reads after it see a corpse as not running. Start and
+// with (mc-48az4, mc-wdjni). Whether the runtime runs is that read's too
+// (ensureRunningOn), never a caching provider's IsRunning. Start and
 // Attach keep ensureRunning's: an operator attaches to a crashed pane to read
 // it.
 func (m *Manager) ensureDeliverable(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	if err := m.startRefusal(by, id, b); err != nil {
 		return err
 	}
-	if State(b.Metadata["state"]) != StateSuspended {
-		if live, err := m.freshLiveness(sessName, hints.ProcessNames); err != nil {
-			return fmt.Errorf("%w: %s: %w", ErrAgentDead, id, err)
-		} else if live.Running && !live.Alive {
-			return fmt.Errorf("%w: %s", ErrAgentDead, id)
-		}
+	if State(b.Metadata["state"]) == StateSuspended {
+		return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
 	}
-	return m.ensureRunning(ctx, by, id, b, sessName, resumeCommand, hints, false)
+	live, err := m.freshLiveness(sessName, hints.ProcessNames)
+	switch {
+	case err != nil:
+		return fmt.Errorf("%w: %s: %w", ErrAgentDead, id, err)
+	case live.Running && !live.Alive:
+		return fmt.Errorf("%w: %s", ErrAgentDead, id)
+	}
+	// The fresh read, not the provider's cache, says whether the runtime
+	// runs: a corpse reads not running whether or not the read refreshed a
+	// caching provider (J26 C2, mc-ir8qp).
+	return m.ensureRunningOn(ctx, by, id, b, sessName, resumeCommand, hints, false, live.Running)
 }
 
 // freshLiveness reads sessName's runtime as of now, not from a provider's
@@ -993,7 +1064,10 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	return nil
 }
 
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool) error {
+// confirmLiveSessionState marks the row of a session found or brought live as
+// active. extra rides the same write (the runtime binding of a start, or of a
+// resume that converged on a runtime already up).
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch) error {
 	if b == nil {
 		return nil
 	}
@@ -1001,6 +1075,7 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool
 	if started {
 		maps.Copy(batch, restartStopRequestClears(b.Metadata))
 	}
+	maps.Copy(batch, extra)
 	switch State(b.Metadata["state"]) {
 	case "", StateStartPending, StateCreating, StateAsleep, StateSuspended:
 		batch["state"] = string(StateActive)
@@ -1062,7 +1137,7 @@ func formatWaitIdleReminder(source, message string) string {
 
 func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, immediate bool) error {
 	content := runtime.TextContent(message)
-	err := m.nudgeContent(sessName, content, immediate)
+	err := m.nudgeContent(ctx, sessName, content, immediate)
 	if errors.Is(err, runtime.ErrNudgeDeliveredUnobserved) {
 		// The provider proved delivery and only missed the turn start, so
 		// this nudge is delivered: a caller that retried it would deliver
@@ -1084,13 +1159,15 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 	return nil
 }
 
-func (m *Manager) nudgeContent(sessName string, content []runtime.ContentBlock, immediate bool) error {
-	if immediate {
-		if np, ok := m.sp.(runtime.ImmediateNudgeProvider); ok {
-			return np.NudgeNow(sessName, content)
-		}
-	}
-	return m.sp.Nudge(sessName, content)
+// nudgeContent delivers content, passing the delivery key ctx carries (see
+// runtime.WithNudgeDeliveryKey) to a provider that deduplicates keyed
+// deliveries. Immediate delivery through an ImmediateNudgeProvider goes out
+// unkeyed: NudgeNow takes no key.
+//
+// Under an input fence in ctx (runtime.WithInputFence) the runtime delivers
+// only to the incarnation it names, or refuses.
+func (m *Manager) nudgeContent(ctx context.Context, sessName string, content []runtime.ContentBlock, immediate bool) error {
+	return runtime.NudgeWithContext(ctx, m.sp, sessName, content, immediate)
 }
 
 func normalizeWaitIdleNudgeSource(source string) string {
@@ -1260,9 +1337,10 @@ func (m *Manager) sendLiveOnly(ctx context.Context, id, message string, immediat
 		if err != nil {
 			return err
 		}
-		if !m.liveAgent(sessName, processNames) { // a dead agent's pane takes nothing (mc-wdjni)
+		live, err := m.freshLiveness(sessName, processNames)
+		if err != nil || !live.Running || !live.Alive { // a dead agent's pane takes nothing (mc-wdjni)
 			delivered = false
-			return nil
+			return runtime.LivenessFenceMiss(ctx, sessName, live, err)
 		}
 		if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
 			return err
@@ -1322,7 +1400,10 @@ func (m *Manager) SendImmediate(ctx context.Context, by Actor, id, message, resu
 
 // SendLiveOnly nudges the runtime only when the current session is already
 // running with its agent alive (by processNames; none reads alive). It never
-// resumes or restarts the session.
+// resumes or restarts the session. Under an input fence in ctx, a session it
+// finds not running, or with its agent exited, is a miss rather than
+// undelivered, and a liveness read that fails is runtime.ErrRuntimeUnavailable
+// (runtime.LivenessFenceMiss).
 func (m *Manager) SendLiveOnly(ctx context.Context, id, message string, processNames []string) (bool, error) {
 	return m.sendLiveOnly(ctx, id, message, false, processNames)
 }
@@ -1382,33 +1463,44 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // interrupt neither way gets nothing sent and StopTurn returns
 // ErrTurnInterruptUnsupported.
 func (m *Manager) StopTurn(id string) error {
+	return m.stopTurn(context.Background(), id)
+}
+
+// stopTurn is StopTurn under ctx. Under an input fence in ctx every key and
+// interrupt it sends is fenced, and a runtime that cannot fence the session
+// is refused before anything is sent.
+func (m *Manager) stopTurn(ctx context.Context, id string) error {
 	return withSessionMutationLock(id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		running := State(b.Metadata["state"]) != StateSuspended && m.sp.IsRunning(sessName)
-		if !running {
+		_, fenced := runtime.InputFenceFrom(ctx)
+		if fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
+			return fmt.Errorf("stopping the turn of %s: %w", id, runtime.ErrInputFenceUnsupported)
+		}
+		if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
 			// No runtime means no turn to interrupt: stopTurnLocked sends
-			// nothing, so there is nothing to wait for either.
-			return nil
+			// nothing, so there is nothing to wait for either. A fenced stop
+			// reports what its read found: never success into none.
+			return err
 		}
 		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
 		interruptStartedAt := time.Now()
-		if err := m.stopTurnLocked(b, sessName, mode); err != nil {
+		if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 			return err
 		}
-		if err := m.waitForInterruptIdleLocked(context.Background(), b, sessName, mode); err != nil {
+		if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
 			return fmt.Errorf("waiting for stopped session to become idle: %w", err)
 		}
-		if err := m.waitForInterruptBoundaryLocked(context.Background(), b, sessName, interruptStartedAt); err != nil {
+		if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
 			return fmt.Errorf("waiting for stopped session interrupt boundary: %w", err)
 		}
 		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
 			// The stop already succeeded. A draft that will not clear is
 			// logged, not returned: the next submit clears the input box
 			// again before it pastes.
-			if _, err := m.clearRestoredInputLocked(context.Background(), sessName); err != nil {
+			if _, err := m.clearRestoredInputLocked(ctx, sessName); err != nil {
 				log.Printf("session: stopped the turn of %q but %v", sessName, err)
 			}
 		}

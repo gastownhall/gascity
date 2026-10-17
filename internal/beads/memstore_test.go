@@ -872,3 +872,7 @@ func TestMemStoreEphemeralTierPartitioning(t *testing.T) {
 		})
 	}
 }
+
+func TestMemStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "MemStore", func(*testing.T) beads.Store { return beads.NewMemStore() })
+}

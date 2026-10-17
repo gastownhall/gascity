@@ -113,6 +113,10 @@ type demandView struct {
 	// environment generation.
 	RelocatedClaimRefs []string
 	WakeClaimRefs      []string
+	// ProbeStores are the stores of the demand targets' default scale-check
+	// probes (demandProbeStores): K1's lane reads them, and gather's
+	// lane-fed check reuses them rather than build the targets again.
+	ProbeStores []beads.Store
 }
 
 // endpointView is one endpoint's breaker as the pass reads it.

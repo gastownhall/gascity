@@ -3528,6 +3528,69 @@ func TestReconcileSessionBeads_AsleepMaxSessionAgePoolBeadFreesSlot(t *testing.T
 	}
 }
 
+// TestReconcileSessionBeads_AsleepConfigDriftPoolBeadFreesSlot mirrors
+// TestReconcileSessionBeads_AsleepIdlePoolBeadFreesSlot for
+// sleep_reason=config-drift: a pool session drained for a config-drift
+// restart must free its pool slot through the same live-query close gate
+// once it has gone fully asleep, instead of wedging the slot forever. A
+// config-drifted pool session is never woken in place (that would run the
+// agent on stale config — see resetConfiguredNamedSessionForConfigDriftInfo,
+// which only covers named sessions), so without this close a pool whose
+// every slot drifts goes dark indefinitely even with ready routed demand
+// (srvcity sr-sxbc7: st/support.dispatch dark 17.5h, both slots
+// asleep-for-drift, 59 ready steps queued, nothing closed or replaced it).
+func TestReconcileSessionBeads_AsleepConfigDriftPoolBeadFreesSlot(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Agents: []config.Agent{{Name: "worker"}},
+	}
+	env.addDesired("worker", "worker", false) // NOT running
+	session := env.createSessionBead("worker", "worker")
+	// Simulate the post-drain-ack-ghost state: asleep + sleep_reason=config-drift
+	// + pool-managed, but the runtime has exited and no work is assigned.
+	env.setSessionMetadata(&session, map[string]string{
+		"state":                "asleep",
+		"sleep_reason":         string(sessionpkg.SleepReasonConfigDrift),
+		poolManagedMetadataKey: boolMetadata(true),
+	})
+
+	reconcileSessionBeadsAtPath(
+		context.Background(),
+		env.city,
+		[]beads.Bead{session},
+		env.desiredState,
+		map[string]bool{"worker": true},
+		env.cfg,
+		env.sp,
+		env.store,
+		newFakeDrainOps(),
+		nil,
+		nil, // rigStores
+		nil,
+		env.dt,
+		nil,
+		false,
+		nil,
+		"",
+		nil,
+		env.clk,
+		env.rec,
+		0,
+		0,
+		&env.stdout,
+		&env.stderr,
+		withAsyncDrainAckStopTracker(env.stops),
+	)
+
+	got, err := env.store.Get(session.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", session.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("status = %q, want closed — asleep-config-drift pool beads must free their slot via the live-query close gate", got.Status)
+	}
+}
+
 // capturingRecorder is an in-memory events.Recorder used in tests that
 // need to assert which events were emitted.
 type capturingRecorder struct {

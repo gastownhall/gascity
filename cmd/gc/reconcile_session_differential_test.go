@@ -198,7 +198,7 @@ var parityFindings = map[string]parityEntry{
 		"CONTRACT v5 A10, C3; BEHAVIORS MAINT-051, SESS-050..052", "an undesired pool pending create past its never-started deadline: legacy's MAINT-051 sweep closes it first as gc_swept, its claim keys left on the closed row, so its rollback never runs; v2 does not run the sweep, and A10 rolls it back (failed-create, the claim cleared). §12.2 #17 covers only the orphan close's reason",
 		[]string{"state", "close_reason", "pending_create_claim", "pending_create_started_at"},
 	},
-	"rollback-stops-nothing": {"CONTRACT v5 C3, C8.8; BEHAVIORS SESS-052", "legacy stops a bead-scoped pool name before its rollback whether or not anything runs under it (releaseBeadScopedPoolRuntime); v2 stops only a runtime its fresh read finds, whose absence that read has confirmed. §12.2 does not list it", nil},
+	"rollback-stops-nothing": {"CONTRACT v5 C3, C8.8; BEHAVIORS SESS-052", "legacy stops a bead-scoped pool name before its rollback whether or not anything runs under it (releaseRowOwnedRuntime); v2 stops only a runtime its fresh read finds, whose absence that read has confirmed. §12.2 does not list it", nil},
 	"rollback-replacement-slot": {
 		"CONTRACT v5 AL1, A10", "v2 creates a rolled-back seat's replacement in the rollback's pass, while the rolled-back row still occupies its slot, so the replacement takes the next slot; legacy closes the row first and creates the replacement the next tick in the freed slot. §12.2 does not list it",
 		[]string{"agent_name", "canonical_instance_name", "canonical_pool_slot", "pool_slot", "prompt_hash"},
@@ -294,6 +294,9 @@ var parityKindOwners = map[string]*regexp.Regexp{
 	// A7's row-metadata verb (C7d) owns the M1 verb's rows.
 	intentRowMetadata:  regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`),
 	intentRuntimeAlias: regexp.MustCompile(`\bM1 row-metadata verb \(A7\)`), // SESS-716's runtime alias sync
+	// A13's pinned skip clears the runtime's restart marker (SESS-521,
+	// mc-nm6yt).
+	intentMarkerClear: regexp.MustCompile(`\bA13 \+ D3\b`),
 	// A8's baseline (C7c) owns the M2 builder's rows.
 	intentBaseline: regexp.MustCompile(`\bM2 baseline builder \(A8\)`),
 	// A12's zombie effect (C5c2) owns the classification rows.

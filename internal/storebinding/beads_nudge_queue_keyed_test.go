@@ -301,7 +301,7 @@ func TestBeadsNudgeQueueHotVerbsNeverScanTheQueue(t *testing.T) {
 	if err := queue.Ack([]string{"n-second"}, "delivered", "", "commit"); err != nil {
 		t.Fatalf("Ack: %v", err)
 	}
-	if err := queue.ReleaseClaims([]string{"n-other"}); err != nil {
+	if err := queue.ReleaseClaims([]string{"n-other"}, time.Time{}); err != nil {
 		t.Fatalf("ReleaseClaims: %v", err)
 	}
 	if _, err := queue.RecordFailure([]string{"n-deferred"}, errors.New("refused"), now); err != nil {
@@ -639,7 +639,7 @@ func TestBeadsNudgeQueueReleasingAnExpiredClaimRecordsItDead(t *testing.T) {
 	if claimed := claimAll(t, queue, claimedAt); len(claimed) != 1 {
 		t.Fatalf("ClaimDue = %v, want the unexpired nudge", nudgeItemIDs(claimed))
 	}
-	if err := queue.ReleaseClaims([]string{item.ID}); err != nil {
+	if err := queue.ReleaseClaims([]string{item.ID}, time.Time{}); err != nil {
 		t.Fatalf("ReleaseClaims: %v", err)
 	}
 	record, err := store.Get(nudgeQueueBeadID(item.ID))
@@ -716,4 +716,52 @@ func containsNudgeID(ids []string, want string) bool {
 		}
 	}
 	return false
+}
+
+// TestBeadsNudgeQueueListLiveIsOneIndexedPartialRead pins the queue-mode
+// shim's read of the beads queue: one Live List indexed on the live lifecycle
+// state, every live item split into pending and in flight, dead letters and
+// items past their deadline left out, and an undecodable record skipped and
+// reported as a partial result rather than failing the read.
+func TestBeadsNudgeQueueListLiveIsOneIndexedPartialRead(t *testing.T) {
+	queue, recorder, backing := newRecordedNudgeQueue(t)
+	now := time.Now().UTC()
+	claimed := testNudgeItem("n-claimed", "", now)
+	claimed.Agent = "beta/claimed"
+	expired := testNudgeItem("n-expired", "", now)
+	expired.ExpiresAt = now.Add(-time.Second)
+	scheduled := testNudgeItem("n-scheduled", "", now)
+	scheduled.DeliverAfter = now.Add(time.Hour)
+	for _, item := range []nudgequeue.Item{testNudgeItem("n-pending", "", now), claimed, expired, scheduled, testNudgeItem("n-dead", "", now)} {
+		if err := queue.EnqueueDeferred(item); err != nil {
+			t.Fatalf("EnqueueDeferred(%s): %v", item.ID, err)
+		}
+	}
+	if got, err := queue.ClaimDue(ClaimTarget{QueueKeys: []string{"beta/claimed"}}, now); err != nil || len(got) != 1 {
+		t.Fatalf("ClaimDue = %v, %v", nudgeItemIDs(got), err)
+	}
+	if _, err := queue.RecordFailure([]string{"n-dead"}, ErrNudgeSessionFenceMismatch, now); err != nil {
+		t.Fatalf("RecordFailure: %v", err)
+	}
+	seedCorruptNudgeRecord(t, backing, "n-corrupt", testNudgeAgent)
+
+	recorder.reset()
+	pending, inFlight, err := queue.(*beadsNudgeQueue).ListLive(now)
+	if !beads.IsPartialResult(err) || !errors.Is(err, ErrBeadsNudgeQueueCorrupt) {
+		t.Fatalf("ListLive error = %v, want a partial result wrapping ErrBeadsNudgeQueueCorrupt", err)
+	}
+	if got, want := nudgeItemIDs(pending), []string{"n-pending", "n-scheduled"}; strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Errorf("ListLive pending = %v, want %v", got, want)
+	}
+	if got := nudgeItemIDs(inFlight); len(got) != 1 || got[0] != "n-claimed" {
+		t.Errorf("ListLive in flight = %v, want [n-claimed]", got)
+	}
+	ops := recorder.Ops()
+	if lists := countOps(ops, beadstest.OpList); lists != 1 {
+		t.Fatalf("ListLive issued %d Lists, want one read of the live records", lists)
+	}
+	assertQueueListsAreIndexedAndLive(t, "ListLive", ops)
+	if live := listsOn(ops, nudgeMetaQueueState); len(live) != 1 || live[0].Metadata[nudgeMetaQueueState] != nudgeQueueStateLive {
+		t.Fatalf("ListLive read %+v, want one read keyed on the live lifecycle state", live)
+	}
 }

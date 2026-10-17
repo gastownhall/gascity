@@ -40,6 +40,7 @@ type fakePlannerTimer struct {
 	at     time.Time
 	active bool
 	arm    uint64 // the clock's arms count when this timer was last armed
+	onFire func() // WithDeadline's cancel, run as the timer fires
 }
 
 func newFakePlannerClock(now time.Time) *fakePlannerClock {
@@ -65,19 +66,21 @@ func (c *fakePlannerClock) NewTimer(d time.Duration) plannerTimer {
 }
 
 // WithDeadline cancels with cause DeadlineExceeded when the fake time
-// reaches t. It arms one timer of its own.
+// reaches t: inside the Advance (or the arm) that reaches it, so the context
+// is done once Advance returns, never at some later turn of a goroutine (the
+// simulator's determinism, mc-gfdi5). It arms one timer of its own.
 func (c *fakePlannerClock) WithDeadline(parent context.Context, t time.Time) (context.Context, context.CancelFunc) {
 	ctx, cancel := context.WithCancelCause(parent)
-	timer := c.NewTimer(t.Sub(c.Now()))
-	go func() {
-		defer timer.Stop()
-		select {
-		case <-timer.C():
-			cancel(context.DeadlineExceeded)
-		case <-ctx.Done():
-		}
-	}()
-	return ctx, func() { cancel(context.Canceled) }
+	timer := &fakePlannerTimer{c: c, ch: make(chan time.Time, 1), onFire: func() { cancel(context.DeadlineExceeded) }}
+	c.mu.Lock()
+	c.timers = append(c.timers, timer)
+	timer.resetLocked(t.Sub(c.now))
+	timer.arm = 0
+	c.mu.Unlock()
+	return ctx, func() {
+		timer.Stop()
+		cancel(context.Canceled)
+	}
 }
 
 func (c *fakePlannerClock) Advance(d time.Duration) {
@@ -173,6 +176,9 @@ func (t *fakePlannerTimer) Stop() {
 func (t *fakePlannerTimer) fireLocked() {
 	t.active = false
 	t.ch <- t.at // drained on every Reset and Stop, and fired once per arm
+	if t.onFire != nil {
+		t.onFire()
+	}
 }
 
 func (t *fakePlannerTimer) drainLocked() {

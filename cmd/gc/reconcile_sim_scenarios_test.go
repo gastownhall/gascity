@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -12,6 +13,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -1722,4 +1724,215 @@ func TestSimWakeDuringAStopKillRunsTheSeatAgain(t *testing.T) {
 		t.Fatalf("the woken seat never ran again: %v", row().Metadata)
 	}
 	s.noViolations(t)
+}
+
+// Scenario mc-4gyej (CONTRACT v5.10w, §12.2 row 66): a floor seat's agent
+// acks its own idle drain and exits, leaving a corpse. With the row's token
+// on the corpse the seat restarts in place, as row 66 says; with no token,
+// or no identity at all, nothing can attribute the corpse to the row, so
+// the ack is signaled and the stop finalizes the row (closed, drained,
+// the corpse removed) for the floor to recreate the seat, instead of the
+// floor check voiding the ack and A9 holding the row over the corpse for
+// good. Kills: the floor check canceling the token-less ack, and the
+// token case losing its restart in place.
+func TestSimFloorAckOverATokenlessCorpseFinalizes(t *testing.T) {
+	for _, c := range []struct {
+		name      string
+		id, token string
+		inPlace   bool
+	}{
+		{"the row's token: restarted in place", "gc-1", "tok-gc-1", true},
+		{"no token: finalized", "gc-1", "", false},
+		{"no identity: finalized", "", "", false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-10*time.Minute), session.DrainAckIncarnationKey, "1")
+			s := scripted(t, []string{"gc-1"}, row)
+			s.cfg.Agents[0].MinActiveSessions = intPtr(1)
+			s.advance(time.Second)
+			s.operator("gc-1", session.DrainAckAtKey, s.rel(0)) // the ack lands after the runtime started
+			name := row.Metadata["session_name"]
+			s.sp.mu.Lock()
+			rt := s.sp.rts[name]
+			first := rt.object
+			rt.id, rt.token, rt.corpse = c.id, c.token, true
+			s.sp.touch(name)
+			s.sp.mu.Unlock()
+			for range 10 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			b, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			s.sp.mu.Lock()
+			now := s.sp.rts[name]
+			s.sp.mu.Unlock()
+			switch {
+			case c.inPlace && (b.Status != "open" || now == nil || now.corpse || now.object == first || now.id != "gc-1"):
+				t.Fatalf("row %s/%s, runtime %+v; want the seat restarted in place", b.Status, b.Metadata["state"], now)
+			case !c.inPlace && (b.Status != "closed" || b.Metadata["state"] != string(session.StateDrained) || now != nil):
+				t.Fatalf("row %s/%s, runtime %+v; want the row finalized (closed, drained) and the corpse removed", b.Status, b.Metadata["state"], now)
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Kills `gc rig restart` leaving a min_active_sessions pool at zero live
+// seats under v2 (mc-ewptj): the real sweep (doRigRestart) runs as an
+// outside writer over three live pool seats with no work, then the planner
+// runs. A floor of 2 comes back to two live seats, revived from the
+// city-stop seats the restart marked; with no floor none restarts; a seat
+// with work restarts; no invariant breaks.
+func TestSimRigRestartRevivesTheFloor(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		floor int
+		work  []string
+		live  int
+	}{
+		{"no work, floor 2", 2, nil, 2},
+		{"no work, no floor", 0, nil, 0},
+		{"work on gc-1, no floor", 0, []string{"gc-1"}, 1},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var rows []beads.Bead
+			var live []string
+			for i := 1; i <= 3; i++ {
+				id := fmt.Sprintf("gc-%d", i)
+				rows = append(rows, poolRow(id, "worker", i, "awake", "instance_token", "tok-"+id, "last_woke_at", rowAt(-10*time.Minute)))
+				live = append(live, id)
+			}
+			for _, id := range c.work {
+				rows = append(rows, beads.Bead{ID: "gw-" + id, Title: "w", Type: "task", Status: "open", Assignee: id, Metadata: map[string]string{"gc.routed_to": "worker"}})
+			}
+			s := scripted(t, live, rows...)
+			if c.floor > 0 {
+				s.cfg.Agents[0].MinActiveSessions = intPtr(c.floor)
+			}
+			for range 3 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			first, err := s.legs[0].backing.Get("gc-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			var stderr bytes.Buffer
+			code := -1
+			s.outside("gc rig restart", s.legs[0], first, func(l *simLeg, _ beads.Bead) {
+				code = doRigRestart(s.sp, events.Discard, l.backing, s.cfg, s.cfg.Agents, "", "test-city", "", &bytes.Buffer{}, &stderr)
+				// The sweep stamps the wall clock; restamp its times on the
+				// sim's, or quiescence waits out the gap as a timer.
+				rows, _ := l.backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+				for _, b := range rows {
+					for _, key := range []string{"slept_at", "suspended_at"} {
+						if b.Metadata[key] != "" {
+							_ = l.backing.SetMetadata(b.ID, key, s.rel(0))
+						}
+					}
+				}
+			})
+			if code != 0 {
+				t.Fatalf("gc rig restart exited %d: %s", code, stderr.String())
+			}
+			for range 12 {
+				s.settle()
+				s.advance(simPatrol)
+			}
+			s.quiesce()
+			all, err := s.legs[0].backing.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err != nil {
+				t.Fatal(err)
+			}
+			got := 0
+			var seats []string
+			for _, b := range all {
+				if b.Metadata["template"] != "worker" {
+					continue
+				}
+				if b.Status != "closed" && s.object(b.Metadata["session_name"]) != 0 {
+					got++
+				}
+				seats = append(seats, fmt.Sprintf("%s:%s/%s/%s", b.ID, b.Status, b.Metadata["state"], b.Metadata["sleep_reason"]))
+			}
+			if got != c.live {
+				t.Errorf("live seats after the restart = %d, want %d: %v", got, c.live, seats)
+			}
+			s.report(t)
+		})
+	}
+}
+
+// Scenario J21 C / mc-sqdv6 (CONTRACT v5.7 D7 rule 2, §12.2 #26): an
+// operator wakes an asleep seat and attaches, so its runtime comes up
+// outside the controller, the wake request still on the row. A6's
+// asleep-to-awake heal clears the wake in its own write (or, on an awake row,
+// the satisfied-wake clear does). When the runtime later dies, the row's
+// runtime-missing heal finds no wake left to restart it with. Kills a
+// residue wake that restarts the seat once after the death.
+func TestSimSatisfiedWakeDoesNotRestartAfterADeath(t *testing.T) {
+	for _, state := range []string{"asleep", "awake"} {
+		t.Run(state, func(t *testing.T) {
+			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, state, "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+				"wake_request", "explicit", "wake_requested_at", rowAt(-time.Minute)))
+			s.settle()
+			s.settle()
+			if m := s.gc1(); m["wake_request"] != "" || m["wake_requested_at"] != "" {
+				t.Fatalf("row %v: want the wake consumed while its runtime runs", m)
+			}
+			s.sp.mu.Lock()
+			starts := len(s.sp.starts)
+			s.sp.drop("s-gc-1")
+			s.sp.mu.Unlock()
+			for range 6 {
+				s.advance(simPatrol)
+				s.settle()
+			}
+			s.sp.mu.Lock()
+			restarted := len(s.sp.starts) > starts
+			s.sp.mu.Unlock()
+			if restarted {
+				t.Errorf("row %v: the seat restarted after its runtime died, want the wake consumed and no restart; schedule:\n%s", s.gc1(), strings.Join(s.schedule, "\n"))
+			}
+			s.noViolations(t)
+		})
+	}
+}
+
+// Scenario DRAIN-047 (the #7855 review): an operator wakes an awake seat
+// whose idle or no-wake drain is requested (begun, not yet signaled); the
+// wake makes A19 cancel that drain, and the seat stays up through it; the
+// satisfied-wake clear consumes the wake only after the cancel. Kills the
+// clear consuming that wake first, so the requested drain goes on and the
+// seat is stopped. (Once the wake is consumed, the seat idle-sleeps
+// normally on a later drain of its own, §12.2 #26.)
+func TestSimWakeOverARequestedDrainCancelsIt(t *testing.T) {
+	for _, reason := range []string{"idle", reasonNoWake} {
+		t.Run(reason, func(t *testing.T) {
+			s := scripted(t, []string{"gc-1"}, poolRow("gc-1", "worker", 1, "awake", "instance_token", "tok-gc-1", "last_woke_at", rowAt(-time.Hour),
+				session.DrainIntentReasonKey, reason, session.DrainIntentAtKey, rowAt(-5*time.Second), session.DrainIntentIncarnationKey, "1",
+				"wake_request", "explicit", "wake_requested_at", rowAt(-time.Second)))
+			s.settle()
+			s.settle()
+			s.sp.mu.Lock()
+			rt := s.sp.rts["s-gc-1"]
+			kills := len(s.sp.kills)
+			s.sp.mu.Unlock()
+			b := s.gc1()
+			canceled := slices.ContainsFunc(s.schedule, func(l string) bool { return strings.Contains(l, "admitted [drain-cancel:gc-1") })
+			switch {
+			case !canceled:
+				t.Errorf("%s: no drain cancel admitted; schedule:\n%s", reason, strings.Join(s.schedule, "\n"))
+			case rt == nil || rt.corpse || kills != 0 || b[session.DrainIntentReasonKey] != "":
+				t.Errorf("%s: runtime %+v, kills %d, row %v; want the seat up and the requested drain canceled", reason, rt, kills, b)
+			case b["wake_request"] != "":
+				t.Errorf("%s: row %v; want the wake consumed once the cancel landed", reason, b)
+			}
+			s.noViolations(t)
+		})
+	}
 }

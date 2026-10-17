@@ -5711,3 +5711,18 @@ func TestBdStoreCloseNotificationConformance(t *testing.T) {
 		return beadstest.NewFakeBd().NewBdStore()
 	})
 }
+
+// TestBdStoreReportsNoGuardedBatches pins that BdStore is not a guarded
+// batcher: bd has no CLI behind the native batch applier, so a caller that
+// needs atomic guarded batches must refuse a bd-backed store at startup
+// rather than discover the gap at its first write. Wrapping it in a cache
+// does not manufacture the capability either.
+func TestBdStoreReportsNoGuardedBatches(t *testing.T) {
+	store := beads.NewBdStore("/city", fakeRunner(nil))
+	if batcher, ok := beads.GuardedBatcherFor(store); ok {
+		t.Fatalf("GuardedBatcherFor(BdStore) = (%T, true), want no capability", batcher)
+	}
+	if batcher, ok := beads.GuardedBatcherFor(beads.NewCachingStoreForTest(store, nil)); ok {
+		t.Fatalf("GuardedBatcherFor(CachingStore over BdStore) = (%T, true), want no capability", batcher)
+	}
+}
