@@ -5,9 +5,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"slices"
 	"sort"
+	"strconv"
 	"strings"
 
+	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
@@ -107,6 +112,50 @@ func (s *Server) resolveMailSendRecipientWithContext(ctx context.Context, recipi
 		return address, nil
 	}
 	return "", apiSessionTargetNotFound(recipient)
+}
+
+// operatorMailIdentities are the operator's mail identities: the mail
+// package's operator mailbox ("human") and the dashboard's configured wire
+// alias (DASHBOARD_OPERATOR_WIRE_ALIAS), which it sends as.
+func operatorMailIdentities() []string {
+	ids := []string{"human"}
+	if alias := strings.TrimSpace(os.Getenv("DASHBOARD_OPERATOR_WIRE_ALIAS")); alias != "" {
+		ids = append(ids, alias)
+	}
+	return ids
+}
+
+// refuseUnconfiguredMailSender refuses, with 422 at body.from, a mail sender
+// that is no configured identity (architecture B v2, mc-v8g4p): the API has
+// no caller identity to bind the sender to (mc-8e9ci), so a sender is the
+// operator, a configured agent, a configured named session or a live session
+// of a configured agent. An empty sender is no identity either (v5.10f): a
+// message names who sent it.
+func (s *Server) refuseUnconfiguredMailSender(ctx context.Context, from string) error {
+	from = strings.TrimSpace(from)
+	if slices.Contains(operatorMailIdentities(), from) {
+		return nil
+	}
+	cfg := s.state.Config()
+	if _, err := mail.ResolveRecipient(from, agentEntries(cfg)); err == nil {
+		return nil
+	}
+	if store := s.state.SessionsBeadStore().Store; store != nil {
+		if _, ok, err := s.configuredMailRecipientAddress(store, from); err != nil {
+			return apierr.Internal.Msg(err.Error())
+		} else if ok {
+			return nil
+		}
+		if id, err := s.resolveSessionTargetIDWithContext(ctx, store, from, apiSessionResolveOptions{}); err == nil {
+			if info, getErr := session.NewStore(beads.SessionStore{Store: store}).Get(id); getErr == nil {
+				if _, ok := findAgentByQualifiedTemplate(cfg, info.Template); ok {
+					return nil
+				}
+			}
+		}
+	}
+	return apierr.ValidationFailed.With("mail sender "+strconv.Quote(from)+" is no configured identity: send as the operator, a configured agent or a named session (the API cannot yet bind a sender to its caller); nothing was sent",
+		&huma.ErrorDetail{Location: "body.from", Message: "not a configured mail identity", Value: from})
 }
 
 // apiMailQuery is the mailbox a mail list or count query reads: the recipient

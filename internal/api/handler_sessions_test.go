@@ -195,10 +195,11 @@ func requestIDMatches(got, want string) bool {
 	return got == want
 }
 
-// waitForRequestFailed polls for a request.failed event with the given request_id.
-func waitForRequestFailed(t *testing.T, prov events.Provider, requestID string, timeout time.Duration) *RequestFailedPayload {
+// waitForRequestFailed polls for a request.failed event with the given
+// request_id, for up to testEventTimeout.
+func waitForRequestFailed(t *testing.T, prov events.Provider, requestID string) *RequestFailedPayload {
 	t.Helper()
-	deadline := time.Now().Add(timeout)
+	deadline := time.Now().Add(testEventTimeout)
 	for time.Now().Before(deadline) {
 		failedEvents, _ := prov.List(events.Filter{Type: events.RequestFailed})
 		for _, e := range failedEvents {
@@ -715,16 +716,67 @@ func (r *syncResponseRecorder) BodyString() string {
 
 func waitForRecorderSubstring(t *testing.T, rec *syncResponseRecorder, want string, timeout time.Duration) string {
 	t.Helper()
+	return waitForRecorderBody(rec, timeout, func(body string) bool {
+		return strings.Contains(body, want)
+	})
+}
 
+// waitForRecorderBody polls rec until done reports true for its body or
+// timeout elapses, and returns the last body it read.
+func waitForRecorderBody(rec *syncResponseRecorder, timeout time.Duration, done func(body string) bool) string {
 	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		body := rec.BodyString()
-		if strings.Contains(body, want) {
+		if done(body) {
 			return body
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	return rec.BodyString()
+}
+
+// sseFrameComplete reports whether body holds the whole SSE frame that
+// contains want. writeSSEFrame writes a frame's event line, "data: ",
+// payload, and blank-line terminator as separate writes, so a body that
+// merely contains want can end mid-frame. Compact JSON payloads hold no raw
+// newline, so the first blank line after want ends that frame.
+func sseFrameComplete(body, want string) bool {
+	i := strings.Index(body, want)
+	return i >= 0 && strings.Contains(body[i:], "\n\n")
+}
+
+// waitForRecorderFrame is waitForRecorderSubstring for a caller that decodes
+// the frame containing want: it waits until that frame is complete (see
+// sseFrameComplete).
+func waitForRecorderFrame(t *testing.T, rec *syncResponseRecorder, want string, timeout time.Duration) string {
+	t.Helper()
+	return waitForRecorderBody(rec, timeout, func(body string) bool {
+		return sseFrameComplete(body, want)
+	})
+}
+
+func TestSSEFrameComplete(t *testing.T) {
+	const payload = `{"request_id":"req-1"}`
+	tests := []struct {
+		name string
+		body string
+		want string
+		ok   bool
+	}{
+		{name: "event line only", body: "event: pending\n", want: "event: pending\n"},
+		{name: "data prefix without payload", body: "event: pending\ndata: ", want: "event: pending\n"},
+		{name: "payload without blank line", body: "event: pending\ndata: " + payload + "\n", want: "event: pending\n"},
+		{name: "blank line only before want", body: ": keepalive\n\nevent: pending\ndata: " + payload + "\n", want: "event: pending\n"},
+		{name: "finished frame with a longer event name", body: "event: pending_cleared\ndata: " + payload + "\n\n", want: "event: pending\n"},
+		{name: "finished frame", body: "id: 7\nevent: pending\ndata: " + payload + "\n\n", want: "event: pending\n", ok: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := sseFrameComplete(tt.body, tt.want); got != tt.ok {
+				t.Fatalf("sseFrameComplete(%q, %q) = %v, want %v", tt.body, tt.want, got, tt.ok)
+			}
+		})
+	}
 }
 
 func TestHandleSessionList(t *testing.T) {
@@ -3044,7 +3096,7 @@ func TestHandleSessionCreateAsync_PoolTemplateCanonicalizesAliasCollisions(t *te
 	}
 	accepted2 := decodeAsyncAccepted(t, rec.Body)
 	// The second create should fail asynchronously due to alias collision.
-	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID, 5*time.Second)
+	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID)
 	if failure2 == nil {
 		t.Fatal("expected second create to fail due to alias collision")
 	}
@@ -3648,6 +3700,9 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 	if failure.ErrorCode != "message_delivery_failed" {
 		t.Fatalf("failure error_code = %q, want message_delivery_failed; message=%s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	if failure.SessionID != "" {
+		t.Fatalf("failure session_id = %q, want empty: the rollback removed the session", failure.SessionID)
+	}
 	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider)
 	sessions, err := mgr.List("", "")
 	if err != nil {
@@ -3819,7 +3874,7 @@ func TestHandleSessionCreateRejectsDuplicateAlias(t *testing.T) {
 	if err := json.NewDecoder(secondW.Body).Decode(&accepted2); err != nil {
 		t.Fatalf("decode second 202: %v", err)
 	}
-	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID, 5*time.Second)
+	failure2 := waitForRequestFailed(t, fs.eventProv, accepted2.RequestID)
 	if failure2 == nil {
 		t.Fatal("expected second create to fail due to duplicate alias")
 	}
@@ -3899,41 +3954,168 @@ func newSessionFakeStateWithOptions(t *testing.T) *fakeState {
 	return fs
 }
 
-func TestHandleSessionCreateDoesNotApplyProviderDefaultsToAgentCommand(t *testing.T) {
-	fs := newSessionFakeStateWithOptions(t)
-	srv := New(fs)
-	h := newTestCityHandlerWith(t, fs, srv)
-	_ = h
+// sessionOptionsTemplateBaseline is the command the controller composes for
+// the newSessionFakeStateWithOptions agent: the provider command plus its
+// option defaults in schema order. Deferred agent creates must persist exactly
+// this, or the async-start drift check rolls the pending create back.
+const sessionOptionsTemplateBaseline = "echo --skip-permissions --effort max"
 
-	body := `{"kind":"agent","name":"myrig/worker"}`
-	req := newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(body))
+// createAgentSessionViaCityRoute creates myrig/worker through the city-scoped
+// session route and returns the created session ID.
+func createAgentSessionViaCityRoute(t *testing.T, fs *fakeState) string {
+	t.Helper()
+	h := newTestCityHandlerWith(t, fs, New(fs))
 	w := httptest.NewRecorder()
-	h.ServeHTTP(w, req)
-
+	h.ServeHTTP(w, newPostRequest(cityURL(fs, "/sessions"), strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`)))
 	if w.Code != http.StatusAccepted {
-		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
-
 	accepted := decodeAsyncAccepted(t, w.Body)
 	success, failure := waitForSessionCreateResult(t, fs.eventProv, accepted.RequestID)
 	if success == nil {
 		t.Fatalf("session create failed: %s: %s", failure.ErrorCode, failure.ErrorMessage)
 	}
+	return success.Session.ID
+}
 
-	b, err := fs.cityBeadStore.Get(success.Session.ID)
+// createAgentSessionViaLegacyRoute creates myrig/worker through the
+// compatibility POST /v0/sessions route and returns the created session ID.
+func createAgentSessionViaLegacyRoute(t *testing.T, fs *fakeState) string {
+	t.Helper()
+	w := httptest.NewRecorder()
+	New(fs).ServeHTTP(w, newPostRequest("/v0/sessions", strings.NewReader(`{"kind":"agent","name":"myrig/worker"}`)))
+	if w.Code != http.StatusAccepted {
+		t.Fatalf("create status = %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
+	}
+	var resp sessionResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode create response: %v", err)
+	}
+	return resp.ID
+}
+
+// agentSessionCreateRoutes are the API routes that create an agent session and
+// persist its command baseline.
+var agentSessionCreateRoutes = []struct {
+	name   string
+	create func(*testing.T, *fakeState) string
+}{
+	{name: "city route", create: createAgentSessionViaCityRoute},
+	{name: "legacy route", create: createAgentSessionViaLegacyRoute},
+}
+
+func storedSessionCommand(t *testing.T, fs *fakeState, id string) string {
+	t.Helper()
+	b, err := fs.cityBeadStore.Get(id)
 	if err != nil {
 		t.Fatalf("get bead: %v", err)
 	}
-	cmd := b.Metadata["command"]
-	if strings.Contains(cmd, "--skip-permissions") {
-		t.Errorf("command %q should not contain provider default flags for deferred agent create", cmd)
-	}
-	if strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should not contain provider default effort=max for deferred agent create", cmd)
+	return b.Metadata["command"]
+}
+
+func TestHandleSessionCreatePersistsProviderDefaultsAsCommandBaseline(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+
+	cmd := storedSessionCommand(t, fs, createAgentSessionViaCityRoute(t, fs))
+	if cmd != sessionOptionsTemplateBaseline {
+		t.Errorf("command = %q, want the controller template baseline %q", cmd, sessionOptionsTemplateBaseline)
 	}
 }
 
-func TestHandleSessionCreateStoresExplicitOverridesWithoutCommandRewrite(t *testing.T) {
+func TestLegacyHandleSessionCreatePersistsProviderDefaultsAsCommandBaseline(t *testing.T) {
+	fs := newSessionFakeStateWithOptions(t)
+
+	cmd := storedSessionCommand(t, fs, createAgentSessionViaLegacyRoute(t, fs))
+	if cmd != sessionOptionsTemplateBaseline {
+		t.Errorf("command = %q, want the controller template baseline %q", cmd, sessionOptionsTemplateBaseline)
+	}
+}
+
+// TestAgentSessionCreateBaselineOmitsUnhonoredOptionDefaults covers agent
+// option_defaults pins that cannot render as flags. Config loading accepts
+// them and the controller launches without the flag after a warning, so both
+// create routes must accept the session and persist that same command rather
+// than fail with a 500.
+func TestAgentSessionCreateBaselineOmitsUnhonoredOptionDefaults(t *testing.T) {
+	cases := []struct {
+		name        string
+		pins        map[string]string
+		wantCommand string
+		wantWarning string
+	}{
+		{
+			name:        "unknown option",
+			pins:        map[string]string{"bogus": "x"},
+			wantCommand: sessionOptionsTemplateBaseline,
+			wantWarning: `WARNING: agent "myrig/worker": option_defaults bogus="x" is not in the "test-agent" provider schema; flag omitted`,
+		},
+		{
+			name:        "invalid closed value",
+			pins:        map[string]string{"effort": "ultra"},
+			wantCommand: "echo --skip-permissions",
+			wantWarning: `WARNING: agent "myrig/worker": option_defaults effort="ultra" is not a valid choice for provider "test-agent" (valid: low, max, high); flag omitted`,
+		},
+		{
+			name:        "empty value",
+			pins:        map[string]string{"permission_mode": ""},
+			wantCommand: "echo --effort max",
+		},
+	}
+	for _, route := range agentSessionCreateRoutes {
+		for _, tc := range cases {
+			t.Run(route.name+"/"+tc.name, func(t *testing.T) {
+				fs := newSessionFakeStateWithOptions(t)
+				fs.cfg.Agents[0].OptionDefaults = tc.pins
+				var logs bytes.Buffer
+				restoreLog := captureLog(t, &logs)
+				defer restoreLog()
+
+				cmd := storedSessionCommand(t, fs, route.create(t, fs))
+				if cmd != tc.wantCommand {
+					t.Errorf("command = %q, want the controller template baseline %q", cmd, tc.wantCommand)
+				}
+				switch {
+				case tc.wantWarning != "" && !strings.Contains(logs.String(), tc.wantWarning):
+					t.Errorf("log = %q, want warning %q", logs.String(), tc.wantWarning)
+				case tc.wantWarning == "" && strings.Contains(logs.String(), "option_defaults"):
+					t.Errorf("log = %q, want no option_defaults warning for an unset pin", logs.String())
+				}
+			})
+		}
+	}
+}
+
+// TestAgentSessionCreateBaselineAddsKimiHookConfigForProviderAlias covers an
+// agent on a Kimi provider alias whose install_agent_hooks names that alias.
+// Only the city provider catalog maps the alias to the Kimi family, so both
+// create routes must compose with the agent's hooks and cfg.Providers to
+// persist the controller's command: the base command, the Kimi hook config
+// file, then the schema defaults.
+func TestAgentSessionCreateBaselineAddsKimiHookConfigForProviderAlias(t *testing.T) {
+	const want = "echo --yolo --no-thinking --config-file .kimi/config.toml --model kimi-k2.6"
+	for _, route := range agentSessionCreateRoutes {
+		t.Run(route.name, func(t *testing.T) {
+			fs := newFakeState(t)
+			fs.cityBeadStore = beads.NewMemStore()
+			kimiBase := "builtin:kimi"
+			fs.cfg.Providers = map[string]config.ProviderSpec{
+				"fast-kimi": {Base: &kimiBase, Command: "echo"},
+			}
+			agent := &fs.cfg.Agents[0]
+			agent.Provider = "fast-kimi"
+			agent.Session = config.SessionTransportTmux
+			agent.InstallAgentHooks = []string{"fast-kimi"}
+			agent.OptionDefaults = map[string]string{"model": "kimi-k2.6"}
+
+			cmd := storedSessionCommand(t, fs, route.create(t, fs))
+			if cmd != want {
+				t.Errorf("command = %q, want the controller template baseline %q", cmd, want)
+			}
+		})
+	}
+}
+
+func TestHandleSessionCreateKeepsTemplateBaselineUnderExplicitOverrides(t *testing.T) {
 	fs := newSessionFakeStateWithOptions(t)
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
@@ -3959,8 +4141,11 @@ func TestHandleSessionCreateStoresExplicitOverridesWithoutCommandRewrite(t *test
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort high") || strings.Contains(cmd, "--effort max") {
-		t.Errorf("command %q should not be rewritten from provider defaults or explicit overrides", cmd)
+	if cmd != sessionOptionsTemplateBaseline {
+		t.Errorf("command = %q, want the template baseline %q with its defaults", cmd, sessionOptionsTemplateBaseline)
+	}
+	if strings.Contains(cmd, "--effort high") {
+		t.Errorf("command %q leaked the explicit effort override into the baseline; overrides belong in template_overrides", cmd)
 	}
 	ovr := b.Metadata["template_overrides"]
 	if ovr == "" {
@@ -4004,8 +4189,8 @@ func TestHandleSessionCreatePersistsExplicitOptionsInTemplateOverrides(t *testin
 		t.Fatalf("get bead: %v", err)
 	}
 	cmd := b.Metadata["command"]
-	if strings.Contains(cmd, "--permission-mode plan") || strings.Contains(cmd, "--skip-permissions") || strings.Contains(cmd, "--effort low") {
-		t.Errorf("command %q should not be rewritten from explicit overrides", cmd)
+	if cmd != sessionOptionsTemplateBaseline {
+		t.Errorf("command = %q, want the template baseline %q; explicit overrides must not rewrite it", cmd, sessionOptionsTemplateBaseline)
 	}
 	ovr := b.Metadata["template_overrides"]
 	if ovr == "" {
@@ -6782,6 +6967,14 @@ func TestHandleSessionStreamClosedSessionReturnsSnapshot(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), "event: turn") || !strings.Contains(rec.Body.String(), "hello") || !strings.Contains(rec.Body.String(), "world") {
 		t.Errorf("stream body missing closed-session snapshot: %s", rec.Body.String())
 	}
+	var snapshot SessionStreamMessageEvent
+	frame := firstSSETestFrame(t, rec.Body.String(), "turn")
+	if err := json.Unmarshal([]byte(frame.Data), &snapshot); err != nil {
+		t.Fatalf("decode turn frame: %v; data=%s", err, frame.Data)
+	}
+	if len(snapshot.Turns) != 2 || snapshot.Turns[0].ID != "1" || snapshot.Turns[1].ID != "2" {
+		t.Errorf("snapshot turns = %+v, want the transcript entry ids 1 and 2", snapshot.Turns)
+	}
 	for _, event := range fs.eventProv.(*events.Fake).Events {
 		if event.Type == events.WorkerOperation {
 			t.Fatalf("closed session stream emitted worker operation event: %#v", event)
@@ -7540,18 +7733,20 @@ func TestSessionStreamStructuredHistoryStallEmitsPending(t *testing.T) {
 			if closeErr != nil {
 				t.Fatalf("close resolved transcript entry: %v", closeErr)
 			}
-			body := waitForRecorderSubstring(t, rec, "event: pending_cleared", time.Second)
+			body := waitForRecorderFrame(t, rec, "event: pending_cleared\n", time.Second)
 			cancel()
 			<-done
 
-			if !strings.Contains(body, "event: pending") {
+			if !strings.Contains(body, "event: pending\n") {
 				t.Fatalf("structured history stream missing pending SSE event: %s", body)
 			}
-			if !strings.Contains(body, "event: pending_cleared") {
-				t.Fatalf("structured history stream missing pending-cleared SSE event: %s", body)
+			clearedFrame := firstSSETestFrame(t, body, "pending_cleared")
+			var cleared SessionPendingClearedEvent
+			if err := json.Unmarshal([]byte(clearedFrame.Data), &cleared); err != nil {
+				t.Fatalf("decode pending-cleared SSE event: %v; data=%s", err, clearedFrame.Data)
 			}
-			if !strings.Contains(body, `"request_id":"req-structured-1"`) {
-				t.Fatalf("structured history stream pending-cleared event missing request ID: %s", body)
+			if cleared.RequestID != "req-structured-1" {
+				t.Fatalf("structured history stream pending-cleared request ID = %q, want %q: %s", cleared.RequestID, "req-structured-1", body)
 			}
 		})
 	}

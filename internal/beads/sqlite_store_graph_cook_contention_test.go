@@ -394,6 +394,20 @@ func TestSQLiteListMetadataQueriesDriveOffMetadataIndex(t *testing.T) {
 		"assignee":         {Metadata: source, Assignee: "worker"},
 		"list by metadata": {Metadata: source, Limit: 10, Sort: SortCreatedDesc},
 		"two keys":         {Metadata: map[string]string{"gc.source_bead_id": "mc-5495l", "gc.kind": "workflow"}},
+		// A label-filtered family read keyed by metadata — the shape a
+		// target-scoped durable queue read takes. The label stays a
+		// correlated residual probe; the metadata key must still drive.
+		"label, type, both tiers": {
+			Label: "gc:family", Type: "chore", Metadata: source,
+			TierMode: TierBoth, Sort: SortCreatedAsc,
+		},
+		// A bounded, oldest-first retention sweep over a family's retired
+		// records.
+		"label, closed, updated before, limit": {
+			Label: "gc:family", Metadata: source, Status: "closed",
+			UpdatedBefore: time.Unix(1_700_000_000, 0), Limit: 256,
+			TierMode: TierBoth, Sort: SortCreatedAsc, Live: true,
+		},
 	}
 	for name, q := range cases {
 		t.Run(name, func(t *testing.T) {

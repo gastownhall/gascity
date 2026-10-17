@@ -162,6 +162,36 @@ trace_bd_argv() {
         >>"$GC_BD_TRACE" 2>/dev/null || true
 }
 
+# require_executable_gc_bin fails closed when GC_BIN names a gc that can no
+# longer be executed. GC_BIN is the executable of the gc process that spawned
+# this script, usually the long-running supervisor. When that binary is removed
+# from disk (package upgrade, `brew unlink`), the supervisor keeps running the
+# old build and keeps exporting the dead path. A set GC_BIN is authoritative
+# for every gc helper call, so the script stops here, before any side effect,
+# instead of failing partway through an operation on its first helper call.
+# The restart command depends on how the supervisor is deployed, so the
+# message defers to 'gc doctor', which names the right one.
+#
+# Teardown ($1 is stop or shutdown) warns instead, clears GC_BIN, and runs on
+# the shell-native fallbacks an unset GC_BIN selects: refusing would leave the
+# Dolt server running when a stale supervisor stops the city.
+require_executable_gc_bin() {
+    local stale
+    [ -n "${GC_BIN:-}" ] || return 0
+    if [ -f "$GC_BIN" ] && [ -x "$GC_BIN" ]; then
+        return 0
+    fi
+    stale="gc-beads-bd: GC_BIN=$GC_BIN is not an executable file. The gc process that launched this helper (usually the supervisor) was started from a gc binary that has since been removed or replaced, so it is still running an old build. Restart the supervisor from the current gc binary; 'gc doctor' (check supervisor-binary) names the restart command for this deployment."
+    case "${1:-}" in
+        stop|shutdown)
+            printf '%s Stopping without it.\n' "$stale" >&2
+            GC_BIN=
+            return 0
+            ;;
+    esac
+    die "$stale"
+}
+
 resolve_gc_helper_bin() {
     if [ -n "${GC_BIN:-}" ]; then
         printf '%s\n' "$GC_BIN"
@@ -796,7 +826,7 @@ ensure_bd_runtime_issue_prefix() {
 # beads (#1039). Must match doctor.RequiredCustomTypes.
 # GC_BEADS_CUSTOM_TYPES overrides the default SDK set.
 gc_custom_types() {
-    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode}"
+    printf '%s\n' "${GC_BEADS_CUSTOM_TYPES:-molecule,convoy,message,event,gate,merge-request,agent,role,rig,session,spec,convergence,step,startup-health-episode,op}"
 }
 
 valid_custom_types_value() {
@@ -1943,27 +1973,14 @@ wait_deleted_data_inodes() {
     return 1
 }
 
-# kill_imposter kills a process that isn't our dolt server.
-kill_imposter() {
-    local pid="$1"
-    [ -n "$pid" ] || return 0
-
-    echo "killing imposter dolt server (PID $pid) on port $DOLT_PORT" >&2
-    kill "$pid" 2>/dev/null || return 0
-
-    # Wait up to 5s for graceful shutdown.
-    local waited=0
-    while [ "$waited" -lt 5 ]; do
-        if ! kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-        sleep 1
-        waited=$((waited + 1))
-    done
-
-    # Force kill.
-    kill -9 "$pid" 2>/dev/null || true
-    sleep 1
+# leave_foreign_port_holder_alone handles a listener on DOLT_PORT that is not
+# this scope's dolt server. It never signals the holder: it says so on stderr
+# and moves DOLT_PORT to the next free port, so the server starts beside it.
+# Only a server verify_our_server recognizes as ours is ever stopped here.
+leave_foreign_port_holder_alone() {
+    local holder="$1"
+    echo "gc-beads-bd: port $DOLT_PORT is held by pid $holder, which is not this scope's dolt server; leaving it alone and starting on another port." >&2
+    DOLT_PORT=$(next_available_port $((DOLT_PORT + 1)))
 }
 
 # dolt_data_lock_holder prints the path of the first dolt exclusive store
@@ -3113,8 +3130,7 @@ op_start() {
                     die "could not stop dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
             else
                 if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
-                    sleep 1
+                    leave_foreign_port_holder_alone "$holder"
                 fi
             fi
         fi
@@ -3141,11 +3157,14 @@ op_start() {
                 echo "$holder" > "$PID_FILE"
                 save_state "$holder" true
                 exit 0
-            else
-                # Imposter or stale local server on our port — kill it.
-                if [ -z "$gc_helper_bin" ]; then
-                    kill_imposter "$holder"
-                    sleep 1
+            elif [ -z "$gc_helper_bin" ]; then
+                if [ "$holder_owned" = true ]; then
+                    # Our server, still running on deleted data inodes — restart it.
+                    graceful_stop_owned_pid "$holder" || \
+                        die "could not stop stale dolt server (PID $holder) holding port $DOLT_PORT without risking journal corruption (check $LOG_FILE)"
+                else
+                    # Someone else's listener on our port — never signal it.
+                    leave_foreign_port_holder_alone "$holder"
                 fi
             fi
         fi
@@ -3251,7 +3270,7 @@ op_start() {
         if [ -f "$LOG_FILE" ]; then
             startup_output=$(tail -c +$((log_offset + 1)) "$LOG_FILE" 2>/dev/null || true)
         fi
-        if printf '%s' "$startup_output" | grep -qi 'address already in use'; then
+        if printf '%s' "$startup_output" | grep -qiE 'address already in use|port [0-9]+ already in use'; then
             launch_attempt=$((launch_attempt + 1))
             DOLT_PORT=$(next_available_port $((DOLT_PORT + 1)))
             continue
@@ -4954,6 +4973,7 @@ fi
 # historical GC-managed Dolt lifecycle below. The adapter supplies this marker
 # for every operation; init additionally carries the ephemeral selector.
 if [ "${GC_BEADS_PROVIDER_OWNED:-}" = "1" ]; then
+    require_executable_gc_bin "$op"
     case "$op" in
         init) op_provider_owned_init "$@" ;;
         start|ensure-ready|health|probe|recover|stop|shutdown) op_provider_owned_lifecycle "$op" ;;
@@ -4972,6 +4992,7 @@ if scope_is_proxied "$GC_CITY_PATH"; then
             exit 2
             ;;
     esac
+    require_executable_gc_bin "$op"
     # Proxied store bridge operations are handled by bd through the GC bridge;
     # no managed listener exists from which to derive a port.
     DOLT_PORT=0
@@ -4982,6 +5003,11 @@ if scope_is_proxied "$GC_CITY_PATH"; then
             op_store_bridge "$op" "$@"; exit $? ;;
     esac
 fi
+
+# Refuse a stale GC_BIN before any helper call can fall back to legacy
+# behavior or touch city state. Every branch above that can reach a helper
+# call or city state runs the same check first.
+require_executable_gc_bin "$op"
 
 # Prefer GC-owned runtime layout derivation when the current gc binary is
 # available. Fall back to the legacy shell derivation for compatibility.

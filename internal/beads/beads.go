@@ -62,6 +62,18 @@ var ErrStoreClosed = errors.New("bead store closed")
 // BUSY. The error's message stays the driver's.
 var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 
+// ErrStoreUnavailable marks a bead-store read whose answer is unknown because
+// the store could not be reached, as distinct from a store that answered with
+// no rows. Consumers must treat it as "unknown", never as "empty". Its producer
+// today is gc hook's work-query classification, which wraps a failure that got
+// no answer from the store (a connection error, a timeout, bd's breaker failing
+// fast) and renders it as exit 2 instead of the exit-1 no-work answer, with or
+// without --claim. Check with errors.Is. The control dispatcher's
+// ClassifyControllerError (internal/dispatch) does not check it yet; the first
+// producer whose error can reach the dispatcher adds it there as
+// TierAvailability.
+var ErrStoreUnavailable = errors.New("bead store unavailable")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")
@@ -738,6 +750,7 @@ var readyExcludeTypes = map[string]bool{
 	"role":                   true, // agent role definitions
 	"rig":                    true, // rig identity beads
 	"startup-health-episode": true, // per-session-name bookkeeping record, never actionable Ready work (ga-o04bfr.1.1)
+	"op":                     true, // conversation operation journal op, fact and runtime rows; lanes execute them, never Ready (internal/opjournal)
 }
 
 var readyBlockingDependencyTypes = map[string]bool{
@@ -833,15 +846,16 @@ func IsReadyExcludedBead(b Bead) bool {
 }
 
 // HasReadyExcludedLabel reports whether a bead carries a label that marks it
-// as infrastructure bookkeeping (session continuity, order tracking) rather
-// than actionable Ready work. Distinct from IsReadyExcludedType: a bead may be
-// label-excluded regardless of its type. Callers that have already constrained
-// the bead's type (e.g. iterating known-convoy beads) use this to test only
-// the label dimension.
+// as infrastructure bookkeeping (session continuity, order tracking,
+// conversation operation journal rows) rather than actionable Ready work.
+// Distinct from IsReadyExcludedType: a bead may be label-excluded regardless
+// of its type. Callers that have already constrained the bead's type (e.g.
+// iterating known-convoy beads) use this to test only the label dimension.
 func HasReadyExcludedLabel(b Bead) bool {
 	for _, label := range b.Labels {
 		switch label {
-		case "gc:session", "gc:order-tracking", "order-tracking":
+		case "gc:session", "gc:order-tracking", "order-tracking",
+			"gc:op", "gc:fact", "gc:rt": // op, fact and runtime rows; canonical: internal/opjournal
 			return true
 		}
 	}
@@ -1170,6 +1184,11 @@ type StorageGraphApplyStore interface {
 type ParentProjectionWaiter interface {
 	// WaitForParentProjection blocks until the store's parent-child listing
 	// view reflects a reparent from oldParentID to newParentID for id, or
-	// returns an error if the projection does not converge.
+	// returns an error if the projection does not converge. The error wraps
+	// ErrParentProjectionSuperseded when another writer moved id to a
+	// different parent, and ErrNotFound when id was deleted. When the wait
+	// stops because ctx ended, the error's chain holds ctx.Err() and no other
+	// context error, so errors.Is reports why the wait stopped even if a
+	// backend read failed earlier with its own timeout.
 	WaitForParentProjection(ctx context.Context, id, oldParentID, newParentID string) error
 }

@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
@@ -65,10 +66,7 @@ listed.`,
   gc doctor --check controller,events-log --json`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if doDoctor(opts, stdout, stderr) != 0 {
-				return errExit
-			}
-			return nil
+			return exitForCode(doDoctor(opts, stdout, stderr))
 		},
 	}
 	cmd.Flags().BoolVar(&opts.Fix, "fix", false, "attempt automatic repairs and safe mechanical migrations")
@@ -183,6 +181,7 @@ type buildDoctorChecksOpts struct {
 	SupervisorRunning       bool
 	SupervisorPID           int
 	SupervisorUnitOwnership doctor.SupervisorUnitOwnership
+	SupervisorBinary        doctor.SupervisorBinary
 	SkipCityDoltCheck       bool
 	SkipManagedDoltCheck    bool
 	SkipRigDoltChecks       bool
@@ -372,7 +371,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	register(doctor.NewControllerCheck(cityPath, controllerRunning))
 	register(doctor.NewSupervisorHTTPCheck(opts.SupervisorRunning))
 	register(doctor.NewSupervisorUnitOwnershipCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorUnitOwnership))
+	register(doctor.NewSupervisorBinaryCheck(opts.SupervisorRunning, opts.SupervisorPID, opts.SupervisorBinary))
 
+	// sessionSP is the session provider the session checks read, and the
+	// ownerless-runtimes check after them; sessionSPErr is why there is none.
+	var sessionSP runtime.Provider
+	sessionSPErr := errors.New("the session provider was not built")
 	if cfgErr == nil && cfg != nil {
 		cityName := loadedCityName(cfg, cityPath)
 		st := cfg.Workspace.SessionTemplate
@@ -386,10 +390,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			sp, err := newSessionProvider()
 			if err != nil {
 				register(doctor.ErrorCheck("session-provider", err.Error()))
+				sessionSPErr = err
 			} else {
 				register(doctor.NewAgentSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewZombieSessionsCheck(cfg, cityName, st, sp))
 				register(doctor.NewOrphanSessionsCheck(cfg, cityName, st, sp))
+				sessionSP = sp
 			}
 		}
 	}
@@ -464,6 +470,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 			registerCityStoreCheck(newOrderTrackingRetentionCheck(cityPath, storeFactory))
 			registerCityStoreCheck(&sessionModelDoctorCheck{cfg: cfg, cityPath: cityPath, newStore: storeFactory})
 			registerCityStoreCheck(newStartupHealthEpisodesCheck(cfg, cityPath, storeFactory))
+			registerCityStoreCheck(newOwnerlessRuntimesCheck(cfg, cityPath, storeFactory, sessionSP, sessionSPErr))
 			// Differential probe: the preflight above just proved the store
 			// reachable with the controller's environment, so a read that
 			// fails under the gate sandbox isolates the sandbox (ga-pqlgh).
@@ -489,6 +496,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// managed bd scope. The version check follows the same gate so file-backed
 	// and external Dolt workspaces do not get irrelevant local-binary warnings.
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewDoltCompactStateCheck(cityPath, opts.SkipManagedDoltCheck))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at
 	// every start and nothing rotates or truncates it, so it accumulates for
@@ -623,6 +631,19 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	return checks
 }
 
+// gatherSupervisorUnitOwnership relates the live supervisor PID to gc's own
+// systemd user unit for the supervisor-unit-ownership doctor check.
+func gatherSupervisorUnitOwnership(pid int) doctor.SupervisorUnitOwnership {
+	raw := supervisorDetermineUnitOwnership(pid)
+	return doctor.SupervisorUnitOwnership{
+		Status:     raw.Status,
+		Unit:       raw.Unit,
+		UnitActive: raw.UnitActive,
+		UnitPID:    raw.UnitPID,
+		ProbeErr:   raw.ProbeErr,
+	}
+}
+
 // doDoctor runs the health checks and prints results. With opts.Checks set it
 // runs only those checks and derives the exit code from them alone.
 func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
@@ -650,14 +671,10 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	supervisorPID := supervisorAliveHook()
 	supervisorRunning := supervisorPID != 0
 	var supervisorUnitOwnership doctor.SupervisorUnitOwnership
+	var supervisorBinary doctor.SupervisorBinary
 	if supervisorPID != 0 {
-		raw := supervisorDetermineUnitOwnership(supervisorPID)
-		supervisorUnitOwnership = doctor.SupervisorUnitOwnership{
-			Status:     raw.Status,
-			Unit:       raw.Unit,
-			UnitActive: raw.UnitActive,
-			UnitPID:    raw.UnitPID,
-		}
+		supervisorBinary = gatherSupervisorBinary(supervisorPID)
+		supervisorUnitOwnership = gatherSupervisorUnitOwnership(supervisorPID)
 	}
 	skipRigDoltChecks := gcDoltSkip()
 	skipCityDoltCheck := skipRigDoltChecks || (!scopeUsesManagedBdStoreContract(cityPath, cityPath) && !workspaceNeedsCityDoltCheck(cityPath, cfg))
@@ -678,6 +695,7 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 		SupervisorRunning:       supervisorRunning,
 		SupervisorPID:           supervisorPID,
 		SupervisorUnitOwnership: supervisorUnitOwnership,
+		SupervisorBinary:        supervisorBinary,
 		SkipCityDoltCheck:       skipCityDoltCheck,
 		SkipManagedDoltCheck:    skipManagedDoltCheck,
 		SkipRigDoltChecks:       skipRigDoltChecks,
@@ -706,10 +724,15 @@ func doDoctor(opts doctorOpts, stdout, stderr io.Writer) int {
 	}
 
 	if report.BlockingFailed > 0 {
-		return 1
+		return doctorBlockingFailureExitCode
 	}
 	return 0
 }
+
+// doctorBlockingFailureExitCode is the exit code gc doctor returns when any
+// blocking check fails. The --json failure record carries it as
+// error.exit_code, so the record and the process agree.
+const doctorBlockingFailureExitCode = 1
 
 // maxDoctorCheckSuggestions bounds the "did you mean" list so one typo cannot
 // print most of the registry inline. The full list still follows in text mode.
@@ -1067,7 +1090,7 @@ func writeDoctorJSON(w io.Writer, report *doctor.Report) error {
 				Error: jsonSchemaErrorDetail{
 					Code:     doctorBlockingFailedErrorCode,
 					Message:  fmt.Sprintf("%d blocking check(s) failed", report.BlockingFailed),
-					ExitCode: 1,
+					ExitCode: doctorBlockingFailureExitCode,
 				},
 			},
 			doctorJSONReport: out,

@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"maps"
 	"strings"
 	"time"
 
@@ -72,6 +73,15 @@ const LabelSession = "gc:session"
 // the wall-clock time of the most recent successful nudge delivery.
 const MetadataLastNudgeDeliveredAt = "last_nudge_delivered_at"
 
+// MetadataRuntimeThreadID and MetadataRuntimeProjectID record, for a runtime
+// that hosts the session in a thread of its own ([runtime.SessionBinding]),
+// the thread and the project that scopes it, as of the last confirmed start
+// whose binding read succeeded. Empty values mean no thread was bound.
+const (
+	MetadataRuntimeThreadID  = "runtime_thread_id"
+	MetadataRuntimeProjectID = "runtime_project_id"
+)
+
 // Info holds the user-facing details of a chat session.
 type Info struct {
 	ID string
@@ -106,9 +116,10 @@ type Info struct {
 	LastNudgeDeliveredAt time.Time
 	Attached             bool
 	// ContinuationEpoch is the persisted continuation_epoch marker, used by the
-	// wait registration/retry paths to stamp registered_epoch on wait beads.
-	// Additive, internal-only: it is NOT emitted on the HTTP session-response
-	// wire (the response builder maps a fixed field set).
+	// wait registration/retry paths to stamp registered_epoch on wait beads and
+	// to scope LogicalConversationID. Additive, internal-only: it is NOT emitted
+	// on the HTTP session-response wire (the response builder maps a fixed field
+	// set).
 	ContinuationEpoch string
 	// SleepReason is the persisted sleep_reason marker, read by the wait-hold
 	// clear path to decide whether to clear sleep_reason. Additive,
@@ -479,6 +490,12 @@ type Info struct {
 	// the raw string (!= "" && != "0"), which the int form cannot reproduce (it collapses
 	// missing/"0"/malformed all to 0); the mirror preserves that distinction for Step 6b.
 	WakeAttemptsMetadata string // wake_attempts (raw)
+	// ResumeFailures is the RAW resume_failures metadata: the resume-shaped
+	// wake failures in a row of the current conversation (mc-bm1af).
+	ResumeFailures string // resume_failures (raw)
+	// ResumeLaunch is the RAW resume_launch metadata: "true" when the
+	// incarnation that last committed was launched as a resume.
+	ResumeLaunch string // resume_launch (raw)
 	// WakeRefusedEventAt is the RAW wake_refused_event_at metadata — the
 	// idempotency marker emitSessionWakeRefused checks (trimmed != "") before
 	// firing session.wake_refused, so repeated reconciler ticks on the same
@@ -605,7 +622,8 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
-	leaseTTL                time.Duration // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -1049,7 +1067,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
 			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
-				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
 					return metaErr
 				}
 				info = m.infoFromBead(b)
@@ -1066,7 +1084,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
-		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, &b); metaErr != nil {
+		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
 				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
 			}
@@ -1085,8 +1103,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	return info, nil
 }
 
-func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error {
+func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
+	maps.Copy(metadata, m.startedRuntimeBindingPatch(sessName))
 	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
 		return fmt.Errorf("storing started runtime metadata: %w", err)
 	}
@@ -1099,6 +1118,19 @@ func (m *Manager) confirmStartedRuntimeMetadata(id string, b *beads.Bead) error 
 		}
 	}
 	return nil
+}
+
+// startedRuntimeBindingPatch is the patch recording the thread the runtime
+// hosts session sessName in (RuntimeBindingPatch), read once a start, or a
+// resume that converged on a runtime already up, has it live. The binding is
+// advisory: a read that fails is logged and records nothing, and the start or
+// resume it describes stands without it.
+func (m *Manager) startedRuntimeBindingPatch(sessName string) MetadataPatch {
+	patch, err := RuntimeBindingPatch(m.sp, sessName)
+	if err != nil {
+		log.Printf("session: %q started; not recording its runtime binding: %v", sessName, err)
+	}
+	return patch
 }
 
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
@@ -1642,9 +1674,12 @@ func retiredIdentifiersPatch(b beads.Bead) MetadataPatch {
 // Kill force-kills the runtime process for a session without changing bead
 // state. This is intended for manual intervention; the reconciler will detect
 // the dead process and restart it according to the session's lifecycle rules.
-// Like Close, it is a cleanup path: a session that is already gone is the
-// outcome Kill was asked for, so it reports success rather than surfacing the
-// provider's "nothing to stop" answer to the operator.
+// Like Close, it is a cleanup path: a runtime that is already gone when Kill
+// stops it is the outcome Kill was asked for, so it reports success rather
+// than surfacing the provider's "nothing to stop" answer to the operator. A
+// session whose state is not live and whose runtime is not running is
+// refused before the stop with ErrSessionInactive, wrapped; each caller
+// decides whether that already satisfies its request.
 //
 // It runs under the session's runtime lease: by.Lease, or one taken in by's
 // mode, an operator's waited for up to RuntimeLeaseOperatorWait.
@@ -1658,14 +1693,17 @@ func (m *Manager) Kill(ctx context.Context, by Actor, id string) error {
 	}
 	// Accept any state where a runtime process could plausibly exist.
 	// The reconciler uses "awake" as equivalent to "active", and metadata
-	// state can lag behind reality, so also check provider liveness.
+	// state can lag behind reality, so also check provider liveness, on a
+	// fresh read: a cached IsRunning (tmux's state cache) can read a runtime
+	// that just came up gone, and a kill-fenced row (asleep) would then be
+	// refused while its runtime runs.
 	state := State(b.Metadata["state"])
 	switch state {
 	case StateActive, StateStartPending, StateCreating, StateDraining, StateAwake:
 		// Known live states — proceed.
 	default:
-		if !m.sp.IsRunning(sessName) {
-			return fmt.Errorf("session %s is not active", id)
+		if m.runtimeConfirmedGone(ctx, sessName) {
+			return fmt.Errorf("session %s: %w", id, ErrSessionInactive)
 		}
 	}
 	release, err := m.leaseForStop(ctx, by, id, sessName, operatorLeaseWait)

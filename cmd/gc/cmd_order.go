@@ -2045,7 +2045,10 @@ const bdCursorRecentRunsLimit = 256
 
 func bdCursor(store beads.Store, orderName string) (uint64, error) {
 	beadList, err := store.List(beads.ListQuery{
-		Label:         "order:" + orderName,
+		// Keyed on the owned order-run:<name> label (coordclass.CoordinationOwned):
+		// only order dispatch writes it, so no plain bead can crowd the run
+		// records out of this bounded window (the #7766 review).
+		Label:         orders.RunLabel(orderName),
 		IncludeClosed: true,
 		Limit:         bdCursorRecentRunsLimit,
 		Sort:          beads.SortCreatedDesc,
@@ -2064,9 +2067,14 @@ func bdCursor(store beads.Store, orderName string) (uint64, error) {
 		}
 		orderLogf("gc order: event cursor lookup partially failed for %s: %v", orderName, err)
 	}
-	labelSets := make([][]string, len(beadList))
-	for i, b := range beadList {
-		labelSets[i] = b.Labels
+	// Only a run record's seq is the order's cursor (orders.IsRunRecord): a
+	// plain bead carrying the order:<name> and seq:<n> labels moves nothing
+	// (architecture B v2, the #7766 review).
+	labelSets := make([][]string, 0, len(beadList))
+	for _, b := range beadList {
+		if orders.IsRunRecord(b) {
+			labelSets = append(labelSets, b.Labels)
+		}
 	}
 	return orders.MaxSeqFromLabels(labelSets), nil
 }
@@ -2169,10 +2177,10 @@ func cmdOrderSweepNudgeMail(nudgeTTL, mailTTL, unreadMailTTL time.Duration, mail
 	defer closeBeadStoreHandle(store) //nolint:errcheck // best-effort
 
 	// Load nudge state to protect live nudge IDs from being swept. A missing
-	// state file is not an error (LoadState returns empty state), so any error
+	// state file is not an error (the snapshot is empty), so any error
 	// here is a real read/parse failure: fail closed rather than sweeping with
 	// no live-ID protection, which could close beads for in-flight nudges.
-	nudgeState, stateErr := nudgequeue.LoadState(cityPath)
+	nudgeState, stateErr := openNudgeQueue(cityPath, beads.NudgesStore{}).Queue.Snapshot()
 	if stateErr != nil {
 		fmt.Fprintf(stderr, "gc order sweep-nudge-mail: %v\n", stateErr) //nolint:errcheck // best-effort stderr
 		return 1

@@ -33,14 +33,17 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 	const rawIgnored = 26
 
 	cases := []struct {
-		name          string
-		absentTables  map[string]bool
-		absentColumns map[string]bool
-		ignored       int
-		wantLimited   bool
-		wantFloor     int
-		wantMissing   string
-		wantEffective int
+		name           string
+		absentTables   map[string]bool
+		absentColumns  map[string]bool
+		likeDecoys     map[string][]string
+		recasedColumns map[string]string
+		likeFoldsCase  bool
+		ignored        int
+		wantLimited    bool
+		wantFloor      int
+		wantMissing    string
+		wantEffective  int
 	}{
 		{
 			name:          "a corroborated cursor is believed as read",
@@ -120,6 +123,55 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			wantEffective: 11,
 		},
 		{
+			// The column's own table absent reads as the column absent, without
+			// a SHOW COLUMNS: that statement fails on an absent table, and a
+			// failing statement pins the session to its pre-statement catalog.
+			name:          "a missing sentinel column table floors the lane at the column's replay floor",
+			absentTables:  map[string]bool{"leases": true},
+			ignored:       rawIgnored,
+			wantLimited:   true,
+			wantFloor:     11,
+			wantMissing:   "leases.granted_node",
+			wantEffective: 11,
+		},
+		{
+			// SHOW COLUMNS ... LIKE 'granted_node' also lists a column the '_'
+			// wildcard matches; only the exact name corroborates the cursor.
+			name:          "a column the LIKE wildcard matches is not the sentinel column",
+			absentColumns: map[string]bool{"leases.granted_node": true},
+			likeDecoys:    map[string][]string{"leases.granted_node": {"grantedXnode"}},
+			ignored:       rawIgnored,
+			wantLimited:   true,
+			wantFloor:     11,
+			wantMissing:   "leases.granted_node",
+			wantEffective: 11,
+		},
+		{
+			// Dolt's LIKE does not list a column re-cased by hand, so it reads
+			// as absent: the case-sensitive match the library's own SHOW COLUMNS
+			// reads make (beads#7592).
+			name:           "a re-cased sentinel column is not the sentinel column",
+			recasedColumns: map[string]string{"leases.granted_node": "GRANTED_NODE"},
+			ignored:        rawIgnored,
+			wantLimited:    true,
+			wantFloor:      11,
+			wantMissing:    "leases.granted_node",
+			wantEffective:  11,
+		},
+		{
+			// The Field comparison decides, not the server's LIKE collation: a
+			// LIKE that folds case lists the re-cased column, which still
+			// reads as absent.
+			name:           "a re-cased sentinel column is absent even where LIKE folds case",
+			recasedColumns: map[string]string{"leases.granted_node": "GRANTED_NODE"},
+			likeFoldsCase:  true,
+			ignored:        rawIgnored,
+			wantLimited:    true,
+			wantFloor:      11,
+			wantMissing:    "leases.granted_node",
+			wantEffective:  11,
+		},
+		{
 			// A floor at or above the raw cursor clamps nothing.
 			name:          "a floored table's absence does not raise a lower cursor",
 			absentTables:  map[string]bool{"bd_events_seq": true},
@@ -145,9 +197,12 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := &fakeProbeConnector{
-				cursors:       map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: int64(tc.ignored)},
-				absentTables:  tc.absentTables,
-				absentColumns: tc.absentColumns,
+				cursors:        map[string]int64{mainCursorQuery: 66, ignoredCursorQuery: int64(tc.ignored)},
+				absentTables:   tc.absentTables,
+				absentColumns:  tc.absentColumns,
+				likeDecoys:     tc.likeDecoys,
+				recasedColumns: tc.recasedColumns,
+				likeFoldsCase:  tc.likeFoldsCase,
 			}
 			report, err := readCursorsOver(context.Background(), fake)
 			if err != nil {
@@ -185,11 +240,18 @@ func TestProbeSessionReadsTheIgnoredLanesCursorReality(t *testing.T) {
 			// The evidence, not just the conclusion.
 			probedColumn := false
 			for _, statement := range fake.statements() {
-				if strings.HasPrefix(statement, columnExistsQuery) {
+				if strings.HasPrefix(statement, sentinelColumnQuery) {
 					probedColumn = true
 				}
+				// information_schema.columns answers in one statement, but Dolt
+				// does not push its predicate down: it materializes every column
+				// of every table on the server, 360-410 ms on a shared server.
+				if strings.Contains(strings.ToLower(statement), "information_schema.columns") {
+					t.Fatalf("the session asked information_schema.columns: %q", statement)
+				}
 			}
-			wantColumnProbe := tc.ignored > 0 && !tc.absentTables["wisps"] && !tc.absentTables["wisp_dependencies"]
+			wantColumnProbe := tc.ignored > 0 && !tc.absentTables["wisps"] && !tc.absentTables["wisp_dependencies"] &&
+				!tc.absentTables[IgnoredSentinelColumnTable]
 			if probedColumn != wantColumnProbe {
 				t.Fatalf("the session probed the sentinel column = %v, want %v; statements: %v",
 					probedColumn, wantColumnProbe, fake.statements())
@@ -234,8 +296,9 @@ func TestProbeSessionReadsHeadOnItsFirstStatement(t *testing.T) {
 	}
 	// A healthy database at 66/26 with every sentinel present: two cursor
 	// existence checks, two MAX reads, two sentinel tables, three floored
-	// sentinel tables, one sentinel column. HEAD adds none of them.
-	if want := 4 + len(ignoredSentinelTables) + len(ignoredSentinelFlooredTables) + 1; len(statements) != want {
+	// sentinel tables, and the sentinel column (its table's existence, then
+	// SHOW COLUMNS). HEAD adds none of them.
+	if want := 4 + len(ignoredSentinelTables) + len(ignoredSentinelFlooredTables) + 2; len(statements) != want {
 		t.Fatalf("the session issued %d statements, want the %d it issues without a HEAD read of its own: %v", len(statements), want, statements)
 	}
 	if opened := fake.opened.Load(); opened != 1 {

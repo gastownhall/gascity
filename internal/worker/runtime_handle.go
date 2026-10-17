@@ -21,12 +21,20 @@ var ErrOperationUnsupported = errors.New("worker operation is unsupported")
 // RuntimeHandleConfig configures a worker handle for a legacy runtime-only
 // session target that has no bead-backed session identity.
 type RuntimeHandleConfig struct {
-	Provider     runtime.Provider
-	SessionName  string
+	Provider    runtime.Provider
+	SessionName string
+	// ProviderName is the builtin provider family (for example "claude"), not
+	// the configured provider name. Callers resolve a wrapped alias first with
+	// config.BuiltinFamily or ResolvedProvider.BuiltinAncestor.
 	ProviderName string
 	Transport    string
 	ProcessNames []string
 	Recorder     events.Recorder
+	// CityPath is the city the session belongs to, which scopes the
+	// handle's bounded turn reads as a SessionHandle's are; empty scopes
+	// them to Provider, so they share no read with the city's
+	// SessionHandles. Set it wherever the handle reads turns.
+	CityPath string
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
@@ -39,6 +47,7 @@ type RuntimeHandle struct {
 	transport    string
 	processNames []string
 	recorder     events.Recorder
+	cityPath     string
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -62,6 +71,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 		transport:    strings.TrimSpace(cfg.Transport),
 		processNames: append([]string(nil), cfg.ProcessNames...),
 		recorder:     recorder,
+		cityPath:     strings.TrimSpace(cfg.CityPath),
 	}, nil
 }
 
@@ -269,11 +279,31 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 	return result, nil
 }
 
-// Interrupt asks the provider to interrupt the live runtime session.
-func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+// Interrupt asks the provider to interrupt the live runtime session. With no
+// session bead to pick provider-specific keys, keystroke and protocol
+// runtimes both get Interrupt; a runtime that cannot interrupt the turn is
+// sent nothing and reported with [sessionpkg.ErrTurnInterruptUnsupported].
+func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if !req.Fence.IsZero() {
+		if err = req.Fence.Validate(); err != nil {
+			return err
+		}
+		if runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
+			err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
+			return err
+		}
+	}
+	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
+		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
+		return err
+	}
+	if !req.Fence.IsZero() {
+		err = runtime.InterruptWithContext(runtime.WithInputFence(ctx, req.Fence), h.provider, h.sessionName)
+		return err
+	}
 	err = h.provider.Interrupt(h.sessionName)
 	return err
 }
@@ -282,6 +312,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -292,7 +323,27 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
-	if !h.provider.IsRunning(h.sessionName) {
+	ctx, unfenced, err := fencedNudgeContext(ctx, req, func() (runtime.InputFencing, error) {
+		return runtime.InputFencingFor(h.provider, h.sessionName), nil
+	})
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	defer func() { result.Unfenced = unfenced && result.Delivered }()
+	_, fenced := runtime.InputFenceFrom(ctx)
+	// Decided on a fresh read, not the provider's cache: the tmux state
+	// cache can show a crashed agent alive for seconds after the crash.
+	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
+	// A fenced nudge reports what the read found instead of undelivered.
+	if err = runtime.LivenessFenceMiss(ctx, h.sessionName, live, liveErr); err != nil {
+		return NudgeResult{}, err
+	}
+	if liveErr != nil || live.Running && !live.Alive {
+		// A dead agent's pane takes nothing (mc-48az4): the caller queues it.
+		result = NudgeResult{Undelivered: NudgeUndeliveredAgentDead}
+		return result, nil
+	}
+	if !live.Running {
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
 			result = NudgeResult{Delivered: false}
 			return result, nil
@@ -303,13 +354,23 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if fenced {
+			err = runtime.NudgeWithContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), false)
+		} else {
+			err = runtime.NudgeWithDeliveryKey(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text))
+		}
+		if err != nil {
 			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
+		if fenced {
+			err = runtime.NudgeWithContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), true)
+		} else {
+			err = h.nudgeNow(req.Text)
+		}
+		if err != nil {
 			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}

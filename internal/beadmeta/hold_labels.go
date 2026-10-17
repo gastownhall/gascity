@@ -47,6 +47,17 @@ const (
 // release, pool accounting and the in_progress ownership tiers above.
 var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 
+// HumanLabel is bd's native label for a bead waiting on a person's decision
+// (`bd human list` enumerates the beads that carry it). It is deliberately NOT a
+// dispatch hold and is absent from DispatchHoldLabels: that list is fixed at the
+// two canonical holds, and the hook's held-candidate filter and the in_progress
+// serve gate iterate it, so adding human there would also park beads already
+// assigned to an agent. Route-scoped, unassigned dispatch excludes it all the
+// same, for the reason it excludes a hold: a worker cannot advance a bead that
+// is waiting on a person, and serving it back on every tick burns a turn each
+// time (ga-7yfnyv). The assignee-scoped tiers stay transparent to it.
+const HumanLabel = "human"
+
 // HasDispatchHold reports whether labels carry one of DispatchHoldLabels. It is
 // the label comparison the hold-aware WORK-SERVING decisions answer with: the
 // hook's serve filter (isHeldHookCandidate), continuation-group pre-assignment
@@ -56,7 +67,9 @@ var DispatchHoldLabels = []string{HoldMayorLabel, HoldExternalLabel}
 // So held OPEN assigned work is never wake readiness, keep-awake work or a
 // drain-ack strand, which ended the wake/drain loop where an on-demand named
 // session was re-woken every tick for assigned hold:external work its hook
-// drained past as no_work.
+// drained past as no_work. The controller's route-restore lanes consult it too
+// (isDetachedHandoffOrphanCandidate, carriedPoolRoute): a held bead's empty
+// gc.routed_to is a parking decision, not a lost route, so it is not re-stamped.
 //
 // Two demand paths do not consult it. Pool accounting
 // (filterAssignedWorkBeadsForPoolDemandAt) still counts a held OPEN assigned

@@ -83,6 +83,11 @@ var contractCoverage = map[string]classification{
 	"Interrupt_MissingSession": {Deferred: "signaling group not yet ported"},
 	"Nudge_RunningSession":     {Deferred: "signaling group not yet ported"},
 	"Nudge_MissingSession":     {Deferred: "signaling group not yet ported"},
+
+	// --- Fenced input (deferred: an optional in-process capability) ---
+	"FencedInput_MatchingFenceDelivers":            {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_MismatchedFenceRefusesEveryInput": {Deferred: "optional in-process capability; RPP has no fenced-input op"},
+	"FencedInput_AbsentSessionRefuses":             {Deferred: "optional in-process capability; RPP has no fenced-input op"},
 }
 
 // conformanceSourcePath is the in-tree provider contract whose cases this

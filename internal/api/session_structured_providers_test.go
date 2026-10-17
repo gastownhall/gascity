@@ -1462,7 +1462,7 @@ func TestHandleSessionStreamStructuredResumesFromPaginatedRESTSnapshot(t *testin
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", hangBudget)
+	body := waitForRecorderFrame(t, rec, "event: structured\n", hangBudget)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")
@@ -1540,7 +1540,7 @@ func TestHandleSessionStreamStructuredResumesFromEmptyPaginatedRESTSnapshot(t *t
 		close(done)
 	}()
 
-	initialBody := waitForRecorderSubstring(t, rec, "event: structured", hangBudget)
+	initialBody := waitForRecorderFrame(t, rec, "event: structured\n", hangBudget)
 	initialFrame := firstSSETestFrame(t, initialBody, "structured")
 	var initialUpdate SessionStreamStructuredMessageEvent
 	if err := json.Unmarshal([]byte(initialFrame.Data), &initialUpdate); err != nil {
@@ -1733,7 +1733,7 @@ func TestHandleSessionStreamStructuredResumeEmitsInclusiveTailUpsert(t *testing.
 		t.Fatalf("close transcript: %v", closeErr)
 	}
 
-	body := waitForRecorderSubstring(t, rec, "event: structured", 10*time.Second)
+	body := waitForRecorderFrame(t, rec, "event: structured\n", 10*time.Second)
 	cancel()
 	<-done
 	frame := firstSSETestFrame(t, body, "structured")

@@ -805,9 +805,10 @@ func admitByRequestID(
 //     re-clone pre-drop's os.RemoveAll would destroy the committed rig's working
 //     tree and .beads store. A rolled_back / incomplete-in_flight record never
 //     holds its OWN name in config (a failed provision's config write is rolled
-//     back atomically with mutateAndPoke, and the delete-then-re-add-own-rig path
-//     reaches here only with rigInConfig already false), so this never rejects a
-//     legitimate self-recovery.
+//     back atomically inside the controller's config transaction, which
+//     publishes through mutateAndPokeLocked, and the delete-then-re-add-own-rig
+//     path reaches here only with rigInConfig already false), so this never
+//     rejects a legitimate self-recovery.
 //
 // A brand-new admission (existingBeadID == "") already passed the name axis
 // (including rigInConfig) under the same lock, so both guards are no-ops for it;

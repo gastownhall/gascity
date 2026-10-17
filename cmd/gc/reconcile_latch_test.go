@@ -70,7 +70,7 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 			if len(got) != 1 || got[0].Config != tc.config || got[0].ParityPR != tc.pr {
 				t.Fatalf("v2LatchRefusals = %+v, want one refusal of %q by %s", got, tc.config, tc.pr)
 			}
-			mode, err := latchReconcilerMode(cfg, overrideEnv("1"))
+			mode, err := latchReconcilerMode(cfg, noEnv)
 			if err == nil || mode != reconcilerLegacy || !strings.Contains(err.Error(), got[0].String()) {
 				t.Fatalf("latch = %v, %v; want legacy and an error naming %q", mode, err, got[0])
 			}
@@ -86,7 +86,7 @@ func TestV2LatchRefusesEachDeferredFeature(t *testing.T) {
 	if got := len(v2LatchRefusals(all, nil)); got != 8 {
 		t.Errorf("v2LatchRefusals(every feature, nil) = %d refusals, want 8", got)
 	}
-	_, err := latchReconcilerMode(all, overrideEnv("1"))
+	_, err := latchReconcilerMode(all, noEnv)
 	if err == nil {
 		t.Fatal("latch(every feature) admitted v2")
 	}
@@ -119,7 +119,7 @@ func TestV2LatchAdmitsInScopeFeatures(t *testing.T) {
 		if got := v2LatchRefusals(cfg, nil); len(got) != 0 {
 			t.Errorf("provider %q: v2LatchRefusals = %+v, want none", provider, got)
 		}
-		if mode, err := latchReconcilerMode(cfg, overrideEnv("1")); err != nil || mode != reconcilerV2 {
+		if mode, err := latchReconcilerMode(cfg, noEnv); err != nil || mode != reconcilerV2 {
 			t.Errorf("provider %q: latch = %v, %v; want v2, nil", provider, mode, err)
 		}
 	}
@@ -219,13 +219,13 @@ func TestV2RunsOnlyOnRuntimesThatReadFresh(t *testing.T) {
 		t.Fatalf("v2SessionRuntimesAdmitted = %v, want %v; a new runtime must read fresh (ruling (c))", v2SessionRuntimesAdmitted, want)
 	}
 	for name, p := range map[string]runtime.Provider{"tmux": (*tmux.Provider)(nil), "acp": (*acp.Provider)(nil), "subprocess": (*subprocess.Provider)(nil)} {
-		if !freshReadable(p) {
+		if !runtime.FreshReadable(p) {
 			t.Errorf("admitted runtime %s cannot read fresh", name)
 		}
 	}
 	for name, p := range map[string]runtime.Provider{"herdr": (*herdr.Provider)(nil), "k8s": (*k8s.Provider)(nil), "exec": (*exec.Provider)(nil)} {
-		if v2SessionRuntimesAdmitted[name] || freshReadable(p) {
-			t.Errorf("%s: admitted %t, reads fresh %t; want refused, and not fresh (else revisit ruling (c))", name, v2SessionRuntimesAdmitted[name], freshReadable(p))
+		if v2SessionRuntimesAdmitted[name] || runtime.FreshReadable(p) {
+			t.Errorf("%s: admitted %t, reads fresh %t; want refused, and not fresh (else revisit ruling (c))", name, v2SessionRuntimesAdmitted[name], runtime.FreshReadable(p))
 		}
 	}
 }

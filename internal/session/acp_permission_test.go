@@ -276,11 +276,7 @@ func sessionMutationLockHeld(id string) bool {
 	if lock == nil {
 		return false
 	}
-	if lock.mu.TryLock() {
-		lock.mu.Unlock()
-		return false
-	}
-	return true
+	return sessionMutationLockEntryHeld(lock)
 }
 
 // TestACPSubmitWaitingForIdleRefusedWhenPermissionArrives composes the
@@ -329,7 +325,7 @@ func TestACPLiveOnlyNudgeRefusedWhilePermissionPending(t *testing.T) {
 	}
 	result := make(chan sendResult, 1)
 	go func() {
-		delivered, err := s.mgr.SendLiveOnly(context.Background(), s.id, "queued nudge")
+		delivered, err := s.mgr.SendLiveOnly(context.Background(), s.id, "queued nudge", nil)
 		result <- sendResult{delivered, err}
 	}()
 	select {

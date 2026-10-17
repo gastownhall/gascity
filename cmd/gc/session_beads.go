@@ -1648,8 +1648,25 @@ func (r retiredCleanup) cleanup(id string) {
 	cancelStateAssignedToRetiredSessionBead(r.store, id, r.clock.Now(), nil)
 }
 
-// syncSessionBeadsWithSnapshotAndRigStores ensures every desired session has a corresponding session
-// bead. Accepts desiredState (sessionName → TemplateParams) instead of
+// clientProviderChat reports whether a session with this origin, running
+// under agent, is a client's provider chat: a session projected as manual
+// (templateParamsSessionOrigin) whose template is a provider's implicit agent,
+// which it runs under only because that agent is named after the provider.
+// POST /sessions with kind=provider creates one; discovery also projects as
+// manual an ephemeral row of the agent with no pool, named or dependency-only
+// marker (isLegacyManualSessionInfoForAgent). The chat has no agent identity
+// of its own, so no agent_name is stamped on it; one would make every later
+// read resolve it as kind "agent" (a pool member of the implicit agent)
+// instead of the provider session its create reported. A chat that already
+// carries agent_name keeps it: gc session new and a template start stamp one
+// on the manual sessions they create for an implicit agent, which are agent
+// sessions, and the two cannot be told apart.
+func clientProviderChat(origin string, agent *config.Agent) bool {
+	return origin == "manual" && agent != nil && agent.Implicit
+}
+
+// syncSessionBeadsWithSnapshotAndRigStores materializes configured desired sessions and retains existing
+// manual sessions. Accepts desiredState (sessionName → TemplateParams) instead of
 // map[string]TemplateParams, and uses runtime.Provider for liveness checks.
 //
 // configuredNames is the set of ALL configured agent session names (including
@@ -1950,6 +1967,22 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				openBeads = upsertOpenSessionBead(openBeads, indexBySessionName, recovered)
 			}
 		}
+		if !exists && tp.ManualSession {
+			// Manual entries retain sessions discovered during planning; they
+			// are not create requests. A close can win before this fresh store
+			// read. Never replace that terminal conversation with a new bead
+			// carrying its old alias and runtime name.
+			continue
+		}
+		if !exists && tp.NamedCanonicalOnly {
+			// The canonical bead that made this on_demand session desired was
+			// in the tick's snapshot, but the fresh read above found it gone:
+			// an operator close won the race. Without work it is no longer
+			// desired, so neither reopen nor mint a row, which would sit open
+			// and asleep answering to the name until someone closed it again
+			// (mc-58gr9). The next tick no longer materializes it.
+			continue
+		}
 		state := syncSessionCachedState(sn, b, exists, sp)
 		if !exists && isConfiguredNamed {
 			extraMeta := startupKickoffReopenMetadata(tp.BoundStepID, now)
@@ -1985,7 +2018,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 			// bead-scoped name too, so it must not mint a second generation
 			// beside an open, unconfirmed create for the same slot identity —
 			// that row may still own a box whose teardown has not been
-			// confirmed (releaseBeadScopedPoolRuntime, ga-vcjr9).
+			// confirmed (releaseRowOwnedRuntime, ga-vcjr9).
 			leaseTemplate := tp.TemplateName
 			if tp.RigName != "" && !strings.Contains(leaseTemplate, "/") {
 				leaseTemplate = tp.RigName + "/" + leaseTemplate
@@ -2029,7 +2062,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 					// Bead-ID scoped, same as the planner's create path
 					// (createPoolSessionBeadWithIdentifiers): the runtime name
 					// resolves back to its bead. ga-vcjr9's leak is closed by
-					// releaseBeadScopedPoolRuntime (a failed create's runtime is
+					// releaseRowOwnedRuntime (a failed create's runtime is
 					// torn down before its row may close) plus the identity
 					// lease, not by reusing a name across generations.
 					createdSessionName = PoolSessionName(qualifiedTemplate, newBead.ID)
@@ -2207,7 +2240,7 @@ func syncSessionBeadsWithSnapshotAndRigStores(
 				queueAliasGuardedMeta("work_dir", tp.WorkDir)
 			}
 		}
-		if legacyNeedsConcreteIdentity && agentName != "" {
+		if legacyNeedsConcreteIdentity && agentName != "" && !clientProviderChat(origin, findAgentByTemplate(cfg, tp.TemplateName)) {
 			queueAliasGuardedMeta("agent_name", agentName)
 		}
 		if b.Metadata["dependency_only"] != boolMetadata(tp.DependencyOnly) {
@@ -3007,7 +3040,9 @@ func reapStaleSessionBeads(
 		// They may legitimately be stopped between supervisor restarts; the
 		// named-session reconciler is responsible for preserving, waking, or
 		// retiring them after desired state is rebuilt from config.
-		if isNamedSessionInfo(info) {
+		// A committed manual conversation may be creating again while it
+		// resumes after runtime loss. It is not an abandoned first creation.
+		if isNamedSessionInfo(info) || session.HasStartedManualConversation(info) {
 			continue
 		}
 		// Session is alive — nothing to reap.
@@ -3069,13 +3104,15 @@ func reapStaleSessionBeads(
 		if startHolderLive(store, cityPath, info) {
 			continue
 		}
-		// A bead-scoped pool row may only close once its runtime is confirmed
-		// gone (releaseBeadScopedPoolRuntime, ga-vcjr9). IsRunning=false is not
+		// A row that owns its runtime name (a bead-scoped pool row, or a
+		// manual session on a runtime that cannot vouch for identity) may only
+		// close once its runtime is confirmed gone (releaseRowOwnedRuntime,
+		// ga-vcjr9). IsRunning=false is not
 		// proof of teardown (k8s reports false for a pod whose tmux is not up,
 		// or on an API error), and closing releases the identity lease so a
 		// successor mints under a new name, leaving this box unaddressed. Hold
 		// the row; the next pass retries.
-		if !releaseBeadScopedPoolRuntimeLeased(cityPath, info, sp, stderr) {
+		if !releaseRowOwnedRuntimeLeased(cityPath, store, info, sp, stderr, standingRowRuntimeHold(dt, stderr, info.ID, now)) {
 			continue
 		}
 		if closeSeat(store, sw, info, closeWhy{reason: "stale-session", gate: closeReleasing}, now.UTC(), stderr) {
@@ -3182,7 +3219,10 @@ func reapPreBootSessionBeads(
 		}
 		// Manual sessions are operator-owned; drain/archive states have their
 		// own lifecycle paths that must not be short-circuited here.
-		if info.ManualSession || !reapableStateForPreBoot(info) {
+		// ManualSession, the retired legacy marker, keeps a marked row whether
+		// or not it ever started; HasStartedManualConversation is the committed
+		// manual conversation the sibling reapers keep too.
+		if info.ManualSession || session.HasStartedManualConversation(info) || !reapableStateForPreBoot(info) {
 			continue
 		}
 		// A clean `gc stop` parks pool beads asleep with sleep_reason=city-stop;
@@ -3440,7 +3480,12 @@ func cleanDeadRuntimeCorpse(store beads.Store, sw *SeatWork, info session.Info, 
 	// the dead pane is that sleep's leftover. Closing it would make the
 	// session impossible to wake. Reaping the pane above is still right: it
 	// frees the name for that wake.
-	if claimsLive {
+	//
+	// A committed manual conversation is never closed here either
+	// (SESSION-LIFE-MANUAL-LOSS): its provider key, not the pane, holds the
+	// conversation, so losing the pane leaves the row for the heal and the
+	// next wake to resume.
+	if claimsLive && !session.HasStartedManualConversation(info) {
 		fmt.Fprintf(stderr, "session reconciler: closing session bead %s as dead-runtime (session %s, state %q)\n", info.ID, name, strings.TrimSpace(info.MetadataState)) //nolint:errcheck
 		closeSeat(store, sw, info, closeWhy{reason: "dead-runtime", gate: closeReleasing}, clk.Now().UTC(), stderr)
 	}
@@ -3484,8 +3529,29 @@ func reapRuntimesBoundToClosedBeads(
 	cityPath string,
 	stderr io.Writer,
 ) int {
+	return reapRuntimesBoundToClosedBeadsWith(store, sessionBeads, dt, sp, inv, cityPath, nil, stderr)
+}
+
+// reapRuntimesBoundToClosedBeadsWith is reapRuntimesBoundToClosedBeads that,
+// with ownerless (the controller's sightings and owner lookup) set, also
+// reaps a dead runtime whose owner no session store holds at all
+// (reapOwnerlessRuntime, CONTRACT v5.10j).
+func reapRuntimesBoundToClosedBeadsWith(
+	store beads.Store,
+	sessionBeads *sessionBeadSnapshot,
+	dt *drainTracker,
+	sp runtime.Provider,
+	inv *runtimeInventoryView,
+	cityPath string,
+	ownerless *ownerlessReap,
+	stderr io.Writer,
+) int {
 	if store == nil || sp == nil {
 		return 0
+	}
+	if ownerless != nil {
+		ownerless.sightings.begin()
+		defer ownerless.sightings.end()
 	}
 	if stderr == nil {
 		stderr = io.Discard
@@ -3557,6 +3623,19 @@ func reapRuntimesBoundToClosedBeads(
 		// goes past any cache: a reopen another process wrote without an
 		// event leaves a cached row still saying closed.
 		bead, err := beads.HandlesFor(store).Live.Get(liveID)
+		if errors.Is(err, beads.ErrNotFound) && ownerless != nil {
+			// No row at all: no closed owner to reap it, and no row's arm
+			// sees it. Only a dead runtime of this city, confirmed across
+			// sightings, is reaped (CONTRACT v5.10j).
+			var nameOwnerID string
+			if owner, ok := sessionBeads.FindInfoBySessionName(name); ok {
+				nameOwnerID = owner.ID
+			}
+			if reapOwnerlessRuntime(store, cityPath, name, liveID, nameOwnerID, sp, ownerless, stderr) {
+				reaped++
+			}
+			continue
+		}
 		if err != nil {
 			continue
 		}
@@ -3753,6 +3832,43 @@ func processRootReapable(live runtime.LiveRuntime, selfPID, subreaperPID int) bo
 		!live.ParentIsProviderInfrastructure && pidutil.IsReparentedOrphan(live.PPID, subreaperPID)
 }
 
+// processScanErrorLogRepeat is how often the orphan sweep repeats a scan
+// error of an unchanged shape (mc-ygved): unreadable entries recur every
+// tick on a busy host and say nothing new.
+const processScanErrorLogRepeat = 10 * time.Minute
+
+// processScanErrorLogs paces the orphan sweep's scan-error line per city.
+var processScanErrorLogs = &scanErrorLog{last: map[string]scanErrorLogged{}}
+
+// scanErrorLog remembers, per city, the last scan error the sweep logged.
+type scanErrorLog struct {
+	mu   sync.Mutex
+	last map[string]scanErrorLogged
+}
+
+type scanErrorLogged struct {
+	shape string
+	at    time.Time
+}
+
+// report reports whether err is logged now: a failure of the whole scan
+// always is (it bars rule 2 and must never be hidden); unreadable entries
+// are, the first time their shape (proctable.ScanErrorShape) is seen, and
+// again once processScanErrorLogRepeat has passed.
+func (l *scanErrorLog) report(city string, err error, now time.Time) bool {
+	if proctable.HasWholeScanFailure(err) {
+		return true
+	}
+	shape := proctable.ScanErrorShape(err)
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if prev, ok := l.last[city]; ok && prev.shape == shape && now.Sub(prev.at) < processScanErrorLogRepeat {
+		return false
+	}
+	l.last[city] = scanErrorLogged{shape: shape, at: now}
+	return true
+}
+
 // sweepProcessTableOrphans terminates untracked, reparented process roots of
 // this city whose incarnation is over (processRootIncarnationOver). inv, when
 // set, is the tick's inventory view; without it, or when its pass is
@@ -3790,7 +3906,7 @@ func sweepProcessTableOrphans(
 		return 0
 	}
 	found, err := scanner.FindRuntimesBySessionID("")
-	if err != nil {
+	if err != nil && processScanErrorLogs.report(cityPath, err, time.Now()) {
 		fmt.Fprintf(stderr, "session reconciler: scanning process table for orphaned runtimes: %s\n", proctable.SummarizeScanError(err)) //nolint:errcheck
 	}
 	// IsTracked rests on the provider's session listing and per-session

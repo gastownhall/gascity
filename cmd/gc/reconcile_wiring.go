@@ -49,7 +49,7 @@ func newControllerWiring(cfg *config.City, lookupEnv func(string) (string, bool)
 	if mode == reconcilerV2 {
 		w.v2 = newDefaultPlanner(stderr)
 		w.wake.planner, w.wake.waitDepClosed = w.v2.planner, w.v2.waitDependencyClosed
-		fmt.Fprintln(stderr, "session reconciler: v2 (planner: trace-only)") //nolint:errcheck // best-effort stderr
+		fmt.Fprintln(stderr, "session reconciler: v2") //nolint:errcheck // best-effort stderr
 	}
 	return w, nil
 }

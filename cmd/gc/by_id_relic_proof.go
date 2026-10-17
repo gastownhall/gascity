@@ -429,7 +429,7 @@ func censusCityBindingTwins(cityPath string, ids []string) map[string]byIDTwinPr
 		}
 		return out
 	}
-	cfg, _, err := config.LoadWithIncludesOptions(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
+	cfg, _, err := loadComposedCityConfig(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), cliStorageRoutesLoad)
 	if err != nil || cfg == nil {
 		return all(twinUndecided)
 	}

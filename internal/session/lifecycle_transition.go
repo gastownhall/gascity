@@ -3,9 +3,13 @@ package session
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"maps"
 	"strings"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // Priming markers record that a session's launch path attempted delivery of
@@ -61,6 +65,19 @@ func clearPrimingMarkers(patch MetadataPatch) {
 	}
 }
 
+// resumeRunKeys are the resume backstop's run (mc-bm1af): its count of
+// resume-shaped failures, and whether the last committed launch resumed.
+// They belong to one conversation, so every conversation reset clears them
+// (ClearResumeRun): a new conversation must not inherit the old one's run.
+var resumeRunKeys = []string{"resume_failures", "resume_launch"}
+
+// ClearResumeRun adds the resume backstop's run to patch, cleared.
+func ClearResumeRun(patch MetadataPatch) {
+	for _, k := range resumeRunKeys {
+		patch[k] = ""
+	}
+}
+
 // PromptHash returns the sha256 hex digest of the exact rendered startup
 // prompt. The empty prompt hashes to "" (not the sha256 of the empty string),
 // so it is one of the two independent gates — alongside promptDelivery("")
@@ -93,6 +110,9 @@ var freshWakeConversationResetKeys = []string{
 	PrimedAtMetadataKey,
 	PrimingAttemptedAtMetadataKey,
 	PromptHashMetadataKey,
+	// The resume backstop's run belongs to the conversation (ClearResumeRun).
+	"resume_failures",
+	"resume_launch",
 }
 
 // ResetCommittedAtKey records when a restart handoff durably committed.
@@ -132,6 +152,7 @@ func applyFreshWakeConversationReset(patch MetadataPatch) {
 	patch["live_hash"] = ""
 	patch[startupDialogVerifiedKey] = ""
 	clearPrimingMarkers(patch)
+	ClearResumeRun(patch)
 }
 
 func pendingCreateStartedAt(now time.Time) string {
@@ -364,6 +385,10 @@ type CommitStartedPatchInput struct {
 	// priming_attempted_at is never emitted here.
 	PrimedAt   time.Time
 	PromptHash string
+	// RuntimeBinding is the patch recording the thread the runtime hosts
+	// the session in, read after the start (RuntimeBindingPatch); empty
+	// writes no binding keys.
+	RuntimeBinding MetadataPatch
 }
 
 // CommitStartedPatch records a successful runtime start atomically with the
@@ -415,7 +440,36 @@ func CommitStartedPatch(input CommitStartedPatchInput) MetadataPatch {
 		patch[PrimedAtMetadataKey] = input.PrimedAt.UTC().Format(time.RFC3339)
 		patch[PromptHashMetadataKey] = input.PromptHash
 	}
+	maps.Copy(patch, input.RuntimeBinding)
 	return patch
+}
+
+// RuntimeBindingPatch reads the thread sp hosts the session name in and
+// returns the patch that records it on the session row. A runtime that is
+// not a [runtime.SessionBindingProvider], or that does not host name in a
+// thread (a zero binding), writes nothing. When no thread is
+// bound ([runtime.ErrSessionNotFound]), the patch clears both keys, so the
+// row never names a previous incarnation's thread as current. Any other read
+// error writes nothing and is returned: the keys then stay as of the last
+// successful read.
+func RuntimeBindingPatch(sp runtime.Provider, name string) (MetadataPatch, error) {
+	bp, ok := sp.(runtime.SessionBindingProvider)
+	if !ok {
+		return MetadataPatch{}, nil
+	}
+	binding, err := bp.SessionBinding(name)
+	switch {
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		binding = runtime.SessionBinding{}
+	case err != nil:
+		return MetadataPatch{}, fmt.Errorf("reading the runtime binding of %q: %w", name, err)
+	case binding.ThreadID == "":
+		return MetadataPatch{}, nil
+	}
+	return MetadataPatch{
+		MetadataRuntimeThreadID:  binding.ThreadID,
+		MetadataRuntimeProjectID: binding.ProjectID,
+	}, nil
 }
 
 // BeginDrainPatch transitions a live session into draining.
@@ -454,6 +508,23 @@ func SleepPatch(now time.Time, reason string) MetadataPatch {
 		"pending_create_started_at": "",
 		"slept_at":                  now.UTC().Format(time.RFC3339),
 	}
+}
+
+// KeepQuarantineReason drops patch's sleep_reason while the row's quarantine
+// is in force at now and its reason is the quarantine's (quarantine,
+// rate_limit, context-churn): a finalize landing after a late quarantine
+// never overwrites its reason, as the quarantine dominates (mc-slkxd), nor
+// does a crash or churn accrual during it (ExitAccrual.Over, v5.9z). It
+// returns patch, edited in place.
+func KeepQuarantineReason(patch MetadataPatch, d Disposition, reason string, now time.Time) MetadataPatch {
+	if _, ok := patch["sleep_reason"]; !ok || !d.Quarantine.After(now) {
+		return patch
+	}
+	switch SleepReason(strings.TrimSpace(reason)) {
+	case SleepReasonQuarantine, SleepReasonRateLimit, SleepReasonContextChurn:
+		delete(patch, "sleep_reason")
+	}
+	return patch
 }
 
 // AcknowledgeDrainPatch records an agent-acknowledged drain. Drained is a
@@ -502,6 +573,12 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	if now.IsZero() {
 		now = time.Now().UTC()
 	}
+	return RestartRequestPatchAt(sessionKey, now)
+}
+
+// RestartRequestPatchAt is RestartRequestPatch at now, reading no clock:
+// v2's restart handoff (A13).
+func RestartRequestPatchAt(sessionKey string, now time.Time) MetadataPatch {
 	patch := MetadataPatch{
 		"restart_requested":          "",
 		"started_config_hash":        "",
@@ -514,8 +591,10 @@ func RestartRequestPatch(sessionKey string, now time.Time) MetadataPatch {
 	// A restart handoff clears started_config_hash to force the next wake onto a
 	// first-start path, so the priming markers share that clear (S19 Stage 2
 	// priming-key lifetime rule): the fresh conversation must re-prime rather
-	// than inherit the previous incarnation's confirmation pair.
+	// than inherit the previous incarnation's confirmation pair. The fresh
+	// conversation starts the resume backstop's run anew too.
 	clearPrimingMarkers(patch)
+	ClearResumeRun(patch)
 	if sessionKey != "" {
 		patch["session_key"] = sessionKey
 	}

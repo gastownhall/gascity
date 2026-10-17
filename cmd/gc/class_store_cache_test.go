@@ -103,6 +103,13 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 		_, ok := beads.AtomicConditionalCloserFor(store)
 		return ok
 	},
+	// Handle-only, like CloseWithMetadataIfMatch: the cache exposes guarded
+	// batches through GuardedBatcherHandle only when its backing has them, so
+	// a cache over a bd store never advertises a batcher that always refuses.
+	"ApplyGuarded": func(store beads.Store) bool {
+		_, ok := beads.GuardedBatcherFor(store)
+		return ok
+	},
 	"SupportsEphemeralGraphApply": func(store beads.Store) bool {
 		applier, ok := beads.GraphApplyFor(store)
 		_, ephemeral := applier.(beads.EphemeralGraphApplyStore)
@@ -131,6 +138,14 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	// demand reads ask the cache's backing (demandLegCache), and a cache
 	// carrying it would advertise exactness over a bd backing.
 	"CachedReadExact": nil,
+	// Engine-only (see above): the events journal. A cache holds no journal
+	// of its own, and carrying the read structurally would make every cached
+	// bd, memory or exec store type-assert as a journal. The feed is wired
+	// over the base store before the cache exists, and a consumer handed a
+	// class store discovers the journal with beads.ActiveEventsJournal, which
+	// unwraps the cache and applies the activation predicate.
+	"EventsJournalActive":   nil,
+	"ReadEventsJournalPage": nil,
 }
 
 // TestControllerBindingCacheForwardsEveryEngineCapability holds the cache to

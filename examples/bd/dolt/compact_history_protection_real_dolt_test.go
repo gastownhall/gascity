@@ -13,8 +13,8 @@ import (
 )
 
 // Real-Dolt regressions for #5958: the scheduled compactor must never flatten
-// history this city did not grow, and must never force-push over a shared
-// remote without an explicit opt-in.
+// history from before its gc-compact-base watermark, and must never force-push
+// over a shared remote without an explicit opt-in.
 
 const historyProtectionThreshold = 20
 

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 
@@ -165,7 +166,7 @@ func (w fencedWriter) rollbackPendingCreate(expected session.Info, closePatch, p
 	if err != nil {
 		return false, false, err
 	}
-	return front.RollbackPendingCreateAtomically(expected, closePatch, postClosePatch)
+	return front.RollbackPendingCreateAtomically(context.Background(), expected, closePatch, postClosePatch)
 }
 
 // foldInfo is info.ApplyPatch(patch), a pure fold that writes nothing. The

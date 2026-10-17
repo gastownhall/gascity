@@ -30,8 +30,10 @@ import (
 //     kill landed, so a recycle that keeps being refused records none twice;
 //   - no output: the recycle alone.
 //
-// A peek that fails classifies nothing and refuses (peek-error). The kill
-// keeps L3 (an attached pane refuses, and the start waits for the detach)
+// Each completed classification is recorded in the planner's classified set
+// (v5 S5, X10), with the crash it found, so a recycle refused again does not
+// peek again. A peek that fails classifies nothing and refuses
+// (peek-error). The kill keeps L3 (an attached pane refuses, and the start waits for the detach)
 // and re-checks the object server-side (KillCorpseObject, KillZombieObject);
 // a refused kill leaves the runtime, and the verb section's read refuses
 // dead with a row backoff.
@@ -53,24 +55,50 @@ var recycleSections = []section{
 	{Decide: deathStep},
 }
 
-// deadPeek is what the recycle's Probe read of the row's own dead pane.
+// deadPeek is what the recycle's Probe read of the row's own dead pane, or
+// the classification the planner remembers for it.
 type deadPeek struct {
 	read    bool // the row's own: classified
 	content string
+	known   *classifiedRuntime // classified before (World.Classified): not peeked again
 }
 
-// peekDead peeks the dead runtime's pane when it is the row's own; nothing
-// otherwise.
+// peekDead peeks the dead runtime's pane when it is the row's own and not
+// classified yet; nothing otherwise. A corpse whose agent pane is gone (an
+// operator's split left as its only, dead, pane) has no screen of the
+// agent's to classify: it reads empty, and the recycle removes it by exact
+// object as before (the #7762 review). A zombie's never does: its live pane
+// may be an operator's, which KillZombieObject would kill, so the peek
+// refuses. The screen counts only when a fresh read after the capture, taken
+// at the wall clock (so no snapshot from before the capture answers it),
+// still finds the session object the classification read, its id and its
+// created time (tmux reuses ids after a server restart); otherwise the peek
+// refuses (errPeekObjectMoved).
 func peekDead(ctx context.Context, _ effectReads, v txView) (deadPeek, error) {
 	if v.RT == nil || v.RT.Class != rtCorpse && v.RT.Class != rtZombie || !ownRuntime(compareIdentity(v.Row, v.RT.Identity), v.Row, v.RT.Identity) {
 		return deadPeek{}, nil
 	}
-	content, err := v.RT.leaf.Peek(strings.TrimSpace(v.Row.SessionName), rateLimitPeekLines)
-	if err != nil {
+	if c, ok := v.World.Classified[v.It.Key]; ok && c.classifies(v.RT.Identity) {
+		return deadPeek{read: true, known: &c}, nil
+	}
+	name := strings.TrimSpace(v.Row.SessionName)
+	content, err := v.RT.leaf.Peek(name, rateLimitPeekLines)
+	switch {
+	case errors.Is(err, runtime.ErrTmuxAgentPaneGone) && v.RT.Class == rtCorpse:
+		return deadPeek{read: true}, ctx.Err()
+	case err != nil:
 		return deadPeek{}, err
+	}
+	if again, ok := freshRead(ctx, v.RT.leaf, name, nil, time.Now()); !ok || again.ObjectID != v.RT.Again.ObjectID || again.ObjectCreated != v.RT.Again.ObjectCreated {
+		return deadPeek{}, errPeekObjectMoved
 	}
 	return deadPeek{read: true, content: content}, ctx.Err()
 }
+
+// errPeekObjectMoved: the session object under the name changed, or could
+// not be read again, between the classification's read and the capture, so
+// the screen may be another object's.
+var errPeekObjectMoved = errors.New("v2 recycle: the session object changed across the peek")
 
 // deadKill is the dead runtime the recycle's Call removes, the crash it
 // records once the kill landed, and whether the death is the row's own to
@@ -109,23 +137,29 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 		return txStep{Refuse: causePeekError, Err: peekErr}
 	}
 	k := deadKill{leaf: v.RT.leaf, name: strings.TrimSpace(v.Row.SessionName), zombie: v.RT.Class == rtZombie, live: v.RT.Again, now: v.Now, account: own}
-	if !peek.read || strings.TrimSpace(peek.content) == "" {
+	switch {
+	case peek.known != nil: // classified on an earlier attempt: its crash, if any, still waits on the kill
+		k.crash = peek.known.Crash
 		return txStep{Pass: k}
+	case !peek.read:
+		return txStep{Pass: k}
+	}
+	classified := &classifiedRuntime{Key: v.It.Key, Token: deadToken(v.RT.Identity), Recycle: true}
+	facts := effectFacts{Classified: classified}
+	if strings.TrimSpace(peek.content) == "" {
+		return txStep{Pass: k, Facts: facts}
 	}
 	if screen, ok := deadScreen(v, peek.content); ok {
 		if parkedTerminal(v.Row) && screen.patch["sleep_reason"] == string(session.SleepReasonProviderTerminalError) {
 			if strings.TrimSpace(v.Row.WakeRequest) == string(session.WakeCauseExplicit) {
-				return txStep{Pass: k} // a wake request: the screen it was parked on is recycled for its one launch
+				return txStep{Pass: k, Facts: facts} // a wake request: the screen it was parked on is recycled for its one launch
 			}
-			return txStep{Done: true, Cause: causeDead} // already parked
+			return txStep{Done: true, Cause: causeDead, Facts: facts} // already parked
 		}
-		return txStep{Write: screen.patch, Class: screen.class, Done: true}
+		return txStep{Write: screen.patch, Class: screen.class, Done: true, Facts: facts}
 	}
 	if !k.zombie || runtime.ContainsProviderRateLimitScreen(peek.content) {
-		return txStep{Pass: k} // legacy records a crash for a zombie alone, and never a rate-limit screen's
-	}
-	if v.World.Classified[v.It.Key] == deadToken(v.RT.Identity) {
-		return txStep{Pass: k} // A12 recorded this death's crash (SESS-089: once per episode)
+		return txStep{Pass: k, Facts: facts} // legacy records a crash for a zombie alone, and never a rate-limit screen's
 	}
 	res, _ := v.World.Templates.lookup(v.Row)
 	k.crash = &events.Event{
@@ -133,7 +167,8 @@ func recycleStep(v txView, peek deadPeek, peekErr error) txStep {
 		Message: truncateCrashPaneOutput(peek.content, crashEventPaneOutputMaxLines),
 		Payload: api.SessionLifecyclePayloadJSON(v.Row.ID, res.TP.TemplateName, "zombie process"),
 	}
-	return txStep{Pass: k}
+	classified.Crash = k.crash
+	return txStep{Pass: k, Facts: facts}
 }
 
 // deadScreen classifies the row's own dead pane as legacy's zombie capture
@@ -146,7 +181,14 @@ func deadScreen(v txView, content string) (screenWrite, bool) {
 	if !runtime.ContainsProviderRateLimitScreen(content) {
 		return screenWrite{}, false
 	}
-	_, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	// A drain a request explains (the controller's, or an operator's)
+	// quarantines no screen, as legacy's exit decision (D09). A bare ack,
+	// the agent's own (a dead floor seat's, which A18 restarts in place
+	// with the ack on the row), suppresses only the death's crash and churn
+	// accounting (deadRuntimePatch), not this screen, so the seat is not
+	// relaunched into the limit (§12.2 row 66).
+	req, draining := activeStop(v.World.Census.reread(v.It.Key, v.Row, v.Meta)) // the fresh row's stop keys
+	draining = draining && (req.Reason != "" || req.Operator)
 	facts := session.ExitFacts{LastWokeAt: v.Row.LastWokeAt, Now: v.Now, ScreenAvailable: true, Screen: session.ScreenRateLimit, DrainPending: draining}
 	if cfg := v.World.Env.Cfg; cfg != nil {
 		facts.SubprocessProvider = cfg.Session.Provider == "subprocess"
@@ -191,7 +233,9 @@ func killDead(ctx context.Context, c txCaps, k deadKill) (deadKilled, error) {
 // SESS-537/538): the heal, and a rapid crash's wake failure or churn. A
 // death that accrues ends the effect with its record, so the row restarts
 // the next pass, as legacy's does (and a quarantine holds it); any other
-// rides ahead of the PreWake. An attached pane or a refused kill refuses.
+// rides ahead of the PreWake. An attached pane or a refused kill refuses,
+// and so does a runtime this section's own read finds under the name again
+// (goneNow): the death is accounted only over a name its read proves gone.
 func deathStep(v txView) txStep {
 	out, err := callResult[deadKilled](v)
 	switch {
@@ -201,9 +245,15 @@ func deathStep(v txView) txStep {
 		return txStep{Refuse: causeOperatorPane}
 	case !out.killed || !out.account || !committed(v.Row):
 		return txStep{}
+	case !goneNow(v):
+		return txStep{Refuse: causeRuntimePresent}
 	}
 	w := *v.World
 	w.Now = v.Now
-	patch, class, accrued := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
-	return txStep{Write: patch, Class: class, Done: accrued}
+	patch, class, accrued, ev := deadRuntimePatch(&rowFacts{w: &w, k: v.It.Key, row: v.World.Census.reread(v.It.Key, v.Row, v.Meta), found: true}, true) // the fresh row's stop keys: a drain's death is no crash
+	step := txStep{Write: patch, Class: class, Done: accrued}
+	if ev != nil { // recorded once the write lands
+		step.Facts.Events = append(step.Facts.Events, *ev)
+	}
+	return step
 }

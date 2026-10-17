@@ -3816,3 +3816,64 @@ func TestInstantiate_DeferredStepsStayGate(t *testing.T) {
 		t.Errorf("deferred step.Type = %q, want %q", b.Type, "gate")
 	}
 }
+
+// TestInstantiateRefusesASessionStep (mc-okw9n): a step whose bead would be
+// a session row (type session, or the gc:session label a variable
+// substitutes in) is refused at instantiation, on the sequential path and
+// the graph-apply path, and nothing is created; compile refuses the
+// literal marks.
+func TestInstantiateRefusesASessionStep(t *testing.T) {
+	for _, graph := range []bool{false, true} {
+		gcSession := "gc:session"
+		for _, c := range []struct {
+			name string
+			step formula.RecipeStep
+			vars map[string]string          // runtime vars
+			defs map[string]*formula.VarDef // the formula's, with defaults
+			want string
+		}{
+			{"type session", formula.RecipeStep{ID: "f.s", Title: "S", Type: "session"}, nil, nil, "session row"},
+			{"a substituted gc:session label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:session"}, nil, "session row"},
+			{"a gc:session label by a var's default (M05)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, nil, map[string]*formula.VarDef{"lbl": {Default: &gcSession}}, "session row"},
+			{"type startup-health-episode (mc-lp7zb)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "startup-health-episode"}, nil, nil, "startup-health episode"},
+			{"type convergence (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Convergence"}, nil, nil, "controller-owned"},
+			{"a ' GC:Session ' label (architecture B)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{" GC:Session "}}, nil, nil, "controller-owned"},
+			{"a forged order run root (the #7766 review)", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"order-run:digest"}, Metadata: map[string]string{"gc.kind": "wisp"}}, nil, nil, "coordination row"},
+			{"a substituted gc:wait label", formula.RecipeStep{ID: "f.s", Title: "S", Type: "task", Labels: []string{"{{lbl}}"}}, map[string]string{"lbl": "gc:wait"}, nil, "coordination row"},
+			{"type message", formula.RecipeStep{ID: "f.s", Title: "S", Type: "Message"}, nil, nil, "coordination row"},
+		} {
+			prev := IsGraphApplyEnabled()
+			SetGraphApplyEnabled(graph)
+			store := &graphApplySpyStore{MemStore: beads.NewMemStore()}
+			recipe := &formula.Recipe{
+				Name:  "f",
+				Steps: []formula.RecipeStep{{ID: "f", Title: "F", Type: "task", IsRoot: true}, c.step},
+				Deps:  []formula.RecipeDep{{StepID: "f.s", DependsOnID: "f", Type: "parent-child"}},
+				Vars:  c.defs,
+			}
+			_, err := Instantiate(context.Background(), store, recipe, Options{Vars: c.vars})
+			SetGraphApplyEnabled(prev)
+			all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+			if err == nil || !strings.Contains(err.Error(), c.want) || len(all) != 0 {
+				t.Fatalf("graph %v, %s: Instantiate = %v, beads %d; want refused (%s) with nothing created", graph, c.name, err, len(all), c.want)
+			}
+		}
+	}
+}
+
+// TestInstantiateFragmentRefusesASessionStep (mc-okw9n): a fragment whose
+// step would make a session row is refused before anything is written onto
+// its workflow.
+func TestInstantiateFragmentRefusesASessionStep(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "wf", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	recipe := &formula.FragmentRecipe{Name: "frag", Steps: []formula.RecipeStep{{ID: "frag.s", Title: "S", Type: "task", Labels: []string{"gc:session"}}}, Entries: []string{"frag.s"}, Sinks: []string{"frag.s"}}
+	_, err = InstantiateFragment(context.Background(), store, recipe, FragmentOptions{RootID: root.ID})
+	all, _ := store.List(beads.ListQuery{AllowScan: true, IncludeClosed: true})
+	if err == nil || !strings.Contains(err.Error(), "session row") || len(all) != 1 {
+		t.Fatalf("InstantiateFragment = %v, beads %d; want refused with only the root", err, len(all))
+	}
+}

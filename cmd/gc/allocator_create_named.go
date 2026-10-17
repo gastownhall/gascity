@@ -264,6 +264,11 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 		return session.Info{}, err
 	}
 	if closed, ok := session.ClosedNamedSessionBeadIn(rows, plan.SessionName); ok {
+		if !plan.AdoptLive {
+			if err := nameConfirmedFree(ctx, pass.sp, tp.Hints.ProcessNames, plan.SessionName, now, x.host.now, prog); err != nil {
+				return session.Info{}, err
+			}
+		}
 		return reopenNamed(ctx, store, live, cfg, p, closed, now, prog)
 	}
 	if err := session.EnsureAliasAvailableWithConfigForOwner(live, cfg, plan.Identity, "", plan.Identity); err != nil {
@@ -287,6 +292,34 @@ func (x *createEffects) writeNamed(ctx context.Context, pass *createPass, p crea
 		return session.Info{}, poolCreateWriteError{err: fmt.Errorf("creating named session %q: %w", plan.Identity, err)}
 	}
 	return info, prog.afterWrite(ctx, info.ID)
+}
+
+// nameConfirmedFree is a reopen's fresh runtime read of name (readRuntime,
+// the effects' standard read, with the template's process names), under the
+// identifier locks the reopen holds: a plan read the name free from an
+// observation the inventory's lag can leave behind a runtime started since,
+// and a reopen writes the row stopped. Only a read that finds the name
+// absent, or dead (a corpse or a zombie, as the plan's are), lets it write;
+// a live runtime or a read that cannot tell refuses redecided, and a pass
+// after the backoff adopts it or decides again. A context that ends before
+// or during the read is an abandoned no-write.
+func nameConfirmedFree(ctx context.Context, sp runtime.Provider, processNames []string, name string, since time.Time, now func() time.Time, prog *createProgress) error {
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errCreateAbandoned, err) // nothing written, as at the write's begin
+	}
+	rt, cause := readRuntime(ctx, sp, processNames, name, since, now)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errCreateAbandoned, err)
+	}
+	switch {
+	case cause != "":
+		prog.stage = createStageRedecided
+		return fmt.Errorf("named session %q: the name's runtime read: %s", name, cause)
+	case rt.Class == rtAbsent || rt.Class == rtCorpse || rt.Class == rtZombie:
+		return nil
+	}
+	prog.stage = createStageRedecided
+	return fmt.Errorf("named session %q: the name's runtime is not confirmed free (class %d)", name, rt.Class)
 }
 
 // reopenNamed reopens closed, the identity's closed canonical row, with

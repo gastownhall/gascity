@@ -116,9 +116,11 @@ func TestCustomTypesCheckFixPreservesTableOnlyTypes(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	v142 := RequiredCustomTypes[:len(RequiredCustomTypes)-1] // everything but startup-health-episode
-	if RequiredCustomTypes[len(RequiredCustomTypes)-1] != "startup-health-episode" {
-		t.Fatalf("test assumes startup-health-episode is the last required type: %v", RequiredCustomTypes)
+	// The list gc v1.4.2 registered: it predates startup-health-episode.
+	v142 := []string{
+		"molecule", "convoy", "message", "event", "gate",
+		"merge-request", "agent", "role", "rig", "session", "spec",
+		"convergence", "step",
 	}
 	table := append(append([]string{}, v142...), "ops-extra")
 	recorded := filepath.Join(dir, "bd-calls")
@@ -167,4 +169,114 @@ func TestCustomTypesCheckFixRefusesWithoutTheTable(t *testing.T) {
 	if calls := readRecordedBdCalls(t, recorded); strings.Contains(calls, "config set") {
 		t.Fatalf("Fix wrote types.custom without reading custom_types; calls:\n%s", calls)
 	}
+}
+
+// TestCustomTypesCheckMissingTypeHintNamesTheExactFix: a store an older gc
+// registered lacks a newer required type (startup-health-episode), and no boot
+// path registers it on a store gc does not provision (an external Dolt server
+// or an HTTP binding). doctor is the repair, so its failure must name the exact
+// one-shot command, scoped to this check, and say it only adds types: an
+// operator about to run --fix against a production store needs to know it
+// touches nothing else.
+func TestCustomTypesCheckMissingTypeHintNamesTheExactFix(t *testing.T) {
+	dir := guardedTempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	older := RequiredCustomTypes[:len(RequiredCustomTypes)-1]
+	recorded := filepath.Join(dir, "bd-calls")
+	pinned := writeCustomTypesStateBdStub(t, dir, recorded, strings.Join(older, ","), older)
+
+	c := NewCustomTypesCheck(dir, "city", pinned)
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusError {
+		t.Fatalf("Run = %v %q, want an error", r.Status, r.Message)
+	}
+	for _, want := range []string{"gc doctor --fix --check custom-types:city", "additive"} {
+		if !strings.Contains(r.FixHint, want) {
+			t.Errorf("FixHint = %q, want it to contain %q", r.FixHint, want)
+		}
+	}
+	if calls := readRecordedBdCalls(t, recorded); strings.Contains(calls, "config set") {
+		t.Fatalf("Run wrote types.custom; calls:\n%s", calls)
+	}
+}
+
+// TestCustomTypesCheckReadFailureHintNamesTheScopedFix: when bd cannot read the
+// types.custom row or the custom_types table, the warning's hint names the same
+// scoped repair as the missing-type failure, and says the repair waits on the
+// read: Fix re-reads both and writes nothing while either fails, so an operator
+// told to run it straight away would see it fail the same way.
+func TestCustomTypesCheckReadFailureHintNamesTheScopedFix(t *testing.T) {
+	for _, tc := range []struct {
+		unread  string
+		failing string
+	}{
+		{"the types.custom row", "config get"},
+		{"the custom_types table", "types --json"},
+	} {
+		t.Run(tc.unread, func(t *testing.T) {
+			dir := guardedTempDir(t)
+			if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			recorded := filepath.Join(dir, "bd-calls")
+			pinned := writeFailingReadBdStub(t, dir, recorded, tc.failing)
+
+			c := NewCustomTypesCheck(dir, "city", pinned)
+			r := c.Run(&CheckContext{CityPath: dir})
+			if r.Status != StatusWarning {
+				t.Fatalf("Run = %v %q, want a warning for %s bd could not read", r.Status, r.Message, tc.unread)
+			}
+			for _, want := range []string{"gc doctor --fix --check custom-types:city", "writes nothing while"} {
+				if !strings.Contains(r.FixHint, want) {
+					t.Errorf("FixHint = %q, want it to contain %q", r.FixHint, want)
+				}
+			}
+			if calls := readRecordedBdCalls(t, recorded); strings.Contains(calls, "config set") {
+				t.Fatalf("Run wrote types.custom; calls:\n%s", calls)
+			}
+		})
+	}
+}
+
+// TestCustomTypesCheckHintQuotesTheCheckName: a rig's check name carries the
+// rig name, which defaults to the rig directory's base name and so can hold a
+// space. Both hints are commands an operator pastes, so the name is
+// shell-quoted and the pasted command still selects this one check.
+func TestCustomTypesCheckHintQuotesTheCheckName(t *testing.T) {
+	dir := guardedTempDir(t)
+	if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	recorded := filepath.Join(dir, "bd-calls")
+	older := RequiredCustomTypes[:len(RequiredCustomTypes)-1]
+	for name, bd := range map[string]string{
+		"a missing type": writeCustomTypesStateBdStub(t, dir, recorded, strings.Join(older, ","), older),
+		"a failed read":  writeFailingReadBdStub(t, dir, recorded, "types --json"),
+	} {
+		r := NewCustomTypesCheck(dir, "my rig", bd).Run(&CheckContext{CityPath: dir})
+		if want := "gc doctor --fix --check 'custom-types:my rig'"; !strings.Contains(r.FixHint, want) {
+			t.Errorf("%s: FixHint = %q, want it to contain %q", name, r.FixHint, want)
+		}
+	}
+}
+
+// writeFailingReadBdStub is a pinned bd whose failing read ("$1 $2") exits
+// non-zero, while the other read answers with every required type, and which
+// records every call.
+func writeFailingReadBdStub(t *testing.T, dir, recorded, failing string) string {
+	t.Helper()
+	path := filepath.Join(dir, "failing-bd")
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> " + recorded + "\n" +
+		"case \"$1 $2\" in\n" +
+		"  '" + failing + "') echo 'bd: store unreachable' >&2; exit 1 ;;\n" +
+		"  'config get') echo '{\"value\":\"" + strings.Join(RequiredCustomTypes, ",") + "\"}' ;;\n" +
+		"  'types --json') echo '{\"custom_types\":[\"" + strings.Join(RequiredCustomTypes, "\",\"") + "\"]}' ;;\n" +
+		"esac\n"
+	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	return path
 }

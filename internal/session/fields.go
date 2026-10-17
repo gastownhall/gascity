@@ -72,9 +72,8 @@ type Field struct {
 	Writers []Site
 	Readers []Site // the consumers a Request needs; others list the decisive ones
 	Clears  []Site
-	// NoWriter is the ruling for a key with no production writer, NoV2Writer
-	// for a premise key v2 reads and only legacy writes.
-	NoWriter, NoV2Writer string
+	// NoWriter is the ruling for a key with no production writer.
+	NoWriter string
 	// NewKey is CONTRACT R1's rollback rule: legacy ignores it and never
 	// writes it.
 	NewKey bool
@@ -144,25 +143,35 @@ const (
 	srcBeads      = "cmd/gc/session_beads.go"
 	srcSleep      = "cmd/gc/session_sleep.go"
 	srcPoolNames  = "cmd/gc/session_name_lookup.go"
+	srcLifecycle  = "cmd/gc/session_lifecycle_parallel.go"
+	srcAbandon    = "cmd/gc/reconcile_effect_abandon.go"
 )
 
 // Shared sites. The pending ones' beads: mc-cfmtd (S1's PreWake, the C5a1
-// replay), mc-yeiz3 (NEW-1) and mc-fmhlc (NEW-2), both the C5d replay,
-// mc-h28bx (C5a3), mc-7je1h (the SESS-537/538 accrual owner).
+// replay), mc-h28bx (C5a3), mc-7je1h (the SESS-537/538 accrual owner).
 var (
 	legacyPreWake = legacy(srcTransition, "PreWakePatch")
 	legacyCommit  = legacy(srcTransition, "CommitStartedPatch")
 	v2PreWake     = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-cfmtd",
 		"S1's PreWake stamps the incarnation and consumes and clears the row's requests")
-	v2AwakeHeal = v2(srcHeals, "armAwakeHeal").pending("mc-yeiz3",
-		"A6's asleep-to-awake heal clears the wake request (D7 rule 2)")
-	v2SatisfiedWake = Site{Mode: ModeV2, File: srcHeals}.pending("mc-fmhlc", "A6's satisfied-wake clear (D7)")
+	v2AwakeHeal     = v2(srcHeals, "armAwakeHeal")     // A6's asleep-to-awake heal clears the wake request (D7 rule 2)
+	v2SatisfiedWake = v2(srcHeals, "armSatisfiedWake") // A6's satisfied-wake clear (D7 rule 2)
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
 		"S2's adopt commit clears the wake request (D7)")
 	// v2Accrual is A6's accrual of a dead runtime (SESS-537/538), which
 	// also finishes a pending idle stop's sleep (SESS-532: sleep_reason=idle,
 	// sleep_intent cleared); v2StartAccrual is C5a2's of a failed start.
 	v2Accrual = v2(srcHeals, "deadRuntimePatch")
+	// resumeRunClears are the conversation resets that clear the resume
+	// backstop's run (ClearResumeRun, mc-bm1af).
+	// The fresh-wake reset (applyFreshWakeConversationReset) is named at its
+	// entry points: PreWakePatch and the config-drift resets.
+	resumeRunClears = sites(
+		legacy("internal/session/lifecycle_exits.go", "ConversationResetPatch"),
+		legacyPreWake, legacy(srcTransition, "ConfigDriftResetPatch"), legacy(srcTransition, "ConfigDriftAsleepResetPatch"),
+		op(srcTransition, "RestartRequestPatch"),
+		legacy(srcLifecycle, "clearStaleResumeKeyMetadata"),
+		legacy(srcReconcile, "healStatePatchWithRollbackInfo"), v2(srcHeals, "asleepHealPatch"))
 	// v2SleepIntentClear is A20's clear of a woken row's leftover
 	// idle-stop-pending mark (SESS-616).
 	v2SleepIntentClear = v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")
@@ -209,10 +218,10 @@ var fields = withObserved(with(with(with(with(with(with(with(registry, false, v2
 	"pool_alias_conflict_at", "synced_at", "work_dir", "wake_mode", "session_key", "continuation_epoch", "command", "provider", "provider_kind",
 	"builtin_ancestor", "resume_flag", "resume_style", "resume_command", "session_id_flag", "close_reason", "closed_at"), false, v2("cmd/gc/reconcile_baseline.go", "baselinePatch"),
 	"started_config_hash", "started_provision_hash", "started_launch_hash", "core_hash_breakdown", "started_live_hash", "live_hash"), false, v2("cmd/gc/reconcile_steps_nudges.go", "externalReadsLane.nudges"),
-	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "continuation_claim_nudge_work",
+	"idle_claim_nudge_trigger", "idle_claim_nudge_count", "idle_claim_nudge_at", "idle_claim_nudge_token", "idle_claim_nudge_stalled", "idle_claim_nudge_stalled_token", "continuation_claim_nudge_work",
 	"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 	"continuation_claim_nudge_count", "continuation_claim_nudge_at", "execution_claim_nudge_work", "execution_claim_nudge_root",
-	"execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at", "execution_claim_nudge_stalled",
+	"execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at", "execution_claim_nudge_token", "execution_claim_started", "execution_claim_nudge_stalled",
 	"execution_claim_nudge_stalled_token", "execution_claim_hold"), true, v2(srcHeals, "asleepHealPatch"), "session_key", "started_config_hash",
 	PrimedAtMetadataKey, PrimingAttemptedAtMetadataKey, PromptHashMetadataKey),
 	false, v2("cmd/gc/allocator_create_named.go", "createEffects.writeNamed"), "agent_name", CanonicalInstanceNameMetadata, CanonicalPoolSlotMetadata,
@@ -285,13 +294,13 @@ var registry = slices.Concat([]Field{
 		v2("cmd/gc/reconcile_arms_identity.go", "armIdentity"), v2("cmd/gc/allocator_create_named.go", "recordRowToken"))},
 
 	// Lifecycle.
-	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "asleepHealPatch"))},
+	{Key: "state", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2(srcHeals, "armAwakeHeal"), v2(srcHeals, "armSoftSuspendHeal"), v2(srcHeals, "asleepHealPatch"))},
 	{Key: "state_reason", Class: ClassLifecycle, Writers: sites(legacyCommit, op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual), Clears: sites(waitHold)},
 	{Key: "slept_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"),
 		op("internal/session/kill_fence.go", "KillPendingPatch"))},
 	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake)},
-	{Key: "drain_at", Class: ClassLifecycle, Writers: sites(legacy(srcReconciler, "markDrainAckStopPending")), NoV2Writer: "v2 reads legacy residue: its stop request (D1) replaces drain_at"},
+	{Key: "drain_at", Class: ClassLifecycle, Writers: sites(legacy(srcReconciler, "markDrainAckStopPending"), v2("cmd/gc/reconcile_effect_stop.go", "dormantChoice"))},
 	{Key: "pending_create_claim", Class: ClassLifecycle, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers")), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "pending_create_started_at", Class: ClassLifecycle, Writers: sites(legacyPreWake), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "creation_complete_at", Class: ClassLifecycle, Writers: sites(legacyCommit)},
@@ -301,12 +310,12 @@ var registry = slices.Concat([]Field{
 	{Key: "closed_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "ClosePatch"))},
 
 	// Operator intent.
-	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), op("cmd/gc/cmd_session_kill_fence.go", "killSleepPatch"))},
+	{Key: "held_until", Class: ClassOperatorIntent, Writers: sites(opEncode), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), op("internal/session/kill_fence.go", "KillSleepPatch"))},
 	{Key: "quarantined_until", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcReconcile, "recordRateLimitQuarantine"), v2Accrual, v2StartAccrual), Clears: sites(v2(srcHeals, "armStabilityClear"))},
-	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"), v2SleepIntentClear, v2Accrual)},
+	{Key: "sleep_intent", Class: ClassOperatorIntent, Writers: sites(opEncode, legacy(srcSleep, "markIdleSleepPendingInfo")), Clears: sites(waitHold, opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"), v2SleepIntentClear, v2Accrual)},
 	{Key: "wait_hold", Class: ClassOperatorIntent, Writers: sites(opEncode, op("cmd/gc/cmd_wait.go", "doSessionWait")), Clears: sites(waitHold)},
-	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("cmd/gc/cmd_session_kill_fence.go", "writeSessionKillFence"))},
-	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("cmd/gc/cmd_session_pin.go", "cmdSessionSetPin")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
+	{Key: "suspended_at", Class: ClassOperatorIntent, Writers: sites(opEncode, op(srcManager, "Manager.Suspend")), Clears: sites(opConsumeHold, op("internal/session/kill_fence.go", "WriteKillFence"))},
+	{Key: "pin_awake", Class: ClassOperatorIntent, Writers: sites(op("internal/session/store.go", "Store.SetPinAwake")), Readers: sites(v2("cmd/gc/allocator_decide.go", "decidePass.awake"))},
 	// template_overrides is a per-session setting the start reads and nothing
 	// clears, so it is operator intent, not a request.
 	{Key: "template_overrides", Class: ClassOperatorIntent, Writers: sites(op(srcManager, "Manager.UpdateTemplateOverrides"))},
@@ -314,7 +323,7 @@ var registry = slices.Concat([]Field{
 	// Requests (D7 for the wake request).
 	{Key: "wake_request", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy("internal/session/lifecycle_projection.go", "projectWakeCauses"), v2("internal/session/lifecycle_projection.go", "projectWakeCauses")), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
 	{Key: "wake_requested_at", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy(srcReconciler, "explicitWakePendingInfo"), v2(srcReconciler, "explicitWakePendingInfo"), v2SatisfiedWake), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
-	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart")), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_arms_lifecycle.go"}.pending("mc-029ln", "A13 stops a restart-requested row")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
+	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart")), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), v2("cmd/gc/reconcile_arms_lifecycle.go", "restartHandoff"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
 	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart")), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake)},
 
 	// The stop request: the controller half, then the CLI's ack (E3), which
@@ -324,15 +333,25 @@ var registry = slices.Concat([]Field{
 	{Key: DrainIntentIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(v2(srcStopKeys, "stopBeginPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopCancelPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckIncarnationKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
 	{Key: DrainAckAtKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op("cmd/gc/cmd_runtime_drain.go", "drainAckRowPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(v2(srcStopKeys, "stopVoidResiduePatch"), v2(srcStopKeys, "stopAckVoidPatch"), opRestartConfirm, opConsumeHold)},
+	// The operator's drain (`gc runtime drain` in a v2 city, PAR-FLOORACK):
+	// it explains an agent's ack (A11) and nothing else reads it.
+	{Key: OperatorDrainKey, Class: ClassStopRequest, NewKey: true, Writers: sites(op(srcStopKeys, "operatorDrainPatch")), Readers: sites(v2(srcStopKeys, "readStopKeys")), Clears: sites(op(srcStopKeys, "operatorUndrainPatch"), v2(srcStopKeys, "stopEndPatch"), opRestartConfirm)},
 
 	// Counters.
 	{Key: "wake_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "churn_count", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordChurn"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2StartAccrual)},
 	{Key: "crash_count", Class: ClassCounter, NoWriter: "dead: only ReactivatePatch writes it, and nothing calls that"},
 	{Key: "quarantine_cycle", Class: ClassCounter, NoWriter: "dead: only QuarantinePatch writes it, and nothing calls that"},
-	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"))},
+	// The resume backstop's count (mc-bm1af, CONTRACT v5.9w): resume-shaped
+	// wake failures in a row; a reset, a fresh launch's commit and the
+	// stability clear end the run.
+	{Key: "resume_failures", Class: ClassCounter, Writers: sites(legacy(srcReconcile, "recordWakeFailure"), legacy(srcReconcile, "clearWakeFailures"), legacy(srcLifecycle, "startCommitPatch"), v2(srcHeals, "armStabilityClear"), v2Accrual, v2(srcAbandon, "otherFailurePatch")), Clears: resumeRunClears},
+	{Key: "idle_respawn_attempts", Class: ClassCounter, Writers: sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin"))},
 
 	// Markers.
+	// Whether the incarnation that last committed was launched as a resume,
+	// for a later rapid crash's resume backstop (mc-bm1af).
+	{Key: "resume_launch", Class: ClassMarker, Writers: sites(legacy(srcLifecycle, "startCommitPatch"), v2(srcLifecycle, "startCommitPatch")), Readers: sites(legacy(srcReconcile, "checkStability"), v2Accrual), Clears: resumeRunClears},
 	{Key: "detached_at", Class: ClassMarker, Writers: sites(legacy(srcSleep, "reconcileDetachedAtInfo"), v2(srcHeals, "armDetachedAt")), Clears: sites(legacyPreWake)},
 	{Key: "stranded_event_emitted_at", Class: ClassMarker, Writers: sites(legacy(srcReconciler, "emitSessionStrandedDiagnostic")), Clears: sites(v2(srcHeals, "armStrandedClear"))},
 	// D2's idle latch: A20's idle begin writes it in its CAS (C6a2); v2
@@ -413,22 +432,26 @@ var registry = slices.Concat([]Field{
 	same(ClassMarker, false, sites(legacy(srcReconcile, "providerTerminalErrorPatch")), "provider_terminal_error",
 		"provider_terminal_error_at", "session_health", "session_health_reason", "session_drainable"),
 	same(ClassMarker, false, sites(legacy(srcReconciler, "emitSessionWakeRefused")), "wake_refused_event_at"),
-	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle")), "idle_respawn_bead_id"),
+	same(ClassMarker, false, sites(legacy(srcReconciler, "beginIdleRespawnDrainIfIdle"), v2("cmd/gc/reconcile_arms_drain.go", "rowFacts.idleRespawnBegin")), "idle_respawn_bead_id"),
 
 	// Advisory: diagnostics, pacing and usage stamps. The execution backstop's
 	// are written every pass, under either controller.
 	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "writeExecutionClaimMarker")), "execution_claim_nudge_work",
-		"execution_claim_nudge_root", "execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at"),
+		"execution_claim_nudge_root", "execution_claim_nudge_store_ref", "execution_claim_nudge_count", "execution_claim_nudge_at",
+		"execution_claim_nudge_token"),
 	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "poolExecutionBackstop.exhausted")), "execution_claim_nudge_stalled",
 		"execution_claim_nudge_stalled_token"),
 	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "poolExecutionBackstop.observeHold")), "execution_claim_hold"),
+	same(ClassAdvisory, true, sites(legacy("cmd/gc/execution_backstop.go", "poolExecutionBackstop.markStarted")), "execution_claim_started"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/drain_reminder.go", "writeDrainReminderMarker")), "drain_reminder_at", "drain_reminder_count",
 		"drain_reminder_drain", "drain_reminder_failed"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/drain_reminder.go", "noteDrainReminderHold")), "drain_reminder_hold"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/drain_ack_escalation.go", "recordDrainAckEscalationAttempt")), "drain_escalation_at",
 		"drain_escalation_count", "drain_escalation_drain"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "writeIdleClaimMarker")), "idle_claim_nudge_trigger", "idle_claim_nudge_count",
-		"idle_claim_nudge_at"),
+		"idle_claim_nudge_at", "idle_claim_nudge_token"),
+	same(ClassAdvisory, true, sites(legacy("cmd/gc/idle_nudge.go", "poolClaimBackstop.exhausted")), "idle_claim_nudge_stalled",
+		"idle_claim_nudge_stalled_token"),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/idle_nudge.go", "writeContinuationClaimMarker")), "continuation_claim_nudge_work",
 		"continuation_claim_nudge_root", "continuation_claim_nudge_store_ref", "continuation_claim_nudge_generation",
 		"continuation_claim_nudge_count", "continuation_claim_nudge_at"),
@@ -437,6 +460,11 @@ var registry = slices.Concat([]Field{
 	same(ClassAdvisory, false, sites(op("internal/session/waits.go", "StampWaitLookupCapMetadata")),
 		"wait_lookup_capped_at", "wait_lookup_capped_label", "wait_lookup_capped_limit", "wait_lookup_capped_source"),
 	same(ClassAdvisory, false, sites(legacyCommit), "awake_started_at", PrimedAtMetadataKey, PromptHashMetadataKey),
+	// The thread a runtime hosts the session in (runtime.SessionBinding):
+	// recorded at each confirmed start (create, resume, pending-create
+	// recovery), read by no decision.
+	same(ClassAdvisory, false, sites(legacyCommit, op(srcManager, "Manager.confirmStartedRuntimeMetadata"), opRestartConfirm, op("internal/session/resume_user_hold.go", "Manager.consumeUserHold")),
+		MetadataRuntimeThreadID, MetadataRuntimeProjectID),
 	same(ClassAdvisory, false, sites(legacy("cmd/gc/session_wake.go", "freshWakeResetPriorValues")), PrimingAttemptedAtMetadataKey),
 	same(ClassAdvisory, false, sites(legacyCreate), "synced_at", "startup_kickoff_state", "startup_kickoff_started_at", "startup_kickoff_attempts"),
 	same(ClassAdvisory, false, sites(legacy(srcBeads, "startupKickoffReopenMetadata")), "startup_kickoff_last_nudge_at"),

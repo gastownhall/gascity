@@ -184,6 +184,9 @@ func freshWakeResetPriorValues(info sessions.Info) map[string]string {
 		"primed_at":            info.PrimedAtMetadata,
 		"priming_attempted_at": info.PrimingAttemptedAtMetadata,
 		"prompt_hash":          info.PromptHashMetadata,
+		// The resume backstop's run is cleared with the conversation (mc-bm1af).
+		"resume_failures": info.ResumeFailures,
+		"resume_launch":   info.ResumeLaunch,
 	}
 }
 
@@ -390,6 +393,12 @@ func setReconcilerDrainAckMetadata(sp runtime.Provider, name string, ds *drainSt
 		return err
 	}
 	if err := sp.SetMeta(name, "GC_DRAIN_ACK", "1"); err != nil {
+		if runtime.OnlyMetadataNotMirrored(err) {
+			// An ack that landed is an ack; only the runtime's view of it lags,
+			// and the log reports that.
+			log.Printf("session wake: setting reconciler drain ack metadata GC_DRAIN_ACK for %s: %v", name, err)
+			return nil
+		}
 		_ = clearReconcilerDrainAckMetadata(sp, name)
 		return err
 	}
@@ -413,7 +422,11 @@ func clearReconcilerDrainAckMetadata(sp runtime.Provider, name string) error {
 	} {
 		if err := sp.RemoveMeta(name, key); err != nil {
 			log.Printf("session wake: clearing reconciler drain ack metadata %s for %s: %v", key, name, err)
-			errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			// A removal that landed is a removal; only the runtime's view of it
+			// lags, and the log above reports that.
+			if !runtime.OnlyMetadataNotMirrored(err) {
+				errs = append(errs, fmt.Errorf("removing %s: %w", key, err))
+			}
 		}
 	}
 	return errors.Join(errs...)

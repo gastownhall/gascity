@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -111,6 +112,27 @@ func (s readyInvariantStage) assertDeclines(stage, id string) {
 	if _, err := s.cache.Handles().Cached.Ready(); !errors.Is(err, ErrCacheUnavailable) {
 		s.t.Errorf("cached reader Ready (%s) error = %v, want ErrCacheUnavailable", stage, err)
 	}
+}
+
+// assertHeldThroughFailedVeto pins a cycle whose work-outcome veto read failed:
+// the failure is on the problem log, and id, a dependent the veto holds back,
+// stays held on the verdict the cache already had instead of being offered.
+func (s readyInvariantStage) assertHeldThroughFailedVeto(stage, id string) {
+	s.t.Helper()
+	if problem := s.cache.Stats().LastProblem; !strings.Contains(problem, "ready projection work-outcome veto") {
+		s.t.Errorf("%s: last problem = %q, want the failed work-outcome veto recorded", stage, problem)
+	}
+	if blocked := cachedIsBlockedForTest(s.cache, id); blocked == nil || !*blocked {
+		s.t.Errorf("%s: cached is_blocked for %s = %s, want true: a failed veto read must not release the dependent", stage, id, ptrStr(blocked))
+	}
+	preferred, err := s.cache.ReadyPreferCache(ReadyQuery{TierMode: TierBoth})
+	if err != nil {
+		s.t.Fatalf("ReadyPreferCache (%s): %v", stage, err)
+	}
+	if containsID(sortedIDs(preferred), id) {
+		s.t.Errorf("ReadyPreferCache (%s) offered %s, which the backing's own Ready hides", stage, id)
+	}
+	s.assertNeverExceedsBacking(stage, map[string]string{id: "a failed work-outcome veto read must leave it held"})
 }
 
 // readyProjectionUnknownForTest reports whether readiness reads must decline id.

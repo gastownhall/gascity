@@ -183,6 +183,34 @@ func (h *SessionHandle) Kill(ctx context.Context, by sessionpkg.Actor) (err erro
 	return err
 }
 
+// KillFenced is Kill under the session kill fence
+// (session.Manager.KillFencedReport), the operator kill `gc session kill`
+// runs: the caller's lease (by.Lease) covers the fence write, the stop and the
+// asleep sync, and the report says whether a fresh read under the lease found
+// the runtime already gone. warn receives the best-effort warnings.
+func (h *SessionHandle) KillFenced(ctx context.Context, by sessionpkg.Actor, warn func(string)) (report sessionpkg.KillReport, err error) {
+	event := h.beginOperationEvent(ctx, workerOperationKill)
+	defer func() { event.finish(err) }()
+
+	id := h.currentSessionID()
+	if id == "" {
+		return report, nil
+	}
+	kill := func(ctx context.Context, by sessionpkg.Actor) error { return h.manager.Kill(ctx, by, id) }
+	report, err = h.manager.KillFencedReport(ctx, by, id, kill, warn)
+	return report, err
+}
+
+// KillRuntimeGone reports KillFenced's "runtime already gone" verdict taken
+// now, without the lease (session.Manager.KillRuntimeGone).
+func (h *SessionHandle) KillRuntimeGone(ctx context.Context) (bool, error) {
+	id := h.currentSessionID()
+	if id == "" {
+		return false, nil
+	}
+	return h.manager.KillRuntimeGone(ctx, id)
+}
+
 // Close permanently ends the worker session.
 func (h *SessionHandle) Close(ctx context.Context, by sessionpkg.Actor) (err error) {
 	_, err = h.CloseDetailed(ctx, by)
@@ -346,11 +374,22 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 }
 
 // Interrupt soft-stops any in-flight worker turn.
-func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
 	id := h.currentSessionID()
+	if !req.Fence.IsZero() {
+		if err = req.Fence.Validate(); err != nil {
+			return err
+		}
+		if id == "" {
+			err = h.noRowFenceMiss()
+			return err
+		}
+		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
+		return err
+	}
 	if id == "" {
 		return nil
 	}
@@ -360,6 +399,7 @@ func (h *SessionHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 
 // Nudge sends a best-effort redirect message to the worker.
 func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -373,10 +413,20 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
+	// Refuse a malformed fenced request, or one with no session row to
+	// deliver into, before ensureSessionID, which may create a session row.
+	if err = h.fencedNudgeRefusal(req); err != nil {
+		return NudgeResult{}, err
+	}
 	id, err := h.ensureSessionID()
 	if err != nil {
 		return NudgeResult{}, err
 	}
+	ctx, unfenced, err := fencedNudgeContext(ctx, req, func() (runtime.InputFencing, error) { return h.manager.InputFencing(id) })
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	defer func() { result.Unfenced = unfenced && result.Delivered }()
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return NudgeResult{}, err
@@ -384,7 +434,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text)
+			delivered, err := h.manager.SendLiveOnly(ctx, id, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -399,7 +449,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		return result, nil
 	case NudgeDeliveryImmediate:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text)
+			delivered, err := h.manager.SendImmediateLiveOnly(ctx, id, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -414,7 +464,7 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		if normalizeNudgeWakePolicy(req.Wake) == NudgeWakeLiveOnly {
-			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text)
+			delivered, err := h.manager.TryWaitIdleNudgeLiveOnly(ctx, id, req.Source, req.Text, h.runtimeHints().ProcessNames)
 			if err != nil {
 				return NudgeResult{}, err
 			}
@@ -437,10 +487,29 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	}
 }
 
-// sentNudgeResult: a held session queued the nudge rather than taking it.
+// fencedNudgeRefusal is validateFencedNudge's refusal of req, or, for a
+// fenced req to a handle with no session row, a miss finding it absent: no
+// incarnation exists for the fence to name.
+func (h *SessionHandle) fencedNudgeRefusal(req NudgeRequest) error {
+	if err := validateFencedNudge(req); err != nil || req.Fence.IsZero() {
+		return err
+	}
+	if h.currentSessionID() == "" {
+		return h.noRowFenceMiss()
+	}
+	return nil
+}
+
+// noRowFenceMiss is a fenced input's miss on a handle with no session row,
+// named as the caller names the session: by explicit name, alias or template.
+func (h *SessionHandle) noRowFenceMiss() error {
+	return &runtime.FenceMismatchError{Session: firstNonEmpty(h.session.ExplicitName, h.session.Alias, h.session.Template), Found: runtime.FenceFoundAbsent}
+}
+
+// sentNudgeResult: a session that could not take the nudge now queued it.
 func sentNudgeResult(outcome sessionpkg.SubmitOutcome) NudgeResult {
 	if outcome.Queued {
-		return NudgeResult{Undelivered: NudgeQueuedHeld}
+		return NudgeResult{Undelivered: NudgeQueued}
 	}
 	return NudgeResult{Delivered: true}
 }
