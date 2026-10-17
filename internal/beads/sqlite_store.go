@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -1240,7 +1242,10 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 }
 
 // rewriteBead replaces id's row with apply's edit of it in one transaction,
-// bumping the claim fence when the edit moves ownership.
+// bumping the claim fence when the edit moves ownership. An edit that leaves
+// the stored row as it is commits nothing: the store decides the no-op against
+// the row its own transaction read, so the revision and updated_at stay put
+// and no CAS token another writer holds goes stale.
 func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
@@ -1256,8 +1261,11 @@ func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 		if err != nil {
 			return err
 		}
-		before := b
+		before := cloneBead(b) // apply may edit b's maps and slices in place
 		b = apply(b)
+		if sqliteRowUnchanged(before, b) {
+			return nil // commit nothing: the deferred rollback ends the transaction
+		}
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
@@ -1267,6 +1275,25 @@ func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 		}
 		return tx.Commit()
 	})
+}
+
+// sqliteRowUnchanged reports whether next, an edit of the stored row before,
+// would store what before already holds. Labels compare as the set the labels
+// table keeps (INSERT OR IGNORE), so re-adding a present label is no change.
+// A row either side cannot marshal is treated as changed.
+func sqliteRowUnchanged(before, next Bead) bool {
+	if !slices.Equal(sqliteLabelSet(before.Labels), sqliteLabelSet(next.Labels)) {
+		return false
+	}
+	before.Labels, next.Labels = nil, nil
+	next.UpdatedAt = before.UpdatedAt
+	a, errA := json.Marshal(before)
+	b, errB := json.Marshal(next)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
+}
+
+func sqliteLabelSet(labels []string) []string {
+	return slices.Compact(slices.Sorted(slices.Values(labels)))
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still

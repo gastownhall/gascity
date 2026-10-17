@@ -830,38 +830,55 @@ func TestCachingStoreWriteMatchingStaleCacheReachesBacking(t *testing.T) {
 			check: func(b Bead) bool { return !slices.Contains(b.Labels, "z") },
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-
-			backing := &countingBackingStore{Store: NewMemStore()}
-			bead, err := backing.Create(tc.seed)
+	// The SQLite leg is a store that skips same-value writes itself: the
+	// write must still reach it, and it must find the row changed.
+	backings := []struct {
+		name string
+		open func(t *testing.T) Store
+	}{
+		{"MemStore", func(*testing.T) Store { return NewMemStore() }},
+		{"SQLiteStore", func(t *testing.T) Store {
+			s, err := OpenSQLiteStore(t.TempDir())
 			if err != nil {
-				t.Fatalf("Create: %v", err)
+				t.Fatalf("OpenSQLiteStore: %v", err)
 			}
-			cache := NewCachingStoreForTest(backing, nil)
-			if err := cache.Prime(context.Background()); err != nil {
-				t.Fatalf("Prime: %v", err)
-			}
-			if err := backing.Store.Update(bead.ID, tc.drift); err != nil {
-				t.Fatalf("drift Update: %v", err)
-			}
-			before := tc.calls(backing)
+			return s
+		}},
+	}
+	for _, store := range backings {
+		for _, tc := range cases {
+			t.Run(store.name+"/"+tc.name, func(t *testing.T) {
+				t.Parallel()
 
-			if err := tc.write(cache, bead.ID); err != nil {
-				t.Fatalf("write: %v", err)
-			}
-			if got := tc.calls(backing) - before; got != 1 {
-				t.Errorf("backing write calls = %d, want 1: a stale cached match must not skip the write", got)
-			}
-			got, err := backing.Get(bead.ID)
-			if err != nil {
-				t.Fatalf("backing Get: %v", err)
-			}
-			if !tc.check(got) {
-				t.Errorf("backing row %+v does not carry the write; the stale cache turned it into a no-op", got)
-			}
-		})
+				backing := &countingBackingStore{Store: store.open(t)}
+				bead, err := backing.Create(tc.seed)
+				if err != nil {
+					t.Fatalf("Create: %v", err)
+				}
+				cache := NewCachingStoreForTest(backing, nil)
+				if err := cache.Prime(context.Background()); err != nil {
+					t.Fatalf("Prime: %v", err)
+				}
+				if err := backing.Store.Update(bead.ID, tc.drift); err != nil {
+					t.Fatalf("drift Update: %v", err)
+				}
+				before := tc.calls(backing)
+
+				if err := tc.write(cache, bead.ID); err != nil {
+					t.Fatalf("write: %v", err)
+				}
+				if got := tc.calls(backing) - before; got != 1 {
+					t.Errorf("backing write calls = %d, want 1: a stale cached match must not skip the write", got)
+				}
+				got, err := backing.Get(bead.ID)
+				if err != nil {
+					t.Fatalf("backing Get: %v", err)
+				}
+				if !tc.check(got) {
+					t.Errorf("backing row %+v does not carry the write; the stale cache turned it into a no-op", got)
+				}
+			})
+		}
 	}
 }
 
