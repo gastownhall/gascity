@@ -370,7 +370,8 @@ func (sm *SupervisorMux) registerCityRoutes() {
 		Path:          "/sessions",
 		Summary:       "Create a session",
 		DefaultStatus: http.StatusAccepted,
-		Errors:        []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusServiceUnavailable},
+		// 409: a same-key retry while the first create is still being accepted.
+		Errors: []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
 	}, (*Server).humaHandleSessionCreate)
 	// 400: invalid pagination cursor (invalid-cursor problem type).
 	cityGet(sm, "/sessions", (*Server).humaHandleSessionList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest sessions first"))

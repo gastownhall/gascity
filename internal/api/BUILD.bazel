@@ -394,6 +394,7 @@ go_test(
         "idempotency_guard_test.go",
         "idempotency_helper_test.go",
         "idempotency_session_actions_test.go",
+        "idempotency_session_create_test.go",
         "idempotency_session_stop_wake_test.go",
         "idempotency_test.go",
         "keyset_page_test.go",

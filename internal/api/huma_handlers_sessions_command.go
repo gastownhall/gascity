@@ -42,6 +42,28 @@ type sessionCommandableWaiter interface {
 }
 
 func (s *Server) humaHandleSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
+	// Idempotency: accept (and create) at most once per Idempotency-Key. A
+	// replay returns the original 202 body — same request_id and event_cursor —
+	// whether the first create is still running or has finished, so a client
+	// that lost the 202 watches the original request instead of creating a
+	// second session.
+	accepted, err := withIdempotency(s.idem, "/v0/sessions", input.IdempotencyKey, input.Body,
+		func() (asyncAcceptedBody, error) {
+			out, err := s.acceptSessionCreate(ctx, input)
+			if err != nil {
+				return asyncAcceptedBody{}, err
+			}
+			return out.Body, nil
+		})
+	if err != nil {
+		return nil, err
+	}
+	return &SessionCreateOutput{Status: http.StatusAccepted, Body: accepted}, nil
+}
+
+// acceptSessionCreate validates the create request, starts the asynchronous
+// create, and returns the 202 response.
+func (s *Server) acceptSessionCreate(ctx context.Context, input *SessionCreateInput) (*SessionCreateOutput, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
 		return nil, apierr.ServiceUnavailable.Msg("no bead store configured")

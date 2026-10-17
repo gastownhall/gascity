@@ -10133,7 +10133,8 @@ export const zGetV0CityByCityNameSessionsResponse = zListBodySessionResponse;
 export const zCreateSessionBody = zSessionCreateBody;
 
 export const zCreateSessionHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zCreateSessionPath = z.object({

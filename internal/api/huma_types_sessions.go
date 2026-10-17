@@ -61,7 +61,8 @@ type sessionCreateBody struct {
 // SessionCreateInput is the Huma input for POST /v0/city/{cityName}/sessions.
 type SessionCreateInput struct {
 	CityScope
-	Body sessionCreateBody
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           sessionCreateBody
 }
 
 // asyncAcceptedBody is the response body for all async session 202 responses.
