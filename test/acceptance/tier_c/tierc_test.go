@@ -59,6 +59,9 @@ func TestMain(m *testing.M) {
 		// No credentials available, skip silently.
 		os.Exit(0)
 	}
+	if err := dolttest.ArmOwnerReaper(); err != nil {
+		panic("acceptance-c: arming owner reaper: " + err.Error())
+	}
 
 	tmpRoot, err := acceptanceTempRoot()
 	if err != nil {
