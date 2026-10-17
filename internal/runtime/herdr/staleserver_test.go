@@ -8,12 +8,11 @@ import (
 )
 
 // shortHome points socketPath()'s config-dir resolution at a short, isolated
-// temp dir via $XDG_CONFIG_HOME — the env var os.UserConfigDir() consults
-// before $HOME (see socketPath's doc comment) — so these tests never touch
-// the real user's ~/.config/herdr/sessions/. The default t.TempDir()
-// (/var/folders/… on macOS) blows past the 104-byte unix-socket sun_path
-// limit once socketPath() appends herdr/sessions/<name>/herdr.sock, so we
-// root under /tmp instead.
+// temp dir. Linux uses $XDG_CONFIG_HOME; macOS resolves under $HOME instead.
+// Set both so these tests never touch the real user's config. The default
+// t.TempDir() (/var/folders/… on macOS) blows past the 104-byte unix-socket
+// sun_path limit once socketPath() appends herdr/sessions/<name>/herdr.sock,
+// so we root under /tmp instead.
 func shortHome(t *testing.T) {
 	t.Helper()
 	configHome, err := os.MkdirTemp("/tmp", "hdr")
@@ -22,6 +21,7 @@ func shortHome(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(configHome) })
 	t.Setenv("XDG_CONFIG_HOME", configHome)
+	t.Setenv("HOME", configHome)
 }
 
 // A stale socket inode — left by a herdr server that exited uncleanly — must not
