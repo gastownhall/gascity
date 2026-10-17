@@ -1257,6 +1257,74 @@ func TestSyncSessionBeads_ConfiguredNamedSessionIsNotPoolManaged(t *testing.T) {
 	})
 }
 
+// A configured named session whose name ends in -<n> on a capped template
+// (deputy-2 on template deputy, max_active_sessions=6) must keep pool_slot
+// empty across ticks. The heal pass clears the slot; the empty-slot backfill
+// used to re-derive it from the numeric suffix on the next tick, so the bead
+// flapped every tick and each flip was re-emitted as a full bead.updated event.
+func TestSyncSessionBeads_ConfiguredNamedNumberedSessionPoolSlotStaysClear(t *testing.T) {
+	workspace := config.Workspace{Name: "test-city"}
+	sessionName := config.NamedSessionRuntimeName(workspace.Name, workspace, "deputy-2")
+	ds := map[string]TemplateParams{
+		sessionName: {
+			SessionName:             sessionName,
+			TemplateName:            "deputy",
+			InstanceName:            "deputy-2",
+			Alias:                   "deputy-2",
+			Command:                 "claude",
+			ConfiguredNamedIdentity: "deputy-2",
+			ConfiguredNamedMode:     "on_demand",
+		},
+	}
+	store := beads.NewMemStore()
+	clk := &clock.Fake{Time: time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC)}
+	sp := runtime.NewFake()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "test-city"},
+		Agents: []config.Agent{
+			{Name: "deputy", MaxActiveSessions: intPtr(2)},
+		},
+		NamedSessions: []config.NamedSession{
+			{Name: "deputy-1", Template: "deputy", Mode: "on_demand"},
+			{Name: "deputy-2", Template: "deputy", Mode: "on_demand"},
+		},
+	}
+	if _, err := store.Create(beads.Bead{
+		Title:  "deputy-2",
+		Type:   sessionBeadType,
+		Labels: []string{sessionBeadLabel, "agent:deputy-2"},
+		Metadata: map[string]string{
+			"session_name":               sessionName,
+			"alias":                      "deputy-2",
+			"template":                   "deputy",
+			"agent_name":                 "deputy-2",
+			"state":                      "active",
+			namedSessionMetadataKey:      "true",
+			namedSessionIdentityMetadata: "deputy-2",
+			namedSessionModeMetadata:     "on_demand",
+			"pool_slot":                  "2",
+		},
+	}); err != nil {
+		t.Fatalf("Create(named bead): %v", err)
+	}
+
+	for tick := 1; tick <= 3; tick++ {
+		var stderr bytes.Buffer
+		syncSessionBeads("", store, ds, sp, allConfiguredDS(ds), cfg, clk, &stderr, false)
+		all, err := store.ListByLabel(sessionBeadLabel, 0)
+		if err != nil {
+			t.Fatalf("tick %d: ListByLabel(session): %v", tick, err)
+		}
+		if len(all) != 1 {
+			t.Fatalf("tick %d: session bead count = %d, want 1", tick, len(all))
+		}
+		if got := all[0].Metadata["pool_slot"]; got != "" {
+			t.Fatalf("tick %d: pool_slot = %q, want empty for configured named session", tick, got)
+		}
+		clk.Time = clk.Time.Add(30 * time.Second)
+	}
+}
+
 func TestSyncSessionBeads_ReopensClosedConfiguredNamedSession(t *testing.T) {
 	cityPath := t.TempDir()
 	store := beads.NewMemStore()
