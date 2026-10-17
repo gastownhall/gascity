@@ -177,6 +177,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			if _, named := obs.Started[e.Key]; named {
 				continue
 			}
+			e.Last = now // a release the lane could not finish is retried a backoff later
 			d.Next.Release = &ReleaseMark{Key: e.Key, Gen: obs.Gen, At: now}
 			d.Actions = append(d.Actions, Release{Key: e.Key})
 		case e.Recycles < p.MaxRecycles:
@@ -300,4 +301,15 @@ func initialRung(k Kind, started bool) Rung {
 	default:
 		return RungClaimed
 	}
+}
+
+// ClearRelease is r without its pending release, when that release names key
+// at generation gen: the lane's last release step (§6.5 step 3), once the
+// release has run to an outcome. ok is false when r holds no such release.
+func ClearRelease(r Record, key ClaimKey, gen int64) (Record, bool) {
+	if r.Release == nil || r.Release.Key != key || r.Release.Gen != gen {
+		return r, false
+	}
+	r.Release = nil
+	return r, true
 }

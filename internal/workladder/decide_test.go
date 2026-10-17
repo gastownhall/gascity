@@ -410,8 +410,8 @@ func TestDecideDue(t *testing.T) {
 				if d.Next.Release == nil || *d.Next.Release != (ReleaseMark{Key: key("x"), Gen: 1, At: now}) {
 					t.Errorf("mark %+v", d.Next.Release)
 				}
-				if e.Attempts != 3 {
-					t.Errorf("entry %+v", e)
+				if e.Attempts != 3 || !e.Last.Equal(now) {
+					t.Errorf("entry %+v, want the count kept and last stamped", e)
 				}
 			},
 		},
@@ -626,5 +626,35 @@ func TestPolicyNeverZero(t *testing.T) {
 	}
 	if got := (Policy{Threshold: map[Kind]map[Rung]int{KindClaim: {RungClaimed: 0}}}).withDefaults().threshold(KindClaim, RungClaimed); got != DefaultClaimedThreshold {
 		t.Fatalf("zero threshold = %d", got)
+	}
+}
+
+// A release that ran to an outcome is cleared; any other release is kept,
+// and a release the lane could not finish is retried a backoff later.
+func TestClearRelease(t *testing.T) {
+	mark := &ReleaseMark{Key: key("u"), Gen: 3, At: t0}
+	r := rec(3, Entry{Key: key("u"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 3, Last: t0})
+	r.Release = mark
+	for _, tc := range []struct {
+		name string
+		key  ClaimKey
+		gen  int64
+		ok   bool
+	}{{"named", key("u"), 3, true}, {"another key", key("v"), 3, false}, {"another generation", key("u"), 4, false}} {
+		got, ok := ClearRelease(r, tc.key, tc.gen)
+		if ok != tc.ok || (got.Release == nil) != tc.ok || r.Release != mark {
+			t.Errorf("%s: ok=%v release=%+v", tc.name, ok, got.Release)
+		}
+	}
+	if _, ok := ClearRelease(rec(3), key("u"), 3); ok {
+		t.Error("cleared a release that was not there")
+	}
+	// Cleared but still outstanding and unstarted (the route was unserved,
+	// so the claim was kept): the next release waits out a backoff.
+	cleared, _ := ClearRelease(r, key("u"), 3)
+	d := Decide(cleared, quiet(t0.Add(time.Minute), 3, claim("u")), p)
+	wantEffects(t, d)
+	if want := t0.Add(12 * time.Minute); !d.Due.Equal(want) {
+		t.Fatalf("Due = %v, want the backoff after the attempt", d.Due.Sub(t0))
 	}
 }
