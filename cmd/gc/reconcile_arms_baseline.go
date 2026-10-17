@@ -18,8 +18,8 @@ const (
 	decideBaselineSoftReload = "baseline:soft-reload"      // MAINT-025
 )
 
-// armBaseline is A8. A legacy or version-mismatched stored config hash is
-// rebaselined, whatever the liveness, as legacy's silent rebaseline does (no
+// armBaseline is A8. A legacy, version-mismatched or pre-change-policy
+// stored config hash (runtime.IsCoreHashArtifact) is rebaselined, whatever the liveness, as legacy's silent rebaseline does (no
 // drain, no restart); a missing or empty one never is (the next start commit
 // baselines it), nor is a row the start arms start this pass (the start
 // commits it). Once the core
@@ -47,7 +47,7 @@ func armBaseline(r *rowFacts) (intent, bool) {
 		return r.heal(intentBaseline, reason, patch)
 	}
 	switch storedLive, live := info.StartedLiveHash, runtime.LiveFingerprint(cfg); {
-	case stored != core && runtime.IsLegacyOrMismatchedVersion(stored): // the rebaseline, below
+	case stored != core && runtime.IsCoreHashArtifact(stored, cfg): // the rebaseline, below
 	case r.w.owesSoftReload(r.k, e, stored, core):
 		patch := baselinePatch(cfg, baselineSoftReload)
 		if req, ok := activeStop(r.row); ok && req.Reason == drainConfigDrift && req.Phase == stopRequested {

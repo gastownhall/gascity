@@ -62,11 +62,7 @@ func LaunchFingerprint(cfg Config) string {
 func hashProvisionFields(h hash.Hash, cfg Config) {
 	hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
 
-	if len(cfg.FingerprintExtra) > 0 {
-		h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.FingerprintExtra)
-	}
+	hashFingerprintExtra(h, restartFingerprintExtra(cfg.FingerprintExtra))
 
 	for _, ps := range cfg.PreStart {
 		h.Write([]byte(ps)) //nolint:errcheck // hash.Write never errors

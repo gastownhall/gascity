@@ -603,7 +603,9 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	// is populated" and § "Stage 2 runtime gate"). Stage-2 eligible
 	// runtimes (tmux for v0.15.1) get a PreStart entry for per-session
 	// materialization into non-scope-root workdirs, and every eligible
-	// agent gets per-skill fingerprint entries so catalog edits drain.
+	// agent gets per-skill FingerprintExtra entries. Those are NextStart
+	// (runtime.FingerprintExtraChangePolicy): a catalog edit reaches the
+	// next start's materialization and never drains a running session.
 	// Stage-2 ineligible runtimes (subprocess/acp/k8s/hybrid/...) get
 	// neither — the materializer cannot reach them, so spurious
 	// fingerprint drift would cause pointless drain-restart cycles.

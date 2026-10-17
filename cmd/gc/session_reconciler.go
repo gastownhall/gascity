@@ -3800,7 +3800,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// rebaseline all four fingerprint fields rather than
 						// draining the session. The mismatch is a versioning
 						// artifact, not real config drift. See ga-s760 FRs 1-3.
-						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+						// So is a hash computed before the FingerprintExtra
+						// change policy for config unchanged since.
+						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
 							outcome := rebaselineLegacyHashOutcome(storedHash)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
@@ -4121,7 +4123,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Stored hash carries no version prefix or a different
 						// version — silently rebaseline rather than treating
 						// the asleep named session as drifted. ga-s760 FRs 1-3.
-						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
+						// Likewise a pre-change-policy hash of unchanged config.
+						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
 							outcome := rebaselineLegacyHashOutcome(storedHash)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
@@ -7463,7 +7466,7 @@ func truncateCrashPaneOutput(output string, maxLines int) string {
 // rebaselineLegacyHashOutcome picks the trace outcome that matches a
 // stored hash about to be silently rebaselined.
 func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
-	if runtime.IsVersionMismatchedHash(stored) {
+	if runtime.IsVersionMismatchedHash(stored) || !runtime.IsLegacyOrMismatchedVersion(stored) { // another version's, or a pre-change-policy hash
 		return TraceOutcomeRebaselinedVersionMismatch
 	}
 	return TraceOutcomeRebaselinedUnversioned

@@ -52,14 +52,65 @@ type BreakdownCopyEntry struct {
 // its own dedicated Launch-tier identity field (Config.OperatorEnv), separate
 // from Env and FingerprintExtra (Option A', ga-3a42sp). The bump rebaselines
 // existing v5 hashes silently rather than draining the fleet. (ga-i91hrn)
+//
+// The FingerprintExtra change policy did not bump the version: a config with
+// no Ignore or NextStart key hashes byte-identically, and a stored hash that
+// still carries such keys is recognized by PrePolicyCoreFingerprint.
 const FingerprintVersion = "v6"
+
+// ChangePolicy is what a change to one launch input does to a running
+// session (ARCH-SIMPLIFICATION-REVIEW §3.5).
+type ChangePolicy int
+
+const (
+	// ChangeRestart drains or restarts the running session onto the change.
+	// The default for any input not declared otherwise.
+	ChangeRestart ChangePolicy = iota
+	// ChangeNextStart takes effect when the session next starts naturally;
+	// it never drains a session.
+	ChangeNextStart
+	// ChangeIgnore is an allocation input, not session identity.
+	ChangeIgnore
+)
+
+// FingerprintExtraChangePolicy returns the declared policy of a
+// FingerprintExtra key. Pool sizing only changes demand; skills are
+// materialized at each start, so an edit reaches the next one. Every other
+// key (mcp:*, depends_on, wake_mode, and any new key) is Restart.
+func FingerprintExtraChangePolicy(key string) ChangePolicy {
+	switch {
+	case key == "pool.min" || key == "pool.max":
+		return ChangeIgnore
+	case strings.HasPrefix(key, "skills:"):
+		return ChangeNextStart
+	default:
+		return ChangeRestart
+	}
+}
+
+// restartFingerprintExtra is the Restart-policy subset of extra, the only
+// part any fingerprint hashes; nil when no key is Restart, so an extra of
+// only Ignore and NextStart keys hashes as no extra at all.
+func restartFingerprintExtra(extra map[string]string) map[string]string {
+	var out map[string]string
+	for k, v := range extra {
+		if FingerprintExtraChangePolicy(k) != ChangeRestart {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string, len(extra))
+		}
+		out[k] = v
+	}
+	return out
+}
 
 // ConfigFingerprint returns a deterministic hash of the Config fields that
 // define an agent's behavioral identity. Changes to these fields indicate
 // the agent should be restarted (via drain when drain ops are available).
 //
 // Included: Command, Lifecycle, Env, OperatorEnv (config-authored env
-// identity), FingerprintExtra (pool config, etc.), PreStart, SessionSetup,
+// identity), FingerprintExtra (Restart-policy keys only), PreStart, SessionSetup,
 // SessionSetupScript, OverlayDir, effective provider overlay slots, CopyFiles,
 // AcceptStartupDialogs, MouseOn, SessionLive.
 //
@@ -83,6 +134,27 @@ func CoreFingerprint(cfg Config) string {
 	h := sha256.New()
 	hashCoreFields(h, cfg)
 	return fmt.Sprintf("%s:%x", FingerprintVersion, h.Sum(nil))
+}
+
+// PrePolicyCoreFingerprint is CoreFingerprint as computed before the
+// FingerprintExtra change policy: every key hashed. It is the migration of
+// ARCH-SIMPLIFICATION-REVIEW §3.5: a stored hash equal to it is a session
+// started before the policy whose config has not changed since, which is
+// rebaselined rather than drained. It equals CoreFingerprint for a config
+// with no Ignore or NextStart key. Delete once no stored hash predates the
+// policy.
+func PrePolicyCoreFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashCoreFieldsExtra(h, cfg, cfg.FingerprintExtra)
+	return fmt.Sprintf("%s:%x", FingerprintVersion, h.Sum(nil))
+}
+
+// IsCoreHashArtifact reports whether a stored core hash that differs from
+// cfg's CoreFingerprint differs only in how it was computed, not in the
+// config: a legacy or version-mismatched hash, or cfg's pre-policy hash.
+// The reconciler silently rebaselines such a hash instead of draining.
+func IsCoreHashArtifact(stored string, cfg Config) bool {
+	return IsLegacyOrMismatchedVersion(stored) || stored != "" && stored == PrePolicyCoreFingerprint(cfg)
 }
 
 // LiveFingerprint returns a hash of only the SessionLive fields.
@@ -211,6 +283,12 @@ func envFingerprintInclude(key string) bool {
 
 // hashCoreFields writes all config fields except SessionLive to the hash.
 func hashCoreFields(h hash.Hash, cfg Config) {
+	hashCoreFieldsExtra(h, cfg, restartFingerprintExtra(cfg.FingerprintExtra))
+}
+
+// hashCoreFieldsExtra is hashCoreFields hashing extra as cfg's
+// FingerprintExtra.
+func hashCoreFieldsExtra(h hash.Hash, cfg Config, extra map[string]string) {
 	h.Write([]byte(cfg.Command)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})           //nolint:errcheck // hash.Write never errors
 
@@ -220,15 +298,10 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
 	hashMCPServers(h, cfg.MCPServers)
 
-	// FingerprintExtra carries additional identity fields (pool config, etc.)
-	// that aren't part of the session command but should
-	// trigger a restart on change. Prefixed with "fp:" to avoid collisions
-	// with Env keys.
-	if len(cfg.FingerprintExtra) > 0 {
-		h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.FingerprintExtra)
-	}
+	// FingerprintExtra carries additional fields that aren't part of the
+	// session command; only its Restart-policy keys are identity. Prefixed
+	// with "fp:" to avoid collisions with Env keys.
+	hashFingerprintExtra(h, extra)
 
 	// PreStart
 	for _, ps := range cfg.PreStart {
@@ -297,6 +370,17 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 		h.Write([]byte{0})              //nolint:errcheck // hash.Write never errors
 		hashSortedMap(h, cfg.OperatorEnv)
 	}
+}
+
+// hashFingerprintExtra writes extra to h, framed by "fp"; nothing when it is
+// empty.
+func hashFingerprintExtra(h hash.Hash, extra map[string]string) {
+	if len(extra) == 0 {
+		return
+	}
+	h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
+	h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
+	hashSortedMap(h, extra)
 }
 
 // hashOptionalString contributes name+value to the hash only when value is
@@ -445,12 +529,10 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		"MCPServers": fieldHash(func(h hash.Hash) {
 			hashMCPServers(h, cfg.MCPServers)
 		}),
+		// Every key, whatever its policy: the breakdown only diagnoses a
+		// drift the core hash found, and stored breakdowns stay comparable.
 		"FPExtra": fieldHash(func(h hash.Hash) {
-			if len(cfg.FingerprintExtra) > 0 {
-				h.Write([]byte("fp"))
-				h.Write([]byte{0})
-				hashSortedMap(h, cfg.FingerprintExtra)
-			}
+			hashFingerprintExtra(h, cfg.FingerprintExtra)
 		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
 			for _, ps := range cfg.PreStart {

@@ -1427,6 +1427,7 @@ go_test(
         "extmsg_services_wiring_test.go",
         "fast_loop_helpers_env_test.go",
         "fast_loop_helpers_test.go",
+        "fingerprint_change_policy_test.go",
         "formula_cook_attach_class_test.go",
         "formula_resolve_test.go",
         "frontdoor_di_guard_test.go",

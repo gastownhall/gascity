@@ -62,7 +62,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 		return intent{}, false
 	}
 	if e.Liveness != livenessAlive {
-		return r.driftRepair(stored, core)
+		return r.driftRepair(cfg, stored, core)
 	}
 	if stored == core {
 		if info.ConfigDriftDeferredAt+info.ConfigDriftDeferredKey+info.AttachedConfigDriftDeferredAt+info.AttachedConfigDriftDeferredKey != "" {
@@ -155,9 +155,9 @@ func liveHashPatch(live string) session.MetadataPatch {
 // as legacy repairs and then starts it: its key cleared, so the PreWake's
 // set-once fill mints the fresh conversation's, never resuming the old one
 // on the drifted config.
-func (r *rowFacts) driftRepair(stored, core string) (intent, bool) {
+func (r *rowFacts) driftRepair(cfg runtime.Config, stored, core string) (intent, bool) {
 	info, now := r.row.Info, r.w.Now
-	if stored == core || !isNamedSessionInfo(info) || runtime.IsLegacyOrMismatchedVersion(stored) ||
+	if stored == core || !isNamedSessionInfo(info) || runtime.IsCoreHashArtifact(stored, cfg) ||
 		pendingResumePreservingNamedRestartAt(info, now, r.w.startupTimeout()) || !r.freshGone() {
 		return intent{}, false
 	}
