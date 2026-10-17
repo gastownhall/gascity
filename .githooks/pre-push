@@ -31,6 +31,41 @@ replay_refs() {
 # own pre-push hook alive.
 "$repo_root/.githooks/lib/beads-chain.sh" pre-push "$@" < <(replay_refs)
 
+# `git config --add gascity.prePushSkipRef <glob>` (repeatable) names
+# destination refs whose pushes leave out the push-time suite, for branches
+# another gate checks before they merge. Each pattern is a shell glob matched
+# against the full remote ref name (refs/heads/...). None by default.
+skip_ref_patterns=()
+skip_ref_status=0
+skip_ref_config="$(git config --get-all gascity.prePushSkipRef)" || skip_ref_status=$?
+case "$skip_ref_status" in
+  0)
+    while IFS= read -r pattern; do
+      [ -n "$pattern" ] && skip_ref_patterns+=("$pattern")
+    done <<<"$skip_ref_config"
+    ;;
+  1) ;; # not set
+  *)
+    echo "pre-push: cannot read gascity.prePushSkipRef (git config exit $skip_ref_status)" >&2
+    exit 1
+    ;;
+esac
+
+# skip_ref_match prints the first configured pattern matching ref $1, if any.
+skip_ref_match() {
+  local pattern
+  for pattern in ${skip_ref_patterns[@]+"${skip_ref_patterns[@]}"}; do
+    # shellcheck disable=SC2254 # the pattern is a glob on purpose
+    case "$1" in
+      $pattern)
+        printf '%s\n' "$pattern"
+        return 0
+        ;;
+    esac
+  done
+  return 1
+}
+
 go_changed=0
 any_non_deletion=0
 while read -r _local_ref local_sha remote_ref remote_sha; do
@@ -39,6 +74,12 @@ while read -r _local_ref local_sha remote_ref remote_sha; do
     continue
   fi
   any_non_deletion=1
+  # A configured destination ref stays out of the Go-change scan, so it never
+  # starts the suite by itself. The ownership guard below still runs.
+  if matched_pattern="$(skip_ref_match "$remote_ref")"; then
+    echo "pre-push: $remote_ref matches gascity.prePushSkipRef '$matched_pattern'; not running the push-time suite for it" >&2
+    continue
+  fi
   # New remote branch: no cheap base to diff against — run the suite.
   if [ "$remote_sha" = "$zero" ]; then
     go_changed=1
