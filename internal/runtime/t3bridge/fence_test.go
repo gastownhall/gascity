@@ -46,11 +46,33 @@ func t3FenceEnv(f runtime.InputFence) map[string]string {
 // turn there (with the delivery key's ids); every op under another fence, to
 // a thread that records no incarnation or to a session with no thread is a
 // miss that dispatches nothing.
+//
+// It runs on the raw bridge and on the seam-backed provider production
+// builds, so a seam that forwards a fenced op to its unfenced twin fails.
 func TestT3FencedInputComparesTheThreadBinding(t *testing.T) {
-	server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(t3Fence)))
-	p := newTurnFenceTestProvider(t, server)
-	if got := runtime.InputFencingFor(NewSeamBacked(), "s"); got != runtime.InputFencingChecked {
-		t.Fatalf("seam-backed fencing = %q, want checked", got)
+	for label, newProvider := range map[string]func(*testing.T, *t3BridgeTestServer) runtime.FencedInputProvider{
+		"raw": func(t *testing.T, server *t3BridgeTestServer) runtime.FencedInputProvider {
+			return newTurnFenceTestProvider(t, server)
+		},
+		"seam-backed": func(t *testing.T, server *t3BridgeTestServer) runtime.FencedInputProvider {
+			_, sp := newSeamBackedSnapshotTestProvider(t, server.wsURL())
+			fp, ok := sp.(runtime.FencedInputProvider)
+			if !ok {
+				t.Fatalf("NewSeamBacked() = %T, want a fenced input provider", sp)
+			}
+			return fp
+		},
+	} {
+		t.Run(label, func(t *testing.T) {
+			server := newTurnFenceServer(t, fencedSnapshot(t, "thread-1", "ready", t3FenceEnv(t3Fence)))
+			testT3FencedInputComparesTheThreadBinding(t, server, newProvider(t, server))
+		})
+	}
+}
+
+func testT3FencedInputComparesTheThreadBinding(t *testing.T, server *t3BridgeTestServer, p runtime.FencedInputProvider) {
+	if got := p.InputFencing(turnFenceSession); got != runtime.InputFencingChecked {
+		t.Fatalf("fencing = %q, want checked", got)
 	}
 	ctx := t.Context()
 	if err := p.NudgeFenced(ctx, turnFenceSession, runtime.TextContent("hello"), runtime.FencedNudge{Fence: t3Fence, DeliveryKey: "k1"}); err != nil {
