@@ -340,3 +340,54 @@ func TestCancelStateAssignedToRetiredSessionBeadSuccessfulWaitOvershootIsNotCutO
 		}
 	})
 }
+
+// requireOneCutOffLine fails unless log is exactly one line that names the
+// session, the cut-off leg and the leg budget, and carries none of the ordinary
+// error line (ordinary is its message prefix) that the same error would
+// otherwise produce.
+func requireOneCutOffLine(t *testing.T, log, sessionID, leg, ordinary string) {
+	t.Helper()
+	if !strings.HasSuffix(log, "\n") || strings.Count(log, "\n") != 1 {
+		t.Fatalf("stderr = %q, want exactly one line for a cut-off %s leg", log, leg)
+	}
+	for _, want := range []string{sessionID, fmt.Sprintf("%s leg cut off at its %s budget", leg, retiredSessionCleanupLegBudget)} {
+		if !strings.Contains(log, want) {
+			t.Fatalf("stderr = %q, want it to contain %q", log, want)
+		}
+	}
+	if strings.Contains(log, ordinary) {
+		t.Fatalf("stderr = %q, want the ordinary %q line left out of a cut-off %s leg", log, ordinary, leg)
+	}
+}
+
+// TestCancelStateAssignedToRetiredSessionBeadWaitsLegCutOffLogsExactlyOneLine
+// pins that a cut-off waits leg logs the cut-off line alone, not also the
+// ordinary "canceling waits" error line the same error would produce.
+func TestCancelStateAssignedToRetiredSessionBeadWaitsLegCutOffLogsExactlyOneLine(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		sessionBead, _, _ := seedRetiredSessionCleanupState(t, store, 0, 100)
+		slow := &slowCleanupStore{Store: store, closeAllPerID: 400 * time.Millisecond}
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(slow, sessionBead.ID, time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC), &stderr)
+
+		requireOneCutOffLine(t, stderr.String(), sessionBead.ID, "waits", "canceling waits for retired session")
+	})
+}
+
+// TestCancelStateAssignedToRetiredSessionBeadExtmsgLegCutOffLogsExactlyOneLine
+// pins the same for a cut-off external messaging leg, against its ordinary
+// "closing external message bindings" error line.
+func TestCancelStateAssignedToRetiredSessionBeadExtmsgLegCutOffLogsExactlyOneLine(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		sessionBead, _, _ := seedRetiredSessionCleanupState(t, store, 3, 3)
+		slow := &slowCleanupStore{Store: store, writeDelay: 6 * time.Second}
+
+		var stderr bytes.Buffer
+		cancelStateAssignedToRetiredSessionBead(slow, sessionBead.ID, time.Date(2026, 5, 15, 10, 0, 0, 0, time.UTC), &stderr)
+
+		requireOneCutOffLine(t, stderr.String(), sessionBead.ID, "extmsg", "closing external message bindings for retired session")
+	})
+}
