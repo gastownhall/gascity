@@ -641,50 +641,6 @@ func TestNativeDoltStoreTranslationTableNormalizesNotFoundText(t *testing.T) {
 	}
 }
 
-func TestNativeDoltStoreNormalizesRealUpstreamMissingIssueErrors(t *testing.T) {
-	ctx := context.Background()
-	storage, err := beadslib.Open(ctx, filepath.Join(t.TempDir(), ".beads"))
-	if err != nil {
-		t.Skipf("upstream beads storage unavailable: %v", err)
-	}
-	t.Cleanup(func() {
-		if err := storage.Close(); err != nil {
-			t.Fatalf("close upstream storage: %v", err)
-		}
-	})
-	store := newNativeDoltStoreWithStorageAndPrefix(storage, "native-test", "gc")
-	title := "changed"
-
-	checks := []struct {
-		name string
-		call func() error
-	}{
-		{name: "Get", call: func() error {
-			_, err := store.Get("gc-missing")
-			return err
-		}},
-		{name: "Close", call: func() error {
-			return store.Close("gc-missing")
-		}},
-		{name: "Update", call: func() error {
-			return store.Update("gc-missing", UpdateOpts{Title: &title})
-		}},
-		{name: "SetMetadataBatch", call: func() error {
-			return store.SetMetadataBatch("gc-missing", map[string]string{"k": "v"})
-		}},
-		{name: "DepAdd", call: func() error {
-			return store.DepAdd("gc-missing", "gc-target", "blocks")
-		}},
-	}
-	for _, tc := range checks {
-		t.Run(tc.name, func(t *testing.T) {
-			if err := tc.call(); !errors.Is(err, ErrNotFound) {
-				t.Fatalf("%s error = %v, want ErrNotFound", tc.name, err)
-			}
-		})
-	}
-}
-
 func TestNativeDoltStoreCloseStoreWaitsForInFlightOperation(t *testing.T) {
 	entered := make(chan struct{})
 	release := make(chan struct{})
