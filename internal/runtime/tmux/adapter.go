@@ -1147,11 +1147,11 @@ func (p *Provider) ListRunningComplete() bool { return true }
 
 // RuntimeInventory implements [runtime.InventoryProvider] with one
 // batched pane read. Delegates to [Tmux.listRuntimeInventory], and logs
-// malformed lines at most once per inventoryMalformedLogEvery.
+// malformed lines (see noteInventoryFaults).
 func (p *Provider) RuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
-	entries, malformed, err := p.tm.listRuntimeInventory(ctx)
-	if len(malformed) > 0 {
-		p.noteMalformedInventory(malformed)
+	entries, faults, err := p.tm.listRuntimeInventory(ctx)
+	if len(faults.lines) > 0 || err == nil {
+		p.noteInventoryFaults(faults)
 	}
 	return entries, err
 }
@@ -1163,34 +1163,49 @@ const inventoryMalformedLogEvery = 10 * time.Minute
 // malformedInventoryLog rate-limits the malformed-inventory log.
 type malformedInventoryLog struct {
 	mu         sync.Mutex
-	at         time.Time // last line logged
+	at         time.Time // last malformed line logged
 	suppressed int       // reads with malformed lines since at, not logged
+	faulted    bool      // the last parsed read had a malformed line
 }
 
-// noteMalformedInventory logs one read's malformed lines, or counts the read
-// toward the next line when one was logged within inventoryMalformedLogEvery.
-func (p *Provider) noteMalformedInventory(malformed []string) {
+// noteInventoryFaults logs a parsed read's malformed lines at most once per
+// inventoryMalformedLogEvery, counting the reads it skips toward the next
+// line, and logs once when a read parses clean again.
+func (p *Provider) noteInventoryFaults(faults inventoryFaults) {
 	l := &p.inventoryMalformedLog
+	faulted := len(faults.lines) > 0
 	l.mu.Lock()
-	now := time.Now()
-	if !l.at.IsZero() && now.Sub(l.at) < inventoryMalformedLogEvery {
+	now, since, suppressed, wasFaulted := time.Now(), l.at, l.suppressed, l.faulted
+	l.faulted = faulted
+	switch {
+	case !faulted && !wasFaulted:
+		l.mu.Unlock()
+		return
+	case !faulted:
+		l.at, l.suppressed = time.Time{}, 0
+	case !since.IsZero() && now.Sub(since) < inventoryMalformedLogEvery:
 		l.suppressed++
 		l.mu.Unlock()
 		return
+	default:
+		l.at, l.suppressed = now, 0
 	}
-	since, suppressed := l.at, l.suppressed
-	l.at, l.suppressed = now, 0
 	l.mu.Unlock()
 
 	logf := p.logf
 	if logf == nil {
 		logf = log.Printf
 	}
-	msg := fmt.Sprintf("tmux inventory: %d malformed list-panes line(s), their sessions read unknown this pass; first %q", len(malformed), malformed[0])
+	var unlogged string
 	if suppressed > 0 {
-		msg += fmt.Sprintf(" (%d more since %s)", suppressed, since.Format(time.RFC3339))
+		unlogged = fmt.Sprintf(" (%d unlogged faulted reads since %s)", suppressed, since.Format(time.RFC3339))
 	}
-	logf("%s", msg)
+	if !faulted {
+		logf("tmux inventory: list-panes lines well-formed again%s", unlogged)
+		return
+	}
+	logf("tmux inventory: %d malformed list-panes line(s); omitted sessions %q keep their previous facts until those age out; first line %q%s",
+		len(faults.lines), faults.sessions, faults.lines[0], unlogged)
 }
 
 // GetLastActivity returns the time of the last I/O activity in the named

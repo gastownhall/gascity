@@ -1515,38 +1515,51 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
-// window.pane index, pane_dead, pane pid, the pane's window activity, the
-// restart marker's option mirror (empty when unset) and runtimeInventoryEnd.
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{" + restartRequestedOption + "}\t" + runtimeInventoryEnd
+// window.pane index, pane_dead, pane pid, the pane's window activity,
+// whether the restart marker's option mirror is set (1, or 0 when unset) and
+// runtimeInventoryEnd. The marker is read as a comparison, never its value:
+// tmux prints a user option raw, so a tab or newline in it could forge
+// fields or another session's line.
+const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}\t" + runtimeInventoryEnd
 
 // runtimeInventoryEnd ends every runtimeInventoryFormat line, so the
 // executor's trim cannot drop an empty last field (#7871) and a line cut
 // short or split by an unescaped tab or newline is visibly malformed. tmux
-// prints it verbatim. It stays a tab-separated field: tmux 3.4 escapes a raw
-// \x1f in a format as the text \037, and escapes tabs and newlines in values.
+// prints it verbatim. It stays a tab-separated field: tmux 3.4 and 3.5 print
+// a raw \x1f in a format as the text \037. Of the values read here, tmux
+// escapes only the session name (3.2+); the rest are numbers, ids or 0/1.
 const runtimeInventoryEnd = "gc-eol"
 
 // runtimeInventoryFields is the field count of a runtimeInventoryFormat line.
 const runtimeInventoryFields = 10
+
+// inventoryFaults is what parseRuntimeInventory could not read.
+type inventoryFaults struct {
+	lines    []string // the malformed lines
+	sessions []string // the sessions omitted for them, sorted
+}
 
 // listRuntimeInventory reads every pane on the server with one untargeted
 // list-panes -a and folds the panes into one entry per session. A live server
 // holding no sessions answers "no current target", which is an empty
 // inventory, as in [tmuxFetcher.FetchState]; an unreachable server
 // (ErrNoServer) is an error. A malformed line costs only its session, which
-// is omitted (see parseRuntimeInventory) and returned in malformed; output
-// with no well-formed line at all is an error.
-func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, malformed []string, err error) {
+// is omitted (see parseRuntimeInventory) and reported in faults; output that
+// leaves no session is an error.
+func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, err error) {
 	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", runtimeInventoryFormat)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
-			return map[string]runtime.InventoryEntry{}, nil, nil
+			return map[string]runtime.InventoryEntry{}, faults, nil
 		}
-		return nil, nil, err
+		return nil, faults, err
 	}
-	entries, malformed = parseRuntimeInventory(out)
-	if len(entries) == 0 && len(malformed) > 0 {
-		return nil, malformed, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", malformed[0])
+	entries, faults, wellFormed := parseRuntimeInventory(out)
+	if len(entries) == 0 && len(faults.lines) > 0 {
+		if wellFormed == 0 {
+			return nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
+		}
+		return nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
 	}
 	for name, e := range entries {
 		if e.ActivityKnown { // the poke discount GetLastActivity applies
@@ -1554,7 +1567,7 @@ func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]run
 			entries[name] = e
 		}
 	}
-	return entries, malformed, nil
+	return entries, faults, nil
 }
 
 // inventoryFirstPane tracks a session's lowest window.pane index while
@@ -1563,13 +1576,13 @@ type inventoryFirstPane struct {
 	window, pane int
 }
 
-// parseRuntimeInventory parses each line on its own and returns the lines it
-// could not parse. A malformed line omits its session (its first field, when
-// it has one), every line of it: a session folded from only the panes that
-// parsed could read all-dead when its live pane is the malformed one. An
-// omitted name is unread, not gone ([runtime.InventoryProvider]); the rest
-// of the inventory stands.
-func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntry, malformed []string) {
+// parseRuntimeInventory parses each line on its own, and reports the lines
+// it could not parse and how many it could. A malformed line omits its
+// session (its first field, when it has one), every line of it: a session
+// folded from only the panes that parsed could read all-dead when its live
+// pane is the malformed one. An omitted name is unread, not gone
+// ([runtime.InventoryProvider]); the rest of the inventory stands.
+func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, wellFormed int) {
 	entries = make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
 	omitted := make(map[string]bool)
@@ -1580,7 +1593,8 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 		fields := strings.Split(line, "\t")
 		name := fields[0]
 		var window, pane int
-		ok := len(fields) == runtimeInventoryFields && fields[runtimeInventoryFields-1] == runtimeInventoryEnd && name != ""
+		ok := len(fields) == runtimeInventoryFields && fields[runtimeInventoryFields-1] == runtimeInventoryEnd && name != "" &&
+			(fields[8] == "0" || fields[8] == "1")
 		if ok {
 			windowText, paneText, _ := strings.Cut(fields[4], ".")
 			var wErr, pErr error
@@ -1589,10 +1603,14 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 			ok = wErr == nil && pErr == nil
 		}
 		if !ok {
-			malformed = append(malformed, line)
-			omitted[name] = true
+			faults.lines = append(faults.lines, line)
+			if name != "" && !omitted[name] {
+				omitted[name] = true
+				faults.sessions = append(faults.sessions, name)
+			}
 			continue
 		}
+		wellFormed++
 		sessionID, created, attached, paneDead, panePID := fields[1], fields[2], fields[3], fields[5], fields[6]
 
 		entry, seen := entries[name]
@@ -1601,7 +1619,7 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 			entry.AttachedKnown = err == nil && clients >= 0
 			entry.Attached = entry.AttachedKnown && clients > 0
 			entry.DeadKnown, entry.AllPanesDead = true, true
-			entry.RestartRequested = strings.TrimSpace(fields[8]) != "" // a session option: every pane line carries it
+			entry.RestartRequested = fields[8] == "1" // a session option: every pane line carries it
 		}
 		switch paneDead {
 		case "0":
@@ -1632,10 +1650,11 @@ func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntr
 		}
 		entries[name] = entry
 	}
-	for name := range omitted {
+	for _, name := range faults.sessions {
 		delete(entries, name)
 	}
-	return entries, malformed
+	sort.Strings(faults.sessions)
+	return entries, faults, wellFormed
 }
 
 // ListSessions returns all session names. An unreachable tmux server is

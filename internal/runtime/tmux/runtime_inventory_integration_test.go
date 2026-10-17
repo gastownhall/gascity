@@ -42,8 +42,8 @@ func TestTmuxRuntimeInventory_RealTmuxEmptyTrailingMarker(t *testing.T) {
 		t.Fatalf("list-panes: %v", err)
 	}
 	lines := strings.Split(raw, "\n")
-	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "inv-z-quiet\t") || !strings.HasSuffix(last, "\t\t"+runtimeInventoryEnd) {
-		t.Fatalf("last inventory line %q, want inv-z-quiet with its empty marker and the terminator", last)
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "inv-z-quiet\t") || !strings.HasSuffix(last, "\t0\t"+runtimeInventoryEnd) {
+		t.Fatalf("last inventory line %q, want inv-z-quiet with its unset marker and the terminator", last)
 	}
 
 	check := func(when string, want map[string]bool) {
@@ -71,4 +71,12 @@ func TestTmuxRuntimeInventory_RealTmuxEmptyTrailingMarker(t *testing.T) {
 		t.Fatalf("RemoveMeta: %v", err)
 	}
 	check("marker cleared", map[string]bool{"inv-a-asked": false, "inv-z-quiet": false})
+
+	// tmux prints a user option raw: a marker holding a tab and a newline
+	// must not forge fields or a line for another session.
+	forged := "1\tforged\ninv-z-quiet\t$0\t1\t0\t0.0\t1\t1\t1\t1\t" + runtimeInventoryEnd
+	if err := p.SetMeta("inv-a-asked", "GC_RESTART_REQUESTED", forged); err != nil {
+		t.Fatalf("SetMeta forged: %v", err)
+	}
+	check("forged marker", map[string]bool{"inv-a-asked": true, "inv-z-quiet": false})
 }
