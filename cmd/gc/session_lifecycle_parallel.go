@@ -2919,7 +2919,10 @@ func confirmStartCommitState(currentState string) bool {
 // being accounted (no epoch, or one the compute lane has already recorded):
 // heal projects awake as soon as the runtime is observed, while the claimed
 // Start is still in flight, so a live state at commit does not prove an
-// interval is open. An open interval's epoch is never replaced.
+// interval is open. An open interval's epoch is never replaced. Residual: the
+// compute lane records the epoch only once its model sweep settles, so a
+// heal-raced re-wake before then keeps the previous interval's epoch and the
+// sink's first-wins dedupe drops the new interval's wall time (ga-d8ikk3).
 func startOpensAwakeInterval(info sessionpkg.Info) bool {
 	if confirmPendingStart(info.MetadataState) {
 		return true

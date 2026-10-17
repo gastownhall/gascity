@@ -5370,8 +5370,10 @@ func TestCommitStartResult_AtomicBatchLandsStateAndClaimClearTogether(t *testing
 // must still stamp state_reason=creation_complete — that marker is what
 // poolSessionWithinPostCreateProtection keys the post-create demand floor on,
 // and without it the fresh pool worker was drained as "orphaned" seconds after
-// claiming its first step. The in-flight awake interval the heal opened must
-// not be reset (mirrors recoverRunningPendingCreate).
+// claiming its first step. Heal never writes awake_started_at, so the seeded
+// epoch stands for an interval the compute lane has not accounted yet: an open
+// interval keeps its epoch (startOpensAwakeInterval, which
+// recoverRunningPendingCreate shares).
 func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testing.T) {
 	store := beads.NewMemStore()
 	healedAwakeAt := "2026-03-18T11:59:58Z"
@@ -5427,7 +5429,7 @@ func TestCommitStartResult_HealedAwakeBeforeCommitStillConfirmsCreation(t *testi
 		t.Errorf("pending_create_claim = %q, want cleared", got.Metadata["pending_create_claim"])
 	}
 	if got.Metadata["awake_started_at"] != healedAwakeAt {
-		t.Errorf("awake_started_at = %q, want the in-flight interval %q kept (StartsAwakeInterval must stay keyed on a genuine pending start)", got.Metadata["awake_started_at"], healedAwakeAt)
+		t.Errorf("awake_started_at = %q, want the open interval's epoch %q kept (an open, not yet accounted, interval keeps its epoch; see startOpensAwakeInterval)", got.Metadata["awake_started_at"], healedAwakeAt)
 	}
 	if info := sessiontest.SeedBead(t, got); !poolSessionWithinPostCreateProtection(info, commitAt.Add(30*time.Second)) {
 		t.Error("fresh pool worker is not within post-create protection after its start committed onto a healed-awake bead")
@@ -5457,7 +5459,7 @@ func TestConfirmStartCommitState(t *testing.T) {
 		}
 	}
 	if confirmPendingStart("awake") {
-		t.Error("confirmPendingStart(awake) = true; StartsAwakeInterval would reset an in-flight awake interval")
+		t.Error("confirmPendingStart(awake) = true; startOpensAwakeInterval would then restamp an awake bead whose interval is still open")
 	}
 }
 
