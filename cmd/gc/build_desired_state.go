@@ -205,6 +205,12 @@ type poolEvalWork struct {
 	poolDir   string
 	env       map[string]string
 	newDemand bool
+	// probes is non-nil only for a city-scoped agent with a custom
+	// scale_check: evaluatePendingPools sums sp.Check's count across every
+	// probe (city + non-suspended rigs) instead of running it once against
+	// poolDir. nil preserves the single-store evaluatePool/evaluatePoolNewDemand
+	// path unchanged (ga-drb140 AC1/AC4).
+	probes []poolStoreProbe
 }
 
 type defaultScaleCheckTarget struct {
@@ -321,23 +327,44 @@ func evaluatePendingPools(
 		wg.Add(1)
 		sp := pw.sp
 		probeEnv := pw.env
-		sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		if len(pw.probes) == 0 {
+			// A fan-out pool prefixes each probe from that probe's own env in
+			// evaluatePoolFanOutSum; one prefix from this pool's env would
+			// re-point every rig probe at the city's Dolt endpoint.
+			sp.Check = prefixShellEnv(controllerQueryPrefixEnv(probeEnv), sp.Check)
+		}
 		template := cfg.Agents[pw.agentIdx].QualifiedName()
 		agentName := cfg.Agents[pw.agentIdx].Name
 		agentIndex := pw.agentIdx
 		newDemand := pw.newDemand
-		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string, newDemand bool) {
+		probes := pw.probes
+		go func(idx int, template, agentName string, agentIndex int, sp scaleParams, dir string, newDemand bool, probes []poolStoreProbe) {
 			defer wg.Done()
 			defer recoverLeg(&evalResults[idx].err, "scale_check "+template, stderr)
-			sem <- struct{}{}
-			defer func() { <-sem }()
-			started := time.Now()
+			var started time.Time
 			var d int
 			var err error
-			if newDemand {
-				d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, runner)
+			if len(probes) > 0 {
+				// evaluatePoolFanOutSum shares this same sem, acquiring it
+				// itself once per probe. Acquiring it again here would nest an
+				// outer whole-item wait around per-probe acquires on the
+				// identical channel, which can deadlock once sem is saturated
+				// (ga-drb140 AC1).
+				started = time.Now()
+				var errs []error
+				d, errs = evaluatePoolFanOutSum(agentName, sp, probes, runner, sem, newDemand, stderr)
+				err = errors.Join(errs...)
 			} else {
-				d, err = evaluatePool(agentName, sp, dir, probeEnv, runner)
+				sem <- struct{}{}
+				func() {
+					defer func() { <-sem }()
+					started = time.Now()
+					if newDemand {
+						d, err = evaluatePoolNewDemand(agentName, sp, dir, probeEnv, runner)
+					} else {
+						d, err = evaluatePool(agentName, sp, dir, probeEnv, runner)
+					}
+				}()
 			}
 			evalResults[idx] = poolEvalResult{desired: d, err: err}
 			if trace != nil {
@@ -355,7 +382,7 @@ func evaluatePendingPools(
 					"agent_index":    agentIndex,
 				})
 			}
-		}(j, template, agentName, agentIndex, sp, pw.poolDir, newDemand)
+		}(j, template, agentName, agentIndex, sp, pw.poolDir, newDemand, probes)
 	}
 	wg.Wait()
 
@@ -1359,7 +1386,8 @@ func buildDemandTargets(
 					coldWakeTemplates[template] = true
 				}
 			}
-			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil})
+			probes := customScaleCheckFanOutProbes(cityPath, cfg, &cfg.Agents[i], rigName, poolDir, nil, suspendedRigPaths)
+			pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, newDemand: store != nil, probes: probes})
 			continue
 		}
 
@@ -1448,7 +1476,8 @@ func buildDemandTargets(
 			fmt.Fprintf(stderr, "scaleCheck: building env for %s: %v\n", cfg.Agents[i].QualifiedName(), err) //nolint:errcheck
 			continue
 		}
-		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil})
+		probes := customScaleCheckFanOutProbes(cityPath, cfg, &cfg.Agents[i], rigName, poolDir, env, suspendedRigPaths)
+		pendingPools = append(pendingPools, poolEvalWork{agentIdx: i, sp: sp, poolDir: poolDir, env: env, newDemand: store != nil, probes: probes})
 	}
 	return demandTargets{
 		pendingPools:             pendingPools,
