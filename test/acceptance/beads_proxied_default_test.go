@@ -625,7 +625,9 @@ func makeCityLookLegacyManaged(t *testing.T, env *helpers.Env, bdPath, cityRoot 
 	var metadata proxiedBeadsMetadata
 	readJSONFile(t, filepath.Join(beadsDir, "metadata.json"), &metadata)
 
-	for _, name := range []string{"dolt", "proxied_server_client_info.json"} {
+	// Pre-provider-owned legacy cities did not have the identity file that
+	// fresh provider-owned init now creates before the fixture is rewritten.
+	for _, name := range []string{"dolt", "proxied_server_client_info.json", "identity.toml"} {
 		if err := os.RemoveAll(filepath.Join(beadsDir, name)); err != nil {
 			t.Fatal(err)
 		}
