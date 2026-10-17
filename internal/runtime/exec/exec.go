@@ -241,6 +241,11 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
 	if err := p.publishInputFence(ctx, name, cfg); err != nil {
+		if startFailureKeepsBox(err, foreignBox) {
+			// The box was up before the attempt and stays: its pane, unless
+			// the start op replaced its process, keeps the fence it held.
+			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
+		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
 	p.publishReadyPrompt(ctx, name, cfg)

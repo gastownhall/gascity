@@ -4,24 +4,27 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 )
 
-// boxTmux is a scripted ExecProvider standing in for a box's tmux. It
-// answers the fence read with read, or the read script's absent sentinel when
-// noTmux is set (the box tmux could not answer), exiting readCode (the
-// connection's own exit). Each guarded command answers the next of guarded
-// ("" when they run out), exiting the next of guardedCodes (0 when they run
-// out). A buffer load exits loadCode and a publish publishCode. It records
-// every argv.
+// boxTmux is a scripted ExecProvider standing in for a box's tmux. The fence
+// read answers read and each guarded command the next of guarded ("" when
+// they run out). The box shell's tmux exits readTmux for the read, the next
+// of guardedTmux for a guarded command (0 when they run out) and loadTmux for
+// a buffer load, and the shell reports a non-zero one as the carrier's box
+// scripts do; the connection exits readCode, the next of guardedCodes and
+// loadCode. A publish exits publishCode. It records every argv.
 type boxTmux struct {
 	read         string
 	readCode     int
-	noTmux       bool
+	readTmux     int
 	guarded      []string
 	guardedCodes []int
+	guardedTmux  []int
 	loadCode     int
+	loadTmux     int
 	publishCode  int
 	err          error
 	calls        [][]string
@@ -34,33 +37,59 @@ func (b *boxTmux) Exec(_ context.Context, _ string, argv []string) ([]byte, int,
 	}
 	switch {
 	case isFenceRead(argv):
-		if b.noTmux {
-			return []byte(carrierFenceAbsent + "\n"), b.readCode, nil
-		}
-		return []byte(b.read + "\n"), b.readCode, nil
+		return boxShellOutput(b.readTmux, b.read), b.readCode, nil
 	case len(argv) > 2 && argv[0] == "sh" && argv[2] == carrierLoadBufferScript:
-		return nil, b.loadCode, nil
+		return boxShellOutput(b.loadTmux, ""), b.loadCode, nil
 	case len(argv) > 1 && argv[1] == "set-option":
 		return nil, b.publishCode, nil
-	case len(argv) > 1 && argv[1] == "if-shell":
-		code := 0
-		if len(b.guardedCodes) > 0 {
-			code = b.guardedCodes[0]
-			b.guardedCodes = b.guardedCodes[1:]
+	case isGuarded(argv):
+		code, tmuxExit, out := shiftInt(&b.guardedCodes), shiftInt(&b.guardedTmux), ""
+		if len(b.guarded) > 0 {
+			out, b.guarded = b.guarded[0], b.guarded[1:]
 		}
-		if len(b.guarded) == 0 {
-			return nil, code, nil
-		}
-		out := b.guarded[0]
-		b.guarded = b.guarded[1:]
-		return []byte(out), code, nil
+		return boxShellOutput(tmuxExit, out), code, nil
 	}
 	return nil, 0, nil
 }
 
+// boxShellOutput is what a carrier box script prints when its tmux printed
+// out and exited tmuxExit.
+func boxShellOutput(tmuxExit int, out string) []byte {
+	if tmuxExit != 0 {
+		return []byte(carrierTmuxFailed + strconv.Itoa(tmuxExit) + "\n")
+	}
+	return []byte(out + "\n")
+}
+
+// shiftInt removes and returns the first of *s, 0 when it is empty.
+func shiftInt(s *[]int) int {
+	if len(*s) == 0 {
+		return 0
+	}
+	v := (*s)[0]
+	*s = (*s)[1:]
+	return v
+}
+
+// boxTmuxArgs are argv's tmux arguments when argv runs tmux through the
+// carrier's box script (carrierTmuxScript).
+func boxTmuxArgs(argv []string) ([]string, bool) {
+	if len(argv) < 5 || argv[0] != "sh" || argv[1] != "-c" || argv[2] != carrierTmuxScript || argv[3] != "sh" {
+		return nil, false
+	}
+	return argv[4:], true
+}
+
 // isFenceRead reports whether argv is the carrier's fence read.
 func isFenceRead(argv []string) bool {
-	return len(argv) > 2 && argv[0] == "sh" && argv[2] == carrierFenceReadScript
+	args, ok := boxTmuxArgs(argv)
+	return ok && args[0] == "display-message"
+}
+
+// isGuarded reports whether argv is a guarded input command.
+func isGuarded(argv []string) bool {
+	args, ok := boxTmuxArgs(argv)
+	return ok && args[0] == "if-shell"
 }
 
 // deletedBuffers are the buffers the box was told to delete.
@@ -75,16 +104,19 @@ func (b *boxTmux) deletedBuffers() []string {
 }
 
 // inputs are the box commands that type into a pane: send-keys and
-// paste-buffer, bare or inside an if-shell, as the guarded tmux command
-// string.
+// paste-buffer, bare (direct or through the box script) or inside an
+// if-shell, as the guarded tmux command string.
 func (b *boxTmux) inputs() []string {
 	var out []string
 	for _, argv := range b.calls {
+		args, boxed := boxTmuxArgs(argv)
 		switch {
 		case len(argv) > 1 && (argv[1] == "send-keys" || argv[1] == "paste-buffer"):
 			out = append(out, "BARE "+strings.Join(argv[1:], " "))
-		case len(argv) > 6 && argv[1] == "if-shell":
-			out = append(out, argv[6])
+		case boxed && (args[0] == "send-keys" || args[0] == "paste-buffer"):
+			out = append(out, "BARE "+strings.Join(args, " "))
+		case boxed && len(args) > 5 && args[0] == "if-shell":
+			out = append(out, args[5])
 		}
 	}
 	return out
@@ -105,7 +137,7 @@ func TestTmuxCarrierFencedNudgeGuardsEveryInput(t *testing.T) {
 	if err := c.NudgeFenced(context.Background(), "s", TextContent("hi; it's -x"), carrierFence); err != nil {
 		t.Fatalf("NudgeFenced: %v", err)
 	}
-	if got := box.calls[0]; !slices.Equal(got, []string{"sh", "-c", carrierFenceReadScript, "sh", "main", TmuxFenceReadFormat}) {
+	if got := box.calls[0]; !slices.Equal(got, []string{"sh", "-c", carrierTmuxScript, "sh", "display-message", "-p", "-t", "main", TmuxFenceReadFormat}) {
 		t.Fatalf("first call = %q, want the fence read", got)
 	}
 	load := box.calls[1]
@@ -121,7 +153,8 @@ func TestTmuxCarrierFencedNudgeGuardsEveryInput(t *testing.T) {
 		t.Fatalf("inputs = %q, want %q", got, want)
 	}
 	for _, argv := range box.calls[2:] {
-		if argv[4] != "%3" || !strings.Contains(argv[5], carrierFence.Digest()+".#{pane_id}") || !strings.Contains(argv[5], "#{==:#{pane_id},%3}") {
+		args, _ := boxTmuxArgs(argv)
+		if !isGuarded(argv) || args[3] != "%3" || !strings.Contains(args[4], carrierFence.Digest()+".#{pane_id}") || !strings.Contains(args[4], "#{==:#{pane_id},%3}") {
 			t.Errorf("guard %q does not condition on pane %%3 holding the fence", argv)
 		}
 		if strings.Contains(strings.Join(argv, " "), carrierFence.Token) {
@@ -173,24 +206,22 @@ func TestTmuxCarrierMissAfterTextIsPartial(t *testing.T) {
 
 // Kills a fenced op that sends input after a read that does not prove the
 // fence: another incarnation, a pane with no own fence (no adoption over the
-// carrier), a dead pane, no session, or a box tmux that cannot answer (no
-// server, no session: the read script's absent sentinel).
+// carrier), a dead pane, or no session (a live box tmux answering with no
+// pane).
 func TestTmuxCarrierFenceReadMissesSendNothing(t *testing.T) {
 	other := InputFence{Generation: 1, Epoch: 1, Token: "old"}
 	for name, tc := range map[string]struct {
-		read   string
-		noTmux bool
-		found  string
+		read  string
+		found string
 	}{
 		"other":     {read: ownRead(other, "%3"), found: other.Digest()},
 		"inherited": {read: carrierFence.Digest() + ".%9|%3|0", found: FenceFoundUnproven},
 		"none":      {read: "|%3|0", found: FenceFoundUnproven},
 		"dead":      {read: carrierFence.Digest() + ".%3|%3|1", found: FenceFoundDead},
 		"absent":    {read: "||", found: FenceFoundAbsent},
-		"no tmux":   {noTmux: true, found: FenceFoundAbsent},
 	} {
 		for op, call := range carrierOps() {
-			box := &boxTmux{read: tc.read, noTmux: tc.noTmux}
+			box := &boxTmux{read: tc.read}
 			err := call(NewTmuxCarrier(box, "main"), carrierFence)
 			var miss *FenceMismatchError
 			if !errors.As(err, &miss) || miss.Found != tc.found || miss.Partial {
@@ -290,33 +321,52 @@ func TestTmuxCarrierPublishInputFence(t *testing.T) {
 }
 
 // Kills a fence read that takes a box it cannot read for an absent one: the
-// connection's own non-zero exit (ssh 255, kubectl or docker exec 1) or
-// output that is no fence read leaves the incarnation unproven, so it is
-// ErrRuntimeUnavailable, never a miss, and nothing is sent.
+// connection's own non-zero exit (ssh 255, kubectl or docker exec 1), tmux in
+// the box failing (no server, a wrong socket, no tmux binary), or output that
+// is no fence read leaves the incarnation unproven, so it is
+// ErrRuntimeUnavailable, never a miss and never gone, and nothing is sent.
+// Every unanswered read is a whole *CarrierFenceUnreadError, which the
+// provider owning the connection may check against the box's existence.
 func TestTmuxCarrierUnreadableFenceIsUnavailable(t *testing.T) {
-	for name, box := range map[string]*boxTmux{
-		"ssh exit":   {read: "", readCode: 255},
-		"exec exit":  {read: ownRead(carrierFence, "%3"), readCode: 1},
-		"bad output": {read: "garbage"},
+	for name, tc := range map[string]struct {
+		box    boxTmux
+		unread bool
+	}{
+		"ssh exit":   {box: boxTmux{read: "", readCode: 255}, unread: true},
+		"exec exit":  {box: boxTmux{read: ownRead(carrierFence, "%3"), readCode: 1}, unread: true},
+		"no server":  {box: boxTmux{readTmux: 1}, unread: true},
+		"no tmux":    {box: boxTmux{readTmux: 127}, unread: true},
+		"bad output": {box: boxTmux{read: "garbage"}},
 	} {
 		for op, call := range carrierOps() {
-			b := *box
+			b := tc.box
 			err := call(NewTmuxCarrier(&b, "main"), carrierFence)
 			if !errors.Is(err, ErrRuntimeUnavailable) || errors.Is(err, ErrFenceMismatch) || IsSessionGone(err) {
 				t.Errorf("%s/%s: %v, want ErrRuntimeUnavailable", name, op, err)
+			}
+			var unread *CarrierFenceUnreadError
+			if got := errors.As(err, &unread); got != tc.unread || got != errors.Is(err, ErrCarrierFenceUnread) || (got && (unread.Partial || unread.Session != "s")) {
+				t.Errorf("%s/%s: %v, want an unread error %v (whole, naming s)", name, op, err, tc.unread)
 			}
 			if len(b.calls) != 1 {
 				t.Errorf("%s/%s: calls %q, want the read alone", name, op, b.calls)
 			}
 		}
 	}
+	// A session whose name holds a phrase IsSessionGone reads as gone is
+	// still unavailable.
+	b := boxTmux{readTmux: 1}
+	if err := NewTmuxCarrier(&b, "main").InterruptFenced(context.Background(), "box not found", carrierFence); IsSessionGone(err) || !errors.Is(err, ErrCarrierFenceUnread) {
+		t.Errorf("unanswered read of %q = %v, want unread and not gone", "box not found", err)
+	}
 }
 
-// Kills a guarded send whose failure reads as delivery, or whose staged
-// buffer outlives it: a non-zero exit of the guarded command (tmux cannot
-// resolve the pane, or the inner command failed) is a miss finding the pane
-// absent, partial after earlier input; output that is neither empty nor a
-// miss is ErrRuntimeUnavailable; a miss read that cannot be parsed is
+// Kills a guarded send whose failure reads as delivery or as absence, or
+// whose staged buffer outlives it: a guarded command or buffer load the box
+// did not answer (the connection's non-zero exit, or tmux in the box failing,
+// as when its server died after the read) is a *CarrierFenceUnreadError,
+// partial after earlier input, and never a miss; output that is neither empty
+// nor a miss is ErrRuntimeUnavailable; a miss read that cannot be parsed is
 // unproven; and every failed paste deletes its buffer.
 func TestTmuxCarrierGuardedSendFailures(t *testing.T) {
 	ctx := context.Background()
@@ -327,6 +377,13 @@ func TestTmuxCarrierGuardedSendFailures(t *testing.T) {
 			t.Errorf("%s = %v, want a miss finding %s (partial %v)", label, err, found, partial)
 		}
 	}
+	wantUnread := func(t *testing.T, label string, err error, partial bool) {
+		t.Helper()
+		var unread *CarrierFenceUnreadError
+		if !errors.As(err, &unread) || unread.Partial != partial || !errors.Is(err, ErrRuntimeUnavailable) || errors.Is(err, ErrFenceMismatch) || IsSessionGone(err) {
+			t.Errorf("%s = %v, want unread (partial %v), never a miss", label, err, partial)
+		}
+	}
 	pasteBuffer := func(b *boxTmux) string {
 		for _, argv := range b.calls {
 			if len(argv) > 2 && argv[0] == "sh" && argv[2] == carrierLoadBufferScript {
@@ -335,20 +392,28 @@ func TestTmuxCarrierGuardedSendFailures(t *testing.T) {
 		}
 		return ""
 	}
-
-	box := &boxTmux{read: ownRead(carrierFence, "%3"), guardedCodes: []int{1}}
-	wantMiss(t, "paste exiting 1", NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence), FenceFoundAbsent, false)
-	if buf := pasteBuffer(box); buf == "" || !slices.Equal(box.deletedBuffers(), []string{buf}) {
-		t.Errorf("paste exiting 1 deleted %q, want its buffer %q", box.deletedBuffers(), buf)
+	unanswered := map[string]func() *boxTmux{
+		"the connection exiting 255": func() *boxTmux { return &boxTmux{read: ownRead(carrierFence, "%3"), guardedCodes: []int{255}} },
+		"the box tmux exiting 1":     func() *boxTmux { return &boxTmux{read: ownRead(carrierFence, "%3"), guardedTmux: []int{1}} },
 	}
 
-	box = &boxTmux{read: ownRead(carrierFence, "%3"), guardedCodes: []int{0, 1}}
-	wantMiss(t, "Enter exiting 1", NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence), FenceFoundAbsent, true)
+	for label, newBox := range unanswered {
+		box := newBox()
+		wantUnread(t, "paste with "+label, NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence), false)
+		if buf := pasteBuffer(box); buf == "" || !slices.Equal(box.deletedBuffers(), []string{buf}) {
+			t.Errorf("paste with %s deleted %q, want its buffer %q", label, box.deletedBuffers(), buf)
+		}
+		for op, call := range carrierOps() {
+			wantUnread(t, op+" with "+label, call(NewTmuxCarrier(newBox(), "main"), carrierFence), false)
+		}
+	}
+
+	box := &boxTmux{read: ownRead(carrierFence, "%3"), guardedCodes: []int{0, 255}}
+	wantUnread(t, "Enter with the connection exiting 255", NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence), true)
+	box = &boxTmux{read: ownRead(carrierFence, "%3"), guardedTmux: []int{0, 1}}
+	wantUnread(t, "Enter with the box tmux exiting 1", NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence), true)
 
 	for op, call := range carrierOps() {
-		box = &boxTmux{read: ownRead(carrierFence, "%3"), guardedCodes: []int{1}}
-		wantMiss(t, op+" exiting 1", call(NewTmuxCarrier(box, "main"), carrierFence), FenceFoundAbsent, false)
-
 		box = &boxTmux{read: ownRead(carrierFence, "%3"), guarded: []string{"surprise"}}
 		if err := call(NewTmuxCarrier(box, "main"), carrierFence); !errors.Is(err, ErrRuntimeUnavailable) || errors.Is(err, ErrFenceMismatch) {
 			t.Errorf("%s with unexpected output = %v, want ErrRuntimeUnavailable", op, err)
@@ -358,17 +423,18 @@ func TestTmuxCarrierGuardedSendFailures(t *testing.T) {
 		wantMiss(t, op+" with an unparseable miss", call(NewTmuxCarrier(box, "main"), carrierFence), FenceFoundUnproven, false)
 	}
 
-	box = &boxTmux{read: ownRead(carrierFence, "%3"), loadCode: 1}
-	err := NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence)
-	if !errors.Is(err, ErrRuntimeUnavailable) || errors.Is(err, ErrFenceMismatch) {
-		t.Errorf("NudgeFenced with the buffer load failing = %v, want ErrRuntimeUnavailable", err)
-	}
-	if got := box.inputs(); len(got) != 0 {
-		t.Errorf("inputs after a failed buffer load = %q, want none", got)
+	for label, box := range map[string]*boxTmux{
+		"the connection exiting 1": {read: ownRead(carrierFence, "%3"), loadCode: 1},
+		"the box tmux exiting 1":   {read: ownRead(carrierFence, "%3"), loadTmux: 1},
+	} {
+		wantUnread(t, "buffer load with "+label, NewTmuxCarrier(box, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence), false)
+		if got := box.inputs(); len(got) != 0 {
+			t.Errorf("inputs after a buffer load with %s = %q, want none", label, got)
+		}
 	}
 
 	flaky := &flakyBox{boxTmux: boxTmux{read: ownRead(carrierFence, "%3")}, failIfShell: errBoom}
-	err = NewTmuxCarrier(flaky, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence)
+	err := NewTmuxCarrier(flaky, "main").NudgeFenced(ctx, "s", TextContent("hi"), carrierFence)
 	if !errors.Is(err, ErrRuntimeUnavailable) || !errors.Is(err, errBoom) {
 		t.Errorf("NudgeFenced with the guarded paste's connection failing = %v, want ErrRuntimeUnavailable wrapping it", err)
 	}
@@ -384,7 +450,7 @@ type flakyBox struct {
 }
 
 func (b *flakyBox) Exec(ctx context.Context, name string, argv []string) ([]byte, int, error) {
-	if len(argv) > 1 && argv[1] == "if-shell" {
+	if isGuarded(argv) {
 		b.calls = append(b.calls, argv)
 		return nil, -1, b.failIfShell
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 )
@@ -12,23 +13,54 @@ import (
 // The box carrier's fenced input (RUNTIME-CONTRACT-009): the same guard the
 // local tmux provider runs, issued over the box connection. A fenced
 // operation reads the box tmux's agent pane once ("display-message" of
-// TmuxFenceReadFormat on the carrier's target, run by a box shell that
-// reports a tmux unable to answer as carrierFenceAbsent, so that the
-// connection's own non-zero exit stays distinct) and needs it live and holding
+// TmuxFenceReadFormat on the carrier's target) and needs it live and holding
 // the fence as its own value; then every input command runs inside one
 // if-shell -F on that pane's id and fence (TmuxGuardedInputArgs), so a pane
 // respawned as another incarnation between the read and a send takes nothing.
-// Text reaches tmux through a named buffer loaded by a box shell from its
-// argv, never through a tmux command string. Unlike the tmux provider, the
-// carrier never adopts a fence from the box's session environment: a pane
-// with no own fence (started before the carrier published one) is unproven
-// until the agent is relaunched.
+// Each of these tmux commands runs in a box shell that reports tmux's own
+// failure (carrierTmuxFailed), so a command the box did not answer, whether
+// the connection exited non-zero or tmux in the box failed, is a
+// *CarrierFenceUnreadError and never an absent miss: absence is only what a
+// live box tmux answers. An Exec error instead (a spawn or transport failure,
+// a timeout, a cancel) is transport's plain ErrRuntimeUnavailable, which does
+// not say whether part of the input went in first. Text reaches tmux through
+// a named buffer loaded by a box shell from its argv, never through a tmux
+// command string. Unlike the tmux provider, the carrier never adopts a fence
+// from the box's session environment: a pane with no own fence (started
+// before the carrier published one) is unproven until the agent is relaunched.
 
-// ErrCarrierFenceUnread marks a carrier fence read the box connection did
-// not answer (its own non-zero exit), wrapped with ErrRuntimeUnavailable.
-// Nothing was sent; the provider that owns the connection may still tell an
-// absent box apart (exec asks its pack's is-running).
-var ErrCarrierFenceUnread = errors.New("the box connection did not answer the fence read")
+// ErrCarrierFenceUnread marks a fenced carrier command the box did not
+// answer (CarrierFenceUnreadError).
+var ErrCarrierFenceUnread = errors.New("the box did not answer a fenced input command")
+
+// CarrierFenceUnreadError is a fenced carrier command the box did not answer:
+// the connection's own non-zero exit (ssh 255, kubectl or docker exec 1), or
+// tmux in the box failing (no server, a wrong socket, no tmux binary). It
+// cannot tell an absent incarnation from an outage, so it is
+// ErrRuntimeUnavailable and ErrCarrierFenceUnread, never a miss and never
+// gone; the provider that owns the connection may still tell an absent box
+// apart (exec asks its pack's is-running). Partial reports that some of the
+// operation's effect was applied first, as FenceMismatchError's does.
+type CarrierFenceUnreadError struct {
+	Session string
+	Partial bool
+	// Detail names the unanswered command and how it failed.
+	Detail string
+}
+
+// Error names the session and the unanswered command; never a token.
+func (e *CarrierFenceUnreadError) Error() string {
+	partial := ""
+	if e.Partial {
+		partial = ", after partial input"
+	}
+	return fmt.Sprintf("%s: fenced input to %q: %s: %s%s", ErrRuntimeUnavailable.Error(), e.Session, ErrCarrierFenceUnread.Error(), e.Detail, partial)
+}
+
+// Unwrap is ErrRuntimeUnavailable and ErrCarrierFenceUnread.
+func (e *CarrierFenceUnreadError) Unwrap() []error {
+	return []error{ErrRuntimeUnavailable, ErrCarrierFenceUnread}
+}
 
 // carrierBufferSeq numbers the carrier's paste buffers.
 var carrierBufferSeq atomic.Uint64
@@ -38,20 +70,21 @@ func carrierBufferName() string {
 	return fmt.Sprintf("gc-nudge-%d-c%d", os.Getpid(), carrierBufferSeq.Add(1))
 }
 
-// carrierFenceAbsent is what carrierFenceReadScript prints when tmux in the
-// box fails for any reason: no server or no session, but also a missing tmux
-// binary, an unreachable socket or a protocol mismatch. Each reads as an
-// absent target.
-const carrierFenceAbsent = "gc-fence-absent"
+// carrierTmuxFailed starts the last line a carrier box script prints when
+// its tmux fails, followed by tmux's exit status. The script itself then
+// exits 0, so a non-zero exit is the connection's own.
+const carrierTmuxFailed = "gc-tmux-failed:"
 
-// carrierFenceReadScript reads the pane its first argument targets in the
-// format its second names, printing carrierFenceAbsent when tmux fails. It
-// exits 0 whenever the box ran it, so a non-zero exit is the connection's.
-const carrierFenceReadScript = `tmux display-message -p -t "$1" "$2" 2>/dev/null || echo ` + carrierFenceAbsent
+// carrierTmuxReport ends a carrier box script: it drops tmux's stderr and
+// reports a tmux that failed as carrierTmuxFailed and its exit status.
+const carrierTmuxReport = ` 2>/dev/null || echo "` + carrierTmuxFailed + `$?"`
+
+// carrierTmuxScript runs tmux with the script's arguments.
+const carrierTmuxScript = `tmux "$@"` + carrierTmuxReport
 
 // carrierLoadBufferScript loads its first argument into the buffer its
 // second names, byte for byte (printf, not echo, and no tmux parsing).
-const carrierLoadBufferScript = `printf '%s' "$1" | tmux load-buffer -b "$2" -`
+const carrierLoadBufferScript = `printf '%s' "$1" | tmux load-buffer -b "$2" -` + carrierTmuxReport
 
 // carrierGuard is one fenced operation on one box session: the digest and
 // the pane its read proved, and whether any of its effect was applied.
@@ -84,10 +117,16 @@ func (g *carrierGuard) miss(found string) error {
 	return &FenceMismatchError{Session: g.name, Found: found, Partial: g.applied}
 }
 
+// unread is the operation's error for a command the box did not answer.
+func (g *carrierGuard) unread(detail string) error {
+	return &CarrierFenceUnreadError{Session: g.name, Partial: g.applied, Detail: detail}
+}
+
 // transport is what a fenced operation reports for a connection failure: a
 // pack without the exec op cannot fence (ErrInputFenceUnsupported); any
 // other failure left the incarnation unproven, so it is
-// ErrRuntimeUnavailable, never a miss and never gone.
+// ErrRuntimeUnavailable, never a miss and never gone. It does not carry
+// Partial: input applied before the failure goes unreported.
 func (g *carrierGuard) transport(err error) error {
 	if errors.Is(err, ErrExecUnsupported) {
 		return fmt.Errorf("session %q: %w: %w", g.name, ErrInputFenceUnsupported, err)
@@ -95,26 +134,46 @@ func (g *carrierGuard) transport(err error) error {
 	return fmt.Errorf("%w: fenced input to %q: %w", ErrRuntimeUnavailable, g.name, err)
 }
 
+// tmux runs tmux with args in a box shell (carrierTmuxScript) and returns
+// what it printed (answer).
+func (g *carrierGuard) tmux(ctx context.Context, step string, args ...string) (string, error) {
+	out, code, err := g.c.conn.Exec(ctx, g.name, append([]string{"sh", "-c", carrierTmuxScript, "sh"}, args...))
+	return g.answer(step, out, code, err)
+}
+
+// answer is the trimmed output of a carrier box script the connection ran
+// for step. A connection failure is transport's; the connection's non-zero
+// exit, or a last line reporting tmux's failure (carrierTmuxFailed), is a
+// command the box did not answer (unread).
+func (g *carrierGuard) answer(step string, out []byte, code int, err error) (string, error) {
+	switch {
+	case err != nil:
+		return "", g.transport(err)
+	case code != 0:
+		return "", g.unread(fmt.Sprintf("%s: the box connection exited %d", step, code))
+	}
+	trimmed := strings.TrimSpace(string(out))
+	status, reported := strings.CutPrefix(trimmed[strings.LastIndexByte(trimmed, '\n')+1:], carrierTmuxFailed)
+	if _, parseErr := strconv.ParseUint(status, 10, 8); reported && parseErr == nil {
+		return "", g.unread(fmt.Sprintf("%s: tmux in the box exited %s", step, status))
+	}
+	return trimmed, nil
+}
+
 // verify is the operation's precheck: the carrier target's pane must be live
-// and hold the guard's digest as its own fence. A box tmux that cannot
-// answer for the target (any tmux failure in the box) finds it absent. A read the
-// box did not answer (the connection's non-zero exit) or answered with
-// something else cannot tell, so it is ErrRuntimeUnavailable.
+// and hold the guard's digest as its own fence. A box tmux answering with no
+// pane for the target finds it absent; a read the box did not answer is
+// unread, and one answered with something else cannot tell either, so it is
+// ErrRuntimeUnavailable.
 func (g *carrierGuard) verify(ctx context.Context) error {
-	out, code, err := g.c.conn.Exec(ctx, g.name, []string{"sh", "-c", carrierFenceReadScript, "sh", g.c.target, TmuxFenceReadFormat})
+	out, err := g.tmux(ctx, "reading the fence", "display-message", "-p", "-t", g.c.target, TmuxFenceReadFormat)
 	if err != nil {
-		return g.transport(err)
+		return err
 	}
-	if code != 0 {
-		return fmt.Errorf("%w: %w: reading input fence of %q: exit %d", ErrRuntimeUnavailable, ErrCarrierFenceUnread, g.name, code)
-	}
-	if strings.TrimSpace(string(out)) == carrierFenceAbsent {
-		return g.miss(FenceFoundAbsent)
-	}
-	r, ok := ParseTmuxFenceRead(string(out))
+	r, ok := ParseTmuxFenceRead(out)
 	switch {
 	case !ok:
-		return fmt.Errorf("%w: reading input fence of %q: unexpected tmux output %q", ErrRuntimeUnavailable, g.name, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%w: reading input fence of %q: unexpected tmux output %q", ErrRuntimeUnavailable, g.name, out)
 	case r.Absent() || r.Dead:
 		return g.miss(r.Found())
 	case r.Own() != g.digest:
@@ -126,30 +185,27 @@ func (g *carrierGuard) verify(ctx context.Context) error {
 
 // run runs inner as one guarded input command on the proven pane. buffer is
 // the paste buffer inner consumes, deleted when the guard misses or the
-// command fails; text marks input that is the operation's effect.
+// command fails; text marks input that is the operation's effect. A guarded
+// command the box did not answer (tmux in the box failing, as when its server
+// died after the read) is unread, never a miss: tmux answers a pane it
+// cannot resolve through the guard's false branch.
 func (g *carrierGuard) run(ctx context.Context, inner []string, buffer string) error {
 	guarded, err := TmuxGuardedInputArgs(g.pane, g.pane, g.digest, inner, buffer)
 	if err != nil {
 		g.deleteBuffer(buffer)
 		return err
 	}
-	out, code, err := g.c.conn.Exec(ctx, g.name, append([]string{"tmux"}, guarded...))
+	out, err := g.tmux(ctx, "a guarded input command", guarded...)
 	if err != nil {
 		g.deleteBuffer(buffer)
-		return g.transport(err)
+		return err
 	}
-	if code != 0 {
-		// tmux cannot resolve the pane id (or no server answers): the agent
-		// pane is gone.
-		g.deleteBuffer(buffer)
-		return g.miss(FenceFoundAbsent)
-	}
-	switch trimmed := strings.TrimSpace(string(out)); {
-	case trimmed == "":
+	switch {
+	case out == "":
 		g.applied = true
 		return nil
-	case strings.HasPrefix(trimmed, TmuxFenceMissPrefix):
-		r, ok := ParseTmuxFenceRead(strings.TrimPrefix(trimmed, TmuxFenceMissPrefix))
+	case strings.HasPrefix(out, TmuxFenceMissPrefix):
+		r, ok := ParseTmuxFenceRead(strings.TrimPrefix(out, TmuxFenceMissPrefix))
 		switch {
 		case !ok:
 			return g.miss(FenceFoundUnproven)
@@ -160,19 +216,16 @@ func (g *carrierGuard) run(ctx context.Context, inner []string, buffer string) e
 		}
 		return g.miss(r.Found())
 	default:
-		return fmt.Errorf("%w: fenced input to %q: unexpected tmux output %q", ErrRuntimeUnavailable, g.name, trimmed)
+		return fmt.Errorf("%w: fenced input to %q: unexpected tmux output %q", ErrRuntimeUnavailable, g.name, out)
 	}
 }
 
 // paste loads text into a new buffer and pastes it, guarded.
 func (g *carrierGuard) paste(ctx context.Context, text string) error {
 	buffer := carrierBufferName()
-	_, code, err := g.c.conn.Exec(ctx, g.name, []string{"sh", "-c", carrierLoadBufferScript, "sh", text, buffer})
-	switch {
-	case err != nil:
-		return g.transport(err)
-	case code != 0:
-		return fmt.Errorf("%w: fenced input to %q: loading a tmux paste buffer exited %d", ErrRuntimeUnavailable, g.name, code)
+	out, code, err := g.c.conn.Exec(ctx, g.name, []string{"sh", "-c", carrierLoadBufferScript, "sh", text, buffer})
+	if _, err = g.answer("loading a paste buffer", out, code, err); err != nil {
+		return err
 	}
 	return g.run(ctx, []string{"paste-buffer", "-d", "-r", "-b", buffer, "-t", g.pane}, buffer)
 }

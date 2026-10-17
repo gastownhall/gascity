@@ -469,7 +469,8 @@ const peekBarrierWait = 2 * time.Second
 // for Peek to show it, returning that output. Input sent before the barrier
 // has reached the session by then, so a case can confirm delivery or
 // non-delivery from it. False when sp's Peek never shows nudged text (a
-// runtime with no visible input), so the case cannot confirm by peeking.
+// runtime with no visible input), so the case cannot confirm by peeking; the
+// log then names the input fencing the case relied on instead.
 func peekBarrier(t *testing.T, sp runtime.Provider, name string) (string, bool) {
 	t.Helper()
 	marker := "barrier-" + name
@@ -478,7 +479,7 @@ func peekBarrier(t *testing.T, sp runtime.Provider, name string) (string, bool) 
 		send = now.NudgeNow
 	}
 	if err := send(name, runtime.TextContent(marker)); err != nil {
-		t.Logf("barrier nudge: %v; delivery not confirmed by Peek", err)
+		t.Logf("barrier nudge: %v; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", err, runtime.InputFencingFor(sp, name))
 		return "", false
 	}
 	deadline := time.Now().Add(peekBarrierWait)
@@ -488,7 +489,7 @@ func peekBarrier(t *testing.T, sp runtime.Provider, name string) (string, bool) 
 			return out, true
 		}
 		if time.Now().After(deadline) {
-			t.Logf("Peek never showed the barrier nudge; delivery not confirmed by Peek")
+			t.Logf("Peek never showed the barrier nudge; delivery not confirmed by Peek, only by the fenced calls' results (input fencing %q)", runtime.InputFencingFor(sp, name))
 			return "", false
 		}
 		time.Sleep(50 * time.Millisecond)

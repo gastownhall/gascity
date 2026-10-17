@@ -32,7 +32,7 @@ sock="$box/s"
 real_tmux=$(command -v tmux)
 bt() { "$real_tmux" -u -S "$sock" "$@"; }
 case "$op" in
-  protocol) printf '%%s' '{"version":0,"capabilities":["proc.exec"]}'; exit 0 ;;
+  protocol) printf '%%s' '{"version":0,"capabilities":["proc.exec","input-fence"]}'; exit 0 ;;
   start)
     if [ ! -f "$STATE/$name.running" ]; then
       mkdir -p "$box/bin"

@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -54,7 +55,7 @@ func newLocalBox(t *testing.T) *localBox {
 }
 
 func (b *localBox) Exec(ctx context.Context, _ string, argv []string) ([]byte, int, error) {
-	if b.beforeGuard != nil && len(argv) > 1 && argv[1] == "if-shell" {
+	if b.beforeGuard != nil && slices.Contains(argv, "if-shell") {
 		hook := b.beforeGuard
 		b.beforeGuard = nil
 		hook()
@@ -139,11 +140,12 @@ func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 	}
 }
 
-// Kills a carrier that reads a box tmux gone between the fence read and the
-// send as delivery: real tmux's if-shell with no server exits 1 with no
-// output, which is a miss finding the pane absent. A read with no server at
-// all finds it absent too, through the read script's sentinel.
-func TestCarrierFencedInputRealTmuxServerGoneIsAbsent(t *testing.T) {
+// Kills a carrier that reads a box tmux it could not reach as an answer:
+// real tmux with no server exits 1, which the box shell reports, so a
+// guarded command after the server died and a fence read with no server are
+// both unread (ErrRuntimeUnavailable), neither a miss nor gone. Only a live
+// server without the agent's session answers that the pane is absent.
+func TestCarrierFencedInputRealTmuxServerGoneIsUnread(t *testing.T) {
 	box := newLocalBox(t)
 	box.mustTmux("new-session", "-d", "-s", "main", "-x", "200", "-y", "20", "cat")
 	c := runtime.NewTmuxCarrier(box, "main")
@@ -151,14 +153,21 @@ func TestCarrierFencedInputRealTmuxServerGoneIsAbsent(t *testing.T) {
 	if err := c.PublishInputFence(context.Background(), "s", f); err != nil {
 		t.Fatalf("PublishInputFence: %v", err)
 	}
-	box.beforeGuard = func() { box.mustTmux("kill-server") }
-	err := c.SendKeysFenced(context.Background(), "s", f, "Enter")
 	var miss *runtime.FenceMismatchError
-	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
-		t.Fatalf("SendKeysFenced after the server died = %v, want a whole miss finding the pane absent", err)
+	unread := func(op string, err error) {
+		t.Helper()
+		var u *runtime.CarrierFenceUnreadError
+		if !errors.As(err, &u) || u.Partial || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.As(err, &miss) || runtime.IsSessionGone(err) {
+			t.Fatalf("%s = %v, want a whole unread command (ErrRuntimeUnavailable), neither a miss nor gone", op, err)
+		}
 	}
-	err = c.NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), f)
+	box.beforeGuard = func() { box.mustTmux("kill-server") }
+	unread("SendKeysFenced after the server died", c.SendKeysFenced(context.Background(), "s", f, "Enter"))
+	unread("NudgeFenced with no server", c.NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), f))
+
+	box.mustTmux("new-session", "-d", "-s", "other", "-x", "200", "-y", "20", "cat")
+	err := c.NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), f)
 	if !errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial {
-		t.Fatalf("NudgeFenced with no server = %v, want a whole miss finding the pane absent", err)
+		t.Fatalf("NudgeFenced with the session gone from a live server = %v, want a whole miss finding the pane absent", err)
 	}
 }

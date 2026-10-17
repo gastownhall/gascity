@@ -14,14 +14,14 @@ import (
 
 var execFence = runtime.InputFence{Generation: 2, Epoch: 3, Token: "tok"}
 
-// boxScript is a pack declaring the exec connection whose exec op logs each
-// in-box command to calls and answers the fence read with read and a guarded
-// command with guarded. separable adds proc.provision.
+// boxScript is a pack declaring the exec connection and input fencing whose
+// exec op logs each in-box command to calls and answers the fence read with
+// read and a guarded command with guarded. separable adds proc.provision.
 func boxScript(t *testing.T, read, guarded string, separable bool) (script, calls string) {
 	t.Helper()
 	dir := t.TempDir()
 	calls = filepath.Join(dir, "calls")
-	caps := `"proc.exec"`
+	caps := `"proc.exec","input-fence"`
 	if separable {
 		caps += `,"proc.provision"`
 	}
@@ -63,36 +63,47 @@ func ownRead(f runtime.InputFence) string {
 }
 
 // Kills an exec provider whose fencing does not follow its pack: a pack
-// declaring the exec connection is atomic (the tmux carrier guard), and one
-// without it cannot fence and refuses before running anything.
-func TestExecInputFencingFollowsTheExecConnection(t *testing.T) {
+// declaring the exec connection and input fencing (input-fence) is atomic
+// (the tmux carrier guard); one declaring the exec connection alone, whose
+// box tmux need not hold a fence, or no handshake at all cannot fence and
+// refuses before running anything.
+func TestExecInputFencingFollowsTheInputFenceCapability(t *testing.T) {
 	script, _ := boxScript(t, "", "", false)
 	for name, p := range map[string]runtime.Provider{"raw": NewProvider(script), "seam-backed": NewSeamBacked(script)} {
 		if got := runtime.InputFencingFor(p, "s"); got != runtime.InputFencingAtomic {
 			t.Errorf("%s: fencing = %q, want atomic", name, got)
 		}
 	}
-	dir := t.TempDir()
-	calls := filepath.Join(dir, "calls")
-	legacy := writeScript(t, dir, `[ "$1" = protocol ] && exit 2
-echo "$1" >> `+calls+`
-`)
-	p := NewSeamBacked(legacy)
-	if got := runtime.InputFencingFor(p, "s"); got != runtime.InputFencingNone {
-		t.Fatalf("legacy pack fencing = %q, want none", got)
-	}
-	fp := p.(runtime.FencedInputProvider)
-	for op, err := range map[string]error{
-		"nudge":     fp.NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), runtime.FencedNudge{Fence: execFence}),
-		"keys":      fp.SendKeysFenced(context.Background(), "s", execFence, "Enter"),
-		"interrupt": fp.InterruptFenced(context.Background(), "s", execFence),
+	for label, protocol := range map[string]string{
+		"exec connection alone": `echo '{"version":0,"capabilities":["proc.exec"]}'`,
+		"input fence alone":     `echo '{"version":0,"capabilities":["input-fence"]}'`,
+		"no handshake":          "exit 2",
 	} {
-		if !errors.Is(err, runtime.ErrInputFenceUnsupported) {
-			t.Errorf("legacy %s = %v, want ErrInputFenceUnsupported", op, err)
+		dir := t.TempDir()
+		calls := filepath.Join(dir, "calls")
+		script := writeScript(t, dir, `
+case "$1" in
+  protocol) `+protocol+` ;;
+  *) echo "$1" >> `+calls+` ;;
+esac
+`)
+		p := NewSeamBacked(script)
+		if got := runtime.InputFencingFor(p, "s"); got != runtime.InputFencingNone {
+			t.Errorf("%s: fencing = %q, want none", label, got)
 		}
-	}
-	if got := readCalls(t, calls); len(got) != 0 {
-		t.Fatalf("legacy pack ran %q under a fence", got)
+		fp := p.(runtime.FencedInputProvider)
+		for op, err := range map[string]error{
+			"nudge":     fp.NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), runtime.FencedNudge{Fence: execFence}),
+			"keys":      fp.SendKeysFenced(context.Background(), "s", execFence, "Enter"),
+			"interrupt": fp.InterruptFenced(context.Background(), "s", execFence),
+		} {
+			if !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+				t.Errorf("%s: %s = %v, want ErrInputFenceUnsupported", label, op, err)
+			}
+		}
+		if got := readCalls(t, calls); len(got) != 0 {
+			t.Errorf("%s: the pack ran %q under a fence", label, got)
+		}
 	}
 }
 
@@ -151,7 +162,7 @@ func TestExecDismissKnownDialogsIsOneFencedOperation(t *testing.T) {
 	guards := filepath.Join(dir, "guards")
 	script := writeScript(t, dir, `
 case "$1" in
-  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
   exec)
     cmd=$(cat)
     echo "$cmd" >> `+calls+`
@@ -175,11 +186,11 @@ esac
 	var reads, guarded int
 	for _, c := range readCalls(t, calls) {
 		switch {
-		case strings.HasPrefix(c, "'sh' '-c' 'tmux display-message"):
+		case strings.Contains(c, "'sh' 'display-message'"):
 			reads++
-		case strings.HasPrefix(c, "'tmux' 'if-shell'"):
+		case strings.Contains(c, "'sh' 'if-shell'"):
 			guarded++
-		case strings.HasPrefix(c, "'tmux' 'send-keys'"):
+		case strings.HasPrefix(c, "'tmux' 'send-keys'"), strings.Contains(c, "'sh' 'send-keys'"):
 			t.Errorf("unguarded dialog key %q", c)
 		}
 	}
@@ -226,38 +237,78 @@ func TestExecStartAndLaunchPublishTheFence(t *testing.T) {
 
 // Kills an exec fenced op that reads a fence read its pack's exec op did not
 // answer as absence, or that never lets the pack say the box is gone: the
-// op's own non-zero exit is ErrRuntimeUnavailable unless is-running answers
+// op's own non-zero exit, and tmux in the box failing (reported by the
+// carrier's box shell), are ErrRuntimeUnavailable unless is-running answers
 // a definite "false", which is a miss finding the box absent.
 func TestExecUnansweredFenceReadAsksIsRunning(t *testing.T) {
-	for answer, wantAbsent := range map[string]bool{"false": true, "true": false, "": false} {
-		dir := t.TempDir()
-		script := writeScript(t, dir, `
+	for shape, exec := range map[string]string{
+		"exec op exiting 255": "cat > /dev/null; exit 255",
+		"box tmux failing":    "cat > /dev/null; echo 'gc-tmux-failed:1'",
+	} {
+		for answer, wantAbsent := range map[string]bool{"false": true, "true": false, "": false} {
+			dir := t.TempDir()
+			script := writeScript(t, dir, `
 case "$1" in
-  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
-  exec) cat > /dev/null; exit 255 ;;
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
+  exec) `+exec+` ;;
   is-running) echo '`+answer+`' ;;
   *) exit 2 ;;
 esac
 `)
-		p := NewProvider(script)
-		ctx := context.Background()
-		for op, err := range map[string]error{
-			"nudge":     p.NudgeFenced(ctx, "s", runtime.TextContent("hi"), runtime.FencedNudge{Fence: execFence}),
-			"keys":      p.SendKeysFenced(ctx, "s", execFence, "Enter"),
-			"interrupt": p.InterruptFenced(ctx, "s", execFence),
-			"dialogs":   p.DismissKnownDialogs(runtime.WithInputFence(ctx, execFence), "s", time.Second),
-		} {
-			var miss *runtime.FenceMismatchError
-			switch {
-			case wantAbsent && (!errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial):
-				t.Errorf("%s, is-running %q: %v, want a whole miss finding the box absent", op, answer, err)
-			case !wantAbsent && (!errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch)):
-				t.Errorf("%s, is-running %q: %v, want ErrRuntimeUnavailable", op, answer, err)
+			p := NewProvider(script)
+			ctx := context.Background()
+			for op, err := range map[string]error{
+				"nudge":     p.NudgeFenced(ctx, "s", runtime.TextContent("hi"), runtime.FencedNudge{Fence: execFence}),
+				"keys":      p.SendKeysFenced(ctx, "s", execFence, "Enter"),
+				"interrupt": p.InterruptFenced(ctx, "s", execFence),
+				"dialogs":   p.DismissKnownDialogs(runtime.WithInputFence(ctx, execFence), "s", time.Second),
+			} {
+				var miss *runtime.FenceMismatchError
+				switch {
+				case wantAbsent && (!errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial):
+					t.Errorf("%s, %s, is-running %q: %v, want a whole miss finding the box absent", shape, op, answer, err)
+				case !wantAbsent && (!errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch) || runtime.IsSessionGone(err)):
+					t.Errorf("%s, %s, is-running %q: %v, want ErrRuntimeUnavailable", shape, op, answer, err)
+				}
+			}
+			fp := NewSeamBacked(script).(runtime.FencedInputProvider)
+			if err := fp.SendKeysFenced(ctx, "s", execFence, "Enter"); wantAbsent != errors.Is(err, runtime.ErrFenceMismatch) {
+				t.Errorf("%s, seam-backed keys, is-running %q: %v", shape, answer, err)
 			}
 		}
-		fp := NewSeamBacked(script).(runtime.FencedInputProvider)
-		if err := fp.SendKeysFenced(ctx, "s", execFence, "Enter"); wantAbsent != errors.Is(err, runtime.ErrFenceMismatch) {
-			t.Errorf("seam-backed keys, is-running %q: %v", answer, err)
+	}
+}
+
+// Kills an exec nudge that loses its partial effect when the box stops
+// answering between the text and its Enter: a definite is-running "false"
+// is a partial miss finding the box absent, and any other answer leaves the
+// partial unread error in place.
+func TestExecUnansweredEnterAfterTheTextIsPartial(t *testing.T) {
+	for answer, wantAbsent := range map[string]bool{"false": true, "true": false} {
+		dir := t.TempDir()
+		script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
+  exec)
+    cmd=$(cat)
+    case "$cmd" in
+      *if-shell*Enter*) exit 255 ;;
+      *if-shell*) ;;
+      *display-message*) echo '`+ownRead(execFence)+`' ;;
+    esac
+    ;;
+  is-running) echo '`+answer+`' ;;
+  *) exit 2 ;;
+esac
+`)
+		err := NewProvider(script).NudgeFenced(context.Background(), "s", runtime.TextContent("hi"), runtime.FencedNudge{Fence: execFence})
+		var miss *runtime.FenceMismatchError
+		var unread *runtime.CarrierFenceUnreadError
+		switch {
+		case wantAbsent && (!errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || !miss.Partial):
+			t.Errorf("is-running %q: %v, want a partial miss finding the box absent", answer, err)
+		case !wantAbsent && (!errors.As(err, &unread) || !unread.Partial || errors.Is(err, runtime.ErrFenceMismatch)):
+			t.Errorf("is-running %q: %v, want a partial unread error", answer, err)
 		}
 	}
 }
@@ -270,7 +321,7 @@ func TestExecStartFailsWhenTheFenceCannotBePublished(t *testing.T) {
 	stops := filepath.Join(dir, "stops")
 	script := writeScript(t, dir, `
 case "$1" in
-  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
   is-running) echo false ;;
   exec)
     cmd=$(cat)
@@ -292,8 +343,52 @@ esac
 	}
 }
 
-// collisionScript is a pack declaring the exec connection whose box is
-// already up: is-running answers running, the fence read answers read, and
+// Kills a start into a box that was already up which, when the new fence
+// cannot be published after the start op returned, leaves the live session
+// without the fence it held: the box is kept, so the fence cleared before the
+// start op goes back on the same pane and root process.
+func TestExecStartRestoresTheLiveFenceWhenThePublishFails(t *testing.T) {
+	old := runtime.InputFence{Generation: 1, Epoch: 1, Token: "old"}
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	stops := filepath.Join(dir, "stops")
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
+  is-running) echo true ;;
+  exec)
+    cmd=$(cat)
+    echo "$cmd" >> `+calls+`
+    case "$cmd" in
+      "'tmux' 'set-option'"*) exit 1 ;;
+      *display-message*) echo '`+old.Digest()+`.%1|%1|4242' ;;
+    esac
+    ;;
+  start) cat > /dev/null ;;
+  stop) echo stop >> `+stops+` ;;
+  *) exit 2 ;;
+esac
+`)
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err == nil {
+		t.Fatal("Start with the fence publish failing = nil, want an error")
+	}
+	restore := shellQuote([]string{
+		"tmux", "if-shell", "-F", "-t", "main",
+		"#{&&:#{==:#{pane_id},%1},#{&&:#{==:#{pane_pid},4242},#{==:#{@gc_fence},}}}",
+		"'set-option' '-p' '-F' '-t' 'main' '@gc_fence' '" + old.Digest() + ".#{pane_id}'",
+	})
+	got := readCalls(t, calls)
+	if len(got) != 3 || !strings.Contains(got[0], "'set-option' '-p' '-u'") || !strings.HasPrefix(got[1], "'tmux' 'set-option' '-p' '-F'") || got[2] != restore {
+		t.Fatalf("Start ran %q, want the fence cleared, the failed publish, then the old fence restored on pane %%1 under pid 4242", got)
+	}
+	if s := readCalls(t, stops); len(s) != 0 {
+		t.Fatalf("stops = %q, want the live box kept", s)
+	}
+}
+
+// collisionScript is a pack declaring the exec connection and input fencing
+// whose box is already up: is-running answers running, the fence read answers read, and
 // the start op fails with startErr (and exit 1). Every in-box command is
 // logged to calls and every stop to stops.
 func collisionScript(t *testing.T, read, startErr string) (script, calls, stops string) {
@@ -303,7 +398,7 @@ func collisionScript(t *testing.T, read, startErr string) (script, calls, stops 
 	stops = filepath.Join(dir, "stops")
 	script = writeScript(t, dir, `
 case "$1" in
-  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  protocol) echo '{"version":0,"capabilities":["proc.exec","input-fence"]}' ;;
   is-running) echo true ;;
   exec)
     cmd=$(cat)
@@ -369,26 +464,52 @@ func TestExecCollidingStartRestoresTheLiveFence(t *testing.T) {
 	}
 }
 
-// Kills a welded start that drives the box tmux of a pack without the exec
-// connection: such a pack cannot fence, so Start neither clears nor
-// publishes a fence, and runs no in-box command.
-func TestExecStartOfAPackWithoutTheExecConnectionTouchesNoFence(t *testing.T) {
-	dir := t.TempDir()
-	calls := filepath.Join(dir, "calls")
-	script := writeScript(t, dir, `
+// Kills a start or launch that drives the box tmux of a pack that cannot
+// fence (no input-fence, with or without the exec connection), whose box
+// tmux need not hold a fence: Start neither clears nor publishes a fence and
+// runs no in-box command, and a separable launch carries no fence command.
+func TestExecStartOfAPackThatCannotFenceTouchesNoFence(t *testing.T) {
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	for label, caps := range map[string]string{"no capabilities": ``, "exec connection alone": `"proc.exec"`} {
+		dir := t.TempDir()
+		calls := filepath.Join(dir, "calls")
+		script := writeScript(t, dir, `
 case "$1" in
-  protocol) echo '{"version":0,"capabilities":[]}' ;;
+  protocol) echo '{"version":0,"capabilities":[`+caps+`]}' ;;
   is-running) echo true ;;
   exec) cat >> `+calls+`; echo >> `+calls+` ;;
   start) cat > /dev/null ;;
   *) exit 2 ;;
 esac
 `)
-	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
-	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err != nil {
-		t.Fatalf("Start: %v", err)
+		if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err != nil {
+			t.Fatalf("%s: Start: %v", label, err)
+		}
+		if got := readCalls(t, calls); len(got) != 0 {
+			t.Fatalf("%s: Start ran %q in the box, want nothing", label, got)
+		}
 	}
-	if got := readCalls(t, calls); len(got) != 0 {
-		t.Fatalf("Start ran %q in the box, want nothing", got)
+
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec","proc.provision"]}' ;;
+  exec) cat >> `+calls+`; echo >> `+calls+` ;;
+  *) exit 2 ;;
+esac
+`)
+	if err := NewProvider(script).launchAgent(context.Background(), "s", runtime.Config{Command: "agent", Env: env}); err != nil {
+		t.Fatalf("launchAgent: %v", err)
+	}
+	launched := false
+	for _, c := range readCalls(t, calls) {
+		launched = launched || strings.HasSuffix(c, "'agent'")
+		if strings.Contains(c, "@gc_fence") || strings.Contains(c, "';'") {
+			t.Errorf("a launch on a pack that cannot fence ran %q, want no fence command", c)
+		}
+	}
+	if !launched {
+		t.Errorf("launchAgent ran %q, want the agent launched", readCalls(t, calls))
 	}
 }

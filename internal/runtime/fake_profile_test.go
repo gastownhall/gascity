@@ -164,13 +164,13 @@ current-context: c
 	}
 }
 
-// execConnectionPack is an exec pack that declares the exec connection
-// (proc.exec) alone, the tmux-in-a-box shape the exec profile models, and
-// answers every other op as /bin/true does.
+// execConnectionPack is an exec pack that declares the exec connection and
+// input fencing (proc.exec, input-fence) alone, the tmux-in-a-box shape the
+// exec profile models, and answers every other op as /bin/true does.
 func execConnectionPack(t *testing.T) string {
 	t.Helper()
 	script := filepath.Join(t.TempDir(), "pack")
-	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\"]}'\nexit 0\n"
+	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\",\"input-fence\"]}'\nexit 0\n"
 	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
 		t.Fatal(err)
 	}

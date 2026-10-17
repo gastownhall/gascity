@@ -128,8 +128,9 @@ func (transportTrait) SupportsTransport(transport string) bool { return transpor
 
 // profileCapabilities are each backend's static capabilities; subprocess
 // has none. exec's come from its script's handshake: the profile is a pack
-// declaring the exec connection (proc.exec) alone, which reports none of
-// these and fences input atomically through the tmux carrier.
+// declaring the exec connection and input fencing (proc.exec, input-fence)
+// alone, which reports none of these and fences input atomically through
+// the tmux carrier.
 var profileCapabilities = map[Profile]ProviderCapabilities{
 	ProfileTmux:     {CanReportAttachment: true, CanReportActivity: true},
 	ProfileACP:      {CanReportActivity: true},
