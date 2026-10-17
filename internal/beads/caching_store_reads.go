@@ -495,6 +495,10 @@ func (c *CachingStore) staleParentCacheIDs(parentID string, fresh []Bead) []stri
 	return stale
 }
 
+// deferredOmittingLister is implemented by backing stores whose
+// status-filtered List omits indefinitely deferred rows by construction.
+type deferredOmittingLister interface{ StatusListOmitsDeferred() bool }
+
 func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string {
 	if !query.Live || query.Limit > 0 || query.IncludesClosed() {
 		return nil
@@ -503,6 +507,11 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 	freshIDs := make(map[string]struct{}, len(fresh))
 	for _, item := range fresh {
 		freshIDs[item.ID] = struct{}{}
+	}
+
+	omitsDeferred := false
+	if l, ok := c.backing.(deferredOmittingLister); ok {
+		omitsDeferred = l.StatusListOmitsDeferred()
 	}
 
 	c.mu.RLock()
@@ -517,6 +526,28 @@ func (c *CachingStore) staleLiveCacheIDs(query ListQuery, fresh []Bead) []string
 			continue
 		}
 		if !query.Matches(bead) {
+			continue
+		}
+		if omitsDeferred && query.Status != "" && bead.IndefinitelyDeferred {
+			// A deferred row is absent from a status-filtered backing list by
+			// construction, not by staleness: bd filters on its own richer
+			// status vocabulary, where the row is "deferred", while
+			// normalizedBdReadState collapses that to Status "open" for us
+			// (bdstore.go) and records the deferral out-of-band. So the cached
+			// row keeps matching a Status "open" query that the backing list
+			// can never answer with it.
+			//
+			// Getting it changes neither fact — the fresh copy normalizes to
+			// the same Status — so it would be re-Got on every live list
+			// forever, one bd show per deferred bead per list. The cached
+			// deferral already explains the absence. A deferral that later
+			// closes is still reconciled by recoverMissingFromList, which
+			// verifies missing rows on the reconciliation cadence.
+			//
+			// The skip applies only when the backing store's status filter
+			// omits deferred rows: a store that returns them (native Dolt) only
+			// drops one after a real status change, which must still be
+			// refreshed.
 			continue
 		}
 		stale = append(stale, id)
