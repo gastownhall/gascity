@@ -1,0 +1,6 @@
+Folder access
+  /home/tester/work
+  Trust this folder? Codex can read, edit, and run files here, ...
+› 1. Trust and continue
+  2. Quit
+  enter continue · esc quit

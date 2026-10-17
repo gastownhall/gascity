@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"strings"
 )
@@ -188,4 +189,30 @@ func containsClaudeSessionLimitDialog(content string) bool {
 	return strings.Contains(content, "hit your session limit") &&
 		strings.Contains(content, "Stop and wait") &&
 		strings.Contains(content, "Upgrade")
+}
+
+// ErrStartupDialogUnanswered reports that a known startup dialog owns a pane's
+// input and could not be answered safely, so nothing was typed into it.
+var ErrStartupDialogUnanswered = errors.New("a startup dialog owns the pane input and could not be answered; nothing was typed")
+
+// StartupDialogOnScreen reports whether screen, a pane's visible screen, shows
+// a known startup dialog (one AcceptStartupDialogs handles) in place of the
+// agent's input prompt, and whether text input may answer it the way startup
+// would. Text typed into such a dialog is read as menu input: Enter confirms
+// whatever row is selected, and a digit can pick another option.
+//
+// A screen that shows an input prompt is not on a startup dialog, whatever its
+// transcript says: a live dialog replaces the prompt, and a dialog's selected
+// "› 1." row is a menu row, not a prompt (see containsPromptIndicator). That
+// keeps the permissive startup matchers away from a working session whose
+// output merely mentions a trust question or a rate limit.
+//
+// A rate-limit dialog is reported as not answerable: startup answers it with
+// "Stop" so the session exits for the reconciler to quarantine, which is not a
+// nudge's call to make.
+func StartupDialogOnScreen(screen string) (shown, answerable bool) {
+	if !containsStartupDialog(screen) || containsPromptIndicator(screen) {
+		return false, false
+	}
+	return true, !ContainsRateLimitDialog(screen)
 }

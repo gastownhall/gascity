@@ -95,6 +95,7 @@ go_test(
         "nudge_poke_integration_test.go",
         "nudge_prompt_guard_test.go",
         "nudge_staged_draft_integration_test.go",
+        "nudge_startup_dialog_test.go",
         "nudge_submit_confirm_integration_test.go",
         "nudge_submit_confirm_test.go",
         "nudge_submit_key_sequence_integration_test.go",

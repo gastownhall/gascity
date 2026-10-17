@@ -231,3 +231,33 @@ func TestDismissMidSessionDialogsPropagatesSendKeysError(t *testing.T) {
 		t.Error("dismissed = true on send error, want false")
 	}
 }
+
+// StartupDialogOnScreen gates a nudge's answering of startup dialogs, which
+// use permissive matchers, so it must only fire on a screen the dialog owns.
+func TestStartupDialogOnScreen(t *testing.T) {
+	codexTrust := "Folder access\n" +
+		"  /home/tester/work\n" +
+		"  Trust this folder? Codex can read, edit, and run files here, ...\n" +
+		"› 1. Trust and continue\n" +
+		"  2. Quit\n" +
+		"  enter continue · esc quit"
+	for _, tc := range []struct {
+		name                      string
+		screen                    string
+		wantShown, wantAnswerable bool
+	}{
+		{"codex folder trust", codexTrust, true, true},
+		{"claude bypass permissions warning", "Bypass Permissions mode\n❯ 1. No, exit\n  2. Yes, I accept", true, true},
+		{"composer below a transcript quoting the trust question", "• The dialog asked: Trust this folder?\n\n› Ask Codex to do anything\n\n  gpt-5.5 high · ~/work", false, false},
+		{"composer below a transcript mentioning a rate limit", "• We hit a rate limit earlier.\n\n❯ ", false, false},
+		{"rate-limit dialog", "Usage limit reached\n● 1. Keep trying\n  2. Stop", true, false},
+		{"plain composer", "› Ask Codex to do anything", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			shown, answerable := StartupDialogOnScreen(tc.screen)
+			if shown != tc.wantShown || answerable != tc.wantAnswerable {
+				t.Fatalf("StartupDialogOnScreen = (%v, %v), want (%v, %v)", shown, answerable, tc.wantShown, tc.wantAnswerable)
+			}
+		})
+	}
+}

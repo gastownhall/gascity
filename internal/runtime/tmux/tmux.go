@@ -3226,10 +3226,27 @@ func (t *Tmux) nudgeSession(
 	// peek, so a mid-turn session costs one capture-pane and no delay. This
 	// step is best-effort and never aborts the nudge on a peek/dismiss error
 	// (see dismissMidSessionDialogBeforeNudge).
-	if t.dismissMidSessionDialogBeforeNudge(ctx, target) {
+	dismissed, screen, read := t.midSessionDialogLookBeforeNudge(ctx, target)
+	if dismissed {
 		// Give the TUI a beat to retire the dialog before pasting, so the
 		// message lands at the prompt rather than in a closing overlay.
 		time.Sleep(midSessionDialogSettleDelay)
+		// The screen read before the dismissal is stale now.
+		screen, err = t.CaptureVisiblePane(target)
+		read = err == nil
+	}
+
+	// 0.5. Answer a startup dialog still owning the pane, such as a Codex
+	// folder-trust dialog drawn after startup stopped watching, before any
+	// key: the clear, the text, Escape and Enter would all be read as menu
+	// input. One that cannot be answered safely refuses the nudge with
+	// nothing typed (see answerStartupDialogBeforeNudge). It reads the
+	// screen step 0 already captured, so a pane without a dialog costs no
+	// extra capture.
+	if read {
+		if err := t.answerStartupDialogBeforeNudge(ctx, session, target, screen); err != nil {
+			return err
+		}
 	}
 
 	// 1. Clear any pending input already sitting on the line before pasting,
@@ -3603,6 +3620,55 @@ func dismissModelSwitchModal(content string, sendKeys func(keys ...string) error
 // prompt rather than in a closing overlay.
 const midSessionDialogSettleDelay = 500 * time.Millisecond
 
+// nudgeStartupDialogTimeout bounds answering a startup dialog found before a
+// nudge (see answerStartupDialogBeforeNudge). It matches the budget of the
+// session layer's deferred Codex dialog check, and each dialog the acceptance
+// recognizes refreshes it.
+var nudgeStartupDialogTimeout = 2 * time.Second
+
+// answerStartupDialogBeforeNudge answers a known startup dialog that owns
+// target's input before a nudge types anything, the way startup would
+// (DismissKnownDialogs), and confirms from a fresh read of the screen that the
+// dialog is gone. A pane can be left on one after startup's watch for it ended:
+// a Codex folder-trust dialog is the case seen, where the nudge's Escape quits
+// Codex and its Enter confirms whichever row is selected.
+//
+// It returns an error wrapping runtime.ErrStartupDialogUnanswered, having sent
+// no keys of its own, when the dialog is one a nudge must not answer (see
+// runtime.StartupDialogOnScreen); and one wrapping it, after the acceptance's
+// own keys, when the dialog is still on screen afterwards, as when its cursor
+// row cannot be located. The nudge then types nothing.
+//
+// screen is target's visible screen as the nudge last read it. A screen the
+// nudge could not read is left to the nudge: the caller's look for a
+// permission prompt already refuses an unreadable pane, and the startup
+// prompt's delivery never depended on a capture (see
+// dismissMidSessionDialogBeforeNudge).
+func (t *Tmux) answerStartupDialogBeforeNudge(ctx context.Context, session, target, screen string) error {
+	shown, answerable := runtime.StartupDialogOnScreen(screen)
+	if !shown {
+		return nil
+	}
+	if !answerable {
+		return fmt.Errorf("%w: session %q shows a rate-limit dialog", runtime.ErrStartupDialogUnanswered, session)
+	}
+	dismissErr := t.DismissKnownDialogs(ctx, session, nudgeStartupDialogTimeout)
+	if dismissErr != nil && !errors.Is(dismissErr, runtime.ErrWorkspaceTrustUnconfirmed) {
+		return fmt.Errorf("%w: session %q: answering it: %w", runtime.ErrStartupDialogUnanswered, session, dismissErr)
+	}
+	screen, err := t.CaptureVisiblePane(target)
+	if err != nil {
+		return fmt.Errorf("%w: session %q: re-reading the pane after answering it: %w", runtime.ErrStartupDialogUnanswered, session, err)
+	}
+	if shown, _ := runtime.StartupDialogOnScreen(screen); shown {
+		if dismissErr != nil {
+			return fmt.Errorf("%w: session %q: %w", runtime.ErrStartupDialogUnanswered, session, dismissErr)
+		}
+		return fmt.Errorf("%w: session %q: still on screen after answering it", runtime.ErrStartupDialogUnanswered, session)
+	}
+	return nil
+}
+
 // dismissMidSessionDialogBeforeNudge clears a blocking mid-session dialog (the
 // token-ceiling resume selector, the periodic feedback prompt, or the provider
 // session-limit chooser) on target so an imminent nudge lands at the prompt
@@ -3620,9 +3686,21 @@ const midSessionDialogSettleDelay = 500 * time.Millisecond
 //
 // target is the nudge's resolved agent pane (agentInputTarget).
 func (t *Tmux) dismissMidSessionDialogBeforeNudge(ctx context.Context, target string) bool {
+	dismissed, _, _ := t.midSessionDialogLookBeforeNudge(ctx, target)
+	return dismissed
+}
+
+// midSessionDialogLookBeforeNudge is dismissMidSessionDialogBeforeNudge that
+// also returns the visible screen it read, and whether it read one, so the
+// nudge's next look at the screen needs no capture of its own.
+func (t *Tmux) midSessionDialogLookBeforeNudge(ctx context.Context, target string) (dismissed bool, screen string, read bool) {
 	dismissed, err := runtime.DismissMidSessionDialogs(
 		context.Background(),
-		func() (string, error) { return t.CaptureVisiblePane(target) },
+		func() (string, error) {
+			s, err := t.CaptureVisiblePane(target)
+			screen, read = s, err == nil
+			return s, err
+		},
 		func(keys ...string) error {
 			for _, k := range keys {
 				if _, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), k); err != nil {
@@ -3633,9 +3711,10 @@ func (t *Tmux) dismissMidSessionDialogBeforeNudge(ctx context.Context, target st
 		},
 	)
 	if err != nil {
-		return false
+		// A failed dismissal may have left the screen half-answered.
+		return false, "", false
 	}
-	return dismissed
+	return dismissed, screen, read
 }
 
 // DismissModelSwitchModalIfPresent clears a mid-session Codex/GPT model-switch
