@@ -10,7 +10,8 @@ package main
 // finish_by passes, as failed{deadline_in_flight}, through legacyop.Sweep. A
 // lane op and an op still within its finish_by are never touched (Sweep's
 // rule), and every close is revision-fenced, so racing an adopter or a late
-// executor is safe. The sweeper emits no events.
+// executor is safe. A swept op gets no terminal event; a store failure under
+// a gate that is on raises ops.recording_degraded.
 //
 // It runs one pass at boot whatever the gates say, which catches ops left
 // open after a gate was turned off, and then a pass every interval while any
@@ -43,8 +44,10 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -77,8 +80,11 @@ type opSweeper struct {
 	// degraded hears every store failure the sweeper degrades past while a
 	// gate is on; it never receives Mode off (with every gate off a failure
 	// is only logged, so recording that is off never reads as degraded).
-	// OJ-2b wires it to the ops.recording_degraded event; the default logs.
+	// The default logs and raises ops.recording_degraded (reportDegrade).
 	degraded func(legacyop.Degrade)
+	// events latches and records the sweeper's ops.recording_degraded
+	// events.
+	events *api.OpsDegradeReporter
 	// logf writes the sweeper's log lines; tests capture them.
 	logf func(format string, args ...any)
 
@@ -108,8 +114,32 @@ func (cs *controllerState) newOpSweeper() *opSweeper {
 		},
 		logf: log.Printf,
 	}
-	s.degraded = s.logDegrade
+	s.events = api.NewOpsDegradeReporter(func() events.Recorder { return cs.EventProvider() }, s.clk)
+	s.degraded = s.reportDegrade
 	return s
+}
+
+// reportDegrade is the default degrade hook: it logs d and raises one
+// ops.recording_degraded event for each ops gate that is not off, under that
+// gate's mode. A sweep serves every gate's ops, so its failure degrades each
+// gate that records.
+func (s *opSweeper) reportDegrade(d legacyop.Degrade) {
+	s.logDegrade(d)
+	for _, g := range []struct {
+		key  string
+		mode rollout.Mode
+	}{
+		{rollout.KeyOpsContent, s.flags.OpsContent()},
+		{rollout.KeyOpsControl, s.flags.OpsControl()},
+		{rollout.KeyOpsLifecycle, s.flags.OpsLifecycle()},
+	} {
+		if g.mode == rollout.Off {
+			continue
+		}
+		gd := d
+		gd.Mode = g.mode
+		s.events.Report(g.key, gd)
+	}
 }
 
 // startOpSweep runs the op sweeper until ctx ends: a boot pass, then a pass
