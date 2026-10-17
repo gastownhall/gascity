@@ -31,6 +31,7 @@ go_library(
         "stream_cursor.go",
         "supervisor_payloads.go",
         "watch_backfill.go",
+        "work_payloads.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/events",
     visibility = ["//:__subpackages__"],

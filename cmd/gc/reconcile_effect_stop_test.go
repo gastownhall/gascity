@@ -838,23 +838,30 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 // loop. A confirmed execution-stalled stop gives back the claim its marker
 // names, so the seat closes and a fresh seat takes the claim; another
 // in-progress bead of the seat's, or the same drain for another reason,
-// keeps its work as before.
+// keeps its work as before. That is the rolled-back backstops' stop: with the
+// work ladder on, the stop is the ladder's recycle, which keeps the claim
+// (PHASE1-2 §6.5).
 func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		reason  string
 		release bool
 		other   bool // the seat holds a second in-progress bead
+		ladder  bool // the work ladder is on: the stop is its recycle
 	}{
-		{"execution-stalled", executionStalledDrainReason, true, false},
-		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true},
-		{"another drain reason", drainOrphaned, false, false},
+		{"execution-stalled", executionStalledDrainReason, true, false, false},
+		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true, false},
+		{"another drain reason", drainOrphaned, false, false, false},
+		{"execution-stalled, the work ladder's recycle", executionStalledDrainReason, false, false, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string
 			var work beads.Store
 			s, got, leaf := stopRun(t, signaled(c.reason), undesired(c.reason), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
 				work = store
+				if !c.ladder {
+					p.World.Env.Cfg.Daemon.WorkLadder = "off" // the backstops' stop gives their claim back
+				}
 				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
 				if err != nil {
 					t.Fatal(err)
@@ -964,6 +971,7 @@ func TestExecutionStalledStopWithNothingLiveReleasesOnConfirmation(t *testing.T)
 			var work beads.Store
 			s, got, _ := stopRun(t, signaled(executionStalledDrainReason), undesired(executionStalledDrainReason), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
 				work = store
+				p.World.Env.Cfg.Daemon.WorkLadder = "off" // the backstops' stop gives their claim back
 				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
 				if err != nil {
 					t.Fatal(err)

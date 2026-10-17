@@ -146,7 +146,7 @@ func stopDecide(v txView) txStep {
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
-	if stopReason(v.It) == executionStalledDrainReason {
+	if stopReason(v.It) == executionStalledDrainReason && !workLadderOn(v.World) {
 		plan.stalled = stalledClaim{beadID: strings.TrimSpace(v.Meta[executionClaimNudgeWorkKey]), row: v.Row}
 	}
 	switch rt := v.RT; rt.Class {
@@ -219,6 +219,16 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 	clearRestartMarker(sp, p)
 	releaseStalledClaim(c.release, p.stalled)
 	return stopped{Confirmed: true}, nil
+}
+
+// workLadderOn reports whether w's city runs the work ladder ([daemon]
+// work_ladder). With it on, an execution-stalled stop is the ladder's
+// recycle, which keeps a started claim on the seat (PHASE1-2 §6.5): the
+// ladder releases an unstarted claim itself, by a CAS proving it unstarted,
+// and never asks a stop to. Rolled back, the stop gives back the execution
+// backstop's claim, as before.
+func workLadderOn(w *World) bool {
+	return w == nil || w.Env == nil || w.Env.Cfg == nil || w.Env.Cfg.Daemon.WorkLadderEnabled()
 }
 
 // releaseStalledClaim gives back, after a confirmed stop, the claim an

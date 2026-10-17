@@ -7410,6 +7410,86 @@ type TypedEventStreamEnvelopeWebhookRejected struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWorkEscalated defines model for TypedEventStreamEnvelopeWorkEscalated.
+type TypedEventStreamEnvelopeWorkEscalated struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkNudgeFailed defines model for TypedEventStreamEnvelopeWorkNudgeFailed.
+type TypedEventStreamEnvelopeWorkNudgeFailed struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkNudged defines model for TypedEventStreamEnvelopeWorkNudged.
+type TypedEventStreamEnvelopeWorkNudged struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkRecycleRequested defines model for TypedEventStreamEnvelopeWorkRecycleRequested.
+type TypedEventStreamEnvelopeWorkRecycleRequested struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkReleased defines model for TypedEventStreamEnvelopeWorkReleased.
+type TypedEventStreamEnvelopeWorkReleased struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
 type TypedEventStreamEnvelopeWorkerOperation struct {
 	Actor            string                      `json:"actor"`
@@ -9250,6 +9330,91 @@ type TypedTaggedEventStreamEnvelopeWebhookRejected struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeWorkEscalated defines model for TypedTaggedEventStreamEnvelopeWorkEscalated.
+type TypedTaggedEventStreamEnvelopeWorkEscalated struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkNudgeFailed defines model for TypedTaggedEventStreamEnvelopeWorkNudgeFailed.
+type TypedTaggedEventStreamEnvelopeWorkNudgeFailed struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkNudged defines model for TypedTaggedEventStreamEnvelopeWorkNudged.
+type TypedTaggedEventStreamEnvelopeWorkNudged struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkRecycleRequested defines model for TypedTaggedEventStreamEnvelopeWorkRecycleRequested.
+type TypedTaggedEventStreamEnvelopeWorkRecycleRequested struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkReleased defines model for TypedTaggedEventStreamEnvelopeWorkReleased.
+type TypedTaggedEventStreamEnvelopeWorkReleased struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeWorkerOperation defines model for TypedTaggedEventStreamEnvelopeWorkerOperation.
 type TypedTaggedEventStreamEnvelopeWorkerOperation struct {
 	Actor            string                      `json:"actor"`
@@ -9493,6 +9658,21 @@ type WebhookRejectedPayload struct {
 
 	// Webhook Configured webhook name (empty only for unresolved routes, which are not evented).
 	Webhook string `json:"webhook"`
+}
+
+// WorkLadderPayload defines model for WorkLadderPayload.
+type WorkLadderPayload struct {
+	Attempt     *int64  `json:"attempt,omitempty"`
+	BeadId      string  `json:"bead_id"`
+	Generation  int64   `json:"generation"`
+	Kind        *string `json:"kind,omitempty"`
+	Paused      *bool   `json:"paused,omitempty"`
+	Reason      *string `json:"reason,omitempty"`
+	Rung        *string `json:"rung,omitempty"`
+	SessionId   string  `json:"session_id"`
+	SessionName *string `json:"session_name,omitempty"`
+	StoreRef    *string `json:"store_ref,omitempty"`
+	Template    *string `json:"template,omitempty"`
 }
 
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
@@ -12486,6 +12666,32 @@ func (t *EventPayload) FromWebhookRejectedPayload(v WebhookRejectedPayload) erro
 
 // MergeWebhookRejectedPayload performs a merge with any union data inside the EventPayload, using the provided WebhookRejectedPayload
 func (t *EventPayload) MergeWebhookRejectedPayload(v WebhookRejectedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsWorkLadderPayload returns the union data inside the EventPayload as a WorkLadderPayload
+func (t EventPayload) AsWorkLadderPayload() (WorkLadderPayload, error) {
+	var body WorkLadderPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromWorkLadderPayload overwrites any union data inside the EventPayload as the provided WorkLadderPayload
+func (t *EventPayload) FromWorkLadderPayload(v WorkLadderPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeWorkLadderPayload performs a merge with any union data inside the EventPayload, using the provided WorkLadderPayload
+func (t *EventPayload) MergeWorkLadderPayload(v WorkLadderPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -17165,6 +17371,146 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWebhookRejected(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWorkEscalated returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkEscalated
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkEscalated() (TypedEventStreamEnvelopeWorkEscalated, error) {
+	var body TypedEventStreamEnvelopeWorkEscalated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkEscalated overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkEscalated
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkEscalated(v TypedEventStreamEnvelopeWorkEscalated) error {
+	v.Type = "work.escalated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkEscalated performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkEscalated
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkEscalated(v TypedEventStreamEnvelopeWorkEscalated) error {
+	v.Type = "work.escalated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkNudgeFailed returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkNudgeFailed
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkNudgeFailed() (TypedEventStreamEnvelopeWorkNudgeFailed, error) {
+	var body TypedEventStreamEnvelopeWorkNudgeFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkNudgeFailed overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkNudgeFailed
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkNudgeFailed(v TypedEventStreamEnvelopeWorkNudgeFailed) error {
+	v.Type = "work.nudge_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkNudgeFailed performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkNudgeFailed
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkNudgeFailed(v TypedEventStreamEnvelopeWorkNudgeFailed) error {
+	v.Type = "work.nudge_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkNudged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkNudged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkNudged() (TypedEventStreamEnvelopeWorkNudged, error) {
+	var body TypedEventStreamEnvelopeWorkNudged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkNudged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkNudged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkNudged(v TypedEventStreamEnvelopeWorkNudged) error {
+	v.Type = "work.nudged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkNudged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkNudged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkNudged(v TypedEventStreamEnvelopeWorkNudged) error {
+	v.Type = "work.nudged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkRecycleRequested returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkRecycleRequested
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkRecycleRequested() (TypedEventStreamEnvelopeWorkRecycleRequested, error) {
+	var body TypedEventStreamEnvelopeWorkRecycleRequested
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkRecycleRequested overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkRecycleRequested
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkRecycleRequested(v TypedEventStreamEnvelopeWorkRecycleRequested) error {
+	v.Type = "work.recycle_requested"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkRecycleRequested performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkRecycleRequested
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkRecycleRequested(v TypedEventStreamEnvelopeWorkRecycleRequested) error {
+	v.Type = "work.recycle_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkReleased returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkReleased
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkReleased() (TypedEventStreamEnvelopeWorkReleased, error) {
+	var body TypedEventStreamEnvelopeWorkReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkReleased overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkReleased
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkReleased(v TypedEventStreamEnvelopeWorkReleased) error {
+	v.Type = "work.released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkReleased performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkReleased
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkReleased(v TypedEventStreamEnvelopeWorkReleased) error {
+	v.Type = "work.released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -17449,6 +17795,16 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWebhookReceived()
 	case "webhook.rejected":
 		return t.AsTypedEventStreamEnvelopeWebhookRejected()
+	case "work.escalated":
+		return t.AsTypedEventStreamEnvelopeWorkEscalated()
+	case "work.nudge_failed":
+		return t.AsTypedEventStreamEnvelopeWorkNudgeFailed()
+	case "work.nudged":
+		return t.AsTypedEventStreamEnvelopeWorkNudged()
+	case "work.recycle_requested":
+		return t.AsTypedEventStreamEnvelopeWorkRecycleRequested()
+	case "work.released":
+		return t.AsTypedEventStreamEnvelopeWorkReleased()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -20434,6 +20790,146 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWebh
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWorkEscalated returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkEscalated
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkEscalated() (TypedTaggedEventStreamEnvelopeWorkEscalated, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkEscalated
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkEscalated overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkEscalated
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkEscalated(v TypedTaggedEventStreamEnvelopeWorkEscalated) error {
+	v.Type = "work.escalated"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkEscalated performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkEscalated
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkEscalated(v TypedTaggedEventStreamEnvelopeWorkEscalated) error {
+	v.Type = "work.escalated"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkNudgeFailed returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkNudgeFailed
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkNudgeFailed() (TypedTaggedEventStreamEnvelopeWorkNudgeFailed, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkNudgeFailed
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkNudgeFailed overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkNudgeFailed
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkNudgeFailed(v TypedTaggedEventStreamEnvelopeWorkNudgeFailed) error {
+	v.Type = "work.nudge_failed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkNudgeFailed performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkNudgeFailed
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkNudgeFailed(v TypedTaggedEventStreamEnvelopeWorkNudgeFailed) error {
+	v.Type = "work.nudge_failed"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkNudged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkNudged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkNudged() (TypedTaggedEventStreamEnvelopeWorkNudged, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkNudged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkNudged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkNudged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkNudged(v TypedTaggedEventStreamEnvelopeWorkNudged) error {
+	v.Type = "work.nudged"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkNudged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkNudged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkNudged(v TypedTaggedEventStreamEnvelopeWorkNudged) error {
+	v.Type = "work.nudged"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkRecycleRequested
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested() (TypedTaggedEventStreamEnvelopeWorkRecycleRequested, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkRecycleRequested
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkRecycleRequested overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkRecycleRequested
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkRecycleRequested(v TypedTaggedEventStreamEnvelopeWorkRecycleRequested) error {
+	v.Type = "work.recycle_requested"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkRecycleRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkRecycleRequested
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkRecycleRequested(v TypedTaggedEventStreamEnvelopeWorkRecycleRequested) error {
+	v.Type = "work.recycle_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkReleased returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkReleased
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkReleased() (TypedTaggedEventStreamEnvelopeWorkReleased, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkReleased
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkReleased overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkReleased
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkReleased(v TypedTaggedEventStreamEnvelopeWorkReleased) error {
+	v.Type = "work.released"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkReleased performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkReleased
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkReleased(v TypedTaggedEventStreamEnvelopeWorkReleased) error {
+	v.Type = "work.released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -20718,6 +21214,16 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookReceived()
 	case "webhook.rejected":
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookRejected()
+	case "work.escalated":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkEscalated()
+	case "work.nudge_failed":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkNudgeFailed()
+	case "work.nudged":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkNudged()
+	case "work.recycle_requested":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested()
+	case "work.released":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkReleased()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

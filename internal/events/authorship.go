@@ -208,6 +208,12 @@ var builtinAuthorship = map[string]Authorship{
 	BeadsBlockedRecomputed: AuthorController,
 	ExecutionStepCompleted: AuthorController,
 	ExecutionStepStalled:   AuthorController,
+	// The work ladder's facts: the v2 lane step records them (rule 4).
+	WorkNudged:           AuthorController,
+	WorkNudgeFailed:      AuthorController,
+	WorkRecycleRequested: AuthorController,
+	WorkReleased:         AuthorController,
+	WorkEscalated:        AuthorController,
 
 	// Controller: the controller, the city, orders, async requests and the
 	// API server's integrations. city.* by D13; gc suspend, gc resume and gc

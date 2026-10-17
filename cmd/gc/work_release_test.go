@@ -32,6 +32,7 @@ func TestReleasePoliciesTable(t *testing.T) {
 		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true},
 		releaseRetired:        {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseLadder:         {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
 	}
 	if !reflect.DeepEqual(releasePolicies, want) {
 		t.Fatalf("releasePolicies = %+v\nwant %+v", releasePolicies, want)

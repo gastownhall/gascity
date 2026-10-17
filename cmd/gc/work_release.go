@@ -2,10 +2,10 @@ package main
 
 // The one release verb (ARCH-RESTRUCTURE-2 R9, the REL half; pass-1 R4).
 //
-// Seven paths give a seat's claims back: the killed-seat release (B1), the
+// Eight paths give a seat's claims back: the killed-seat release (B1), the
 // drain-ack release (D5), the close cascade, the stranded repair, the
-// confirmed-orphan release, the dead-assignee sweep and the retired-session
-// sweep. Each decided for
+// confirmed-orphan release, the dead-assignee sweep, the retired-session
+// sweep and the work ladder's release of an unstarted claim. Each decided for
 // itself which claims it released and into which lane, and four of them
 // released claims no lane serves: an unserved route, or an expanded workflow
 // root with no route of its own (NEW-5, mc-zndi7.87). Released, such a claim
@@ -47,6 +47,7 @@ const (
 	releaseStrandedRepair
 	releaseOrphan // the confirmed orphan and the dead-assignee sweep: one policy
 	releaseRetired
+	releaseLadder // the work ladder's release of an unstarted claim (PHASE1-2 §6.5)
 )
 
 // laneRule says when a released claim's route counts as served.
@@ -88,7 +89,10 @@ var (
 //     kept it would leave the acked seat asleep holding it (mc-sca8r);
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
-//     give back started work too: the seat is gone.
+//     give back started work too: the seat is gone;
+//   - the work ladder gives back one in_progress claim of a live seat, which
+//     its CAS proved unstarted (PHASE1-2 §6.5); a routeless claim takes the
+//     seat's route, as drain-ack's.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
 	releaseDrainAck:       {statuses: startedOnly, lane: laneCarried, seatRoute: true},
@@ -96,6 +100,7 @@ var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true},
 	releaseRetired:        {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
+	releaseLadder:         {statuses: startedOnly, lane: laneCarried, seatRoute: true},
 }
 
 // Why a claim was kept or failed.

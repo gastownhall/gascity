@@ -940,7 +940,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5812,6 +5812,16 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.escalated';
+} & TypedEventStreamEnvelopeWorkEscalated) | ({
+    type: 'work.nudge_failed';
+} & TypedEventStreamEnvelopeWorkNudgeFailed) | ({
+    type: 'work.nudged';
+} & TypedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.recycle_requested';
+} & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.released';
+} & TypedEventStreamEnvelopeWorkReleased) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -7744,6 +7754,96 @@ export type TypedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.escalated
+ */
+export type TypedEventStreamEnvelopeWorkEscalated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.nudge_failed
+ */
+export type TypedEventStreamEnvelopeWorkNudgeFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudge_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.nudged
+ */
+export type TypedEventStreamEnvelopeWorkNudged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.recycle_requested
+ */
+export type TypedEventStreamEnvelopeWorkRecycleRequested = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.recycle_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.released
+ */
+export type TypedEventStreamEnvelopeWorkReleased = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -7979,6 +8079,16 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedTaggedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.escalated';
+} & TypedTaggedEventStreamEnvelopeWorkEscalated) | ({
+    type: 'work.nudge_failed';
+} & TypedTaggedEventStreamEnvelopeWorkNudgeFailed) | ({
+    type: 'work.nudged';
+} & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.recycle_requested';
+} & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.released';
+} & TypedTaggedEventStreamEnvelopeWorkReleased) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -10018,6 +10128,101 @@ export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope work.escalated
+ */
+export type TypedTaggedEventStreamEnvelopeWorkEscalated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.nudge_failed
+ */
+export type TypedTaggedEventStreamEnvelopeWorkNudgeFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudge_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.nudged
+ */
+export type TypedTaggedEventStreamEnvelopeWorkNudged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.recycle_requested
+ */
+export type TypedTaggedEventStreamEnvelopeWorkRecycleRequested = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.recycle_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.released
+ */
+export type TypedTaggedEventStreamEnvelopeWorkReleased = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope worker.operation
  */
 export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
@@ -10332,6 +10537,20 @@ export type WebhookRejectedPayload = {
      * Configured webhook name (empty only for unresolved routes, which are not evented).
      */
     webhook: string;
+};
+
+export type WorkLadderPayload = {
+    attempt?: number;
+    bead_id: string;
+    generation: number;
+    kind?: string;
+    paused?: boolean;
+    reason?: string;
+    rung?: string;
+    session_id: string;
+    session_name?: string;
+    store_ref?: string;
+    template?: string;
 };
 
 export type WorkerOperationEventPayload = {

@@ -224,7 +224,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			cb.RecordRestart("worker", now)
 			must(t, persistSessionCircuitBreakerMetadata(front, id, cb, "worker", now))
 		}},
-		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 work-ladder step", "work_ladder", []string{"cmd/gc/work_ladder_lane.go:ladderPass.commit"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			env, _ := nudgeStepsFixture(t)
 			sess := idleClaimPoolSession()
 			sess.Labels = []string{sessionBeadLabel}
@@ -235,7 +235,21 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
 			}, nil)
 			rec.reset()
-			lane.nudges(context.Background(), env)
+			lane.workLadder(context.Background(), env)
+		}},
+		{"v2 work-ladder step, rolled back", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.legacyBackstops"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			env, _ := nudgeStepsFixture(t)
+			env.Cfg.Daemon.WorkLadder = "off"
+			sess := idleClaimPoolSession()
+			sess.Labels = []string{sessionBeadLabel}
+			_, err := rec.MemStore.Create(sess)
+			must(t, err)
+			env.CityStore = rec
+			lane, _ := newPoolStepsTestLane(env, func() *allocSummary {
+				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
+			}, nil)
+			rec.reset()
+			lane.workLadder(context.Background(), env)
 		}},
 	}
 	// The operator's verbs, in an order each accepts, on one row.

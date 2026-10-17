@@ -94,6 +94,21 @@ const (
 	// LIVENESS fact, not a graph execution fact — nothing about the step's
 	// topology is asserted, and no projector consumes it.
 	ExecutionStepStalled = "execution.step_stalled"
+	// The work-progress ladder's facts (PHASE1-2 §6, the v2 lane step
+	// work-ladder): one seat's pacing of one piece of outstanding work.
+	// Subject carries the work bead, SessionID the seat; the payload is
+	// WorkLadderPayload. WorkNudged and WorkNudgeFailed are a delivered and a
+	// refused nudge (a degraded provider's are marked paused);
+	// WorkRecycleRequested is a recycle posted to the planner (arm A16);
+	// WorkReleased is an unstarted claim given back; WorkEscalated is an
+	// alert: a started claim or a continuation still unanswered, or a release
+	// that raced a start (an invariant alarm). They are controller liveness
+	// facts, as execution.step_stalled is.
+	WorkNudged           = "work.nudged"
+	WorkNudgeFailed      = "work.nudge_failed"
+	WorkRecycleRequested = "work.recycle_requested"
+	WorkReleased         = "work.released"
+	WorkEscalated        = "work.escalated"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -541,6 +556,7 @@ var KnownEventTypes = []string{
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkEscalated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,

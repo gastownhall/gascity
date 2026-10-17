@@ -1479,6 +1479,15 @@
           "description": "SessionReconciler selects the controller's session reconciler. \"legacy\"\n(default) runs the tick reconciler. \"v2\" is reserved for the keyed\nreconciler and is refused in this build: a controller configured with it\ndoes not start. The gc-enterprise values \"off\", \"auto\" and \"require\" are\ndeprecated aliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart. Leave it unset.",
           "default": "legacy"
         },
+        "work_ladder": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge. \"off\" runs the three backstops it replaced (idle-claim,\ncontinuation, execution) instead: the rollback. Read on every pass, so a\nconfig reload applies. Legacy ignores it.",
+          "default": "on"
+        },
         "auto_restart_on_drift": {
           "type": "boolean",
           "description": "AutoRestartOnDrift controls whether `gc start` automatically restarts\nthe supervisor when it detects the running supervisor's binary or\npack snapshot has drifted from on-disk state. Nil (unset) defaults\nto true — operators get the correct-by-default behavior. Set to\nfalse as a global kill switch (e.g., for production cities where a\nrebuild on the host should not auto-restart the supervisor).",
