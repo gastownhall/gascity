@@ -691,6 +691,58 @@ func populateSlingDepsCallbacks(deps *slingDeps) {
 	deps.Notify = &cliNotifier{}
 	deps.DirectSessionResolver = cliDirectSessionResolver
 	deps.Router = cliBeadRouter{deps: deps}
+	deps.WorkQueryProbe = cliWorkQueryProbe(deps.CityPath, deps.CityName, deps.Cfg)
+}
+
+// cliWorkQueryProbe implements sling.SlingDeps.WorkQueryProbe the way `gc hook`
+// polls an explicit target: the same query, env, dir and timeout resolution
+// (hookQueryEnv + shellWorkQueryWithEnv), run across the same federated store
+// legs (hookWorkQueryStores + bestStoreWithWork), so the probe answers with the
+// output a hook poll for that agent would act on. The one departure is a failed
+// leg; see probeWorkQueryStores.
+func cliWorkQueryProbe(cityPath, cityName string, cfg *config.City) func(a config.Agent) (string, error) {
+	return func(a config.Agent) (string, error) {
+		topo := cityQueryTopology(cityPath, cfg)
+		workQuery := a.EffectiveWorkQueryFor(topo)
+		workQuery = expandAgentCommandTemplate(cityPath, cityName, &a, cfg.Rigs, "work_query", workQuery, os.Stderr)
+		workDir := agentCommandDir(cityPath, &a, cfg.Rigs)
+		overrides, err := hookQueryEnv(cityPath, cfg, &a)
+		if err != nil {
+			return "", err
+		}
+		resolvedAgentName := a.QualifiedName()
+		overrides["GC_AGENT"] = resolvedAgentName
+		overrides["GC_ALIAS"] = resolvedAgentName
+		overrides["GC_SESSION_NAME"] = cliSessionName(cityPath, cityName, resolvedAgentName, cfg.Workspace.SessionTemplate)
+		overrides["GC_SESSION_ID"] = ""
+		overrides["GC_SESSION_ORIGIN"] = ""
+		overrides["GC_TEMPLATE"] = ""
+		queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+		stores := hookWorkQueryStores(cityPath, cfg, &a, resolvedAgentName, workDir, queryEnv, overrides)
+		stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, os.Stderr))
+		return probeWorkQueryStores(workQuery, stores, shellWorkQueryWithEnv)
+	}
+}
+
+// probeWorkQueryStores runs the probe's query across the federated legs with
+// bestStoreWithWork, which skips a failed secondary leg so one flaky store
+// cannot wedge the hook; the hook polls again. The probe answers once, so a
+// no-work answer is unproven while any leg failed: the leg errors replace it,
+// and sling records them rather than failing on them.
+func probeWorkQueryStores(command string, stores []hookStore, run hookStoreRunner) (string, error) {
+	var legErrs []error
+	recordLegErrors := func(query, dir string, env []string) (string, error) {
+		out, err := run(query, dir, env)
+		if err != nil {
+			legErrs = append(legErrs, fmt.Errorf("store %s: %w", dir, err))
+		}
+		return out, err
+	}
+	out, _, err := bestStoreWithWork(command, stores, stores[0], recordLegErrors)
+	if len(legErrs) > 0 && !workQueryHasReadyWork(strings.TrimSpace(out)) {
+		return out, errors.Join(legErrs...)
+	}
+	return out, err
 }
 
 func cliDirectSessionResolver(store beads.Store, cityName, cityPath string, cfg *config.City, target, rigContext string) (string, bool, error) {
