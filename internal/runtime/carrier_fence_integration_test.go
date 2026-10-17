@@ -97,7 +97,7 @@ func (b *localBox) paneHas(want string) bool {
 }
 
 // Kills a carrier guard that real tmux does not hold to: text arrives byte
-// for byte under the fence, and an agent respawned as another incarnation
+// for byte under the fence (quotes, semicolons and backslashes included), and an agent respawned as another incarnation
 // between the fence read and the send receives no keystroke, with the
 // staged buffer deleted.
 func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
@@ -109,10 +109,10 @@ func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 		t.Fatalf("PublishInputFence: %v", err)
 	}
 	ctx := context.Background()
-	if err := c.NudgeFenced(ctx, "s", TextContent("-x it's; done;"), first); err != nil {
+	if err := c.NudgeFenced(ctx, "s", TextContent("-x it's; done; a\\b c\\tz"), first); err != nil {
 		t.Fatalf("NudgeFenced under the pane's fence: %v", err)
 	}
-	if !box.paneHas("-x it's; done;") {
+	if !box.paneHas("-x it's; done; a\\b c\\tz") {
 		t.Fatalf("pane = %q, want the text byte for byte", box.mustTmux("capture-pane", "-p", "-t", "main"))
 	}
 

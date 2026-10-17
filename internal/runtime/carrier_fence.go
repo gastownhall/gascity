@@ -38,8 +38,10 @@ func carrierBufferName() string {
 	return fmt.Sprintf("gc-nudge-%d-c%d", os.Getpid(), carrierBufferSeq.Add(1))
 }
 
-// carrierFenceAbsent is what carrierFenceReadScript prints when the box tmux
-// cannot answer for the target: no server, no session.
+// carrierFenceAbsent is what carrierFenceReadScript prints when tmux in the
+// box fails for any reason: no server or no session, but also a missing tmux
+// binary, an unreachable socket or a protocol mismatch. Each reads as an
+// absent target.
 const carrierFenceAbsent = "gc-fence-absent"
 
 // carrierFenceReadScript reads the pane its first argument targets in the
@@ -95,7 +97,7 @@ func (g *carrierGuard) transport(err error) error {
 
 // verify is the operation's precheck: the carrier target's pane must be live
 // and hold the guard's digest as its own fence. A box tmux that cannot
-// answer for the target (no server, no session) finds it absent. A read the
+// answer for the target (any tmux failure in the box) finds it absent. A read the
 // box did not answer (the connection's non-zero exit) or answered with
 // something else cannot tell, so it is ErrRuntimeUnavailable.
 func (g *carrierGuard) verify(ctx context.Context) error {

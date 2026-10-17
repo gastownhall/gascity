@@ -254,6 +254,21 @@ func TestTmuxCarrierFencedKeysAndInterrupt(t *testing.T) {
 	}
 }
 
+// Kills fenced keys whose body can send a non-key argument: a dialog body
+// asking for text gets an error, and nothing past the fence read is sent.
+func TestTmuxCarrierFencedKeysRefusesNonKeyNames(t *testing.T) {
+	box := &boxTmux{read: ownRead(carrierFence, "%3")}
+	err := NewTmuxCarrier(box, "main").FencedKeys(context.Background(), "s", carrierFence, func(sendKeys func(keys ...string) error) error {
+		return sendKeys("Enter", "some text")
+	})
+	if err == nil {
+		t.Fatal("FencedKeys sending text = nil, want refused")
+	}
+	if got := box.inputs(); len(got) != 0 {
+		t.Fatalf("inputs = %q, want none", got)
+	}
+}
+
 // Kills a publish that carries the token, or targets another pane option.
 func TestTmuxCarrierPublishInputFence(t *testing.T) {
 	box := &boxTmux{}

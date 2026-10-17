@@ -74,3 +74,22 @@ func TestParseTmuxFenceRead(t *testing.T) {
 		}
 	}
 }
+
+// Kills a guard format check that accepts any value ending in the pane-id
+// format: only a fence value whose digest is a key name, and the guard's own
+// miss report, are formats a guarded command may carry.
+func TestTmuxGuardFormatArg(t *testing.T) {
+	for a, want := range map[string]bool{
+		TmuxFenceValue("1172ccc4fbf9f6a6"):        true,
+		TmuxFenceMissPrefix + TmuxFenceReadFormat: true,
+		"#{pane_pid}.#{pane_id}":                  false,
+		"a b.#{pane_id}":                          false,
+		".#{pane_id}":                             false,
+		"1172ccc4fbf9f6a6.#{pane_pid}":            false,
+		TmuxFenceMissPrefix + "#{pane_pid}":       false,
+	} {
+		if got := TmuxGuardFormatArg(a); got != want {
+			t.Errorf("TmuxGuardFormatArg(%q) = %v, want %v", a, got, want)
+		}
+	}
+}

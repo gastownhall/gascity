@@ -261,6 +261,38 @@ interactive_resume = "10m"   # interactive sessions: needs sleep_capability = fu
 noninteractive = "60s"
 ```
 
+### Fenced input over `exec`
+
+A runtime that declares `proc.exec` takes fenced input: gc sends a nudge,
+keys or an interrupt only to the agent incarnation it is meant for. The fence
+is the pane option `@gc_fence` on the agent pane of the in-box tmux session
+`main`, and gc manages it over `exec`. Such a runtime must:
+
+- **Run tmux 3.0 or later in the box.** gc sets and clears the fence with
+  `set-option -p` (pane options), which older tmux rejects. With older tmux
+  every `start` fails and the box is torn down, and a separable launch fails
+  as a whole, because gc appends the fence command to the launch's own tmux
+  command list.
+- **Have the `main` session when `start` returns.** gc publishes the fence
+  right after `start`. A publish that fails fails the start and tears the box
+  down.
+- **Provide `sh` in the box.** gc reads the fence and loads nudge text into a
+  tmux buffer through short `sh -c` scripts.
+
+Before a `start` of a box that may already be running, gc reads and clears
+the pane's fence, so a start that reuses the pane never leaves the previous
+incarnation's fence on it. When `start` then fails and the box stays up (it
+reports that the session already exists, or `is-running` said it was running
+before the attempt), gc puts the fence back on the same pane, as long as the
+pane's root process is unchanged and no other fence has been set since.
+
+During the fence read gc treats any tmux failure in the box as an absent
+session and sends nothing. That covers no server or no `main` session, and
+also a missing tmux, a socket it cannot reach or a version mismatch. A failure
+of the `exec` op itself (its own non-zero exit) is an outage, unless
+`is-running` answers `false`. A pane started before gc published fences takes
+no fenced input until its agent is relaunched.
+
 ### Start Config (JSON on stdin)
 
 The `start` operation receives a JSON object on stdin:
