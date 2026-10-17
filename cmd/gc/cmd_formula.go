@@ -901,7 +901,9 @@ store, copy them into the binding with
 						// A post-prepare failure discards the invocation; close the
 						// synthetic input convoy it minted (the success path threads the
 						// convoy into the started workflow, so err == nil never reaches here).
-						graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach)
+						if closeErr := graphv2.CloseSyntheticInputConvoy(store, syntheticInputConvoyID, attach); closeErr != nil {
+							err = errors.Join(err, closeErr)
+						}
 						return formulaCommandError(stderr, "gc formula cook", jsonOutput, err)
 					}
 					if jsonOutput {
