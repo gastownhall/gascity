@@ -83,11 +83,37 @@ func (c *RigStoreBindingCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
-	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
+	if pending := pendingScopeInitResult(c.Name(), c.cityPath, rigPath); pending != nil {
+		return pending
+	}
+
+	explicit, err := contract.ScopeUsesExplicitEndpoint(fsys.OSFS{}, c.cityPath, rigPath)
 	if err != nil {
 		r.Status = StatusError
 		r.Message = fmt.Sprintf("rig %q: resolve dolt target: %v", c.rig.Name, err)
 		r.FixHint = "reconcile the canonical external Dolt endpoint"
+		return r
+	}
+	target, err := contract.ResolveDoltConnectionTarget(fsys.OSFS{}, c.cityPath, rigPath)
+	if err != nil {
+		if !explicit && contract.IsManagedRuntimeUnavailable(err) {
+			// The rig inherits the city endpoint and the city has no
+			// gc-managed runtime to resolve it from, so there is nothing to
+			// query. RigDoltServerCheck makes the same call.
+			r.Status = StatusOK
+			r.Message = "inherits city dolt endpoint"
+			return r
+		}
+		r.Status = StatusError
+		r.Message = fmt.Sprintf("rig %q: resolve dolt target: %v", c.rig.Name, err)
+		r.FixHint = "reconcile the canonical external Dolt endpoint"
+		return r
+	}
+	if strings.EqualFold(target.DoltMode, "proxied-server") && !target.External {
+		// A bd-owned proxied server resolves with no host or port, and the
+		// check must not start a stopped store to open a connection to it.
+		r.Status = StatusOK
+		r.Message = "not checked (bd backend=dolt proxied-server; no direct SQL endpoint)"
 		return r
 	}
 
