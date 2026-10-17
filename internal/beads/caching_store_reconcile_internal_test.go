@@ -878,3 +878,45 @@ func TestUnchangedStatusEventDoesNotReopenTheReconcileLoop(t *testing.T) {
 		t.Fatalf("a real status change left %s's ready projection stale", dependent.ID)
 	}
 }
+
+// Writes must not postpone a full scan that can discover external closes.
+func TestNextReconcileDelayIsNotStarvedByWrites(t *testing.T) {
+	t.Parallel()
+
+	backing := NewMemStore()
+	gate, err := backing.Create(Bead{Title: "gate", Type: "gate"})
+	if err != nil {
+		t.Fatalf("create gate: %v", err)
+	}
+	busy, err := backing.Create(Bead{Title: "busy"})
+	if err != nil {
+		t.Fatalf("create busy: %v", err)
+	}
+	now := time.Unix(10000, 0)
+	c := NewCachingStoreForTest(backing, nil, WithClock(func() time.Time { return now }))
+	if err := c.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	now = now.Add(40 * time.Second)
+	if err := c.SetMetadata(busy.ID, "write", "1"); err != nil {
+		t.Fatalf("write through cache: %v", err)
+	}
+	if delay := c.nextReconcileDelay(now); delay != 0 {
+		t.Fatalf("nextReconcileDelay = %v after a write, want 0: the prime 40 s ago is the last full scan", delay)
+	}
+
+	if err := backing.Close(gate.ID); err != nil {
+		t.Fatalf("close gate behind the cache: %v", err)
+	}
+	c.runReconciliation()
+	got, err := c.Get(gate.ID)
+	if err != nil {
+		t.Fatalf("Get(gate): %v", err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("gate status = %q after reconcile, want closed", got.Status)
+	}
+	if delay := c.nextReconcileDelay(now); delay <= 0 {
+		t.Fatalf("nextReconcileDelay = %v right after a reconcile, want the interval", delay)
+	}
+}

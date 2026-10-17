@@ -4661,3 +4661,55 @@ func TestClearOrphanedWaitHoldsRederivesEachPass(t *testing.T) {
 		}
 	}
 }
+
+// A city-store gate closed externally must ready its wait even while local
+// writes keep the cache fresh. Drive the periodic step with the existing clock
+// seam so this exercises the production due check without real-time polling.
+func TestPrepareWaitWakeState_PendingWaitReadiesWhileTheCityStoreIsBusy(t *testing.T) {
+	const depID = "gcg-gate-1"
+	const busyID = "gcg-busy-1"
+	now := time.Unix(10000, 0).UTC()
+	backing := waitWakeCityStore(now, depID, waitDepBead(now, depID, "open"), waitDepBead(now, busyID, "open"))
+	cache := beads.NewCachingStore(backing, nil, beads.WithClock(func() time.Time { return now }))
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	city := waitPrefixedStore{Store: cache, prefix: "gcg"}
+	pass := func() bool {
+		t.Helper()
+		ready, err := prepareWaitWakeStateWithSnapshot(
+			sessionFrontDoor(city),
+			newWaitDependencyPlanReader(assembleResidencyTopology(nil, city, nil, nil, nil), false),
+			beads.NudgesStore{Store: city}, now, nil,
+		)
+		if err != nil {
+			t.Fatalf("prepareWaitWakeStateWithSnapshot: %v", err)
+		}
+		return ready[waitWakeSessionID]
+	}
+	if err := backing.Close(depID); err != nil {
+		t.Fatalf("close gate behind the cache: %v", err)
+	}
+	if pass() {
+		t.Fatal("wait went ready before reconciliation")
+	}
+	// Cover more than two full-scan intervals with a write before each tick.
+	for n := 0; n < 80; n++ {
+		now = now.Add(time.Second)
+		if err := cache.SetMetadata(busyID, "write", fmt.Sprint(n)); err != nil {
+			t.Fatalf("write through cache: %v", err)
+		}
+		cache.ReconcileIfDueForTest()
+		if pass() {
+			wait, err := backing.Get(waitWakeWaitID)
+			if err != nil {
+				t.Fatalf("backing.Get(wait): %v", err)
+			}
+			if got := wait.Metadata["state"]; got != waitStateReady {
+				t.Fatalf("wait state = %q, want %q", got, waitStateReady)
+			}
+			return
+		}
+	}
+	t.Fatal("wait still pending after 80 simulated seconds of steady writes")
+}
