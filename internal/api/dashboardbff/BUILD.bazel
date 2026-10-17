@@ -41,6 +41,7 @@ go_test(
         "config_test.go",
         "dashboard_endpoints_test.go",
         "enrichment_cache_test.go",
+        "exec_test.go",
         "hangbudget_test.go",
         "health_darwin_test.go",
         "health_test.go",
