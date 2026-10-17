@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -191,6 +192,12 @@ func TestInvocationStoreMemoCoversTheHookVerbs(t *testing.T) {
 		{[]string{"prime", "--hook"}, true},
 		{[]string{"handoff", "--auto", "subject"}, true},
 		{[]string{"hook", "--claim"}, true},
+		{[]string{"mail", "inbox", "human", "--json"}, true},
+		// One store open each, so the memo would only widen what it covers:
+		// gc session list opens the city store once, and gc bd is a
+		// passthrough to bd (writes included) that opens none itself.
+		{[]string{"session", "list"}, false},
+		{[]string{"bd", "list", "--limit", "1"}, false},
 		{[]string{"nudge", "poll"}, false},
 		{[]string{"supervisor", "run"}, false},
 		{[]string{"start"}, false},
@@ -237,5 +244,30 @@ func TestEndInvocationStoreMemoLogsCloseErrorsAtDebug(t *testing.T) {
 	endInvocationStoreMemoLogged(func() error { return nil }, &stderr)
 	if stderr.Len() != 0 {
 		t.Fatalf("a clean release logged %q", stderr.String())
+	}
+}
+
+// gc mail inbox reaches the city store twice, through the mail provider and
+// through target resolution. Under the memo that is one open. The target is
+// unknown on purpose: resolving it is what takes the second open, and its
+// "session not found" proves the resolution ran against the store.
+func TestMailInboxOpensTheCityStoreOnce(t *testing.T) {
+	clearGCEnv(t)
+	opened := stubInvocationStoreFactory(t)
+	city := t.TempDir()
+	t.Chdir(city)
+	t.Setenv("GC_CITY_PATH", city)
+	writeCityToml(t, city, "[workspace]\nname = \"demo\"\n")
+
+	var stdout, stderr bytes.Buffer
+	run([]string{"mail", "inbox", "worker", "--json"}, &stdout, &stderr)
+	if !strings.Contains(stderr.String(), "session not found") {
+		t.Fatalf("stderr = %q, want target resolution to have run against the store", stderr.String())
+	}
+	if len(*opened) != 1 {
+		t.Fatalf("gc mail inbox opened the city store %d times, want 1", len(*opened))
+	}
+	if got := (*opened)[0].closes(); got != 1 {
+		t.Fatalf("shared store closed %d times at exit, want 1", got)
 	}
 }
