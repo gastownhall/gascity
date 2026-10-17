@@ -256,3 +256,19 @@ func declaredIDInfixConstants(t *testing.T) []string {
 	}
 	return names
 }
+
+// TestValidateConversation pins the exported conversation check to the one
+// Propose applies: an id it accepts proposes, an id it refuses is refused as
+// ErrInvalidRequest.
+func TestValidateConversation(t *testing.T) {
+	for _, conv := range []string{"gc-1", "gc-abc.def", strings.Repeat("a", maxConversationLen)} {
+		if err := ValidateConversation(conv); err != nil {
+			t.Errorf("ValidateConversation(%q) = %v, want nil", conv, err)
+		}
+	}
+	for _, conv := range []string{"", "gc 1", "gc@1", "gc#1", "gc,1", "gc\"1", "gc\x011", strings.Repeat("a", maxConversationLen+1), "\xff"} {
+		if err := ValidateConversation(conv); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("ValidateConversation(%q) = %v, want ErrInvalidRequest", conv, err)
+		}
+	}
+}
