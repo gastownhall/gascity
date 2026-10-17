@@ -1524,10 +1524,12 @@ const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_create
 
 // runtimeInventoryEnd ends every runtimeInventoryFormat line, so the
 // executor's trim cannot drop an empty last field (#7871) and a line cut
-// short or split by an unescaped tab or newline is visibly malformed. tmux
-// prints it verbatim. It stays a tab-separated field: tmux 3.4 and 3.5 print
-// a raw \x1f in a format as the text \037. Of the values read here, tmux
-// escapes only the session name (3.2+); the rest are numbers, ids or 0/1.
+// short or split by an unescaped tab is visibly malformed. A line split by an
+// unescaped newline need not be: a piece of it can be well-formed (see
+// parseRuntimeInventory). tmux prints the terminator verbatim. It stays a
+// tab-separated field: tmux 3.4 and 3.5 print a raw \x1f in a format as the
+// text \037. Of the values read here, tmux escapes only the session name
+// (3.2+); the rest are numbers, ids or 0/1.
 const runtimeInventoryEnd = "gc-eol"
 
 // runtimeInventoryFields is the field count of a runtimeInventoryFormat line.
@@ -1581,7 +1583,12 @@ type inventoryFirstPane struct {
 // session (its first field, when it has one), every line of it: a session
 // folded from only the panes that parsed could read all-dead when its live
 // pane is the malformed one. An omitted name is unread, not gone
-// ([runtime.InventoryProvider]); the rest of the inventory stands.
+// ([runtime.InventoryProvider]); the rest of the inventory stands, with one
+// gap. tmux before 3.2 prints a session name unescaped, so a newline in a
+// name splits its line, and the piece after the newline can be a well-formed
+// line under the rest of the name: it reads as a session of its own, or folds
+// into a real session of that name, whose liveness and other facts can then
+// read wrong.
 func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, wellFormed int) {
 	entries = make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
