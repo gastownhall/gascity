@@ -183,11 +183,26 @@ func (c *tmuxCarrier) SendKeysFenced(ctx context.Context, name string, fence Inp
 			return fmt.Errorf("fenced send-keys to %q: %q is not a key name", name, k)
 		}
 	}
+	return c.FencedKeys(ctx, name, fence, func(sendKeys func(keys ...string) error) error {
+		return sendKeys(keys...)
+	})
+}
+
+// FencedKeys runs body as one fenced operation whose sendKeys sends tmux key
+// names as SendKeys does, each send guarded on the one fence read.
+func (c *tmuxCarrier) FencedKeys(ctx context.Context, name string, fence InputFence, body func(sendKeys func(keys ...string) error) error) error {
 	return c.fenced(ctx, name, fence, func(g *carrierGuard) error {
-		if len(keys) == 0 {
-			return nil
-		}
-		return g.run(ctx, append([]string{"send-keys", "-t", g.pane}, keys...), "")
+		return body(func(keys ...string) error {
+			for _, k := range keys {
+				if !TmuxKeyName(k) {
+					return fmt.Errorf("fenced send-keys to %q: %q is not a key name", name, k)
+				}
+			}
+			if len(keys) == 0 {
+				return nil
+			}
+			return g.run(ctx, append([]string{"send-keys", "-t", g.pane}, keys...), "")
+		})
 	})
 }
 

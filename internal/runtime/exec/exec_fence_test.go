@@ -57,8 +57,9 @@ func readCalls(t *testing.T, calls string) []string {
 	return strings.Split(strings.TrimRight(string(data), "\n"), "\n")
 }
 
-func ownRead(f runtime.InputFence, pane string) string {
-	return f.Digest() + "." + pane + "|" + pane + "|0"
+// ownRead is the fence read of agent pane %1 live and holding f as its own.
+func ownRead(f runtime.InputFence) string {
+	return f.Digest() + ".%1|%1|0"
 }
 
 // Kills an exec provider whose fencing does not follow its pack: a pack
@@ -100,7 +101,7 @@ echo "$1" >> `+calls+`
 // incarnation between the fence read and the send.
 func TestExecFencedNudgeRespawnBetweenCheckAndSendIsRefused(t *testing.T) {
 	other := runtime.InputFence{Generation: 3, Epoch: 3, Token: "next"}
-	script, calls := boxScript(t, ownRead(execFence, "%1"), "gc-fence-miss:"+ownRead(other, "%1"), false)
+	script, calls := boxScript(t, ownRead(execFence), "gc-fence-miss:"+ownRead(other), false)
 	fp := NewSeamBacked(script).(runtime.FencedInputProvider)
 	err := fp.NudgeFenced(context.Background(), "s", runtime.TextContent("hello"), runtime.FencedNudge{Fence: execFence})
 	var miss *runtime.FenceMismatchError
@@ -120,7 +121,7 @@ func TestExecFencedNudgeRespawnBetweenCheckAndSendIsRefused(t *testing.T) {
 // Kills a ctx-fenced DismissKnownDialogs that sends a dialog key unguarded on
 // a pack that can fence.
 func TestExecDismissKnownDialogsFencesItsKeys(t *testing.T) {
-	script, calls := boxScript(t, ownRead(execFence, "%1"), "", false)
+	script, calls := boxScript(t, ownRead(execFence), "", false)
 	p := NewSeamBacked(script).(runtime.DialogProvider)
 	ctx := runtime.WithInputFence(context.Background(), execFence)
 	// No dialog in a pane that peeks empty: the call reads and returns.
@@ -136,6 +137,54 @@ func TestExecDismissKnownDialogsFencesItsKeys(t *testing.T) {
 		if strings.HasPrefix(c, "'tmux' 'send-keys'") {
 			t.Errorf("unguarded dialog key %q", c)
 		}
+	}
+}
+
+// Kills a ctx-fenced DismissKnownDialogs that guards each dialog key on its
+// own: the call is one fenced operation, so the fence is read once, every
+// key goes through that read's guard, and a respawn after the first key
+// reached the pane is a miss marked partial.
+func TestExecDismissKnownDialogsIsOneFencedOperation(t *testing.T) {
+	other := runtime.InputFence{Generation: 3, Epoch: 3, Token: "next"}
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	guards := filepath.Join(dir, "guards")
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  exec)
+    cmd=$(cat)
+    echo "$cmd" >> `+calls+`
+    case "$cmd" in
+      *if-shell*)
+        echo x >> `+guards+`
+        if [ "$(wc -l < `+guards+`)" -gt 1 ]; then echo 'gc-fence-miss:`+ownRead(other)+`'; fi ;;
+      *display-message*) echo '`+ownRead(execFence)+`' ;;
+      *capture-pane*) printf '%s\n' 'Resume from summary' 'Resume full session as-is' 'Enter to confirm' ;;
+    esac
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewSeamBacked(script).(runtime.DialogProvider)
+	err := p.DismissKnownDialogs(runtime.WithInputFence(context.Background(), execFence), "s", time.Second)
+	var miss *runtime.FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != other.Digest() || !miss.Partial {
+		t.Fatalf("DismissKnownDialogs with a respawn after the first key = %v, want a partial miss finding %s", err, other.Digest())
+	}
+	var reads, guarded int
+	for _, c := range readCalls(t, calls) {
+		switch {
+		case strings.HasPrefix(c, "'tmux' 'display-message'"):
+			reads++
+		case strings.HasPrefix(c, "'tmux' 'if-shell'"):
+			guarded++
+		case strings.HasPrefix(c, "'tmux' 'send-keys'"):
+			t.Errorf("unguarded dialog key %q", c)
+		}
+	}
+	if reads != 1 || guarded != 2 {
+		t.Fatalf("fence reads = %d, guarded keys = %d; want one read guarding both dialog keys", reads, guarded)
 	}
 }
 

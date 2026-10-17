@@ -590,25 +590,27 @@ func formatStartupWatchError(stderr string, err error) error {
 // auto-trusts an unverified import.
 //
 // Under a ctx input fence, a pack that cannot fence refuses before any peek
-// or key (runtime.RefuseUnfenceableCtx); one that can proves the fence
-// before the first peek and sends every dialog key through the carrier
-// guard.
+// or key (runtime.RefuseUnfenceableCtx); one that can runs the whole call as
+// one fenced operation of the carrier guard: the fence is proven before the
+// first peek, every dialog key is guarded on that proof, and a miss after a
+// key reached the pane is partial.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
 	if err := runtime.RefuseUnfenceableCtx(ctx, p, name); err != nil {
 		return err
 	}
-	sendKeys := func(keys ...string) error { return p.SendKeys(name, keys...) }
-	if f, ok := runtime.InputFenceFrom(ctx); ok {
-		// No keys: the fence read alone.
-		if err := p.SendKeysFenced(ctx, name, f); err != nil {
-			return err
-		}
-		sendKeys = func(keys ...string) error { return p.SendKeysFenced(ctx, name, f, keys...) }
+	peek := func(lines int) (string, error) { return p.Peek(name, lines) }
+	f, ok := runtime.InputFenceFrom(ctx)
+	if !ok {
+		return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout, peek,
+			func(keys ...string) error { return p.SendKeys(name, keys...) })
 	}
-	return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout,
-		func(lines int) (string, error) { return p.Peek(name, lines) },
-		sendKeys,
-	)
+	c, err := p.fencedCarrier(name)
+	if err != nil {
+		return err
+	}
+	return c.FencedKeys(ctx, name, f, func(sendKeys func(keys ...string) error) error {
+		return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout, peek, sendKeys)
+	})
 }
 
 // Stop destroys the named session: script stop <name>

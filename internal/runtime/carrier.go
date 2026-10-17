@@ -50,6 +50,11 @@ type Carrier interface {
 	SendKeysFenced(ctx context.Context, name string, fence InputFence, keys ...string) error
 	// InterruptFenced interrupts as Interrupt does, only fence's incarnation.
 	InterruptFenced(ctx context.Context, name string, fence InputFence) error
+	// FencedKeys runs body as one fenced operation: the fence is read once
+	// before body, every key body sends goes through that read's guard, and
+	// a miss after any key applied is partial. It is how a ctx-fenced
+	// composite (dialog dismissal) sends its keys.
+	FencedKeys(ctx context.Context, name string, fence InputFence, body func(sendKeys func(keys ...string) error) error) error
 	// PublishInputFence records fence as the incarnation the session's
 	// agent now runs, so fenced input to it can be proven.
 	PublishInputFence(ctx context.Context, name string, fence InputFence) error
