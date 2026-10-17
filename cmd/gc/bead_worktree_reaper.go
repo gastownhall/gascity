@@ -17,6 +17,7 @@ import (
 	"github.com/gastownhall/gascity/internal/git"
 	"github.com/gastownhall/gascity/internal/pathutil"
 	"github.com/gastownhall/gascity/internal/sling"
+	"github.com/gastownhall/gascity/internal/workdir"
 )
 
 // reapDecision records one worktree the reaper acted on or declined to act on,
@@ -140,7 +141,7 @@ func reapClosedBeadWorktrees(
 		fmt.Fprintf(stderr, "reapClosedBeadWorktrees: liveness scanned via %s (/proc unavailable)\n", live.source) //nolint:errcheck
 	}
 
-	wtRoot := filepath.Join(cityPath, ".gc", "worktrees")
+	wtRoot := workdir.WorktreesRoot(cityPath)
 
 	for rigName, store := range rigStores {
 		if store == nil {
