@@ -45,7 +45,8 @@ const (
 	// proxy root, where the script degrades to a ping alone rather than cycling
 	// the one proxy serving hq and every other rig. Admission never spends it
 	// for such a scope: the recover rung is the city scope's (round4 recheck
-	// M2, beads.AdmissionInput.CityRoot).
+	// M2, beads.AdmissionInput.CityRoot). Nor for a one-shot open: only a
+	// long-lived store's admission spends it (beads.AdmissionInput.LongLived).
 	proxiedProviderRecoverOp = "recover"
 
 	// proxiedOneShotAdmissionBudget bounds admission for a command a human is
