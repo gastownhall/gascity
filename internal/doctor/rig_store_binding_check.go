@@ -2,12 +2,12 @@ package doctor
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
@@ -25,9 +25,11 @@ import (
 )
 
 // rigStoreBindingMinRetentionPct is the minimum percentage of the most
-// recent accepted JSONL export's issue count that the live store must
+// recent accepted JSONL export's durable issue count that the live store must
 // retain before RigStoreBindingCheck fails it as collapsed. It mirrors the
-// export pack's own GC_BEADS_JSONL_MAX_SHRINK_PCT default (20% max shrink).
+// export pack's own GC_BEADS_JSONL_MAX_SHRINK_PCT default (20% max shrink),
+// and the floor is computed with the pack's integer arithmetic so doctor
+// errors exactly when the next export would be quarantined as shrunk.
 const rigStoreBindingMinRetentionPct = 80
 
 // rigStoreBindingQueryTimeout bounds each SQL round-trip the check makes.
@@ -185,32 +187,37 @@ func judgeRigStoreBinding(r *CheckResult, rigName, database, addr, exportPath st
 
 	stats, err := readRigExportStats(exportPath)
 	if err != nil {
-		r.Status = StatusError
-		r.Message = fmt.Sprintf("rig %q: read export baseline %s: %v", rigName, exportPath, err)
+		// Damage to a backup file is not evidence about the live store.
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("rig %q: export baseline %s is unreadable, store binding not compared: %v", rigName, exportPath, err)
+		r.FixHint = "inspect or regenerate the rig's JSONL export; the live store was not judged"
 		return r
 	}
-	r.Details = append(r.Details, fmt.Sprintf("export baseline: %s (%d issues)", filepath.Base(exportPath), stats.lines))
+	r.Details = append(r.Details, fmt.Sprintf("export baseline: %s (%d durable issues)", filepath.Base(exportPath), stats.durable))
 
-	if stats.lines > 0 && liveCount*100 < stats.lines*rigStoreBindingMinRetentionPct {
+	if floor := stats.durable * rigStoreBindingMinRetentionPct / 100; stats.durable > 0 && liveCount < floor {
 		r.Status = StatusError
 		if liveCount == 0 {
-			r.Message = fmt.Sprintf("rig %q: database %q on %s has an empty issues table but the last accepted export (%s) has %d issues", rigName, database, addr, filepath.Base(exportPath), stats.lines)
+			r.Message = fmt.Sprintf("rig %q: database %q on %s has an empty issues table but the last accepted export (%s) has %d durable issues", rigName, database, addr, filepath.Base(exportPath), stats.durable)
 		} else {
-			r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues, below %d%% of the last accepted export's %d (%s)", rigName, database, addr, liveCount, rigStoreBindingMinRetentionPct, stats.lines, filepath.Base(exportPath))
+			r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues, below the floor of %d (%d%% of the last accepted export's %d durable issues, %s)", rigName, database, addr, liveCount, floor, rigStoreBindingMinRetentionPct, stats.durable, filepath.Base(exportPath))
 		}
 		r.FixHint = "restore the database from backup or investigate the store collapse before trusting doctor OK"
 		return r
 	}
 
-	if !stats.newest.IsZero() && !liveNewest.Time.After(stats.newest) {
+	// An export is a snapshot of the live store, so a dormant rig keeps the
+	// same newest created_at forever. Only a live store strictly older than
+	// its export looks rolled back or replaced.
+	if !stats.newest.IsZero() && liveNewest.Time.UTC().Truncate(time.Second).Before(stats.newest) {
 		r.Status = StatusWarning
-		r.Message = fmt.Sprintf("rig %q: database %q on %s has not advanced past the last accepted export (%s, newest %s); live store looks frozen", rigName, database, addr, filepath.Base(exportPath), stats.newest.Format(time.RFC3339))
+		r.Message = fmt.Sprintf("rig %q: database %q on %s is older than the last accepted export (%s, newest %s); live store looks rolled back or frozen", rigName, database, addr, filepath.Base(exportPath), stats.newest.Format(time.RFC3339))
 		r.FixHint = "confirm writes are actually reaching this rig's live store, not silently landing elsewhere"
 		return r
 	}
 
 	r.Status = StatusOK
-	r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues (export baseline %d)", rigName, database, addr, liveCount, stats.lines)
+	r.Message = fmt.Sprintf("rig %q: database %q on %s has %d issues (export baseline %d durable)", rigName, database, addr, liveCount, stats.durable)
 	return r
 }
 
@@ -242,11 +249,11 @@ func openRigStoreBindingConn(host, port, user, password, database string) (*sql.
 	return sql.Open("mysql", cfg.FormatDSN())
 }
 
-// rigExportStats summarizes a rig's accepted JSONL export for comparison
-// against the live store.
+// rigExportStats summarizes the durable records of a rig's accepted JSONL
+// export for comparison against the live store.
 type rigExportStats struct {
-	lines  int
-	newest time.Time
+	durable int
+	newest  time.Time
 }
 
 // latestAcceptedRigExport returns the path to the most recently named
@@ -282,8 +289,12 @@ func latestAcceptedRigExport(cityPath, rigName string) (string, error) {
 	return filepath.Join(dir, best), nil
 }
 
-// readRigExportStats counts issue lines and finds the newest created_at in
-// a JSONL export.
+// readRigExportStats counts the durable issue records in a JSONL export and
+// finds their newest created_at, truncated to the second in UTC. Records that
+// are not issues (_type other than "issue") or that live in the wisp plane
+// (wisp_plane true) are not in the live issues table and are not counted; this
+// is the rule the export pack's own shrink gate applies. The file is streamed
+// with a json.Decoder, so a record's size is not capped.
 func readRigExportStats(path string) (rigExportStats, error) {
 	f, err := os.Open(path) //nolint:gosec // path is derived from the city's own export directory
 	if err != nil {
@@ -292,25 +303,27 @@ func readRigExportStats(path string) (rigExportStats, error) {
 	defer func() { _ = f.Close() }()
 
 	var stats rigExportStats
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 10*1024*1024)
-	for scanner.Scan() {
-		line := bytes.TrimSpace(scanner.Bytes())
-		if len(line) == 0 {
-			continue
-		}
-		stats.lines++
+	dec := json.NewDecoder(bufio.NewReaderSize(f, 1<<20))
+	for {
 		var rec struct {
+			Type      string `json:"_type"`
+			WispPlane bool   `json:"wisp_plane"`
 			CreatedAt string `json:"created_at"`
 		}
-		if err := json.Unmarshal(line, &rec); err == nil && rec.CreatedAt != "" {
-			if t, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil && t.After(stats.newest) {
+		if err := dec.Decode(&rec); err != nil {
+			if errors.Is(err, io.EOF) {
+				return stats, nil
+			}
+			return rigExportStats{}, fmt.Errorf("decode record %d: %w", stats.durable+1, err)
+		}
+		if (rec.Type != "" && rec.Type != "issue") || rec.WispPlane {
+			continue
+		}
+		stats.durable++
+		if t, err := time.Parse(time.RFC3339, rec.CreatedAt); err == nil {
+			if t = t.UTC().Truncate(time.Second); t.After(stats.newest) {
 				stats.newest = t
 			}
 		}
 	}
-	if err := scanner.Err(); err != nil {
-		return stats, err
-	}
-	return stats, nil
 }
