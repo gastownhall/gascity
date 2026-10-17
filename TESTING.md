@@ -1509,7 +1509,7 @@ For integration buckets, use the named shard runner:
 
 ```bash
 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
-./scripts/test-integration-shard review-formulas-retries-1-of-2
+./scripts/test-integration-shard review-formulas-retries-1-of-3
 ./scripts/test-integration-shard rest-full-4-of-8
 ```
 
