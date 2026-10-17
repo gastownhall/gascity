@@ -540,50 +540,44 @@ func copyHistoryInvocationMetadata(page, full []HistoryEntry) {
 	}
 }
 
+// attachTailUsageToAssistantEntries attaches each usage to the latest
+// assistant entry still lacking metadata that is newer than the previous
+// attachment and not newer than the usage. Usages and entries are both in
+// transcript order, so one forward pass suffices. A usage with no such entry
+// is dropped rather than landing on an earlier row of the turn.
 func attachTailUsageToAssistantEntries(entries []HistoryEntry, usages []sessionlog.TailUsage) []HistoryEntry {
 	if len(entries) == 0 || len(usages) == 0 {
 		return entries
 	}
-	nextStart := 0
+	next, candidate := 0, -1
 	for _, usage := range usages {
 		usageTime, ok := tailUsageTimestamp(usage)
 		if !ok {
 			continue
 		}
-		target := latestAssistantEntryBefore(entries, nextStart, usageTime)
-		if target < 0 {
-			target = latestAssistantEntryBefore(entries, 0, usageTime)
+		for ; next < len(entries); next++ {
+			entry := entries[next]
+			if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
+				break
+			}
+			if entry.Actor == ActorAssistant && entry.Timestamp != nil && (entry.Usage == nil || entry.Model == "") {
+				candidate = next
+			}
 		}
-		if target < 0 {
+		if candidate < 0 || entries[candidate].Timestamp.After(usageTime) {
 			continue
 		}
-		if entries[target].Model == "" {
-			entries[target].Model = usage.Model
+		target := &entries[candidate]
+		if target.Model == "" {
+			target.Model = usage.Model
 		}
-		if entries[target].Usage == nil {
-			entries[target].Usage = historyUsageFromTailUsage(usage)
-			enrichUsageContext(entries[target].Usage, entries[target].Model)
+		if target.Usage == nil {
+			target.Usage = historyUsageFromTailUsage(usage)
+			enrichUsageContext(target.Usage, target.Model)
 		}
-		nextStart = target + 1
+		candidate = -1
 	}
 	return entries
-}
-
-func latestAssistantEntryBefore(entries []HistoryEntry, start int, usageTime time.Time) int {
-	target := -1
-	for idx := start; idx < len(entries); idx++ {
-		entry := entries[idx]
-		if entry.Timestamp != nil && entry.Timestamp.After(usageTime) {
-			break
-		}
-		if entry.Actor != ActorAssistant || entry.Timestamp == nil {
-			continue
-		}
-		if entry.Usage == nil || entry.Model == "" {
-			target = idx
-		}
-	}
-	return target
 }
 
 func tailUsageTimestamp(usage sessionlog.TailUsage) (time.Time, bool) {
