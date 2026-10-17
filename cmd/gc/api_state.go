@@ -157,6 +157,14 @@ type controllerState struct {
 	autocloseSweep     *autocloseSweep
 	autocloseSweepOnce sync.Once
 
+	// webhookInapplicableReports is the set of orders the webhook dispatch seam
+	// has reported as inapplicable this controller boot. Every per-delivery
+	// dispatcher shares it (controllerWebhookDispatcher.dispatcher), so a refused
+	// order is announced once, not on every delivery and sender retry. The tick
+	// loop's dispatcher keeps its own set: it never dispatches a webhook-trigger
+	// order, the only kind this seam fires, so no order is in both.
+	webhookInapplicableReports inapplicableReportSet
+
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
 	// each record into the city event log as an emergency.signaled event.
@@ -2040,6 +2048,12 @@ func (cs *controllerState) NudgesBeadStore() beads.NudgesStore {
 	return beads.NudgesStore{Store: resolveNudgesStore(cs.storageRoutes, cs.cityBeadStore, cs.cfg, cs.cityPath, cs.eventProv)}
 }
 
+// NudgeQueue returns the city's nudge queue over its nudges-class store, for the
+// API's deferred submits and wait-nudge withdrawals.
+func (cs *controllerState) NudgeQueue() api.NudgeQueue {
+	return openNudgeQueue(cs.cityPath, cs.NudgesBeadStore()).Queue
+}
+
 // SessionsBeadStore returns the store backing session-class beads. At the default
 // backend resolveSessionStore returns cityBeadStore, so this is byte-identical to
 // CityBeadStore; when [beads.classes.sessions] is relocated it returns the per-class
@@ -3492,9 +3506,11 @@ func (cs *controllerState) ServiceRegistry() workspacesvc.Registry {
 // dispatcher (cr.od, which is owned by the orders lane — see orders_lane.go — and
 // may be nil for a webhook-only city). The seam's Dispatch path consults no per-tick
 // dispatcher state (cooldown cache, open-work gate) — it validates required params,
-// writes the tracking bead, and launches dispatchOne — so a per-delivery instance
-// is byte-equivalent to a long-lived one, and the order's own timeout bounds the
-// async work.
+// refuses an order its scope's backend rules out, writes the tracking bead, and
+// launches dispatchOne — and the order's own timeout bounds the async work. The one
+// piece of state that must outlive a delivery is the set of orders already reported
+// as inapplicable, so every per-delivery instance shares the controller's
+// webhookInapplicableReports and the report stays once per controller boot.
 func (cs *controllerState) WebhookDispatcher() orderdispatch.Dispatcher {
 	return controllerWebhookDispatcher{cs: cs}
 }
@@ -3525,7 +3541,9 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	md := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	md.inapplicableReported = &cs.webhookInapplicableReports
+	return md
 }
 
 // ExtMsgServices returns the external messaging services.

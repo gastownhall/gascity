@@ -192,6 +192,8 @@ func TestT3ExitCauseIsRejection(t *testing.T) {
 
 // A turn start whose handler died or was interrupted may still commit, so it
 // is not a rejection: redelivering under a new key could start a second turn.
+// Nor is it unavailable, which runtime.TurnFenceProvider reserves for a send
+// that sent nothing: deliver-now would queue the message a second time.
 func TestNudgeKeyedAmbiguousFailureIsNotErrNudgeRejected(t *testing.T) {
 	for name, cause := range map[string]interface{}{
 		"die":       map[string]interface{}{"_tag": "Die", "defect": "boom"},
@@ -209,6 +211,9 @@ func TestNudgeKeyedAmbiguousFailureIsNotErrNudgeRejected(t *testing.T) {
 			}
 			if errors.Is(err, runtime.ErrNudgeRejected) {
 				t.Fatalf("NudgeKeyed with a %s cause = %v, want an ambiguous (non-rejection) error", name, err)
+			}
+			if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("NudgeKeyed with a %s cause = %v, want an error that does not claim nothing was sent", name, err)
 			}
 		})
 	}

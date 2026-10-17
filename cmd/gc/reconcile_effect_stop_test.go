@@ -904,3 +904,99 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		})
 	}
 }
+
+// TestExecutionStalledStopReleasesOnlyOnAConfirmedStop (v5.10x X7). Kills a
+// stalled stop that gives the claim back before its stop is confirmed: an
+// attached seat the fence refuses, and a stop whose fresh read still finds
+// the runtime, leave the claim in_progress on the seat, which stays open.
+func TestExecutionStalledStopReleasesOnlyOnAConfirmedStop(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		setup func(*fenceLeaf)
+	}{
+		{"attached", func(l *fenceLeaf) { l.SetAttached("s-gc-1", true) }},
+		{"the stop unconfirmed", func(l *fenceLeaf) { l.StopLeavesRunning = map[string]bool{"s-gc-1": true} }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var claimID string
+			var work beads.Store
+			s, got, _ := stopRun(t, signaled(executionStalledDrainReason), undesired(executionStalledDrainReason), func(p *effectPass, l *fenceLeaf, store beads.Store, id string) {
+				work = store
+				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				inProgress := "in_progress"
+				if err := store.Update(claim.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &id}); err != nil {
+					t.Fatal(err)
+				}
+				claimID = claim.ID
+				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
+					t.Fatal(err)
+				}
+				rel := newCloseReleases(p.World, nil, io.Discard)
+				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil)
+				p.held.release = rel
+				c.setup(l)
+			})
+			claim, err := work.Get(claimID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if s.Outcome != settledRefused || claim.Status != "in_progress" || got.Status == "closed" {
+				t.Fatalf("settlement %+v, claim %q, row %s; want refused, the claim kept, the seat open", s, claim.Status, got.Status)
+			}
+		})
+	}
+}
+
+// TestExecutionStalledStopWithNothingLiveReleasesOnConfirmation (v5.10x X7,
+// mc-muv2x review M7). Kills a stalled stop that, with no live runtime to
+// stop, gives the claim back before C8.8 confirms it: a runtime back under
+// the name by the confirmation's fresh read leaves the claim in_progress on
+// the seat, which stays open; confirmed, the claim is given back and the
+// seat closes.
+func TestExecutionStalledStopWithNothingLiveReleasesOnConfirmation(t *testing.T) {
+	for _, back := range []bool{false, true} {
+		t.Run(map[bool]string{false: "confirmed", true: "back by the confirmation"}[back], func(t *testing.T) {
+			obs := &freshObserver{Fake: runtime.NewFake(), env: map[string]string{"GC_SESSION_ID": "gc-1", "GC_INSTANCE_TOKEN": "tok-3"}}
+			var claimID string
+			var work beads.Store
+			s, got, _ := stopRun(t, signaled(executionStalledDrainReason), undesired(executionStalledDrainReason), func(p *effectPass, _ *fenceLeaf, store beads.Store, id string) {
+				work = store
+				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				inProgress := "in_progress"
+				if err := store.Update(claim.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &id}); err != nil {
+					t.Fatal(err)
+				}
+				claimID = claim.ID
+				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
+					t.Fatal(err)
+				}
+				rel := newCloseReleases(p.World, nil, io.Discard)
+				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil)
+				p.held.release = rel
+				p.Runtime = obs.tmux()
+				p.seam = func(_ context.Context, at txSeam, _ intent, _, _ int) error {
+					if back && at == seamBeforeCall { // the fence read nothing live; C8.8 finds it back
+						obs.l = runtime.Liveness{Running: true, Alive: true, ObjectID: "$1", ObjectCreated: "1"}
+					}
+					return nil
+				}
+			})
+			claim, err := work.Get(claimID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch {
+			case back && (s.Outcome != settledRefused || claim.Status != "in_progress" || got.Status == "closed"):
+				t.Fatalf("settlement %+v, claim %q, row %s; want refused, the claim kept, the seat open", s, claim.Status, got.Status)
+			case !back && (s.Outcome != settledLanded || claim.Status != "open" || got.Status != "closed"):
+				t.Fatalf("settlement %+v, claim %q, row %s; want landed, the claim given back, the seat closed", s, claim.Status, got.Status)
+			}
+		})
+	}
+}

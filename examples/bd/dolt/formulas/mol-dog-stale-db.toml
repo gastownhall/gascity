@@ -110,7 +110,12 @@ append_report_note() {
   local title="$1"
   local file="$2"
   if [ -s "$file" ]; then
-    if ! bd update "$WORK_BEAD" --append-notes "$(printf '## %s %s\n\n```json\n%s\n```' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$(cat "$file")")"; then
+    # The note's code fence is built from octal escapes, and \\n is doubled so
+    # TOML keeps it for printf: a literal triple backtick in this script ends
+    # the step's own bash fence early for whoever reads it (gascity#7967).
+    local fence
+    fence="$(printf '\\140\\140\\140')"
+    if ! bd update "$WORK_BEAD" --append-notes "$(printf '## %s %s\\n\\n%sjson\\n%s\\n%s' "$title" "$(date -u +"%Y-%m-%dT%H:%M:%SZ")" "$fence" "$(cat "$file")" "$fence")"; then
       echo "failed to append ${title} report; continuing to drain-ack" >&2
     fi
   fi

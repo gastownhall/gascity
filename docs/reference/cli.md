@@ -104,6 +104,7 @@ gc agent
 | Subcommand | Description |
 |------------|-------------|
 | [gc agent add](#gc-agent-add) | Add an agent scaffold |
+| [gc agent is-foreign](#gc-agent-is-foreign) | Report whether this city can vouch for a claim's assignee |
 | [gc agent list](#gc-agent-list) | List configured agents |
 | [gc agent resume](#gc-agent-resume) | Resume a suspended agent |
 | [gc agent suspend](#gc-agent-suspend) | Suspend an agent (reconciler will skip it) |
@@ -140,6 +141,45 @@ gc agent add --name worker --prompt-template ./worker.md --suspended
 | `--name` | string |  | Name of the agent |
 | `--prompt-template` | string |  | Path to prompt template file (relative to city root) |
 | `--suspended` | bool |  | Register the agent in suspended state |
+
+## gc agent is-foreign
+
+Report whether this city can vouch for a claim's assignee identity.
+
+An identity is local when it resolves against this city's roster (configured
+agents, named sessions, pool and namepool instances), or when one of this
+city's own session records, open or closed, answers to it under its bead ID,
+session name, alias, configured named identity or sole alias-history entry.
+Anything else is foreign: on a shared rig store, another city's claims look
+exactly like this. Every identity shape is checked, qualified or bare.
+
+Exit codes:
+  0  local    this city can vouch for the identity
+  1  foreign  this city cannot vouch for it; protect the claim
+  2  unknown  this city cannot answer (no roster, a failed lookup, bad usage);
+              protect the claim
+
+"local" is not a liveness claim: a dead local claimant is still local, and the
+caller has to establish liveness itself.
+
+Callers that reap claims on this verdict must fail closed: treat a missing
+verb, exit 2, or unparseable output as "protect", never as "local". Pass the
+identity after "--" when it is untrusted text.
+
+```
+gc agent is-foreign <identity> [flags]
+```
+
+**Example:**
+
+```
+gc agent is-foreign repo/worker-3
+gc agent is-foreign --json -- "$assignee"
+```
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--json` | bool |  | Output in JSON format |
 
 ## gc agent list
 
@@ -300,11 +340,16 @@ filters would otherwise return [] and exit 0 on a ledger full of live
 molecules. Every other list is forwarded as written. "heartbeat
 &lt;issue-id&gt;" forwards to bd's native heartbeat, which refreshes the claim's
 lease and fails loudly when the caller no longer owns it. "show &lt;id&gt;
---watch" (or "show --current --watch", or the "view" alias) on a scope that
-uses bd's proxied-server transport (the default for a new city), where bd
-refuses watch mode, is served by gc instead: it re-runs "bd show" every 2
-seconds and redraws when the bead's status or update time changes, until
-Ctrl+C. Like bd's own watch, it renders the plain form and ignores show's
+--watch" (or "show --current --watch", or the "view" alias) is served by gc
+on two kinds of scope: one that uses bd's proxied-server transport (the
+default for a new city), where bd refuses watch mode, and one whose store bd
+reaches over http, where enterprise bd refuses it and OSS bd would poll the
+shared server every 2 seconds. gc re-runs "bd show" every 2 seconds on a
+proxied scope and every 10 to 12 seconds on an http scope, and redraws when
+the bead's status or update time changes, until Ctrl+C. A failing read is
+reported once, with bd's error; the last view stays up and the wait between
+reads doubles, up to 5 minutes, until a read succeeds, which is reported
+too. Like bd's own watch, it renders the plain form and ignores show's
 display flags (--json, --short, --long, --refs, --children). gc adds one
 subcommand of its own: "release-if-current &lt;issue-id&gt; &lt;assignee&gt;", which
 conditionally resets an in-progress assignment only when the bead still has
@@ -2985,6 +3030,8 @@ Use --rig to disambiguate same-name orders in different rigs.
 Use --var key=value (repeatable) to pass args to the order: formula orders
 receive them as formula vars, exec orders as environment variables. A param
 declared required in [order.params] must be supplied or the run fails.
+An order whose requires_backend does not name its scope's backend is
+refused; --force runs it anyway.
 
 ```
 gc order run <name> [flags]
@@ -2992,6 +3039,7 @@ gc order run <name> [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--force` | bool |  | run an order even when its requires_backend rules out its scope's backend |
 | `--json` | bool |  | JSON output (formula orders only; rejected for exec orders) |
 | `--rig` | string |  | rig name to disambiguate same-name orders |
 | `--var` | stringArray |  | order arg as key=value (repeatable): formula var / exec env |

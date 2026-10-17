@@ -538,11 +538,32 @@ func (s *BdStore) projectViaBlockedDoor(wanted map[string]struct{}, withheld err
 // refusal it fails to recognize costs a retry per cycle rather than a wrong
 // answer, and a blip it misreads as a refusal costs the projection, never the
 // readiness verdict, because the degrade sends readiness to a live `bd ready`.
+//
+// Three refusal shapes are recognized:
+//
+//   - the verb itself is missing or unsupported by the client or its storage
+//     ("unknown command", "not supported", ...), which must name the verb;
+//   - a client that classifies the command against the server's advertised
+//     capabilities and refuses before dialing:
+//     `bd blocked requires server capability "X"; bd serve at ... does not
+//     advertise it`;
+//   - a client whose transport refuses the operation at the handshake:
+//     `bd serve at ... does not advertise capability "X", which ... requires`.
+//
+// The last two are what a newer bd says to an older `bd serve` that lacks the
+// operation. That is as permanent for the life of the process as the verb
+// being absent (a server upgrade needs the gc restart the latch already
+// prescribes), so it latches too; without it a newer bd in front of an older
+// server re-spends a failing subprocess every reconcile.
 func isBdBlockedUnsupported(err error) bool {
 	if err == nil {
 		return false
 	}
 	msg := strings.ToLower(err.Error())
+	if strings.Contains(msg, "requires server capability") ||
+		strings.Contains(msg, "does not advertise capability") {
+		return true
+	}
 	if !strings.Contains(msg, "blocked") {
 		return false
 	}
