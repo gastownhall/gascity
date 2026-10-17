@@ -49,7 +49,8 @@ import (
 //     legacy has no WorkSet either;
 //   - custom scale_check counts and partials (ruling 1, PAR-SC): K1's run of
 //     legacy's own evaluation, read through gather, agrees on every
-//     scaleCheckDiffCities fixture but those its two findings name.
+//     scaleCheckDiffCities fixture but those its two explained
+//     differences (scale-check-source, named-always-custom-count) name.
 
 // diffNow is the shared row helpers' clock (censusSession).
 var diffNow = censusNow
@@ -91,22 +92,21 @@ var allocDifferences = map[string]allocDifference{
 		"v5 AL1",
 		"the census reads beads.FederatedReadTier, so a wisp-tier session row is in v2's census; legacy's snapshot does not read that tier",
 	},
+	"scale-check-source": {
+		"v5 §12.2, PAR-SC (owner ruling 2026-10-17)",
+		"one scale_check source runs every custom check: before its first run ends inside its budget, or once its result is older than 3 × patrol, every custom template reads partial (rows kept, no create) until a fresh run publishes, where legacy's tick waits on each check and marks only the one that failed or timed out",
+	},
+	"named-always-custom-count": {
+		"v5 §12.2, PAR-SC, POOL-008 (owner ruling 2026-10-17)",
+		"an always named session whose template's custom check counts work: v2 plans the canonical named create, where legacy's build creates a pool-managed ephemeral row that its desired state maps to the named identity",
+	},
 }
 
 // allocFindings are divergences the differential found that CONTRACT v5
 // does not explain. They are pinned so the suite stays honest while the owner
 // decides; an entry is deleted when its fix lands (the fixture then fails
 // until its explain entry goes too). A finding is not an explanation.
-var allocFindings = map[string]allocDifference{
-	"scale-check-source": {
-		"PAR-SC; not in CONTRACT v5 (K1 per SIMPLIFICATION-CHECKPOINT C4; BEHAVIORS I5)",
-		"one scale_check source runs every custom check: before its first run ends inside its budget, or once its result is older than 3 × patrol, every custom template reads partial (rows kept, no create), where legacy's tick waits on each check and marks only the one that failed or timed out",
-	},
-	"named-always-custom-count": {
-		"PAR-SC; POOL-008",
-		"an always named session whose template's custom check counts work: legacy's build creates a pool-managed ephemeral row that its desired state maps to the named identity; v2 plans the canonical named create",
-	},
-}
+var allocFindings = map[string]allocDifference{}
 
 // diffCity is one fixture city: its config, the beads both stores start
 // from, the runtime names alive on both sides, and the K1 scale_check run.
