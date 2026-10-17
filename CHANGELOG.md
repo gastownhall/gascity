@@ -351,6 +351,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Suspending a session shortly after it woke keeps its conversation.** An
+  operator, idle or `gc stop` suspend no longer counts as a rapid crash or
+  churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
+
 - **The Dolt compactor docs no longer claim it only rewrites history this
   city grew.** The `gc-compact-base` watermark is a position, not an author:
   a database several cities write to is flattened for all of them when the
