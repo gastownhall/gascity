@@ -18,6 +18,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/guard"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/spf13/cobra"
 )
@@ -618,7 +619,12 @@ func cmdRuntimeDrainCheck(args []string, jsonOutput bool, stdout, stderr io.Writ
 		readRow = drainCheckRowReader(target.cityPath, func() (*config.City, error) { return cfg, nil }, target.sessionName, target.sessionID)
 	} else {
 		current, rowName, err := currentDrainCheckTarget()
-		if err != nil {
+		switch {
+		case isControlPlaneDescriptorError(err):
+			// The session's city is there, but its plane is unknown, so no
+			// source can answer: unknown, not "not draining".
+			return writeRuntimeDrainCheckUnknown(defaultSessionDisplayIdentity(), []string{drainCheckFailure(drainCheckSourceRow, err)}, jsonOutput, stdout, stderr)
+		case err != nil:
 			return 1 // no session to check; silent without context, as before
 		}
 		target = current
@@ -717,8 +723,13 @@ func drainCheckRowDraining(front *session.Store, sessionName, sessionID string) 
 // GC_DRAIN". Only the typed sentinels count; an error that merely reads like
 // absence (an adapter's "command not found") or that also says the runtime
 // could not be observed is a failure to answer.
+//
+// The worker-site guard's refusal is "meta not applicable" too: a box holds no
+// runtime meta, so the session row alone answers there. In-box drain-ack has
+// no path under the legacy reconciler (D-DRAINACK); the guard makes that loud
+// instead of reading a box-local runtime.
 func drainCheckRuntimeAbsent(err error) bool {
-	if errors.Is(err, runtime.ErrMetaUnsupported) {
+	if errors.Is(err, runtime.ErrMetaUnsupported) || errors.Is(err, guard.ErrControllerOwnedRuntime) {
 		return true
 	}
 	return errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable)
@@ -893,7 +904,7 @@ func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, 
 			return drainAckRefused
 		}
 	}
-	return finishRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(rowAckedDrainOps{drainOps: dops, stderr: stderr}, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
 }
 
 // ---------------------------------------------------------------------------
@@ -1247,6 +1258,25 @@ func finishRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID st
 	}
 	fmt.Fprintln(stdout, "Drain acknowledged. Controller poked for immediate stop.") //nolint:errcheck // best-effort stdout
 	return 0
+}
+
+// rowAckedDrainOps is the strict path's drainOps after the row ack committed.
+// The row is the ack there; the env flag only mirrors it into the runtime. A
+// worker site's guard holds no runtime to mirror into, so its
+// ErrControllerOwnedRuntime is "not applicable" (a warning), as drain-check
+// reads it, rather than failing an ack that is already in force.
+type rowAckedDrainOps struct {
+	drainOps
+	stderr io.Writer
+}
+
+func (o rowAckedDrainOps) setDrainAck(sessionName string) error {
+	err := o.drainOps.setDrainAck(sessionName)
+	if errors.Is(err, guard.ErrControllerOwnedRuntime) {
+		fmt.Fprintf(o.stderr, "gc runtime drain-ack: warning: the row ack is in force; no runtime here to mirror it into: %v\n", err) //nolint:errcheck // best-effort stderr
+		return nil
+	}
+	return err
 }
 
 // drainAckRefused is runtimeDrainAck's status for a v2 ack that the row check

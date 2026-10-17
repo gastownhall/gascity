@@ -752,8 +752,11 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	target, err := resolveNudgeTargetPreferringHookIdentity(targetID, len(args) == 0, stderr)
 	if err != nil {
 		if inject {
-			if errors.Is(err, errHookSessionClosed) {
+			switch {
+			case errors.Is(err, errHookSessionClosed):
 				fmt.Fprintf(stderr, "gc nudge drain: %v; not draining its nudges\n", err) //nolint:errcheck
+			case isControlPlaneDescriptorError(err):
+				fmt.Fprintf(stderr, "gc nudge drain: %v\n", err) //nolint:errcheck
 			}
 			wispExtra = ""
 			injectPrefix += contextInjectLineForSample(contextUsage, nil, nil)
@@ -2678,11 +2681,18 @@ func nudgeQueueIsEmpty(cityPath string) bool {
 // explicit city environment alone decides it: no --city/--rig flag and no
 // remote selector outranks GC_CITY/GC_CITY_PATH/GC_CITY_ROOT. Unlike
 // resolveCity it does not load the city config to name a rig.
+//
+// The city's control-plane gate applies here too: a city whose descriptor
+// cannot be used is not taken, so the full path's resolution refuses it.
 func nudgeDrainExplicitCityPath() (string, bool) {
 	if cityFlag != "" || rigFlag != "" || readRemoteSelection().hasExplicitRemote() {
 		return "", false
 	}
-	return resolveExplicitCityPathEnv()
+	cityPath, ok := resolveExplicitCityPathEnv()
+	if !ok || gateControlPlaneAt(cityPath) != nil {
+		return "", false
+	}
+	return cityPath, true
 }
 
 // claimDueQueuedNudgesForTarget claims every due nudge for target, pinned or

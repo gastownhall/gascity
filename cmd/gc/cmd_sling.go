@@ -7,7 +7,6 @@ import (
 	"io"
 	"maps"
 	"math/rand"
-	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1618,8 +1617,12 @@ func resolvePoolNudgeMember(cfg *config.City, pool *config.Agent, qualifiedInsta
 // pokeController sends a "poke" command to the controller socket to
 // trigger an immediate reconciler tick. If the per-city controller
 // socket doesn't exist (supervisor model), falls back to sending
-// "reload" to the supervisor socket.
+// "reload" to the supervisor socket. On a worker site it returns
+// errWorkerSiteNoController without trying either.
 func pokeController(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	_, err := sendControllerCommand(cityPath, "poke")
 	if err == nil {
 		return nil
@@ -1630,8 +1633,12 @@ func pokeController(cityPath string) error {
 
 // reloadControllerConfig asks the controller to reload config immediately.
 // If the per-city controller socket doesn't exist (supervisor model), falls
-// back to sending "reload" to the supervisor socket.
+// back to sending "reload" to the supervisor socket. On a worker site it
+// returns errWorkerSiteNoController without trying either.
 func reloadControllerConfig(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	_, err := sendControllerCommand(cityPath, "reload")
 	if err == nil {
 		return nil
@@ -1646,9 +1653,12 @@ func reloadControllerConfig(cityPath string) error {
 // commands like `gc sling` after the workflow has already been created. It
 // must not wait for the full supervisor reconcile to finish, or the caller can
 // block for minutes even though the wake was already queued.
+//
+// It dials through dialGCSocket, so on a worker site it returns
+// errWorkerSiteNoController (wrapped) without dialing.
 func pokeSupervisor() error {
 	sockPath := supervisorSocketPath()
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := dialGCSocket(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor: %w", err)
 	}

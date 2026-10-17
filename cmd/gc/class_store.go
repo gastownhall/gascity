@@ -274,11 +274,23 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 // over the binding's engine (storageRoutes.withControllerCache), which emits
 // the way the work ledger's does. See class_store_emit.go and
 // class_store_cache.go.
+//
+// On a worker site cityPath is read: a class whose binding no descriptor
+// ledger serves (a SQLite or file binding, or one the bundle did not carry)
+// resolves to a refused store, because the box holds no copy of it that is
+// the city's (DES-CN §4.4).
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
-	_ = cityPath
 	_ = rec
-	if store, relocated := routes.storeFor(coordclassFor(class)); relocated {
+	store, relocated := routes.storeFor(coordclassFor(class))
+	binding := config.StorageWorkBinding
+	if relocated {
+		binding = routes.binding
+	}
+	if refusal := workerSiteClassRefusal(cityPath, class, binding); refusal != nil {
+		return refusedClassStore{err: refusal}
+	}
+	if relocated {
 		return store
 	}
 	return workStore

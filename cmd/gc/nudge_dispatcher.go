@@ -31,6 +31,8 @@ const pingNudgeWakeSocketDialTimeout = 200 * time.Millisecond
 // and the per-session poller in legacy mode each guarantee eventual
 // delivery without the wake.
 //
+// It dials through dialCitySocket, so on a worker site it sends nothing.
+//
 // It is a variable so the file queue's characterization tests can count the
 // pings a queue verb sends without opening a listener; tests that replace it
 // must stay serial.
@@ -39,7 +41,7 @@ var pingNudgeWakeSocket = func(cityPath string) {
 		return
 	}
 	path := nudgequeue.WakeSocketPath(cityPath)
-	conn, err := net.DialTimeout("unix", path, pingNudgeWakeSocketDialTimeout)
+	conn, err := dialCitySocket(cityPath, path, pingNudgeWakeSocketDialTimeout)
 	if err != nil {
 		return
 	}

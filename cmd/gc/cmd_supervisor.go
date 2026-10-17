@@ -2275,6 +2275,15 @@ func startOneCity(
 		})
 	}
 
+	// A worker site's city is the remote controller's: the supervisor builds
+	// no runtime for it, whichever city the supervisor itself was started in.
+	// Each attempt re-reads the descriptor, so removing a stray one clears it.
+	if err := refuseCityStartOnWorkerSite(path); err != nil {
+		emitPendingCityCreateFailure(cr, path, name, "city_init_failed", err, stderr)
+		recordInitFailure(name, err.Error())
+		return
+	}
+
 	if err := ensureLegacyNamedPacksCached(path); err != nil {
 		emitPendingCityCreateFailure(cr, path, name, "pack_cache_failed", err, stderr)
 		recordInitFailure(name, fmt.Sprintf("fetching packs: %v", err))
