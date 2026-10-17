@@ -257,9 +257,8 @@ func (c *CachingStore) ObservedList(query ListQuery) ([]Bead, CacheObservation, 
 // write, within the known limits listed on CacheRevision. It says nothing about
 // writes made around the cache. A later local write to id raises it, and so do
 // failed conditional writes, including a CompareAndSetMetadataKey that lost
-// (false, nil). With no write to id on record — never written here, dropped
-// from the cache more than recentWriteVerifyWindow ago, or a write that
-// short-circuited because the clean cached row already matched — it is the
+// (false, nil). With no write to id on record — never written here, or
+// dropped from the cache more than recentWriteVerifyWindow ago — it is the
 // current mutation sequence, which no clean census can precede. Epochs are
 // process-local and restart at 1 in each process.
 func (c *CachingStore) WriteRev(id string) CacheRevision {
