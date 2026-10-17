@@ -5100,26 +5100,28 @@ func TestHandleSessionMessageMaterializesNamedSessionAsync(t *testing.T) {
 	}
 }
 
-func TestHandleSessionMessageEmitsFailureWhenProviderNudgeHangs(t *testing.T) {
+// A delivery that fails after outlasting the API's wait reports its own
+// error, not a timeout the API invented while the delivery was still running.
+func TestHandleSessionMessageSlowDeliveryFailureReportsRealError(t *testing.T) {
 	fs := newSessionFakeState(t)
 	blocker := &blockingNudgeProvider{
 		Fake:    fs.sp,
 		started: make(chan struct{}),
 		unblock: make(chan struct{}),
 	}
-	t.Cleanup(func() {
-		close(blocker.unblock)
-	})
-	prevTimeout := sessionMessageAsyncTimeout
-	sessionMessageAsyncTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		sessionMessageAsyncTimeout = prevTimeout
-	})
+	var unblockOnce sync.Once
+	unblock := func() { unblockOnce.Do(func() { close(blocker.unblock) }) }
+	t.Cleanup(unblock)
+	prevWait := sessionMessageSlowDeliveryLogAfter
+	sessionMessageSlowDeliveryLogAfter = time.Nanosecond
+	t.Cleanup(func() { sessionMessageSlowDeliveryLogAfter = prevWait })
+	logs := captureLockedLog(t)
 
 	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	info := createTestSession(t, fs.cityBeadStore, fs.sp, "blocked-message")
+	fs.sp.NudgeErrors = map[string]error{info.SessionName: errors.New("pane went away")}
 	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -5134,79 +5136,22 @@ func TestHandleSessionMessageEmitsFailureWhenProviderNudgeHangs(t *testing.T) {
 	case <-time.After(testEventTimeout):
 		t.Fatal("provider nudge was not reached")
 	}
+	logs.waitFor(t, "session.message still in flight")
+	unblock()
+
 	success, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
 	if success != nil {
 		t.Fatalf("unexpected success: %+v", success)
 	}
-	if failure == nil {
-		t.Fatal("expected request.failed for blocked provider nudge")
-	}
-	if failure.ErrorCode != "timeout" {
-		t.Fatalf("failure error_code = %q, want timeout", failure.ErrorCode)
+	if failure.ErrorCode != "message_failed" || !strings.Contains(failure.ErrorMessage, "pane went away") {
+		t.Fatalf("failure = %s: %s, want message_failed carrying the delivery error", failure.ErrorCode, failure.ErrorMessage)
 	}
 }
 
-func TestSessionMessageAsyncTimeoutMatchesClientTimeout(t *testing.T) {
-	if sessionMessageAsyncTimeout != sessionMessageTimeout {
-		t.Fatalf("sessionMessageAsyncTimeout = %s, want client timeout %s", sessionMessageAsyncTimeout, sessionMessageTimeout)
+func TestSessionMessageSlowDeliveryLogMatchesClientTimeout(t *testing.T) {
+	if sessionMessageSlowDeliveryLogAfter != sessionMessageTimeout {
+		t.Fatalf("sessionMessageSlowDeliveryLogAfter = %s, want client timeout %s", sessionMessageSlowDeliveryLogAfter, sessionMessageTimeout)
 	}
-}
-
-func TestHandleSessionMessageLogsLateProviderResultAfterTimeout(t *testing.T) {
-	fs := newSessionFakeState(t)
-	blocker := &blockingNudgeProvider{
-		Fake:    fs.sp,
-		started: make(chan struct{}),
-		unblock: make(chan struct{}),
-	}
-	prevTimeout := sessionMessageAsyncTimeout
-	sessionMessageAsyncTimeout = 50 * time.Millisecond
-	t.Cleanup(func() {
-		sessionMessageAsyncTimeout = prevTimeout
-	})
-
-	var logs bytes.Buffer
-	oldOutput := log.Writer()
-	oldFlags := log.Flags()
-	log.SetOutput(&logs)
-	log.SetFlags(0)
-	t.Cleanup(func() {
-		log.SetOutput(oldOutput)
-		log.SetFlags(oldFlags)
-	})
-
-	srv := New(&stateWithSessionProvider{fakeState: fs, provider: blocker})
-	h := newTestCityHandlerWith(t, fs, srv)
-
-	info := createTestSession(t, fs.cityBeadStore, fs.sp, "late-message")
-	req := newPostRequest(cityURL(fs, "/session/")+info.ID+"/messages", strings.NewReader(`{"message":"hello"}`))
-	rec := httptest.NewRecorder()
-	h.ServeHTTP(rec, req)
-
-	if rec.Code != http.StatusAccepted {
-		t.Fatalf("message status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
-	}
-	accepted := decodeAsyncAccepted(t, rec.Body)
-
-	select {
-	case <-blocker.started:
-	case <-time.After(testEventTimeout):
-		t.Fatal("provider nudge was not reached")
-	}
-	_, failure := waitForSessionMessageResult(t, fs.eventProv, accepted.RequestID)
-	if failure == nil || failure.ErrorCode != "timeout" {
-		t.Fatalf("failure = %+v, want timeout", failure)
-	}
-
-	close(blocker.unblock)
-	deadline := time.Now().Add(testEventTimeout)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logs.String(), "late session.message result after timeout") {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("logs = %q, want late session.message result after timeout", logs.String())
 }
 
 func TestHandleSessionMessageMaterializesBoundNamedSessionUsingQualifiedIdentity(t *testing.T) {

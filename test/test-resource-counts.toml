@@ -1599,7 +1599,7 @@ calls = 10
 [[count]]
 path = "internal/api/handler_sessions_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 8
 
 [[count]]
 path = "internal/api/handler_sessions_test.go"

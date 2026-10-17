@@ -283,12 +283,22 @@ giving clients real-time visibility into operation progress.
    - `request.failed` for failure (shared, `operation` enum)
 5. On success, the payload contains the full typed result.
 
-`session.message` uses the same four-minute timeout on both sides of
-the API adapter: the server emits `request.failed` with
-`error_code=timeout` at the same boundary the CLI client waits for on
-the SSE stream. If the provider path ignores cancellation and returns
-after that timeout, the API logs a late `session.message` result with
-the request ID instead of emitting a second terminal event.
+   The server never invents a terminal event at a deadline. Like
+   `session.submit`, a `session.message` delivery runs to its real
+   outcome, and that outcome is the request's one terminal event,
+   however long it takes. A deadline cannot tell a delivery that will
+   never land from one about to land, so a `request.failed` emitted
+   there would be false whenever the delivery later succeeded, and a
+   client that retried on it would deliver the message twice. The
+   provider paths bound their own waits. A delivery still in flight
+   after four minutes (the CLI client's wait) is logged with its
+   request ID, and its result event follows when the delivery finishes.
+
+   A client that stops waiting has not learned the outcome. It must not
+   treat its own timeout as a failure and resend without a key. A retry
+   with the same `Idempotency-Key`, inside the key's replay window,
+   replays the original 202, so the client can resume from its
+   `event_cursor` and receive the real result.
 6. On failure, `error_code` + `error_message` describe the problem.
 7. Do NOT use the resource before the success event arrives.
 

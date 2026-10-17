@@ -13,7 +13,6 @@ import (
 	"reflect"
 	"slices"
 	"strings"
-	"sync/atomic"
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
@@ -33,8 +32,12 @@ import (
 // to isolate mutation logic from reads and streaming.
 
 var (
-	sessionMessageAsyncTimeout      = sessionMessageTimeout
-	sessionCreateCommandableTimeout = 120 * time.Second
+	// sessionMessageSlowDeliveryLogAfter is how long a /messages delivery may
+	// run before the API logs that it is still in flight. It matches the CLI
+	// client's wait so the log marks the point where that client gives up. It
+	// never ends the request: the delivery's own result is the terminal event.
+	sessionMessageSlowDeliveryLogAfter = sessionMessageTimeout
+	sessionCreateCommandableTimeout    = 120 * time.Second
 )
 
 type sessionCommandableWaiter interface {
@@ -838,80 +841,35 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 	}
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
+	// Like /submit, the delivery runs to its real outcome on a background
+	// context and that outcome is the request's one terminal event. The API
+	// does not time the delivery out: it cannot know whether a delivery still
+	// in flight will land, so any event it emitted at a deadline would be a
+	// guess, and a "failed" guess makes a retry duplicate the message. The
+	// provider paths bound their own waits.
 	go func() {
 		defer s.recoverAsRequestFailed(reqID, RequestOperationSessionMessage)
-
-		type messageResult struct {
-			sessionID string
-			outcome   messageOutcome
-			errorCode string
-			err       error
+		slowAfter := sessionMessageSlowDeliveryLogAfter
+		slow := time.AfterFunc(slowAfter, func() {
+			log.Printf("api: session.message still in flight after %s request_id=%s target=%s; its result event follows when delivery finishes", slowAfter, reqID, sessionTarget)
+		})
+		defer slow.Stop()
+		ctx := context.Background()
+		id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, sessionTarget)
+		if err != nil {
+			s.emitSessionMessageFailed(reqID, "resolve_failed", err.Error())
+			return
 		}
-
-		resultCh := make(chan messageResult, 1)
-		var terminalEmitted atomic.Bool
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		sendResult := func(result messageResult) {
-			if terminalEmitted.Load() {
-				if result.err != nil {
-					log.Printf("api: late session.message result after timeout request_id=%s target=%s error_code=%s err=%v", reqID, sessionTarget, result.errorCode, result.err)
-				} else {
-					log.Printf("api: late session.message result after timeout request_id=%s target=%s session_id=%s", reqID, sessionTarget, result.sessionID)
-				}
-				return
+		outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
+		if err != nil {
+			code := "message_failed"
+			if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+				code = "timeout"
 			}
-			resultCh <- result
+			s.emitSessionMessageFailed(reqID, code, err.Error())
+			return
 		}
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					sendResult(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
-				}
-			}()
-			id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, sessionTarget)
-			if err != nil {
-				sendResult(messageResult{errorCode: "resolve_failed", err: err})
-				return
-			}
-			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
-			if err != nil {
-				code := "message_failed"
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					code = "timeout"
-				}
-				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
-				return
-			}
-			sendResult(messageResult{sessionID: id, outcome: outcome})
-		}()
-
-		timer := time.NewTimer(sessionMessageAsyncTimeout)
-		defer timer.Stop()
-		select {
-		case result := <-resultCh:
-			terminalEmitted.Store(true)
-			if result.err != nil {
-				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
-				return
-			}
-			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome)
-		case <-timer.C:
-			cancel()
-			select {
-			case result := <-resultCh:
-				terminalEmitted.Store(true)
-				if result.err != nil {
-					s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error())
-					return
-				}
-				s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome)
-				return
-			default:
-			}
-			terminalEmitted.Store(true)
-			s.emitSessionMessageFailed(reqID, "timeout", fmt.Sprintf("session.message timed out after %s", sessionMessageAsyncTimeout))
-		}
+		s.emitSessionMessageSucceeded(reqID, id, outcome)
 	}()
 
 	return asyncAcceptedBody{Status: "accepted", RequestID: reqID, EventCursor: eventCursor}, nil

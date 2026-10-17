@@ -444,6 +444,7 @@ go_test(
         "session_get_read_test.go",
         "session_key_guard_test.go",
         "session_materialization_guard_test.go",
+        "session_message_late_delivery_test.go",
         "session_model_phase0_interface_spec_test.go",
         "session_model_phase0_lifecycle_spec_test.go",
         "session_model_phase0_resolution_spec_test.go",
