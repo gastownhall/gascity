@@ -26,7 +26,7 @@ func TestClaudeAPIErrorAfterPartialResponse(t *testing.T) {
 		t.Fatal("ordinary assistant refusal was reclassified")
 	}
 	got := session.Messages[1]
-	if got.Type != "system" || got.SystemEvent == nil {
+	if got.Type != "assistant" || got.SystemEvent == nil {
 		t.Fatalf("API error classification: type=%q event=%+v", got.Type, got.SystemEvent)
 	}
 	if got.SystemEvent.Kind != "error" || got.SystemEvent.Category != "provider_error" || got.SystemEvent.Code != "invalid_request" || got.SystemEvent.Message != "API Error: Request blocked by provider safeguards." {
@@ -61,5 +61,26 @@ func TestClaudeAPIErrorRequiresExplicitFlag(t *testing.T) {
 				t.Fatal(err)
 			}
 		})
+	}
+}
+
+// Marking the failure must not change how the transcript reads: the row stays
+// on the branch as the assistant row Claude wrote, so activity is unchanged.
+func TestClaudeAPIErrorKeepsTranscriptShape(t *testing.T) {
+	prompt := `{"uuid":"prompt","type":"user","message":{"role":"user","content":"hello"}}`
+	failure := `{"uuid":"failure","parentUuid":"prompt","type":"assistant","isApiErrorMessage":true,"error":"rate_limit","message":{"role":"assistant","model":"<synthetic>","content":[{"type":"text","text":"API Error: rate limited"}],"stop_reason":"stop_sequence"}}`
+	p := filepath.Join(t.TempDir(), "session.jsonl")
+	if err := os.WriteFile(p, []byte(prompt+"\n"+failure+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	session, err := ReadFile(p, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(session.Messages) != 2 || session.Messages[1].UUID != "failure" {
+		t.Fatalf("branch = %d messages", len(session.Messages))
+	}
+	if got := InferActivityFromEntries(session.Messages); got != "idle" {
+		t.Fatalf("activity = %q, want idle", got)
 	}
 }

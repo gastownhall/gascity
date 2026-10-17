@@ -2,9 +2,13 @@ package sessionlog
 
 import "strings"
 
-// normalizeClaudeAPIError uses the CLI's explicit failure marker. Assistant
-// refusals and text quoting an API error remain ordinary assistant messages.
-func normalizeClaudeAPIError(entry *Entry) {
+// attachClaudeAPIErrorEvent marks a Claude-generated provider failure with a
+// provider_error system event. Only the CLI's explicit isApiErrorMessage flag
+// counts: assistant refusals and text quoting an API error stay ordinary
+// replies. The entry keeps its assistant type, so the conversation DAG and
+// activity inference read the transcript as Claude wrote it; consumers that
+// project history (the worker) present the event instead of a reply.
+func attachClaudeAPIErrorEvent(entry *Entry) {
 	if entry.Type != "assistant" || !entry.IsAPIErrorMessage {
 		return
 	}
@@ -21,6 +25,5 @@ func normalizeClaudeAPIError(entry *Entry) {
 	if strings.TrimSpace(text) == "" {
 		text = "Claude provider failed"
 	}
-	entry.Type = "system"
 	entry.SystemEvent = &SystemEvent{Kind: "error", Category: "provider_error", Code: jsonStringValue(entry.APIError), Message: text}
 }

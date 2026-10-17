@@ -502,6 +502,12 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 	}
 	normalized.Model, normalized.StopReason, normalized.Usage = historyEntryMetadata(entry)
 	normalized.SystemEvent = historySystemEventFromSessionLog(entry.SystemEvent)
+	if isProviderFailureReply(entry) {
+		// A provider writes its own failure as an assistant row; it is a
+		// system event, not a completion of the turn.
+		normalized.Kind = "system"
+		normalized.Actor = ActorSystem
+	}
 
 	blocks := normalizeBlocks(entry)
 	normalized.Blocks = blocks
@@ -512,6 +518,12 @@ func normalizeEntry(provider, path, sessionID string, order int, entry *sessionl
 		normalized.UserPrompt = parseHistoryUserPrompt(normalized.Text)
 	}
 	return normalized
+}
+
+// isProviderFailureReply reports whether entry is an assistant row the
+// transcript reader marked as a provider failure.
+func isProviderFailureReply(entry *sessionlog.Entry) bool {
+	return entry.Type == "assistant" && entry.SystemEvent != nil && entry.SystemEvent.Category == "provider_error"
 }
 
 func normalizedHistoryEntryID(entry *sessionlog.Entry, order int) string {

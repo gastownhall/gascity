@@ -458,7 +458,7 @@ func parseFileDetailed(path string) ([]*Entry, SessionDiagnostics, error) {
 		raw := make([]byte, len(line))
 		copy(raw, line)
 		e.Raw = raw
-		normalizeClaudeAPIError(&e)
+		attachClaudeAPIErrorEvent(&e)
 		entries = append(entries, &e)
 	}
 	if err := scanner.Err(); err != nil {
