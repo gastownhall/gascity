@@ -63,12 +63,16 @@ if [ -n "$timing_file" ]; then
   fi
 fi
 
+# A log the caller named is the caller's to keep. A log this wrapper created
+# is scratch: it is removed on PASS and kept on failure for diagnosis.
+remove_log_on_pass=0
 if [ -n "${OBSERVABLE_TEST_LOG:-}" ]; then
   log="$OBSERVABLE_TEST_LOG"
   rm -f "$log"
 else
   safe_name="$(printf '%s' "$name" | tr -c 'A-Za-z0-9._-' '_')"
   log="$(mktemp "${TMPDIR:-/var/tmp}/gascity-${safe_name}.jsonl.XXXXXX")"
+  remove_log_on_pass=1
 fi
 
 echo "observable go test: log=$log" >&2
@@ -265,6 +269,8 @@ if [ "$status" -ne 0 ]; then
   if ! print_failure_details; then
     echo "observable go test: warning: failure-detail rendering failed; product result is unchanged" >&2
   fi
+elif [ "$remove_log_on_pass" -eq 1 ] && rm -f "$log"; then
+  echo "observable go test: PASS (log removed)" >&2
 else
   echo "observable go test: PASS log=$log" >&2
 fi
