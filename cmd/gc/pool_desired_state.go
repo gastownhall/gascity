@@ -1483,6 +1483,7 @@ func recordNewDemandCapTrace(
 	if limits.agentRigUnresolved[template] {
 		log.Printf("pool desired state: template %q rig_resolution_error: refusing %d new session(s) for non-city agent scope=%q dir=%q",
 			template, scaleCount-newCount, strings.TrimSpace(agent.Scope), strings.TrimSpace(agent.Dir))
+		trace.RecordCapRejectionReason(template, TraceReasonRigCap)
 		if trace != nil {
 			trace.RecordDecision(TraceSitePoolNewDemandCap, TraceReasonRigCap, TraceOutcomeRejected, template, "", traceRecordPayload{
 				"scale_check":          scaleCount,
@@ -1505,6 +1506,7 @@ func recordNewDemandCapTrace(
 	if site == "" {
 		return
 	}
+	trace.RecordCapRejectionReason(template, reason)
 	blockingSessions := make([]string, 0, len(blockers))
 	blockingWork := make([]string, 0, len(blockers))
 	for _, req := range blockers {
