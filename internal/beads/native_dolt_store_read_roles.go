@@ -64,7 +64,9 @@ import (
 // three-value projection (mapBdStatus, ListQuery.Matches) is the only
 // definition of them and runs Go-side. The two statuses that map one-to-one
 // onto a bd status are pushed beside AllFlag (nativeListRequestFromListQuery),
-// which keeps the pinned-flag default lifted under a named status.
+// which keeps the pinned-flag default lifted under a named status. One
+// exception: a Live "open" is pushed as bd's raw "open" (nativeListPushesRawOpen).
+// That is the backing's own answer, and Live callers are owed it.
 //
 // The four include flags lift the type and plane suppressions in the same
 // spirit. They are stated individually rather than as IncludeAllTypes because
@@ -706,7 +708,7 @@ func nativeListRequestFromListQuery(query ListQuery, pushableTypes map[string]bo
 	if !query.CreatedBefore.IsZero() {
 		req.CreatedBefore = zeroTimePtr(query.CreatedBefore)
 	}
-	if nativeListPushableStatus(query.Status) {
+	if nativeListPushableStatus(query.Status) || nativeListPushesRawOpen(query) {
 		req.Status = query.Status
 	}
 	if pushableTypes[query.Type] {
