@@ -48,6 +48,12 @@ var ErrCacheUnavailable = errors.New("bead cache unavailable")
 // installed nothing. The caller may retry.
 var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
 
+// ErrRowRefreshYielded is the ErrRowRefreshFenced a refresh asked to yield
+// (RowRefreshOptions.YieldToLocalWrites) returns while a local write of the
+// cache that may touch the row is in flight. It says nothing about the row;
+// the caller retries once the write has returned.
+var ErrRowRefreshYielded = fmt.Errorf("a local write is in flight: %w", ErrRowRefreshFenced)
+
 // ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
 // projection stops when the caller's context is canceled.
 var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")

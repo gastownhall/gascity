@@ -705,7 +705,10 @@ func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool)
 //     was evicted;
 //   - ErrRowRefreshFenced: a write, deletion or event newer than the read
 //     owns the row (refetchFencedLocked), or a reconcile, full Prime or
-//     PrimeActive merged since the read began (scanGen); retry;
+//     PrimeActive merged since the read began (scanGen); retry. With
+//     RowRefreshOptions.YieldToLocalWrites it is ErrRowRefreshYielded
+//     while a local write that may touch the row is in flight; retry once
+//     the write has returned;
 //   - ErrCacheUnavailable: the cache is neither live nor partial, or id is
 //     outside the namespaces this cache owns (ownsBeadID);
 //   - any other error: the backing read of the row or its edges failed.
@@ -722,20 +725,86 @@ func (c *CachingStore) rowReadDisagreesLocked(id string, fresh Bead, found bool)
 // It is on *CachingStore only, with no optional interface: the caller needs
 // the leg's cache itself, as it does for ObservedList, and unwraps a policy
 // layer to reach it.
+//
+// RefreshRow never announces the close of a row the cache did not hold; see
+// RefreshRowReport for the caller that has evidence such a close is recent.
 func (c *CachingStore) RefreshRow(id string) (Bead, error) {
+	rep, err := c.RefreshRowReport(id, RowRefreshOptions{})
+	if err != nil {
+		return Bead{}, err
+	}
+	return rep.Bead, nil
+}
+
+// RowRefreshOptions adjusts RefreshRowReport.
+type RowRefreshOptions struct {
+	// AnnounceUnheldClose announces, as bead.closed (ChangeRefresh), a closed
+	// row the refresh installs that the cache did not hold, unless a closing
+	// write of this cache is in flight for it (that write announces it) or
+	// this cache announced this close within recentWriteVerifyWindow
+	// (announcedCloses): its closing write, a re-scan or a refresh announced
+	// it, and a re-scan or full Prime then dropped the closed row. A close
+	// the cache never announced is announced, however recently the cache
+	// wrote the row: a full Prime drops a row closed out of band silently.
+	// Pass it with YieldToLocalWrites: a closing write of this cache can drop
+	// its row before it announces the close, and without the yield a refresh
+	// in between announces the close too. Pass it only with evidence the row
+	// closed recently: a re-scan holds no closed rows, so without it a
+	// long-closed row would be announced again every time a read installed
+	// it.
+	AnnounceUnheldClose bool
+	// YieldToLocalWrites refuses with ErrRowRefreshYielded, installing and
+	// notifying nothing, while a local write of this cache that may touch
+	// the row is in flight: one naming id, or one whose rows its backing
+	// call decides (Create, Tx, a graph apply). Between that write's backing
+	// commit and its absorb the backing read would see the write before the
+	// cache holds it, and the refresh would announce the cache's own write.
+	// The write absorbs and announces it; a refresh after it returns finds
+	// nothing new. The refresh checks before its backing read, so one that
+	// starts while the write is in flight reads nothing, and again after
+	// the read, for a write that started during it.
+	// A caller that passes it must retry a yielded row for as long as the
+	// write may run: a graph apply holds the fence for seconds.
+	YieldToLocalWrites bool
+}
+
+// RowRefresh reports what one RefreshRowReport did.
+type RowRefresh struct {
+	// Bead is the installed row. On ErrNotFound it is the evicted copy,
+	// marked closed as its notification was, or the zero Bead when the cache
+	// held none.
+	Bead Bead
+	// Found reports whether the backing has the row.
+	Found bool
+	// Held reports whether the cache held the row before the refresh.
+	Held bool
+	// Event is the notification the refresh emitted: "", "bead.created",
+	// "bead.updated" or "bead.closed".
+	Event string
+}
+
+// RefreshRowReport is RefreshRow, reporting what the refresh found and what
+// it notified, for a caller that acts on whether anything changed (the
+// controller's journal feed). Errors are RefreshRow's; on ErrNotFound the
+// report is filled in too. opts.AnnounceUnheldClose is the one difference in
+// behavior (RowRefreshOptions).
+func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowRefresh, error) {
 	if !c.ownsBeadID(id) {
-		return Bead{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
+		return RowRefresh{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
 	}
 	c.mu.RLock()
 	live := c.state == cacheLive || c.state == cachePartial
 	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 	if !live {
-		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+	}
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
 	}
 	fresh, readErr := c.backing.Get(id)
 	if readErr != nil && !errors.Is(readErr, ErrNotFound) {
-		return Bead{}, readErr
+		return RowRefresh{}, readErr
 	}
 	found := readErr == nil
 	var freshDeps []Dep
@@ -743,7 +812,7 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	if found && !c.rowAnswersEdges(fresh) {
 		deps, err := c.backing.DepList(id, "down")
 		if err != nil {
-			return Bead{}, fmt.Errorf("refresh %s deps: %w", id, err)
+			return RowRefresh{}, fmt.Errorf("refresh %s deps: %w", id, err)
 		}
 		freshDeps, depsFromBacking = deps, true
 	}
@@ -751,31 +820,41 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	c.mu.Lock()
 	if c.state != cacheLive && c.state != cachePartial {
 		c.mu.Unlock()
-		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
 	}
 	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
 		c.mu.Unlock()
-		return Bead{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
+	}
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
+		c.mu.Unlock()
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
 	}
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
+	announceUnheld := opts.AnnounceUnheldClose && found && !held && fresh.Status == "closed" &&
+		c.closeIntents[id] == nil && !c.announcedCloseCoversLocked(id, fresh, c.clockNow())
 	var installed Bead
 	evicted := false
 	if found {
-		opts := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
-		// RefreshRow announces the close of a row it held open itself
-		// (rowRefreshChange), so that close is not queued as well.
-		opts.closeAnnounced = held && cached.Status != "closed" && fresh.Status == "closed"
+		absorb := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
+		// RefreshRowReport announces the close of a row it held open itself
+		// (rowRefreshChange), and of an unheld row when asked to, so neither
+		// close is queued as well.
+		absorb.closeAnnounced = (held && cached.Status != "closed" && fresh.Status == "closed") || announceUnheld
 		if depsFromBacking {
-			opts.depsMode, opts.deps = depsExplicit, freshDeps
+			absorb.depsMode, absorb.deps = depsExplicit, freshDeps
 		}
-		c.absorbFreshLocked(id, fresh, c.clockNow(), opts)
+		c.absorbFreshLocked(id, fresh, c.clockNow(), absorb)
 		installed = cloneBead(c.beads[id])
 	} else if _, dirty := c.dirty[id]; held || dirty {
 		c.evictLocked(id)
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
+	if announceUnheld {
+		eventType = "bead.closed"
+	}
 	if eventType == "bead.closed" {
 		c.noteCloseAnnouncedLocked(id)
 	}
@@ -791,18 +870,22 @@ func (c *CachingStore) RefreshRow(id string) (Bead, error) {
 	}
 	c.mu.Unlock()
 
+	rep := RowRefresh{Found: found, Held: held, Event: eventType}
 	if !found {
-		if eventType != "" {
-			gone := cloneBead(cached)
-			setBeadStatus(&gone, "closed")
-			c.notifyChange(ChangeRefresh, eventType, gone)
+		if held {
+			rep.Bead = cloneBead(cached)
+			if eventType != "" {
+				setBeadStatus(&rep.Bead, "closed")
+				c.notifyChange(ChangeRefresh, eventType, rep.Bead)
+			}
 		}
-		return Bead{}, readErr
+		return rep, readErr
 	}
+	rep.Bead = installed
 	if eventType != "" {
 		c.notifyChange(ChangeRefresh, eventType, installed)
 	}
-	return installed, nil
+	return rep, nil
 }
 
 // rowRefreshChange decides whether RefreshRow changed id's cached state and

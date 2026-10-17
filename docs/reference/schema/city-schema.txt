@@ -1118,6 +1118,15 @@
           "description": "NativeTransport selects whether this city's bead stores may open the\nnative Dolt store at all: \"off\" (this city's stores never open\nnatively; always BdStore, the bd CLI subprocess — logged once at boot)\nor \"auto\" (default: native when preflight-eligible, today's behavior).\nEmpty defaults to \"auto\". Any other value (including \"require\", which\nbelongs to conditional_writes/guarded_release, not this switch) fails\nconfig load. A running city keeps the stores it holds open on the value\nit read at boot until it restarts; every other open, by a gc command or\nfor a single tick, reads the current value.\nGC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for\n\"off\" that overrides every city's value for one release.",
           "default": "auto"
         },
+        "ledger_feed": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto"
+          ],
+          "description": "LedgerFeed selects whether the controller tails each bead scope's\ndurable mutation journal to bring writes made outside gc (agents running\nbd, humans) into its caches within about a second instead of at the\nnext re-scan: \"off\" (default) or \"auto\" (tail the scopes whose native or\nproxied store has the journal active; gc never turns the journal on).\nAny other value fails config load. Scopes that cannot be tailed stay on\nthe re-scan, and gc doctor reports which. The stores of a non-work\n[storage] binding, and rigs that share the city's legacy file store,\nare never tailed: they stay on the re-scan, and gc doctor does not list\nthem. A reload that changes ledger_feed rebuilds the controller's\nstores.",
+          "default": "off"
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
