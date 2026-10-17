@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	gascity "github.com/gastownhall/gascity"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -116,10 +117,25 @@ func cliOpJSON(t *testing.T, out []byte) map[string]any {
 	return m
 }
 
-// cliOpFailureCode is the error code of a failure envelope.
+// cliOpFailureCode is the error code of a failure envelope, which must
+// validate against schemas/failure.schema.json.
 func cliOpFailureCode(t *testing.T, out []byte) string {
 	t.Helper()
+	raw, err := gascity.BuiltinSchemas.ReadFile("schemas/failure.schema.json")
+	if err != nil {
+		t.Fatalf("reading the failure schema: %v", err)
+	}
+	var doc any
+	if err := json.Unmarshal(bytes.TrimSpace(out), &doc); err != nil {
+		t.Fatalf("decoding JSON %q: %v", out, err)
+	}
+	if err := compileJSONSchema(t, "gc://schemas/failure.schema.json", raw).Validate(doc); err != nil {
+		t.Fatalf("failure envelope %s does not match the failure schema: %v", out, err)
+	}
 	m := cliOpJSON(t, out)
+	if m["ok"] != false {
+		t.Fatalf("failure envelope %s, want ok:false", out)
+	}
 	e, _ := m["error"].(map[string]any)
 	code, _ := e["code"].(string)
 	return code
@@ -369,6 +385,9 @@ func TestSessionWakeOpInProgressExitsOne(t *testing.T) {
 	if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeInProgress {
 		t.Fatalf("failure code = %q, want %s", got, cliOpCodeInProgress)
 	}
+	if m := cliOpJSON(t, []byte(stdout)); m["op_id"] != open.ID || m["key"] != "busy-key" {
+		t.Fatalf("failure envelope %v, want op_id %s and key busy-key", m, open.ID)
+	}
 	if !strings.Contains(stderr, open.ID) || !strings.Contains(stderr, "busy-key") || !strings.Contains(stderr, "rerun later or without --key") {
 		t.Fatalf("stderr = %q, want the op id, the key and the remedy", stderr)
 	}
@@ -497,4 +516,56 @@ func TestSessionWakeOpWillNotStartClosesRefused(t *testing.T) {
 		t.Fatalf("wake = %d, want 1; stderr=%s", code, stderr)
 	}
 	cliOpWantOutcome(t, cliOpOnly(t, f.rec), opjournal.ArmFailed, "refused:will_not_start", "")
+}
+
+func TestSessionWakeOpInvalidKey(t *testing.T) {
+	t.Run("require refuses", func(t *testing.T) {
+		newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+		f := newCLIOpWakeFixture(t)
+		writes := f.sessionWrites()
+		code, stdout, _ := f.run(t, " padded", true)
+		if code != 1 {
+			t.Fatalf("wake = %d, want 1 for an invalid key in require", code)
+		}
+		if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeInvalidKey {
+			t.Fatalf("failure code = %q, want %s", got, cliOpCodeInvalidKey)
+		}
+		if got := f.sessionWrites(); got != writes {
+			t.Fatalf("session writes %d -> %d: require must refuse before any effect", writes, got)
+		}
+	})
+	t.Run("auto warns and runs unrecorded", func(t *testing.T) {
+		newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+		f := newCLIOpWakeFixture(t)
+		code, _, stderr := f.run(t, " padded", false)
+		if code != 0 {
+			t.Fatalf("wake = %d; stderr=%s", code, stderr)
+		}
+		if !strings.Contains(stderr, "warning: invalid --key") {
+			t.Fatalf("stderr = %q, want an invalid-key warning", stderr)
+		}
+		if ops := cliOpRows(t, f.rec); len(ops) != 0 {
+			t.Fatalf("op rows = %+v, want none for an invalid key", ops)
+		}
+	})
+}
+
+func TestSessionKillOpKeyReusedForAnotherGenerationIsAMismatch(t *testing.T) {
+	newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	f := newCLIOpWakeFixture(t)
+	// An earlier kill under the same key named generation 2; this row is at 3.
+	cliOpProposeOpen(t, f.rec, opjournal.KindKill, f.id, "kill-key",
+		opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 2}, cliOpT0, opjournal.Policy{})
+	var stdout, stderr bytes.Buffer
+	op, start := startCLIOp(f.deps.cfg, f.rec, cliOpRequest{
+		verb: "gc session kill", kind: opjournal.KindKill, key: "kill-key", conversation: f.id,
+		scope:  opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 3},
+		asJSON: true, stdout: &stdout, stderr: &stderr,
+	})
+	if start != cliOpRefused || op.adm != nil {
+		t.Fatalf("start = %v, want refused", start)
+	}
+	if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeKeyMismatch {
+		t.Fatalf("failure code = %q, want %s", got, cliOpCodeKeyMismatch)
+	}
 }

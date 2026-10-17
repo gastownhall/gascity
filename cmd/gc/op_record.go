@@ -172,6 +172,11 @@ func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cli
 	}
 	op.adm = adm
 	if adm.Decision != legacyop.Replay {
+		if !adm.Recorded && req.key != "" {
+			if kerr := opjournal.ValidateClientKey(req.key); kerr != nil {
+				fmt.Fprintf(req.stderr, "%s: warning: invalid --key (%v); running unrecorded, so a rerun acts again\n", req.verb, kerr) //nolint:errcheck // best-effort stderr
+			}
+		}
 		return op, cliOpExecute
 	}
 	if cliOpReplaysAsSuccess(adm.Op) {
@@ -249,7 +254,7 @@ func (o *cliOp) refuseAdmit(err error) {
 	case errors.Is(err, opjournal.ErrKeyReuse):
 		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), "", o.req.key)
 	case o.req.key != "" && opjournal.ValidateClientKey(o.req.key) != nil:
-		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key: %v", opjournal.ValidateClientKey(o.req.key)), "", o.req.key)
+		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), "", o.req.key)
 	default:
 		o.refuse(cliOpCodeUnavailable, fmt.Sprintf("op journal cannot record this request (%v); nothing was done", err), "", o.req.key)
 	}
