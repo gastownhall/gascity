@@ -495,8 +495,10 @@ func (p poolExecutionBackstop) content(s beads.Bead) string {
 // revalidate re-reads the claim through the owning store's authoritative live
 // handle immediately before delivery. Assigned-work snapshots are normally
 // CachingStore-backed, so a plain read can still show a claim the agent finished
-// seconds ago. A failed read HOLDS: it is not proof the claim went away.
-func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolution {
+// seconds ago. A failed read HOLDS: it is not proof the claim went away. The
+// session itself needs no second look here: resolve already proved it quiet
+// (quietHold) on this tick.
+func (p poolExecutionBackstop) revalidate(_ beads.Bead, _ string, target backstopTarget) backstopResolution {
 	if target.Store == nil {
 		return backstopResolutionHold
 	}

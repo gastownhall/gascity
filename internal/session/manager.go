@@ -1455,6 +1455,12 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		// after the failed-create pre-check above, preserving closed-guard-
 		// first ordering.
 		current = canonicalLifecycleState(current)
+		// drained -> suspended is the operator's alone. The shutdown sweep
+		// and the idle auto-suspend write no hold, so moving a drained row to
+		// suspended would only lose its drain; they still refuse it.
+		if current == StateDrained && intent != suspendIntentOperator {
+			return &IllegalTransitionError{From: current, Command: CmdSuspend}
+		}
 		if _, err := Transition(current, CmdSuspend); err != nil {
 			return err
 		}

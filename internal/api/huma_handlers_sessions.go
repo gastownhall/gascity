@@ -101,6 +101,14 @@ func humaStoreError(err error) error {
 	if isRetryableStoreConflict(err) {
 		return apierr.StoreUnavailable.Msg("store_conflict: " + err.Error())
 	}
+	// A write the store committed but could not read back in time is not a
+	// server fault either, and not a failure: it may have landed. Callers
+	// that can settle it by a re-read (session close) already have; what
+	// reaches here is unsettled, so answer the declared, retryable 503 and
+	// let the client re-read or retry an idempotent request.
+	if errors.Is(err, beads.ErrWriteUnconfirmed) {
+		return apierr.StoreUnavailable.Msg("write_unconfirmed: " + err.Error())
+	}
 	return apierr.Internal.Msg("internal: " + err.Error())
 }
 

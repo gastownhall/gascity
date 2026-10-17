@@ -3554,10 +3554,25 @@ type Run struct {
 	UpdatedAt *string `json:"updated_at,omitempty"`
 }
 
+// RunCancelInterruptFailure defines model for RunCancelInterruptFailure.
+type RunCancelInterruptFailure struct {
+	// Error Why the interrupt failed.
+	Error string `json:"error"`
+
+	// Session Session ID, or the step assignee when it could not be resolved to a session.
+	Session string `json:"session"`
+}
+
 // RunCancelOutputBody defines model for RunCancelOutputBody.
 type RunCancelOutputBody struct {
-	// Closed Count of the run's beads closed by the cancel.
+	// Closed Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
 	Closed int64 `json:"closed"`
+
+	// InterruptFailures Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+	InterruptFailures *[]RunCancelInterruptFailure `json:"interrupt_failures,omitempty"`
+
+	// Interrupted IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+	Interrupted *[]string `json:"interrupted,omitempty"`
 
 	// RunId The canceled run.
 	RunId string `json:"run_id"`
@@ -3981,28 +3996,30 @@ type SessionRespondOutputBody struct {
 
 // SessionResponse defines model for SessionResponse.
 type SessionResponse struct {
-	ActiveBead             *string                 `json:"active_bead,omitempty"`
-	Activity               *string                 `json:"activity,omitempty"`
-	AgentKind              *string                 `json:"agent_kind,omitempty"`
-	Alias                  *string                 `json:"alias,omitempty"`
-	Attached               bool                    `json:"attached"`
-	ConfiguredNamedSession *bool                   `json:"configured_named_session,omitempty"`
-	ContextPct             *int64                  `json:"context_pct,omitempty"`
-	ContextWindow          *int64                  `json:"context_window,omitempty"`
-	CreatedAt              string                  `json:"created_at"`
-	DisplayName            *string                 `json:"display_name,omitempty"`
-	Id                     string                  `json:"id"`
-	Kind                   *string                 `json:"kind,omitempty"`
-	LastActive             *string                 `json:"last_active,omitempty"`
-	LastNudgeDeliveredAt   *string                 `json:"last_nudge_delivered_at,omitempty"`
-	LastOutput             *string                 `json:"last_output,omitempty"`
-	Metadata               *map[string]string      `json:"metadata,omitempty"`
-	Model                  *string                 `json:"model,omitempty"`
-	Options                *map[string]string      `json:"options,omitempty"`
-	Pool                   *string                 `json:"pool,omitempty"`
-	Provider               string                  `json:"provider"`
-	Reason                 *string                 `json:"reason,omitempty"`
-	Rig                    *string                 `json:"rig,omitempty"`
+	ActiveBead             *string            `json:"active_bead,omitempty"`
+	Activity               *string            `json:"activity,omitempty"`
+	AgentKind              *string            `json:"agent_kind,omitempty"`
+	Alias                  *string            `json:"alias,omitempty"`
+	Attached               bool               `json:"attached"`
+	ConfiguredNamedSession *bool              `json:"configured_named_session,omitempty"`
+	ContextPct             *int64             `json:"context_pct,omitempty"`
+	ContextWindow          *int64             `json:"context_window,omitempty"`
+	CreatedAt              string             `json:"created_at"`
+	DisplayName            *string            `json:"display_name,omitempty"`
+	Id                     string             `json:"id"`
+	Kind                   *string            `json:"kind,omitempty"`
+	LastActive             *string            `json:"last_active,omitempty"`
+	LastNudgeDeliveredAt   *string            `json:"last_nudge_delivered_at,omitempty"`
+	LastOutput             *string            `json:"last_output,omitempty"`
+	Metadata               *map[string]string `json:"metadata,omitempty"`
+	Model                  *string            `json:"model,omitempty"`
+	Options                *map[string]string `json:"options,omitempty"`
+	Pool                   *string            `json:"pool,omitempty"`
+	Provider               string             `json:"provider"`
+	Reason                 *string            `json:"reason,omitempty"`
+	Rig                    *string            `json:"rig,omitempty"`
+
+	// Running Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
 	Running                bool                    `json:"running"`
 	SessionName            string                  `json:"session_name"`
 	State                  string                  `json:"state"`

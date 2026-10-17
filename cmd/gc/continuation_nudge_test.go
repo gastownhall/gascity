@@ -1670,3 +1670,68 @@ func TestNudgeStalledPoolContinuations_FailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// Kills a continuation nudge that interrupts a running turn, the hazard the
+// pool-claim backstop hit in factory-lifecycle oct14b: the shared delivery
+// path types into the session, so a session whose runtime shows output within
+// the grace is held without spending an attempt, and is nudged once quiet.
+func TestNudgeStalledPoolContinuations_BusySessionIsNotNudged(t *testing.T) {
+	const sessionName = "session-a"
+	sp := continuationRunningFake(t, sessionName)
+	cfg := continuationNudgeCfg()
+	session := continuationPoolSession("session-bead-a", sessionName)
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	candidate := validContinuationCandidate("step-a", sessionName)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedContinuationMarker(t, backing, session, candidate, 0, base)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	var out bytes.Buffer
+
+	sp.SetActivity(sessionName, now.Add(-5*time.Second))
+	nudgeStalledPoolContinuations(sp, cfg, backing, []beads.Bead{mustGetTestBead(t, backing, session.ID)}, []ContinuationClaimCandidate{candidate}, false, now, &out)
+	if got := sp.CountCalls("Nudge", sessionName); got != 0 {
+		t.Fatalf("Nudge calls = %d, want none delivered into a busy session", got)
+	}
+	if got := mustGetTestBead(t, backing, session.ID).Metadata[continuationClaimNudgeCountKey]; got != "0" {
+		t.Fatalf("attempt count = %q, want 0: a busy hold spends nothing", got)
+	}
+
+	sp.SetActivity(sessionName, now.Add(-time.Hour))
+	nudgeStalledPoolContinuations(sp, cfg, backing, []beads.Bead{mustGetTestBead(t, backing, session.ID)}, []ContinuationClaimCandidate{candidate}, false, now, &out)
+	if got := sp.CountCalls("Nudge", sessionName); got != 1 {
+		t.Fatalf("Nudge calls = %d, want the quiet session nudged", got)
+	}
+}
+
+// Kills a deferred continuation delivery spending an attempt: quiet at the
+// busy look, busy when the nudge is typed, so the runtime defers with
+// runtime.ErrSessionBusy and the reserved attempt is refunded; the next
+// quiet tick delivers attempt 1.
+func TestNudgeStalledPoolContinuations_BusyAtDeliveryRefundsTheAttempt(t *testing.T) {
+	const sessionName = "session-a"
+	sp := &busyAtDeliveryProvider{Fake: continuationRunningFake(t, sessionName), busy: true}
+	cfg := continuationNudgeCfg()
+	session := continuationPoolSession("session-bead-a", sessionName)
+	backing := beads.NewMemStoreFrom(0, []beads.Bead{session}, nil)
+	candidate := validContinuationCandidate("step-a", sessionName)
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	seedContinuationMarker(t, backing, session, candidate, 0, base)
+	now := base.Add(idleClaimNudgeGrace + time.Second)
+	sp.SetActivity(sessionName, now.Add(-time.Hour))
+	var out bytes.Buffer
+
+	nudgeStalledPoolContinuations(sp, cfg, backing, []beads.Bead{mustGetTestBead(t, backing, session.ID)}, []ContinuationClaimCandidate{candidate}, false, now, &out)
+	if sp.deferred != 1 || sp.CountCalls("Nudge", sessionName) != 0 {
+		t.Fatalf("deferred %d delivered %d, want one deferral and nothing delivered", sp.deferred, sp.CountCalls("Nudge", sessionName))
+	}
+	got := mustGetTestBead(t, backing, session.ID)
+	if got.Metadata[continuationClaimNudgeCountKey] != "0" || got.Metadata[continuationClaimNudgeAtKey] != base.Format(time.RFC3339) {
+		t.Fatalf("marker count %q at %q, want the reservation refunded to 0 at %s", got.Metadata[continuationClaimNudgeCountKey], got.Metadata[continuationClaimNudgeAtKey], base.Format(time.RFC3339))
+	}
+
+	sp.busy = false
+	nudgeStalledPoolContinuations(sp, cfg, backing, []beads.Bead{mustGetTestBead(t, backing, session.ID)}, []ContinuationClaimCandidate{candidate}, false, now, &out)
+	if got := mustGetTestBead(t, backing, session.ID).Metadata[continuationClaimNudgeCountKey]; sp.CountCalls("Nudge", sessionName) != 1 || got != "1" {
+		t.Fatalf("delivered %d count %q, want attempt 1 delivered once the session is quiet", sp.CountCalls("Nudge", sessionName), got)
+	}
+}

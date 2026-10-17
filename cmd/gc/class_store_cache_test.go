@@ -126,14 +126,13 @@ var cacheOmittedCapabilities = map[string]func(beads.Store) bool{
 	"AdvanceSequenceFloor": nil,
 	"StoreHealthPath":      nil,
 	"ReadOnly":             nil,
-	// Engine-only (see above): the batch dep-edge read exists for
-	// `gc storage recover-stranded`, which opens the engine itself. A live
-	// cache answers per-anchor down-dep reads from memory, and the scope-skip
-	// dispatch path falls back to them when the assertion misses, so
-	// forwarding DepListBatch on every CachingStore would advertise a batch
-	// capability over backings (e.g. a cached bd store) that do not actually
-	// have it.
-	"DepListBatch": nil,
+	// (DepListBatch is carried, not omitted: a cached bd store paid one
+	// `bd dep list` per member of every close order behind a failed
+	// assertion. The cache answers the anchors it holds from memory as
+	// DepList does, batches the rest to the backing, and reports
+	// ErrDepListBatchUnsupported over a backing without the batch, which
+	// every caller treats as the cue to read per anchor.)
+
 	// A declaration about what a cache over the engine holds: the v2
 	// demand reads ask the cache's backing (demandLegCache), and a cache
 	// carrying it would advertise exactness over a bd backing.

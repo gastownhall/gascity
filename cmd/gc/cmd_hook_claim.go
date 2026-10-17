@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 const hookClaimCommandName = "hook"
@@ -51,11 +52,12 @@ const (
 )
 
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
-// back. Both describe a claim this process WON and could not hand to a live
+// back. Each describes a claim this process WON and could not hand to a live
 // consumer.
 const (
 	hookClaimReleaseReasonUndelivered = "result_undelivered"
 	hookClaimReleaseReasonStraddled   = "claim_window_straddled"
+	hookClaimReleaseReasonDraining    = "session_draining"
 )
 
 var hookClaimMutationTimeout = 10 * time.Second
@@ -308,6 +310,16 @@ type hookClaimOps struct {
 	// restampHookAdoption). Only a CAS may back it: a lost CAS is how the
 	// caller learns someone else took the bead.
 	RestampAdopted hookClaimRestampFunc
+	// WorkflowStore opens the store a candidate's workflow ancestry is read
+	// from, and a candidate stranded under a stopped workflow is closed in,
+	// writing as actor (see hookClaimWorkflowStop).
+	WorkflowStore hookWorkflowStoreFunc
+	// AnnounceBeadEvents records the work-store writes this invocation has
+	// made so far in the city event log, so the supervisor's run views see
+	// them (hook_claim_bead_events.go). Called once a claim is kept, before
+	// its result is written. Nil — the default — announces nothing; only
+	// claimHookWork installs it. Best-effort.
+	AnnounceBeadEvents func()
 }
 
 type (
@@ -335,6 +347,9 @@ type (
 	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
 	// hook-claim-continuation nudge, keyed by the claim assignee.
 	hookEnqueueContinuationNudgeFunc func(assignee string)
+	// hookWorkflowStoreFunc (ctx, dir, env, beadID, actor) opens the store
+	// that holds beadID's workflow, writing as actor.
+	hookWorkflowStoreFunc func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store
 )
 
 type hookClaimJSONResult struct {
@@ -498,12 +513,16 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 		// enough to re-serve a bead the dispatcher already gave to a fresher
 		// seat. Certify against the canonical store before promising it.
 		verdict, canonicalAssignee := certifyHookAdoption(bead, *opts, *ops, dir, stderr)
-		if verdict != hookAdoptionRefused {
+		// Holding a bead is no reason to resume it once its workflow stopped:
+		// the step a worker took before its root failed is exactly the one a
+		// re-poll would otherwise hand straight back. A stopped bead is closed
+		// and not adopted, and the claim tiers below look for live work.
+		if verdict != hookAdoptionRefused && !hookClaimStoppedAdoption(bead, canonicalAssignee, *opts, *ops, dir, stderr) {
 			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
 				// minted=false: adoption returns work this session already owned.
-				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, stdout, stderr)}
+				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, time.Time{}, stdout, stderr)}
 			}
 		}
 		// Not adopted — the canonical store named another owner, or the bead is
@@ -595,6 +614,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.RestampAdopted == nil {
 		ops.RestampAdopted = hookClaimRestampWithBdStore
 	}
+	if ops.WorkflowStore == nil {
+		ops.WorkflowStore = hookWorkflowStoreWithBdStore
+	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
 	}
@@ -677,14 +699,35 @@ func (ops *hookClaimOps) claimWindowOrDefault() time.Duration {
 	return resolveHookClaimWindow()
 }
 
-// claimLandingWindowSpent reports whether a claim CAS that just returned landed
-// too late to hand to the invoking turn: past the claim window PLUS the reserved
-// claim budget. The window fences when a claim may START (claimWindowSpent); a
-// claim started inside it owns a separate, full mutation budget
-// (claimMutationContext), so only a CAS that overran that reserved budget is a
-// straddle.
-func (ops *hookClaimOps) claimLandingWindowSpent() bool {
-	return ops.invocationAge() > ops.claimWindowOrDefault()+hookClaimMutationTimeout
+// claimLandingWindowSpent reports whether a claim CAS landed too late to hand to
+// the invoking turn: past the claim window PLUS the reserved claim budget. The
+// window fences when a claim may START (claimWindowSpent); a claim started
+// inside it owns a separate, full mutation budget (claimMutationContext), so
+// only a CAS that overran that reserved budget is a straddle.
+//
+// landedAt is the instant the claim CAS returned, stamped by the tier that ran
+// it, and the landing age is taken there rather than now. The question is
+// whether the CAS landed after the invoking turn could have received it; the
+// store reads a tier makes after the CAS (the post-CAS workflow stop gate, the
+// adoption re-stamp) are not the claim landing, and on a slow store they would
+// otherwise turn a claim that landed in time into a straddle unwind.
+func (ops *hookClaimOps) claimLandingWindowSpent(landedAt time.Time) bool {
+	return ops.claimLandingAge(landedAt) > ops.claimWindowOrDefault()+hookClaimMutationTimeout
+}
+
+// claimLandingAge is the invocation age at landedAt, the instant a claim CAS
+// returned. Like invocationAge it is zero for a caller that opened no
+// invocation window (zero InvokedAt), so the straddle fence fails open for a
+// direct-seam caller. A zero landedAt falls back to now, the conservative
+// reading for a minted claim whose tier did not record its landing.
+func (ops *hookClaimOps) claimLandingAge(landedAt time.Time) time.Duration {
+	if ops.InvokedAt.IsZero() {
+		return 0
+	}
+	if landedAt.IsZero() {
+		return ops.invocationAge()
+	}
+	return landedAt.Sub(ops.InvokedAt)
 }
 
 // claimMutationContext bounds a claim-write child by the reserved mutation
@@ -774,7 +817,13 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		// or alias; bd's idempotent --claim path requires the actor to match the
 		// existing assignee exactly.
 		claimActor := strings.TrimSpace(candidate.Assignee)
+		if hookClaimWorkflowStop(ctx, candidate, claimActor, opts, ops, dir, stderr) {
+			continue
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, claimActor)
+		// The straddle fence asks when the CAS landed; stamp it before the
+		// re-stamp and the workflow re-check below spend any more store time.
+		landedAt := ops.nowOrWallClock()
 		if err != nil {
 			if !ok && (hookClaimBeadIsElsewhere(err) || hookClaimBindingRefusedTheClaim(err) || hookClaimBeadIsAWisp(err)) {
 				// The read federated and the write did not: the assigned tier
@@ -844,6 +893,12 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		}
 		claimed = restamped
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		// The race window: the workflow can stop between the pre-claim check
+		// and the CAS landing. Re-check the claim just won rather than hand the
+		// worker a step under a root that settled in between.
+		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
@@ -860,7 +915,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if result.Assignee == "" {
 			result.Assignee = claimActor
 		}
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, landedAt, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
@@ -935,7 +990,17 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// next tick (NDI).
 			break
 		}
+		// Neither the work query nor bd ready knows a workflow stopped: a step's
+		// only link to its root is a non-blocking tracks edge, so a step under a
+		// failed or canceled root stays ready. This gate is what keeps it from
+		// minting a new obligation.
+		if hookClaimWorkflowStop(ctx, candidate, opts.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
 		claimed, ok, err := ops.Claim(ctx, dir, opts.Env, candidate.ID, opts.Assignee)
+		// The straddle fence asks when the CAS landed; stamp it before the
+		// workflow re-check below spends any more store time.
+		landedAt := ops.nowOrWallClock()
 		if err != nil {
 			if ok {
 				// The atomic mutation committed, but its canonical readback failed.
@@ -984,6 +1049,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			return hookClaimResult{terminal: true, code: 1}
 		}
 		claimed = mergeHookClaimCandidateMetadata(candidate, claimed)
+		// Re-check across the CAS, as the ready tier does.
+		if hookClaimWorkflowStop(ctx, claimed, claimed.Assignee, opts, ops, dir, stderr) {
+			continue
+		}
 		result := hookClaimJSONResult{
 			SchemaVersion: "1",
 			OK:            true,
@@ -1006,7 +1075,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// since the bead was never ours to begin with.
 			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
 		}
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, stdout, stderr)}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, landedAt, stdout, stderr)}
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
@@ -1067,6 +1136,74 @@ func hookCandidateReclaimEligible(candidate beads.Bead, routeTargets []string, n
 		strings.TrimSpace(candidate.Assignee) != "" &&
 		hookClaimMatchesRoute(candidate, routeTargets) &&
 		!hookCandidateBudgetDeferred(candidate, now)
+}
+
+// hookClaimWorkflowLinked reports whether a candidate has workflow ancestry for
+// the stop gate to read: a root other than itself, or a drain-control link (a
+// drain item root handed out whole). Plain work and standalone roots skip the
+// gate without a store read.
+func hookClaimWorkflowLinked(candidate beads.Bead) bool {
+	rootID := strings.TrimSpace(candidate.Metadata[beadmeta.RootBeadIDMetadataKey])
+	return (rootID != "" && rootID != candidate.ID) ||
+		strings.TrimSpace(candidate.Metadata[beadmeta.DrainControlIDMetadataKey]) != ""
+}
+
+// hookClaimWorkflowStop is the claim-time stop gate. It reports whether
+// candidate belongs to a workflow that already stopped — some root on its
+// ancestor chain, nested drain levels included, has settled or been canceled
+// (molecule.WorkflowStopReason, which exempts the teardown tail) — and so must
+// not be handed to a worker.
+//
+// A stopped candidate is also closed, as gc.outcome=canceled under a
+// cancellation and skipped otherwise, the same residue outcomes the
+// dispatcher's control gate and the finalizer's sweep stamp. Closing it here
+// rather than merely skipping it is what makes the stop durable: an open step
+// under a dead root is otherwise offered to every poll of every worker until
+// one of them takes it. actor is the identity the close writes as — the
+// assignee the bead carries, so bd's assignee fence admits it.
+//
+// A failed read of the ancestry fails open, the same trade the drain-pending
+// probe makes: one store hiccup must not idle every seat, and the claim CAS
+// that follows runs against the same store. A failed close still withholds the
+// bead; it stays visible to the next poll, which re-runs this gate.
+func hookClaimWorkflowStop(ctx context.Context, candidate beads.Bead, actor string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	if !hookClaimWorkflowLinked(candidate) || ops.WorkflowStore == nil {
+		return false
+	}
+	store := ops.WorkflowStore(ctx, dir, opts.Env, candidate.ID, actor)
+	stop, err := molecule.WorkflowStopReason(store, candidate)
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: workflow stop check unavailable for %s: %v; proceeding\n", candidate.ID, err) //nolint:errcheck
+		return false
+	}
+	if !stop.Stopped() {
+		return false
+	}
+	reason := fmt.Sprintf("workflow root %s settled before this step started", stop.RootID)
+	if stop.Canceled {
+		reason = fmt.Sprintf("workflow root %s was canceled before this step started", stop.RootID)
+	}
+	if _, err := store.CloseAll([]string{candidate.ID}, map[string]string{
+		beadmeta.OutcomeMetadataKey: stop.Outcome(),
+		"close_reason":              reason,
+	}); err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: not serving %s: %s; closing it failed: %v\n", candidate.ID, reason, err) //nolint:errcheck
+		return true
+	}
+	fmt.Fprintf(stderr, "gc hook --claim: closed %s as %s: %s\n", candidate.ID, stop.Outcome(), reason) //nolint:errcheck
+	return true
+}
+
+// hookClaimStoppedAdoption runs the stop gate over a bead offered for
+// adoption, writing as the canonical holder when the readback named one.
+func hookClaimStoppedAdoption(bead beads.Bead, canonicalAssignee string, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) bool {
+	actor := strings.TrimSpace(canonicalAssignee)
+	if actor == "" {
+		actor = strings.TrimSpace(bead.Assignee)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	return hookClaimWorkflowStop(ctx, bead, actor, opts, ops, dir, stderr)
 }
 
 // reportHookClaimRejected publishes a bead.claim_rejected event (ADR-0009) when a
@@ -1263,15 +1400,38 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // owned, so releasing it on a delivery failure would give away a claim an earlier
 // turn legitimately made. A held claim that goes undelivered is re-served to the
 // next turn by the existing-assignment tier instead.
-func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
+//
+// landedAt is the instant a minted claim's CAS returned (see
+// claimLandingWindowSpent); adoption passes the zero time.
+func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, landedAt time.Time, stdout, stderr io.Writer) int {
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
 	// window plus its reserved claim budget: the claim-write child carries its own
-	// ceiling, so a claim can commit after the invoking turn is already gone. That is the same parked claim by another
-	// route, so it takes the same unwind as an undelivered one.
-	if minted && ops.claimLandingWindowSpent() {
-		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s); releasing it rather than parking it",
-			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.invocationAge().Round(time.Millisecond))
+	// ceiling, so a claim can commit after the invoking turn is already gone. That
+	// is the same parked claim by another route, so it takes the same unwind as an
+	// undelivered one. The landing age is the one taken when the CAS returned, not
+	// now: the reads the tier made after the CAS are not the claim landing.
+	if minted && ops.claimLandingWindowSpent(landedAt) {
+		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s at landing); releasing it rather than parking it",
+			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.claimLandingAge(landedAt).Round(time.Millisecond))
 		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
+	}
+	// F-D, post-claim. The pre-claim fence read the session row before the
+	// CAS; a controller drain can mark the row draining between that read and
+	// the CAS landing, and the controller's own post-mark re-read of the seat's
+	// work can run before the CAS lands too. Re-reading the row AFTER the CAS
+	// makes this side write-then-read, like the controller's: on a store where
+	// a committed write is visible to every later read, at least one side sees
+	// the other. A row that now reads draining gets its claim back and the
+	// drain_pending result, before anything is stamped; a probe error fails
+	// open, as the pre-claim fence does.
+	if minted && ops.DrainPending != nil {
+		if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
+			if pending, err := ops.DrainPending(sessionID); err == nil && pending {
+				cause := fmt.Sprintf("claim of %s landed on session %s after its drain began; releasing it rather than parking it", bead.ID, sessionID)
+				unwindUndeliveredHookClaim(hookClaimReleaseReasonDraining, cause, bead, opts, ops, dir, stderr)
+				return writeHookClaimDrainPending(hookClaimLabel, sessionID, opts, ops, stdout, stderr)
+			}
+		}
 	}
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
@@ -1287,6 +1447,11 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		return 1
 	}
 	result.ContinuationAssigned = assigned
+	// The claim is kept (the landing check above is behind it) and stamped:
+	// put it in the city event log now, before the worker can read the result
+	// and close the step, so the run views never see the close first. Its
+	// reads come after the landing decision, so they cannot spend it.
+	ops.announceBeadEvents()
 	if writeErr := writeHookClaimResultLine(result, opts.JSON, stdout); writeErr != nil {
 		// F-C. The claim is won but its result never left the process — the
 		// orphaned tool call's signature is EPIPE on a stdout whose reader the
@@ -1580,6 +1745,32 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 		return nil, err
 	}
 	pinAssignee := continuationPinAssignee(opts)
+	// A pin is a claim made on the sibling's behalf, so it answers to the same
+	// stop gate. The served bead passed that gate, but a teardown step passes it
+	// under a stopped root, and its group siblings are ordinary work under that
+	// same root. Siblings share the bead's root, so one ancestry read, made only
+	// once there is a sibling to pin, answers for all of them; a failed read
+	// fails open like the gate itself.
+	var workflowStore beads.Store
+	var ancestorStop molecule.WorkflowStop
+	ancestorRead := false
+	stoppedSibling := func(sibling beads.Bead) bool {
+		if ops.WorkflowStore == nil {
+			return false
+		}
+		if !ancestorRead {
+			ancestorRead = true
+			workflowStore = ops.WorkflowStore(ctx, dir, opts.Env, bead.ID, "")
+			if stop, err := molecule.StoppedWorkflowAncestor(workflowStore, bead); err == nil {
+				ancestorStop = stop
+			}
+		}
+		if !ancestorStop.Stopped() {
+			return false
+		}
+		teardown, err := molecule.IsTeardownTailMember(workflowStore, sibling)
+		return err != nil || !teardown
+	}
 	assigned := make([]string, 0, len(siblings))
 	for _, sibling := range siblings {
 		if strings.TrimSpace(sibling.ID) == "" ||
@@ -1592,7 +1783,8 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			// sibling's required next actor is, by construction, not this
 			// claimant — the same beadmeta.HasDispatchHold answer the hook's
 			// serve filter (isHeldHookCandidate) gives (gas-kg6, #6026).
-			beadmeta.HasDispatchHold(sibling.Labels) {
+			beadmeta.HasDispatchHold(sibling.Labels) ||
+			stoppedSibling(sibling) {
 			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pinAssignee); err != nil {
@@ -2283,6 +2475,10 @@ func hookClaimWorktreeEvidenceIsWholeOrAbsent(bead beads.Bead) bool {
 func hookStampWorkMetaWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string, patch map[string]string) error {
 	store := hookClaimBdStore(dir, env, assignee)
 	return store.Update(beadID, beads.UpdateOpts{Metadata: patch})
+}
+
+func hookWorkflowStoreWithBdStore(ctx context.Context, dir string, env []string, _, actor string) beads.Store {
+	return hookClaimBdStoreContext(ctx, dir, env, actor)
 }
 
 func hookReadClaimedBeadWithBdStore(_ context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error) {

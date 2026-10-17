@@ -1258,6 +1258,11 @@ func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp run
 			// runtime refused to type into it.
 			return refuseOrQueueNudgeBehindPendingInteraction(target, store, sp, message, mode, jsonOutput, err.Error(), stdout, stderr)
 		}
+		if errors.Is(err, runtime.ErrSessionBusy) {
+			// The runtime typed nothing rather than interrupt the session's
+			// running turn; the queue delivers it at the next idle boundary.
+			return queueSessionNudgeWithWorker(target, store, sp, message, mode, jsonOutput, worker.NudgeUndeliveredNoIdleBoundary, stdout, stderr)
+		}
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck
 		return 1
 	}
@@ -2815,9 +2820,13 @@ func ackQueuedNudgesWithOutcome(cityPath string, ids []string, outcome, reason, 
 // holds a permission request, and the next pass tries again. A permission
 // prompt the runtime refused to type into (#2892) stays up until someone
 // answers it, so claiming the nudges again on the very next pass would only
-// be refused again.
+// be refused again. A session still running a turn the runtime would not
+// interrupt (runtime.ErrSessionBusy) is deferred the same way: nothing was
+// typed, and the turn needs time to end.
 func queuedNudgeReleaseAfter(err error, now time.Time) (time.Time, bool) {
 	switch {
+	case errors.Is(err, runtime.ErrSessionBusy):
+		return now.Add(defaultQueuedNudgeRetryDelay), true
 	// Before ErrPendingInteraction: the session layer wraps this refusal in
 	// session.ErrPendingInteraction, which is that sentinel.
 	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):

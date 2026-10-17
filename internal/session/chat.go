@@ -1289,7 +1289,9 @@ func (m *Manager) markStartupDialogsVerifiedLocked(id string, b *beads.Bead) {
 
 // sendLocked delivers message, starting or resuming the runtime as by
 // allows; a row it may not resume, or whose agent is dead in a pane still
-// up, gets the message queued (reports true).
+// up, gets the message queued (reports true). So does a live session the
+// runtime would not type into because it is running a turn the submit keys
+// would interrupt (runtime.ErrSessionBusy): the queue delivers it later.
 func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.Bead, sessName, message, resumeCommand string, hints runtime.Config, immediate bool) (bool, error) {
 	if err := m.ensureDeliverable(ctx, by, id, b, sessName, resumeCommand, hints); err != nil {
 		if !errors.Is(err, ErrResumeHeld) && !errors.Is(err, ErrAgentDead) {
@@ -1305,6 +1307,9 @@ func (m *Manager) sendLocked(ctx context.Context, by Actor, id string, b beads.B
 		return false, err
 	}
 	if err := m.nudgeSession(ctx, sessName, message, immediate); err != nil {
+		if errors.Is(err, runtime.ErrSessionBusy) {
+			return true, m.enqueueDeferredSubmitLocked(b, sessName, message)
+		}
 		return false, err
 	}
 	if verifyDeferredDialogs && m.dismissKnownDialogsLocked(ctx, sessName, codexDeferredDialogDelay) {
@@ -1457,7 +1462,13 @@ func (m *Manager) TryWaitIdleNudgeLiveOnly(ctx context.Context, id, source, mess
 // it waits for the session to return to an idle prompt before returning.
 // Claude Code puts a prompt interrupted before its first response chunk back
 // into its input box, so for Claude StopTurn also clears the input box when
-// the runtime can do a verified clear (see clearRestoredInputLocked).
+// the runtime can do a verified clear (see clearRestoredInputLocked). Codex
+// keeps running an interrupted turn's commands in background terminals, and
+// Claude a command the model ran in the background, so for both StopTurn also
+// has the runtime stop them once the interrupt boundary is reached and any
+// restored prompt is cleared (see stopBackgroundWorkLocked). That stops ALL
+// of the session's background work, including what earlier turns started: a
+// stop stops the session's work. An interrupt_now submit does not do this.
 // A runtime that interrupts turns by protocol (runtime.TurnInterruptProtocol)
 // gets its Interrupt for every provider and no keys. A runtime that can
 // interrupt neither way gets nothing sent and StopTurn returns
@@ -1503,6 +1514,11 @@ func (m *Manager) stopTurn(ctx context.Context, id string) error {
 			if _, err := m.clearRestoredInputLocked(ctx, sessName); err != nil {
 				log.Printf("session: stopped the turn of %q but %v", sessName, err)
 			}
+		}
+		// After the restored prompt is cleared: Claude's background shells
+		// are stopped from an empty input box.
+		if stopsBackgroundWork(b) {
+			m.stopBackgroundWorkLocked(context.Background(), sessName)
 		}
 		return nil
 	})

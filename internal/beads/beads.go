@@ -74,6 +74,17 @@ var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 // TierAvailability.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
 
+// ErrWriteUnconfirmed marks a write the store reported committed whose
+// read-back did not show it before the store stopped waiting. It is not a
+// failed write: the write may well have landed and become visible a moment
+// later, so the caller must neither report it as failed nor replay it blindly.
+// Re-read the row to learn the outcome. When it wraps the error of a
+// multi-write operation (a staged BdStore Tx), the operation may also be
+// incomplete: the writes after the unconfirmed one did not run. Its producer
+// is BdStore's staged Tx apply, which reads each update back before the next
+// write (waitForUpdateProjection). Check with errors.Is.
+var ErrWriteUnconfirmed = errors.New("bead write committed but its read-back was not confirmed")
+
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
 var ErrParentProjectionSuperseded = errors.New("parent projection superseded by concurrent update")

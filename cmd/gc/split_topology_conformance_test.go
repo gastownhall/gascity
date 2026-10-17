@@ -2590,8 +2590,10 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		// fell through would print `[]` and exit 0, which is the same fail-open one
 		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
 		// EXECUTES this; the clause is pinned here so the split-topology row cannot
-		// go green on a command that swallows it.
-		if !strings.Contains(cmd, `|| exit $?`) {
+		// go green on a command that swallows it. The work query's clause names the
+		// failed read on stderr before exiting with its status (`exit "$gc_rc"`);
+		// the count-form exits with it directly (`|| exit $?`).
+		if !strings.Contains(cmd, `|| exit $?`) && !strings.Contains(cmd, `exit "$gc_rc"`) {
 			t.Errorf("a split city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
 		}
 	}

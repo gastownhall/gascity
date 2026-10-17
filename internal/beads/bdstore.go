@@ -434,6 +434,11 @@ type BdStore struct {
 	// what makes the SQL guard inert there. See bdsql_relocation.go.
 	relocatedClasses []RelocatedClass
 
+	// txProjectionTimeout bounds a staged Tx's wait for an update to read
+	// back (waitForUpdateProjection). Zero means bdTxProjectionTimeout; tests
+	// shorten it.
+	txProjectionTimeout time.Duration
+
 	readyProjectionMu      sync.Mutex
 	readyProjectionChecked bool
 	readyProjectionEnabled bool
@@ -2475,8 +2480,20 @@ func (tx *bdStoreTx) apply() error {
 	return nil
 }
 
+// waitForUpdateProjection polls id until a read shows opts, so the staged
+// Tx's next write (bd close, or the post-close re-assert) acts on the row the
+// previous update left: bd update can clobber unspecified fields in
+// dolt-server mode, and a read can lag the write. It runs after bd exited 0 on
+// the update, reporting it committed, so on timeout only the read-back is
+// missing: the error wraps ErrWriteUnconfirmed. The bound is internal
+// (txProjectionTimeout, else bdTxProjectionTimeout); Store.Tx carries no
+// caller context.
 func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
-	ctx, cancel := context.WithTimeout(context.Background(), bdTxProjectionTimeout)
+	timeout := s.txProjectionTimeout
+	if timeout <= 0 {
+		timeout = bdTxProjectionTimeout
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
 
 	ticker := time.NewTicker(bdParentProjectionPollInterval)
@@ -2495,10 +2512,14 @@ func (s *BdStore) waitForUpdateProjection(id string, opts UpdateOpts) error {
 		}
 		select {
 		case <-ctx.Done():
+			// bd exited 0 on the update, reporting it committed: only the
+			// read-back is missing. Report that, not a failed write, so a
+			// caller re-reads instead of answering "failed" for a write that
+			// landed.
 			if lastErr != nil {
-				return fmt.Errorf("updating bead %q: waiting for tx update projection: %w (last check error: %w)", id, ctx.Err(), lastErr)
+				return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w (last check error: %w)", id, ErrWriteUnconfirmed, ctx.Err(), lastErr)
 			}
-			return fmt.Errorf("updating bead %q: waiting for tx update projection: %w", id, ctx.Err())
+			return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w", id, ErrWriteUnconfirmed, ctx.Err())
 		case <-ticker.C:
 		}
 	}
@@ -3747,9 +3768,30 @@ func (s *BdStore) DepList(id, direction string) ([]Dep, error) {
 
 // DepListBatch fetches "down" deps for multiple issue IDs in a single bd
 // subprocess call. Returns a map from issue ID to its deps.
+//
+// One id is read with DepList and returned as that anchor's entry: a one-id
+// `bd dep list <id> --json` prints the depended-on beads' rows, not the
+// dependency records a multi-id call prints, so parsing it as records would
+// key every edge under "" and report the anchor as edge-free.
+//
+// A backend that does not implement the read at all — the bd/Postgres backend
+// answers `operation "IssueRelations" not supported by the postgres backend`
+// (measured on maintainer-city, ga-7i7ts) — is reported with
+// ErrDepListBatchUnsupported and no map, never as an empty map. An empty map
+// reads to every caller as "these anchors have no edges": close ordering would
+// drop its blockers and the scope-skip walk would see no dependencies. The
+// sentinel sends each caller to its per-anchor reads, exactly as a wrapper
+// without the batch does.
 func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 	if len(ids) == 0 {
 		return nil, nil
+	}
+	if len(ids) == 1 {
+		deps, err := s.DepList(ids[0], "down")
+		if err != nil {
+			return nil, err
+		}
+		return map[string][]Dep{ids[0]: deps}, nil
 	}
 	args := append([]string{"dep", "list"}, ids...)
 	args = append(args, "--json")
@@ -3759,14 +3801,7 @@ func (s *BdStore) DepListBatch(ids []string) (map[string][]Dep, error) {
 			return make(map[string][]Dep), nil
 		}
 		if isBdOperationUnsupported(err) {
-			// Some backends don't implement this at all — e.g. the Postgres
-			// backend answers `operation "IssueRelations" not supported by
-			// the postgres backend` (measured on maintainer-city, ga-7i7ts).
-			// Callers use this as a post-filter over an already-correct bd
-			// answer, so "no evidence of blocking" is the safe degrade:
-			// today's (pre-gc.work_outcome-filter) behavior, not a hard
-			// failure of the read that got them here.
-			return make(map[string][]Dep), nil
+			return nil, fmt.Errorf("batch dep list: %w: %w", ErrDepListBatchUnsupported, err)
 		}
 		return nil, fmt.Errorf("batch dep list: %w", err)
 	}

@@ -907,6 +907,13 @@ at runtime.
 | `continuation_group` | Shared execution group suffix; valid only with `context = "shared"` |
 | `item.single_lane` | Must be `true` for shared drains |
 
+A `blocks` edge is satisfied by its predecessor's close whatever
+`gc.outcome` that close carries, but a drain does not expand when a direct
+blocking predecessor in the same workflow closed with a failed outcome: it
+reserves no members, creates no unit convoys or item roots, and closes with
+`gc.outcome = skipped`, so the steps that need it and `workflow-finalize`
+still run.
+
 ```toml
 formula = "review-batch"
 description = "Run a work formula for each convoy member"

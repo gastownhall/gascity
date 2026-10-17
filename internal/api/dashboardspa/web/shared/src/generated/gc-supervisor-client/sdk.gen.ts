@@ -948,26 +948,36 @@ export const createRig = <ThrowOnError extends boolean = false>(options: Options
 
 /**
  * Get v0 city by city name runs
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads on the projection's next poll, normally within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A worker's `gc hook --claim` (the claim and the hook's own follow-up writes) and `gc bd close` record their changes in the log before the command returns, and these reads pick them up on the next poll. No fixed bound is promised: on a slow store the recording itself takes store reads, and claims were measured visible 1 to 8 seconds after they landed. Any other change another process writes straight to the bead store (such as a `bd close` or `bd update` run without gc), or one of those changes the worker could not record, reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRuns = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsResponses, GetV0CityByCityNameRunsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs', ...options });
 
 /**
  * Get v0 city by city name runs census
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads on the projection's next poll, normally within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A worker's `gc hook --claim` (the claim and the hook's own follow-up writes) and `gc bd close` record their changes in the log before the command returns, and these reads pick them up on the next poll. No fixed bound is promised: on a slow store the recording itself takes store reads, and claims were measured visible 1 to 8 seconds after they landed. Any other change another process writes straight to the bead store (such as a `bd close` or `bd update` run without gc), or one of those changes the worker could not record, reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRunsCensus = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsCensusData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsCensusResponses, GetV0CityByCityNameRunsCensusErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/census', ...options });
 
 /**
  * Get v0 city by city name runs by run ID
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads on the projection's next poll, normally within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A worker's `gc hook --claim` (the claim and the hook's own follow-up writes) and `gc bd close` record their changes in the log before the command returns, and these reads pick them up on the next poll. No fixed bound is promised: on a slow store the recording itself takes store reads, and claims were measured visible 1 to 8 seconds after they landed. Any other change another process writes straight to the bead store (such as a `bd close` or `bd update` run without gc), or one of those changes the worker could not record, reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRunsByRunId = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsByRunIdData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsByRunIdResponses, GetV0CityByCityNameRunsByRunIdErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/{run_id}', ...options });
 
 /**
  * Post v0 city by city name runs by run ID cancel
+ *
+ * A successful cancel folds its own writes into the run projection before it responds, so a GET /runs/{run_id} or /runs/{run_id}/steps issued after the 202 reports the run and its open steps canceled.
  */
 export const postV0CityByCityNameRunsByRunIdCancel = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameRunsByRunIdCancelData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameRunsByRunIdCancelResponses, PostV0CityByCityNameRunsByRunIdCancelErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/{run_id}/cancel', ...options });
 
 /**
  * Get v0 city by city name runs by run ID steps
+ *
+ * Run reads are a projection of the city event log, not a direct store read. A change the supervisor makes (sling, cancel, its own step writes) is in the log when the write returns and reaches these reads on the projection's next poll, normally within about a second; a successful POST /runs/{run_id}/cancel is reflected before its response. A worker's `gc hook --claim` (the claim and the hook's own follow-up writes) and `gc bd close` record their changes in the log before the command returns, and these reads pick them up on the next poll. No fixed bound is promised: on a slow store the recording itself takes store reads, and claims were measured visible 1 to 8 seconds after they landed. Any other change another process writes straight to the bead store (such as a `bd close` or `bd update` run without gc), or one of those changes the worker could not record, reaches the log, and these reads, when the supervisor first reads it back from the store: a live read of the run's steps, or its periodic store reconcile (normally every 30 to 120 seconds, by store size and latency). From then on these reads agree with GET /bead/{id}, which serves the same supervisor view.
  */
 export const getV0CityByCityNameRunsByRunIdSteps = <ThrowOnError extends boolean = false>(options: Options<GetV0CityByCityNameRunsByRunIdStepsData, ThrowOnError>) => (options.client ?? client).get<GetV0CityByCityNameRunsByRunIdStepsResponses, GetV0CityByCityNameRunsByRunIdStepsErrors, ThrowOnError>({ url: '/v0/city/{cityName}/runs/{run_id}/steps', ...options });
 
@@ -1015,6 +1025,8 @@ export const getV0CityByCityNameSessionByIdAgentsByAgentId = <ThrowOnError exten
 
 /**
  * Post v0 city by city name session by ID close
+ *
+ * Ends the session permanently: stops its runtime and closes its session bead. Closing a session that is already closed answers 200, so a retry is safe; address it by session ID, because a closed session no longer resolves by its alias or name. A close the store committed but could not read back in time is settled by re-reading the session: when it reads closed the answer is 200, not an error. When it does not, the answer is 503 with detail prefix write_unconfirmed: the close may still land, so re-read the session or retry the close.
  */
 export const postV0CityByCityNameSessionByIdClose = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdCloseData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdCloseResponses, PostV0CityByCityNameSessionByIdCloseErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/close', ...options });
 
@@ -1092,6 +1104,8 @@ export const respondSession = <ThrowOnError extends boolean = false>(options: Op
 
 /**
  * Post v0 city by city name session by ID stop
+ *
+ * Stops the session's current turn with a provider-appropriate interrupt. The session stays running and keeps its conversation. For a Codex session it also closes the session's background terminals, the processes Codex keeps running a turn's commands in after the turn is interrupted. That closes all of them, including ones started by earlier turns, such as a dev server. An interrupt_now submit interrupts the turn the same way but leaves background terminals running. A runtime that can interrupt the turn neither by keys nor by protocol gets nothing sent and answers 501 turn_interrupt_unsupported.
  */
 export const postV0CityByCityNameSessionByIdStop = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdStopData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdStopResponses, PostV0CityByCityNameSessionByIdStopErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/stop', ...options });
 

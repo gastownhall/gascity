@@ -3380,7 +3380,7 @@ func TestWaitForCodexInterruptBoundary(t *testing.T) {
 		_, _ = f.WriteString(`{"type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"<turn_aborted>\nThe user interrupted the previous turn on purpose.\n</turn_aborted>"}]}}` + "\n")
 	}()
 
-	if err := waitForCodexInterruptBoundary(context.Background(), codexHome, since, 2*time.Second); err != nil {
+	if err := waitForCodexInterruptBoundary(context.Background(), transcript, since, 2*time.Second); err != nil {
 		t.Fatalf("waitForCodexInterruptBoundary: %v", err)
 	}
 }

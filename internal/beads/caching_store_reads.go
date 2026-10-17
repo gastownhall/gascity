@@ -26,9 +26,10 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 		items, err := c.backing.List(query)
 		if err == nil {
 			items = c.refreshCachedBeads(query, startSeq, startScan, items)
-			// A live list is often the first reader to see a close made by
-			// another process (bd close); announce what it installed.
-			c.announceUnannouncedCloses()
+			// A live list is often the first reader to see a close or a
+			// claim made by another process (bd close, gc hook --claim);
+			// announce what it installed.
+			c.announceReadInstalls()
 		}
 		return items, err
 	}
@@ -334,26 +335,28 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 	removedParents := make(map[string]struct{})
 	refreshedLiveMissing := make(map[string]Bead)
 	removedLiveMissing := make(map[string]struct{})
-	for _, id := range c.staleParentCacheIDs(query.ParentID, items) {
-		fresh, err := c.backing.Get(id)
+	staleParents := c.staleParentCacheIDs(query.ParentID, items)
+	for i, read := range c.readBackingRows(staleParents) {
+		id := staleParents[i]
 		switch {
-		case err == nil:
-			refreshedParents[id] = cloneBead(fresh)
-		case errors.Is(err, ErrNotFound):
+		case read.err == nil:
+			refreshedParents[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
 			removedParents[id] = struct{}{}
 		default:
-			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, err))
+			c.recordProblem("refresh parent cache during list", fmt.Errorf("%s: %w", id, read.err))
 		}
 	}
-	for _, id := range c.staleLiveCacheIDs(query, items) {
-		fresh, err := c.backing.Get(id)
+	staleLive := c.staleLiveCacheIDs(query, items)
+	for i, read := range c.readBackingRows(staleLive) {
+		id := staleLive[i]
 		switch {
-		case err == nil:
-			refreshedLiveMissing[id] = cloneBead(fresh)
-		case errors.Is(err, ErrNotFound):
+		case read.err == nil:
+			refreshedLiveMissing[id] = cloneBead(read.bead)
+		case errors.Is(read.err, ErrNotFound):
 			removedLiveMissing[id] = struct{}{}
 		default:
-			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, err))
+			c.recordProblem("refresh live cache during list", fmt.Errorf("%s: %w", id, read.err))
 		}
 	}
 	if len(items) == 0 && len(refreshedParents) == 0 && len(removedParents) == 0 &&
@@ -400,9 +403,10 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 		// A list never reads DepList: a row that omits its edges leaves any
 		// mark on the cached ones, as do the refreshes below.
 		c.absorbFreshLocked(item.ID, item, now, absorbOpts{
-			depsMode:   depsFromFieldsIfCarried,
-			seqMode:    seqClearGuarded,
-			clearDirty: c.rowAnswersEdges(item),
+			depsMode:     depsFromFieldsIfCarried,
+			seqMode:      seqClearGuarded,
+			clearDirty:   c.rowAnswersEdges(item),
+			announceRead: true,
 		})
 		if query.Matches(item) {
 			refreshed = append(refreshed, cloneBead(item))
@@ -416,9 +420,10 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 			continue
 		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
-			depsMode:   depsFromFieldsIfCarried,
-			seqMode:    seqClearGuarded,
-			clearDirty: c.rowAnswersEdges(bead),
+			depsMode:     depsFromFieldsIfCarried,
+			seqMode:      seqClearGuarded,
+			clearDirty:   c.rowAnswersEdges(bead),
+			announceRead: true,
 		})
 	}
 	for id := range removedParents {
@@ -438,9 +443,10 @@ func (c *CachingStore) refreshCachedBeads(query ListQuery, startSeq, startScan u
 			continue
 		}
 		c.absorbFreshLocked(id, bead, now, absorbOpts{
-			depsMode:   depsFromFieldsIfCarried,
-			seqMode:    seqClearGuarded,
-			clearDirty: c.rowAnswersEdges(bead),
+			depsMode:     depsFromFieldsIfCarried,
+			seqMode:      seqClearGuarded,
+			clearDirty:   c.rowAnswersEdges(bead),
+			announceRead: true,
 		})
 	}
 	for id := range removedLiveMissing {
@@ -536,8 +542,8 @@ func (c *CachingStore) ListOpen(status ...string) ([]Bead, error) {
 // Get returns a single bead by ID from the cache or backing store.
 func (c *CachingStore) Get(id string) (Bead, error) {
 	// Deferred so it runs after every unlock below: a dirty-row refresh can be
-	// the first reader to see a close made by another process.
-	defer c.announceUnannouncedCloses()
+	// the first reader to see a close or a claim made by another process.
+	defer c.announceReadInstalls()
 	c.mu.RLock()
 	if _, deleted := c.deletedSeq[id]; deleted {
 		c.mu.RUnlock()
@@ -602,9 +608,10 @@ func (c *CachingStore) Get(id string) (Bead, error) {
 				return fresh, nil
 			}
 			opts := absorbOpts{
-				depsMode:   depsFromFieldsIfCarried,
-				seqMode:    seqClearBeadSeqOnly,
-				clearDirty: true,
+				depsMode:     depsFromFieldsIfCarried,
+				seqMode:      seqClearBeadSeqOnly,
+				clearDirty:   true,
+				announceRead: true,
 			}
 			if depsFromBacking {
 				opts.depsMode, opts.deps = depsExplicit, freshDeps

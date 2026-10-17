@@ -2983,11 +2983,30 @@ export type Run = {
     updated_at?: string;
 };
 
+export type RunCancelInterruptFailure = {
+    /**
+     * Why the interrupt failed.
+     */
+    error: string;
+    /**
+     * Session ID, or the step assignee when it could not be resolved to a session.
+     */
+    session: string;
+};
+
 export type RunCancelOutputBody = {
     /**
-     * Count of the run's beads closed by the cancel.
+     * Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
      */
     closed: number;
+    /**
+     * Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+     */
+    interrupt_failures?: Array<RunCancelInterruptFailure> | null;
+    /**
+     * IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+     */
+    interrupted?: Array<string> | null;
     /**
      * The canceled run.
      */
@@ -3089,7 +3108,7 @@ export type RunStep = {
      */
     kind?: string;
     /**
-     * Closed step lifecycle status.
+     * Closed step lifecycle status. Under a terminal run an unfinished step reads the status the run's wind-down closes it with (canceled for a canceled run, skipped otherwise), so it never changes from one terminal status to another; a step that executes after the run settles (the workflow finalizer, the teardown tail) reads its own status until it closes.
      */
     status: RunStepStatus;
     /**
@@ -3539,6 +3558,9 @@ export type SessionResponse = {
     provider: string;
     reason?: string;
     rig?: string;
+    /**
+     * Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
+     */
     running: boolean;
     session_name: string;
     state: string;

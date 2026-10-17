@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"strings"
@@ -36,16 +37,22 @@ type backstopPredicate interface {
 	// content resolves the text to nudge with, or "" to skip silently.
 	content(s beads.Bead) string
 
-	// revalidate checks the exact target immediately before attempt reservation
-	// and delivery. It closes the desired-state-snapshot race without treating
-	// a read failure as proof that work disappeared.
-	revalidate(target backstopTarget) backstopResolution
+	// revalidate checks the exact target, and session s (runtime name
+	// sessName), immediately before attempt reservation and delivery. It
+	// closes the desired-state-snapshot race without treating a read failure
+	// as proof that work disappeared, and it is where a predicate whose
+	// resolve does not already prove the session quiet refuses to type into a
+	// running turn (claimNudgeBusyHold): Hold spends no attempt.
+	revalidate(s beads.Bead, sessName string, target backstopTarget) backstopResolution
 
 	// observe persists the start of a new assignment's grace window.
 	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
 
 	// reserve durably records a nudge attempt before delivery. false means the
-	// write failed and the provider must not be nudged.
+	// write failed and the provider must not be nudged. The engine also calls
+	// it with the previous attempts and time to refund a reservation whose
+	// delivery the runtime deferred (runtime.ErrSessionBusy), so it must write
+	// exactly what it is given.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
 	// exhausted is invoked once attempts reach the shared max attempts.
@@ -214,7 +221,7 @@ func runNudgeBackstop(
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
-			switch pred.revalidate(target) {
+			switch pred.revalidate(*s, sessName, target) {
 			case backstopResolutionHold:
 				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
 				continue
@@ -255,6 +262,18 @@ func runNudgeBackstop(
 				continue
 			}
 			if err := sp.Nudge(sessName, runtime.TextContent(content)); err != nil {
+				if errors.Is(err, runtime.ErrSessionBusy) {
+					// The session went busy between revalidate and delivery,
+					// and the runtime typed nothing rather than interrupt its
+					// turn. Nothing was attempted, so the reservation is
+					// refunded: the marker goes back to the attempts and time
+					// it held, and the next tick that finds the session quiet
+					// tries again. A failed refund leaves the attempt spent,
+					// which is the write-ahead's ordinary failure mode.
+					pred.reserve(store, s, target, attempts, last, stdout)
+					fmt.Fprintf(stdout, "%s: %s is busy; deferred the nudge for %s without spending an attempt\n", label, sessName, target.ID) //nolint:errcheck // best-effort
+					continue
+				}
 				fmt.Fprintf(stdout, "%s: %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
 				continue
 			}

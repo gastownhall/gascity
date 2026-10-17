@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 )
@@ -1329,5 +1330,54 @@ func TestCachingStoreCloseKeepsCachedSynthesisWhenRefreshFails(t *testing.T) {
 	}
 	if got.Status != "closed" {
 		t.Fatalf("cached status after Close with failed refresh = %q, want %q (synthesis fallback)", got.Status, "closed")
+	}
+}
+
+// unconfirmedTxBackingStore runs a Tx's writes, then answers as a bd staged Tx
+// whose read-back timed out: committed, but unconfirmed.
+type unconfirmedTxBackingStore struct {
+	Store
+}
+
+func (s *unconfirmedTxBackingStore) Tx(commitMsg string, fn func(Tx) error) error {
+	if err := s.Store.Tx(commitMsg, fn); err != nil {
+		return err
+	}
+	return fmt.Errorf("updating bead: %w: waiting for tx update projection: %w", ErrWriteUnconfirmed, context.DeadlineExceeded)
+}
+
+// TestCachingStoreTxUnconfirmedReadsTheBackingAfterward: a non-atomic
+// backing's failed Tx may have committed some or all of its writes, and an
+// unconfirmed one committed at least one. The cache must not keep serving the
+// pre-Tx row: a caller re-reading to learn the outcome (a session close that
+// re-reads for closed) would otherwise be told the close never happened.
+func TestCachingStoreTxUnconfirmedReadsTheBackingAfterward(t *testing.T) {
+	t.Parallel()
+
+	backing := &unconfirmedTxBackingStore{Store: NewMemStore()}
+	bead, err := backing.Create(Bead{Title: "unconfirmed"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+
+	err = cache.Tx("close", func(tx Tx) error {
+		if err := tx.SetMetadataBatch(bead.ID, map[string]string{"tx": "applied"}); err != nil {
+			return err
+		}
+		return tx.Close(bead.ID)
+	})
+	if !errors.Is(err, ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want ErrWriteUnconfirmed passed through", err)
+	}
+	cached, err := cache.Get(bead.ID)
+	if err != nil {
+		t.Fatalf("cache Get: %v", err)
+	}
+	if cached.Status != "closed" || cached.Metadata["tx"] != "applied" {
+		t.Fatalf("cache Get = status %q metadata %v, want the backing's closed row", cached.Status, cached.Metadata)
 	}
 }

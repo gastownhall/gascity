@@ -8731,3 +8731,166 @@ func TestSessionMessageAndSubmitRejectAmbiguousTargetWith409(t *testing.T) {
 		}
 	}
 }
+
+// unconfirmedCloseStore reproduces a bd staged Tx whose read-back of a write
+// timed out on a slow store: the writes it ran committed, but the Tx answered
+// `updating bead "<id>": ...: waiting for tx update projection: context
+// deadline exceeded` (wrapping beads.ErrWriteUnconfirmed). landClose decides
+// whether the close was among the committed writes (the post-close read-back
+// timed out) or not (the pre-close one did, so the close never ran). refuse
+// instead fails the Tx with nothing committed, as a write bd refused does. A
+// Tx runs through untouched until armed, so seeding is unaffected.
+type unconfirmedCloseStore struct {
+	beads.Store
+	armed     bool
+	landClose bool
+	refuse    error
+	txCalls   int
+}
+
+func (s *unconfirmedCloseStore) Tx(commitMsg string, fn func(beads.Tx) error) error {
+	if !s.armed {
+		return s.Store.Tx(commitMsg, fn)
+	}
+	s.txCalls++
+	if s.refuse != nil {
+		return s.refuse
+	}
+	var id string
+	if err := s.Store.Tx(commitMsg, func(tx beads.Tx) error {
+		return fn(&closeFilterTx{Tx: tx, skipClose: !s.landClose, id: &id})
+	}); err != nil {
+		return err
+	}
+	return fmt.Errorf("updating bead %q: %w: waiting for tx update projection: %w", id, beads.ErrWriteUnconfirmed, context.DeadlineExceeded)
+}
+
+type closeFilterTx struct {
+	beads.Tx
+	skipClose bool
+	id        *string
+}
+
+func (tx *closeFilterTx) Close(id string) error {
+	*tx.id = id
+	if tx.skipClose {
+		return nil
+	}
+	return tx.Tx.Close(id)
+}
+
+func postSessionClose(t *testing.T, h http.Handler, fs *fakeState, id string) *httptest.ResponseRecorder {
+	t.Helper()
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, newPostRequest(cityURL(fs, "/session/")+id+"/close", nil))
+	return w
+}
+
+func requireSessionStatus(t *testing.T, store beads.Store, id, want string) {
+	t.Helper()
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got.Status != want {
+		t.Fatalf("session %s status = %q, want %q", id, got.Status, want)
+	}
+}
+
+// TestHumaSessionCloseThatLandedUnconfirmedAnswersOK is the regression for a
+// close answering 500 "internal: closing session ...: waiting for tx update
+// projection: context deadline exceeded" while the session read closed right
+// after. A close whose write committed but whose read-back timed out is a
+// close that landed: the answer is 200, the session reads closed, and a retry
+// of the close (all a client could do with the old 500) is also 200.
+func TestHumaSessionCloseThatLandedUnconfirmedAnswersOK(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore, landClose: true}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unconfirmed Close")
+	store.armed = true
+
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusOK {
+		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("close Tx calls = %d, want 1", store.txCalls)
+	}
+	requireSessionStatus(t, store.Store, info.ID, "closed")
+
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusOK {
+		t.Fatalf("second close status = %d, want %d (closing a closed session is idempotent); body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	if store.txCalls != 1 {
+		t.Fatalf("close Tx calls after the retry = %d, want 1 (a closed session is not rewritten)", store.txCalls)
+	}
+}
+
+// TestLegacySessionCloseThatLandedUnconfirmedAnswersOK mirrors the Huma
+// regression on the legacy close route.
+func TestLegacySessionCloseThatLandedUnconfirmedAnswersOK(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore, landClose: true}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unconfirmed Legacy Close")
+	store.armed = true
+
+	for attempt := 1; attempt <= 2; attempt++ {
+		w := httptest.NewRecorder()
+		srv.legacySessionHandler().ServeHTTP(w, newPostRequest("/v0/session/"+info.ID+"/close", nil))
+		if w.Code != http.StatusOK {
+			t.Fatalf("close attempt %d status = %d, want %d; body: %s", attempt, w.Code, http.StatusOK, w.Body.String())
+		}
+	}
+	requireSessionStatus(t, store.Store, info.ID, "closed")
+}
+
+// TestHumaSessionCloseUnconfirmedAndStillOpenAnswersRetryable503: when the
+// read-back that timed out came before the close, so the session still reads
+// open, the close did not land. That is neither success nor an internal
+// fault: the answer is the declared, retryable 503 write_unconfirmed, and the
+// retry closes the session.
+func TestHumaSessionCloseUnconfirmedAndStillOpenAnswersRetryable503(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Unconfirmed Open Close")
+	store.armed = true
+
+	w := postSessionClose(t, h, fs, info.ID)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusServiceUnavailable, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), "write_unconfirmed") {
+		t.Fatalf("close body = %s, want the write_unconfirmed detail", w.Body.String())
+	}
+	requireSessionStatus(t, store.Store, info.ID, "open")
+
+	store.armed = false
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusOK {
+		t.Fatalf("retried close status = %d, want %d; body: %s", w.Code, http.StatusOK, w.Body.String())
+	}
+	requireSessionStatus(t, store.Store, info.ID, "closed")
+}
+
+// TestHumaSessionCloseRefusedWriteStillFails: a close whose write the store
+// refused committed nothing and is still an error, and the session stays open.
+func TestHumaSessionCloseRefusedWriteStillFails(t *testing.T) {
+	fs := newSessionFakeState(t)
+	store := &unconfirmedCloseStore{Store: fs.cityBeadStore, refuse: errors.New("updating bead: exit status 1: disk full")}
+	fs.cityBeadStore = store
+	srv := New(fs)
+	h := newTestCityHandlerWith(t, fs, srv)
+	info := createTestSession(t, fs.cityBeadStore, fs.sp, "Refused Close")
+	store.armed = true
+
+	if w := postSessionClose(t, h, fs, info.ID); w.Code != http.StatusInternalServerError {
+		t.Fatalf("close status = %d, want %d; body: %s", w.Code, http.StatusInternalServerError, w.Body.String())
+	}
+	requireSessionStatus(t, store.Store, info.ID, "open")
+}

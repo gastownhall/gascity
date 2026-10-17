@@ -108,6 +108,16 @@ type CachingStore struct {
 	// costs no lock when idle.
 	unannouncedCloses    map[string]queuedClose
 	hasUnannouncedCloses atomic.Bool
+	// unannouncedUpdates holds rows a read installed over a held open row
+	// whose status, assignee or metadata it changed: another process's claim
+	// or update that a live list, dirty-row read or dirty overlay saw before
+	// the reconcile did. The next notification (or the read's own drain)
+	// announces them as bead.updated, the update-shaped twin of
+	// unannouncedCloses (see caching_store_read_announce.go).
+	// hasUnannouncedUpdates mirrors len(unannouncedUpdates) > 0 so the drain
+	// costs no lock when idle.
+	unannouncedUpdates    map[string]Bead
+	hasUnannouncedUpdates atomic.Bool
 	// closeIntents tracks, per bead, the closing writes (Close, a closing
 	// Update, the conditional closers) between their backing write and their
 	// claim of the bead.closed announcement (claimCloseLocked), and the close
@@ -880,6 +890,12 @@ type absorbOpts struct {
 	// an event already on the bus. Every other absorb that closes a cached row
 	// queues the close for the next notification (see unannouncedCloses).
 	closeAnnounced bool
+	// announceRead marks an install by a read that refetched the row from the
+	// backing (a live list, a dirty-row Get, the dirty overlay): a change it
+	// installs over a held open row is queued for a bead.updated announcement
+	// (see unannouncedUpdates). Writes, reconcile diffs and applied events
+	// announce for themselves or came from the bus, and leave it false.
+	announceRead bool
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -897,6 +913,7 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
 	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
+	c.trackReadUpdateLocked(id, previous, hadPrevious, bead, opts.announceRead)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -1069,6 +1086,7 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 // mode.
 func (c *CachingStore) evictLocked(id string) {
 	c.advanceObservationLocked()
+	c.dropQueuedUpdateLocked(id)
 	delete(c.beads, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
@@ -1177,8 +1195,8 @@ func (c *CachingStore) cacheServableLocked() bool {
 // survived the bounded retry. No backing I/O happens under c.mu (I7).
 func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppressed map[string]struct{})) error {
 	// Deferred so it runs after every unlock below: a dirty-row refresh can be
-	// the first reader to see a close made by another process.
-	defer c.announceUnannouncedCloses()
+	// the first reader to see a close or a claim made by another process.
+	defer c.announceReadInstalls()
 	suppressed := make(map[string]struct{})
 	for pass := 0; pass < 2; pass++ {
 		c.mu.RLock()
@@ -1227,9 +1245,10 @@ func (c *CachingStore) readCacheWithOverlay(gate func() bool, collect func(suppr
 				continue
 			}
 			opts := absorbOpts{
-				depsMode:   depsFromFields,
-				seqMode:    seqClearBeadSeqOnly,
-				clearDirty: true,
+				depsMode:     depsFromFields,
+				seqMode:      seqClearBeadSeqOnly,
+				clearDirty:   true,
+				announceRead: true,
 			}
 			// R1: rows whose backing.Get carried no dependency fields had their
 			// authoritative deps fetched separately; install them verbatim so the

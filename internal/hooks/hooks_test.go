@@ -2768,3 +2768,48 @@ func TestInstallEmpty(t *testing.T) {
 		t.Errorf("Install(nil) should not write files; got %v", fs.Files)
 	}
 }
+
+// TestInstalledWorkDirPathsMatchesInstall pins InstalledWorkDirPaths to what
+// Install really writes into the work dir, provider by provider: the overlay
+// staging caller skips exactly these paths to leave them to the installer, so
+// a path Install writes but the set omits would get two writers, and a path
+// the set names but Install never writes would get none on the tick.
+func TestInstalledWorkDirPathsMatchesInstall(t *testing.T) {
+	for _, provider := range SupportedProviders() {
+		t.Run(provider, func(t *testing.T) {
+			fs := fsys.NewFake()
+			if err := Install(fs, "/city", "/work", []string{provider}); err != nil {
+				t.Fatalf("Install(%s): %v", provider, err)
+			}
+			written := make(map[string]bool)
+			for p := range fs.Files {
+				if rel, ok := strings.CutPrefix(filepath.ToSlash(p), "/work/"); ok {
+					written[rel] = true
+				}
+			}
+			got := InstalledWorkDirPaths([]string{provider}, nil)
+			for rel := range written {
+				if !got[rel] {
+					t.Errorf("Install(%s) wrote %q, missing from InstalledWorkDirPaths %v", provider, rel, got)
+				}
+			}
+			for rel := range got {
+				if !written[rel] {
+					t.Errorf("InstalledWorkDirPaths(%s) names %q, which Install did not write (wrote %v)", provider, rel, written)
+				}
+			}
+		})
+	}
+	if got := InstalledWorkDirPaths([]string{"no-such-provider"}, nil); len(got) != 0 {
+		t.Errorf("InstalledWorkDirPaths(unsupported) = %v, want empty", got)
+	}
+	resolver := func(name string) string {
+		if name == "my-codex" {
+			return "codex"
+		}
+		return ""
+	}
+	if got := InstalledWorkDirPaths([]string{"my-codex"}, resolver); !got[".codex/hooks.json"] {
+		t.Errorf("InstalledWorkDirPaths(my-codex -> codex) = %v, want .codex/hooks.json", got)
+	}
+}

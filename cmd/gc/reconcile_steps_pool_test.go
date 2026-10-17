@@ -313,7 +313,9 @@ func TestNudgeStepsNudgeARigPoolWithoutNudge(t *testing.T) {
 		testTriggerBeadIDKey: "gcg-step", idleClaimNudgeTriggerKey: "gcg-step", idleClaimNudgeCountKey: "0",
 		idleClaimNudgeAtKey: stepsTestNow.Add(-idleClaimNudgeGrace - time.Second).Format(time.RFC3339),
 	}}
-	store := beads.NewMemStoreFrom(0, []beads.Bead{sess}, nil)
+	// The step is in the store, and the env carries work legs, because the
+	// backstop re-reads the trigger live before it delivers.
+	store := beads.NewMemStoreFrom(0, []beads.Bead{sess, {ID: "gcg-step", Status: "open"}}, nil)
 	sp := runningIdleClaimFake(t, "beads--claude-max-gw-2-pool")
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "c"},
@@ -321,6 +323,7 @@ func TestNudgeStepsNudgeARigPoolWithoutNudge(t *testing.T) {
 		Agents:    []config.Agent{{Name: "claude-max-gw", Dir: "beads", MaxActiveSessions: intPtr(100)}},
 	}
 	env := externalReadsEnv{Cfg: cfg, CityStore: store, SP: sp}
+	env.WorkLegs = workLegsFromCensus(t.TempDir(), cfg, cityWorkLegOf(beads.WorkStore{Store: store}), nil)
 	sum := &allocSummary{At: stepsTestNow, ReadyRouted: []beads.Bead{{ID: "gcg-step", Status: "open"}}, ReadyRoutedRefs: []string{""}}
 	lane, _ := newPoolStepsTestLane(env, func() *allocSummary { return sum }, nil)
 	lane.nudges(context.Background(), env)

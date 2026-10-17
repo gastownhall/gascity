@@ -182,6 +182,7 @@ go_test(
         "sleep_reason_test.go",
         "startup_health_test.go",
         "state_machine_test.go",
+        "stop_background_work_test.go",
         "stop_fallback_shape_test.go",
         "stop_input_clear_test.go",
         "stop_request_keys_test.go",

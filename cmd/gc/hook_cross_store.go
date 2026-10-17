@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"strings"
 	"time"
@@ -296,20 +298,53 @@ func rigScopedHookRig(cfg *config.City, agentIdentity string) string {
 // coincide with a flat cross-store comparison; the dir grouping only matters for
 // same-dir multi-leg callers like the class-routing front door's test harness.
 //
+// # Failed reads
+//
+// A store whose read failed never contributes a candidate, and a store that did
+// answer with work is served regardless — a failed read elsewhere is not a
+// reason to withhold work this agent can see. What a failed read changes is the
+// "no work" answer: with any store unread, "no store has work" is not known,
+// and answering it anyway is how a seat drains as idle while its work sits in a
+// store the hook could not reach.
+//
 // When no store has ready work, an error on the agent's OWN store (identified by
-// primary, not by slice position) is surfaced so emitCityWorkQueryFailure can
-// classify it — preserving the single-store emit-on-timeout contract (a
-// work-query timeout must reach the reconciler, not be silently downgraded to
-// "no work"). Errors from federated rig stores are best-effort discovery (like
-// appendRigHookStores) and are not surfaced, so one flaky rig store can't wedge
-// the hook. primary is matched by identity rather than position because the
+// primary, not by slice position) takes precedence and is surfaced as itself so
+// emitCityWorkQueryFailure can classify it — preserving the single-store
+// emit-on-timeout contract (a work-query timeout must reach the reconciler, not
+// be silently downgraded to "no work"). Failing that, an error on a secondary
+// store is surfaced as a *hookSecondaryStoreFailure naming every store that
+// failed, so plain `gc hook` exits with its work-query-failed code and `gc hook
+// --claim` reports the failed read (reportClaimWorkQueryFailure) without a
+// drain result.
+//
+// Secondary-store failures do NOT inherit the primary's emit-on-timeout event
+// (hookEmitWorkQueryFailure filters them), and that is the part of the old
+// "best-effort" rule that survives: one flaky rig store neither escalates to the
+// reconciler as this session's work-query failure nor outranks the primary's
+// own error. primary is matched by identity rather than position because the
 // federated claim loop reselects over a shrinking store set: once the primary
 // store has been dropped it is no longer in stores, so no later federated store
 // may inherit its emit-on-timeout semantics.
-func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner) (string, hookStore, error) {
+//
+// When work IS served, each secondary store that failed is passed to noted (when
+// given) so the caller can report it; the answer is right, but a store was still
+// unreadable and someone should hear about it.
+func bestStoreWithWork(command string, stores []hookStore, primary hookStore, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	var lastOut string
 	var ownStoreOut string
 	var ownStoreErr error
+	var secondaryFailures []*hookStoreReadError
+	served := func(out string, st hookStore) (string, hookStore, error) {
+		for _, note := range noted {
+			if note == nil {
+				continue
+			}
+			for _, failure := range secondaryFailures {
+				note(failure)
+			}
+		}
+		return out, st, nil
+	}
 
 	var firstHitOut string
 	var firstHitStore hookStore
@@ -334,6 +369,8 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			if sameHookStore(st, primary) {
 				ownStoreOut, ownStoreErr = out, err
 				federatedPrimaryFailed = federationPinnedToPrimary
+			} else {
+				secondaryFailures = append(secondaryFailures, &hookStoreReadError{dir: st.dir, err: err})
 			}
 			continue
 		}
@@ -344,7 +381,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 			// overturn it, and refusing it would regress crash recovery whenever
 			// the primary is down. Take it and stop; discard every other answer.
 			if resumeOut, ok := hookOwnResumeAnswer(out, now); ok {
-				return resumeOut, st, nil
+				return served(resumeOut, st)
 			}
 			continue
 		}
@@ -363,7 +400,7 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		}
 		// Resuming this session's own in-progress work is unconditional.
 		if rank.tier == hookTierInProgress && sameHookStore(st, primary) {
-			return out, st, nil
+			return served(out, st)
 		}
 		// Collected raw (uncollapsed) so bestRankedCandidate can compare same-dir
 		// candidates on full tier before collapsing across dirs. See its doc
@@ -381,18 +418,79 @@ func bestStoreWithWork(command string, stores []hookStore, primary hookStore, ru
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
 	if unrankable && firstHit {
-		return firstHitOut, firstHitStore, nil
+		return served(firstHitOut, firstHitStore)
 	}
 	if winner, ok := bestRankedCandidate(ranked); ok {
-		return winner.out, winner.store, nil
+		return served(winner.out, winner.store)
 	}
 	if firstHit {
-		return firstHitOut, firstHitStore, nil
+		return served(firstHitOut, firstHitStore)
 	}
 	if ownStoreErr != nil {
 		return ownStoreOut, hookStore{}, ownStoreErr
 	}
+	// No output alongside the error: an empty array next to a failure still
+	// reads as an empty queue to any caller that looks at stdout first.
+	if len(secondaryFailures) > 0 {
+		return "", hookStore{}, &hookSecondaryStoreFailure{failures: secondaryFailures}
+	}
 	return lastOut, hookStore{}, nil
+}
+
+// hookStoreReadError is one store's failed work-query read, named by the store
+// directory so an operator can tell WHICH leg of the fan-out could not be read.
+type hookStoreReadError struct {
+	dir string
+	err error
+}
+
+func (e *hookStoreReadError) Error() string {
+	return fmt.Sprintf("work query against store %s failed: %v", e.dir, e.err)
+}
+
+func (e *hookStoreReadError) Unwrap() error { return e.err }
+
+// hookStoreFailureNote receives a secondary store's failed read when
+// bestStoreWithWork served work from another store anyway.
+type hookStoreFailureNote func(*hookStoreReadError)
+
+// hookSecondaryStoreFailure is bestStoreWithWork's error when no store had work
+// and only secondary stores failed: "no work" could not be established. It is
+// a distinct type so the caller reports it as a failed query without treating
+// it as the agent's own store failing (hookEmitWorkQueryFailure).
+type hookSecondaryStoreFailure struct {
+	failures []*hookStoreReadError
+}
+
+func (e *hookSecondaryStoreFailure) Error() string {
+	msgs := make([]string, len(e.failures))
+	for i, failure := range e.failures {
+		msgs[i] = failure.Error()
+	}
+	return strings.Join(msgs, "; ")
+}
+
+func (e *hookSecondaryStoreFailure) Unwrap() []error {
+	errs := make([]error, len(e.failures))
+	for i, failure := range e.failures {
+		errs[i] = failure
+	}
+	return errs
+}
+
+// hookEmitWorkQueryFailure passes a failed work query to emit unless the only
+// failures were secondary stores': the work-query-failure event escalates THIS
+// session's own read failing (bestStoreWithWork's emit-on-timeout contract), and
+// a flaky rig store is not that.
+func hookEmitWorkQueryFailure(emit func(command string, err error), command string, err error) {
+	if err == nil || emit == nil {
+		return
+	}
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		return
+	}
+	emit(command, err)
 }
 
 // hookRankedCandidate is one store's best candidate together with its RAW
@@ -679,7 +777,9 @@ func hookRankCandidate(row map[string]any) hookCandidateRank {
 // mc's topology that read is the more expensive half of the claim.
 //
 // discovered is the output selection already read from this store, moments ago.
-func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner) (string, hookStore, error) {
+//
+// noted is forwarded to bestStoreWithWork for its failed-secondary reports.
+func claimStoreWithFallback(command string, stores []hookStore, selected, primary hookStore, discovered string, run hookStoreRunner, noted ...hookStoreFailureNote) (string, hookStore, error) {
 	if len(stores) == 1 {
 		return discovered, selected, nil
 	}
@@ -688,13 +788,13 @@ func claimStoreWithFallback(command string, stores []hookStore, selected, primar
 		if sameHookStore(selected, primary) {
 			return "", hookStore{}, err
 		}
-		return bestStoreWithWork(command, stores, primary, run)
+		return bestStoreWithWork(command, stores, primary, run, noted...)
 	}
 	ready := filterUnreadyHookCandidates(normalizeWorkQueryOutput(strings.TrimSpace(selectedOut)), time.Now())
 	if workQueryHasReadyWork(ready) {
 		return selectedOut, selected, nil
 	}
-	return bestStoreWithWork(command, stores, primary, run)
+	return bestStoreWithWork(command, stores, primary, run, noted...)
 }
 
 // hookClaimReadsPerTick counts the work-query runs one claim attempt performs

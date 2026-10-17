@@ -710,5 +710,18 @@ func classRoutedHookClaimOps(ops hookClaimOps, route *hookClaimClassRoute) hookC
 		route.emitExecutionStepStarted(step)
 	}
 
+	// The workflow stop gate reads a step's ancestry, and closes a stranded
+	// step, in the ledger the step lives in. Like the emission above it routes
+	// on the MEMO alone: before a claim nothing is known resident, so a graph
+	// step's pre-claim read finds nothing in the work store and fails open, and
+	// the post-claim re-check — after the route memoized the step — reads the
+	// binding.
+	ops.WorkflowStore = func(ctx context.Context, dir string, env []string, beadID, actor string) beads.Store {
+		if route.knownResident(beadID) {
+			return route.class
+		}
+		return base.WorkflowStore(ctx, dir, env, beadID, actor)
+	}
+
 	return ops
 }

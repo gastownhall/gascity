@@ -467,9 +467,13 @@ func TestBestStoreWithWorkSurfacesOwnStoreErrorWhenNoWork(t *testing.T) {
 	}
 }
 
-func TestBestStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
-	// A flaky federated rig store must not wedge the hook: when the agent's own
-	// store is healthy (no work), a rig-store error is best-effort and dropped.
+func TestBestStoreWithWorkSurfacesRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T) {
+	// The agent's own store is healthy and empty, but a rig store could not be
+	// read, so "no work" is not established. This used to drop the rig error as
+	// best-effort and answer the city store's "[]", which drained seats whose
+	// work sat in the unread rig. The error now surfaces as a secondary-store
+	// failure: a failed query to the caller, but not this session's own store
+	// failing (hookEmitWorkQueryFailure does not escalate it).
 	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
 	run := func(_, dir string, _ []string) (string, error) {
 		if dir == "city" {
@@ -478,14 +482,55 @@ func TestBestStoreWithWorkIgnoresRigStoreErrorWhenOwnStoreHasNoWork(t *testing.T
 		return "", errTestStoreTimeout
 	}
 	out, gotStore, err := bestStoreWithWork("q", stores, stores[0], run)
-	if err != nil {
-		t.Fatalf("rig-store error must not surface when own store is healthy; got %v", err)
+	var secondary *hookSecondaryStoreFailure
+	if !errors.As(err, &secondary) {
+		t.Fatalf("err = %v, want a *hookSecondaryStoreFailure", err)
 	}
-	if out != `[]` {
-		t.Fatalf("out = %q, want city store's no-work output", out)
+	if !errors.Is(err, errTestStoreTimeout) {
+		t.Fatalf("err = %v, want it to wrap the rig store's own error", err)
+	}
+	if out != "" {
+		t.Fatalf("out = %q, want no output alongside the failure", out)
 	}
 	if gotStore.dir != "" || len(gotStore.env) != 0 {
 		t.Fatalf("store = %#v, want zero value when no work is found", gotStore)
+	}
+}
+
+func TestBestStoreWithWorkOwnStoreErrorTakesPrecedenceOverRigStoreError(t *testing.T) {
+	// Both stores fail: the agent's own store's error is the one surfaced, as
+	// itself, so emitCityWorkQueryFailure still classifies it.
+	errRig := errors.New("rig store down")
+	stores := []hookStore{{dir: "city"}, {dir: "riga"}}
+	run := func(_, dir string, _ []string) (string, error) {
+		if dir == "city" {
+			return "", errTestStoreTimeout
+		}
+		return "", errRig
+	}
+	_, _, err := bestStoreWithWork("q", stores, stores[0], run)
+	if !errors.Is(err, errTestStoreTimeout) {
+		t.Fatalf("err = %v, want the own store's error", err)
+	}
+	var secondary *hookSecondaryStoreFailure
+	if errors.As(err, &secondary) {
+		t.Fatalf("err = %v, want the own store's error surfaced as itself, not as a secondary failure", err)
+	}
+}
+
+func TestHookEmitWorkQueryFailureSkipsSecondaryStoreFailures(t *testing.T) {
+	var emitted []error
+	emit := func(_ string, err error) { emitted = append(emitted, err) }
+	secondary := &hookSecondaryStoreFailure{failures: []*hookStoreReadError{{dir: "riga", err: errTestStoreTimeout}}}
+	hookEmitWorkQueryFailure(emit, "q", secondary)
+	hookEmitWorkQueryFailure(emit, "q", hookClaimRetryWindowClosed(secondary, &hookClaimOps{}))
+	hookEmitWorkQueryFailure(emit, "q", nil)
+	if len(emitted) != 0 {
+		t.Fatalf("emitted %v; a rig store's failure is not this session's work-query failure", emitted)
+	}
+	hookEmitWorkQueryFailure(emit, "q", errTestStoreTimeout)
+	if len(emitted) != 1 {
+		t.Fatalf("emitted %v, want the own store's failure emitted once", emitted)
 	}
 }
 

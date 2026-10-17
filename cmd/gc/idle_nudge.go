@@ -80,7 +80,14 @@ const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it
 // idle-session nudger reverted:
 //   - Keys on bead state (trigger bead == open), never "idle for N minutes", so
 //     it is structurally invisible to a working agent: the instant a pool slot
-//     claims, its trigger bead flips to in_progress and stops matching.
+//     claims, its trigger bead flips to in_progress and stops matching. The
+//     tick's work snapshot can predate that flip — on a slow store by minutes
+//     (factory-lifecycle oct14b: a slot told to re-claim the step it had been
+//     executing for two minutes) — so the trigger is re-read live before every
+//     delivery (poolClaimBackstop.revalidate).
+//   - Never types into a running turn: delivery also waits until the runtime
+//     shows the slot quiet (claimNudgeBusyHold). A slot that is busy without
+//     having claimed is most often running the claim itself.
 //   - State is persisted on the session bead, so a restart cannot replay it.
 //   - Bounded per assignment: observe (grace) → nudge → backoff retries → give
 //     up. It never spams a tick and never loops forever.
@@ -128,10 +135,12 @@ func nudgeStalledPoolClaims(
 	})
 }
 
-// poolClaimDrain is what the claim backstop's terminal drain needs from its
-// caller (mc-zndi7.80): readTrigger, the slot's trigger read live from the
-// store that owns it by residency (found false on a clean miss); and request,
-// the drain request. Either nil disables the drain.
+// poolClaimDrain is what the claim backstop needs from its caller for the
+// decisions a snapshot must not make (mc-zndi7.80): readTrigger, the slot's
+// trigger read live from the store that owns it by residency (found false on
+// a clean miss); and request, the drain request. readTrigger gates every
+// nudge delivery as well as the terminal drain, so nil readTrigger holds both;
+// nil request disables only the drain.
 type poolClaimDrain struct {
 	readTrigger func(id string) (bead beads.Bead, found bool, err error)
 	request     func(sessionBead beads.Bead) error
@@ -183,6 +192,8 @@ func nudgeStalledPoolContinuations(
 		poolContinuationBackstop{
 			cfg:        cfg,
 			candidates: newPoolContinuationCandidateSnapshot(sessionBeads, candidates),
+			sp:         sp,
+			now:        now,
 		},
 	)
 }
@@ -205,6 +216,8 @@ type poolClaimBackstop struct {
 type poolContinuationBackstop struct {
 	cfg        *config.City
 	candidates poolContinuationCandidateSnapshot
+	sp         runtime.Provider
+	now        time.Time
 }
 
 func (p poolContinuationBackstop) governs(s beads.Bead) bool {
@@ -251,7 +264,12 @@ func (p poolContinuationBackstop) content(s beads.Bead) string {
 	return claimNudgeFor(p.cfg, s)
 }
 
-func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopResolution {
+func (p poolContinuationBackstop) revalidate(s beads.Bead, sessName string, target backstopTarget) backstopResolution {
+	// The runtime look comes first: it is the cheaper read, and a busy session
+	// holds whatever the store says.
+	if p.sp == nil || claimNudgeBusyHold(p.sp, s, sessName, p.now) != "" {
+		return backstopResolutionHold
+	}
 	if target.Store == nil {
 		return backstopResolutionHold
 	}
@@ -483,8 +501,69 @@ func (p poolClaimBackstop) content(s beads.Bead) string {
 	return stalledPoolClaimNudgeFor(p.cfg, s)
 }
 
-func (p poolClaimBackstop) revalidate(_ backstopTarget) backstopResolution {
-	return backstopResolutionOutstanding
+// revalidate confirms, immediately before an attempt is reserved, what resolve
+// read from the tick's snapshot. That snapshot is the planner's work view and
+// can be well behind the store: on a contended store a slot that claimed its
+// trigger minutes ago can still read open there. So, in order:
+//
+//   - The slot must be quiet (claimNudgeBusyHold): a nudge typed into a running
+//     turn can abort it, and a slot that is busy without having claimed is
+//     most often running the claim. A busy slot holds.
+//   - Its trigger, re-read live through the store that owns it by residency
+//     (drain.readTrigger, the read the terminal drain uses), must still be
+//     open and unclaimed. Claimed since the snapshot, by this slot or any
+//     other session, clears; a failed read, a clean miss, or no reader at all
+//     holds, since none of them proves the trigger still waits.
+//
+// A hold spends no attempt, so a slot that really stalled is nudged on the
+// first tick it is quiet and its trigger reads open. The live read costs one
+// owner resolution and one Live Get per would-be delivery, never per tick.
+func (p poolClaimBackstop) revalidate(s beads.Bead, sessName string, target backstopTarget) backstopResolution {
+	if p.sp == nil || claimNudgeBusyHold(p.sp, s, sessName, p.now) != "" {
+		return backstopResolutionHold
+	}
+	if p.drain.readTrigger == nil {
+		return backstopResolutionHold
+	}
+	trigger, found, err := p.drain.readTrigger(target.ID)
+	switch {
+	case err != nil, !found:
+		return backstopResolutionHold
+	case !isUnclaimedTrigger(p.cfg, trigger):
+		return backstopResolutionClear
+	default:
+		return backstopResolutionOutstanding
+	}
+}
+
+// claimNudgeBusyHold names what keeps a claim nudge from being typed into
+// sp's session sessName (its row s) at now, or returns "" when nothing does.
+// Every runtime delivers a nudge by typing into the session, and the tmux
+// provider's own wait for idle sends anyway once its timeout passes; for Codex
+// the submit sequence then leads with Escape, which aborts the running turn.
+// So the claim backstops wait for quiet themselves:
+//
+//   - activity the runtime observed within idleClaimNudgeGrace holds, as does
+//     an activity read that fails;
+//   - for a busy-readable provider family off ACP (executionSnapshotVetoApplies)
+//     a pane still showing the busy indicator holds, as does a failed snapshot
+//     (snapshotHoldFor).
+//
+// Unlike sessionQuietHold, a runtime that reports no activity at all (zero
+// time) does not hold by itself: holding on it would leave a slot on an
+// activity-blind runtime that really missed its claim with no nudge, ever.
+// There the live trigger read is the remaining guard. The execution backstop,
+// whose in-progress claim is exactly what a working agent looks like, keeps
+// the stricter rule.
+func claimNudgeBusyHold(sp runtime.Provider, s beads.Bead, sessName string, now time.Time) string {
+	last, err := sp.GetLastActivity(sessName)
+	if err != nil || (!last.IsZero() && now.Sub(last) < idleClaimNudgeGrace) {
+		return executionHoldNotQuiet
+	}
+	if !executionSnapshotVetoApplies(s.Metadata) {
+		return ""
+	}
+	return snapshotHoldFor(sp, sessName)
 }
 
 func (p poolClaimBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {

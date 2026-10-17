@@ -3327,6 +3327,65 @@ func TestTryDeliverQueuedNudgesByPollerKeepsPendingInteractionRefusalRecoverable
 	}
 }
 
+// busySessionNudgeProvider defers every Nudge with runtime.ErrSessionBusy,
+// typing nothing, as the tmux provider does for a Codex pane still running a
+// turn when its wait for idle runs out.
+type busySessionNudgeProvider struct {
+	*runtime.Fake
+	calls int
+}
+
+func (p *busySessionNudgeProvider) Nudge(name string, _ []runtime.ContentBlock) error {
+	p.calls++
+	return fmt.Errorf("%w: session %q is still running a turn", runtime.ErrSessionBusy, name)
+}
+
+// A queued nudge the runtime defers because the session is mid-turn stays
+// queued, spends none of its bounded attempts, and is not claimed again until
+// the retry delay has passed.
+func TestTryDeliverQueuedNudgesByPollerKeepsABusyDeferralQueued(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	dir := t.TempDir()
+	now := time.Now().Add(-1 * time.Minute)
+	if err := enqueueQueuedNudge(dir, newQueuedNudge("worker", "check hook output", now)); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	fake := &busySessionNudgeProvider{Fake: runtime.NewFake()}
+	if err := fake.Start(context.Background(), "sess-worker", runtime.Config{}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	idleSince := time.Now().Add(-10 * time.Second)
+	fake.Activity = map[string]time.Time{"sess-worker": idleSince}
+	target := nudgeTarget{
+		cityPath:    dir,
+		transport:   "acp",
+		agent:       config.Agent{Name: "worker", Session: "acp"},
+		resolved:    &config.ResolvedProvider{Name: "codex"},
+		sessionName: "sess-worker",
+	}
+	obs := worker.LiveObservation{Running: true, Alive: true, LastActivity: &idleSince}
+
+	for pass := 1; pass <= 2; pass++ {
+		delivered, err := tryDeliverQueuedNudgesByPoller(target, openNudgeBeadStore(dir).Store, openNudgeBeadStore(dir).Store, fake, 3*time.Second, obs)
+		if err != nil || delivered {
+			t.Fatalf("pass %d: delivered %t err %v, want the deferred nudge left queued", pass, delivered, err)
+		}
+	}
+	if fake.calls != 1 {
+		t.Fatalf("nudge calls = %d, want 1: the deferral waits out the retry delay before the next try", fake.calls)
+	}
+	state, err := nudgequeue.LoadState(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 || len(state.InFlight) != 0 || len(state.Dead) != 0 {
+		t.Fatalf("pending/inFlight/dead = %d/%d/%d, want 1/0/0", len(state.Pending), len(state.InFlight), len(state.Dead))
+	}
+	if item := state.Pending[0]; item.Attempts != 0 || !item.DeliverAfter.After(time.Now()) {
+		t.Fatalf("pending item attempts %d deliver_after %v, want 0 attempts and a retry in the future", item.Attempts, item.DeliverAfter)
+	}
+}
+
 func TestQueuedNudgeReleaseAfter(t *testing.T) {
 	now := time.Date(2026, 5, 1, 12, 0, 0, 0, time.UTC)
 	backoff := now.Add(defaultQueuedNudgeRetryDelay)
@@ -3344,6 +3403,7 @@ func TestQueuedNudgeReleaseAfter(t *testing.T) {
 		{"session pending-interaction refusal", session.ErrPendingInteraction, true, backoff},
 		{"runtime could not be observed", fmt.Errorf("sending message to session: %w: bridge down", runtime.ErrRuntimeUnavailable), true, backoff},
 		{"busy timeout", errors.New(`agent "sess-worker" busy, timed out waiting for idle`), false, time.Time{}},
+		{"runtime deferred a busy session", fmt.Errorf("sending message to session: %w: session %q is still running a turn", runtime.ErrSessionBusy, "sess-worker"), true, backoff},
 		{"submit delivered but unobserved", fmt.Errorf("nudging: %w", tmux.ErrNudgeSubmitDeliveredUnobserved), false, time.Time{}},
 	}
 	for _, tc := range cases {

@@ -1118,9 +1118,11 @@ func TestBuiltinProviders_CodexHasNilArgsAndOptionDefaults(t *testing.T) {
 		t.Errorf("codex OptionDefaults[permission_mode] = %q, want unrestricted",
 			codex.OptionDefaults["permission_mode"])
 	}
-	if codex.OptionDefaults["model"] != "gpt-5.5" {
-		t.Errorf("codex OptionDefaults[model] = %q, want gpt-5.5",
-			codex.OptionDefaults["model"])
+	// Model and effort are left to the user's Codex config unless chosen.
+	for _, key := range []string{"model", "effort"} {
+		if v, ok := codex.OptionDefaults[key]; ok {
+			t.Errorf("codex OptionDefaults[%s] = %q, want unset", key, v)
+		}
 	}
 	if !schemaHasChoice(codex.OptionsSchema, "model", "gpt-5.5") {
 		t.Error("codex OptionsSchema missing model choice gpt-5.5")

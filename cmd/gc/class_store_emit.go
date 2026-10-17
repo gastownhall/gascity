@@ -272,18 +272,25 @@ func (s *emittingClassStore) snapshot(id string) (beads.Bead, bool) {
 	if err != nil || strings.TrimSpace(bead.ID) == "" {
 		return beads.Bead{}, false
 	}
+	return s.withConfirmedEdges(bead), true
+}
+
+// withConfirmedEdges is snapshot's edge half, for a caller that already holds
+// the post-write row (a claim's canonical readback): a row that carries its
+// edges is used as is, and one that carries none is confirmed with DepList.
+func (s *emittingClassStore) withConfirmedEdges(bead beads.Bead) beads.Bead {
 	if len(bead.Dependencies) > 0 {
 		bead.Needs = nil
-		return bead, true
+		return bead
 	}
-	if deps, err := s.DepList(id, "down"); err == nil {
+	if deps, err := s.DepList(bead.ID, "down"); err == nil {
 		bead.Dependencies = deps
 		if bead.Dependencies == nil {
 			bead.Dependencies = []beads.Dep{}
 		}
 		bead.Needs = nil
 	}
-	return bead, true
+	return bead
 }
 
 // withExplicitEdges adds "dependencies":[] to a payload whose bead has a
@@ -996,14 +1003,15 @@ func (classStoreEmitWarnWriter) Write(p []byte) (int, error) {
 // classStoreEmitWarn is the emission-diagnostic sink. It is a package variable
 // so a test can capture what would otherwise be a one-line warning; the default
 // prints the first diagnostic and suppresses the rest, so a broken event log is
-// neither silent nor a flood in a worker's stderr.
+// neither silent nor a flood in a worker's stderr. The hook's work-store
+// announcements and gc bd's close announcements report through it too.
 var classStoreEmitWarn = warnClassStoreEmitOncePerProcess()
 
 func warnClassStoreEmitOncePerProcess() func(error) {
 	var once sync.Once
 	return func(err error) {
 		once.Do(func() {
-			fmt.Fprintf(os.Stderr, "gc: class-store event emission: %v (further emission errors suppressed)\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(os.Stderr, "gc: bead event emission: %v (further emission errors suppressed)\n", err) //nolint:errcheck // best-effort stderr
 		})
 	}
 }

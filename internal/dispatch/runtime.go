@@ -231,6 +231,10 @@ func ProcessControl(store beads.Store, bead beads.Bead, opts ProcessOptions) (Co
 	}
 }
 
+// workflowCanceledMemberCloseReason is stamped on the open members a finalizer
+// sweeps when it settles a canceled workflow.
+const workflowCanceledMemberCloseReason = "workflow member closed: workflow canceled via run cancel"
+
 // controlRootCanceledCloseReason is stamped on a control bead closed because its
 // workflow root was canceled, distinguishing the cancellation gate from a skip
 // teardown or a missing-root orphan close.
@@ -330,9 +334,9 @@ func closeOrphanedControl(store beads.Store, bead beads.Bead, opts ProcessOption
 
 // rootCanceled reports whether a workflow root is a durable cancellation stop
 // signal: either closed with gc.outcome=canceled, or carrying the
-// gc.cancel_requested intent marker (which run cancel stamps atomically with the
-// root's own close). Control beads under such a root must not spawn or continue
-// work.
+// gc.cancel_requested intent marker (which run cancel stamps on the open run
+// root as its first write, before it closes the run). Control beads under such
+// a root must not spawn or continue work.
 func rootCanceled(root beads.Bead) bool {
 	if strings.TrimSpace(root.Metadata[beadmeta.OutcomeMetadataKey]) == beadmeta.OutcomeCanceled {
 		return true
@@ -1113,6 +1117,27 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		}
 		return ControlResult{}, fmt.Errorf("%s: resolving workflow outcome: %w", bead.ID, err)
 	}
+	// Run cancel marks the run root canceling before it closes the run's
+	// beads, and interrupts the sessions working them while it closes. A step
+	// an interrupted agent closes as passed in that window can make this
+	// finalizer ready, and the finalizer is exempt from the canceled-root gate
+	// because it is the bead that settles the root. The workflow was canceled,
+	// so it settles as canceled, not with an outcome computed from steps that
+	// finished after the cancel, and its source bead is not closed as done. A
+	// drain item workflow under a canceled run settles the same way.
+	root, rootFound, err := finalizeRoot(store, rootID, opts)
+	if err != nil {
+		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: loading workflow root: %w", rootID, err))
+	}
+	if rootFound {
+		canceled, err := workflowCanceled(store, root)
+		if err != nil {
+			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: reading workflow cancellation: %w", rootID, err))
+		}
+		if canceled {
+			outcome = beadmeta.OutcomeCanceled
+		}
+	}
 
 	// On success, propagate the closure across the gc.source_bead_id chain so
 	// parent source beads in other stores (e.g. the city-scope "Adopt PR"
@@ -1143,7 +1168,7 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 		// PASS arm clears all three as it closes the parent
 		// (propagateSourceBeadTerminalMetadata) so a succeeded parent never
 		// carries the failure it superseded.
-		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, bead, opts), opts); err != nil {
+		if err := annotateSourceBeadFailure(store, root, resolveFinalizeFailureDiagnostics(store, bead, opts), opts); err != nil {
 			return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: marking failed source bead: %w", rootID, err))
 		}
 	}
@@ -1184,10 +1209,17 @@ func processWorkflowFinalize(store beads.Store, bead beads.Bead, opts ProcessOpt
 	excludeFromSweep := func(member beads.Bead) bool {
 		return member.ID == bead.ID || excludeTeardown(member)
 	}
-	if _, err := molecule.CloseMembersWithMetadataExcept(store, members, map[string]string{
+	sweep := map[string]string{
 		beadmeta.OutcomeMetadataKey: beadmeta.OutcomeSkipped,
 		"close_reason":              sourceworkflow.WorkflowSkippedCloseReason,
-	}, excludeFromSweep); err != nil {
+	}
+	if outcome == beadmeta.OutcomeCanceled {
+		sweep = map[string]string{
+			beadmeta.OutcomeMetadataKey: beadmeta.OutcomeCanceled,
+			"close_reason":              workflowCanceledMemberCloseReason,
+		}
+	}
+	if _, err := molecule.CloseMembersWithMetadataExcept(store, members, sweep, excludeFromSweep); err != nil {
 		return ControlResult{}, recordWorkflowFinalizeError(store, bead, fmt.Errorf("%s: closing terminal workflow members: %w", rootID, err))
 	}
 	if outcome == beadmeta.OutcomePass {
@@ -1234,13 +1266,56 @@ func completeWorkflowRoot(store beads.Store, finalizer beads.Bead, rootID, outco
 		return beadmeta.OutcomeMissingRoot, nil
 	case errors.Is(err, errRootQuarantined):
 		opts.tracef("workflow-finalize bead=%s root=%s pass_refused reason=control_quarantined", finalizer.ID, rootID)
-		if err := annotateSourceBeadFailure(store, rootID, resolveFinalizeFailureDiagnostics(store, finalizer, opts), opts); err != nil {
+		// Read the root live: the quarantine landed after the finalizer's
+		// root view was read. A missing root is a no-op stamp.
+		root, getErr := store.Get(rootID)
+		if getErr != nil && !errors.Is(getErr, beads.ErrNotFound) {
+			return "", fmt.Errorf("%s: marking failed source bead: loading root for failure annotation: %w", rootID, getErr)
+		}
+		if err := annotateSourceBeadFailure(store, root, resolveFinalizeFailureDiagnostics(store, finalizer, opts), opts); err != nil {
 			return "", fmt.Errorf("%s: marking failed source bead: %w", rootID, err)
 		}
 		return beadmeta.OutcomeFail, nil
 	default:
 		return "", fmt.Errorf("%s: completing workflow head: %w", rootID, err)
 	}
+}
+
+// finalizeRoot returns the workflow root a finalizer settles: from the
+// invocation's root view when resolving the outcome already read it, otherwise
+// read here. A missing root is reported as not found, for the finalizer's own
+// missing-root path to handle.
+func finalizeRoot(store beads.Store, rootID string, opts ProcessOptions) (beads.Bead, bool, error) {
+	if members, ok := rootViewAll(opts, rootID); ok {
+		for _, member := range members {
+			if member.ID == rootID {
+				return member, true, nil
+			}
+		}
+	}
+	root, err := store.Get(rootID)
+	if err != nil {
+		if errors.Is(err, beads.ErrNotFound) {
+			return beads.Bead{}, false, nil
+		}
+		return beads.Bead{}, false, err
+	}
+	return root, true, nil
+}
+
+// workflowCanceled reports whether a workflow root was canceled: it carries
+// the cancel itself (rootCanceled), or it is a drain item workflow nested
+// under a run that does (molecule.StoppedWorkflowAncestor). A root that is not
+// a drain item costs no read.
+func workflowCanceled(store beads.Store, root beads.Bead) (bool, error) {
+	if rootCanceled(root) {
+		return true, nil
+	}
+	stop, err := molecule.StoppedWorkflowAncestor(store, root)
+	if err != nil {
+		return false, err
+	}
+	return stop.Canceled, nil
 }
 
 func preflightSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOptions) error {
@@ -1264,18 +1339,16 @@ func closeSourceBeadChain(rootStore beads.Store, rootID string, opts ProcessOpti
 // leaves the parent OPEN and redispatchable — no close, no gc.outcome. A
 // cross-store ref with no resolver fails LOUD rather than silently narrowing:
 // the parent would otherwise never learn its DAG failed. An empty ref
-// (same-store parent), a missing root, or a deleted parent is a traced no-op.
+// (same-store parent), a missing root (the zero root; the finalizer passes the
+// root it already read), or a deleted parent is a traced no-op.
 // The stamp must be the complete set of failure keys (see failureStamp); the
 // pass path's propagateSourceBeadTerminalMetadata is the other half of that
 // contract and clears the same set as it closes the parent.
-func annotateSourceBeadFailure(rootStore beads.Store, rootID string, failure map[string]string, opts ProcessOptions) error {
-	root, err := rootStore.Get(rootID)
-	if err != nil {
-		if errors.Is(err, beads.ErrNotFound) {
-			return nil
-		}
-		return fmt.Errorf("loading root %s for failure annotation: %w", rootID, err)
+func annotateSourceBeadFailure(rootStore beads.Store, root beads.Bead, failure map[string]string, opts ProcessOptions) error {
+	if root.ID == "" {
+		return nil // missing root
 	}
+	rootID := root.ID
 	parentID := strings.TrimSpace(root.Metadata[beadmeta.SourceBeadIDMetadataKey])
 	if parentID == "" {
 		opts.tracef("annotate-source-failure root=%s stop reason=no_source", rootID)

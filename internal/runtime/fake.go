@@ -54,8 +54,11 @@ type Fake struct {
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	ClearInputErrors        map[string]error
-	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
-	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
+	// BackgroundWorkStopErrors configures Fake.StopBackgroundWork errors per
+	// session name; an absent entry stops successfully.
+	BackgroundWorkStopErrors map[string]error
+	RemoveMetaErrors         map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors            map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -109,6 +112,8 @@ var (
 	_ ListingAttestation  = (*Fake)(nil)
 	_ InputClearProvider  = (*Fake)(nil)
 	_ FencedInputProvider = (*Fake)(nil)
+
+	_ BackgroundWorkStopper = (*Fake)(nil)
 
 	_ AttachmentObserverWithError = (*Fake)(nil)
 )
@@ -358,6 +363,20 @@ func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since ti
 		return fmt.Errorf("session unavailable")
 	}
 	if err, ok := f.InterruptBoundaryErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// StopBackgroundWork records the call and returns the configured result.
+func (f *Fake) StopBackgroundWork(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "StopBackgroundWork", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.BackgroundWorkStopErrors[name]; ok {
 		return err
 	}
 	return nil

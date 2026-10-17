@@ -5726,3 +5726,116 @@ func TestBdStoreReportsNoGuardedBatches(t *testing.T) {
 		t.Fatalf("GuardedBatcherFor(CachingStore over BdStore) = (%T, true), want no capability", batcher)
 	}
 }
+
+// staleProjectionBd fakes a bd whose writes exit 0 but whose reads can lag
+// them, the shape behind a session close that answered 500 while the close had
+// landed: `bd close` drops the row's metadata (as in dolt-server mode) and the
+// post-close `bd update` that re-asserts it exits 0 without a read showing it.
+// hidePreClose makes the pre-close update read back stale instead.
+type staleProjectionBd struct {
+	mu            sync.Mutex
+	closed        bool
+	metadata      map[string]string
+	hidePreClose  bool
+	failPostClose bool
+	updates       int
+}
+
+func (f *staleProjectionBd) run(_, _ string, args ...string) ([]byte, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	switch args[0] {
+	case "show":
+		status := "open"
+		if f.closed {
+			status = "closed"
+		}
+		return []byte(fmt.Sprintf(`[{"id":"bd-7","title":"before","status":%q,"issue_type":"task","created_at":"2025-01-15T10:30:00Z","metadata":%s}]`,
+			status, mustJSONPlain(f.metadata))), nil
+	case "close":
+		f.closed = true
+		f.metadata = map[string]string{}
+		return []byte(`[{"id":"bd-7","status":"closed"}]`), nil
+	case "update":
+		f.updates++
+		postClose := strings.Contains(strings.Join(args, " "), "--status closed")
+		if postClose && f.failPostClose {
+			return nil, errors.New("exit status 1: Error updating bd-7: disk full")
+		}
+		if postClose || f.hidePreClose {
+			return []byte(`[{"id":"bd-7"}]`), nil // exit 0; no read shows it
+		}
+		for i := 0; i+1 < len(args); i++ {
+			if args[i] == "--set-metadata" {
+				k, v, _ := strings.Cut(args[i+1], "=")
+				f.metadata[k] = v
+			}
+		}
+		return []byte(`[{"id":"bd-7"}]`), nil
+	}
+	return nil, fmt.Errorf("unexpected command: bd %s", strings.Join(args, " "))
+}
+
+func mustJSONPlain(v any) string {
+	data, err := json.Marshal(v)
+	if err != nil {
+		panic(err)
+	}
+	return string(data)
+}
+
+func runStaleProjectionCloseTx(f *staleProjectionBd) error {
+	s := beads.NewBdStore("/city", f.run)
+	s.SetTxProjectionTimeoutForTest(200 * time.Millisecond)
+	return s.Tx("close", func(tx beads.Tx) error {
+		if err := tx.SetMetadataBatch("bd-7", map[string]string{"tx": "applied"}); err != nil {
+			return err
+		}
+		return tx.Close("bd-7")
+	})
+}
+
+// TestBdStoreTxUnconfirmedPostCloseUpdateIsWriteUnconfirmed: a staged
+// close whose writes all exited 0, but whose last update never read back,
+// reports ErrWriteUnconfirmed rather than a bare deadline, so a caller can tell
+// "committed, not confirmed" from "failed". The close itself ran.
+func TestBdStoreTxUnconfirmedPostCloseUpdateIsWriteUnconfirmed(t *testing.T) {
+	f := &staleProjectionBd{metadata: map[string]string{}}
+	err := runStaleProjectionCloseTx(f)
+	if !errors.Is(err, beads.ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want ErrWriteUnconfirmed", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Tx error = %v, want it to keep the deadline cause", err)
+	}
+	if !f.closed {
+		t.Fatal("bd close did not run, want the close applied before the unconfirmed update")
+	}
+}
+
+// TestBdStoreTxUnconfirmedPreCloseUpdateStopsBeforeTheClose: an update that
+// never reads back before the close is also unconfirmed, and the Tx stops
+// there: the close does not run on an unconfirmed row.
+func TestBdStoreTxUnconfirmedPreCloseUpdateStopsBeforeTheClose(t *testing.T) {
+	f := &staleProjectionBd{metadata: map[string]string{}, hidePreClose: true}
+	err := runStaleProjectionCloseTx(f)
+	if !errors.Is(err, beads.ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want ErrWriteUnconfirmed", err)
+	}
+	if f.closed {
+		t.Fatal("bd close ran after an unconfirmed update, want the Tx to stop before it")
+	}
+}
+
+// TestBdStoreTxFailedUpdateIsNotWriteUnconfirmed: an update bd refused is a
+// failed write, never an unconfirmed one.
+func TestBdStoreTxFailedUpdateIsNotWriteUnconfirmed(t *testing.T) {
+	f := &staleProjectionBd{metadata: map[string]string{}, failPostClose: true}
+	err := runStaleProjectionCloseTx(f)
+	if err == nil {
+		t.Fatal("Tx error = nil, want the refused update's error")
+	}
+	if errors.Is(err, beads.ErrWriteUnconfirmed) {
+		t.Fatalf("Tx error = %v, want a failed write, not ErrWriteUnconfirmed", err)
+	}
+}

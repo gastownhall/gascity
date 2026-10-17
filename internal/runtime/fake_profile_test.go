@@ -30,6 +30,7 @@ import (
 // interfaces, by name. TestOptionalInterfacesAreListed keeps it complete.
 var optionalInterfaces = map[string]reflect.Type{
 	"AttachmentObserverWithError":     reflect.TypeFor[runtime.AttachmentObserverWithError](),
+	"BackgroundWorkStopper":           reflect.TypeFor[runtime.BackgroundWorkStopper](),
 	"BackendListingProvider":          reflect.TypeFor[runtime.BackendListingProvider](),
 	"BackendsProvider":                reflect.TypeFor[runtime.BackendsProvider](),
 	"ConditionalProcessTableScanner":  reflect.TypeFor[runtime.ConditionalProcessTableScanner](),
@@ -491,4 +492,38 @@ func TestT3BridgeProfileAnswersProductionsTurnCapabilities(t *testing.T) {
 	if got := fake.TurnCapabilities("s"); got != want {
 		t.Fatalf("t3bridge profile TurnCapabilities = %+v, production declares %+v", got, want)
 	}
+}
+
+// A profiled tmux must reach the backend's background-work stop with its
+// caller's context, and pass its answer back.
+func TestTmuxProfileForwardsBackgroundWorkStop(t *testing.T) {
+	for _, result := range []error{nil, runtime.ErrInteractionUnsupported} {
+		b := &profileBackgroundStopSpy{FullFake: runtime.FullFake{Fake: runtime.NewFake()}, result: result}
+		p := runtime.NewFakeProfile(runtime.ProfileTmux, b)
+		stopper, ok := p.(runtime.BackgroundWorkStopper)
+		if !ok {
+			t.Fatal("tmux profile lacks BackgroundWorkStopper")
+		}
+		ctx := t.Context()
+		if err := stopper.StopBackgroundWork(ctx, "session"); !errors.Is(err, result) {
+			t.Fatalf("StopBackgroundWork error = %v, want %v", err, result)
+		}
+		if b.calls != 1 || b.ctx != ctx || b.name != "session" {
+			t.Fatalf("StopBackgroundWork did not forward context and session: %+v", b)
+		}
+	}
+}
+
+type profileBackgroundStopSpy struct {
+	runtime.FullFake
+	ctx    context.Context
+	name   string
+	result error
+	calls  int
+}
+
+func (b *profileBackgroundStopSpy) StopBackgroundWork(ctx context.Context, name string) error {
+	b.ctx, b.name = ctx, name
+	b.calls++
+	return b.result
 }

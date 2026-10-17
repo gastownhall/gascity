@@ -627,6 +627,37 @@ func requiresInterruptBoundaryWait(b beads.Bead) bool {
 	return providerKind(b) == "codex"
 }
 
+// stopsBackgroundWork reports whether an explicit stop must also stop work
+// the provider keeps running after its turn is interrupted. Codex does: it
+// runs a turn's commands in background terminals that outlive the turn.
+// Claude does too: a command the model ran in the background outlives the
+// turn, and its completion notice starts another one.
+func stopsBackgroundWork(b beads.Bead) bool {
+	if transportFromMetadata(b) == "acp" {
+		return false
+	}
+	switch providerKind(b) {
+	case "codex", "claude":
+		return true
+	}
+	return false
+}
+
+// stopBackgroundWorkLocked has the runtime stop the work a stopped turn left
+// running, when the runtime can (see [runtime.BackgroundWorkStopper]). Only
+// StopTurn calls it: an interrupt_now submit replaces the turn and leaves
+// earlier work, such as a dev server, running. The turn is already stopped,
+// so a failure is logged, not returned.
+func (m *Manager) stopBackgroundWorkLocked(ctx context.Context, sessName string) {
+	stopper, ok := m.sp.(runtime.BackgroundWorkStopper)
+	if !ok {
+		return
+	}
+	if err := stopper.StopBackgroundWork(ctx, sessName); err != nil && !errors.Is(err, runtime.ErrInteractionUnsupported) {
+		log.Printf("session: stopped the turn of %q but not its background work: %v", sessName, err)
+	}
+}
+
 func requiresHardRestartInterrupt(b beads.Bead) bool {
 	if transportFromMetadata(b) == "acp" {
 		return false

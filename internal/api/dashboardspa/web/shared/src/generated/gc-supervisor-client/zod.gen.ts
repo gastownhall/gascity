@@ -1531,6 +1531,11 @@ export const zRotatedPayload = z.object({
     prior_last_seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zRunCancelInterruptFailure = z.object({
+    error: z.string(),
+    session: z.string()
+});
+
 export const zRunLastError = z.object({
     code: z.string(),
     message: z.string().optional()
@@ -1569,6 +1574,8 @@ export const zRun = z.object({
 
 export const zRunCancelOutputBody = z.object({
     closed: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    interrupt_failures: z.array(zRunCancelInterruptFailure).nullish(),
+    interrupted: z.array(z.string()).nullish(),
     run_id: z.string(),
     status: zRunStatus
 });

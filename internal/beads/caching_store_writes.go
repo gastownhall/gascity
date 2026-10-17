@@ -587,14 +587,16 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 	refreshed := make([]refreshedBead, 0, len(ids))
 	var refreshErr error
 	refreshFailed := make(map[string]struct{})
-	for _, id := range ids {
-		fresh, getErr := c.backing.Get(id)
-		if getErr != nil {
+	// One batched read for the whole close where the backing has one, not a
+	// `bd show` per closed bead.
+	for i, read := range c.readBackingRows(ids) {
+		id := ids[i]
+		if read.err != nil {
 			refreshFailed[id] = struct{}{}
-			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, getErr))
+			refreshErr = errors.Join(refreshErr, fmt.Errorf("refresh bead after close-all %s: %w", id, read.err))
 			continue
 		}
-		refreshed = append(refreshed, refreshedBead{id: id, bead: fresh})
+		refreshed = append(refreshed, refreshedBead{id: id, bead: read.bead})
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
@@ -810,10 +812,32 @@ func (c *CachingStore) Tx(commitMsg string, fn func(Tx) error) error {
 		tx.backing = backingTx
 		return fn(tx)
 	}); err != nil {
+		// A backing without atomic rollback may have committed some or all of
+		// the Tx's writes before failing, and an ErrWriteUnconfirmed answer
+		// committed at least one. Fence the touched rows so the next read
+		// asks the backing rather than serving the pre-Tx row: a caller
+		// re-reading to learn the outcome must see what landed.
+		if !StoreSupportsAtomicTx(c.backing) || errors.Is(err, ErrWriteUnconfirmed) {
+			c.fenceTxTouchedBeads(tx.ids)
+		}
 		return err
 	}
 	c.refreshTxTouchedBeads(tx.ids, tx.closed, startSeq)
 	return nil
+}
+
+// fenceTxTouchedBeads marks the rows a failed Tx touched dirty, as a failed
+// SetMetadataBatch does, until an ordinary read installs backing truth.
+func (c *CachingStore) fenceTxTouchedBeads(ids []string) {
+	if len(ids) == 0 {
+		return
+	}
+	c.mu.Lock()
+	for _, id := range ids {
+		c.noteMutationLocked(id)
+		c.markDirtyLocked(id)
+	}
+	c.mu.Unlock()
 }
 
 // AtomicTx reports whether Tx is atomic, which for the caching store is exactly
