@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -77,18 +76,31 @@ func (p *Provider) InterruptFenced(ctx context.Context, name string, fence runti
 	return p.fencedResult(name, c.InterruptFenced(ctx, name, fence))
 }
 
-// publishInputFence records the incarnation cfg.Env names on the agent pane
-// a welded start op created, for a pack that can fence. Best-effort: a pane
-// left without a fence is unproven, so fenced input to it misses rather than
-// reaching it unchecked.
-func (p *Provider) publishInputFence(ctx context.Context, name string, cfg runtime.Config) {
-	f, ok := runtime.InputFenceFromEnv(cfg.Env)
-	if !ok || p.InputFencing(name) == runtime.InputFencingNone {
+// clearInputFence removes the agent pane's fence before a welded start op,
+// for a pack that can fence, so a pack whose start reuses a pane never leaves
+// the previous incarnation's fence naming the new agent. Best-effort: a box
+// that does not exist yet has no pane to clear, and the publish after the
+// start op is required.
+func (p *Provider) clearInputFence(ctx context.Context, name string) {
+	if p.InputFencing(name) == runtime.InputFencingNone {
 		return
 	}
-	if err := p.carrier().PublishInputFence(ctx, name, f); err != nil {
-		_, _ = fmt.Fprintf(os.Stderr, "exec provider: warning: session %q: %v\n", name, err)
+	_, _, _ = p.Exec(ctx, name, append([]string{"tmux"}, runtime.TmuxClearInputFenceArgs(execTmuxSession)...))
+}
+
+// publishInputFence records the incarnation cfg.Env names on the agent pane
+// a welded start op created, for a pack that can fence. A pane left without
+// its fence would be unproven to every fenced op, so a failed publish fails
+// the start.
+func (p *Provider) publishInputFence(ctx context.Context, name string, cfg runtime.Config) error {
+	f, ok := runtime.InputFenceFromEnv(cfg.Env)
+	if !ok || p.InputFencing(name) == runtime.InputFencingNone {
+		return nil
 	}
+	if err := p.carrier().PublishInputFence(ctx, name, f); err != nil {
+		return fmt.Errorf("exec provider: %w", err)
+	}
+	return nil
 }
 
 // launchFenceArgs is the tmux command, joined to the launch's own as one

@@ -229,10 +229,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
+	if !occupancyKnown || occupiedBefore {
+		p.clearInputFence(ctx, name)
+	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
-	p.publishInputFence(ctx, name, cfg)
+	if err := p.publishInputFence(ctx, name, cfg); err != nil {
+		return p.cleanupAfterStartFailure(name, err, foreignBox)
+	}
 	p.publishReadyPrompt(ctx, name, cfg)
 
 	if err := p.dismissStartupDialogs(ctx, name, cfg); err != nil {

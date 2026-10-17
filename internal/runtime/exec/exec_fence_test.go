@@ -189,17 +189,20 @@ esac
 }
 
 // Kills a start or relaunch that leaves the new agent pane without its
-// incarnation's fence, or a respawn that keeps its predecessor's.
+// incarnation's fence, or a respawn that keeps its predecessor's: a welded
+// start clears a reused pane's fence before the start op and publishes the
+// new one after it.
 func TestExecStartAndLaunchPublishTheFence(t *testing.T) {
 	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
 	publish := "'set-option' '-p' '-F' '-t' 'main' '@gc_fence' '" + execFence.Digest() + ".#{pane_id}'"
+	clearFence := "'tmux' 'set-option' '-p' '-u' '-t' 'main' '@gc_fence'"
 
 	script, calls := boxScript(t, "", "", false)
 	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err != nil {
 		t.Fatalf("welded Start: %v", err)
 	}
-	if got := readCalls(t, calls); len(got) != 1 || got[0] != "'tmux' "+publish {
-		t.Fatalf("welded Start ran %q, want the fence published", got)
+	if got := readCalls(t, calls); len(got) != 2 || got[0] != clearFence || got[1] != "'tmux' "+publish {
+		t.Fatalf("welded Start ran %q, want the old fence cleared, then the new one published", got)
 	}
 
 	script, calls = boxScript(t, "", "", true)
@@ -245,5 +248,35 @@ esac
 		case !wantAbsent && (!errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch)):
 			t.Errorf("is-running %q: %v, want ErrRuntimeUnavailable", answer, err)
 		}
+	}
+}
+
+// Kills a welded start that reports success with its agent pane left
+// unproven: when the fence cannot be published, Start fails (and tears the
+// box down) rather than leave a pane no fenced input can reach.
+func TestExecStartFailsWhenTheFenceCannotBePublished(t *testing.T) {
+	dir := t.TempDir()
+	stops := filepath.Join(dir, "stops")
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  is-running) echo false ;;
+  exec)
+    cmd=$(cat)
+    case "$cmd" in
+      *set-option*-F*) exit 1 ;;
+    esac
+    ;;
+  start) cat > /dev/null ;;
+  stop) echo stop >> `+stops+` ;;
+  *) exit 2 ;;
+esac
+`)
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err == nil {
+		t.Fatal("Start with the fence publish failing = nil, want an error")
+	}
+	if got := readCalls(t, stops); len(got) != 1 {
+		t.Fatalf("stops = %q, want the box torn down once", got)
 	}
 }
