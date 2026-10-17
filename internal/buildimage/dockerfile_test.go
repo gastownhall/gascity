@@ -23,9 +23,14 @@ func TestGenerateDockerfile(t *testing.T) {
 		t.Error("missing touch .gc-workspace-ready")
 	}
 
-	// Must set USER.
-	if !strings.Contains(content, "USER gcagent") {
-		t.Error("missing USER gcagent")
+	// The image identity is a numeric, non-root fallback. The root group
+	// permissions keep baked workspace content writable when admission supplies
+	// a different non-root UID with GID 0.
+	if !strings.Contains(content, "chown -R 1001:0 /workspace") || !strings.Contains(content, "chmod -R g=u /workspace") {
+		t.Error("workspace must be owned by the numeric fallback UID and root group with group permissions matching owner permissions")
+	}
+	if !strings.Contains(content, "USER 1001:0") {
+		t.Error("missing numeric non-root fallback USER 1001:0")
 	}
 
 	// Must start with the generated-by comment.

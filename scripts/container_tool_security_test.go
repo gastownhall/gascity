@@ -134,6 +134,9 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	if got := strings.Count(dockerfile, `go get "github.com/apache/thrift@v${THRIFT_VERSION}"`); got != 1 {
 		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd thrift override %d times, want exactly 1", got)
 	}
+	if got := strings.Count(dockerfile, `go get "golang.org/x/net@v${XNET_VERSION}"`); got != 1 {
+		t.Errorf("contrib/k8s/Dockerfile.agent applies the bd x/net override %d times, want exactly 1", got)
+	}
 	if strings.Contains(dockerfile, "COPY bd /usr/local/bin/bd") {
 		t.Error("contrib/k8s/Dockerfile.agent still copies the vulnerable prebuilt bd binary")
 	}
@@ -317,19 +320,19 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 		}
 	}
 
-	// Inside the gh stanza the x/mod get has to run after the x/text one. A later
-	// `go get` naming a version below what an earlier one dragged in is a downgrade,
-	// and it takes the earlier module with it: measured against the pinned source,
-	// with XTEXT_VERSION at 0.39.0 the reversed order selects x/mod v0.38.0, under
-	// the fixed version. The two orders agree at the versions pinned today, so this
-	// is what keeps the next bump from recreating that shape.
+	// Inside the gh stanza, x/mod follows x/text and the x/net security floor is
+	// applied last so later transitive requirements cannot lower it.
 	xtextGet := strings.Index(ghStanza, `"golang.org/x/text@v${XTEXT_VERSION}"`)
 	xmodGet := strings.Index(ghStanza, `"golang.org/x/mod@v${XMOD_VERSION}"`)
-	if xtextGet < 0 || xmodGet < 0 {
-		t.Fatal("gh stanza is missing the x/text or the x/mod override")
+	xnetGet := strings.Index(ghStanza, `"golang.org/x/net@v${XNET_VERSION}"`)
+	if xtextGet < 0 || xmodGet < 0 || xnetGet < 0 {
+		t.Fatal("gh stanza is missing the x/text, x/mod, or x/net override")
 	}
 	if xmodGet < xtextGet {
 		t.Error("gh stanza runs the x/mod override ahead of x/text; the newest constraint goes last, so a lower x/text pin cannot downgrade x/mod out from under its assertion")
+	}
+	if xnetGet < xmodGet {
+		t.Error("gh stanza must apply the x/net security floor after x/mod so a later transitive requirement cannot downgrade it")
 	}
 }
 
@@ -400,14 +403,11 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 }
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
-// source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.26.9 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
-// x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
-// it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
-// rebuild instead of proving the fix holds. The one surviving reviewed waiver is
-// CVE-2026-56852 for kubectl, which is an upstream-signed prebuilt this repo installs
-// rather than builds, so nothing here can move its dependencies. gc's module waivers
-// are enforced separately by TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
+// source tools (bd, dolt, gh) carry no waiver at all. Their Go 1.26.9 toolchain and
+// explicit x/net 0.60.0 overrides clear the current findings. Only the current stable
+// kubectl prebuilt retains three time-boxed CVE waivers until Kubernetes ships a
+// release with both fixes. gc's module waivers are enforced separately by
+// TestTrivyIgnoreDropsGCModuleWaiversPastThreshold.
 func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	root := repoRoot(t)
 
@@ -424,7 +424,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		"usr/local/bin/dolt": true,
 		"usr/bin/gh":         true,
 	}
-	stdlibCVEs := map[string]bool{
+	rebuiltToolCVEs := map[string]bool{
 		"CVE-2026-33811": true, "CVE-2026-33814": true, "CVE-2026-39820": true,
 		"CVE-2026-39822": true, "CVE-2026-39823": true, "CVE-2026-39825": true,
 		"CVE-2026-39826": true, "CVE-2026-39836": true, "CVE-2026-42499": true,
@@ -432,6 +432,8 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 		// kubectl-only stdlib CVEs, fixed in Go 1.26.6.
 		"CVE-2026-33818": true, "CVE-2026-56853": true, "CVE-2026-56858": true,
 		"CVE-2026-56859": true, "CVE-2026-56860": true, "CVE-2026-56862": true,
+		// Current kubectl-only findings, also rejected on every rebuilt tool.
+		"CVE-2026-78667": true, "CVE-2026-78669": true, "CVE-2026-97031": true,
 	}
 	// Waivers that survive, checked as present so an entry cannot be dropped without
 	// a deliberate edit here, and as the only rebuilt-path entries allowed, so the set
@@ -442,10 +444,16 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	// is gone entirely: Dockerfile.agent forced bd's thrift to 0.24.0 first, and
 	// Dockerfile.base's own THRIFT_VERSION has now followed for the Dolt rebuild, so
 	// no rebuilt path is waived for it and a regression below 0.24.0 fails the scan.
-	// Nothing rebuilt from source is waived here any more; only kubectl is, and
-	// kubectl is a prebuilt.
+	// Nothing rebuilt from source is waived here any more; only the three current
+	// findings on the upstream-signed kubectl prebuilt are time-boxed.
 	reviewedWaivers := map[string]map[string]bool{
-		"CVE-2026-56852": {
+		"CVE-2026-78667": {
+			"usr/local/bin/kubectl": true,
+		},
+		"CVE-2026-78669": {
+			"usr/local/bin/kubectl": true,
+		},
+		"CVE-2026-97031": {
 			"usr/local/bin/kubectl": true,
 		},
 	}
@@ -453,8 +461,8 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
-			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.9 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+			if rebuiltToolCVEs[v.ID] && rebuiltPaths[p] {
+				t.Errorf("%s still waives rebuilt tool %q; drop the path so the scan proves the source build keeps the fixed dependency", v.ID, p)
 			}
 			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundReviewed[v.ID] == nil {
@@ -464,7 +472,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				continue
 			}
 			if rebuiltPaths[p] {
-				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc, thrift and x/net forward, so move the module forward in that build instead of waiving the path", v.ID, p)
+				t.Errorf("%s waives rebuilt tool %q; force the patched dependency into that source build instead of waiving the path", v.ID, p)
 			}
 		}
 	}
