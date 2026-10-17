@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"testing"
 	"time"
 
@@ -316,5 +317,146 @@ func TestStepReminderReadsEntryStepEdgesInOneBatch(t *testing.T) {
 	}
 	if batches != 1 || singles != 0 {
 		t.Errorf("read the open steps' edges in %d batches and %d single reads, want one batch", batches, singles)
+	}
+}
+
+// edgeReadFaultStore fails every dependency read, the batched one included, the
+// way a store does while its database is unreachable.
+type edgeReadFaultStore struct{ beads.Store }
+
+func (s edgeReadFaultStore) DepList(string, string) ([]beads.Dep, error) {
+	return nil, errors.New("dolt: connection refused")
+}
+
+func (s edgeReadFaultStore) DepListBatch([]string) (map[string][]beads.Dep, error) {
+	return nil, errors.New("dolt: connection refused")
+}
+
+// blockerReadFaultStore fails the read of one bead, a blocker, and answers every
+// other read as the store under it does.
+type blockerReadFaultStore struct {
+	beads.Store
+	id string
+}
+
+func (s blockerReadFaultStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		return beads.Bead{}, errors.New("dolt: connection refused")
+	}
+	return s.Store.Get(id)
+}
+
+// edgeBatchFaultStore answers every batched dependency read with answer and err,
+// and the single reads as the store under it does.
+type edgeBatchFaultStore struct {
+	beads.Store
+	answer map[string][]beads.Dep
+	err    error
+}
+
+func (s edgeBatchFaultStore) DepListBatch([]string) (map[string][]beads.Dep, error) {
+	return s.answer, s.err
+}
+
+// assertStepReminderOver is assertStepReminder with each store the resolution
+// reads wrapped by wrap: one wrapper over the one store, one over each of the
+// two. The wrappers are pointers so the one-store resolution still sees one
+// handle.
+func assertStepReminderOver(t *testing.T, p *planBreakdown, wrap func(beads.Store) beads.Store, want string) {
+	t.Helper()
+	for _, split := range []bool{false, true} {
+		work, graph := p.stores(split)
+		work = wrap(work)
+		if split {
+			graph = wrap(graph)
+		} else {
+			graph = work
+		}
+		got, err := resolveActiveWispStep(work, graph, planIdentities)
+		if err != nil {
+			t.Fatalf("split=%v: resolveActiveWispStep: %v", split, err)
+		}
+		if stepID(got) != want {
+			t.Errorf("split=%v: the reminder names %s, want %s", split, describeStep(got), want)
+		}
+	}
+}
+
+// The reminder is advisory: while the edges that decide whether a step can
+// start cannot be read, it names nothing rather than a step the session may not
+// be able to start. Both paths name planIntake while the store answers.
+func TestStepReminderNamesNoStepWhenItsDependenciesCannotBeRead(t *testing.T) {
+	paths := []struct {
+		name  string
+		reach func(t *testing.T, p *planBreakdown)
+	}{
+		{name: "routed bead before the claim", reach: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+		}},
+		{name: "claimed molecule root", reach: func(t *testing.T, p *planBreakdown) {
+			p.claim(t, planRoot)
+		}},
+	}
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			p := newPlanBreakdown()
+			path.reach(t, p)
+			assertStepReminder(t, p, planIntake)
+			assertStepReminderOver(t, p, func(s beads.Store) beads.Store { return &edgeReadFaultStore{Store: s} }, noReminder)
+		})
+	}
+}
+
+// A blocker that cannot be read is not known to be satisfied: the bead it
+// blocks is not offered, though the blocker is closed. Both paths name
+// planIntake while the blocker reads.
+func TestStepReminderTreatsABlockerItCannotReadAsUnsatisfied(t *testing.T) {
+	paths := []struct {
+		name    string
+		blocker string
+		reach   func(t *testing.T, p *planBreakdown)
+	}{
+		{name: "routed bead before the claim", blocker: planBlocker, reach: func(t *testing.T, p *planBreakdown) {
+			p.row(t, planBlocker).Status = "closed"
+		}},
+		{name: "claimed molecule root", blocker: planGate, reach: func(t *testing.T, p *planBreakdown) {
+			p.claim(t, planRoot)
+			p.graph = append(p.graph, beads.Bead{ID: planGate, Title: "DP1 decision gate", Type: "gate", Status: "closed", CreatedAt: time.Date(2026, 10, 9, 19, 44, 3, 0, time.UTC)})
+			p.graphDeps = append(p.graphDeps, beads.Dep{IssueID: planIntake, DependsOnID: planGate, Type: "blocks"})
+		}},
+	}
+	for _, path := range paths {
+		t.Run(path.name, func(t *testing.T) {
+			p := newPlanBreakdown()
+			path.reach(t, p)
+			assertStepReminder(t, p, planIntake)
+			assertStepReminderOver(t, p, func(s beads.Store) beads.Store {
+				return &blockerReadFaultStore{Store: s, id: path.blocker}
+			}, noReminder)
+		})
+	}
+}
+
+// A batched edge read that does not answer for the open steps is not an answer
+// that they have no edges: some stores omit an anchor, and bd answers a batch it
+// declines with an empty map. Read that way, every open step looks startable and
+// the first in created order, planClarify, is named again.
+func TestStepReminderRereadsEdgesTheBatchDoesNotAnswer(t *testing.T) {
+	batches := []struct {
+		name   string
+		answer map[string][]beads.Dep
+		err    error
+	}{
+		{name: "empty answer", answer: map[string][]beads.Dep{}},
+		{name: "unsupported", err: beads.ErrDepListBatchUnsupported},
+	}
+	for _, tc := range batches {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanBreakdown()
+			p.claim(t, planRoot)
+			assertStepReminderOver(t, p, func(s beads.Store) beads.Store {
+				return &edgeBatchFaultStore{Store: s, answer: tc.answer, err: tc.err}
+			}, planIntake)
+		})
 	}
 }
