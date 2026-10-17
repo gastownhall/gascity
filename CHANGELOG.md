@@ -351,9 +351,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- **Suspending a session shortly after it woke keeps its conversation.** An
-  operator, idle or `gc stop` suspend no longer counts as a rapid crash or
-  churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
+- **Stopping a Claude turn that is waiting on a permission prompt now cancels
+  the prompt.** The tmux interrupt sent Ctrl-C, which leaves Claude's prompt
+  up; it now sends Escape (the prompt's own cancel key) when a prompt is on
+  screen, never a numbered option. When it cannot read the pane it logs a
+  warning and sends Ctrl-C as before. (thanks @csells)
 
 - **A Claude API failure now shows as a provider error in structured session
   history, not as an assistant reply.** Entries Claude flags with
@@ -675,6 +677,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
   too, with a warning naming the file. Rigs that inherit the city endpoint are
   compacted as before (#7994).
+
+- **Suspending a session shortly after it woke keeps its conversation.** An
+  operator, idle or `gc stop` suspend no longer counts as a rapid crash or
+  churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
 
 ## [1.5.0] - 2026-10-05
 
