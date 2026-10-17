@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sync"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -115,8 +116,12 @@ func startNudgeWakeListener(ctx context.Context, cityPath string, wakeCh chan<- 
 // sessionBeads, and try delivery. Returns the number of targets that
 // successfully delivered at least one item.
 //
-// This is a no-op when the dispatcher is configured for "legacy" mode —
-// the per-session `gc nudge poll` processes own delivery in that case.
+// In "legacy" mode the per-session `gc nudge poll` processes own delivery,
+// except for ACP sessions: session/prompt needs the process that owns the
+// in-memory ACP connection, so no poller is started for them
+// (ensureNudgePollerForTarget), and this pass delivers their queued items
+// (mc-z0og9). Legacy mode skips every other target, and returns at once
+// when no open session is on ACP.
 //
 // debugOut receives one GC_DEBUG-gated line per silently-skipped target (see
 // logNudgeDispatchSkip); pass nil to suppress (skip counts still accumulate
@@ -126,7 +131,8 @@ func dispatchAllQueuedNudges(cityPath string, cfg *config.City, store, sessStore
 	if cfg == nil || sessionBeads == nil || cityPath == "" {
 		return 0, nil
 	}
-	if !nudgeDispatcherIsSupervisor(cfg) {
+	acpOnly := !nudgeDispatcherIsSupervisor(cfg)
+	if acpOnly && !anyOpenACPSession(cityPath, cfg, sessionBeads) {
 		return 0, nil
 	}
 	return dispatchQueuedNudges(openNudgeQueue(cityPath, beads.NudgesStore{Store: store}), cityPath, cfg, store, sessStore, sp, sessionBeads, debugOut)
@@ -186,6 +192,9 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 	skipCounts := make(map[string]int64)
 	for _, info := range sessionBeads.OpenInfos() {
 		target := resolveNudgeTargetFromSessionInfo(cityPath, cfg, info)
+		if acpOnly && target.sessionTransport() != "acp" {
+			continue // its poller delivers it
+		}
 		if target.sessionName == "" {
 			skipCounts["no-target"]++
 			logNudgeDispatchSkip(debugOut, "no-target", info.AgentName, info.ID, "")
@@ -235,7 +244,19 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 			logNudgeDispatchSkip(debugOut, "not-running", target.agentKey(), target.sessionName, "")
 			continue
 		}
-		ok, err := tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		var ok bool
+		if target.sessionTransport() == "acp" {
+			var pending bool
+			if ok, pending, err = deliverACPQueuedNudgesBounded(cityPath, target, func() (bool, error) {
+				return tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+			}); pending {
+				skipCounts["acp-delivery-pending"]++
+				logNudgeDispatchSkip(debugOut, "acp-delivery-pending", target.agentKey(), target.sessionName, "")
+				continue
+			}
+		} else {
+			ok, err = tryDeliverQueuedNudgesByPoller(target, store, sessStore, sp, defaultNudgePollQuiescence, obs)
+		}
 		if err != nil && firstErr == nil {
 			firstErr = err
 		}
@@ -264,6 +285,67 @@ func dispatchQueuedNudges(queue nudgeQueueHandle, cityPath string, cfg *config.C
 		firstErr = fmt.Errorf("recording nudge dispatch skip counters: %w", err)
 	}
 	return delivered, firstErr
+}
+
+// acpDeliveryWait bounds how long a dispatch pass waits for one ACP
+// target's queued delivery. An ACP nudge waits up to its busy timeout (60s
+// by default) for a busy agent, and the pass runs on the controller's loop
+// (#7816 review), so a delivery still running past the bound is left to
+// finish on its own, its items claimed, and the pass moves on.
+var acpDeliveryWait = 3 * time.Second
+
+// acpDeliveries are the ACP targets with a delivery running, by city and
+// session name: one at a time per target, so a busy agent never piles up
+// waiting deliveries across passes.
+var acpDeliveries sync.Map
+
+// deliverACPQueuedNudgesBounded runs deliver for target off the pass, and
+// waits for it at most acpDeliveryWait. pending reports a delivery still
+// running, this one or an earlier pass's; ok and err are deliver's when it
+// returned in time.
+func deliverACPQueuedNudgesBounded(cityPath string, target nudgeTarget, deliver func() (bool, error)) (ok, pending bool, err error) {
+	key := cityPath + "\x00" + target.sessionName
+	if _, running := acpDeliveries.LoadOrStore(key, struct{}{}); running {
+		return false, true, nil
+	}
+	type result struct {
+		ok  bool
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		// Off the pass, safeTick no longer recovers a panic here, and one
+		// would end the controller and, under a supervisor, every city. A
+		// recovered delivery's claimed items go back to pending when their
+		// lease expires (#7816 review). The target is freed before the
+		// result is sent, so a pass that reads it sees no delivery running.
+		var r result
+		defer func() {
+			if p := recover(); p != nil {
+				r = result{err: fmt.Errorf("acp delivery to %s panicked: %v", target.sessionName, p)}
+			}
+			acpDeliveries.Delete(key)
+			done <- r
+		}()
+		r.ok, r.err = deliver()
+	}()
+	select {
+	case r := <-done:
+		return r.ok, false, r.err
+	case <-time.After(acpDeliveryWait):
+		return false, true, nil
+	}
+}
+
+// anyOpenACPSession reports an open session on the ACP transport, whose
+// queued nudges only the controller can deliver.
+func anyOpenACPSession(cityPath string, cfg *config.City, sessionBeads *sessionBeadSnapshot) bool {
+	for _, info := range sessionBeads.OpenInfos() {
+		if resolveNudgeTargetFromSessionInfo(cityPath, cfg, info).sessionTransport() == "acp" {
+			return true
+		}
+	}
+	return false
 }
 
 // logNudgeDispatchSkip emits a single GC_DEBUG-gated line documenting one

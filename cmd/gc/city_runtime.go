@@ -4058,13 +4058,21 @@ func parseRFC3339Metadata(v string) (time.Time, bool) {
 	return t, true
 }
 
-// nudgeDispatchTick runs one supervisor-side nudge dispatch pass. Called
+// nudgeDispatchTick runs one controller-side nudge dispatch pass. Called
 // from the main run loop on wake-socket signal and (belt-and-suspenders)
 // at the end of each patrol tick so a missed wake doesn't strand a queue
-// item past the patrol interval.
+// item past the patrol interval. In the legacy dispatcher mode it delivers
+// ACP sessions only (dispatchAllQueuedNudges), which no poller can.
 func (cr *CityRuntime) nudgeDispatchTick(_ context.Context) {
-	if !nudgeDispatcherIsSupervisor(cr.cfg) {
+	if cr.cfg == nil {
 		return
+	}
+	// In legacy mode the pollers own most queues: read no session snapshot
+	// unless something is queued at all.
+	if !nudgeDispatcherIsSupervisor(cr.cfg) {
+		if state, err := nudgequeue.LoadState(cr.cityPath); err != nil || len(state.Pending)+len(state.InFlight) == 0 {
+			return
+		}
 	}
 	// Nudge ops route through the nudges accessor; the session snapshot it pairs
 	// them with is loaded via the sessions accessor inside loadSessionBeadSnapshot.
