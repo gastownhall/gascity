@@ -12,9 +12,26 @@
   "ledgers": [
     {
       "scope": "city",
+      "classes": [
+        "work"
+      ],
       "url": "https://ctl.example.ts.net:7491",
       "project_id": "proj-7d2e",
       "ca_pem": "-----BEGIN CERTIFICATE-----\nMIIBkTCCATegAwIBAgIUatUbaCT9PmghGqRTwIIHSfFPnZMwCgYIKoZIzj0EAwIw\nHTEbMBkGA1UEAwwSZ2MtY29ubmVjdC10ZXN0LWNhMCAXDTI2MTAxMzIzMTYwNVoY\nDzIxMjYwOTE5MjMxNjA1WjAdMRswGQYDVQQDDBJnYy1jb25uZWN0LXRlc3QtY2Ew\nWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAATHmYMySuDTOjvWxDPS33hCqnSbA22d\ndIssgXt6dVDDNSbOB/123eWtncXuMlm1fz0NamxCBw4Ey0PWqX8zzkvDo1MwUTAd\nBgNVHQ4EFgQU/2H8DxtWSxfPHSX/MsL8Z4f6S5kwHwYDVR0jBBgwFoAU/2H8DxtW\nSxfPHSX/MsL8Z4f6S5kwDwYDVR0TAQH/BAUwAwEB/zAKBggqhkjOPQQDAgNIADBF\nAiA9f/tT3PdC+8WAh3/TNIWzjzLZGODqkmd8KMiLDRA7NAIhAMmNJdLK4qbhVJ68\nXCX9CrvDwbJwMba+/bAGAiGJYwRI\n-----END CERTIFICATE-----\n"
+    },
+    {
+      "scope": "binding:infra",
+      "classes": [
+        "graph",
+        "sessions",
+        "messaging",
+        "orders",
+        "nudges"
+      ],
+      "config_ref": "infra",
+      "url": "https://infra.example.ts.net:7492",
+      "project_id": "proj-91c0",
+      "auth_wait_s": 20
     }
   ]
 }

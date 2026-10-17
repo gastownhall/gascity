@@ -4,6 +4,7 @@ go_library(
     name = "subprocess",
     srcs = [
         "cutover.go",
+        "local_transcripts.go",
         "seams.go",
         "subprocess.go",
     ],

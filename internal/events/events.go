@@ -371,7 +371,13 @@ const (
 	// that some or all of its work did not run: a bead scope it could not
 	// reach, or a safety gate that held a step back. It accompanies the run's
 	// order.completed so a skip is never read as a clean completion.
-	OrderSkipped                    = "order.skipped"
+	OrderSkipped = "order.skipped"
+	// OrderInapplicable reports that an order declares requires_backend and
+	// its bead scope uses a backend it does not name, so the dispatcher will
+	// not run it there. It is not a failure: the order is reported, not
+	// dispatched. Emitted once per order, scope and backend per controller
+	// boot (see cmd/gc/order_dispatch.go).
+	OrderInapplicable               = "order.inapplicable"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -548,7 +554,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,

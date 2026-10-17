@@ -14,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -48,6 +49,14 @@ type MaintenanceProvider interface {
 	// is held it returns *supervisor.MaintenanceInProgressError so the
 	// POST handler can translate to 409 Conflict.
 	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
+}
+
+// NudgeQueue is the part of the city's nudge queue the API writes through:
+// the deferred submit a session cannot take yet, and the withdrawal of a
+// closed or woken session's queued wait nudges.
+type NudgeQueue interface {
+	EnqueueDeferred(nudgequeue.Item) error
+	WithdrawQueuedWaitNudges([]string) error
 }
 
 // State provides read access to controller-managed state.
@@ -138,6 +147,10 @@ type State interface {
 	// nudges class statically visible at the call site; its embedded .Store is
 	// nil when no store is available.
 	NudgesBeadStore() beads.NudgesStore
+
+	// NudgeQueue returns the city's nudge queue, through which the API queues
+	// deferred submits and withdraws wait nudges.
+	NudgeQueue() NudgeQueue
 
 	// SessionsBeadStore returns the store backing session-class beads — session
 	// lifecycle (type=session/gc:session) and durable session waits

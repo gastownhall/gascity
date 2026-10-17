@@ -38,6 +38,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"EnvironmentBatchProvider":        reflect.TypeFor[runtime.EnvironmentBatchProvider](),
 	"ExecProvider":                    reflect.TypeFor[runtime.ExecProvider](),
 	"FreshByConstruction":             reflect.TypeFor[runtime.FreshByConstruction](),
+	"FencedInputProvider":             reflect.TypeFor[runtime.FencedInputProvider](),
 	"FreshLivenessObserver":           reflect.TypeFor[runtime.FreshLivenessObserver](),
 	"IdentitySidecarProvider":         reflect.TypeFor[runtime.IdentitySidecarProvider](),
 	"IdleProbeBudgetProvider":         reflect.TypeFor[runtime.IdleProbeBudgetProvider](),
@@ -51,6 +52,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"InventoryProvider":               reflect.TypeFor[runtime.InventoryProvider](),
 	"KeyedNudgeProvider":              reflect.TypeFor[runtime.KeyedNudgeProvider](),
 	"ListingAttestation":              reflect.TypeFor[runtime.ListingAttestation](),
+	"LocalTranscriptProvider":         reflect.TypeFor[runtime.LocalTranscriptProvider](),
 	"LivenessObserver":                reflect.TypeFor[runtime.LivenessObserver](),
 	"LivenessObserverWithError":       reflect.TypeFor[runtime.LivenessObserverWithError](),
 	"ProcessTableScanner":             reflect.TypeFor[runtime.ProcessTableScanner](),
@@ -67,6 +69,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
 	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),
 	"TurnInterruptCapabilityProvider": reflect.TypeFor[runtime.TurnInterruptCapabilityProvider](),
+	"TurnObservationProvider":         reflect.TypeFor[runtime.TurnObservationProvider](),
 	"UnattendedSessionStopper":        reflect.TypeFor[runtime.UnattendedSessionStopper](),
 }
 
@@ -164,7 +167,8 @@ current-context: c
 // Kills a profile that drifts from its backend: one optional interface more
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
-// sidecar, a transport, an idle-proof budget, a turn-interrupt mode), or no
+// sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
+// fencing, local transcripts), or no
 // backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
@@ -190,7 +194,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -208,6 +212,12 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.TurnInterruptCapabilityProvider); ok {
 		out[5] = string(f.TurnInterruptMode("s"))
+	}
+	if f, ok := p.(runtime.FencedInputProvider); ok {
+		out[6] = string(f.InputFencing("s"))
+	}
+	if f, ok := p.(runtime.LocalTranscriptProvider); ok {
+		out[7] = strconv.FormatBool(f.LocalTranscripts())
 	}
 	return strings.Join(out, " ")
 }
@@ -461,5 +471,24 @@ func TestFullFakeWaitTurnEndedSessionGoneEndsTheTurn(t *testing.T) {
 	f.TurnReadErrors = map[string][]error{"s": {runtime.ErrSessionNotFound}}
 	if st, err := tf.WaitTurnEnded(t.Context(), "s", "t1", time.Hour); err != nil || st.Active() {
 		t.Fatalf("session gone mid-wait = %+v, %v; want no turn, nil", st, err)
+	}
+}
+
+// Kills a t3bridge profile whose turn capabilities differ from production's
+// static V1 row, or that a FullFake script can change: the row is a fixed
+// trait the profile answers itself.
+func TestT3BridgeProfileAnswersProductionsTurnCapabilities(t *testing.T) {
+	f := runtime.NewFake()
+	f.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"s": {{}}}
+	fake, ok := runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: f}).(runtime.TurnObservationProvider)
+	if !ok {
+		t.Fatal("the t3bridge profile lacks TurnObservationProvider")
+	}
+	want := t3bridge.NewSeamBacked().(runtime.TurnObservationProvider).TurnCapabilities("s")
+	if want == (runtime.TurnCapabilities{}) {
+		t.Fatal("production t3bridge declares no turn capabilities")
+	}
+	if got := fake.TurnCapabilities("s"); got != want {
+		t.Fatalf("t3bridge profile TurnCapabilities = %+v, production declares %+v", got, want)
 	}
 }

@@ -212,11 +212,19 @@ yet settled.
   The single-key marker sidesteps open question 3 (`beads.Tx` validation across
   store impls).
 - **The awake epoch is `awake_started_at` at nanosecond precision**, stamped
-  fresh on every confirmed start/wake — both create-time `ConfirmStartedPatch`
-  and the controller's `CommitStartedPatch` wake path — rather than a separate
-  UUID. Refreshing it on every interval is what lets later intervals on a reused
-  session bill; nanosecond precision keeps two intervals that begin within the
-  same wall-clock second distinct.
+  fresh whenever a confirmed start/wake opens an awake interval — both
+  create-time `ConfirmStartedPatch` and the controller's `CommitStartedPatch`
+  wake path — rather than a separate UUID. Refreshing it on every interval is
+  what lets later intervals on a reused session bill; nanosecond precision
+  keeps two intervals that begin within the same wall-clock second distinct.
+  Heal can mark a bead `awake` while its claimed start is still in flight but
+  never writes the epoch, so a live state at commit does not prove an interval
+  is open. The controller commit therefore stamps a fresh epoch on any start
+  out of a pending or dormant state, and on a start or recovery committed onto
+  a live bead unless that bead's interval is still open (an epoch the compute
+  lane has not yet recorded in `usage_compute_emitted_at`); an open interval's
+  epoch is never replaced (`startOpensAwakeInterval` in
+  `cmd/gc/session_lifecycle_parallel.go`).
 - **Model facts emit from the transcript-tail watcher, as proposed.** The single
   per-invocation tail extraction that drives the `gc.agent.*` token instruments
   (`recordInvocationTelemetry`) also builds one model `usage.Fact` per pending

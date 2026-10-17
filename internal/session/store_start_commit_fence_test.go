@@ -67,7 +67,7 @@ func TestCommitStartedIfCurrentRefusesOverAnOutOfBandKill(t *testing.T) {
 				t.Fatalf("kill: %v", err)
 			}
 
-			applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+			applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 			if err != nil {
 				t.Fatalf("CommitStartedIfCurrent: %v", err)
 			}
@@ -101,7 +101,7 @@ func TestCommitStartedIfCurrentFencesAWriteAfterTheReread(t *testing.T) {
 			}}
 			front := NewStore(beads.SessionStore{Store: racing})
 
-			applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+			applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 			if err != nil {
 				t.Fatalf("CommitStartedIfCurrent: %v", err)
 			}
@@ -133,7 +133,7 @@ func TestCommitStartedIfCurrentRedecidesPastAnUnrelatedWrite(t *testing.T) {
 			}}
 			front := NewStore(beads.SessionStore{Store: racing})
 
-			applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+			applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 			if err != nil || !applied {
 				t.Fatalf("CommitStartedIfCurrent = (%v, %v), want applied", applied, err)
 			}
@@ -182,7 +182,7 @@ func TestCommitStartedIfCurrentBoundsALosingFence(t *testing.T) {
 		}
 	}}
 
-	applied, err := NewStore(beads.SessionStore{Store: racing}).CommitStartedIfCurrent(prepared, startCommitPatch)
+	applied, err := NewStore(beads.SessionStore{Store: racing}).CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 	if applied || !beads.IsPreconditionFailed(err) {
 		t.Fatalf("CommitStartedIfCurrent = (%v, %v), want the precondition error", applied, err)
 	}
@@ -208,7 +208,7 @@ func TestCommitStartedIfCurrentRequireModeFailsClosed(t *testing.T) {
 	}
 	mem.DisableConditionalWrites = true
 
-	applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+	applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 	if applied || !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("CommitStartedIfCurrent = (%v, %v), want the require-mode refusal", applied, err)
 	}
@@ -248,7 +248,7 @@ func TestCommitStartedIfCurrentRaceAgainstAKill(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					_, commitErr = front.CommitStartedIfCurrent(prepared, startCommitPatch)
+					_, commitErr = front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 				}()
 				go func() {
 					defer wg.Done()
@@ -335,7 +335,7 @@ func TestCommitStartedRefusesAnOperatorSuspendDuringTheStart(t *testing.T) {
 				if c.refuseHeld {
 					opts = append(opts, StartCommitRefusingHolds())
 				}
-				applied, err := NewStore(beads.SessionStore{Store: reads}).CommitStartedIfCurrentUnder(prepared, startCommitPatch, nil, opts...)
+				applied, err := NewStore(beads.SessionStore{Store: reads}).CommitStartedIfCurrentUnder(context.Background(), prepared, startCommitPatch, nil, opts...)
 				got, gerr := backing.Get(created.ID)
 				if gerr != nil {
 					t.Fatalf("Get: %v", gerr)

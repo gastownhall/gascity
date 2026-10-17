@@ -491,6 +491,9 @@ func (p *Provider) NudgeNow(name string, content []runtime.ContentBlock) error {
 // ResetInterruptedTurn delegates to the routed backend when it supports
 // provider-native interrupted-turn discard semantics.
 func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if rp, ok := p.route(name).(runtime.InterruptedTurnResetProvider); ok {
 		return rp.ResetInterruptedTurn(ctx, name)
 	}
@@ -500,6 +503,9 @@ func (p *Provider) ResetInterruptedTurn(ctx context.Context, name string) error 
 // ClearInput delegates to the routed backend when it can empty a session's
 // input box and confirm it is empty.
 func (p *Provider) ClearInput(ctx context.Context, name string, restoreWindow time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if cp, ok := p.route(name).(runtime.InputClearProvider); ok {
 		return cp.ClearInput(ctx, name, restoreWindow)
 	}
@@ -579,6 +585,9 @@ func (p *Provider) Respond(name string, response runtime.InteractionResponse) er
 // DismissKnownDialogs delegates to the routed backend when it can dismiss
 // startup dialogs.
 func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout time.Duration) error {
+	if err := runtime.RefuseUnfenceableCtx(ctx, p.route(name), name); err != nil {
+		return err
+	}
 	if dp, ok := p.route(name).(runtime.DialogProvider); ok {
 		return dp.DismissKnownDialogs(ctx, name, timeout)
 	}

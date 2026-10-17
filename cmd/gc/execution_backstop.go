@@ -15,8 +15,9 @@ package main
 //
 // This predicate closes that with the same bounded shape as its two siblings:
 // observe, nudge, back off, give up. It re-delivers the agent's OWN configured
-// claim nudge, which is idempotent by construction — re-running `gc hook --claim`
-// on a bead this session already owns returns action=work
+// claim nudge (a seat whose step started gets the pool default when none is
+// configured; see below), which is idempotent by construction — re-running
+// `gc hook --claim` on a bead this session already owns returns action=work
 // reason=existing_assignment (the ga-i44k invariant), so a slot that was merely
 // slow re-reads its assignment instead of being handed a second one.
 //
@@ -42,6 +43,26 @@ package main
 // by an idle TUI) proves nothing, and holding on it would keep an abandoned
 // claim forever. That pane, every other session, and a runtime that cannot
 // take a snapshot keep the activity clock alone.
+//
+// # Execution evidence vetoes the drain, not the nudge
+//
+// A seat whose claimed step started this incarnation (an execution.step_started
+// stamped on the row as executionClaimStartedKey) is never escalated: draining
+// it throws its work away and wakes it onto the same claim again (v5.10x,
+// mc-muv2x). The evidence proves the step started, not that a turn is still
+// running it, so it does not hold the nudge (ga-ba7k1f). A turn that dies on a
+// provider error leaves the seat at its prompt with its stamp and its claim,
+// and only a nudge brings it back. Once its pane has read quiet past the window
+// it gets the same bounded nudges as any seat, the pool default when its
+// template configures none, and when they are spent it is held as executing.
+// The nudge is idempotent (the hook hands the seat back its own claim), so a
+// seat that ended its turn on purpose, waiting on a human approval, re-checks
+// and waits again.
+//
+// The activity clock is pane output, so output that is not a turn (a wall(1)
+// broadcast into every tty, a repaint) can hold a pass as not_quiet. Such a
+// hold never touches the pacing: it delays the next action by at most one
+// grace window and cannot reset or spend the attempts.
 //
 // # Exhaustion hands the session to a lane that already converges
 //
@@ -133,9 +154,10 @@ const (
 	// stale, but the snapshot still showed the busy indicator, or could not be
 	// taken.
 	executionHoldSnapshotNotIdle = "snapshot_not_idle"
-	// executionHoldExecuting names execution evidence (v5.10x): the claimed
-	// bead's step started since the seat's wake, so it is being executed,
-	// however quiet its pane.
+	// executionHoldExecuting names execution evidence vetoing the escalation
+	// (v5.10x, ga-ba7k1f): the claimed bead's step started this incarnation,
+	// so once its nudges are spent, or it has none to send, the seat is held
+	// rather than drained.
 	executionHoldExecuting     = "executing"
 	executionHoldSnapshotError = "snapshot_error"
 )
@@ -302,7 +324,9 @@ func (p poolExecutionBackstop) governs(s beads.Bead) bool {
 
 // resolve reports an outstanding stall only when all of it holds: the session
 // holds exactly ONE in-progress claim under a current identity, and the runtime
-// says the session has been quiet for at least the grace window (quietHold).
+// says the session has been quiet for at least the grace window (quietHold). A
+// seat with execution evidence is held as executing instead whenever the
+// engine's next action would escalate it (escalatesNext); its nudges go out.
 //
 // Exactly one, because the pacing state names a single bead: a session juggling
 // several claims is demonstrably doing something, and picking one of them to
@@ -343,14 +367,30 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		Assignee: claim.Assignee,
 		Store:    claim.Store,
 	}
-	// Execution evidence vetoes "unexecuted" (v5.10x): the row's stamp
-	// (mc-muv2x), so every action past the window (a nudge, the escalation)
-	// waits on it.
-	if same, attempts, last := p.state(s, target); same && decideBackstopAction(attempts, last, p.now) != backstopActionWait && started {
+	// Execution evidence vetoes the escalation, never the nudge (ga-ba7k1f):
+	// a seat that started its step is not drained, but a seat whose turn
+	// ended while it still holds the claim is nudged like any other.
+	if same, attempts, last := p.state(s, target); same && started && p.escalatesNext(s, attempts, last) {
 		p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
 		return backstopTarget{}, backstopResolutionHold
 	}
 	return target, backstopResolutionOutstanding
+}
+
+// escalatesNext reports whether the engine's next action on s, given its
+// pacing, is the terminal escalation (exhausted): the attempts are spent, or a
+// nudge is due with no content to deliver, which the engine escalates at once.
+// The second mirrors runNudgeBackstop's empty-content shortcut; change the two
+// in lockstep.
+func (p poolExecutionBackstop) escalatesNext(s beads.Bead, attempts int, last time.Time) bool {
+	switch decideBackstopAction(attempts, last, p.now) {
+	case backstopActionExhausted:
+		return true
+	case backstopActionNudge:
+		return p.content(s) == ""
+	default:
+		return false
+	}
 }
 
 // quietHold names the gate that keeps session s from counting as quiet, or
@@ -437,7 +477,18 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 	return same, atoiOr0(s.Metadata[executionClaimNudgeCountKey]), parseRFC3339OrZero(s.Metadata[executionClaimNudgeAtKey])
 }
 
+// content is the agent's configured claim nudge. A seat whose stamp shows the
+// marker's claim started this incarnation gets the pool default when none is
+// configured (stalledPoolClaimNudgeFor, the claim backstop's fallback): its
+// escalation is vetoed, so with nothing to send it would wait at its prompt
+// forever. A seat seen started on a pass whose stamp write failed gets no
+// default; escalatesNext holds it until the stamp lands. A started seat whose
+// template names no configured agent gets no default either, and is held as
+// executing, as in the stamp-failure case.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
+	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
+		return stalledPoolClaimNudgeFor(p.cfg, s)
+	}
 	return claimNudgeFor(p.cfg, s)
 }
 

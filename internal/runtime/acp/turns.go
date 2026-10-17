@@ -153,8 +153,12 @@ func usageCount(raw json.RawMessage) (int64, error) {
 	return int64(value), nil
 }
 
-// turnRecord describes one session/prompt turn. A sessionConn keeps only the
-// running turn and the last finished one; it does not keep a history.
+// turnHistoryLen bounds the finished turns a sessionConn keeps. A reader that
+// polls TurnHistory at least once per turnHistoryLen turns misses none.
+const turnHistoryLen = 8
+
+// turnRecord describes one session/prompt turn. A sessionConn keeps the
+// running turn and the last turnHistoryLen finished ones.
 type turnRecord struct {
 	ID         string // random UUIDv4, unique per turn
 	PromptID   int64  // JSON-RPC id of the session/prompt request
@@ -179,6 +183,19 @@ func (r *turnRecord) clone() *turnRecord {
 		out.Usage = &usage
 	}
 	return &out
+}
+
+// turnStatus is how a turn that ended in state with stopReason ended, as both
+// its completed event and TurnHistory report it.
+func turnStatus(state turnState, stopReason string) runtime.TurnStatus {
+	switch {
+	case state == turnFailed:
+		return runtime.TurnStatusFailed
+	case stopReason == acpStopReasonCanceled:
+		return runtime.TurnStatusCancelled
+	default:
+		return runtime.TurnStatusCompleted
+	}
 }
 
 // turnOutcome is how a running turn ended.
@@ -260,8 +277,9 @@ func (sc *sessionConn) startTurnLocked(id int64, now time.Time) {
 	}
 }
 
-// endTurnLocked closes the running turn with outcome and makes it the last
-// turn. Caller must hold mu.
+// endTurnLocked closes the running turn with outcome and records it as the
+// newest finished turn, dropping the oldest beyond turnHistoryLen. Caller
+// must hold mu.
 func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn := sc.currentTurn
 	if turn == nil {
@@ -273,7 +291,11 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 	turn.StopReason = outcome.stopReason
 	turn.Usage = outcome.usage
 	turn.Error = outcome.err
-	sc.lastTurn = turn
+	if len(sc.recentTurns) == turnHistoryLen {
+		copy(sc.recentTurns, sc.recentTurns[1:])
+		sc.recentTurns = sc.recentTurns[:turnHistoryLen-1]
+	}
+	sc.recentTurns = append(sc.recentTurns, turn)
 	if sc.turnEvents != nil && turn.eventSeq != 0 {
 		sc.turnEventsLost += sc.turnEvents.completed(turn, outcome, now)
 	}
@@ -284,7 +306,16 @@ func (sc *sessionConn) endTurnLocked(outcome turnOutcome, now time.Time) {
 func (sc *sessionConn) turns() (current, last *turnRecord) {
 	sc.mu.Lock()
 	defer sc.mu.Unlock()
-	return sc.currentTurn.clone(), sc.lastTurn.clone()
+	return sc.currentTurn.clone(), sc.lastTurnLocked().clone()
+}
+
+// lastTurnLocked is the newest finished turn, nil before the first ends.
+// Caller must hold mu.
+func (sc *sessionConn) lastTurnLocked() *turnRecord {
+	if len(sc.recentTurns) == 0 {
+		return nil
+	}
+	return sc.recentTurns[len(sc.recentTurns)-1]
 }
 
 // errACPSessionStarting reports an idle query for a session whose handshake

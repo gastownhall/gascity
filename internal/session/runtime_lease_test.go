@@ -1182,3 +1182,41 @@ func TestRuntimeLeaseReleaseChecked(t *testing.T) {
 		t.Fatalf("Release over a refused clear logged %q, want the failure", buf.String())
 	}
 }
+
+// TestRuntimeLeaseHeldAt: a record lease is held until SafeUntil on the
+// holder's clock and not once released; a flock-only lease is held until
+// released; a nil lease is not held.
+func TestRuntimeLeaseHeldAt(t *testing.T) {
+	f := newLeaseFixture(t)
+	city := t.TempDir()
+	l, err := TryRuntimeLease(f.front, f.req(city, leaseT0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !l.HeldAt(leaseT0) || !l.HeldAt(l.SafeUntil().Add(-time.Second)) {
+		t.Fatal("a record lease reads not held before SafeUntil")
+	}
+	if l.HeldAt(l.SafeUntil()) || l.HeldAt(l.Expires()) {
+		t.Fatal("a record lease reads held at or past SafeUntil, where another holder may take it")
+	}
+	l.Release()
+	if l.HeldAt(leaseT0) {
+		t.Fatal("a released record lease reads held")
+	}
+
+	flock, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-flock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !flock.HeldAt(leaseT0.Add(24 * time.Hour)) {
+		t.Fatal("a flock-only lease reads not held before release")
+	}
+	flock.Release()
+	if flock.HeldAt(leaseT0) {
+		t.Fatal("a released flock-only lease reads held")
+	}
+	var none *RuntimeLease
+	if none.HeldAt(leaseT0) {
+		t.Fatal("a nil lease reads held")
+	}
+}

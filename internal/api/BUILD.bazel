@@ -402,6 +402,7 @@ go_test(
         "mail_session_inbox_test.go",
         "middleware_host_test.go",
         "mutation_error_test.go",
+        "nudge_queue_state_test.go",
         "openapi_response_validation_test.go",
         "openapi_sync_test.go",
         "orders_class_store_test.go",

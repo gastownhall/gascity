@@ -22,12 +22,16 @@ go_test(
         "bundle_test.go",
         "descriptor_test.go",
         "refusal_test.go",
+        "storage_classes_test.go",
         "testenv_import_test.go",
         "tokenfile_test.go",
     ],
     data = glob(["testdata/**"]),
     embed = [":connect"],
-    deps = ["//internal/testenv"],
+    deps = [
+        "//internal/config",
+        "//internal/testenv",
+    ],
 )
 
 # --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---

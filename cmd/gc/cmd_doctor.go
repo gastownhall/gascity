@@ -315,8 +315,12 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewServiceSecretsPermsCheck(cfg, cityPath))
 		register(doctor.NewSkillCollisionCheck(cfg, cityPath))
 		register(doctor.NewSkillDanglingSinkCheck(doctorSkillStaticSinks(cityPath, cfg), materialize.LegacyOwnedRootsFor(cityPath), liveSessionSinks))
-		registerCityStoreCheck(doctor.NewOrderFiringCurrentCheck(cfg, cityPath, doctor.WithOrderFiringCurrentLastRunFunc(
-			storeGate.OrderLastRun(cityPath, cfg, doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr)))))
+		registerCityStoreCheck(doctor.NewOrderFiringCurrentCheck(cfg, cityPath,
+			doctor.WithOrderFiringCurrentLastRunFunc(
+				storeGate.OrderLastRun(cityPath, cfg, doctorOrderFiringCurrentLastRunFunc(cityPath, cfg, opts.Stderr))),
+			doctor.WithOrderFiringCurrentInapplicableFunc(func(a orders.Order) (string, bool) {
+				return orderInapplicableBackend(cityPath, cfg, a)
+			})))
 		register(doctor.NewOrderOutcomeHealthyCheck(cfg, cityPath))
 		register(newCodexHooksDriftCheck(cityPath, codexHookWorkDirs(cityPath, cfg)))
 		register(doctor.NewRigPackCoverageCheck(cfg, cityPath))
@@ -496,6 +500,7 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 	// managed bd scope. The version check follows the same gate so file-backed
 	// and external Dolt workspaces do not get irrelevant local-binary warnings.
 	register(doctor.NewDoltNomsSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
+	register(doctor.NewDoltCompactStateCheck(cityPath, opts.SkipManagedDoltCheck))
 	register(doctor.NewDoltJournalSizeCheckForConfig(cityPath, opts.SkipManagedDoltCheck, cfg, cfgErr))
 	// Managed Dolt server log growth canary. dolt.log is opened O_APPEND at
 	// every start and nothing rotates or truncates it, so it accumulates for
