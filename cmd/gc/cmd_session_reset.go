@@ -9,6 +9,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/spf13/cobra"
 )
@@ -16,6 +18,7 @@ import (
 // newSessionResetCmd creates the "gc session reset <id-or-alias>" command.
 func newSessionResetCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "reset <session-id-or-alias>",
 		Short: "Restart a session fresh while preserving the bead",
@@ -37,7 +40,7 @@ starting, or whose runtime is running, is never rolled back.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionReset(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionReset(args, key, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -45,17 +48,18 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	addOpKeyFlag(cmd, &key)
 	return cmd
 }
 
-// cmdSessionReset is the CLI entry point for "gc session reset".
+// cmdSessionReset is the CLI entry point for "gc session reset", recorded
+// under the op key key (empty mints one) as a restart{fresh} op.
 //
 // This command intentionally requires a managed controller. The controller owns
 // the fresh restart lifecycle, including key rotation and immediate restart of
 // already-desired sessions. A worker site refuses before writing anything: its
 // controller is remote, and the reset needs that controller's socket.
-func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
 	store, code := openCityStore(stderr, "gc session reset")
 	if store == nil {
 		return code
@@ -108,8 +112,25 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		return 1
 	}
 	identity := namedSessionIdentity(bead)
+
+	// The op is proposed once the target is loaded, before the circuit-breaker
+	// reset, the first write.
+	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
+		verb: "gc session reset", kind: opjournal.KindRestart, key: key, conversation: sessionID,
+		policy: opjournal.Policy{Restart: opjournal.RestartPolicy{Mode: opjournal.RestartFresh}},
+		asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, op.outcome().Result.Via == legacyop.ViaLegacyRollback, op)
+	}
+	defer op.abandon()
+
 	if identity != "" {
 		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -127,18 +148,27 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	}
 	rolledBack, err := rescuePendingCreateForReset(sessStore, sp, startupTimeout, sessionID, clock.Real{}, stderr)
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !rolledBack {
 		if err := handle.Reset(context.Background()); err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		op.finishErr(nil)
+	} else {
+		op.finishOutcome(opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyRollback}})
 	}
 
 	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+	return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, rolledBack, op)
+}
 
+// emitSessionResetResult prints a reset's success output, a replay's included.
+func emitSessionResetResult(stdout, stderr io.Writer, asJSON bool, sessionID, identity string, rolledBack bool, op *cliOp) int {
 	// Mode tells a caller which outcome it got. A rollback closed the bead, so
 	// a script waiting for this session to restart in place would otherwise
 	// wait for something that is not going to happen.
@@ -147,12 +177,14 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		mode = "rollback"
 	}
 	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
+		result := sessionActionResult{
 			Action:    "reset",
 			Mode:      mode,
 			SessionID: sessionID,
 			Identity:  identity,
-		}); err != nil {
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}

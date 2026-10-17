@@ -889,7 +889,7 @@ func TestWorkerSiteSessionResetRefusesBeforeWriting(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionReset([]string{sessionID}, &stdout, &stderr); code != 1 {
+	if code := cmdSessionReset([]string{sessionID}, "", &stdout, &stderr, false); code != 1 {
 		t.Fatalf("gc session reset on a worker site = %d, want 1; stdout=%q", code, stdout.String())
 	}
 	if !strings.Contains(stderr.String(), errWorkerSiteResetNeedsController.Error()) {
@@ -916,7 +916,7 @@ func TestWorkerSiteSessionSuspendWritesTheOperatorHold(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSuspend([]string{sessionID}, &stdout, &stderr, true); code != 0 {
+	if code := cmdSessionSuspend([]string{sessionID}, "", &stdout, &stderr, true); code != 0 {
 		t.Fatalf("gc session suspend on a worker site = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var result sessionActionResult
@@ -955,7 +955,7 @@ func TestWorkerSiteSessionWakeRecordsTheWakeWithANotice(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{sessionID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionWake([]string{sessionID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("gc session wake on a worker site = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "wake requested") {

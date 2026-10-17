@@ -9,6 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -18,6 +19,7 @@ import (
 // newSessionWakeCmd creates the "gc session wake <id-or-alias>" command.
 func newSessionWakeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "wake <session-id-or-alias>",
 		Short: "Wake a session (request start and clear holds)",
@@ -32,7 +34,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
   gc session wake mayor`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionWake(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionWake(args, key, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -40,10 +42,13 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	addOpKeyFlag(cmd, &key)
 	return cmd
 }
 
 type sessionWakeDeps struct {
+	// opKey is --key, the wake op's client key; empty mints one.
+	opKey                     string
 	store                     beads.Store
 	cfg                       *config.City
 	cityPath                  string
@@ -71,9 +76,9 @@ func wakeVerdictProvider() runtime.Provider {
 	return sp
 }
 
-// cmdSessionWake is the CLI entry point for "gc session wake".
-func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+// cmdSessionWake is the CLI entry point for "gc session wake", recorded
+// under the op key key (empty mints one).
+func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
 	store, code := openCityStore(stderr, "gc session wake")
 	if store == nil {
 		return code
@@ -85,6 +90,7 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		cfg, _ = loadCityConfig(cityPath, stderr)
 	}
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
+		opKey:                     key,
 		sp:                        wakeVerdictProvider(),
 		store:                     store,
 		cfg:                       cfg,
@@ -108,13 +114,29 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		return 1
 	}
 
+	// The wake op (DES-O0API §8.4) is proposed once the target is resolved
+	// (and materialized), before the wake writes the row.
+	op, start := startCLIOp(deps.cfg, sessStore, cliOpRequest{
+		verb: "gc session wake", kind: opjournal.KindWake, key: deps.opKey, conversation: id,
+		asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionWakeResult(stdout, stderr, asJSON, id, 0, op)
+	}
+	defer op.abandon()
+
 	sessFront := sessionFrontDoor(sessStore)
 	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
+			op.finishOutcome(cliOpRefusedOutcome(cliOpWakeConflictReason(state)))
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
 			return 1
 		}
+		op.finishErr(err)
 		switch {
 		case errors.Is(err, session.ErrNotSessionBead):
 			fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
@@ -144,6 +166,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			"wake_request":              "",
 			"wake_requested_at":         "",
 		}); err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -190,16 +213,24 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}
 	}
 	if rejectStuck {
+		op.finishOutcome(cliOpRefusedOutcome(cliOpRefusedWillNotStart))
 		return 1
 	}
+	op.finishErr(nil)
+	return emitSessionWakeResult(stdout, stderr, asJSON, id, len(nudgeIDs), op)
+}
 
+// emitSessionWakeResult prints a wake's success output, a replay's included.
+func emitSessionWakeResult(stdout, stderr io.Writer, asJSON bool, id string, withdrawn int, op *cliOp) int {
 	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
+		result := sessionActionResult{
 			Action:              "wake",
 			SessionID:           id,
 			State:               "wake_requested",
-			WaitNudgesWithdrawn: len(nudgeIDs),
-		}); err != nil {
+			WaitNudgesWithdrawn: withdrawn,
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 			return 1
 		}
