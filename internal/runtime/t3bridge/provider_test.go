@@ -1293,11 +1293,11 @@ func (ts *t3BridgeTestServer) setCommandHook(hook func(payload map[string]interf
 	ts.commandHook = hook
 }
 
-// dropCommands makes the next n dispatched commands go unanswered: each is
+// dropNextCommand makes the next dispatched command go unanswered: it is
 // recorded and its hook runs, then its connection closes, as when T3 took a
 // command and the answer was lost.
-func (ts *t3BridgeTestServer) dropCommands(n int) {
-	ts.closeCommands(n, nil)
+func (ts *t3BridgeTestServer) dropNextCommand() {
+	ts.closeCommands(1, nil)
 }
 
 // closeCommands is dropCommands whose connections send closeMessage, a close

@@ -550,7 +550,7 @@ func TestInterruptTurnLostAnswerWaitsForTheRefence(t *testing.T) {
 	lossy := func(t *testing.T, seq ...map[string]interface{}) (server, other *t3BridgeTestServer, p *Provider) {
 		t.Helper()
 		server = newTurnFenceServer(t, seq...)
-		server.dropCommands(1)
+		server.dropNextCommand()
 		p = newTurnFenceTestProvider(t, server)
 		other = newTurnFenceServer(t, turnRunning("t1"))
 		defaultWSURLCandidates = []string{other.wsURL()}
