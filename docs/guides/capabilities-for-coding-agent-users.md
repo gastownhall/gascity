@@ -51,13 +51,15 @@ applies.
 - Pick the scope:
   - `skills/<name>/` at **pack level** → shared with **every** agent in the
     city.
-  - `agents/<role>/skills/<name>/` at **role level** → only agents of that
-    role (and all its pooled instances). On a name collision, the role-local
-    skill wins.
+  - `agents/<role>/skills/<name>/` at **role level** → agents of that role
+    (and all its pooled instances), and any other agent that shares their
+    skill sink. On a name collision, the role-level skill wins for every
+    agent in that sink.
 - At startup Gas City **symlinks** the pack level and role level skill directories into
   each agent's provider-specific skill sink — `.claude/skills/`,
   `.agents/skills/` (codex), `.gemini/skills/`, `.opencode/skills/`. List with
-  `gc skill list`.
+  `gc skill list`. The sink lives in the agent's city or rig directory, so
+  agents in the same directory that use the same provider share one sink.
 - It *places* the files into each provider's own convention; it doesn't
   translate them. Providers whose convention isn't confirmed (copilot, cursor,
   pi, omp) are skipped for now.
