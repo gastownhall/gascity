@@ -30,6 +30,7 @@ go_test(
         "listener_test.go",
         "pidutil_test.go",
         "procargs2_test.go",
+        "reap_race_test.go",
         "starttime_portable_test.go",
         "subreaper_test.go",
         "testenv_import_test.go",
