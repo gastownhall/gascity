@@ -30,3 +30,22 @@ func TestFindSessionFileByIDClaudeUnderscoreWorkspace(t *testing.T) {
 		})
 	}
 }
+
+func TestClaudeProjectSlugCandidatesSanitizeEveryNonAlphanumeric(t *testing.T) {
+	workDir := "/home/ubuntu/my project+v2.é😀"
+	got := claudeProjectSlugCandidates(workDir)
+	want := "-home-ubuntu-my-project-v2----"
+	if len(got) == 0 || got[0] != want {
+		t.Fatalf("candidates = %q, want first %q", got, want)
+	}
+	legacy := ProjectSlug(workDir)
+	found := false
+	for _, slug := range got {
+		if slug == legacy {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("candidates = %q, missing legacy %q", got, legacy)
+	}
+}

@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode/utf16"
 
 	"github.com/gastownhall/gascity/internal/pathutil"
 )
@@ -1681,10 +1682,10 @@ func claudeProjectSlugCandidates(workDir string) []string {
 	seenSlugs := make(map[string]bool)
 	var slugs []string
 	for _, path := range paths {
-		legacySlug := ProjectSlug(path)
-		// Current Claude versions replace underscores as well. Keep the
-		// legacy spelling as a candidate for transcripts written earlier.
-		for _, slug := range []string{strings.ReplaceAll(legacySlug, "_", "-"), legacySlug} {
+		// Current Claude versions replace every non-alphanumeric byte,
+		// underscores included. Keep the legacy spelling as a candidate for
+		// transcripts written earlier.
+		for _, slug := range []string{claudeSanitizedProjectSlug(path), ProjectSlug(path)} {
 			if seenSlugs[slug] {
 				continue
 			}
@@ -1721,6 +1722,27 @@ func addDarwinClaudePathAliases(path string, add func(string)) {
 	case strings.HasPrefix(path, "/private/var/"):
 		add("/var/" + strings.TrimPrefix(path, "/private/var/"))
 	}
+}
+
+// claudeSanitizedProjectSlug is the project directory name current Claude
+// Code versions write: every UTF-16 code unit outside [A-Za-z0-9] becomes "-"
+// (Claude is a JavaScript program, so a character outside the Basic
+// Multilingual Plane becomes two).
+func claudeSanitizedProjectSlug(absPath string) string {
+	var b strings.Builder
+	b.Grow(len(absPath))
+	for _, r := range absPath {
+		if 'a' <= r && r <= 'z' || 'A' <= r && r <= 'Z' || '0' <= r && r <= '9' {
+			b.WriteRune(r)
+			continue
+		}
+		n := utf16.RuneLen(r)
+		if n < 1 {
+			n = 1
+		}
+		b.WriteString(strings.Repeat("-", n))
+	}
+	return b.String()
 }
 
 // ProjectSlug converts an absolute path to the project directory slug
