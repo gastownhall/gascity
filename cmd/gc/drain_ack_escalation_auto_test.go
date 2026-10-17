@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/pidutil"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionauto "github.com/gastownhall/gascity/internal/runtime/auto"
 )
@@ -23,7 +24,7 @@ type scannerlessDrainAckProvider struct {
 func TestDrainAckEscalationReportsNoProcessTableThroughScannerlessAuto(t *testing.T) {
 	sp := sessionauto.New(&scannerlessDrainAckProvider{Provider: runtime.NewFake()}, runtime.NewFake())
 	var stderr bytes.Buffer
-	got := terminateDrainAckRuntimeByProcessTable(t.TempDir(), sp, "sid", "seat", "", 0, time.Now(), &stderr)
+	got := terminateDrainAckRuntimeByProcessTable(t.TempDir(), sp, "sid", "seat", "", pidutil.Subreapers{}, time.Now(), &stderr)
 	if got != "no_process_table" {
 		t.Fatalf("outcome = %q, want no_process_table", got)
 	}

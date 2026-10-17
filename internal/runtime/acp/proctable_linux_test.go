@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -14,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
+	"github.com/gastownhall/gascity/internal/bazeltest"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/proctable"
 )
@@ -416,6 +420,59 @@ func TestFindRuntimesBySessionIDTracksForeignOwnedSession(t *testing.T) {
 // tracked: the crashed session's escaped tool child is an orphan while the
 // live session's agent is not.
 func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
+	checkCrossSessionOrphanScan(t)
+}
+
+// orphanScanRoleEnv selects the role a re-executed test binary plays in
+// TestFindRuntimesBySessionIDFindsOrphansAdoptedByAnAncestorSubreaper.
+const orphanScanRoleEnv = "GC_ACP_ORPHAN_SCAN_ROLE"
+
+// runTestInRole re-executes this test binary to run only t's test, in role.
+func runTestInRole(t *testing.T, role string) {
+	t.Helper()
+	cmd := exec.Command(os.Args[0], "-test.run=^"+t.Name()+"$", "-test.count=1", "-test.v")
+	cmd.Env = append(bazeltest.HelperProcessEnv(os.Environ()), orphanScanRoleEnv+"="+role)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("%s role failed: %v\n%s", role, err, out)
+	}
+	if !strings.Contains(string(out), "--- PASS: "+t.Name()) {
+		t.Fatalf("%s role did not run the test:\n%s", role, out)
+	}
+}
+
+// A dead session's escaped tool is adopted by the nearest subreaper ancestor
+// of its dead parent. That need not be pid 1 or a process named systemd: under
+// Bazel's local process-wrapper, a container init or any
+// PR_SET_CHILD_SUBREAPER supervisor it is that process, and the orphan sweep's
+// scan must still find the tool there. A helper parent marks itself a
+// subreaper and runs the cross-session scenario below it, the way
+// process-wrapper runs a test action.
+func TestFindRuntimesBySessionIDFindsOrphansAdoptedByAnAncestorSubreaper(t *testing.T) {
+	switch role := os.Getenv(orphanScanRoleEnv); role {
+	case "":
+		runTestInRole(t, "subreaper")
+	case "subreaper":
+		if err := unix.Prctl(unix.PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0); err != nil {
+			t.Fatalf("PR_SET_CHILD_SUBREAPER: %v", err)
+		}
+		runTestInRole(t, "scanner")
+	case "scanner":
+		tool := checkCrossSessionOrphanScan(t)
+		if tool.PPID != os.Getppid() {
+			t.Fatalf("dead session tool parent = %d, want the helper subreaper %d; the test no longer models adoption by an ancestor subreaper", tool.PPID, os.Getppid())
+		}
+	default:
+		t.Fatalf("unknown %s=%q", orphanScanRoleEnv, role)
+	}
+}
+
+// checkCrossSessionOrphanScan runs a live and a crashed session side by side
+// and checks that the empty-id scan reports the crashed session's escaped
+// tool alone, untracked, while the live session's own scan tracks its agent.
+// It returns the tool's scan record.
+func checkCrossSessionOrphanScan(t *testing.T) runtime.LiveRuntime {
+	t.Helper()
 	p := newTestProvider(t)
 	city := t.TempDir()
 	liveName, deadName := testName()+"-live", testName()+"-dead"
@@ -454,6 +511,7 @@ func TestFindRuntimesBySessionIDTracksPerSessionAcrossSessions(t *testing.T) {
 	if len(found) != 1 || found[0].PID != liveAgent || !found[0].IsTracked || found[0].ProviderName != liveName {
 		t.Fatalf("live agent = %+v, want tracked as %q", found, liveName)
 	}
+	return byPID[deadTool]
 }
 
 // The reservation is in the table before the agent's control socket is bound.
