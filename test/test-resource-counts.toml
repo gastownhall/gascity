@@ -2096,9 +2096,42 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "internal/runtime/acp/fence_test.go"
+resource = "fixed_sleep"
+calls = 6
+
+[[count]]
+path = "internal/runtime/acp/fence_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/acp/interrupt_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/dialog_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "internal/runtime/exec/carrier_fence_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/exec/carrier_fence_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/exec/exec_fence_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/runtime/fake_test.go"
@@ -2235,6 +2268,16 @@ path = "internal/runtime/ssh/ssh_localhost_integration_test.go"
 resource = "subprocess"
 calls = 1
 tagged = true
+
+[[count]]
+path = "internal/runtime/subprocess/fence_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/runtime/subprocess/fence_test.go"
+resource = "subprocess"
+calls = 1
 
 [[count]]
 path = "internal/runtime/subprocess/seams_test.go"

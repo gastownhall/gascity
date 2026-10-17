@@ -7,6 +7,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"io/fs"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -17,12 +19,28 @@ import (
 
 	"github.com/gastownhall/gascity/internal/bdflags"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/contract"
+	"github.com/gastownhall/gascity/internal/fsys"
 )
 
 // bdShowWatchInterval is the poll interval bd's own `show --watch` uses
 // (beads v1.3.0 cmd/bd/show_display.go watchIssue: pollInterval = 2s). A var
 // so tests can poll faster.
 var bdShowWatchInterval = 2 * time.Second
+
+// bdShowWatchRemoteBase is the floor of a remote scope's watch poll. A remote
+// watch is one served read per poll, and a watcher can sit unattended for
+// hours, so gc polls a served store five times less often than bd polls a
+// local one: 0.1 req/s per watcher.
+const bdShowWatchRemoteBase = 10 * time.Second
+
+// bdShowWatchRemoteInterval returns the poll interval for a watch on a remote
+// (http) scope: bdShowWatchRemoteBase plus up to 20% jitter, so watchers
+// started together do not poll the server in lockstep. The jitter only ever
+// lengthens the interval. A var so tests can poll faster.
+var bdShowWatchRemoteInterval = func() time.Duration {
+	return bdShowWatchRemoteBase + rand.N(bdShowWatchRemoteBase/5+1) //nolint:gosec // jitter, not security
+}
 
 // bdShowWatchContext is canceled by Ctrl+C or SIGTERM. A var so tests can
 // stop a watch without signaling the test process.
@@ -219,6 +237,25 @@ var bdScopeRefusesShowWatch = func(cityPath string, target execStoreTarget, env 
 	return scopeUsesProxiedDoltMode(cityPath, target.ScopeRoot)
 }
 
+// bdScopeUsesRemoteBackend reports whether the scope's store is served over
+// bd's http backend: its own metadata names backend "http", or, for a rig with
+// no metadata.json of its own, its city's does. Only a missing file inherits;
+// metadata that exists is the scope's own answer. gc serves `show --watch`
+// itself for such a scope, at the remote interval: enterprise bd refuses
+// --watch against an HTTP workspace, and OSS bd would poll the server every
+// 2s.
+func bdScopeUsesRemoteBackend(cityPath, scopeRoot string) bool {
+	if strings.TrimSpace(scopeRoot) == "" {
+		scopeRoot = cityPath
+	}
+	path := scopeMetadataJSONPath(scopeRoot)
+	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) && strings.TrimSpace(cityPath) != "" && !samePath(cityPath, scopeRoot) {
+		path = scopeMetadataJSONPath(cityPath)
+	}
+	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, path)
+	return err == nil && named && strings.EqualFold(strings.TrimSpace(backend), "http")
+}
+
 // bdWatchRunFunc runs one bd invocation and returns its exit code.
 type bdWatchRunFunc func(ctx context.Context, args []string, stdout, stderr io.Writer) int
 
@@ -377,10 +414,10 @@ func bdShowWatchCurrentID(ctx context.Context, req bdShowWatchRequest, run bdWat
 	return rows[0].ID, true
 }
 
-// serveBdShowWatch is doBd's hook: it runs the gc-side watch until Ctrl+C or
-// SIGTERM.
-func serveBdShowWatch(req bdShowWatchRequest, runner *bdWatchRunner, stdout, stderr io.Writer) int {
+// serveBdShowWatch is doBd's hook: it runs the gc-side watch, polling every
+// interval, until Ctrl+C or SIGTERM.
+func serveBdShowWatch(req bdShowWatchRequest, runner *bdWatchRunner, interval time.Duration, stdout, stderr io.Writer) int {
 	ctx, stop := bdShowWatchContext()
 	defer stop()
-	return runBdShowWatch(ctx, req, runner.run, bdShowWatchInterval, stdout, stderr)
+	return runBdShowWatch(ctx, req, runner.run, interval, stdout, stderr)
 }

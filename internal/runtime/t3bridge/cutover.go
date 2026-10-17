@@ -25,6 +25,7 @@ var (
 	_ runtime.SessionBindingProvider          = (*seamBackedProvider)(nil)
 	_ runtime.TurnFenceProvider               = (*seamBackedProvider)(nil)
 	_ runtime.TurnObservationProvider         = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider             = (*seamBackedProvider)(nil)
 )
 
 // NewSeamBacked constructs a t3bridge provider served through the seams.
@@ -109,4 +110,24 @@ func (s *seamBackedProvider) TurnCapabilities(name string) runtime.TurnCapabilit
 // passthrough).
 func (s *seamBackedProvider) TurnHistory(ctx context.Context, name string) (runtime.TurnHistory, error) {
 	return s.raw.TurnHistory(ctx, name)
+}
+
+// InputFencing passes through to the raw bridge (non-seam).
+func (s *seamBackedProvider) InputFencing(name string) runtime.InputFencing {
+	return s.raw.InputFencing(name)
+}
+
+// NudgeFenced passes through to the raw bridge (non-seam).
+func (s *seamBackedProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	return s.raw.NudgeFenced(ctx, name, content, n)
+}
+
+// SendKeysFenced passes through to the raw bridge (non-seam).
+func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	return s.raw.SendKeysFenced(ctx, name, fence, keys...)
+}
+
+// InterruptFenced passes through to the raw bridge (non-seam).
+func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	return s.raw.InterruptFenced(ctx, name, fence)
 }

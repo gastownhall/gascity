@@ -63,6 +63,7 @@ go_test(
         "adapter_unit_test.go",
         "agent_slice_test.go",
         "attach_probe_test.go",
+        "claude_interrupt_test.go",
         "codex_submit_test.go",
         "composer_clear_test.go",
         "copymode_cancel_test.go",
