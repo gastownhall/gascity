@@ -1449,3 +1449,74 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 	}
 	return loadCityConfigCalls.Load() - before
 }
+
+// readyMetadataRecordingStore records the metadata filter every List it serves
+// was asked for.
+type readyMetadataRecordingStore struct {
+	beads.Store
+	asked *[]map[string]string
+}
+
+func (s readyMetadataRecordingStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	*s.asked = append(*s.asked, query.Metadata)
+	return s.Store.List(query)
+}
+
+// TestReadyStatusLegsFilterMetadataInTheStore pins that a --status leg
+// hands its key=value predicates to the store, so a closed tier of tens of
+// thousands of beads is not listed whole to find one run's members. The bare
+// key and "key=" forms are not handed down, and the rows are the same either
+// way, because filterReadyBeads still decides every row.
+func TestReadyStatusLegsFilterMetadataInTheStore(t *testing.T) {
+	var asked []map[string]string
+	store := readyMetadataRecordingStore{Store: splittest.NewWorkStore(t, "gc"), asked: &asked}
+	member := mustCreateReadyBead(t, store, beads.Bead{Title: "member", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gc-root"}})
+	emptyRoot := mustCreateReadyBead(t, store, beads.Bead{Title: "empty root", Type: "task", Metadata: map[string]string{"gc.root_bead_id": ""}})
+	other := mustCreateReadyBead(t, store, beads.Bead{Title: "other run", Type: "task", Metadata: map[string]string{"gc.root_bead_id": "gc-other"}})
+	for _, b := range []beads.Bead{member, emptyRoot, other} {
+		if err := store.Close(b.ID); err != nil {
+			t.Fatalf("close %s: %v", b.ID, err)
+		}
+	}
+
+	tests := []struct {
+		name   string
+		fields []string
+		pushed map[string]string
+		want   []string
+	}{
+		{"key=value goes to the store", []string{"gc.root_bead_id=gc-root"}, map[string]string{"gc.root_bead_id": "gc-root"}, []string{member.ID}},
+		{"first value per key goes to the store", []string{"gc.root_bead_id=gc-root", "gc.root_bead_id=gc-other"}, map[string]string{"gc.root_bead_id": "gc-root"}, nil},
+		{"bare key stays in Go", []string{"gc.root_bead_id"}, nil, []string{member.ID, other.ID}},
+		{"key= stays in Go", []string{"gc.root_bead_id="}, nil, []string{emptyRoot.ID}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			asked = nil
+			rows, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", store)}, readyOpts{status: "closed", metadataFields: tt.fields})
+			if err != nil {
+				t.Fatalf("gc ready --status closed: %v", err)
+			}
+			if len(asked) != 1 || !reflect.DeepEqual(asked[0], tt.pushed) {
+				t.Fatalf("store was asked for metadata %v, want one read with %v", asked, tt.pushed)
+			}
+			got := readyWireIDs(rows)
+			slices.Sort(got)
+			want := slices.Clone(tt.want)
+			slices.Sort(want)
+			if !slices.Equal(got, want) {
+				t.Fatalf("--status closed %v returned %v, want %v", tt.fields, got, want)
+			}
+		})
+	}
+
+	for _, status := range []string{readyStatusOpen, readyStatusInProgress, "blocked"} {
+		asked = nil
+		if _, err := readyBeadsForOpts([]readyLeg{readyTestLeg("city", store)}, readyOpts{status: status, metadataFields: []string{"gc.root_bead_id=gc-root"}}); err != nil {
+			t.Fatalf("gc ready --status %s: %v", status, err)
+		}
+		if len(asked) != 1 || asked[0]["gc.root_bead_id"] != "gc-root" {
+			t.Errorf("--status %s asked the store for metadata %v, want gc.root_bead_id=gc-root", status, asked)
+		}
+	}
+}
