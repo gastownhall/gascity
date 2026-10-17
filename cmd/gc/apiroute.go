@@ -56,9 +56,8 @@ func apiClient(cityPath string) *api.Client {
 
 // supervisorFallthroughAPIClient resolves an API client the way apiClient
 // does, for callers whose local fallback is missing or prohibitively
-// expensive: maintenance commands have no local fallback at all, and
-// `gc status`'s local fallback re-opens the full local bead/dolt store and
-// rescans event archives to rebuild store health — far more expensive than
+// expensive: `gc status`'s local fallback re-opens the full local bead/dolt
+// store and rescans event archives to rebuild store health — far more expensive than
 // the supervisor's answer from its warm caches (ra-r9hm6v: ~9.5s local CPU
 // vs ~0.35s for a saved response, and ~3.65s for the build `gc status`
 // waits for, #5028). Where apiClient returns nil for its caller's local
@@ -75,22 +74,6 @@ func supervisorFallthroughAPIClient(cityPath string) (*api.Client, string) {
 		return c, ""
 	}
 	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisor)
-}
-
-// supervisorFallthroughMutationAPIClient resolves an API client the way
-// supervisorFallthroughAPIClient does, for a mutation with no local fallback,
-// except that a supervisor-hosted city whose supervisor requires city write
-// grants (supervisorRequiresCityWriteGrants) gets nil with reason
-// "grant-required" without resolving the supervisor client: that client mints
-// no grant, so the supervisor would refuse the mutation with a 401 no caller
-// falls back from. A supervisor that requires only read grants still gets the
-// mutation, which its read gate passes through. `gc maintenance dolt-gc` is
-// that mutation.
-func supervisorFallthroughMutationAPIClient(cityPath string) (*api.Client, string) {
-	if c := routeAPIClient(cityPath, apiRoutePreferSupervisorMutation); c != nil {
-		return c, ""
-	}
-	return nil, routeFallbackReason(cityPath, apiRoutePreferSupervisorMutation)
 }
 
 // standaloneAPIClient resolves the API client only where a standalone
@@ -115,11 +98,6 @@ const (
 	// supervisor-managed client in the shapes where apiClient returns nil for
 	// its caller's local fallback.
 	apiRoutePreferSupervisor
-	// apiRoutePreferSupervisorMutation is
-	// supervisorFallthroughMutationAPIClient's routing: apiRoutePreferSupervisor,
-	// except nil for a supervisor-hosted city whose supervisor requires write
-	// grants.
-	apiRoutePreferSupervisorMutation
 	// apiRouteStandaloneOnly is standaloneAPIClient's routing: a standalone
 	// controller's [api] endpoint, and nil wherever apiClient would hand back
 	// the supervisor-managed client.
@@ -129,22 +107,18 @@ const (
 // supervisorRequiresGrantFor reports whether a supervisor hosting the city
 // refuses route's calls without a signed city grant, which this client never
 // mints. apiClient's callers read and write through one client, so any grant
-// the supervisor requires refuses them; a mutation is refused only by a write
-// grant, because the read gate passes every non-GET/HEAD request through. The
-// other routes never decline the supervisor for the grants it requires.
+// the supervisor requires refuses them. The other routes never decline the
+// supervisor for the grants it requires.
 func supervisorRequiresGrantFor(route apiRoute) bool {
-	switch route {
-	case apiRouteGeneral:
+	if route == apiRouteGeneral {
 		return apiRouteSupervisorGrantsHook()
-	case apiRoutePreferSupervisorMutation:
-		return apiRouteSupervisorWriteGrantsHook()
 	}
 	return false
 }
 
 // routeAPIClient is the routing ladder apiClient,
-// supervisorFallthroughAPIClient and supervisorFallthroughMutationAPIClient
-// share; route selects which of them it resolves for.
+// supervisorFallthroughAPIClient and standaloneAPIClient share; route selects
+// which of them it resolves for.
 func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	// Remote routing is NOT handled here. A remote target is refused upstream by
 	// the capability gate in resolveContext (Phase 1) and, once enabled, will be
@@ -183,8 +157,7 @@ func routeAPIClient(cityPath string, route apiRoute) *api.Client {
 	// Standalone controller, or one predating identify (hosting mode
 	// unknown): its configured [api] port is the only endpoint it serves.
 	c := standaloneControllerClient(cityPath)
-	preferSupervisor := route == apiRoutePreferSupervisor || route == apiRoutePreferSupervisorMutation
-	if c == nil && preferSupervisor && identity.HostingMode == controllerHostingUnknown {
+	if c == nil && route == apiRoutePreferSupervisor && identity.HostingMode == controllerHostingUnknown {
 		return apiRouteSupervisorClientHook(cityPath)
 	}
 	return c

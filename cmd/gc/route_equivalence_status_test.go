@@ -15,7 +15,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/chartest"
 	"github.com/gastownhall/gascity/internal/config"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
 
@@ -119,7 +118,6 @@ func markCityStatusRouteControllerRunning(t *testing.T, h *charHarness) {
 		t.Fatalf("register city: %v", err)
 	}
 	stubSupervisorAlive(t)
-	stubStoreHealthEvents(t, events.NewFake())
 }
 
 // giveCityStatusRoutesProxiedDiagnostic hands the proxied-native account to

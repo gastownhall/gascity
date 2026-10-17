@@ -652,9 +652,7 @@ type liveContractFixtures struct {
 // live city cannot be given what they need. Each entry names the open bead
 // that owns closing the gap; an endpoint absent from this map has to answer
 // 200 or the sweep fails.
-var liveContractUncoveredReadPaths = map[string]string{
-	"/v0/city/{cityName}/maintenance/status": "ga-gc85sm2",
-}
+var liveContractUncoveredReadPaths = map[string]string{}
 
 type contractRig struct {
 	Name string `json:"name"`

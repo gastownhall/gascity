@@ -544,9 +544,7 @@ function readingNote<T>(
 }
 
 function storeHealthLabel(storeHealth: NonNullable<StatusBody['store_health']>): string {
-  const lastMaintenanceStatus = storeHealth.last_gc_status?.trim();
-  if (lastMaintenanceStatus && lastMaintenanceStatus !== 'success') return 'maintenance failed';
-  return storeHealth.warning ? 'maintenance overdue' : 'healthy';
+  return storeHealth.warning ? 'size-to-row ratio high' : 'healthy';
 }
 
 function NeedsYouStrip({

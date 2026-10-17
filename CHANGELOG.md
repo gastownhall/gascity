@@ -1009,6 +1009,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   them (see Fixed). Correct or delete the entry, and check that the overrides
   below it, such as an `enabled = false`, still say what you want.
 
+- **The `[maintenance.dolt]` city.toml section is no longer read; a city that
+  still carries it stops starting under strict mode.** The key is now an
+  unknown field: `gc config show` and `gc config show --validate` print one
+  `unknown field` warning per key (`maintenance.dolt`, `maintenance.dolt.enabled`,
+  and so on) and still report the config valid, but strict mode, the default,
+  classifies an unknown field as fatal, so a city that carries the table
+  fails the strict start and config-reload checks. Delete the
+  `[maintenance.dolt]` table. Nothing is lost by removing it: the loop was observe-only. No production code ever
+  supplied it a Dolt connection or a backup runner, so it never ran
+  `DOLT_GC` or took a snapshot, and its startup line said so
+  (`observe-only (snapshot and DOLT_GC not yet wired)`). A
+  `gc.store.maintenance.done` event recorded that a cycle finished, not that
+  anything was compacted. For compaction, use `gc dolt compact` (the
+  `mol-dog-compactor` order); see `docs/runbooks/dolt-compact.md`.
+
 ### Added
 
 - **Events: `session.created` and `session.closed`.** The city event
@@ -1343,6 +1358,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   = "supervisor"` now would restart the per-session pollers. `gc nudge
   drain` without `--inject` is deprecated; the prompt hook's `gc nudge drain
   --inject` stays.
+
+### Removed
+
+- **The legacy Dolt maintenance subsystem is removed.** It was a supervisor
+  loop (`[maintenance.dolt]`) that never reached `DOLT_GC` or a snapshot in
+  any deployment (see Upgrading Notes). Gone with it:
+  - commands `gc maintenance status` and `gc maintenance dolt-gc`;
+  - endpoints `GET /v0/city/{city}/maintenance/status` and
+    `POST /v0/city/{city}/maintenance/dolt-gc`, which now answer 404; the
+    OpenAPI spec, the Go and TypeScript clients and the dashboard bundle are
+    regenerated without them;
+  - event types `gc.store.maintenance.done`, `gc.store.maintenance.failed`,
+    `gc.store.disk_warn` and `gc.store.disk_critical`;
+  - the store-health fields `last_gc_at` and `last_gc_status` on the status
+    store-health block (`rows_measured` and the rest stay).
+
+  Unchanged: `gc dolt compact`, the `mol-dog-compactor` order, the
+  `gc doctor` Dolt compact-state check, and the managed-Dolt disk preflight
+  and its free-space thresholds.
 
 ### Fixed
 

@@ -357,11 +357,6 @@ resource = "http_test_server"
 calls = 16
 
 [[count]]
-path = "cmd/gc/cmd_maintenance_test.go"
-resource = "http_test_server"
-calls = 6
-
-[[count]]
 path = "cmd/gc/cmd_nudge_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -2922,16 +2917,6 @@ calls = 44
 tagged = true
 
 [[count]]
-path = "internal/supervisor/maintenance_snapshot_test.go"
-resource = "fixed_sleep"
-calls = 1
-
-[[count]]
-path = "internal/supervisor/maintenance_snapshot_test.go"
-resource = "subprocess"
-calls = 3
-
-[[count]]
 path = "internal/suspensionstate/suspensionstate_test.go"
 resource = "fixed_sleep"
 calls = 2
@@ -3534,6 +3519,11 @@ path = "test/dashport/projection_test.go"
 resource = "listener_helper"
 calls = 11
 tagged = true
+
+[[count]]
+path = "test/docsync/docsync_test.go"
+resource = "subprocess"
+calls = 1
 
 [[count]]
 path = "test/integration/bdstore_batch_delete_test.go"

@@ -58,15 +58,11 @@ func TestRecoveryRunbooksNameOnlyBdFlagsThePinnedBdHas(t *testing.T) {
 }
 
 // recoveryRunbooks returns the runbooks that tell an operator how to recover
-// a managed Dolt store: the dolt pack's own and the maintenance runbook
-// (//:engdocs_dolt_maintenance in this target's data).
+// a managed Dolt store: the dolt pack's own.
 func recoveryRunbooks(t *testing.T) []string {
 	t.Helper()
-	packDir := repoRoot(t)
-	repo := filepath.Dir(filepath.Dir(filepath.Dir(packDir)))
 	return []string{
-		filepath.Join(packDir, "docs", "journal-corruption-recovery.md"),
-		filepath.Join(repo, "engdocs", "contributors", "dolt-maintenance.md"),
+		filepath.Join(repoRoot(t), "docs", "journal-corruption-recovery.md"),
 	}
 }
 

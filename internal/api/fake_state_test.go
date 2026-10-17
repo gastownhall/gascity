@@ -85,7 +85,6 @@ type fakeState struct {
 	enqueued          []reconcilekey.Key       // every key passed to Enqueue, in order
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
-	maintenance       MaintenanceProvider
 	usageSink         usage.Sink
 	// scopedStoreFn backs ScopedStoreLike. Nil (the default) returns
 	// (nil, nil) — "existing isn't bd-CLI backed, keep using it directly" —
@@ -389,7 +388,6 @@ func (f *fakeState) WebhookDispatcher() orderdispatch.Dispatcher { return f.webh
 
 func (f *fakeState) ExtMsgServices() *extmsg.Services         { return f.extmsgSvc }
 func (f *fakeState) AdapterRegistry() *extmsg.AdapterRegistry { return f.adapterReg }
-func (f *fakeState) MaintenanceLoop() MaintenanceProvider     { return f.maintenance }
 
 func (f *fakeState) ApplyStartupPrompt(info session.Info, resolved *config.ResolvedProvider, transport string, hints runtime.Config) (runtime.Config, error) {
 	if f.startupPromptFn != nil {

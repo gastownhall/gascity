@@ -25,7 +25,6 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/runtime/guard"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/storehealth"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 )
@@ -1093,47 +1092,6 @@ func TestWorkerSiteEventsLocalFallbackIsRefused(t *testing.T) {
 		if !strings.Contains(stderr.String(), "worker site") {
 			t.Errorf("gc events %s stderr = %q, want the worker-site refusal", name, stderr.String())
 		}
-	}
-}
-
-// TestWorkerSiteStoreHealthReadsNoLocalEvents: gc status' StoreHealth takes the
-// last store maintenance from the city's events log. A box's events.jsonl
-// holds only what the box wrote, so on a worker site StoreHealth opens no
-// events log and reports no last maintenance, as gc events refuses the same
-// fallback. The control is the same city under local control.
-func TestWorkerSiteStoreHealthReadsNoLocalEvents(t *testing.T) {
-	resetControlPlaneForTest(t)
-	cityDir := newWorkerSiteCity(t)
-	rec, err := events.NewFileRecorder(filepath.Join(cityDir, citylayout.RuntimeRoot, "events.jsonl"), io.Discard)
-	if err != nil {
-		t.Fatalf("NewFileRecorder: %v", err)
-	}
-	payload, err := json.Marshal(events.StoreMaintenanceDonePayload{DurationSeconds: 5})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if err := rec.RecordAck(events.Event{Type: events.StoreMaintenanceDone, Ts: time.Now().UTC(), Actor: "gc", Payload: payload}); err != nil {
-		t.Fatalf("recording the maintenance: %v", err)
-	}
-	if err := rec.Close(); err != nil {
-		t.Fatalf("closing the recorder: %v", err)
-	}
-
-	local := defaultOpenStoreHealthEvents(cityDir, io.Discard)
-	if local == nil {
-		t.Fatal("local city: StoreHealth opened no events log, want the city's own")
-	}
-	lastAt, _ := storehealth.LastMaintenance(local)
-	if closer, ok := local.(io.Closer); ok {
-		_ = closer.Close()
-	}
-	if lastAt.IsZero() {
-		t.Fatal("local city: no last maintenance, want the recorded one")
-	}
-
-	makeWorkerSite(t, cityDir)
-	if ep := defaultOpenStoreHealthEvents(cityDir, io.Discard); ep != nil {
-		t.Fatalf("worker site: StoreHealth opened the box's local events log (%T), want none", ep)
 	}
 }
 

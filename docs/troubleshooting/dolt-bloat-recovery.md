@@ -422,8 +422,7 @@ Every bd write is a Dolt commit, and garbage collection cannot reclaim history
 that is still reachable. In a 2,002-commit replay of the `bd compact` squash,
 recorded in [#7993](https://github.com/gastownhall/gascity/pull/7993), a full
 GC left the database at 4,952 KB while the old history was still reachable,
-and at 548 KB once that history was squashed. Turning on `[maintenance.dolt]`
-does not shorten history either. Automatic compaction for shared and
+and at 548 KB once that history was squashed. Automatic compaction for shared and
 cloud-hosted databases is tracked in
 [#7896](https://github.com/gastownhall/gascity/issues/7896).
 
