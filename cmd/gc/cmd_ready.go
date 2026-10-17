@@ -327,7 +327,7 @@ func readyBeadsForOpts(legs []readyLeg, opts readyOpts) ([]readyBead, error) {
 	if err != nil {
 		return nil, err
 	}
-	items, owners, err := readReadyCandidates(legs, status)
+	items, owners, err := readReadyCandidates(legs, status, readyListMetadata(filters))
 	if err != nil {
 		return nil, err
 	}
@@ -419,17 +419,20 @@ func readyBlockedByForRows(items []beads.Bead, owners map[string]readyLeg) (map[
 // Ownership is recorded at MERGE time rather than re-probed afterwards: the
 // merge is first-leg-wins, and a co-resident bead that is open in one leg and
 // in_progress in another would resolve to the wrong store under a fresh probe.
-func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[string]readyLeg, error) {
+//
+// meta narrows every --status leg in its own store (see readyListMetadata).
+func readReadyCandidates(legs []readyLeg, status string, meta map[string]string) ([]beads.Bead, map[string]readyLeg, error) {
 	if status == "" {
 		items, err := federateReadyBeads(legs, beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 		return items, nil, err
 	}
 	if status == readyStatusOpen {
-		items, err := readOpenStatusCandidates(legs)
+		items, err := readOpenStatusCandidates(legs, meta)
 		return items, nil, err
 	}
 	query := beads.ListQuery{
 		Status:   status,
+		Metadata: meta,
 		TierMode: beads.FederatedReadTier,
 		// Only the crash-recovery tier pays for a live read: a claim that
 		// happened seconds ago must be visible, and a cached projection of it is
@@ -460,8 +463,9 @@ func readReadyCandidates(legs []readyLeg, status string) ([]beads.Bead, map[stri
 // mapped "open" ones gives the bd-backed store the same answer without widening
 // ListQuery{Status: "open"} for the controller callers whose readiness gates
 // rely on bd's narrower status (ga-3mv5d3).
-func readOpenStatusCandidates(legs []readyLeg) ([]beads.Bead, error) {
+func readOpenStatusCandidates(legs []readyLeg, meta map[string]string) ([]beads.Bead, error) {
 	items, err := federateListBeads(legs, beads.ListQuery{
+		Metadata:  meta,
 		AllowScan: true,
 		TierMode:  beads.FederatedReadTier,
 	})
@@ -499,7 +503,8 @@ func readyStatusSelector(status string) (string, error) {
 // They are applied in Go rather than pushed into each leg on purpose: the legs
 // are different backends with different filter semantics, and a predicate
 // evaluated once over the merged set gives one answer instead of one answer per
-// store.
+// store. The one exception is readyListMetadata, which only narrows a --status
+// read; this filter still decides every row.
 func filterReadyBeads(items []beads.Bead, opts readyOpts, metaWant []metadataFieldFilter) []beads.Bead {
 	assignee := strings.TrimSpace(opts.assignee)
 	exclude := make(map[string]bool, len(opts.excludeTypes))
@@ -575,6 +580,34 @@ func parseMetadataFieldFilters(fields []string) ([]metadataFieldFilter, error) {
 		filters = append(filters, metadataFieldFilter{key: key, value: value, present: !hasValue})
 	}
 	return filters, nil
+}
+
+// readyListMetadata returns the --metadata-field predicates a --status leg can
+// apply in its own store: each key=value with a non-empty value, first value
+// per key. Every store matches ListQuery.Metadata by exact string equality, so
+// a leg returns a superset of what filterReadyBeads keeps, never a subset. The
+// bare-key and "key=" forms stay in Go only: a store's empty-value match can
+// differ from "present and empty".
+//
+// Without it a --status leg lists the store's whole status tier and filters
+// afterwards. On a store with 61,081 closed beads, `--status closed
+// --metadata-field gc.root_bead_id=<root>` ran past bd's 2m0s list timeout;
+// with the filter in the store the same read answered in 8s.
+func readyListMetadata(want []metadataFieldFilter) map[string]string {
+	var out map[string]string
+	for _, f := range want {
+		if f.present || f.value == "" {
+			continue
+		}
+		if _, seen := out[f.key]; seen {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]string)
+		}
+		out[f.key] = f.value
+	}
+	return out
 }
 
 func beadMatchesMetadata(b beads.Bead, want []metadataFieldFilter) bool {
