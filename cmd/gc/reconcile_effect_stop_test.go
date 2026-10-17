@@ -844,11 +844,17 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		name    string
 		reason  string
 		release bool
-		other   bool // the seat holds a second in-progress bead
+		other   bool   // the seat holds a second in-progress bead
+		started string // the seat names the claim started: "cell", "stamp" or "unreadable"
 	}{
-		{"execution-stalled", executionStalledDrainReason, true, false},
-		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true},
-		{"another drain reason", drainOrphaned, false, false},
+		{"execution-stalled", executionStalledDrainReason, true, false, ""},
+		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true, ""},
+		{"another drain reason", drainOrphaned, false, false, ""},
+		// T9 (mc-358yo): a claim the seat names as started is not given back,
+		// whoever requested the stop.
+		{"execution-stalled, started by work_started", executionStalledDrainReason, false, false, "cell"},
+		{"execution-stalled, started by execution_claim_started", executionStalledDrainReason, false, false, "stamp"},
+		{"execution-stalled, work_started unreadable", executionStalledDrainReason, false, false, "unreadable"},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string
@@ -876,6 +882,16 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				}
 				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
 					t.Fatal(err)
+				}
+				switch c.started {
+				case "cell":
+					casSetMeta(t, store, id, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Bead: claim.ID, Via: session.WorkStartedViaClaim})))
+				case "stamp":
+					if err := store.SetMetadata(id, executionClaimStartedKey, "tok-old|"+claim.ID); err != nil {
+						t.Fatal(err)
+					}
+				case "unreadable":
+					casSetMeta(t, store, id, session.WorkStartedKey, "{")
 				}
 				rel := newCloseReleases(p.World, nil, io.Discard)
 				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil) // the pass's raw work legs, over the row's store
@@ -998,5 +1014,22 @@ func TestExecutionStalledStopWithNothingLiveReleasesOnConfirmation(t *testing.T)
 				t.Fatalf("settlement %+v, claim %q, row %s; want landed, the claim given back, the seat closed", s, claim.Status, got.Status)
 			}
 		})
+	}
+}
+
+// casSetMeta writes key on row id by a CAS at its current revision, as a
+// CASOnly key must be written.
+func casSetMeta(t *testing.T, store beads.Store, id, key, value string) {
+	t.Helper()
+	w, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatalf("store %T has no conditional writer", store)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
+		t.Fatal(err)
 	}
 }

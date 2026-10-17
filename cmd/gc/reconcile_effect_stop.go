@@ -116,6 +116,22 @@ type stalledClaim struct {
 	row    session.Info
 }
 
+// stalledClaimOf is the claim an execution-stalled stop of row gives back:
+// the backstop marker's, unless the seat names it as started, by its
+// work_started cell (or a cell it cannot read) or its execution_claim_started
+// stamp. Whoever requested the stop, it gives back only unstarted work
+// (mc-358yo, PHASE1-2 §6.5).
+func stalledClaimOf(row session.Info, meta map[string]string) stalledClaim {
+	beadID := strings.TrimSpace(meta[executionClaimNudgeWorkKey])
+	seat := releaseSeat{}
+	seat.nameStarted(startedClaimBead(meta[executionClaimStartedKey]))
+	seat.nameWorkStarted(row.WorkStartedRaw)
+	if beadID == "" || seat.namesStarted(beadID) {
+		return stalledClaim{}
+	}
+	return stalledClaim{beadID: beadID, row: row}
+}
+
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
 // session object the read saw.
 type corpseObject struct {
@@ -147,7 +163,7 @@ func stopDecide(v txView) txStep {
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
 	if stopReason(v.It) == executionStalledDrainReason {
-		plan.stalled = stalledClaim{beadID: strings.TrimSpace(v.Meta[executionClaimNudgeWorkKey]), row: v.Row}
+		plan.stalled = stalledClaimOf(v.Row, v.Meta)
 	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:

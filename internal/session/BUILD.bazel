@@ -73,6 +73,7 @@ go_library(
         "tx.go",
         "wait_store.go",
         "waits.go",
+        "work_cells.go",
         "worker_dir.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/session",
@@ -222,6 +223,7 @@ go_test(
         "waits_test.go",
         "wdelete_edge_test.go",
         "wedge_repro_test.go",
+        "work_cells_test.go",
         "worker_dir_test.go",
     ],
     data = glob(

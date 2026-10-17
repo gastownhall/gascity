@@ -234,6 +234,14 @@ const (
 	// agent panes, and nothing off-pane distinguishes "fence acting" from
 	// "fence inert".
 	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
+	// WorkStartedUnrecorded fires when `gc hook --claim` handed a claim to a
+	// turn but could not record it in the session row's work_started cell (a
+	// store error, a CAS lost every attempt, an unreadable cell, or a seat with
+	// no instance token to fence the write by). The claim is delivered anyway:
+	// the hook fails open. The record is the off-pane sign that the work
+	// ladder sees this claim as unstarted, and is protected from release only
+	// by its quiet gate.
+	WorkStartedUnrecorded = "work.started_unrecorded"
 	// SessionDemandClaimDivergence fires when a seat the controller spawned on
 	// DEMAND evidence drains with no work. It is a diagnostics counter for the
 	// agreement invariant between the two readers — the controller's demand read
@@ -529,6 +537,7 @@ var KnownEventTypes = []string{
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionDrainFenceUnavailable,
+	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	SessionConversationReset,

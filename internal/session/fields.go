@@ -33,15 +33,19 @@ const (
 	ClassLaunchConfig                             // desired identity and launch configuration
 	ClassLease                                    // the cross-process runtime lease (L1)
 	ClassAdvisory                                 // diagnostics and pacing stamps
+	ClassWork                                     // the work cells: agent-owned work_started, controller-owned work_ladder
 )
 
 // classInPremise is whether a fence compares a class's keys. Baseline keys are
 // compared by the drift arms, assignment identity only by an effect that reads
-// L5, the lease by its own CAS, and advisory keys never.
+// L5, the lease by its own CAS, and advisory keys never. The work cells never
+// either: each owner writes its own by CAS, so a v2 effect that loses its CAS
+// to one re-reads and re-decides rather than refusing on premise.
 var classInPremise = map[FieldClass]bool{
 	ClassIncarnation: true, ClassLifecycle: true, ClassOperatorIntent: true, ClassRequest: true,
 	ClassStopRequest: true, ClassCounter: true, ClassMarker: true,
 	ClassBaseline: false, ClassAssignmentIdentity: false, ClassLaunchConfig: false, ClassLease: false, ClassAdvisory: false,
+	ClassWork: false,
 }
 
 // Mode is who runs a site. ModeOperator is the CLI, the API, the worker
@@ -81,6 +85,10 @@ type Field struct {
 	// LifecycleInput, today's fence, already compares. PerTick keeps a key
 	// written every pass out of it, or every CAS on the row would lose.
 	Premise, PerTick bool
+	// CASOnly is a key every write must make through a conditional verb
+	// (UpdateIfMatch, CompareAndSetMetadataKey): GuardSessionKeys fails a
+	// blind one, a fixture's too.
+	CASOnly bool
 }
 
 // InPremise reports whether a fence compares f.
@@ -359,6 +367,15 @@ var registry = slices.Concat([]Field{
 	{Key: "sleep_policy_fingerprint", Class: ClassMarker, Writers: sites(sleepPolicy[0], v2("cmd/gc/reconcile_arms_drain.go", "armDrainBegin")), Readers: sites(v2(srcSleep, "configWakeSuppressedInfoWithError"))},
 	{Key: CurrentBeadIDKey, Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_bead_cycle.go", "recordCurrentBeadIDOnWake"), v2(srcHeals, "armCurrentBead"))},
 	{Key: beadmeta.CurrentClaimBeadIDMetadataKey, Class: ClassMarker, Writers: sites(op("internal/session/store.go", "Store.SetCurrentClaim"))},
+
+	// The work cells (PHASE1-2 §6.1): each written whole, by its one owner,
+	// by a CAS on the row.
+	{Key: WorkStartedKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
+		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
+	{
+		Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true,
+		NoWriter: "the v2 work-ladder lane step (PHASE1-2 W3) writes it; registered with work_started so the hook reads its pending release",
+	},
 	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},
 	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},

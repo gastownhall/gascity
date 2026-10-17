@@ -5812,6 +5812,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.started_unrecorded';
+} & TypedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -7744,6 +7746,24 @@ export type TypedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -7979,6 +7999,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedTaggedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.started_unrecorded';
+} & TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -10014,6 +10036,25 @@ export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
     subject?: string;
     ts: string;
     type: 'webhook.rejected';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
     workflow?: WorkflowEventProjection;
 };
 

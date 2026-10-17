@@ -54,7 +54,8 @@ func (e *drainPendingClaimEnv) ops() hookClaimOps {
 			e.queries++
 			return `[{"id":"work-1","status":"open","metadata":{"gc.routed_to":"worker"}}]`, nil
 		},
-		DrainPending: e.probe.probe,
+		DrainPending:    e.probe.probe,
+		ReadWorkStarted: noStartedClaims,
 		Claim: func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
 			e.claimed = append(e.claimed, beadID)
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, true, nil

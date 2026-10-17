@@ -7410,6 +7410,22 @@ type TypedEventStreamEnvelopeWebhookRejected struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWorkStartedUnrecorded defines model for TypedEventStreamEnvelopeWorkStartedUnrecorded.
+type TypedEventStreamEnvelopeWorkStartedUnrecorded struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkerOperation defines model for TypedEventStreamEnvelopeWorkerOperation.
 type TypedEventStreamEnvelopeWorkerOperation struct {
 	Actor            string                      `json:"actor"`
@@ -9240,6 +9256,23 @@ type TypedTaggedEventStreamEnvelopeWebhookRejected struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          WebhookRejectedPayload   `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded defines model for TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded.
+type TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -17165,6 +17198,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWebhookRejected(
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWorkStartedUnrecorded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkStartedUnrecorded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkStartedUnrecorded() (TypedEventStreamEnvelopeWorkStartedUnrecorded, error) {
+	var body TypedEventStreamEnvelopeWorkStartedUnrecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkStartedUnrecorded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkStartedUnrecorded(v TypedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkStartedUnrecorded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkStartedUnrecorded(v TypedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkerOperation
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkerOperation() (TypedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedEventStreamEnvelopeWorkerOperation
@@ -17449,6 +17510,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWebhookReceived()
 	case "webhook.rejected":
 		return t.AsTypedEventStreamEnvelopeWebhookRejected()
+	case "work.started_unrecorded":
+		return t.AsTypedEventStreamEnvelopeWorkStartedUnrecorded()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -20434,6 +20497,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWebh
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded() (TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded(v TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded(v TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkerOperation returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkerOperation
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkerOperation() (TypedTaggedEventStreamEnvelopeWorkerOperation, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkerOperation
@@ -20718,6 +20809,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookReceived()
 	case "webhook.rejected":
 		return t.AsTypedTaggedEventStreamEnvelopeWebhookRejected()
+	case "work.started_unrecorded":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

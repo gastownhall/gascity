@@ -68,9 +68,12 @@ const (
 type releasePolicy struct {
 	statuses     []string // the claim statuses the path gives back
 	startedKeeps bool     // a started claim keeps the seat: nothing is released
-	lane         laneRule
-	seatRoute    bool // the seat's route is the fallback, stamped on a routeless claim
-	pool         bool // the orphan write: live re-check, detached probe, pool release
+	// startedNamedKeeps keeps each claim the seat names as started; the rest
+	// are released.
+	startedNamedKeeps bool
+	lane              laneRule
+	seatRoute         bool // the seat's route is the fallback, stamped on a routeless claim
+	pool              bool // the orphan write: live re-check, detached probe, pool release
 }
 
 var (
@@ -85,13 +88,15 @@ var (
 //   - drain-ack gives back only in_progress claims (D5): the agent said it
 //     holds nothing, and open claims are its continuation preassignments; a
 //     routeless claim takes the seat's route, as on the paths below, since
-//     kept it would leave the acked seat asleep holding it (mc-sca8r);
+//     kept it would leave the acked seat asleep holding it (mc-sca8r). A
+//     claim the seat names as started is kept (PHASE1-2 §6.5): the ack is no
+//     proof it never ran, and giving it back lost started work (mc-ilr3b);
 //   - the cascade, the stranded repair, both orphan releases and the
 //     retired-session sweep (`gc session close`, a removed named session)
 //     give back started work too: the seat is gone.
 var releasePolicies = map[releaseWhy]releasePolicy{
 	releaseKilledSeat:     {statuses: openOrStarted, startedKeeps: true, lane: laneDirect, seatRoute: true},
-	releaseDrainAck:       {statuses: startedOnly, lane: laneCarried, seatRoute: true},
+	releaseDrainAck:       {statuses: startedOnly, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 	releaseCloseCascade:   {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseStrandedRepair: {statuses: openOrStarted, lane: laneCarried, seatRoute: true},
 	releaseOrphan:         {statuses: openOrStarted, lane: laneDirect, pool: true},
@@ -117,32 +122,63 @@ type releaseSeat struct {
 	id, name, template string
 	fallback           string          // the seat's own route (template, else agent_name)
 	started            map[string]bool // claims the seat names as executing
+	// startedUnread: the seat's work_started cell could not be read, so it
+	// may name any claim (PHASE1-2 §6.1: unreadable reads as all started).
+	startedUnread bool
 }
 
 func releaseSeatOfBead(b beads.Bead) releaseSeat {
 	s := releaseSeat{id: b.ID, name: b.Metadata["session_name"], template: b.Metadata["template"], fallback: retiredSessionFallbackRoute(b)}
-	for _, key := range []string{sessionpkg.CurrentBeadIDKey, beadmeta.CurrentClaimBeadIDMetadataKey} {
-		if id := strings.TrimSpace(b.Metadata[key]); id != "" {
-			if s.started == nil {
-				s.started = make(map[string]bool, 2)
-			}
-			s.started[id] = true
-		}
-	}
+	s.nameStarted(b.Metadata[sessionpkg.CurrentBeadIDKey], b.Metadata[beadmeta.CurrentClaimBeadIDMetadataKey], startedClaimBead(b.Metadata[executionClaimStartedKey]))
+	s.nameWorkStarted(b.Metadata[sessionpkg.WorkStartedKey])
 	return s
 }
 
 func releaseSeatOfInfo(info sessionpkg.Info) releaseSeat {
 	s := releaseSeat{id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info)}
-	for _, id := range []string{info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID} {
+	s.nameStarted(info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID)
+	s.nameWorkStarted(info.WorkStartedRaw)
+	return s
+}
+
+// nameStarted adds ids to the claims the seat names as executing.
+func (s *releaseSeat) nameStarted(ids ...string) {
+	for _, id := range ids {
 		if id = strings.TrimSpace(id); id != "" {
 			if s.started == nil {
-				s.started = make(map[string]bool, 2)
+				s.started = make(map[string]bool, len(ids))
 			}
 			s.started[id] = true
 		}
 	}
-	return s
+}
+
+// nameWorkStarted adds the claims the seat's work_started cell names: the
+// claims its own hook handed to a turn (PHASE1-2 §6.4).
+func (s *releaseSeat) nameWorkStarted(raw string) {
+	cell, err := sessionpkg.DecodeWorkStarted(raw)
+	if err != nil {
+		s.startedUnread = true
+		return
+	}
+	for _, e := range cell.Claims {
+		s.nameStarted(e.Bead)
+	}
+}
+
+// namesStarted reports whether the seat names beadID as started, or may.
+func (s releaseSeat) namesStarted(beadID string) bool {
+	return s.startedUnread || s.started[strings.TrimSpace(beadID)]
+}
+
+// startedClaimBead is the bead an execution_claim_started stamp names
+// ("<instance_token>|<bead>", startedValue), whichever incarnation wrote it.
+func startedClaimBead(stamp string) string {
+	_, bead, ok := strings.Cut(strings.TrimSpace(stamp), "|")
+	if !ok {
+		return ""
+	}
+	return strings.TrimSpace(bead)
 }
 
 // ReleaseOpts adjusts one release.
@@ -215,6 +251,10 @@ func releaseListed(claims []seatWorkHit, why releaseWhy, seat releaseSeat, cfg *
 		fallback = seat.fallback
 	}
 	for _, c := range mine {
+		if p.startedNamedKeeps && seat.namesStarted(c.bead.ID) {
+			keep(c, keptStarted)
+			continue
+		}
 		if route, served := releaseRoute(cfg, c.bead, fallback, p.lane); !served {
 			keep(c, keptUnservedRoute)
 			out.Route[c.bead.ID] = route

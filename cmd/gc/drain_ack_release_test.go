@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"io"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -371,4 +372,46 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 // bead kept is kept by the filter under test, not the route guard.
 func routedToWorker() map[string]string {
 	return map[string]string{beadmeta.RoutedToMetadataKey: "worker"}
+}
+
+// TestDrainAckKeepsClaimsTheSeatStarted (T8; mc-ilr3b, PHASE1-2 §6.5): the
+// drain-ack release keeps every in_progress claim the seat names as started,
+// by its work_started cell or its execution_claim_started stamp (whichever
+// incarnation wrote it), and gives back the rest. A cell it cannot read names
+// every claim. The ack is no proof a started claim never ran: a gate-blocked
+// step gets no_work from the hook, and releasing it lost started work. Kills
+// dropping the keep, and either source of it.
+func TestDrainAckKeepsClaimsTheSeatStarted(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		cell func(started string) string
+		kept []string // of "cell", "stamp", "unstarted"
+	}{
+		{"named", func(started string) string {
+			return session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: "city", Bead: started, Via: session.WorkStartedViaClaim}))
+		}, []string{"cell", "stamp"}},
+		{"cell unreadable", func(string) string { return "{" }, []string{"cell", "stamp", "unstarted"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			work := splittest.NewWorkStore(t, "gc")
+			held := map[string]beads.Bead{}
+			for _, name := range []string{"cell", "stamp", "unstarted"} {
+				held[name] = mustCreateDrainAckBead(t, work, beads.Bead{Title: name, Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+			}
+			seat := drainAckSessionBead()
+			seat.Metadata[session.WorkStartedKey] = c.cell(held["cell"].ID)
+			seat.Metadata[executionClaimStartedKey] = "tok-old|" + held["stamp"].ID
+
+			var stderr bytes.Buffer
+			releaseUnexecutedClaimsOnDrainAck(testWorkLegs("", servingCity("worker"), work, nil), seat, drainAckReleaseBudget, &stderr)
+
+			for name, b := range held {
+				status, assignee := drainAckBeadStatus(t, work, b.ID)
+				kept := status == "in_progress" && assignee == "worker-1"
+				if want := slices.Contains(c.kept, name); kept != want {
+					t.Errorf("%s claim %s: status=%q assignee=%q, kept=%v want %v; stderr=%s", name, b.ID, status, assignee, kept, want, stderr.String())
+				}
+			}
+		})
+	}
 }

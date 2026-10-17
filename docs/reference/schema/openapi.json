@@ -13056,6 +13056,7 @@
             "supervisor.started": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected",
+            "work.started_unrecorded": "#/components/schemas/TypedEventStreamEnvelopeWorkStartedUnrecorded",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -13378,6 +13379,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkStartedUnrecorded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -14759,6 +14763,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.drain_fence_unavailable",
+                "work.started_unrecorded",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
@@ -19595,6 +19600,63 @@
         "title": "TypedEventStreamEnvelope webhook.rejected",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWorkStartedUnrecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.started_unrecorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.started_unrecorded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -19762,6 +19824,7 @@
             "supervisor.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected",
+            "work.started_unrecorded": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -20084,6 +20147,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -21560,6 +21626,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.drain_fence_unavailable",
+                "work.started_unrecorded",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
@@ -26727,6 +26794,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope webhook.rejected",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.started_unrecorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.started_unrecorded",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {

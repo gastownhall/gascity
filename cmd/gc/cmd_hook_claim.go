@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/executionevent"
 	"github.com/gastownhall/gascity/internal/git"
+	"github.com/gastownhall/gascity/internal/session"
 )
 
 const hookClaimCommandName = "hook"
@@ -50,12 +51,21 @@ const (
 	hookClaimReasonRigSuspended               = "rig_suspended"
 )
 
+// hookClaimWorkReasonStartedClaimHeld is the work-action reason the drain-ack
+// fence answers with (OD9): no ready work, but this seat holds a claim it
+// started, so it must continue that claim rather than acknowledge a drain.
+// It is not a hookClaimReason* constant: those are the drain reasons.
+const hookClaimWorkReasonStartedClaimHeld = "started_claim_held"
+
 // Reasons carried on a bead.claim_released event: which unwind gave the claim
 // back. Both describe a claim this process WON and could not hand to a live
 // consumer.
 const (
 	hookClaimReleaseReasonUndelivered = "result_undelivered"
 	hookClaimReleaseReasonStraddled   = "claim_window_straddled"
+	// hookClaimReleaseReasonBeingReleased: the controller's work ladder was
+	// releasing the claim when the hook went to record it as started.
+	hookClaimReleaseReasonBeingReleased = "claim_being_released"
 )
 
 var hookClaimMutationTimeout = 10 * time.Second
@@ -308,6 +318,22 @@ type hookClaimOps struct {
 	// restampHookAdoption). Only a CAS may back it: a lost CAS is how the
 	// caller learns someone else took the bead.
 	RestampAdopted hookClaimRestampFunc
+	// RecordWorkStarted records a claim handed to a turn in the session row's
+	// work_started cell, by a CAS on the row (PHASE1-2 §6.4). It refuses a
+	// claim the controller is releasing and a stale incarnation's write.
+	RecordWorkStarted hookRecordWorkStartedFunc
+	// ForgetWorkStarted drops a claim from work_started before an unwind
+	// gives it back. Best-effort.
+	ForgetWorkStarted hookForgetWorkStartedFunc
+	// ReadWorkStarted reads the session row's raw work_started cell: the
+	// drain-ack fence's input.
+	ReadWorkStarted hookReadWorkStartedFunc
+	// StoreRef names the store a claim made in dir lives in, as the work
+	// cells key it, or "" when it is not knowable.
+	StoreRef func(dir string) string
+	// EmitWorkStartedUnrecorded publishes work.started_unrecorded when a
+	// claim is delivered without its work_started record. Best-effort.
+	EmitWorkStartedUnrecorded func(sessionID, template, beadID string, cause error)
 }
 
 type (
@@ -335,6 +361,9 @@ type (
 	// hookEnqueueContinuationNudgeFunc enqueues the claiming session's
 	// hook-claim-continuation nudge, keyed by the claim assignee.
 	hookEnqueueContinuationNudgeFunc func(assignee string)
+	hookRecordWorkStartedFunc        func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error)
+	hookForgetWorkStartedFunc        func(sessionID string, key hookStartedKey) error
+	hookReadWorkStartedFunc          func(sessionID string) (string, error)
 )
 
 type hookClaimJSONResult struct {
@@ -466,7 +495,7 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			fmt.Fprintf(stderr, "gc hook --claim: drain-pending probe unavailable for %s: %v; proceeding to claim\n", sessionID, err) //nolint:errcheck
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending(hookClaimLabel, sessionID, *opts, *ops, stdout, stderr)}
+			return hookClaimResult{terminal: true, code: writeHookClaimDrainPending(hookClaimLabel, sessionID, *opts, *ops, dir, stdout, stderr)}
 		}
 	}
 
@@ -597,6 +626,21 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.EmitHookClaimReclaimedStale == nil {
 		ops.EmitHookClaimReclaimedStale = hookEmitClaimReclaimedStale
+	}
+	if ops.RecordWorkStarted == nil {
+		ops.RecordWorkStarted = hookRecordWorkStarted
+	}
+	if ops.ForgetWorkStarted == nil {
+		ops.ForgetWorkStarted = hookForgetWorkStarted
+	}
+	if ops.ReadWorkStarted == nil {
+		ops.ReadWorkStarted = hookSessionWorkStarted
+	}
+	if ops.StoreRef == nil {
+		ops.StoreRef = hookClaimStoreRefForDir
+	}
+	if ops.EmitWorkStartedUnrecorded == nil {
+		ops.EmitWorkStartedUnrecorded = emitWorkStartedUnrecorded
 	}
 	if ops.Now == nil {
 		ops.Now = time.Now
@@ -1276,6 +1320,16 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	result.RootBeadID = strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	result.ContinuationGroup = strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
+	// The started write (PHASE1-2 §6.4): before the result line, so a claim
+	// is never handed to a turn without the row saying so, and before the
+	// step-started event, so a refused hand-over emits none.
+	switch recordHookWorkStarted(bead, opts, ops, dir, minted, stderr) {
+	case hookStartedReleasing:
+		return refuseHookClaimBeingReleased(bead, opts, ops, dir, minted, stdout, stderr)
+	case hookStartedStale:
+		fmt.Fprintf(stderr, "gc hook --claim: refusing to hand %s to a stale session: the session row is closed or names another incarnation\n", bead.ID) //nolint:errcheck
+		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
+	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
 		ops.EmitExecutionStepStarted(durable, dir, opts.Env, opts.Assignee)
 	}
@@ -1325,6 +1379,68 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	return 0
 }
 
+// recordHookWorkStarted records bead in this session's work_started cell, as
+// minted ("claim") or adopted ("adopt"), and reports what the write found. A
+// run with no session row records nothing. Every failure, and a seat with no
+// instance token to fence the write by, fails OPEN: the claim is delivered,
+// one stderr line names the fault, and work.started_unrecorded records it off
+// the pane. The work ladder's quiet gate is then what keeps the claim from
+// release (§6.5).
+func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stderr io.Writer) hookStartedResult {
+	sessionID := hookClaimSessionID(opts.Env)
+	beadID := strings.TrimSpace(bead.ID)
+	if sessionID == "" || beadID == "" {
+		return hookStartedUnrecorded
+	}
+	via := session.WorkStartedViaAdopt
+	if minted {
+		via = session.WorkStartedViaClaim
+	}
+	fence := hookStartedFenceOf(opts.Env)
+	var (
+		res hookStartedResult
+		err error
+	)
+	if fence.Token == "" {
+		err = errors.New("no instance token to fence the write by")
+	} else {
+		res, err = ops.RecordWorkStarted(sessionID, fence, hookStartedKey{Store: ops.StoreRef(dir), Bead: beadID}, via)
+	}
+	if err != nil {
+		fmt.Fprintf(stderr, "gc hook --claim: recording %s as started on session %s: %v; delivering it anyway\n", beadID, sessionID, err) //nolint:errcheck
+		ops.EmitWorkStartedUnrecorded(sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), beadID, err)
+		return hookStartedUnrecorded
+	}
+	return res
+}
+
+// refuseHookClaimBeingReleased answers a hand-over the controller's release
+// won (§6.4): the claim is not delivered. A minted claim is given back
+// through the F-C unwind; an adopted one is the controller's to release. The
+// answer is the no-work drain, but --drain-ack is NOT consumed: the seat may
+// hold other work, and the release is the controller's act, not the seat's.
+func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
+	cause := fmt.Sprintf("%s is being released by the controller's work ladder; not handing it out", bead.ID)
+	if minted {
+		unwindUndeliveredHookClaim(hookClaimReleaseReasonBeingReleased, cause, bead, opts, ops, dir, stderr)
+	} else {
+		fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
+	}
+	if opts.JSON {
+		if err := writeCLIJSONLine(stdout, hookClaimJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			Command:       hookClaimCommandName,
+			Action:        "drain",
+			Reason:        hookClaimReasonNoWork,
+		}); err != nil {
+			fmt.Fprintf(stderr, "gc hook --claim: writing JSON: %v\n", err) //nolint:errcheck
+			return 1
+		}
+	}
+	return 0
+}
+
 // writeHookClaimResultLine writes the one line that carries a claim result to
 // its consumer, and — unlike the plain-text path it replaces — reports whether
 // that write actually landed. The non-JSON form used to discard the error, which
@@ -1358,6 +1474,11 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	if assignee == "" {
 		assignee = opts.Assignee
 	}
+	// The claim's work_started entry goes before the release, as the
+	// current-claim stamp does (F-C clears it before calling here): a released
+	// claim must never still read as started. Best-effort; it writes only the
+	// session row, never the claim.
+	forgetHookWorkStarted(bead, opts, ops, dir)
 	// This emits bead.claim_released for a bead that may ALREADY have an
 	// execution.step_started from this same invocation (the stamp runs before the
 	// result write). That pair is the compensation record: the step never
@@ -1392,6 +1513,14 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	return 1
 }
 
+// forgetHookWorkStarted drops bead from this session's work_started cell,
+// best effort: an unwind that cannot drop it still gives the claim back.
+func forgetHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) {
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && strings.TrimSpace(bead.ID) != "" {
+		_ = ops.ForgetWorkStarted(sessionID, hookStartedKey{Store: ops.StoreRef(dir), Bead: strings.TrimSpace(bead.ID)})
+	}
+}
+
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
 // nothing. The reason is "no_work" for a genuinely idle store; it is
 // "claims_errored" when claimsErrored is set — ready work existed but every
@@ -1406,6 +1535,9 @@ func writeHookClaimNoWork(opts hookClaimOptions, ops hookClaimOps, claimsErrored
 	reason := hookClaimReasonNoWork
 	if claimsErrored {
 		reason = hookClaimReasonClaimsErrored
+	}
+	if code, fenced := fenceHookDrainAck(hookClaimLabel, reason, opts, ops, dir, stdout, stderr); fenced {
+		return code
 	}
 	code := writeHookClaimDrain(hookClaimLabel, reason, opts.JSON, opts.DrainAck, ops.DrainAck, stdout, stderr)
 	// Strictly after the result: the drain is already written and its exit code
@@ -1467,7 +1599,10 @@ func writeHookClaimNonTurnDrain(marker string, opts hookClaimOptions, stdout, st
 // "gc hook"), because both are fenced and an operator reading a pane needs to
 // know which one answered. The JSON record is identical either way: the command
 // is "hook" for both, and a consumer should not have to care.
-func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, stdout, stderr io.Writer) int {
+func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) int {
+	if code, fenced := fenceHookDrainAck(label, hookClaimReasonDrainPending, opts, ops, dir, stdout, stderr); fenced {
+		return code
+	}
 	operatorHint := ""
 	if opts.StrictDrainAck {
 		operatorHint = " (an operator acking it from outside the session adds --operator)"
@@ -1477,6 +1612,79 @@ func writeHookClaimDrainPending(label, sessionID string, opts hookClaimOptions, 
 		label, sessionID, operatorHint)
 
 	return writeHookClaimDrain(label, hookClaimReasonDrainPending, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
+}
+
+// fenceHookDrainAck is the hook's drain-ack fence (OD9, PHASE1-2 §6.5), run
+// before a no-work or drain-pending answer consumes --drain-ack: a drain-ack
+// releases every in_progress claim the seat holds that its row does not name
+// as started, and an ack the seat makes while it holds started work it has
+// not finished is how that work was lost (mc-ilr3b). For each claim this
+// session's work_started cell names, the work bead is read live; one still
+// in_progress under this seat's identity answers action=work,
+// reason=started_claim_held, and the ack is not made. A read that fails, of
+// the row, the cell or a bead, fails SAFE: the drain is answered without the
+// ack. fenced reports that the answer was written here; without --drain-ack,
+// or with no session row, the fence does nothing.
+func fenceHookDrainAck(label, reason string, opts hookClaimOptions, ops hookClaimOps, dir string, stdout, stderr io.Writer) (int, bool) {
+	sessionID := hookClaimSessionID(opts.Env)
+	if !opts.DrainAck || sessionID == "" {
+		return 0, false
+	}
+	ops.applyDefaults() // a caller's unset seam reads production, never skips the fence
+	held, err := hookHeldStartedClaim(sessionID, opts, ops, dir)
+	switch {
+	case held.ID != "":
+		fmt.Fprintf(stderr, "%s: this session holds %s, which it started and has not finished; continue it (drain not acknowledged)\n", label, held.ID) //nolint:errcheck
+		result := hookClaimJSONResult{
+			SchemaVersion: "1",
+			OK:            true,
+			Command:       hookClaimCommandName,
+			Action:        "work",
+			Reason:        hookClaimWorkReasonStartedClaimHeld,
+			BeadID:        held.ID,
+			Assignee:      held.Assignee,
+			Route:         hookClaimRoute(held),
+		}
+		if err := writeHookClaimResultLine(result, opts.JSON, stdout); err != nil {
+			fmt.Fprintf(stderr, "%s: writing result for %s: %v\n", label, held.ID, err) //nolint:errcheck
+			return 1, true
+		}
+		return 0, true
+	case err != nil:
+		fmt.Fprintf(stderr, "%s: drain not acknowledged: cannot prove this session holds no started claim: %v\n", label, err) //nolint:errcheck
+		return writeHookClaimDrain(label, reason, opts.JSON, false, nil, stdout, stderr), true
+	}
+	return 0, false
+}
+
+// hookHeldStartedClaim returns the first claim the session's work_started
+// cell names that is still in_progress under one of this seat's identities,
+// read live through the hook's own bd context. err reports a read that
+// failed, when no held claim was found.
+func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaimOps, dir string) (beads.Bead, error) {
+	raw, err := ops.ReadWorkStarted(sessionID)
+	if err != nil {
+		return beads.Bead{}, fmt.Errorf("reading session %s: %w", sessionID, err)
+	}
+	cell, err := session.DecodeWorkStarted(raw)
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	identities := hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
+	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
+	defer cancel()
+	var readErr error
+	for _, e := range cell.Claims {
+		b, err := ops.ReadWorkMeta(ctx, dir, opts.Env, e.Bead, opts.Assignee)
+		if err != nil {
+			readErr = errors.Join(readErr, fmt.Errorf("reading %s: %w", e.Bead, err))
+			continue
+		}
+		if strings.EqualFold(strings.TrimSpace(b.Status), "in_progress") && hookClaimHasIdentity(b.Assignee, identities) {
+			return b, nil
+		}
+	}
+	return beads.Bead{}, readErr
 }
 
 // writeHookClaimStaleSessionDrain emits the terminal result for a refused stale
