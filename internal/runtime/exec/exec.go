@@ -608,9 +608,9 @@ func (p *Provider) DismissKnownDialogs(ctx context.Context, name string, timeout
 	if err != nil {
 		return err
 	}
-	return c.FencedKeys(ctx, name, f, func(sendKeys func(keys ...string) error) error {
+	return p.fencedResult(name, c.FencedKeys(ctx, name, f, func(sendKeys func(keys ...string) error) error {
 		return runtime.AcceptStartupDialogsWithTimeout(ctx, timeout, peek, sendKeys)
-	})
+	}))
 }
 
 // Stop destroys the named session: script stop <name>

@@ -2,6 +2,7 @@ package exec
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 
@@ -32,6 +33,21 @@ func (p *Provider) fencedCarrier(name string) (runtime.Carrier, error) {
 	return p.carrier(), nil
 }
 
+// fencedResult is what a carrier-guarded op on name reports for err. A fence
+// read the pack's exec op did not answer (its own non-zero exit, as for a
+// box that does not exist) cannot tell absence from an outage, so the pack's
+// is-running decides: a definite "false" is a miss finding the box absent;
+// anything else stays ErrRuntimeUnavailable.
+func (p *Provider) fencedResult(name string, err error) error {
+	if !errors.Is(err, runtime.ErrCarrierFenceUnread) {
+		return err
+	}
+	if occupied, definite := p.boxOccupancy(name); definite && !occupied {
+		return &runtime.FenceMismatchError{Session: name, Found: runtime.FenceFoundAbsent}
+	}
+	return err
+}
+
 // NudgeFenced delivers content as Nudge does, through the carrier guard. The
 // exec provider has no idle wait to skip and cannot deduplicate, so
 // n.Immediate and n.DeliveryKey change nothing.
@@ -40,7 +56,7 @@ func (p *Provider) NudgeFenced(ctx context.Context, name string, content []runti
 	if err != nil {
 		return err
 	}
-	return c.NudgeFenced(ctx, name, content, n.Fence)
+	return p.fencedResult(name, c.NudgeFenced(ctx, name, content, n.Fence))
 }
 
 // SendKeysFenced sends keys as SendKeys does, through the carrier guard.
@@ -49,7 +65,7 @@ func (p *Provider) SendKeysFenced(ctx context.Context, name string, fence runtim
 	if err != nil {
 		return err
 	}
-	return c.SendKeysFenced(ctx, name, fence, keys...)
+	return p.fencedResult(name, c.SendKeysFenced(ctx, name, fence, keys...))
 }
 
 // InterruptFenced interrupts as Interrupt does, through the carrier guard.
@@ -58,7 +74,7 @@ func (p *Provider) InterruptFenced(ctx context.Context, name string, fence runti
 	if err != nil {
 		return err
 	}
-	return c.InterruptFenced(ctx, name, fence)
+	return p.fencedResult(name, c.InterruptFenced(ctx, name, fence))
 }
 
 // publishInputFence records the incarnation cfg.Env names on the agent pane

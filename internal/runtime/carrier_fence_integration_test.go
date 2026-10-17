@@ -136,3 +136,27 @@ func TestCarrierFencedNudgeRealTmuxRespawnBetweenCheckAndSend(t *testing.T) {
 		t.Fatalf("NudgeFenced under the new fence = %v, want delivered", err)
 	}
 }
+
+// Kills a carrier that reads a box tmux gone between the fence read and the
+// send as delivery: real tmux's if-shell with no server exits 1 with no
+// output, which is a miss finding the pane absent. A read with no server at
+// all finds it absent too, through the read script's sentinel.
+func TestCarrierFencedInputRealTmuxServerGoneIsAbsent(t *testing.T) {
+	box := newLocalBox(t)
+	box.mustTmux("new-session", "-d", "-s", "main", "-x", "200", "-y", "20", "cat")
+	c := NewTmuxCarrier(box, "main")
+	f := InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	if err := c.PublishInputFence(context.Background(), "s", f); err != nil {
+		t.Fatalf("PublishInputFence: %v", err)
+	}
+	box.beforeGuard = func() { box.mustTmux("kill-server") }
+	err := c.SendKeysFenced(context.Background(), "s", f, "Enter")
+	var miss *FenceMismatchError
+	if !errors.As(err, &miss) || miss.Found != FenceFoundAbsent || miss.Partial {
+		t.Fatalf("SendKeysFenced after the server died = %v, want a whole miss finding the pane absent", err)
+	}
+	err = c.NudgeFenced(context.Background(), "s", TextContent("hi"), f)
+	if !errors.As(err, &miss) || miss.Found != FenceFoundAbsent || miss.Partial {
+		t.Fatalf("NudgeFenced with no server = %v, want a whole miss finding the pane absent", err)
+	}
+}

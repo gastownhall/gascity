@@ -12,7 +12,9 @@ import (
 // The box carrier's fenced input (RUNTIME-CONTRACT-009): the same guard the
 // local tmux provider runs, issued over the box connection. A fenced
 // operation reads the box tmux's agent pane once ("display-message" of
-// TmuxFenceReadFormat on the carrier's target) and needs it live and holding
+// TmuxFenceReadFormat on the carrier's target, run by a box shell that
+// reports a tmux unable to answer as carrierFenceAbsent, so that the
+// connection's own non-zero exit stays distinct) and needs it live and holding
 // the fence as its own value; then every input command runs inside one
 // if-shell -F on that pane's id and fence (TmuxGuardedInputArgs), so a pane
 // respawned as another incarnation between the read and a send takes nothing.
@@ -22,6 +24,12 @@ import (
 // with no own fence (started before the carrier published one) is unproven
 // until the agent is relaunched.
 
+// ErrCarrierFenceUnread marks a carrier fence read the box connection did
+// not answer (its own non-zero exit), wrapped with ErrRuntimeUnavailable.
+// Nothing was sent; the provider that owns the connection may still tell an
+// absent box apart (exec asks its pack's is-running).
+var ErrCarrierFenceUnread = errors.New("the box connection did not answer the fence read")
+
 // carrierBufferSeq numbers the carrier's paste buffers.
 var carrierBufferSeq atomic.Uint64
 
@@ -29,6 +37,15 @@ var carrierBufferSeq atomic.Uint64
 func carrierBufferName() string {
 	return fmt.Sprintf("gc-nudge-%d-c%d", os.Getpid(), carrierBufferSeq.Add(1))
 }
+
+// carrierFenceAbsent is what carrierFenceReadScript prints when the box tmux
+// cannot answer for the target: no server, no session.
+const carrierFenceAbsent = "gc-fence-absent"
+
+// carrierFenceReadScript reads the pane its first argument targets in the
+// format its second names, printing carrierFenceAbsent when tmux fails. It
+// exits 0 whenever the box ran it, so a non-zero exit is the connection's.
+const carrierFenceReadScript = `tmux display-message -p -t "$1" "$2" 2>/dev/null || echo ` + carrierFenceAbsent
 
 // carrierLoadBufferScript loads its first argument into the buffer its
 // second names, byte for byte (printf, not echo, and no tmux parsing).
@@ -78,20 +95,24 @@ func (g *carrierGuard) transport(err error) error {
 
 // verify is the operation's precheck: the carrier target's pane must be live
 // and hold the guard's digest as its own fence. A box tmux that cannot
-// answer for the target (a non-zero exit: no server, no session) finds it
-// absent.
+// answer for the target (no server, no session) finds it absent. A read the
+// box did not answer (the connection's non-zero exit) or answered with
+// something else cannot tell, so it is ErrRuntimeUnavailable.
 func (g *carrierGuard) verify(ctx context.Context) error {
-	out, code, err := g.c.conn.Exec(ctx, g.name, []string{"tmux", "display-message", "-p", "-t", g.c.target, TmuxFenceReadFormat})
+	out, code, err := g.c.conn.Exec(ctx, g.name, []string{"sh", "-c", carrierFenceReadScript, "sh", g.c.target, TmuxFenceReadFormat})
 	if err != nil {
 		return g.transport(err)
 	}
 	if code != 0 {
+		return fmt.Errorf("%w: %w: reading input fence of %q: exit %d", ErrRuntimeUnavailable, ErrCarrierFenceUnread, g.name, code)
+	}
+	if strings.TrimSpace(string(out)) == carrierFenceAbsent {
 		return g.miss(FenceFoundAbsent)
 	}
 	r, ok := ParseTmuxFenceRead(string(out))
 	switch {
 	case !ok:
-		return fmt.Errorf("reading input fence of %q: unexpected tmux output %q", g.name, strings.TrimSpace(string(out)))
+		return fmt.Errorf("%w: reading input fence of %q: unexpected tmux output %q", ErrRuntimeUnavailable, g.name, strings.TrimSpace(string(out)))
 	case r.Absent() || r.Dead:
 		return g.miss(r.Found())
 	case r.Own() != g.digest:
@@ -116,7 +137,8 @@ func (g *carrierGuard) run(ctx context.Context, inner []string, buffer string) e
 		return g.transport(err)
 	}
 	if code != 0 {
-		// tmux cannot resolve the pane id: the agent pane is gone.
+		// tmux cannot resolve the pane id (or no server answers): the agent
+		// pane is gone.
 		g.deleteBuffer(buffer)
 		return g.miss(FenceFoundAbsent)
 	}
@@ -136,7 +158,7 @@ func (g *carrierGuard) run(ctx context.Context, inner []string, buffer string) e
 		}
 		return g.miss(r.Found())
 	default:
-		return fmt.Errorf("fenced input to %q: unexpected tmux output %q", g.name, trimmed)
+		return fmt.Errorf("%w: fenced input to %q: unexpected tmux output %q", ErrRuntimeUnavailable, g.name, trimmed)
 	}
 }
 
@@ -148,7 +170,7 @@ func (g *carrierGuard) paste(ctx context.Context, text string) error {
 	case err != nil:
 		return g.transport(err)
 	case code != 0:
-		return fmt.Errorf("fenced input to %q: loading a tmux paste buffer exited %d", g.name, code)
+		return fmt.Errorf("%w: fenced input to %q: loading a tmux paste buffer exited %d", ErrRuntimeUnavailable, g.name, code)
 	}
 	return g.run(ctx, []string{"paste-buffer", "-d", "-r", "-b", buffer, "-t", g.pane}, buffer)
 }

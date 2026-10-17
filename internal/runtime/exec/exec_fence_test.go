@@ -175,7 +175,7 @@ esac
 	var reads, guarded int
 	for _, c := range readCalls(t, calls) {
 		switch {
-		case strings.HasPrefix(c, "'tmux' 'display-message'"):
+		case strings.HasPrefix(c, "'sh' '-c' 'tmux display-message"):
 			reads++
 		case strings.HasPrefix(c, "'tmux' 'if-shell'"):
 			guarded++
@@ -218,5 +218,32 @@ func TestExecStartAndLaunchPublishTheFence(t *testing.T) {
 	got = readCalls(t, calls)
 	if len(got) != 2 || !strings.HasSuffix(got[1], "'agent' ';' 'set-option' '-p' '-u' '-t' 'main' '@gc_fence'") {
 		t.Fatalf("identity-less launch ran %q, want the fence cleared in the same command list", got)
+	}
+}
+
+// Kills an exec fenced op that reads a fence read its pack's exec op did not
+// answer as absence, or that never lets the pack say the box is gone: the
+// op's own non-zero exit is ErrRuntimeUnavailable unless is-running answers
+// a definite "false", which is a miss finding the box absent.
+func TestExecUnansweredFenceReadAsksIsRunning(t *testing.T) {
+	for answer, wantAbsent := range map[string]bool{"false": true, "true": false, "": false} {
+		dir := t.TempDir()
+		script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  exec) cat > /dev/null; exit 255 ;;
+  is-running) echo '`+answer+`' ;;
+  *) exit 2 ;;
+esac
+`)
+		fp := NewSeamBacked(script).(runtime.FencedInputProvider)
+		err := fp.SendKeysFenced(context.Background(), "s", execFence, "Enter")
+		var miss *runtime.FenceMismatchError
+		switch {
+		case wantAbsent && (!errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial):
+			t.Errorf("is-running %q: %v, want a whole miss finding the box absent", answer, err)
+		case !wantAbsent && (!errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch)):
+			t.Errorf("is-running %q: %v, want ErrRuntimeUnavailable", answer, err)
+		}
 	}
 }
