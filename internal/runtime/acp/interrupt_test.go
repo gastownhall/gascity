@@ -2,10 +2,12 @@ package acp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"syscall"
 	"testing"
@@ -406,7 +408,7 @@ func TestInterruptCancelNeverFollowsTheNextPrompt(t *testing.T) {
 					t.Fatal("next turn never completed")
 				}
 			}
-			sc.cancelTurn(f.name, sessionID, idleCh, nil)
+			sc.cancelTurn(f.name, sessionID, idleCh, nil, nil)
 			if tc.next == "hold" {
 				endTurnBySIGINT(t, sc)
 			}
@@ -639,5 +641,45 @@ func TestNewSessionCancelNotification(t *testing.T) {
 	const want = `{"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":"sess-9"}}`
 	if string(data) != want {
 		t.Fatalf("session/cancel = %s, want %s", data, want)
+	}
+}
+
+// TestInterruptStaysBoundedWhileAStdinWriteIsStuck pins Interrupt's bound when
+// the agent has stopped reading its stdin mid-write: a prompt write holds the
+// pipe, and Interrupt still returns ErrInterruptNotSettled after its
+// session/cancel and SIGINT waits instead of waiting for that write.
+func TestInterruptStaysBoundedWhileAStdinWriteIsStuck(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
+	sc := newSessionConn(exec.Command("true"), w, nil, 10, nil)
+	sc.mu.Lock()
+	sc.sessionID = "s1"
+	sc.markBusyLocked(1)
+	sc.mu.Unlock()
+	writing := make(chan struct{})
+	go func() {
+		close(writing)
+		_ = sc.writeMessage(bytes.Repeat([]byte("x"), 1<<20))
+	}()
+	<-writing
+	waitUntil(t, "the write to hold stdin", func() bool {
+		if sc.stdinMu.TryLock() {
+			sc.stdinMu.Unlock()
+			return false
+		}
+		return true
+	})
+	done := make(chan error, 1)
+	go func() { done <- sc.interrupt("stuck", 50*time.Millisecond) }()
+	select {
+	case err := <-done:
+		if !errors.Is(err, runtime.ErrInterruptNotSettled) {
+			t.Fatalf("interrupt = %v, want ErrInterruptNotSettled", err)
+		}
+	case <-time.After(protocolUnitWait):
+		t.Fatal("interrupt blocked behind a stuck stdin write")
 	}
 }

@@ -329,6 +329,11 @@ type memoryOrderDispatcher struct {
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
 	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// inapplicableReported holds the orders this controller boot has already
+	// reported as inapplicable (keyed by scoped name and backend), so each is
+	// announced once rather than on every tick. Guarded by cacheMu and carried
+	// across dispatcher rebuilds by carryInapplicableReportsFrom.
+	inapplicableReported map[string]struct{}
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -681,6 +686,15 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
+		}
+		// An order that requires a backend its scope does not use is never
+		// dispatched there, and never counted as a failure: it is reported
+		// once as inapplicable and skipped before any store is opened.
+		if a.RequiresBackend != nil {
+			if backend := orderScopeBackend(cityPath, target.ScopeRoot); !a.AppliesToBackend(backend) {
+				m.reportInapplicable(a, target, backend)
+				continue
+			}
 		}
 
 		storeKey := orderStoreTargetKey(target)
@@ -1508,6 +1522,64 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 		if existing, ok := m.lastRunCache[key]; !ok || last.After(existing) {
 			m.lastRunCache[key] = last
 		}
+	}
+}
+
+// reportInapplicable records one order.inapplicable event for an order its
+// scope's backend rules out, the first time this controller boot sees that
+// order on that backend.
+func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execStoreTarget, backend string) {
+	scoped := a.ScopedName()
+	key := scoped + "\x00" + backend
+	m.cacheMu.Lock()
+	if _, seen := m.inapplicableReported[key]; seen {
+		m.cacheMu.Unlock()
+		return
+	}
+	if m.inapplicableReported == nil {
+		m.inapplicableReported = make(map[string]struct{})
+	}
+	m.inapplicableReported[key] = struct{}{}
+	m.cacheMu.Unlock()
+
+	scope := "city"
+	if target.ScopeKind == "rig" && target.RigName != "" {
+		scope = "rig:" + target.RigName
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderInapplicable,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: fmt.Sprintf("%s: requires backend %s; %s scope uses %s, so it is not dispatched there",
+			orderInapplicableLabel(backend), strings.Join(a.RequiresBackend, " or "), scope, backend),
+		Payload: events.OrderInapplicablePayloadJSON(events.OrderInapplicablePayload{
+			OrderName:       scoped,
+			Scope:           scope,
+			Backend:         backend,
+			RequiresBackend: append([]string(nil), a.RequiresBackend...),
+		}),
+	})
+}
+
+// carryInapplicableReportsFrom copies the inapplicable orders a previous
+// dispatcher already reported, so a reload or rescan does not announce them
+// again: the report is once per controller boot.
+func (m *memoryOrderDispatcher) carryInapplicableReportsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	prev.cacheMu.Lock()
+	defer prev.cacheMu.Unlock()
+	if len(prev.inapplicableReported) == 0 {
+		return
+	}
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.inapplicableReported == nil {
+		m.inapplicableReported = make(map[string]struct{}, len(prev.inapplicableReported))
+	}
+	for key := range prev.inapplicableReported {
+		m.inapplicableReported[key] = struct{}{}
 	}
 }
 

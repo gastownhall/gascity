@@ -357,6 +357,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   error code) and are projected as system messages; refusals and text that
   merely quotes an API error stay replies. (thanks @csells)
 
+- **A Claude turn interrupted while a tool was running now reads as idle.**
+  Claude writes `[Request interrupted by user for tool use]` for that case,
+  which the transcript activity check did not recognize, so the session kept
+  reporting `in-turn`. The marker counts only as the whole message, not inside
+  ordinary prose. (thanks @csells)
+
+- **Claude transcripts are found again for work directories with underscores,
+  spaces or other punctuation.** Current Claude Code names a project
+  directory by replacing every UTF-16 code unit outside `[A-Za-z0-9]` with
+  `-`; Gas City only replaced `/` and `.`, so history, resume-key probes and activity missed
+  the transcript. Both spellings are now searched. (thanks @csells)
+
 - **The Dolt compactor docs no longer claim it only rewrites history this
   city grew.** The `gc-compact-base` watermark is a position, not an author:
   a database several cities write to is flattened for all of them when the

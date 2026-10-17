@@ -30,6 +30,7 @@ type sessionConn struct {
 	cancel   context.CancelFunc // cancels in-progress handshake (sentinel only, set by Start)
 	listener net.Listener       // control socket for cross-process ops
 	token    string             // the GC_INSTANCE_TOKEN Start seeded (empty for a sentinel)
+	fence    string             // the input-fence digest of the incarnation Start launched (empty for a sentinel or an env naming none)
 
 	mu             sync.Mutex
 	sessionID      string
@@ -412,14 +413,6 @@ func (sc *sessionConn) sendNotification(msg JSONRPCMessage) error {
 // captures it verbatim. See writeMessageCapturing.
 func (sc *sessionConn) writeMessage(data []byte) error {
 	return sc.writeMessageCapturing(nil, data, nil)
-}
-
-// writeMessageUnlessClosed is writeMessage for a message that is stale once
-// closed has closed: it then writes and captures nothing and returns nil.
-// closed is checked with stdinMu held, so no other stdin write can come
-// between that check and this write.
-func (sc *sessionConn) writeMessageUnlessClosed(closed <-chan struct{}, data []byte) error {
-	return sc.writeMessageCapturing(closed, data, nil)
 }
 
 // writeMessageCapturing writes one encoded JSON-RPC message to the agent's

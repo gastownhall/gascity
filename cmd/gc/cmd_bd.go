@@ -703,15 +703,24 @@ func doBd(args []string, stdout, stderr io.Writer) int {
 
 	// bd refuses `show --watch` in proxied-server mode, the default transport
 	// for a new city, and bd cannot call back into gc. gc serves the watch
-	// itself there by polling plain `bd show` reads; every other scope keeps
-	// bd's own watch. Every bd call the watch makes goes through the same
-	// trace and the same silent-fallback / dolt-start stderr checks as this
-	// passthrough. See cmd_bd_show_watch.go.
-	if req, ok := parseBdShowWatchArgs(bdArgs); ok && bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
-		return serveBdShowWatch(req, &bdWatchRunner{
-			bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
-			cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
-		}, stdout, stderr)
+	// itself there by polling plain `bd show` reads. It does the same for a
+	// remote (http) scope, where enterprise bd refuses --watch and OSS bd
+	// would poll the server every 2s, but at the bounded remote interval.
+	// Every other scope keeps bd's own watch. Every bd call the watch makes
+	// goes through the same trace and the same silent-fallback / dolt-start
+	// stderr checks as this passthrough. See cmd_bd_show_watch.go.
+	if req, ok := parseBdShowWatchArgs(bdArgs); ok {
+		remote := bdScopeUsesRemoteBackend(cityPath, target.ScopeRoot)
+		if remote || bdScopeRefusesShowWatch(cityPath, target, cmd.Env) {
+			interval := bdShowWatchInterval
+			if remote {
+				interval = bdShowWatchRemoteInterval()
+			}
+			return serveBdShowWatch(req, &bdWatchRunner{
+				bdPath: bdPath, dir: cmd.Dir, env: cmd.Env,
+				cityPath: cityPath, scopeRoot: target.ScopeRoot, stderr: stderr,
+			}, interval, stdout, stderr)
+		}
 	}
 
 	traceStart := time.Now()

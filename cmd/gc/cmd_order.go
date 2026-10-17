@@ -329,17 +329,9 @@ operator acknowledgement.`,
 	return cmd
 }
 
-// loadOrders is the common preamble for active order commands: resolve city,
-// load config, scan formula layers, apply overrides, and filter disabled orders.
-func loadOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	return loadActiveOrders(stderr, cmdName)
-}
-
-func loadActiveOrders(stderr io.Writer, cmdName string) ([]orders.Order, int) {
-	_, _, aa, code := loadActiveOrdersWithCity(stderr, cmdName)
-	return aa, code
-}
-
+// loadOrdersWithCity is the common preamble for active order commands: resolve
+// city, load config, scan formula layers, apply overrides, and filter disabled
+// orders.
 func loadOrdersWithCity(stderr io.Writer, cmdName string) (string, *config.City, []orders.Order, int) {
 	return loadActiveOrdersWithCity(stderr, cmdName)
 }
@@ -418,27 +410,69 @@ func cmdOrderListWithOptions(stdout, stderr io.Writer, jsonOutput bool) int {
 		}
 		return doOrderListJSON(cityPath, cfg, aa, stdout)
 	}
-	aa, code := loadOrders(stderr, "gc order list")
+	cityPath, cfg, aa, code := loadOrdersWithCity(stderr, "gc order list")
 	if code != 0 {
 		return code
 	}
-	return doOrderList(aa, stdout)
+	return doOrderListForCity(cityPath, cfg, aa, stdout)
 }
 
 // doOrderList prints a table of orders. Accepts pre-scanned orders for testability.
 func doOrderList(aa []orders.Order, stdout io.Writer) int {
+	return doOrderListForCity("", nil, aa, stdout)
+}
+
+// doOrderListForCity prints a table of orders. When cityPath is set, an order
+// whose requires_backend rules out its scope's backend is marked
+// "inapplicable (backend <name>)" in a trailing STATUS column; the column is
+// shown only when some order is inapplicable.
+func doOrderListForCity(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
 	if len(aa) == 0 {
 		fmt.Fprintln(stdout, "No orders found.") //nolint:errcheck // best-effort stdout
 		return 0
 	}
 
-	hasRig := anyOrderHasRig(aa)
-	if hasRig {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "RIG", "TARGET") //nolint:errcheck
-	} else {
-		fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", "NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED", "TARGET") //nolint:errcheck
+	status := make([]string, len(aa))
+	hasStatus := false
+	if cityPath != "" {
+		for i, a := range aa {
+			if backend, inapplicable := orderInapplicableBackend(cityPath, cfg, a); inapplicable {
+				status[i] = orderInapplicableLabel(backend)
+				hasStatus = true
+			}
+		}
 	}
-	for _, a := range aa {
+	// The STATUS column is appended only when some order is inapplicable, so
+	// the table every other city prints is unchanged.
+	targetFmt, statusFmt := "%s", ""
+	if hasStatus {
+		targetFmt, statusFmt = "%-15s", " %s"
+	}
+	statusCell := func(i int) []any {
+		if !hasStatus {
+			return nil
+		}
+		if status[i] == "" {
+			return []any{"-"}
+		}
+		return []any{status[i]}
+	}
+
+	hasRig := anyOrderHasRig(aa)
+	rowFmt := "%-20s %-8s %-12s %-15s " + targetFmt + statusFmt + "\n"
+	if hasRig {
+		rowFmt = "%-20s %-8s %-12s %-15s %-15s " + targetFmt + statusFmt + "\n"
+	}
+	header := []any{"NAME", "TYPE", "TRIGGER", "INTERVAL/SCHED"}
+	if hasRig {
+		header = append(header, "RIG")
+	}
+	header = append(header, "TARGET")
+	if hasStatus {
+		header = append(header, "STATUS")
+	}
+	fmt.Fprintf(stdout, rowFmt, header...) //nolint:errcheck
+	for i, a := range aa {
 		typ := "formula"
 		if a.IsExec() {
 			typ = "exec"
@@ -461,11 +495,13 @@ func doOrderList(aa []orders.Order, stdout io.Writer) int {
 		if rig == "" {
 			rig = "-"
 		}
+		row := []any{a.Name, typ, a.Trigger, timing}
 		if hasRig {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %-15s %s\n", a.Name, typ, a.Trigger, timing, rig, pool) //nolint:errcheck
-		} else {
-			fmt.Fprintf(stdout, "%-20s %-8s %-12s %-15s %s\n", a.Name, typ, a.Trigger, timing, pool) //nolint:errcheck
+			row = append(row, rig)
 		}
+		row = append(row, pool)
+		row = append(row, statusCell(i)...)
+		fmt.Fprintf(stdout, rowFmt, row...) //nolint:errcheck
 	}
 	return 0
 }
@@ -512,12 +548,28 @@ type orderJSON struct {
 	Source       string            `json:"source,omitempty"`
 	FormulaLayer string            `json:"formula_layer,omitempty"`
 	Env          map[string]string `json:"env,omitempty"`
+	// RequiresBackend is the order's requires_backend declaration.
+	RequiresBackend []string `json:"requires_backend,omitempty"`
+	// Inapplicable is set ("backend <name>") when the order's scope uses a
+	// backend its requires_backend rules out: the dispatcher does not run it
+	// there.
+	Inapplicable string `json:"inapplicable,omitempty"`
+}
+
+// orderToJSONForCity is orderToJSON plus the order's applicability to its
+// scope's backend.
+func orderToJSONForCity(cityPath string, cfg *config.City, a orders.Order) orderJSON {
+	row := orderToJSON(a)
+	if backend, inapplicable := orderInapplicableBackend(cityPath, cfg, a); inapplicable {
+		row.Inapplicable = "backend " + backend
+	}
+	return row
 }
 
 func doOrderListJSON(cityPath string, cfg *config.City, aa []orders.Order, stdout io.Writer) int {
 	rows := make([]orderJSON, 0, len(aa))
 	for _, a := range aa {
-		rows = append(rows, orderToJSON(a))
+		rows = append(rows, orderToJSONForCity(cityPath, cfg, a))
 	}
 	payload := orderListJSON{
 		SchemaVersion: "1",
@@ -542,7 +594,7 @@ func doOrderShowJSON(cityPath string, cfg *config.City, aa []orders.Order, name,
 		SchemaVersion: "1",
 		CityPath:      cityPath,
 		CityName:      effectiveJSONCityName(cfg, cityPath),
-		Order:         orderToJSON(a),
+		Order:         orderToJSONForCity(cityPath, cfg, a),
 	}
 	if err := writeCLIJSONLine(stdout, payload); err != nil {
 		return 1
@@ -583,6 +635,8 @@ func orderToJSON(a orders.Order) orderJSON {
 		Source:       a.Source,
 		FormulaLayer: a.FormulaLayer,
 		Env:          a.Env,
+
+		RequiresBackend: a.RequiresBackend,
 	}
 }
 
