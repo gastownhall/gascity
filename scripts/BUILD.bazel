@@ -128,6 +128,7 @@ go_test(
         "githooks_pre_push_worker_env_test.go",
         "githooks_precommit_local_runtime_test.go",
         "go_module_fetch_test.go",
+        "go_test_budget_test.go",
         "go_test_observable_test.go",
         "go_test_run_script_test.go",
         "gomod_replace_guard_test.go",
