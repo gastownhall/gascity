@@ -3380,7 +3380,7 @@ func TestBdStoreListForcesUnboundedForIDs(t *testing.T) {
 		out []byte
 		err error
 	}{
-		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0`: {
+		`bd list --json --label=bounded-caller --include-infra --include-gates --limit 0 --id bd-b`: {
 			out: []byte(`[
 				{"id":"bd-a","title":"a","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:00Z","labels":["bounded-caller"]},
 				{"id":"bd-b","title":"b","status":"open","issue_type":"task","created_at":"2026-05-02T00:00:00Z","labels":["bounded-caller"]}
