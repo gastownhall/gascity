@@ -427,6 +427,10 @@ target. A green go run is not the Bazel suite; read it as "the go tests
 passed", never as "the push is clean". There is no value that skips the
 suite.
 
+Under either engine, a suite that exits 141 (SIGPIPE) fails the push with a
+named error. A 141 means a writer hit a closed pipe, which can follow a
+passing suite as easily as a failing one, so it is never read as a verdict.
+
 `auto` asks Bazel which options its rc files set (`bazel info --announce_rc
 --config=remote-exec`, which contacts no remote): a non-empty
 `--remote_executor` in the system rc, the workspace rc with `.bazelrc.local`
@@ -1874,11 +1878,17 @@ which reports `make: *** [test-fast-parallel] Error 75` and then exits 2.
 Through those paths the distinguishing signal is the stderr text, not the
 process exit code. The kernel releases the lock automatically when the
 holding process exits — success, failure, or crash alike — so a stale slot
-can never survive a dead holder; no PID-file liveness probing is involved.
-FD inheritance into test jobs is severed at the fan-out boundary, so a slot
+can never survive a dead holder that still owns the descriptor. FD
+inheritance into test jobs is severed at the fan-out boundary, so a slot
 that stays locked past its gate means a leaked descendant is still holding
-the descriptor (`lsof` on the slot file names it), not a stale file to
-delete. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
+the descriptor, not a stale file to delete. When every slot is busy and one
+is locked under a stamped PID that is gone, acquire reaps those leaked
+descendants (the processes `lsof`/`fuser` show with the slot file open)
+instead of waiting out the bound. It first waits one second and checks
+again, and signals only a process that still has the file open under the
+same dead stamp: a new holder rewrites the stamp just after it wins the
+lock, and a waiter probing the slot holds the file only for an instant.
+Never delete the slot file to "unlock" it. The gate needs `flock(1)`, which `docs/getting-started/installation.md`
 already lists as required; if it is absent the run proceeds uncapped with a
 warning rather than blocking. The run likewise proceeds uncapped, with a
 diagnostic, if no descriptor in `[PUSH_GATE_FD_BASE, PUSH_GATE_FD_BASE +
