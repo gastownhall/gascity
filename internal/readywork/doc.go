@@ -2,8 +2,14 @@
 // asks: which beads, across every store a city spreads its work over, are ready
 // for a given selector, in what order, and how many.
 //
-// `gc ready` (cmd/gc) is its one caller: the CLI runs it in-process over the
-// stores it opens. The supervisor's GET /v0/city/{cityName}/beads/ready
+// It is the one reader behind two surfaces. The CLI runs it in-process over the
+// stores it opens (cmd/gc `gc ready`), and the supervisor runs it over the
+// stores it already holds open (GET /v0/city/{cityName}/work/ready). Both
+// surfaces therefore produce the same rows, in the same order, with the same
+// fields, from the same code: CLI == API holds by construction rather than by
+// two copies kept in step.
+//
+// The supervisor's GET /v0/city/{cityName}/beads/ready
 // (internal/api humaHandleBeadReady) is a separate reader, and `gc ready` is
 // specified against that handler's FEDERATION CONTRACT: the same legs in the
 // same order, first-leg-wins dedupe. Where the two deliberately differ (the CLI

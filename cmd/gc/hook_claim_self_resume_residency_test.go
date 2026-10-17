@@ -292,7 +292,7 @@ func TestGcReadyNonInProgressArmsSkipEnrichment(t *testing.T) {
 }
 
 // readyRowsForAssignee runs the crash-recovery read the swapped tier 0 issues.
-func readyRowsForAssignee(t *testing.T, legs []readywork.Leg, assignee string) []readywork.Row {
+func readyRowsForAssignee(t *testing.T, legs []readywork.Leg, assignee string) []readywork.ReadyBead {
 	t.Helper()
 	rows, err := readywork.Read(legs, readywork.Query{Status: readywork.StatusInProgress, Assignee: assignee, Limit: 1})
 	if err != nil {

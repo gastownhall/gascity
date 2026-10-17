@@ -39,7 +39,8 @@ var knownStatuses = []string{StatusOpen, StatusInProgress, StatusBlocked, Status
 // KnownStatuses is the closed set of statuses --status accepts.
 func KnownStatuses() []string { return slices.Clone(knownStatuses) }
 
-// Query is one ready-work question: the `gc ready` flags.
+// Query is one ready-work question: the `gc ready` flags, and the parameters of
+// GET /v0/city/{cityName}/work/ready.
 //
 // --include-ephemeral and --json have no field. Every leg is read across both
 // storage tiers (beads.FederatedReadTier) and the answer is always a JSON array,

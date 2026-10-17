@@ -6790,6 +6790,152 @@
         ],
         "type": "object"
       },
+      "ReadyBead": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "type": "string"
+          },
+          "blocked_by": {
+            "items": {
+              "$ref": "#/components/schemas/ReadyBeadBlocker"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "close_reason": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "defer_until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/ReadyBeadDep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_blocked": {
+            "type": "boolean"
+          },
+          "issue_type": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "needs": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "no_history": {
+            "type": "boolean"
+          },
+          "parent": {
+            "type": "string"
+          },
+          "priority": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "issue_type",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ReadyBeadBlocker": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ReadyBeadDep": {
+        "additionalProperties": false,
+        "properties": {
+          "depends_on_id": {
+            "type": "string"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_id",
+          "depends_on_id",
+          "type"
+        ],
+        "type": "object"
+      },
       "Record": {
         "additionalProperties": false,
         "properties": {
@@ -27230,6 +27376,25 @@
         "required": [
           "webhook",
           "reason"
+        ],
+        "type": "object"
+      },
+      "WorkReadyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The ready work, in the query's order, cut to its limit: exactly the rows gc ready prints.",
+            "items": {
+              "$ref": "#/components/schemas/ReadyBead"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -51366,6 +51531,229 @@
           }
         },
         "summary": "Get v0 city by city name waits"
+      }
+    },
+    "/v0/city/{cityName}/work/ready": {
+      "get": {
+        "description": "Ready work exactly as `gc ready` answers it, read by the controller from the stores it already holds open. Every store is read live at request time (never from a read cache), so work that became ready before the request is in the answer. It reads the city store, the serving (non-suspended) rigs and any relocated class binding, merges them first-store-wins in that order, applies the filters, orders and cuts to the limit. Any store that cannot be read fails the whole request with 503; there is no partial answer.",
+        "operationId": "get-v0-city-by-city-name-work-ready",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only work whose assignee is exactly this identity.",
+            "explode": false,
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "description": "Only work whose assignee is exactly this identity.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only work with no assignee.",
+            "explode": false,
+            "in": "query",
+            "name": "unassigned",
+            "schema": {
+              "description": "Only work with no assignee.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.",
+            "explode": true,
+            "in": "query",
+            "name": "metadata_field",
+            "schema": {
+              "description": "Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Drop beads of this issue type. Repeatable.",
+            "explode": true,
+            "in": "query",
+            "name": "exclude_type",
+            "schema": {
+              "description": "Drop beads of this issue type. Repeatable.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Drop beads carrying this label. Repeatable.",
+            "explode": true,
+            "in": "query",
+            "name": "exclude_label",
+            "schema": {
+              "description": "Drop beads carrying this label. Repeatable.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).",
+              "enum": [
+                "oldest",
+                "newest"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many rows, cut after the merge and the order; 0 is unlimited.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "At most this many rows, cut after the merge and the order; 0 is unlimited.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "List beads in this status instead of ready work.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "List beads in this status instead of ready work.",
+              "enum": [
+                "open",
+                "in_progress",
+                "blocked",
+                "closed"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkReadyBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name work ready"
       }
     },
     "/v0/city/{cityName}/workflow/{workflow_id}": {

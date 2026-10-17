@@ -6,8 +6,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// Row is one row of the ready-work answer: the external wire shape `gc ready`
-// prints.
+// ReadyBead is one row of the ready-work answer: the external wire shape
+// `gc ready` prints and GET /v0/city/{cityName}/work/ready serves.
 //
 // It is a DEDICATED type, not beads.Bead, and that is the point: beads.Bead is
 // the domain model, its fields change for internal reasons, and marshaling it
@@ -29,7 +29,7 @@ import (
 //
 // Field order is the JSON order, and the JSON is a published contract: append,
 // never reorder.
-type Row struct {
+type ReadyBead struct {
 	ID           string            `json:"id"`
 	Title        string            `json:"title"`
 	Status       string            `json:"status"`
@@ -45,7 +45,7 @@ type Row struct {
 	Description  string            `json:"description,omitempty"`
 	Labels       []string          `json:"labels,omitempty"`
 	Metadata     map[string]string `json:"metadata,omitempty"`
-	Dependencies []Dep             `json:"dependencies,omitempty"`
+	Dependencies []ReadyBeadDep    `json:"dependencies,omitempty"`
 	Ephemeral    bool              `json:"ephemeral,omitempty"`
 	NoHistory    bool              `json:"no_history,omitempty"`
 	DeferUntil   *time.Time        `json:"defer_until,omitempty"`
@@ -64,45 +64,45 @@ type Row struct {
 	// every consumer already reads as not-blocked (fail-open). The ready arm
 	// needs nothing: the store's own Ready already applied readiness, so a row it
 	// returned is by construction unblocked.
-	BlockedBy []Blocker `json:"blocked_by,omitempty"`
+	BlockedBy []ReadyBeadBlocker `json:"blocked_by,omitempty"`
 }
 
-// Dep is the wire shape of one dependency edge, for the same reason Row exists:
-// beads.Dep is a domain type.
-type Dep struct {
+// ReadyBeadDep is the wire shape of one dependency edge, for the same reason
+// ReadyBead exists: beads.Dep is a domain type.
+type ReadyBeadDep struct {
 	IssueID     string `json:"issue_id"`
 	DependsOnID string `json:"depends_on_id"`
 	Type        string `json:"type"`
 }
 
-// Blocker is one blocking dependency, carrying the field the readiness decision
-// actually needs: the blocker's STATUS.
+// ReadyBeadBlocker is one blocking dependency, carrying the field the readiness
+// decision actually needs: the blocker's STATUS.
 //
 // The shape is bd's: `bd ready --json` emits
 // `blocked_by: [{"id":..., "status":...}]` and the hook's
 // isDepBlockedHookCandidate reads exactly `status` off each element. Emitting a
 // bare id list (the shape `gc graph --json` uses) would decode without error and
 // be silently ignored, which is worse than omitting the field.
-type Blocker struct {
+type ReadyBeadBlocker struct {
 	ID     string `json:"id"`
 	Status string `json:"status"`
 }
 
-// toRows projects domain beads onto the wire shape, attaching each row's
+// toReadyBeads projects domain beads onto the wire shape, attaching each row's
 // blocked_by projection when one was computed.
-func toRows(items []beads.Bead, blockers map[string][]Blocker) []Row {
-	out := make([]Row, 0, len(items))
+func toReadyBeads(items []beads.Bead, blockers map[string][]ReadyBeadBlocker) []ReadyBead {
+	out := make([]ReadyBead, 0, len(items))
 	for _, b := range items {
-		row := ToRow(b)
+		row := ToReadyBead(b)
 		row.BlockedBy = blockers[b.ID]
 		out = append(out, row)
 	}
 	return out
 }
 
-// ToRow projects one domain bead onto the wire shape, with no blocked_by.
-func ToRow(b beads.Bead) Row {
-	return Row{
+// ToReadyBead projects one domain bead onto the wire shape, with no blocked_by.
+func ToReadyBead(b beads.Bead) ReadyBead {
+	return ReadyBead{
 		ID:           b.ID,
 		Title:        b.Title,
 		Status:       b.Status,
@@ -118,7 +118,7 @@ func ToRow(b beads.Bead) Row {
 		Description:  b.Description,
 		Labels:       b.Labels,
 		Metadata:     b.Metadata,
-		Dependencies: toDeps(b.Dependencies),
+		Dependencies: toReadyBeadDeps(b.Dependencies),
 		Ephemeral:    b.Ephemeral,
 		NoHistory:    b.NoHistory,
 		DeferUntil:   b.DeferUntil,
@@ -127,13 +127,13 @@ func ToRow(b beads.Bead) Row {
 	}
 }
 
-func toDeps(deps []beads.Dep) []Dep {
+func toReadyBeadDeps(deps []beads.Dep) []ReadyBeadDep {
 	if len(deps) == 0 {
 		return nil
 	}
-	out := make([]Dep, 0, len(deps))
+	out := make([]ReadyBeadDep, 0, len(deps))
 	for _, d := range deps {
-		out = append(out, Dep{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type})
+		out = append(out, ReadyBeadDep{IssueID: d.IssueID, DependsOnID: d.DependsOnID, Type: d.Type})
 	}
 	return out
 }

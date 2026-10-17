@@ -969,6 +969,48 @@ func (e GetV0CityByCityNameSessionByIdTranscriptParamsFormat) Valid() bool {
 	}
 }
 
+// Defines values for GetV0CityByCityNameWorkReadyParamsSort.
+const (
+	Newest GetV0CityByCityNameWorkReadyParamsSort = "newest"
+	Oldest GetV0CityByCityNameWorkReadyParamsSort = "oldest"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameWorkReadyParamsSort enum.
+func (e GetV0CityByCityNameWorkReadyParamsSort) Valid() bool {
+	switch e {
+	case Newest:
+		return true
+	case Oldest:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for GetV0CityByCityNameWorkReadyParamsStatus.
+const (
+	Blocked    GetV0CityByCityNameWorkReadyParamsStatus = "blocked"
+	Closed     GetV0CityByCityNameWorkReadyParamsStatus = "closed"
+	InProgress GetV0CityByCityNameWorkReadyParamsStatus = "in_progress"
+	Open       GetV0CityByCityNameWorkReadyParamsStatus = "open"
+)
+
+// Valid indicates whether the value is a known member of the GetV0CityByCityNameWorkReadyParamsStatus enum.
+func (e GetV0CityByCityNameWorkReadyParamsStatus) Valid() bool {
+	switch e {
+	case Blocked:
+		return true
+	case Closed:
+		return true
+	case InProgress:
+		return true
+	case Open:
+		return true
+	default:
+		return false
+	}
+}
+
 // AdapterCapabilities defines model for AdapterCapabilities.
 type AdapterCapabilities struct {
 	MaxMessageLength           int64 `json:"MaxMessageLength"`
@@ -3327,6 +3369,45 @@ type ReadinessItem struct {
 // ReadinessResponse defines model for ReadinessResponse.
 type ReadinessResponse struct {
 	Items map[string]ReadinessItem `json:"items"`
+}
+
+// ReadyBead defines model for ReadyBead.
+type ReadyBead struct {
+	Assignee     *string             `json:"assignee,omitempty"`
+	BlockedBy    *[]ReadyBeadBlocker `json:"blocked_by,omitempty"`
+	CloseReason  *string             `json:"close_reason,omitempty"`
+	CreatedAt    time.Time           `json:"created_at"`
+	DeferUntil   *time.Time          `json:"defer_until,omitempty"`
+	Dependencies *[]ReadyBeadDep     `json:"dependencies,omitempty"`
+	Description  *string             `json:"description,omitempty"`
+	Ephemeral    *bool               `json:"ephemeral,omitempty"`
+	From         *string             `json:"from,omitempty"`
+	Id           string              `json:"id"`
+	IsBlocked    *bool               `json:"is_blocked,omitempty"`
+	IssueType    string              `json:"issue_type"`
+	Labels       *[]string           `json:"labels,omitempty"`
+	Metadata     *map[string]string  `json:"metadata,omitempty"`
+	Needs        *[]string           `json:"needs,omitempty"`
+	NoHistory    *bool               `json:"no_history,omitempty"`
+	Parent       *string             `json:"parent,omitempty"`
+	Priority     *int64              `json:"priority,omitempty"`
+	Ref          *string             `json:"ref,omitempty"`
+	Status       string              `json:"status"`
+	Title        string              `json:"title"`
+	UpdatedAt    *time.Time          `json:"updated_at,omitempty"`
+}
+
+// ReadyBeadBlocker defines model for ReadyBeadBlocker.
+type ReadyBeadBlocker struct {
+	Id     string `json:"id"`
+	Status string `json:"status"`
+}
+
+// ReadyBeadDep defines model for ReadyBeadDep.
+type ReadyBeadDep struct {
+	DependsOnId string `json:"depends_on_id"`
+	IssueId     string `json:"issue_id"`
+	Type        string `json:"type"`
 }
 
 // Record defines model for Record.
@@ -9495,6 +9576,12 @@ type WebhookRejectedPayload struct {
 	Webhook string `json:"webhook"`
 }
 
+// WorkReadyBody defines model for WorkReadyBody.
+type WorkReadyBody struct {
+	// Items The ready work, in the query's order, cut to its limit: exactly the rows gc ready prints.
+	Items *[]ReadyBead `json:"items"`
+}
+
 // WorkerOperationEventPayload defines model for WorkerOperationEventPayload.
 type WorkerOperationEventPayload struct {
 	// AgentName Qualified agent identity (best-effort, absent if the session has no agent_name metadata or alias).
@@ -10685,6 +10772,39 @@ type GetV0CityByCityNameWaitsParams struct {
 	// Session Filter by session ID.
 	Session *string `form:"session,omitempty" json:"session,omitempty"`
 }
+
+// GetV0CityByCityNameWorkReadyParams defines parameters for GetV0CityByCityNameWorkReady.
+type GetV0CityByCityNameWorkReadyParams struct {
+	// Assignee Only work whose assignee is exactly this identity.
+	Assignee *string `form:"assignee,omitempty" json:"assignee,omitempty"`
+
+	// Unassigned Only work with no assignee.
+	Unassigned *bool `form:"unassigned,omitempty" json:"unassigned,omitempty"`
+
+	// MetadataField Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.
+	MetadataField *[]string `form:"metadata_field,omitempty" json:"metadata_field,omitempty"`
+
+	// ExcludeType Drop beads of this issue type. Repeatable.
+	ExcludeType *[]string `form:"exclude_type,omitempty" json:"exclude_type,omitempty"`
+
+	// ExcludeLabel Drop beads carrying this label. Repeatable.
+	ExcludeLabel *[]string `form:"exclude_label,omitempty" json:"exclude_label,omitempty"`
+
+	// Sort Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).
+	Sort *GetV0CityByCityNameWorkReadyParamsSort `form:"sort,omitempty" json:"sort,omitempty"`
+
+	// Limit At most this many rows, cut after the merge and the order; 0 is unlimited.
+	Limit *int64 `form:"limit,omitempty" json:"limit,omitempty"`
+
+	// Status List beads in this status instead of ready work.
+	Status *GetV0CityByCityNameWorkReadyParamsStatus `form:"status,omitempty" json:"status,omitempty"`
+}
+
+// GetV0CityByCityNameWorkReadyParamsSort defines parameters for GetV0CityByCityNameWorkReady.
+type GetV0CityByCityNameWorkReadyParamsSort string
+
+// GetV0CityByCityNameWorkReadyParamsStatus defines parameters for GetV0CityByCityNameWorkReady.
+type GetV0CityByCityNameWorkReadyParamsStatus string
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdParams defines parameters for DeleteV0CityByCityNameWorkflowByWorkflowId.
 type DeleteV0CityByCityNameWorkflowByWorkflowIdParams struct {
@@ -21379,6 +21499,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameWaits request
 	GetV0CityByCityNameWaits(ctx context.Context, cityName string, params *GetV0CityByCityNameWaitsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameWorkReady request
+	GetV0CityByCityNameWorkReady(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// DeleteV0CityByCityNameWorkflowByWorkflowId request
 	DeleteV0CityByCityNameWorkflowByWorkflowId(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -23848,6 +23971,18 @@ func (c *Client) GetV0CityByCityNameWaitById(ctx context.Context, cityName strin
 
 func (c *Client) GetV0CityByCityNameWaits(ctx context.Context, cityName string, params *GetV0CityByCityNameWaitsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameWaitsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameWorkReady(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameWorkReadyRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -34126,6 +34261,174 @@ func NewGetV0CityByCityNameWaitsRequest(server string, cityName string, params *
 	return req, nil
 }
 
+// NewGetV0CityByCityNameWorkReadyRequest generates requests for GetV0CityByCityNameWorkReady
+func NewGetV0CityByCityNameWorkReadyRequest(server string, cityName string, params *GetV0CityByCityNameWorkReadyParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/work/ready", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Assignee != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "assignee", *params.Assignee, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Unassigned != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "unassigned", *params.Unassigned, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "boolean", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.MetadataField != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "metadata_field", *params.MetadataField, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ExcludeType != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "exclude_type", *params.ExcludeType, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ExcludeLabel != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "exclude_label", *params.ExcludeLabel, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Sort != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "sort", *params.Sort, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Limit != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "limit", *params.Limit, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "integer", Format: "int64"}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.Status != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "status", *params.Status, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewDeleteV0CityByCityNameWorkflowByWorkflowIdRequest generates requests for DeleteV0CityByCityNameWorkflowByWorkflowId
 func NewDeleteV0CityByCityNameWorkflowByWorkflowIdRequest(server string, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams) (*http.Request, error) {
 	var err error
@@ -35217,6 +35520,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameWaitsWithResponse request
 	GetV0CityByCityNameWaitsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWaitsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitsResponse, error)
+
+	// GetV0CityByCityNameWorkReadyWithResponse request
+	GetV0CityByCityNameWorkReadyWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkReadyParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWorkReadyResponse, error)
 
 	// DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request
 	DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse(ctx context.Context, cityName string, workflowId string, params *DeleteV0CityByCityNameWorkflowByWorkflowIdParams, reqEditors ...RequestEditorFn) (*DeleteV0CityByCityNameWorkflowByWorkflowIdResponse, error)
@@ -39624,6 +39930,33 @@ func (r GetV0CityByCityNameWaitsResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameWorkReadyResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *WorkReadyBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameWorkReadyResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameWorkReadyResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type DeleteV0CityByCityNameWorkflowByWorkflowIdResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -41568,6 +41901,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameWaitsWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameWaitsResponse(rsp)
+}
+
+// GetV0CityByCityNameWorkReadyWithResponse request returning *GetV0CityByCityNameWorkReadyResponse
+func (c *ClientWithResponses) GetV0CityByCityNameWorkReadyWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkReadyParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWorkReadyResponse, error) {
+	rsp, err := c.GetV0CityByCityNameWorkReady(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameWorkReadyResponse(rsp)
 }
 
 // DeleteV0CityByCityNameWorkflowByWorkflowIdWithResponse request returning *DeleteV0CityByCityNameWorkflowByWorkflowIdResponse
@@ -51691,6 +52033,67 @@ func ParseGetV0CityByCityNameWaitsResponse(rsp *http.Response) (*GetV0CityByCity
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameWorkReadyResponse parses an HTTP response from a GetV0CityByCityNameWorkReadyWithResponse call
+func ParseGetV0CityByCityNameWorkReadyResponse(rsp *http.Response) (*GetV0CityByCityNameWorkReadyResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameWorkReadyResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest WorkReadyBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

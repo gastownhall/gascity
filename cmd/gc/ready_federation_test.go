@@ -364,7 +364,7 @@ func TestReadyIsNotFailedByADarkSuspendedRig(t *testing.T) {
 	if openFailure := "rig " + strconv.Quote(readyBrokenRigName) + " store:"; strings.Contains(stderr.String(), openFailure) {
 		t.Fatalf("gc ready stderr = %q, but the suspended rig is outside the frame and must not be opened", stderr.String())
 	}
-	var rows []readywork.Row
+	var rows []readywork.ReadyBead
 	if err := json.Unmarshal(stdout.Bytes(), &rows); err != nil {
 		t.Fatalf("gc ready emitted %q, which is not the bd array: %v", stdout.String(), err)
 	}

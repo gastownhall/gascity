@@ -1,8 +1,11 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"strconv"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/spf13/cobra"
@@ -11,11 +14,12 @@ import (
 // newReadyCmd builds `gc ready`: the in-process, city-wide claimable-work reader
 // that federates the stores a split city spreads its work across.
 //
-// The reader itself is internal/readywork; this file is its CLI projection.
-// On a city that relocates nothing it reads the stores it always read.
+// The reader itself is internal/readywork, shared with the supervisor's
+// GET /v0/city/{cityName}/work/ready; this file is its CLI projection. On a city
+// that relocates nothing it reads the stores it always read.
 //
 // The output is a bare JSON array in bd's row shape, because it is a drop-in for
-// the `bd ready --json` the default work_query builds; see readywork.Row.
+// the `bd ready --json` the default work_query builds; see readywork.ReadyBead.
 func newReadyCmd(stdout, stderr io.Writer) *cobra.Command {
 	var opts readywork.Query
 	var jsonOut bool
@@ -51,7 +55,14 @@ Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
 suspended_on_start and not resumed. Their agents claim nothing and the
 controller counts no demand in them, so this reads the same rigs the controller
 does; their work comes back when the rig is resumed. The city store and a
-relocated graph store are always read.`,
+relocated graph store are always read.
+
+When the city's controller is running, it answers the query from the stores it
+already holds open (GET /v0/city/{cityName}/work/ready), reading every store
+live, never from a cache. The answer is the one this command would compute
+itself, without opening a store. If the controller is not running, refuses, or
+does not answer within 10s, this command reads the stores itself. GC_NO_API=1
+forces the local read.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
 			if cmdReady(opts, stdout, stderr) != 0 {
@@ -117,6 +128,13 @@ func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if rows, ok := readyThroughController(cityPath, opts, stderr); ok {
+		if err := writeJSON(stdout, rows); err != nil {
+			fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
 	cfg, err := loadCityConfig(cityPath, stderr)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc ready: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -150,4 +168,49 @@ func cmdReady(opts readywork.Query, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// readyAPITimeout bounds how long `gc ready` waits for the controller before it
+// reads in-process instead. The controller answers a claim tier in tens to
+// hundreds of milliseconds and a whole unbounded ready set (eleven thousand rows
+// on a large city) in a few seconds; past this, the request is hung or the
+// controller is overloaded, and the in-process read is the faster route. A
+// variable so tests can stand up a hung controller without waiting this long.
+var readyAPITimeout = 10 * time.Second
+
+// readyAPIClient resolves the controller `gc ready` asks, or nil with the reason
+// it reads in-process instead. supervisorFallthroughAPIClient is the routing for
+// a read whose local path is expensive: a supervisor-managed city answers on the
+// supervisor's port even though its per-city controller socket is alive, where
+// apiClient would send it to the local path. A variable so tests can stand a
+// controller up, or take it away.
+var readyAPIClient = supervisorFallthroughAPIClient
+
+// readyThroughController asks the controller holding this city's stores open
+// (GET /v0/city/{cityName}/work/ready) for the answer, which is the in-process
+// reader's answer over the controller's stores: same rows, same order, same
+// fields, read live (see controllerState.ReadyWork). The process then opens no
+// store at all.
+//
+// It answers false on ANY failure, and the caller reads in-process exactly as it
+// always has: no controller, a controller from before the endpoint existed, a
+// refused request (a config reload in flight), a store the controller could not
+// read, a transport error or a timeout. An answer from the controller is only a
+// faster route to the same rows, never a different answer, so the slower route
+// is always the safe one. GC_NO_API forces it.
+func readyThroughController(cityPath string, q readywork.Query, stderr io.Writer) ([]readywork.ReadyBead, bool) {
+	client, reason := readyAPIClient(cityPath)
+	if client == nil {
+		logRoute(stderr, "ready", "fallback", reason)
+		return nil, false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), readyAPITimeout)
+	defer cancel()
+	rows, err := client.ReadyWork(ctx, q)
+	if err != nil {
+		logRoute(stderr, "ready", "fallback", "api-error", "error", strconv.Quote(err.Error()))
+		return nil, false
+	}
+	logRoute(stderr, "ready", "api", "")
+	return rows, true
 }

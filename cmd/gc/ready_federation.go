@@ -1,7 +1,8 @@
 package main
 
 // The leg assembly behind `gc ready`. The reader over the legs is
-// internal/readywork, and this command is its only caller.
+// internal/readywork, shared with the supervisor's GET
+// /v0/city/{cityName}/work/ready.
 //
 // # Why this exists
 //

@@ -95,13 +95,13 @@ func TestInProgressEnrichmentKeepsEachRowsBlockersInEdgeOrder(t *testing.T) {
 		if err != nil {
 			t.Fatalf("DepList: %v", err)
 		}
-		var want []Blocker
+		var want []ReadyBeadBlocker
 		for _, dep := range deps {
 			blocker, err := store.Get(dep.DependsOnID)
 			if err != nil {
 				t.Fatalf("Get: %v", err)
 			}
-			want = append(want, Blocker{ID: blocker.ID, Status: blocker.Status})
+			want = append(want, ReadyBeadBlocker{ID: blocker.ID, Status: blocker.Status})
 		}
 		if !reflect.DeepEqual(row.BlockedBy, want) {
 			t.Fatalf("row %s blocked_by = %+v, want %+v", row.ID, row.BlockedBy, want)

@@ -56,7 +56,7 @@ const LegFanOut = 8
 // the top N of the city, not of whichever leg filled the quota first. A store
 // may be ASKED for a bounded answer (pushdown.go), but only where that is
 // provably the same top N.
-func Read(legs []Leg, q Query) ([]Row, error) {
+func Read(legs []Leg, q Query) ([]ReadyBead, error) {
 	c, err := compile(q)
 	if err != nil {
 		return nil, err
@@ -73,14 +73,14 @@ func Read(legs []Leg, q Query) ([]Row, error) {
 	// Enrich AFTER the bound, so the dependency reads are paid only for the rows
 	// actually emitted. The crash-recovery tier asks for --limit=1, which makes
 	// this one dependency read on the one row that matters.
-	var blockers map[string][]Blocker
+	var blockers map[string][]ReadyBeadBlocker
 	if c.status == StatusInProgress {
 		blockers, err = blockedByForRows(items, legs, owners)
 		if err != nil {
 			return nil, err
 		}
 	}
-	return toRows(items, blockers), nil
+	return toReadyBeads(items, blockers), nil
 }
 
 // readCandidates reads the merged candidate set from the legs, and which leg
@@ -262,7 +262,7 @@ func merge(results []legResult) ([]beads.Bead, map[string]int) {
 // A dependency read that FAILS is returned, not swallowed. Reporting a gated
 // bead as unblocked is what re-serves work no worker can advance; the federation
 // is fail-loud for the same reason.
-func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]Blocker, error) {
+func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, error) {
 	if len(owners) == 0 || len(items) == 0 {
 		return nil, nil
 	}
@@ -291,7 +291,7 @@ func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (ma
 			failed[id] = err
 		}
 	}
-	out := make(map[string][]Blocker, len(items))
+	out := make(map[string][]ReadyBeadBlocker, len(items))
 	for _, item := range items {
 		if err, bad := failed[item.ID]; bad {
 			return nil, err
@@ -310,7 +310,7 @@ func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (ma
 // legBlockers is one leg's enrichment: each row's blockers, or the error that
 // row's enrichment hit.
 type legBlockers struct {
-	blockers map[string][]Blocker
+	blockers map[string][]ReadyBeadBlocker
 	errs     map[string]error
 }
 
@@ -321,7 +321,7 @@ type legBlockers struct {
 // the rows and then the distinct blocking targets are read concurrently, at most
 // LegFanOut at a time.
 func readLegBlockers(leg Leg, ids []string) legBlockers {
-	out := legBlockers{blockers: make(map[string][]Blocker, len(ids)), errs: make(map[string]error)}
+	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(ids)), errs: make(map[string]error)}
 	live := beads.HandlesFor(leg.Store).Live
 	deps := make([][]beads.Dep, len(ids))
 	depErrs := make([]error, len(ids))
@@ -356,7 +356,7 @@ func readLegBlockers(leg Leg, ids []string) legBlockers {
 		if depErrs[i] != nil {
 			continue
 		}
-		var blockers []Blocker
+		var blockers []ReadyBeadBlocker
 		for _, dep := range deps[i] {
 			if !beads.IsReadyBlockingDependencyType(dep.Type) {
 				continue
@@ -371,7 +371,7 @@ func readLegBlockers(leg Leg, ids []string) legBlockers {
 				blockers = nil
 				break
 			}
-			blockers = append(blockers, Blocker{ID: got[t].ID, Status: got[t].Status})
+			blockers = append(blockers, ReadyBeadBlocker{ID: got[t].ID, Status: got[t].Status})
 		}
 		if _, failed := out.errs[id]; !failed {
 			out.blockers[id] = blockers
