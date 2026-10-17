@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 
@@ -451,6 +452,7 @@ func legacyPublicPackSubpath(subpath string) (string, bool) {
 	return "", false
 }
 
+//nolint:unparam // fs seam is intentional for command tests and symmetry with the other import helpers.
 func rewriteLegacyPublicPackImportsFS(fs fsys.FS, cityPath string, targets map[string]wave1PublicPackImportTarget) (bool, error) {
 	for packName, target := range targets {
 		if strings.TrimSpace(packName) == "" || strings.TrimSpace(target.Binding) == "" {
@@ -594,6 +596,12 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 			if _, legacyTarget := legacyPublicPackForSource(cityPath, existing.Source); !legacyTarget {
 				return false, nil, fmt.Errorf("refusing to overwrite existing %q import with source %q", binding, existing.Source)
 			}
+			// The migration target supplies the durable source and pin, but
+			// the existing legacy declaration owns the composition options.
+			// Preserve those options (including agent narrowing) while
+			// relocating the source so --fix cannot silently widen the roster.
+			target.Import = preserveImportOptions(target.Import, existing)
+			targetBindings[binding] = target
 		}
 	}
 	for _, name := range legacyNames {
@@ -607,7 +615,19 @@ func rewriteLegacyPublicPackImportMap(cityPath string, imports map[string]config
 
 func sameImport(a, b config.Import) bool {
 	return strings.TrimSpace(a.Source) == strings.TrimSpace(b.Source) &&
-		strings.TrimSpace(a.Version) == strings.TrimSpace(b.Version)
+		strings.TrimSpace(a.Version) == strings.TrimSpace(b.Version) &&
+		a.Export == b.Export &&
+		a.ImportIsTransitive() == b.ImportIsTransitive() &&
+		strings.TrimSpace(a.Shadow) == strings.TrimSpace(b.Shadow) &&
+		slices.Equal(a.AgentsExclude, b.AgentsExclude)
+}
+
+func preserveImportOptions(target, existing config.Import) config.Import {
+	target.Export = existing.Export
+	target.Transitive = existing.Transitive
+	target.Shadow = existing.Shadow
+	target.AgentsExclude = append([]string(nil), existing.AgentsExclude...)
+	return target
 }
 
 func replaceImportOrderWithTargets(order []string, rewrites []legacyPublicPackRewrite) []string {

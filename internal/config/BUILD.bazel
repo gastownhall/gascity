@@ -118,6 +118,7 @@ go_test(
         "home_fallback_test.go",
         "implicit_agent_patch_repro_test.go",
         "implicit_test.go",
+        "import_agents_exclude_test.go",
         "import_negative_test.go",
         "import_test.go",
         "launch_command_test.go",
