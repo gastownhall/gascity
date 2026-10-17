@@ -150,17 +150,18 @@ func TestFakeFenceRefusesEveryMiss(t *testing.T) {
 }
 
 // maxUnfencedBackends bounds the production backends that cannot fence
-// session input. Lower it as backends gain a fence (OJ-12a2: subprocess,
-// t3bridge); never raise it.
-const maxUnfencedBackends = 5
+// session input. Lower it as backends gain a fence (OJ-12a2: t3bridge);
+// never raise it.
+const maxUnfencedBackends = 4
 
 // fencedBackends is how each production backend that can fence session
 // input does it (RUNTIME-CONTRACT-009 and -013); every other one reports
 // none.
 var fencedBackends = map[runtime.Profile]runtime.InputFencing{
-	runtime.ProfileTmux: runtime.InputFencingAtomic,
-	runtime.ProfileExec: runtime.InputFencingAtomic,
-	runtime.ProfileACP:  runtime.InputFencingChecked,
+	runtime.ProfileTmux:       runtime.InputFencingAtomic,
+	runtime.ProfileExec:       runtime.InputFencingAtomic,
+	runtime.ProfileACP:        runtime.InputFencingChecked,
+	runtime.ProfileSubprocess: runtime.InputFencingChecked,
 }
 
 // Kills a backend that loses its input fence or weakens it, and a new
