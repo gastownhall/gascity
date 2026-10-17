@@ -381,3 +381,50 @@ func TestInstructionsFileCheck_MergesProvidersForSameGap(t *testing.T) {
 		t.Fatalf("Details[0] = %q, want sorted plural provider list", r.Details[0])
 	}
 }
+
+// Claude reads .claude/CLAUDE.md; doctor must not create a root file over it.
+func TestInstructionsFileCheck_ClaudeProjectDirectory(t *testing.T) {
+	claudeBase, codexBase := "claude", "codex"
+	for _, tc := range []struct {
+		name      string
+		provider  config.ProviderSpec
+		directory bool
+		wantOK    bool
+	}{
+		{name: "builtin", provider: config.BuiltinProviderAlias("claude"), wantOK: true},
+		{name: "inherited", provider: config.ProviderSpec{Base: &claudeBase}, wantOK: true},
+		{name: "custom filename", provider: config.ProviderSpec{Base: &claudeBase, InstructionsFile: "CUSTOM.md"}},
+		{name: "other family", provider: config.ProviderSpec{Base: &codexBase, InstructionsFile: "CLAUDE.md"}},
+		{name: "directory is not a file", provider: config.BuiltinProviderAlias("claude"), directory: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city := t.TempDir()
+			writeFile(t, filepath.Join(city, "AGENTS.md"), "shared instructions")
+			project := filepath.Join(city, ".claude", "CLAUDE.md")
+			if tc.directory {
+				if err := os.MkdirAll(project, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			} else {
+				writeFile(t, project, "project instructions")
+			}
+			cfg := &config.City{
+				Providers: map[string]config.ProviderSpec{"derived": tc.provider},
+				Agents:    []config.Agent{{Name: "a", Provider: "derived"}},
+			}
+			check := newInstructionsFileCheckForTest(cfg, city)
+			r := check.Run(&CheckContext{})
+			if (r.Status == StatusOK) != tc.wantOK {
+				t.Fatalf("status = %v, want OK=%v: %v", r.Status, tc.wantOK, r.Details)
+			}
+			if tc.wantOK {
+				if err := check.Fix(&CheckContext{}); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(filepath.Join(city, "CLAUDE.md")); !os.IsNotExist(err) {
+					t.Fatalf("Fix created root instructions: %v", err)
+				}
+			}
+		})
+	}
+}
