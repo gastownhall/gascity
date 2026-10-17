@@ -28,8 +28,9 @@ type leaseSpyProvider struct {
 	store   beads.Store
 	id      string
 	starts  []string
-	ttls    []string // the record's TTL at each Start
-	watched []bool   // whether each Start's ctx ends at its lease's SafeUntil
+	ttls    []string        // the record's TTL at each Start
+	watched []bool          // whether each Start's ctx ends at its lease's SafeUntil
+	left    []time.Duration // what each Start's ctx had left when it began
 	stops   []string
 }
 
@@ -43,8 +44,9 @@ func (p *leaseSpyProvider) Start(ctx context.Context, name string, cfg runtime.C
 	p.mu.Lock()
 	p.starts = append(p.starts, b.Metadata[sessionpkg.RuntimeLeaseHolderKey])
 	p.ttls = append(p.ttls, b.Metadata[sessionpkg.RuntimeLeaseTTLKey])
-	_, deadline := ctx.Deadline()
+	at, deadline := ctx.Deadline()
 	p.watched = append(p.watched, deadline)
+	p.left = append(p.left, time.Until(at))
 	p.mu.Unlock()
 	return p.Fake.Start(ctx, name, cfg)
 }
@@ -141,6 +143,39 @@ func TestLegacyStartDefersOnAHeldRuntimeLease(t *testing.T) {
 	}
 	if meta[sessionpkg.RuntimeLeaseHolderKey] != "" || meta[sessionpkg.RuntimeLeaseEpochKey] != "2" {
 		t.Fatalf("record after the commit = %v, want epoch 2 released", meta)
+	}
+}
+
+// TestLegacyStartGetsItsStartupTimeoutAfterASlowPrepare (#7897): a start's
+// provider calls get the whole startup timeout however much of the runtime
+// lease its prepare spent. The record is taken before PreWake, and on a host
+// with a starved store the prepare after it took 71-96s live, so the 120s
+// record of a 60s startup timeout reached SafeUntil 14-37s into the provider
+// Start. That cut Codex's late-dialog watch (three quarters of what remains
+// of the start's deadline) to 10s, and a trust dialog drawn 16s after the
+// composer was left on screen. Here the record has 50s left at the start, as
+// after a 70s prepare.
+func TestLegacyStartGetsItsStartupTimeoutAfterASlowPrepare(t *testing.T) {
+	f := newLeaseStartFixture(t, beads.NewMemStore())
+	f.cand.lease = f.hold(t) // a 60s record: SafeUntil 50s out
+	defer f.cand.lease.Release()
+	clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
+	item, err := prepareStartCandidateForCity(f.cand, f.city, "test-city", f.cfg, f.sp, f.store, clk, io.Discard, nil, dispatchOptionSources{})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	const startupTimeout = time.Minute
+	results := executePreparedStartWaveForCity(context.Background(), []preparedStart{*item}, f.city, f.sp, f.store, f.cfg, startupTimeout, 1)
+	if len(results) != 1 || results[0].err != nil || len(f.sp.left) != 1 {
+		t.Fatalf("results %+v, starts %d; want one started session", results, len(f.sp.left))
+	}
+	if left := f.sp.left[0]; left < startupTimeout-5*time.Second {
+		t.Fatalf("the provider Start had %v left of a %v startup timeout, so Codex's late-dialog watch gets %v, not %v; the lease spent in prepare cut it short",
+			left.Round(time.Second), startupTimeout, (left * 3 / 4).Round(time.Second), startupTimeout*3/4)
+	}
+	meta := mustGetBead(t, f.store, f.cand.info.ID).Metadata
+	if meta[sessionpkg.RuntimeLeaseTTLKey] != "120" || meta[sessionpkg.RuntimeLeaseEpochKey] != "1" {
+		t.Fatalf("record after the start = %v, want the start's 120s TTL under the same epoch", meta)
 	}
 }
 

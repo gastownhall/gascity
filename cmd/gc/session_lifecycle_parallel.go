@@ -1798,7 +1798,7 @@ func executePreparedStartWaveForCity(
 				<-sem
 				done <- i
 			}()
-			watched, unwatch := watchStartLease(ctx, item)
+			watched, unwatch := watchStartLease(ctx, item, startupTimeout)
 			defer unwatch()
 			results[i] = runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, startOpts.sessionStaleKeyDetectionWaiter, startOpts.warmClaimProbe)
 		}()
@@ -1814,10 +1814,16 @@ func executePreparedStartWaveForCity(
 var startLeaseWatchEvery = 5 * time.Second
 
 // watchStartLease runs a start's provider calls on its lease's Watch, so they
-// stop once the record lapses or moves. A start without a record, or without
-// a ctx, runs on ctx.
-func watchStartLease(ctx context.Context, item preparedStart) (context.Context, func()) {
+// stop once the record lapses or moves. The record was taken before the
+// start's PreWake, and the prepares of its batch, its own included, may have
+// spent much of it, so it is first extended to a whole TTL from now
+// (RuntimeLease.Extend): the start gets its full startupTimeout, and Codex's
+// late-dialog watch its share of that, rather than what the prepares left
+// (#7897). A failed extension leaves the record as taken, which the Watch then
+// bounds as before. A start without a record, or without a ctx, runs on ctx.
+func watchStartLease(ctx context.Context, item preparedStart, startupTimeout time.Duration) (context.Context, func()) {
 	if l := item.candidate.lease; ctx != nil && l != nil && l.Epoch() != 0 {
+		_ = l.Extend(sessionpkg.RuntimeLeaseTTL(startupTimeout))
 		if watched, cancel, err := l.Watch(ctx, startLeaseWatchEvery); err == nil {
 			return watched, cancel
 		}
@@ -2173,7 +2179,7 @@ func enqueuePreparedStartWaveForCity(
 				}
 			}
 			defer releaseStart()
-			watched, unwatch := watchStartLease(ctx, item)
+			watched, unwatch := watchStartLease(ctx, item, startupTimeout)
 			result := runPreparedStartCandidate(watched, item, cityPath, sp, store, cfg, startupTimeout, stabilityWaiter, sessionStaleKeyDetectionWaiter, warmClaim)
 			unwatch()
 			// Resolve before the commit so a stale, refused, or panicking

@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"reflect"
 	"strconv"
 	"strings"
 	"sync"
@@ -1218,5 +1219,68 @@ func TestRuntimeLeaseHeldAt(t *testing.T) {
 	var none *RuntimeLease
 	if none.HeldAt(leaseT0) {
 		t.Fatal("a nil lease reads held")
+	}
+}
+
+// TestRuntimeLeaseExtend (#7897): a start extends its record once, as its
+// provider calls begin, so the start's clock starts at the start and not at
+// the record its prepare ran under. The extension keeps the holder and the
+// epoch, so a taken-over or lapsed lease cannot extend itself back.
+func TestRuntimeLeaseExtend(t *testing.T) {
+	f := newLeaseFixture(t)
+	city := t.TempDir()
+	now := leaseT0
+	req := f.req(city, leaseT0)
+	req.now = func() time.Time { return now }
+	l, err := TryRuntimeLease(f.front, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Release()
+	taken := f.meta(t)
+
+	now = leaseT0.Add(RuntimeLeaseSkewAllowance - time.Second)
+	if err := l.Extend(leaseTTL); err != nil {
+		t.Fatalf("Extend by less than the skew allowance: %v", err)
+	}
+	if !reflect.DeepEqual(f.meta(t), taken) || !l.Expires().Equal(leaseT0.Add(leaseTTL)) {
+		t.Fatalf("an extension under the skew allowance wrote %v (expires %v), want nothing written", f.meta(t), l.Expires())
+	}
+
+	now = leaseT0.Add(3 * time.Minute)
+	if err := l.Extend(leaseTTL); err != nil {
+		t.Fatalf("Extend: %v", err)
+	}
+	meta := f.meta(t)
+	if want := now.Add(leaseTTL); !l.Expires().Equal(want) || meta[RuntimeLeaseExpiresKey] != want.Format(time.RFC3339) ||
+		meta[RuntimeLeaseTTLKey] != "240" || meta[RuntimeLeaseHolderKey] != taken[RuntimeLeaseHolderKey] || meta[RuntimeLeaseEpochKey] != "1" {
+		t.Fatalf("extended lease expires %v, record %v; want %v under the same holder and epoch", l.Expires(), meta, want)
+	}
+	if !l.HeldAt(now.Add(leaseTTL - RuntimeLeaseSkewAllowance - time.Second)) {
+		t.Fatal("the extended lease reads not held before its new SafeUntil")
+	}
+
+	now = l.SafeUntil()
+	if err := l.Extend(leaseTTL); !errors.Is(err, ErrRuntimeLeaseExpired) {
+		t.Fatalf("Extend at SafeUntil = %v, want ErrRuntimeLeaseExpired: a contender may already read it lapsed", err)
+	}
+
+	now = leaseT0.Add(4 * time.Minute)
+	f.write(t, MetadataPatch{RuntimeLeaseHolderKey: "other/1/n", RuntimeLeaseEpochKey: "9"})
+	before := l.Expires()
+	if err := l.Extend(leaseTTL); !errors.Is(err, ErrRuntimeLeaseLost) {
+		t.Fatalf("Extend after a takeover = %v, want ErrRuntimeLeaseLost", err)
+	}
+	if meta := f.meta(t); meta[RuntimeLeaseHolderKey] != "other/1/n" || meta[RuntimeLeaseExpiresKey] != before.Format(time.RFC3339) || !l.Expires().Equal(before) {
+		t.Fatalf("record after a refused extension = %v (lease expires %v), want the taker's, unchanged", meta, l.Expires())
+	}
+
+	flock, err := TryRuntimeLease(nil, RuntimeLeaseRequest{City: city, Name: "s-flock"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer flock.Release()
+	if err := flock.Extend(leaseTTL); err != nil || !flock.Expires().IsZero() {
+		t.Fatalf("Extend on a flock-only lease = %v (expires %v), want a no-op", err, flock.Expires())
 	}
 }
