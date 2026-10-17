@@ -23,8 +23,6 @@ type fakeGitProbe struct {
 	hasUncommitted   bool
 	hasUnpushed      bool
 	unpushedErr      error
-	hasStashes       bool
-	stashesErr       error
 	worktreeRemove   func(path string, force bool) error
 	removedPath      string
 	removedForce     bool
@@ -39,7 +37,7 @@ func (f *fakeGitProbe) HasUncommittedWork() bool { return f.hasUncommitted }
 func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
-func (f *fakeGitProbe) HasStashesResult() (bool, error) { return f.hasStashes, f.stashesErr }
+
 func (f *fakeGitProbe) WorktreeRemove(path string, force bool) error {
 	f.removeInvoked = true
 	f.removedPath = path
@@ -312,32 +310,131 @@ func TestPruneAgentHomeWorktreeIfSafe_UnpushedProbeError(t *testing.T) {
 	assertNoWorktreeStaleMarker(t, fx.workerDir)
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_HasStashes(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, hasStashes: true, currentBranch: "builder/ga-ghi789"})
+// TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock is a real-git
+// regression test for the repo-global stash aliasing bug (ga-pyp2oh):
+// `git stash list` reads refs/stash from the shared git admin dir, so its
+// result used to be identical for every worktree of the same repo
+// regardless of which worktree's own state was probed. pruneAgentHomeWorktreeIfSafe
+// no longer probes stashes at all; this test exercises a real repo to prove
+// an unrelated stash elsewhere in the shared repo never blocks reclaim.
+func TestPruneAgentHomeWorktreeIfSafe_UnrelatedStashDoesNotBlock(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	rigRoot := t.TempDir()
+	runGit(t, rigRoot, "clone", bare, ".")
+	runGit(t, rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, rigRoot, "config", "user.name", "Test")
+	runGit(t, rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGit(t, rigRoot, "push", "origin", "HEAD")
+
+	// A stash rooted at the rig root — simulating some unrelated agent
+	// session having stashed work anywhere in the shared repo.
+	if err := os.WriteFile(filepath.Join(rigRoot, "wip.txt"), []byte("wip"), 0o644); err != nil {
+		t.Fatalf("write wip file: %v", err)
+	}
+	runGit(t, rigRoot, "add", "wip.txt")
+	runGit(t, rigRoot, "stash")
+
+	cityPath := t.TempDir()
+	workerDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecat-1")
+	if err := os.MkdirAll(filepath.Dir(workerDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktree parent: %v", err)
+	}
+	runGit(t, rigRoot, "worktree", "add", "-b", "polecat-1-branch", workerDir)
+
+	// Sanity: prove the aliasing precondition. The stash created at
+	// rigRoot must be visible from workerDir too, or this test proves
+	// nothing about the bug.
+	if out := runGit(t, workerDir, "stash", "list"); strings.TrimSpace(out) == "" {
+		t.Fatalf("test setup invalid: rig-root stash not visible from workerDir — aliasing precondition not met")
+	}
+
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
+	session := beads.Bead{
+		ID: "session-1",
+		Metadata: map[string]string{
+			"worker_dir":   workerDir,
+			"template":     "demo/polecat",
+			"session_name": "demo/polecat-1",
+		},
+	}
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true with stashes")
+	if !pruneAgentHomeWorktreeIfSafe(session, cityPath, cfg, &stderr) {
+		t.Fatalf("prune returned false for a clean, fully-pushed worktree merely because an unrelated stash exists elsewhere in the shared repo; stderr=%s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "stashed work") {
-		t.Errorf("expected stashes-reason log; got %q", stderr.String())
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Errorf("workerDir %s should have been removed; stat err=%v", workerDir, err)
 	}
-	assertWorktreeStaleMarker(t, fx.workerDir, "builder/ga-ghi789", "stashed-work")
 }
 
-func TestPruneAgentHomeWorktreeIfSafe_StashProbeError(t *testing.T) {
-	fx := newPruneFixture(t)
-	fx.setProbe(fx.workerDir, &fakeGitProbe{isRepo: true, stashesErr: errors.New("boom")})
+// TestPruneAgentHomeWorktreeIfSafe_StashInsideWorktreeSurvivesPrune locks in
+// the premise the stash-gate removal rests on (ga-pyp2oh): a stash created
+// from inside the worktree being pruned is not lost when the worktree is
+// removed. Stash commits live in the shared object store and are held by
+// refs/stash in the shared git admin dir, neither of which
+// `git worktree remove` touches — so the gate could only ever have produced
+// false positives, never prevented a real loss. This test proves the stash
+// entry and its full diff are both still readable from the rig root after
+// the worktree directory is gone.
+func TestPruneAgentHomeWorktreeIfSafe_StashInsideWorktreeSurvivesPrune(t *testing.T) {
+	bare := t.TempDir()
+	runGit(t, bare, "init", "--bare")
+
+	rigRoot := t.TempDir()
+	runGit(t, rigRoot, "clone", bare, ".")
+	runGit(t, rigRoot, "config", "user.email", "test@test.com")
+	runGit(t, rigRoot, "config", "user.name", "Test")
+	runGit(t, rigRoot, "commit", "--allow-empty", "-m", "init")
+	runGit(t, rigRoot, "push", "origin", "HEAD")
+
+	cityPath := t.TempDir()
+	workerDir := filepath.Join(cityPath, ".gc", "worktrees", "demo", "polecat-1")
+	if err := os.MkdirAll(filepath.Dir(workerDir), 0o755); err != nil {
+		t.Fatalf("mkdir worktree parent: %v", err)
+	}
+	runGit(t, rigRoot, "worktree", "add", "-b", "polecat-1-branch", workerDir)
+
+	// Stash work from *inside* the worktree about to be pruned — the case
+	// the removed gate nominally existed to protect. Stashing leaves the
+	// worktree clean, so no other safety gate keeps it alive.
+	const stashedLine = "work stashed inside the worktree"
+	if err := os.WriteFile(filepath.Join(workerDir, "inside.txt"), []byte(stashedLine+"\n"), 0o644); err != nil {
+		t.Fatalf("write in-worktree file: %v", err)
+	}
+	runGit(t, workerDir, "add", "inside.txt")
+	runGit(t, workerDir, "stash")
+	if out := runGit(t, workerDir, "status", "--porcelain"); strings.TrimSpace(out) != "" {
+		t.Fatalf("test setup invalid: worktree not clean after stash; status=%q", out)
+	}
+
+	cfg := &config.City{Rigs: []config.Rig{{Name: "demo", Path: rigRoot}}}
+	session := beads.Bead{
+		ID: "session-1",
+		Metadata: map[string]string{
+			"worker_dir":   workerDir,
+			"template":     "demo/polecat",
+			"session_name": "demo/polecat-1",
+		},
+	}
 
 	var stderr bytes.Buffer
-	if pruneAgentHomeWorktreeIfSafe(fx.sessionBead(), fx.cityPath, fx.cfg, &stderr) {
-		t.Fatal("prune returned true after stash probe error")
+	if !pruneAgentHomeWorktreeIfSafe(session, cityPath, cfg, &stderr) {
+		t.Fatalf("prune returned false for a clean, fully-pushed worktree; stderr=%s", stderr.String())
 	}
-	if !strings.Contains(stderr.String(), "stash probe failed") {
-		t.Errorf("expected stash-error log; got %q", stderr.String())
+	if _, err := os.Stat(workerDir); !os.IsNotExist(err) {
+		t.Fatalf("workerDir %s should have been removed; stat err=%v", workerDir, err)
 	}
-	assertNoWorktreeStaleMarker(t, fx.workerDir)
+
+	// The load-bearing assertion: the stash outlived the worktree it was
+	// made in, and its contents are still recoverable from the rig root.
+	if out := runGit(t, rigRoot, "stash", "list"); strings.TrimSpace(out) == "" {
+		t.Fatalf("stash made inside the worktree was lost when the worktree was pruned")
+	}
+	if out := runGit(t, rigRoot, "stash", "show", "-p"); !strings.Contains(out, stashedLine) {
+		t.Fatalf("stashed content unrecoverable after prune; `git stash show -p` =\n%s", out)
+	}
 }
 
 func TestPruneAgentHomeWorktreeIfSafe_RigPathUnresolved(t *testing.T) {
