@@ -229,10 +229,15 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	if err != nil {
 		return fmt.Errorf("exec provider: marshaling start config: %w", err)
 	}
+	var saved savedPaneFence
 	if !occupancyKnown || occupiedBefore {
-		p.clearInputFence(ctx, name)
+		saved = p.clearInputFence(ctx, name)
 	}
 	if _, err = p.runWithContext(ctx, p.startTimeout, data, "start", name); err != nil {
+		if startFailureKeepsBox(err, foreignBox) {
+			// The live session keeps its box, so it keeps its fence too.
+			p.restoreInputFence(context.WithoutCancel(ctx), name, saved)
+		}
 		return p.cleanupAfterStartFailure(name, err, foreignBox)
 	}
 	if err := p.publishInputFence(ctx, name, cfg); err != nil {
@@ -276,13 +281,19 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 // Stop deliberately runs on its own background context (see run), so cleanup
 // still happens when the caller's context is the thing that died.
 func (p *Provider) cleanupAfterStartFailure(name string, startErr error, foreignBox bool) error {
-	if foreignBox || errors.Is(startErr, runtime.ErrSessionExists) {
+	if startFailureKeepsBox(startErr, foreignBox) {
 		return startErr
 	}
 	if stopErr := p.Stop(name); stopErr != nil {
 		return errors.Join(startErr, fmt.Errorf("exec provider: cleanup after startup failure: %w", stopErr))
 	}
 	return startErr
+}
+
+// startFailureKeepsBox reports whether a failed start leaves the box in
+// place because it belongs to a live session (cleanupAfterStartFailure).
+func startFailureKeepsBox(startErr error, foreignBox bool) bool {
+	return foreignBox || errors.Is(startErr, runtime.ErrSessionExists)
 }
 
 // supportsSeparableLaunch reports whether the pack un-welds provisioning from the

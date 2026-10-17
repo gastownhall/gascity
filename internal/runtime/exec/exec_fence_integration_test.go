@@ -118,3 +118,42 @@ func TestExecRelaunchRefusesTheOldFenceRealTmux(t *testing.T) {
 		t.Fatalf("the relaunched agent received the old fence's nudge: %q", out)
 	}
 }
+
+// Kills a colliding start that strips the live session's fence, over real
+// tmux: a second Start of a running session clears the pane's fence before
+// the start op, the pack refuses because the session exists, and the fence
+// goes back on the live pane, which still takes its fenced input.
+func TestExecCollidingStartKeepsTheLiveFenceRealTmux(t *testing.T) {
+	script := newTmuxConformancePack(t)
+	p := NewProvider(script)
+	ctx := context.Background()
+	env := map[string]string{runtime.RuntimeEpochEnv: "1", runtime.ContinuationEpochEnv: "1", runtime.InstanceTokenEnv: "tok-1"}
+	t.Cleanup(func() { _ = p.Stop("dup") })
+	if err := p.Start(ctx, "dup", runtime.Config{Env: env}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	live, _ := runtime.InputFenceFromEnv(env)
+	if err := p.NudgeFenced(ctx, "dup", runtime.TextContent("one"), runtime.FencedNudge{Fence: live}); err != nil {
+		t.Fatalf("NudgeFenced before the collision: %v", err)
+	}
+	if err := p.Start(ctx, "dup", runtime.Config{Env: env}); !errors.Is(err, runtime.ErrSessionExists) {
+		t.Fatalf("colliding Start = %v, want ErrSessionExists", err)
+	}
+	if !p.IsRunning("dup") {
+		t.Fatal("the colliding Start tore the live box down")
+	}
+	if err := p.NudgeFenced(ctx, "dup", runtime.TextContent("two"), runtime.FencedNudge{Fence: live}); err != nil {
+		t.Fatalf("NudgeFenced after the colliding Start = %v, want delivered to the live incarnation", err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		out, _ := p.Peek("dup", 20)
+		if strings.Contains(out, "two") {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the live agent never echoed the fenced nudge; pane: %q", out)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+}

@@ -195,7 +195,7 @@ esac
 func TestExecStartAndLaunchPublishTheFence(t *testing.T) {
 	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
 	publish := "'set-option' '-p' '-F' '-t' 'main' '@gc_fence' '" + execFence.Digest() + ".#{pane_id}'"
-	clearFence := "'tmux' 'set-option' '-p' '-u' '-t' 'main' '@gc_fence'"
+	clearFence := "'tmux' 'display-message' '-p' '-t' 'main' '#{@gc_fence}|#{pane_id}|#{pane_pid}' ';' 'set-option' '-p' '-u' '-t' 'main' '@gc_fence'"
 
 	script, calls := boxScript(t, "", "", false)
 	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err != nil {
@@ -239,14 +239,25 @@ case "$1" in
   *) exit 2 ;;
 esac
 `)
+		p := NewProvider(script)
+		ctx := context.Background()
+		for op, err := range map[string]error{
+			"nudge":     p.NudgeFenced(ctx, "s", runtime.TextContent("hi"), runtime.FencedNudge{Fence: execFence}),
+			"keys":      p.SendKeysFenced(ctx, "s", execFence, "Enter"),
+			"interrupt": p.InterruptFenced(ctx, "s", execFence),
+			"dialogs":   p.DismissKnownDialogs(runtime.WithInputFence(ctx, execFence), "s", time.Second),
+		} {
+			var miss *runtime.FenceMismatchError
+			switch {
+			case wantAbsent && (!errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial):
+				t.Errorf("%s, is-running %q: %v, want a whole miss finding the box absent", op, answer, err)
+			case !wantAbsent && (!errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch)):
+				t.Errorf("%s, is-running %q: %v, want ErrRuntimeUnavailable", op, answer, err)
+			}
+		}
 		fp := NewSeamBacked(script).(runtime.FencedInputProvider)
-		err := fp.SendKeysFenced(context.Background(), "s", execFence, "Enter")
-		var miss *runtime.FenceMismatchError
-		switch {
-		case wantAbsent && (!errors.As(err, &miss) || miss.Found != runtime.FenceFoundAbsent || miss.Partial):
-			t.Errorf("is-running %q: %v, want a whole miss finding the box absent", answer, err)
-		case !wantAbsent && (!errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrFenceMismatch)):
-			t.Errorf("is-running %q: %v, want ErrRuntimeUnavailable", answer, err)
+		if err := fp.SendKeysFenced(ctx, "s", execFence, "Enter"); wantAbsent != errors.Is(err, runtime.ErrFenceMismatch) {
+			t.Errorf("seam-backed keys, is-running %q: %v", answer, err)
 		}
 	}
 }
@@ -278,5 +289,106 @@ esac
 	}
 	if got := readCalls(t, stops); len(got) != 1 {
 		t.Fatalf("stops = %q, want the box torn down once", got)
+	}
+}
+
+// collisionScript is a pack declaring the exec connection whose box is
+// already up: is-running answers running, the fence read answers read, and
+// the start op fails with startErr (and exit 1). Every in-box command is
+// logged to calls and every stop to stops.
+func collisionScript(t *testing.T, read, startErr string) (script, calls, stops string) {
+	t.Helper()
+	dir := t.TempDir()
+	calls = filepath.Join(dir, "calls")
+	stops = filepath.Join(dir, "stops")
+	script = writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":["proc.exec"]}' ;;
+  is-running) echo true ;;
+  exec)
+    cmd=$(cat)
+    echo "$cmd" >> `+calls+`
+    case "$cmd" in
+      *display-message*) echo '`+read+`' ;;
+    esac
+    ;;
+  start) cat > /dev/null; echo '`+startErr+`' >&2; exit 1 ;;
+  stop) echo stop >> `+stops+` ;;
+  *) exit 2 ;;
+esac
+`)
+	return script, calls, stops
+}
+
+// Kills a colliding start that strips the live session's fence: the start
+// op clears the pane's fence first, so when it then refuses because the box
+// belongs to a live session (a recognized collision, or a box that was up
+// before the attempt), the fence it cleared goes back on the same pane and
+// root process, unless the pane has taken another fence since.
+func TestExecCollidingStartRestoresTheLiveFence(t *testing.T) {
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	restore := shellQuote([]string{
+		"tmux", "if-shell", "-F", "-t", "main",
+		"#{&&:#{==:#{pane_id},%1},#{&&:#{==:#{pane_pid},4242},#{==:#{@gc_fence},}}}",
+		"'set-option' '-p' '-F' '-t' 'main' '@gc_fence' '" + execFence.Digest() + ".#{pane_id}'",
+	})
+	live := execFence.Digest() + ".%1|%1|4242"
+
+	for label, startErr := range map[string]string{
+		"recognized collision": "session already exists",
+		"unrecognized refusal": "box busy",
+	} {
+		t.Run(label, func(t *testing.T) {
+			script, calls, stops := collisionScript(t, live, startErr)
+			if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err == nil {
+				t.Fatal("colliding Start = nil, want the start op's error")
+			}
+			got := readCalls(t, calls)
+			if len(got) != 2 || !strings.Contains(got[0], "'set-option' '-p' '-u'") || got[1] != restore {
+				t.Fatalf("colliding Start ran %q, want the fence cleared and then restored on pane %%1 under pid 4242", got)
+			}
+			if s := readCalls(t, stops); len(s) != 0 {
+				t.Fatalf("stops = %q, want the live box kept", s)
+			}
+		})
+	}
+
+	for label, read := range map[string]string{
+		"no own fence":      "|%1|4242",
+		"inherited fence":   execFence.Digest() + ".%7|%1|4242",
+		"no session":        "||",
+		"unexpected output": "garbage",
+	} {
+		t.Run(label, func(t *testing.T) {
+			script, calls, _ := collisionScript(t, read, "session already exists")
+			_ = NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env})
+			if got := readCalls(t, calls); len(got) != 1 {
+				t.Fatalf("colliding Start ran %q, want only the clear: there is no own fence to restore", got)
+			}
+		})
+	}
+}
+
+// Kills a welded start that drives the box tmux of a pack without the exec
+// connection: such a pack cannot fence, so Start neither clears nor
+// publishes a fence, and runs no in-box command.
+func TestExecStartOfAPackWithoutTheExecConnectionTouchesNoFence(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := writeScript(t, dir, `
+case "$1" in
+  protocol) echo '{"version":0,"capabilities":[]}' ;;
+  is-running) echo true ;;
+  exec) cat >> `+calls+`; echo >> `+calls+` ;;
+  start) cat > /dev/null ;;
+  *) exit 2 ;;
+esac
+`)
+	env := map[string]string{runtime.RuntimeEpochEnv: "2", runtime.ContinuationEpochEnv: "3", runtime.InstanceTokenEnv: "tok"}
+	if err := NewProvider(script).Start(context.Background(), "s", runtime.Config{Env: env}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if got := readCalls(t, calls); len(got) != 0 {
+		t.Fatalf("Start ran %q in the box, want nothing", got)
 	}
 }

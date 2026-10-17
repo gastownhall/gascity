@@ -4,6 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"strconv"
+	"strings"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -76,16 +79,80 @@ func (p *Provider) InterruptFenced(ctx context.Context, name string, fence runti
 	return p.fencedResult(name, c.InterruptFenced(ctx, name, fence))
 }
 
+// paneFenceSaveFormat reads the agent pane's fence value, id and root
+// process, so a fence cleared before a start op can be put back on the same
+// process (restoreInputFence).
+const paneFenceSaveFormat = "#{" + runtime.TmuxInputFenceOption + "}|#{pane_id}|#{pane_pid}"
+
+// savedPaneFence is the own fence clearInputFence removed from a live agent
+// pane, with the pane and root process that held it. Zero when the pane held
+// none or the read did not answer.
+type savedPaneFence struct {
+	digest, pane, pid string
+}
+
+// parseSavedPaneFence parses paneFenceSaveFormat's expansion, keeping only a
+// fence the pane held as its own.
+func parseSavedPaneFence(out string) savedPaneFence {
+	parts := strings.Split(strings.TrimSpace(out), "|")
+	if len(parts) != 3 || !runtime.TmuxPaneID(parts[1]) {
+		return savedPaneFence{}
+	}
+	if _, err := strconv.ParseUint(parts[2], 10, 32); err != nil {
+		return savedPaneFence{}
+	}
+	digest, ok := strings.CutSuffix(parts[0], "."+parts[1])
+	if !ok || !runtime.TmuxKeyName(digest) {
+		return savedPaneFence{}
+	}
+	return savedPaneFence{digest: digest, pane: parts[1], pid: parts[2]}
+}
+
 // clearInputFence removes the agent pane's fence before a welded start op,
 // for a pack that can fence, so a pack whose start reuses a pane never leaves
-// the previous incarnation's fence naming the new agent. Best-effort: a box
-// that does not exist yet has no pane to clear, and the publish after the
-// start op is required.
-func (p *Provider) clearInputFence(ctx context.Context, name string) {
+// the previous incarnation's fence naming the new agent. One tmux command
+// list reads the fence it removes, which it returns so that a start op
+// refused by a live box can put it back (restoreInputFence). Best-effort: a
+// box that does not exist yet has no pane to clear, and the publish after
+// the start op is required.
+func (p *Provider) clearInputFence(ctx context.Context, name string) savedPaneFence {
 	if p.InputFencing(name) == runtime.InputFencingNone {
+		return savedPaneFence{}
+	}
+	argv := append([]string{"tmux", "display-message", "-p", "-t", execTmuxSession, paneFenceSaveFormat, ";"},
+		runtime.TmuxClearInputFenceArgs(execTmuxSession)...)
+	out, code, err := p.Exec(ctx, name, argv)
+	if err != nil || code != 0 {
+		return savedPaneFence{}
+	}
+	return parseSavedPaneFence(string(out))
+}
+
+// restoreInputFence puts saved back on the agent pane after a start op that
+// left a live box in place (a collision with the session it was started
+// for), so that session keeps taking fenced input. It sets the fence only
+// while the pane is the one saved, with the same root process and no fence
+// of its own: a pane the start op respawned, or one a concurrent start has
+// fenced since, is left alone. A restore that fails leaves the pane
+// unproven, which fenced input misses on, so it is reported, not returned.
+func (p *Provider) restoreInputFence(ctx context.Context, name string, saved savedPaneFence) {
+	if saved.digest == "" {
 		return
 	}
-	_, _, _ = p.Exec(ctx, name, append([]string{"tmux"}, runtime.TmuxClearInputFenceArgs(execTmuxSession)...))
+	set, err := runtime.TmuxCommandString(runtime.TmuxGuardFormatArg,
+		"set-option", "-p", "-F", "-t", execTmuxSession, runtime.TmuxInputFenceOption, runtime.TmuxFenceValue(saved.digest))
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "exec provider: session %q: restoring its input fence: %v\n", name, err)
+		return
+	}
+	cond := "#{&&:#{==:#{pane_id}," + saved.pane + "},#{&&:#{==:#{pane_pid}," + saved.pid + "},#{==:#{" + runtime.TmuxInputFenceOption + "},}}}"
+	_, code, err := p.Exec(ctx, name, []string{"tmux", "if-shell", "-F", "-t", execTmuxSession, cond, set})
+	switch {
+	case err != nil:
+		fmt.Fprintf(os.Stderr, "exec provider: session %q: restoring its input fence: %v\n", name, err)
+	case code != 0:
+		fmt.Fprintf(os.Stderr, "exec provider: session %q: restoring its input fence: tmux exit %d\n", name, code)
+	}
 }
 
 // publishInputFence records the incarnation cfg.Env names on the agent pane
