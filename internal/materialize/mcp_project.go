@@ -48,38 +48,18 @@ type MCPProjection struct {
 // projection so callers can reconcile stale managed config away.
 func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPProjection, error) {
 	workdir = filepath.Clean(workdir)
-	switch providerKind {
-	case MCPProviderClaude:
-	case MCPProviderCodex:
-	case MCPProviderGemini:
-	case MCPProviderOpenCode:
-	case MCPProviderMimoCode:
-	case MCPProviderCursor:
-	default:
+	rel := mcpRelTarget(providerKind)
+	if rel == "" {
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
 	}
 
 	out := MCPProjection{
 		Provider: providerKind,
 		Root:     workdir,
+		Target:   filepath.Join(workdir, filepath.FromSlash(rel)),
 		Servers:  append([]MCPServer(nil), servers...),
 	}
 	sort.Slice(out.Servers, func(i, j int) bool { return out.Servers[i].Name < out.Servers[j].Name })
-
-	switch providerKind {
-	case MCPProviderClaude:
-		out.Target = filepath.Join(workdir, ".mcp.json")
-	case MCPProviderCodex:
-		out.Target = filepath.Join(workdir, ".codex", "config.toml")
-	case MCPProviderGemini:
-		out.Target = filepath.Join(workdir, ".gemini", "settings.json")
-	case MCPProviderOpenCode:
-		out.Target = filepath.Join(workdir, "opencode.json")
-	case MCPProviderMimoCode:
-		out.Target = filepath.Join(workdir, "mimocode.json")
-	case MCPProviderCursor:
-		out.Target = filepath.Join(workdir, ".cursor", "mcp.json")
-	}
 	return out, nil
 }
 
@@ -566,10 +546,21 @@ func (p MCPProjection) writeManagedMarker(fs fsys.FS) error {
 	if err := fs.MkdirAll(filepath.Dir(p.markerPath()), 0o755); err != nil {
 		return fmt.Errorf("creating %s: %w", filepath.Dir(p.markerPath()), err)
 	}
-	data, err := json.Marshal(map[string]string{
+	marker := map[string]string{
 		"managed_by": "gc",
 		"provider":   p.Provider,
-	})
+	}
+	// Record what gc actually left on disk. A disposal gate can then tell
+	// gc's own untouched config apart from one an agent edited afterwards,
+	// instead of treating every managed worktree as permanently dirty
+	// (gas-wr8). Read back rather than hashing the intended payload so the
+	// marker describes the bytes on disk under every write path, including
+	// the merge-into-existing-document ones.
+	if written, readErr := fs.ReadFile(p.Target); readErr == nil {
+		sum := sha256.Sum256(written)
+		marker["content_sha256"] = hex.EncodeToString(sum[:])
+	}
+	data, err := json.Marshal(marker)
 	if err != nil {
 		return fmt.Errorf("marshaling %s: %w", p.markerPath(), err)
 	}
