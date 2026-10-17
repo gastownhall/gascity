@@ -4372,6 +4372,19 @@ else
     }
 fi
 
+fsync_stall_helper="$(CDPATH= cd -- "$(dirname "$0")" && pwd)/dolt-fsync-stall.sh"
+if [ -r "$fsync_stall_helper" ]; then
+    . "$fsync_stall_helper"
+else
+    # Focused shell harnesses can run gc-beads-bd without sibling assets. The
+    # production helper is the only copy of the detector, so say that the
+    # guard is missing rather than silently dropping it.
+    recovery_should_skip_due_to_fsync_stall() {
+        echo "warning: fsync-stall guard skipped: dolt-fsync-stall.sh not found beside gc-beads-bd" >&2
+        return 1
+    }
+fi
+
 # op_recover stops the dolt server, restarts it, and verifies health.
 op_recover() {
     local read_only_status
@@ -4390,6 +4403,16 @@ op_recover() {
         echo "skipping dolt recovery: recent dolt log shows ENOSPC — manual intervention required" >&2
         echo "  free disk space, then re-run health checks" >&2
         die "dolt recovery skipped: ENOSPC detected"
+    fi
+
+    # Skip recovery while the data directory's fsync is stalled. One stalled
+    # commit fsync freezes the whole Dolt server, so a live but unresponsive
+    # Dolt is waiting on storage; restarting it cannot fix that and adds
+    # recovery fsync load. Nothing to protect when Dolt is not listening.
+    if tcp_check && recovery_should_skip_due_to_fsync_stall; then
+        echo "skipping dolt recovery: the data directory's fsync is stalled; Dolt is waiting on storage, a restart cannot fix that" >&2
+        echo "  see docs/troubleshooting/dolt-storage-stalls.md; use gc dolt restart --force only if a restart is still required" >&2
+        die "dolt recovery skipped: storage stall"
     fi
 
     if load_recover_managed_from_gc; then

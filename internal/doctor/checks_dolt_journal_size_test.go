@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -114,5 +115,29 @@ func TestDoltJournalSizeCheck_MultiDBLargestDrives(t *testing.T) {
 	}
 	if !strings.Contains(r.Message, "de") {
 		t.Errorf("message = %q, want largest database name 'de' in message", r.Message)
+	}
+}
+
+// TestSumJournalFilesIgnoresFsyncProbeDotfile pins that the fsync probe's
+// root-level dotfile (.gc-fsync-probe-<pid>-<unixnano>) never counts as
+// journal bytes, whether it sits beside the journals or in the data-dir root.
+func TestSumJournalFilesIgnoresFsyncProbeDotfile(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "abc.journal"), make([]byte, 100), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	before, err := sumJournalFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, ".gc-fsync-probe-123"), make([]byte, 4096), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	after, err := sumJournalFiles(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if before != 100 || after != before {
+		t.Fatalf("sumJournalFiles before/after the probe dotfile = %d/%d, want 100/100", before, after)
 	}
 }
