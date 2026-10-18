@@ -427,7 +427,7 @@ type CityRuntimeParams struct {
 }
 
 var (
-	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycleForReload
 	cityRuntimeReloadLifecycleRetryDelay = time.Second
 	// reloadActiveTTL bounds how long a single accepted reload may occupy
 	// the activeReload slot. If a reconciler tick wedges in something that

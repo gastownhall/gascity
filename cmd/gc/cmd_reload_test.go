@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -943,6 +944,11 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	// Boot the bead lifecycle as the supervisor does before a runtime exists:
+	// reload refuses a city whose store was never initialized.
+	if err := startBeadsLifecycle(dir, "test", cfg, io.Discard); err != nil {
+		t.Fatalf("boot bead lifecycle: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
 		cityPath:   dir,
