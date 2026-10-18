@@ -1286,8 +1286,12 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
 			f.tick(t) // the window has run
 
-			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != tc.want || (tc.nudge == "" && strings.Contains(got[0], "--drain-ack")) {
-				t.Fatalf("nudges delivered = %q, want exactly [%q], with no --drain-ack by default; stdout=%s", got, tc.want, f.stdout.String())
+			want := tc.want
+			if want == defaultHeldClaimNudge {
+				want = fmt.Sprintf(defaultHeldClaimNudge, f.work.ID) // the started-rung text names the claim
+			}
+			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != want || (tc.nudge == "" && strings.Contains(got[0], "--drain-ack")) {
+				t.Fatalf("nudges delivered = %q, want exactly [%q], with no --drain-ack by default; stdout=%s", got, want, f.stdout.String())
 			}
 			if len(f.drained) != 0 || f.stalledEvents() != 0 {
 				t.Fatalf("drains %v, step_stalled %d; want neither for a seat with execution evidence", f.drained, f.stalledEvents())

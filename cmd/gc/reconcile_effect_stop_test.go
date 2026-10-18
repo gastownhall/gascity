@@ -8,6 +8,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -839,22 +840,36 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 // names, so the seat closes and a fresh seat takes the claim; another
 // in-progress bead of the seat's, or the same drain for another reason,
 // keeps its work as before.
+//
+// T9 (mc-358yo, PHASE1-2 §6.5): a claim the seat records that a turn began
+// is kept, whoever requested the stop, unless a dispatch hold parks it. With
+// the work ladder off (until W3), that record is execution_claim_started at
+// the row's current token only: a work_started entry, or an earlier
+// incarnation's stamp, would keep a claim the seat was woken on and never
+// ran, and bring the v5.10x loop back, so the claim goes back as before. With
+// the ladder on, either record keeps it, and an unreadable cell does too.
 func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		reason  string
 		release bool
 		other   bool   // the seat holds a second in-progress bead
-		started string // the seat names the claim started: "cell", "stamp" or "unreadable"
+		started string // the seat's record: "cell", "stamp" (current token), "old-stamp" or "unreadable"
+		ladder  bool   // the work ladder is on
+		hold    string // a dispatch hold label on the claim
 	}{
-		{"execution-stalled", executionStalledDrainReason, true, false, ""},
-		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true, ""},
-		{"another drain reason", drainOrphaned, false, false, ""},
-		// T9 (mc-358yo): a claim the seat names as started is not given back,
-		// whoever requested the stop.
-		{"execution-stalled, started by work_started", executionStalledDrainReason, false, false, "cell"},
-		{"execution-stalled, started by execution_claim_started", executionStalledDrainReason, false, false, "stamp"},
-		{"execution-stalled, work_started unreadable", executionStalledDrainReason, false, false, "unreadable"},
+		{"execution-stalled", executionStalledDrainReason, true, false, "", false, ""},
+		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true, "", false, ""},
+		{"another drain reason", drainOrphaned, false, false, "", false, ""},
+		{"ladder off: work_started names it, released (v5.10x)", executionStalledDrainReason, true, false, "cell", false, ""},
+		{"ladder off: an earlier incarnation's stamp, released (v5.10x)", executionStalledDrainReason, true, false, "old-stamp", false, ""},
+		{"ladder off: this incarnation's stamp, kept", executionStalledDrainReason, false, false, "stamp", false, ""},
+		{"ladder off: stamped but hold:mayor, released", executionStalledDrainReason, true, false, "stamp", false, beadmeta.HoldMayorLabel},
+		{"ladder on: work_started names it, kept", executionStalledDrainReason, false, false, "cell", true, ""},
+		{"ladder on: an earlier incarnation's stamp, kept", executionStalledDrainReason, false, false, "old-stamp", true, ""},
+		{"ladder on: work_started unreadable, kept", executionStalledDrainReason, false, false, "unreadable", true, ""},
+		{"ladder on: started but hold:external, released", executionStalledDrainReason, true, false, "cell", true, beadmeta.HoldExternalLabel},
+		{"ladder on: no record, released", executionStalledDrainReason, true, false, "", true, ""},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string
@@ -883,10 +898,24 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
 					t.Fatal(err)
 				}
+				setWorkLadderDeployed(t, c.ladder)
+				if c.hold != "" {
+					if err := store.Update(claim.ID, beads.UpdateOpts{Labels: []string{c.hold}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				row, err := store.Get(id)
+				if err != nil {
+					t.Fatal(err)
+				}
 				switch c.started {
 				case "cell":
 					casSetMeta(t, store, id, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Bead: claim.ID, Via: session.WorkStartedViaClaim})))
 				case "stamp":
+					if err := store.SetMetadata(id, executionClaimStartedKey, row.Metadata["instance_token"]+"|"+claim.ID); err != nil {
+						t.Fatal(err)
+					}
+				case "old-stamp":
 					if err := store.SetMetadata(id, executionClaimStartedKey, "tok-old|"+claim.ID); err != nil {
 						t.Fatal(err)
 					}
@@ -1032,4 +1061,12 @@ func casSetMeta(t *testing.T, store beads.Store, id, key, value string) {
 	if err := w.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
 		t.Fatal(err)
 	}
+}
+
+// setWorkLadderDeployed sets workLadderDeployed for one test.
+func setWorkLadderDeployed(t *testing.T, on bool) {
+	t.Helper()
+	prev := workLadderDeployed
+	workLadderDeployed = on
+	t.Cleanup(func() { workLadderDeployed = prev })
 }

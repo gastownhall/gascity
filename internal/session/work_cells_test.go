@@ -60,6 +60,13 @@ func TestWorkStartedNames(t *testing.T) {
 	if w = w.Without("rig:gascity", "ga-1"); w.Names("rig:gascity", "ga-1") || !w.Names("city", "ga-2") {
 		t.Errorf("Without dropped the wrong entries: %+v", w)
 	}
+	// With matches as Names and Without do: recording a claim drops every
+	// entry naming it, an unknown store's included, and keeps another store's.
+	w = WorkStarted{}.With(startedEntry("", "ga-5")).With(startedEntry("city", "ga-6")).With(startedEntry("rig:x", "ga-6"))
+	w = w.With(startedEntry("city", "ga-5"))
+	if len(w.Claims) != 3 || w.Claims[0] != startedEntry("city", "ga-5") || !w.Names("city", "ga-6") || !w.Names("rig:x", "ga-6") {
+		t.Errorf("With over a storeless entry: %+v; want it replaced, the two ga-6 stores kept", w.Claims)
+	}
 }
 
 // TestWorkStartedCap (T12): at most 8 entries, newest first, the oldest

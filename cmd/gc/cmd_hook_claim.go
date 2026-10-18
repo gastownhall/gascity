@@ -1326,8 +1326,15 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	switch recordHookWorkStarted(bead, opts, ops, dir, minted, stderr) {
 	case hookStartedReleasing:
 		return refuseHookClaimBeingReleased(bead, opts, ops, dir, minted, stdout, stderr)
+	case hookStartedClosed:
+		// No turn of a closed row runs the claim: a minted one is given back
+		// (an adopted one is the close cascade's), then the stale drain.
+		if minted {
+			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, fmt.Sprintf("refusing to hand %s to a closed session; giving it back", bead.ID), bead, opts, ops, dir, stderr)
+		}
+		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	case hookStartedStale:
-		fmt.Fprintf(stderr, "gc hook --claim: refusing to hand %s to a stale session: the session row is closed or names another incarnation\n", bead.ID) //nolint:errcheck
+		fmt.Fprintf(stderr, "gc hook --claim: refusing to hand %s to a stale session: the session row names another incarnation\n", bead.ID) //nolint:errcheck
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
@@ -1658,9 +1665,14 @@ func fenceHookDrainAck(label, reason string, opts hookClaimOptions, ops hookClai
 }
 
 // hookHeldStartedClaim returns the first claim the session's work_started
-// cell names that is still in_progress under one of this seat's identities,
-// read live through the hook's own bd context. err reports a read that
-// failed, when no held claim was found.
+// cell names that is still in_progress under one of this seat's identities
+// and on no dispatch hold, read live through the hook's own bd context. A
+// held bead (hold:mayor, hold:external) is never work for the hook to serve
+// (gas-kg6), so it does not hold the ack either. err reports a read that
+// failed, when no held claim was found. Two reads are answers, not
+// failures: a bead the store no longer has (beads.ErrNotFound) holds
+// nothing, and an entry naming another store than this context's, which
+// this context may not be able to read, is skipped when its read fails.
 func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaimOps, dir string) (beads.Bead, error) {
 	raw, err := ops.ReadWorkStarted(sessionID)
 	if err != nil {
@@ -1671,16 +1683,23 @@ func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaim
 		return beads.Bead{}, err
 	}
 	identities := hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
+	here := ops.StoreRef(dir)
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	var readErr error
 	for _, e := range cell.Claims {
 		b, err := ops.ReadWorkMeta(ctx, dir, opts.Env, e.Bead, opts.Assignee)
-		if err != nil {
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			continue
+		case err != nil && e.Store != "" && here != "" && e.Store != here:
+			continue
+		case err != nil:
 			readErr = errors.Join(readErr, fmt.Errorf("reading %s: %w", e.Bead, err))
 			continue
 		}
-		if strings.EqualFold(strings.TrimSpace(b.Status), "in_progress") && hookClaimHasIdentity(b.Assignee, identities) {
+		if strings.EqualFold(strings.TrimSpace(b.Status), "in_progress") && hookClaimHasIdentity(b.Assignee, identities) &&
+			!beadmeta.HasDispatchHold(b.Labels) {
 			return b, nil
 		}
 	}
