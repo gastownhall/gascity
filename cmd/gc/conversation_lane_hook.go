@@ -3,10 +3,12 @@ package main
 // The in-band hook pass (DES-O1 §8, OJ-13): `gc nudge drain --inject` runs
 // one opjournal.ConversationLane pass over the hook's own conversation with
 // the in-band executor below, so lane notices still reach the agent while the
-// controller is down. The pass takes only notices whose `when` is boundary or
-// after_turn; prompts, urgent content and if_idle wait for the lane host
-// (DES-O1 §16, question 2), which the planner decides from Caps{InBand: true,
-// Live: false}.
+// controller is down. It runs only where the prompt hook's output reaches the
+// model (hookLaneReachesModel); every other family's notices wait for the
+// lane host, which types them at the next boundary. The pass takes only
+// notices whose `when` is boundary or after_turn; prompts, urgent content and
+// if_idle wait for the lane host (DES-O1 §16, question 2), which the planner
+// decides from Caps{InBand: true, Live: false}.
 //
 // The executor's effect is the hook's own output: the lane text joins the one
 // hook context the drain writes (the clock, any legacy nudges, the lane
@@ -18,10 +20,13 @@ package main
 // delivery carries the plain redelivery note (D-NOTE) and an at_most_once op
 // closes failed{ambiguous_delivery}.
 //
-// An empty prompt costs one keyed list (hookLaneDue); the lane store, the
-// session row and the runtime row are read only when the conversation holds
-// an open lane op. The hook writes op rows and the runtime row's lane cells
-// only, never turn facts, and pokes the controller's lane host after a Done.
+// An empty prompt costs one keyed list (hookLaneDue), and nothing on a store
+// that cannot host a lane; the lane store, the session row and the runtime row
+// are read only when the conversation holds an open lane op. The hook writes
+// op rows, the runtime row's lane cells and, after an accepted lane-only
+// delivery, the session's last-nudge-delivered stamp; never turn facts. The
+// drain rings the controller's lane host after a Done, last of all, once its
+// own output and bookkeeping are done (hookLaneRing).
 
 import (
 	"context"
@@ -29,6 +34,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -46,13 +52,40 @@ const (
 	laneHookHostName = "hook"
 	// laneViaHook is the via of a delivery the hook injected in band.
 	laneViaHook = "hook"
-	// laneHookLeaseTTL is the hook's lease: long enough for one hook run,
-	// short enough that a hook killed after its Take returns the batch soon.
-	laneHookLeaseTTL = 30 * time.Second
-	// laneHookPokeTimeout bounds each leg of the doorbell the hook rings
+	// laneHookLeaseGrace is what the hook's lease outlives the hook
+	// deadline by (DES-O1 §4.6): a hook killed at its deadline after its Take
+	// returns the batch soon after.
+	laneHookLeaseGrace = 10 * time.Second
+	// laneHookLeaseTTLNoDeadline is the hook's lease when gc hook run handed
+	// it no deadline: long enough for one hook run.
+	laneHookLeaseTTLNoDeadline = 30 * time.Second
+	// laneHookPokeTimeout bounds each leg of the doorbell the drain rings
 	// after a Done.
 	laneHookPokeTimeout = 500 * time.Millisecond
+	// laneHookPokeLegFloor is the shortest doorbell leg worth trying; with less
+	// time left the doorbell is skipped and the lane host's scan finds the
+	// conversation.
+	laneHookPokeLegFloor = 20 * time.Millisecond
 )
+
+// hookLaneReachesModel reports whether a prompt hook of hookFormat, run by a
+// provider of family (as GC_PROVIDER names it), puts its output in front of
+// the model: the JSON formats gc writes for codex, gemini and antigravity,
+// and plain text for the claude family and the opencode and mimocode plugins. Other families' prompt hooks
+// read stdout as a control document (cursor) or drop plain text (copilot), so
+// an in-band delivery there would be recorded and never seen.
+func hookLaneReachesModel(hookFormat, family string) bool {
+	switch strings.ToLower(strings.TrimSpace(hookFormat)) {
+	case hookOutputFormatCodex, hookOutputFormatGemini, hookOutputFormatAntigravity:
+		return true
+	case "":
+		switch strings.ToLower(strings.TrimSpace(family)) {
+		case "claude", "opencode", "mimocode":
+			return true
+		}
+	}
+	return false
+}
 
 // errLaneHookDeadline is the cause of a release when the hook deadline left
 // no time to record a delivery whose text the hook already wrote.
@@ -64,14 +97,19 @@ var errLaneHookDeadline = errors.New("hook deadline too close to record the in-b
 var errLaneHookControl = errors.New("conversation lane: the in-band hook runs no control effect")
 
 // hookLaneDue reports whether conversation conv holds an open lane op, with
-// one keyed read over the sessions-class store. A failed read is reported on
-// stderr and read as not due: the hook must not fail the prompt, and the
-// lane host and the next hook still see the op.
+// one keyed read over the sessions-class store. A store that cannot apply
+// guarded batches hosts no lane, so it is not read at all. A failed read is
+// reported on stderr and read as not due: the hook must not fail the prompt,
+// and the lane host and the next hook still see the op.
 func hookLaneDue(sessions beads.Store, conv string, stderr io.Writer) bool {
 	if conv == "" || isNilBeadStore(sessions) {
 		return false
 	}
-	due, err := opjournal.HasOpenLaneOps(beads.SessionStore{Store: sessions}, conv)
+	store := beads.SessionStore{Store: sessions}
+	if batcher, ok := beads.GuardedBatcherFor(store); !ok || batcher == nil {
+		return false
+	}
+	due, err := opjournal.HasOpenLaneOps(store, conv)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc nudge drain: conversation lanes: %v\n", err) //nolint:errcheck // best-effort stderr
 		return false
@@ -80,24 +118,41 @@ func hookLaneDue(sessions beads.Store, conv string, stderr io.Writer) bool {
 }
 
 // hookLaneConversation is the conversation the in-band pass serves: the
-// hook's own session (GC_SESSION_ID), and none for a drain that names its
-// target, since the fence the pass checks is the hook's own environment.
-func hookLaneConversation(args []string) string {
-	if len(args) > 0 {
+// hook's own session (GC_SESSION_ID). It is none for a drain that names its
+// target, since the fence the pass checks is the hook's own environment, and
+// none when the hook's output does not reach the model (hookLaneReachesModel,
+// with the family the session's runtime environment names in GC_PROVIDER).
+func hookLaneConversation(args []string, hookFormat string) string {
+	if len(args) > 0 || !hookLaneReachesModel(hookFormat, os.Getenv("GC_PROVIDER")) {
 		return ""
 	}
-	return os.Getenv("GC_SESSION_ID")
+	return strings.TrimSpace(os.Getenv("GC_SESSION_ID"))
 }
 
-// hookLaneFence is the incarnation the hook's environment names, zero when it
-// names no instance token.
+// hookLaneFence is the incarnation the hook's environment names: its
+// generation and epoch always, as the view reads a row's (conversationLaneView),
+// and its instance token, empty when it names none.
 func hookLaneFence() runtime.InputFence {
+	// InputFenceFromEnv reads the generation and epoch only beside a token,
+	// so it reads a copy that names one and the hook's own token is kept.
 	fence, _ := runtime.InputFenceFromEnv(map[string]string{
 		runtime.RuntimeEpochEnv:      os.Getenv(runtime.RuntimeEpochEnv),
 		runtime.ContinuationEpochEnv: os.Getenv(runtime.ContinuationEpochEnv),
-		runtime.InstanceTokenEnv:     os.Getenv(runtime.InstanceTokenEnv),
+		runtime.InstanceTokenEnv:     "-",
 	})
+	fence.Token = os.Getenv(runtime.InstanceTokenEnv)
 	return fence
+}
+
+// hookLaneLeaseTTL is the hook's lease at now: the time left to the deadline
+// gc hook run handed this process plus laneHookLeaseGrace (DES-O1 §4.6), at
+// least opjournal.MinLeaseTTL; laneHookLeaseTTLNoDeadline without one.
+func hookLaneLeaseTTL(now time.Time) time.Duration {
+	deadline, ok, err := inheritedHookDeadline()
+	if err != nil || !ok {
+		return laneHookLeaseTTLNoDeadline
+	}
+	return max(opjournal.MinLeaseTTL, deadline.Sub(now)+laneHookLeaseGrace)
 }
 
 // hookLanePayloadTurnID is the turn id a hook payload names for provider; a
@@ -106,12 +161,13 @@ var hookLanePayloadTurnID = worker.HookPayloadTurnID
 
 // hookLanePass is one in-band pass over the hook's conversation.
 type hookLanePass struct {
-	cityPath string
 	// sessions is the sessions-class store, routed as the drain resolved it.
 	sessions beads.Store
 	conv     string
 	// fence is the hook's own incarnation (hookLaneFence).
 	fence runtime.InputFence
+	// leaseTTL is the lease the pass takes its batch under (hookLaneLeaseTTL).
+	leaseTTL time.Duration
 	// provider is the session's provider family; payload the hook's stdin.
 	provider string
 	payload  []byte
@@ -123,8 +179,6 @@ type hookLanePass struct {
 	// ackAllowed reports whether the hook deadline leaves time to record
 	// the delivery of laneOps lane ops beside whatever else the drain wrote.
 	ackAllowed func(laneOps int) bool
-	// poke rings the controller's lane host for conv after a Done.
-	poke func(cityPath, conv string)
 	// stampDelivered stamps the session's last nudge delivery after an
 	// accepted Done; the drain stamps it instead when legacy nudges rode
 	// along, after their ack.
@@ -142,6 +196,9 @@ type hookLaneOutcome struct {
 	ackAllowed bool
 	// accepted reports that the pass recorded a delivery.
 	accepted bool
+	// done reports that the pass recorded a Done, so the drain rings the
+	// lane host (hookLaneRing) once it has finished.
+	done bool
 }
 
 // run opens the lane over the sessions store, reads the conversation's view
@@ -173,14 +230,12 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 	if accepted && p.stampDelivered && hookDeadlineStillLeavesTime() {
 		stampLastNudgeDeliveredAt(sessionFrontDoor(p.sessions), p.conv, p.clk.Now())
 	}
-	if res.Done != "" && p.poke != nil && hookDeadlineStillLeavesTime() {
-		p.poke(p.cityPath, p.conv)
-	}
 	return hookLaneOutcome{
 		emitted:    exec.emitted,
 		emitErr:    exec.emitErr,
 		ackAllowed: exec.ackAllowed,
 		accepted:   accepted,
+		done:       res.Done != "",
 	}
 }
 
@@ -188,11 +243,46 @@ func (p hookLanePass) notef(format string, args ...any) {
 	fmt.Fprintf(p.stderr, "gc nudge drain: conversation lanes: "+format+"\n", args...) //nolint:errcheck // best-effort stderr
 }
 
+// hookLanePoke rings the controller's lane doorbell for conv with legs of
+// leg each; a seam so tests can record the doorbell.
+var hookLanePoke = pokeLaneHost
+
 // pokeLaneHost rings the controller's lane doorbell for conv (DES-O1 §7.3),
 // best effort: with no controller, nothing answers and the lane host's scan
 // finds the conversation when it starts.
-func pokeLaneHost(cityPath, conv string) {
-	_, _ = sendControllerCommandWithTimeouts(cityPath, laneSocketPrefix+conv, laneHookPokeTimeout, laneHookPokeTimeout, laneHookPokeTimeout)
+func pokeLaneHost(cityPath, conv string, leg time.Duration) {
+	_, _ = sendControllerCommandWithTimeouts(cityPath, laneSocketPrefix+conv, leg, leg, leg)
+}
+
+// hookLanePokeLeg is the timeout of each of the doorbell's three legs at now:
+// laneHookPokeTimeout, cut so the whole doorbell takes at most half the time
+// left to the hook deadline. It is zero when the deadline does not parse or
+// leaves less than laneHookPokeLegFloor a leg.
+func hookLanePokeLeg(now time.Time) time.Duration {
+	deadline, ok, err := inheritedHookDeadline()
+	if err != nil {
+		return 0
+	}
+	if !ok {
+		return laneHookPokeTimeout
+	}
+	leg := min(laneHookPokeTimeout, deadline.Sub(now)/6)
+	if leg < laneHookPokeLegFloor {
+		return 0
+	}
+	return leg
+}
+
+// hookLaneRing rings the lane host for conv after a pass that recorded a
+// Done. The drain calls it last, after its own output, acks and stamps, so
+// the doorbell never spends the time those need.
+func hookLaneRing(cityPath, conv string, out hookLaneOutcome) {
+	if !out.done || conv == "" {
+		return
+	}
+	if leg := hookLanePokeLeg(time.Now()); leg > 0 {
+		hookLanePoke(cityPath, conv, leg)
+	}
 }
 
 // hookLaneExec is the in-band opjournal.Executor: the hook runs inside the
@@ -211,14 +301,15 @@ var _ opjournal.Executor = (*hookLaneExec)(nil)
 
 // hookLaneCaps are the in-band executor's capabilities: no live input, an
 // in-band injection into the starting turn, fenced by the check the probe
-// makes, as a system-reminder block, gathering no turn evidence.
-func hookLaneCaps() opjournal.Caps {
+// makes, as a system-reminder block, gathering no turn evidence, under a
+// lease of leaseTTL.
+func hookLaneCaps(leaseTTL time.Duration) opjournal.Caps {
 	return opjournal.Caps{
 		InBand:   true,
 		Input:    opjournal.FenceChecked,
 		Text:     opjournal.TextReminder,
 		LinkWait: 0,
-		LeaseTTL: laneHookLeaseTTL,
+		LeaseTTL: leaseTTL,
 	}
 }
 
@@ -232,7 +323,7 @@ func (e *hookLaneExec) Probe(_ context.Context, conv opjournal.ConversationView)
 		Running:   true,
 		Boundary:  opjournal.TriYes,
 		TurnLive:  opjournal.TriUnknown,
-		Caps:      hookLaneCaps(),
+		Caps:      hookLaneCaps(e.pass.leaseTTL),
 	}
 	p.ContentBlock = session.ContentGate(e.info, true, e.pass.clk.Now())
 	if p.ContentBlock == "" && !hookLaneFenceMatches(e.pass.fence, conv) {
@@ -242,12 +333,10 @@ func (e *hookLaneExec) Probe(_ context.Context, conv opjournal.ConversationView)
 }
 
 // hookLaneFenceMatches reports whether the hook's incarnation is the one the
-// view names: the same token, generation and epoch. A row and a hook that
-// both name no token match: the delivery is recorded unfenced.
+// view names: the same token, generation and epoch (DES-O1 §8). A row and a
+// hook that both name no token match on generation and epoch alone: the
+// delivery is recorded unfenced.
 func hookLaneFenceMatches(hook runtime.InputFence, conv opjournal.ConversationView) bool {
-	if conv.Token == "" || hook.Token == "" {
-		return conv.Token == hook.Token
-	}
 	return hook.Token == conv.Token && hook.Generation == conv.Generation && hook.Epoch == conv.Epoch
 }
 
@@ -305,21 +394,23 @@ func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Write
 }
 
 // hookDrainLane runs the in-band pass for an injecting drain when conversation
-// conv holds an open lane op. write writes the drain's one hook context with
-// the lane text; legacy is the count of legacy nudges that context also
-// carries, so one deadline answer covers both. With nothing due it costs the
-// one keyed probe and writes nothing.
-func hookDrainLane(cityPath string, sessions beads.Store, conv, provider string, payload []byte, legacy int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
-	if !hookLaneDue(sessions, conv, stderr) {
+// conv holds an open lane op; knownDue says the drain's fast path already
+// found one, so the probe is not run again. write writes the drain's one hook
+// context with the lane text; legacy is the count of legacy nudges that
+// context also carries, so one deadline answer covers both. With nothing due
+// it costs the one keyed probe and writes nothing. The drain rings the lane
+// host itself (hookLaneRing) when it is done.
+func hookDrainLane(sessions beads.Store, conv string, knownDue bool, provider string, payload []byte, legacy int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
+	if !knownDue && !hookLaneDue(sessions, conv, stderr) {
 		return hookLaneOutcome{}
 	}
 	ctx, cancel := hookLaneContext()
 	defer cancel()
 	return hookLanePass{
-		cityPath: cityPath,
 		sessions: sessions,
 		conv:     conv,
 		fence:    hookLaneFence(),
+		leaseTTL: hookLaneLeaseTTL(time.Now()),
 		provider: provider,
 		payload:  payload,
 		clk:      clock.Real{},
@@ -328,7 +419,6 @@ func hookDrainLane(cityPath string, sessions beads.Store, conv, provider string,
 		ackAllowed: func(laneOps int) bool {
 			return hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", legacy+laneOps), stderr)
 		},
-		poke:           pokeLaneHost,
 		stampDelivered: legacy == 0,
 	}.run(ctx)
 }

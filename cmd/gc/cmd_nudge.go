@@ -699,17 +699,24 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	var injectPrefix string
 	var contextUsage contextUsageSample
 	// hookInput is the provider's hook payload; laneConv is the conversation
-	// the in-band lane pass serves (conversation_lane_hook.go).
+	// the in-band lane pass serves (conversation_lane_hook.go), laneDue that
+	// the fast path's probe already found an open lane op there, and lane what
+	// the pass did, so the drain rings the lane host once it is done.
 	var hookInput []byte
-	var laneConv string
+	var laneConv, laneCity string
+	var laneDue bool
+	var lane hookLaneOutcome
 	if inject {
+		// Registered first so it runs last: after the fallback hook context
+		// below and after every ack and stamp of the drain.
+		defer func() { hookLaneRing(laneCity, laneConv, lane) }()
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
 		// the context-usage guidance (see context_inject.go).
 		hookInput = readHookStdin()
 		contextUsage = readContextUsageSample(hookInput)
-		laneConv = hookLaneConversation(args)
+		laneConv = hookLaneConversation(args, hookFormat)
 		injectPrefix = clockInjectLine()
 		defer func() {
 			if !emittedHookContext {
@@ -766,9 +773,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			// The full path writes the step reminder only once the target
 			// resolves, so a non-empty reminder still needs that proof. Recheck
 			// the queue too: a nudge enqueued during the lookup must be claimed.
-			if wispExtra == "" && nudgeQueueIsEmpty(explicitCity) &&
-				(laneConv == "" || !hookLaneDue(hookLaneSessionStore(explicitCity, nil, stderr), laneConv, stderr)) {
-				return 0
+			if wispExtra == "" && nudgeQueueIsEmpty(explicitCity) {
+				if laneConv != "" {
+					laneDue = hookLaneDue(hookLaneSessionStore(explicitCity, nil, stderr), laneConv, stderr)
+				}
+				if !laneDue {
+					return 0
+				}
 			}
 		}
 	}
@@ -805,15 +816,16 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		if laneConv == "" {
 			return hookLaneOutcome{}
 		}
+		laneCity = target.cityPath
 		sessions := hookLaneSessionStore(target.cityPath, target.cfg, stderr)
-		return hookDrainLane(target.cityPath, sessions, laneConv, target.providerFamily(), hookInput, legacy, func(laneText string) error {
+		return hookDrainLane(sessions, laneConv, laneDue, target.providerFamily(), hookInput, legacy, func(laneText string) error {
 			emittedHookContext = true
 			return writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+laneText+wispExtra)
 		}, stderr)
 	}
 	// injectLaneOnly is the injecting drain with no legacy nudge to deliver.
 	injectLaneOnly := func() int {
-		injectLane("", 0)
+		lane = injectLane("", 0)
 		return 0
 	}
 
@@ -887,9 +899,8 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		out = formatNudgeRuntimeMessage(items)
 	}
 	var writeErr error
-	// lane is the in-band lane pass's part in the hook context; when it wrote
-	// the context, its deadline answer covers the legacy nudges too.
-	var lane hookLaneOutcome
+	// lane records the in-band lane pass's part in the hook context; when it
+	// wrote the context, its deadline answer covers the legacy nudges too.
 	if inject {
 		// Fold the clock, the due lane notices and the active formula step
 		// into the nudge so a single provider-formatted payload carries all;
