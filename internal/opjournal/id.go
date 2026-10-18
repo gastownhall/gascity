@@ -163,21 +163,6 @@ func InterruptKey(gen int64, turn string) (string, error) {
 	return composedKey("interrupt key", "stop:"+strconv.FormatInt(gen, 10)+":"+turn)
 }
 
-// RespondKey is the client key of a respond to one interaction of one
-// session: respond:<gen>:<request_id>. The generation is part of the key
-// because some runtimes derive request ids from content. It is unused: in O0
-// respond ops are keyed by the client key, and OJ-16 keys them by the
-// interaction occurrence.
-func RespondKey(gen int64, requestID string) (string, error) {
-	if gen < 1 {
-		return "", invalidf("respond key: generation %d must be >= 1", gen)
-	}
-	if err := validateText("respond key request id", requestID, maxClientKeyLen); err != nil {
-		return "", err
-	}
-	return composedKey("respond key", "respond:"+strconv.FormatInt(gen, 10)+":"+requestID)
-}
-
 // composedKey returns key when it is a client key Propose accepts, so a
 // helper never hands out a key the store then refuses.
 func composedKey(what, key string) (string, error) {

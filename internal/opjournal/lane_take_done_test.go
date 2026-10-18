@@ -706,25 +706,26 @@ func TestLaneRespondWritesTheFact(t *testing.T) {
 	for _, collide := range []bool{false, true} {
 		t.Run(fmt.Sprintf("collide=%v", collide), func(t *testing.T) {
 			h := newLaneHarness(t)
-			req := Request{
-				Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r1",
-				Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
-				Scope: Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1#1"},
-			}
-			op := h.propose(t, req)
+			raised := h.raise(t, "perm-1")
+			op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
 			f := Fact{Kind: FactInteractionResolved, Conversation: "gc-1", Generation: 1, Interaction: "perm-1#1", Basis: FactBasisObserved, At: t0}
+			exec := newFakeExec(h.clk)
+			exec.probe.Caps.Respond, exec.probe.Pending = true, "perm-1"
 			if collide {
-				if _, err := h.store.RecordFact(f); err != nil {
-					t.Fatal(err)
+				// Another writer records the resolution while the effect
+				// runs: Done's create is refused and finds the same
+				// occurrence.
+				exec.onEffect = func() {
+					if _, err := h.store.RecordFact(f); err != nil {
+						t.Error(err)
+					}
 				}
 			}
-			exec := newFakeExec(h.clk)
-			exec.probe.Caps.Respond = true
 			res := mustPass(t, h.lane(t, "ctl"), view(), exec)
 			if res.Took != TakeControl || res.Done != DoneAccepted || len(exec.responds) != 1 {
 				t.Fatalf("pass %+v", res)
 			}
-			if c := exec.responds[0]; c.Interaction != "perm-1#1" || c.Payload != "allow" {
+			if c := exec.responds[0]; c.Interaction != "perm-1#1" || c.RequestID != "perm-1" || c.Response.Action != "approve" {
 				t.Fatalf("respond call %+v", c)
 			}
 			if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded {
@@ -749,12 +750,10 @@ func TestLaneRespondWritesTheFact(t *testing.T) {
 
 func TestLaneRespondWithoutTheCapabilityFails(t *testing.T) {
 	h := newLaneHarness(t)
-	op := h.propose(t, Request{
-		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r1",
-		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
-		Scope: Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1"},
-	})
-	mustPass(t, h.lane(t, "ctl"), view(), newFakeExec(h.clk))
+	op := h.propose(t, laneRespond(t, h.raise(t, "perm-1"), "operator", RespondPayload{Action: "approve"}))
+	exec := newFakeExec(h.clk)
+	exec.probe.Pending = "perm-1"
+	mustPass(t, h.lane(t, "ctl"), view(), exec)
 	if got := h.get(t, op.ID); got.Outcome.Arm != ArmFailed || got.Outcome.Reason != ReasonUnsupported {
 		t.Fatalf("op %+v", got)
 	}
@@ -1388,11 +1387,7 @@ func TestNewLaneRefusals(t *testing.T) {
 // instead, busy or unsupported, with its bookkeeping kept: it is replayed
 // when the probe allows it, or start_by closes it failed{deadline_in_flight}.
 func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
-	respond := Request{
-		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r1",
-		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
-		Scope: Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1"},
-	}
+	respond := respondReq("operator", 1, "perm-1#1", "gc", RespondPayload{Action: "approve"})
 	kinds := []struct {
 		name    string
 		req     Request
@@ -1447,6 +1442,10 @@ func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
 					op := h.propose(t, k.req)
 					exec := newFakeExec(h.clk)
 					exec.probe.Caps.Respond = true
+					if !k.content {
+						h.raise(t, "perm-1")
+						exec.probe.Pending = "perm-1"
+					}
 					allow := exec.probe
 					w.attempt(t, h, exec)
 					if n := effects(exec); n != 1 {

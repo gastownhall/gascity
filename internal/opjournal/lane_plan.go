@@ -92,6 +92,9 @@ type rulesPlan struct {
 	// that the rules leave open and not in flight, in a class or not: a
 	// member waiting on its after target is still in its replay group.
 	groups map[string][]Op
+	// raisings holds, by op id, the occurrence of each respond candidate as
+	// the pass read it after its probe (noteRaisings).
+	raisings map[string]raisingState
 }
 
 // isUrgent reports urgent content precedence: steer (OJ-17 adds now and the
@@ -422,12 +425,15 @@ func orderEntries(es []entry) {
 // takePlan is planTake's answer.
 type takePlan struct {
 	closes []ruleClose
-	take   *takeSpec
-	waits  []OpWait
-	wake   bool
-	busy   bool
-	more   bool
-	next   time.Time
+	// resolves are interaction.resolved facts to record before the closes:
+	// raisings the probe shows gone, whose respond ops close stale.
+	resolves []Fact
+	take     *takeSpec
+	waits    []OpWait
+	wake     bool
+	busy     bool
+	more     bool
+	next     time.Time
 }
 
 // takeSpec is the batch a Take writes.
@@ -466,7 +472,7 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 		return tp, err
 	}
 	caps := probe.Caps
-	if f := probe.Fence; f != (Fence{}) && (f.Conversation != conv.ID || f.Generation != conv.Generation || f.Epoch != conv.Epoch) {
+	if fenceDisagrees(probe, conv) {
 		// Nothing rings when the runtime and the view agree again: retry on
 		// a timer.
 		tp.next = now.Add(TransientBackoffBase)
@@ -533,6 +539,12 @@ func (tp *takePlan) wait(op Op, r WaitReason, detail string) {
 	tp.waits = append(tp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail})
 }
 
+// waitUntil is wait with a timer: the wait ends by itself at until.
+func (tp *takePlan) waitUntil(op Op, r WaitReason, detail string, until time.Time) {
+	tp.waits = append(tp.waits, OpWait{ID: op.ID, Reason: r, Detail: detail, Until: until})
+	tp.next = minTime(tp.next, until)
+}
+
 func (tp *takePlan) close(rp rulesPlan, e entry, o Outcome, now time.Time) {
 	tp.closes = append(tp.closes, ruleClose{cur: e.op, next: closedAt(e.cur, o, rp.by, now)})
 }
@@ -561,6 +573,8 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry
 			tp.wait(e.op, WaitUnsupported, "")
 		case e.op.Kind == KindRespond && !probe.Caps.Respond:
 			tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
+		case e.op.Kind == KindRespond && !tp.respondReady(rp, e, probe, now):
+			// respondReady recorded its wait or close.
 		case picked == nil:
 			picked = &e
 		default:

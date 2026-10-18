@@ -87,7 +87,11 @@ func (l *ConversationLane) effect(ctx context.Context, exec Executor, tb *takenB
 	case KindInterrupt:
 		r = exec.Interrupt(ectx, InterruptCall{Fence: spec.fence, Op: op, Turn: op.Scope.Turn, Seq: op.LaneSeq})
 	case KindRespond:
-		r = exec.Respond(ectx, RespondCall{Fence: spec.fence, Op: op, Interaction: op.Scope.Interaction, Payload: op.Payload, Seq: op.LaneSeq})
+		call, refused := respondCall(spec.fence, op)
+		if refused != nil {
+			return normalizeControl(*refused), preCall
+		}
+		r = exec.Respond(ectx, call)
 	default:
 		return unknownResult(fmt.Errorf("op %s: %s is not a control kind", op.ID, op.Kind)), preCall
 	}
@@ -406,12 +410,7 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	for _, op := range tb.ops {
 		items = append(items, &doneItem{kind: doneOp, id: op.ID, cur: op, next: l.doneNext(tb, er, success, op, now)})
 	}
-	if er.kind == resultSettled && tb.ops[0].Kind == KindRespond {
-		op := tb.ops[0]
-		f := Fact{
-			Kind: FactInteractionResolved, Conversation: op.Conversation, Generation: tb.spec.fence.Generation,
-			Interaction: op.Scope.Interaction, CauseOps: []string{op.ID}, Basis: FactBasisLane, At: now,
-		}
+	if f, ok := respondDoneFact(tb, er, success, now); ok {
 		id, err := FactID(l.store.prefix, f)
 		if err != nil {
 			return err

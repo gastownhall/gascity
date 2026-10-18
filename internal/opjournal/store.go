@@ -127,6 +127,11 @@ func (s *Store) Preview(req Request) (Op, error) {
 	if err != nil {
 		return Op{}, err
 	}
+	if op.Kind == KindRespond {
+		if err := validateRespond(s.prefix, op); err != nil {
+			return Op{}, err
+		}
+	}
 	op.ID, err = DeriveID(s.prefix, op.Conversation, op.Producer.Principal, op.ClientKey)
 	if err != nil {
 		return Op{}, err

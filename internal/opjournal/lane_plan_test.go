@@ -303,10 +303,19 @@ func TestPlanRulesTakePossible(t *testing.T) {
 }
 
 // takeFor runs both planners over ops with probe.
+// takeFor plans a Take of ops under probe. Every respond op's occurrence
+// reads raised and unresolved.
 func takeFor(t *testing.T, ops []Op, probe Probe) takePlan {
 	t.Helper()
 	now := t0.Add(time.Hour)
 	rp := planRules(snapOf(ops...), view(), now, "lane:ctl")
+	rp.raisings = map[string]raisingState{}
+	for _, op := range ops {
+		if op.Kind == KindRespond {
+			req, _, err := ParseInteractionOccurrence(op.Scope.Interaction)
+			rp.raisings[op.ID] = raisingState{request: req, raised: err == nil, invalid: err != nil, err: err}
+		}
+	}
 	tp, err := planTake(rp, probe, view(), now)
 	if err != nil {
 		t.Fatal(err)
@@ -399,12 +408,8 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 		r.Policy.Message.When = WhenSteer
 		r.Policy.Message.OnUnsupported = FallbackFail
 	}
-	respond := Request{
-		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: "r",
-		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: "allow",
-		Scope:   Scope{Kind: ScopeSession, Generation: 1, Interaction: "perm-1"},
-		StartBy: t0.Add(2 * time.Hour), FinishBy: t0.Add(3 * time.Hour),
-	}
+	respond := respondReq("operator", 1, "perm-1#1", "gc", RespondPayload{Action: "approve"})
+	respond.StartBy, respond.FinishBy = t0.Add(2*time.Hour), t0.Add(3*time.Hour)
 	kinds := []struct {
 		name  string
 		req   Request
@@ -442,7 +447,10 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 					}
 				})
 				allow := idleProbe()
-				allow.Caps.Respond = true
+				allow.Caps.Respond, allow.Pending = true, "perm-1"
+				if op.Kind != KindRespond {
+					allow.Pending = ""
+				}
 				deny := allow
 				k.deny(&deny)
 				tp := takeFor(t, []Op{op}, deny)
