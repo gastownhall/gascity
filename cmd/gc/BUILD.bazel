@@ -1581,6 +1581,7 @@ go_test(
         "nudge_target_info_equiv_test.go",
         "oneshot_by_id_routes_test.go",
         "oneshot_class_routes_test.go",
+        "only_lanes_inject_input_test.go",
         "op_sweep_events_test.go",
         "op_sweep_test.go",
         "order_args_channel_test.go",
