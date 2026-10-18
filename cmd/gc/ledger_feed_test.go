@@ -1891,9 +1891,10 @@ func waitForLedgerFeed(t *testing.T, timeout time.Duration, cond func() bool, wh
 
 // TestLedgerFeedOverEmbeddedDolt tails a real native store with the journal
 // on: a Create and then a Close made through the backing, behind the cache,
-// reach the cache and the legacy wake within 2s, long before any re-scan
-// (the first is at least 30s out). Writes through the cache neither notify
-// as cache-reconcile nor wake.
+// reach the cache and the legacy wake within 2s. The cache's reconcile gate
+// stays closed, so no re-scan can deliver them however long the test runs
+// (under -race it outlasts the first re-scan's 30s cadence). Writes through
+// the cache neither notify as cache-reconcile nor wake.
 func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("BD_EVENTS_JOURNAL", "")
@@ -1928,7 +1929,7 @@ func TestLedgerFeedOverEmbeddedDolt(t *testing.T) {
 	set.setWake(newLegacyWake(pokeCh, ctrlCh))
 	ep := events.NewFake()
 	req := &ledgerFeedRequest{set: set, scope: ledgerFeedCityScope, mode: config.BeadsLedgerFeedAuto}
-	cache := wrapWithCachingStoreFeed(ctx, native, ep, true, req).(*beads.CachingStore)
+	cache := wrapWithCachingStoreFeed(ctx, native, ep, true, req, beads.WithReconcileGate(func() bool { return false })).(*beads.CachingStore)
 	defer cache.StopReconciler()
 	_, entries := set.snapshot()
 	if len(entries) != 1 || entries[0].feed == nil || entries[0].feed.late {
