@@ -40,6 +40,31 @@ progression.
    until it is retried.
 5. Results are projections of the op: the executor closes the op, then
    emits the terminal event.
+6. A same-key retry on the **same** endpoint while the first request is
+   still running gets the first request's 202 (same `request_id`, same
+   `event_cursor`). A same-key retry on the **other** endpoint while it
+   runs gets 409 `in_flight`: the running request emits its terminal
+   event for its own operation only, so the other endpoint's waiter would
+   never match it. Once the request has finished, either endpoint gets the
+   stored outcome and a terminal event for its own operation.
+7. A replay's `error_code` is derived from the stored outcome, which
+   keeps the failure's class but not the step that failed, so it can
+   differ from the original's: a session closed or gone during the
+   delivery (originally `submit_failed` or `message_failed`) replays as
+   `resolve_failed`, and a deadline inside `/submit` (originally
+   `submit_failed`) replays as `timeout`. The original `error_message` is
+   not kept either; a replay says which op it replays and its outcome.
+8. A retry still passes the front-door checks first: an unknown target is
+   404 and a session waiting on a pending interaction (for example an
+   approval the first message raised) is 409, before the retry's key is
+   looked up. Such a retry gets its stored outcome once the target is
+   deliverable again.
+9. The in-flight registry that answers rule 6 is one per city per API
+   process, not one per per-city `Server`: the supervisor builds a new
+   `Server` when a city's state changes while the old one may still be
+   delivering, and a retry must find that delivery instead of re-running
+   it. A replaced `Server` stops retrying a failing op close, leaving the
+   op open for the sweeper or for a same-key retry to adopt.
 
 ## The pattern
 

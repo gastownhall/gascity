@@ -106,11 +106,15 @@ var (
 	InvalidIdempotencyKey = Register(ProblemType{Code: "invalid-idempotency-key", Status: http.StatusUnprocessableEntity, Title: "Invalid Idempotency Key"})
 
 	// Operation journal (DES-O0API D12): refusals of an ops gate in require,
-	// made before the request has any effect.
+	// made before the request is delivered. A request to a configured named
+	// session with no row is checked for these before the session is
+	// materialized, except a store that opens but cannot write the op row:
+	// that refusal comes after the materialization, which require needs to
+	// name the op's conversation (§6.4).
 	//
 	// OpJournalUnavailable is an op store that cannot record the request
 	// (no conditional writes, no op bead type, a store error). The client may
-	// retry; nothing ran.
+	// retry; nothing was delivered.
 	OpJournalUnavailable = Register(ProblemType{Code: "op-journal-unavailable", Status: http.StatusServiceUnavailable, Title: "Operation Journal Unavailable"})
 	// PayloadTooLarge is a request payload over the operation journal's
 	// 16 KiB inline limit.

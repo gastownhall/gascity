@@ -6,15 +6,24 @@ package api
 //
 // Under the ops.content rollout gate each request is recorded as a message
 // op before the legacy delivery runs and closed from the legacy result after
-// it, through the legacyop front door. Off records nothing and answers
-// byte for byte as before. Auto records where the op store can and lets the
-// request run unrecorded where it cannot. Require refuses a request it cannot
-// record before any effect. The existing Idempotency-Key LRU stays in front,
-// unchanged; behind it the in-flight registry and the op row are the dedupe
-// authority, so a retry finds its request again across a restart, across
-// /submit and /messages, and across alias and bead id. The delivered text is
-// the legacy path's, unchanged: no op id, key or marker reaches a runtime
-// (D15, I11).
+// it, through the legacyop front door. Off records nothing and answers as
+// before, with one addition every mode shares: an interrupt_now submit's
+// result carries the turn fence's "interrupt" report (DES-T3I §14 item 2),
+// which ops.content does not gate. Auto records where the op store can and
+// lets the request run unrecorded where it cannot. Require refuses a request
+// it cannot record; the one effect that can precede the refusal is the
+// materialization of a configured named session, which require needs to name
+// the op's conversation (§6.4). The existing Idempotency-Key LRU stays in
+// front, unchanged; behind it the in-flight registry and the op row are the
+// dedupe authority, so a retry finds its request again across a restart,
+// across /submit and /messages, and across alias and bead id. The delivered
+// text is the legacy path's, unchanged: no op id, key or marker reaches a
+// runtime (D15, I11).
+//
+// The in-flight registry is per city per process (cityOps), not per Server:
+// the supervisor builds a new Server for a city whenever the city's State
+// changes, while the old Server's deliveries may still run, and adoption
+// reads "not in the registry" as "its API died" (D9, I3).
 
 import (
 	"context"
@@ -22,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"sync"
 	"time"
 	"unicode/utf8"
@@ -66,41 +76,114 @@ func (messageTimeoutError) Unwrap() error { return context.DeadlineExceeded }
 // another session between the 202 and the delivery (DES-O0API §6.1).
 const opTargetMovedResult = "op_target_moved"
 
-// serverOps is one Server's operation-journal state: the in-flight registry,
-// the content recorder and the lazily opened op store.
-type serverOps struct {
+// cityOps is the operation-journal state one process shares across every
+// Server it builds for one city: the in-flight registry, which must outlive
+// a Server whose deliveries are still running (I3), and the degrade
+// reporter, whose latch is per process (§5.5). It is safe for concurrent use.
+type cityOps struct {
 	inflight *legacyop.Inflight
-	content  *legacyop.Recorder
-	clk      clock.Clock
+	degraded *OpsDegradeReporter
+
+	mu       sync.Mutex
+	recorder func() events.Recorder
+}
+
+// newCityOps returns a city's empty shared op state.
+func newCityOps() *cityOps {
+	c := &cityOps{inflight: legacyop.NewInflight()}
+	c.degraded = NewOpsDegradeReporter(c.eventRecorder, clock.Real{})
+	return c
+}
+
+// attach makes recorder, the newest Server's event recorder, the one the
+// city's degrade events go to.
+func (c *cityOps) attach(recorder func() events.Recorder) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.recorder = recorder
+}
+
+// eventRecorder is the attached Server's event recorder, or nil.
+func (c *cityOps) eventRecorder() events.Recorder {
+	c.mu.Lock()
+	recorder := c.recorder
+	c.mu.Unlock()
+	if recorder == nil {
+		return nil
+	}
+	return recorder()
+}
+
+// serverOps is one Server's operation-journal state: the content recorder
+// over its city's shared state, the lazily opened op store, and the done
+// channel that ends the recorder's background close retries when the Server
+// is dropped.
+type serverOps struct {
+	city    *cityOps
+	content *legacyop.Recorder
+	clk     clock.Clock
 	// openStore opens the op store over a sessions-class store; tests
 	// substitute it.
 	openStore func(beads.SessionStore, clock.Clock) (*opjournal.Store, error)
+	// logf writes the op path's log lines; tests capture them.
+	logf func(format string, args ...any)
+	// afterAdmit, when set, runs after a request is admitted and before its
+	// delivery goroutine owns the admission; tests inject a handler panic
+	// there.
+	afterAdmit func()
+
+	done     chan struct{}
+	stopOnce sync.Once
 
 	mu   sync.Mutex
 	st   *opjournal.Store
 	over beads.Store
 }
 
-// newServerOps builds s's op state over its boot-latched gates. It runs once
-// at Server construction, after the gates are latched.
-func newServerOps(s *Server) *serverOps {
+// newServerOps builds s's op state over its boot-latched gates and city, the
+// city's shared state (nil: a city of its own). It runs once at Server
+// construction, after the gates are latched.
+func newServerOps(s *Server, city *cityOps) *serverOps {
+	if city == nil {
+		city = newCityOps()
+	}
+	city.attach(func() events.Recorder { return s.state.EventProvider() })
 	o := &serverOps{
-		inflight: legacyop.NewInflight(),
-		clk:      clock.Real{},
+		city: city,
+		clk:  clock.Real{},
 		openStore: func(st beads.SessionStore, clk clock.Clock) (*opjournal.Store, error) {
 			return opjournal.NewStore(st, clk)
 		},
+		logf: log.Printf,
+		done: make(chan struct{}),
 	}
-	degraded := NewOpsDegradeReporter(func() events.Recorder { return s.state.EventProvider() }, o.clk)
 	o.content = &legacyop.Recorder{
 		Mode:     s.bootFlags.OpsContent(),
 		Executor: legacyop.ExecutorAPI,
 		Open:     func() (*opjournal.Store, error) { return o.store(s.state.SessionsBeadStore()) },
-		Inflight: o.inflight,
+		Inflight: city.inflight,
 		Clock:    o.clk,
-		Degraded: func(d legacyop.Degrade) { degraded.Report(rollout.KeyOpsContent, d) },
+		Degraded: func(d legacyop.Degrade) { city.degraded.Report(rollout.KeyOpsContent, d) },
+		Done:     o.done,
 	}
 	return o
+}
+
+// shutdown ends the Server's background close retries: the supervisor
+// dropped or replaced it. An op whose close was still being retried stays
+// open for the sweeper, or for a same-key retry to adopt. It is idempotent
+// and does nothing on nil.
+func (o *serverOps) shutdown() {
+	if o == nil {
+		return
+	}
+	o.stopOnce.Do(func() { close(o.done) })
+}
+
+// healthy tells the degrade reporter that stages of the content gate just
+// worked, so the next failure there raises a fresh event (§5.5).
+func (o *serverOps) healthy(stages ...string) {
+	o.city.degraded.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, stages...)
 }
 
 // store returns the cached op store, opening it over over when none is cached
@@ -153,6 +236,14 @@ type messageOpRequest struct {
 	operation string
 }
 
+// inflightAnswer is what an admitted request leaves in its in-flight entry
+// for a same-key request to replay while it runs: its 202 and the operation
+// its terminal event names.
+type inflightAnswer struct {
+	operation string
+	body      asyncAcceptedBody
+}
+
 // admitMessageOp admits req under the ops.content gate (DES-O0API §6.1 steps
 // 3 and 4). It returns either an admission to execute or the body to answer
 // a replay with (DES-O0API §6.2), or a refusal mapped to the wire. cursor is
@@ -160,19 +251,7 @@ type messageOpRequest struct {
 // terminal event after it.
 func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *messageOpRequest, cursor string) (*legacyop.Admission, *asyncAcceptedBody, error) {
 	rec := s.ops.content
-	if req.conv == "" {
-		if rec.Mode != gate.Require {
-			return rec.Unrecorded(opjournal.KindMessage, req.key, legacyop.ReasonUnmaterializedTarget), nil, nil
-		}
-		// Require: materialize the named session first, as /wake does, so
-		// the op names its conversation (DES-O0API §6.4).
-		id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, req.target)
-		if err != nil {
-			return nil, nil, humaResolveError(err)
-		}
-		req.conv = id
-	}
-	adm, err := rec.Admit(legacyop.Request{
+	oreq := legacyop.Request{
 		Conversation: req.conv,
 		Principal:    legacyop.PrincipalOperator,
 		Actor:        opjournal.ActorOperator,
@@ -180,19 +259,46 @@ func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *mes
 		Payload:      req.text,
 		Kind:         opjournal.KindMessage,
 		Policy:       messageOpPolicy(req.intent),
-	})
+	}
+	if req.conv == "" {
+		if rec.Mode != gate.Require {
+			return rec.Unrecorded(opjournal.KindMessage, req.key, legacyop.ReasonUnmaterializedTarget), nil, nil
+		}
+		// Require: refuse what cannot be recorded whatever the conversation
+		// (a bad key, a payload over the limit, a store that does not open)
+		// before materializing anything; then materialize the named session,
+		// as /wake does, so the op names its conversation (DES-O0API §6.4).
+		if err := rec.Check(oreq); err != nil {
+			return nil, nil, opAdmitError(err, req.key)
+		}
+		id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store, req.target)
+		if err != nil {
+			return nil, nil, humaResolveError(err)
+		}
+		req.conv, oreq.Conversation = id, id
+	}
+	adm, err := rec.Admit(oreq)
 	if err != nil {
 		return nil, nil, opAdmitError(err, req.key)
+	}
+	if adm.Recorded {
+		s.ops.healthy(legacyop.StageOpen, legacyop.StagePropose)
+		if adm.Adopted {
+			s.ops.healthy(legacyop.StageAdopt)
+		}
 	}
 	if adm.Decision != legacyop.Replay {
 		return adm, nil, nil
 	}
 	if adm.Cached != nil {
-		body, ok := adm.Cached.(asyncAcceptedBody)
-		if !ok {
+		answer, ok := adm.Cached.(inflightAnswer)
+		if !ok || answer.operation != req.operation {
+			// The running request emits its terminal event for its own
+			// endpoint only, so a waiter on another endpoint would never
+			// match it: busy until it finishes, then a stored replay.
 			return nil, nil, apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
 		}
-		return nil, &body, nil
+		return nil, &answer.body, nil
 	}
 	body := asyncAcceptedBody{
 		Status:         "accepted",
@@ -299,6 +405,7 @@ func (s *Server) finishMessageOp(adm *legacyop.Admission, res legacyop.Result) *
 		return nil
 	}
 	if f.Closed {
+		s.ops.healthy(legacyop.StageClose)
 		return conversationOpWire(f.Op)
 	}
 	if f.Background != nil && s.ops.content.Mode == gate.Require {
@@ -318,15 +425,23 @@ func (s *Server) currentOpWire(op opjournal.Op) *ConversationOp {
 	return conversationOpWire(op)
 }
 
-// noteTargetMoved counts a recorded message whose target re-resolved to
-// another session than the one its op names; the op still closes from the
-// legacy result (DES-O0API §6.1).
-func noteTargetMoved(adm *legacyop.Admission, delivered string) {
+// noteTargetMoved logs and counts a recorded message whose target
+// re-resolved to another session than the one its op names; the op still
+// closes from the legacy result (DES-O0API §6.1).
+func (s *Server) noteTargetMoved(adm *legacyop.Admission, delivered string) {
 	if adm == nil || !adm.Recorded || delivered == adm.Op.Conversation {
 		return
 	}
-	log.Printf("api: op %s for session %s was delivered to %s: the target moved after the 202", adm.Op.ID, adm.Op.Conversation, delivered)
+	s.ops.logf("api: op %s for session %s was delivered to %s: the target moved after the 202", adm.Op.ID, adm.Op.Conversation, delivered)
 	telemetry.RecordOpRecord(context.Background(), string(opjournal.KindMessage), legacyop.SurfaceAPI, legacyop.StageClose, opTargetMovedResult, "")
+}
+
+// runAfterAdmit runs the test hook between admission and the delivery
+// goroutine's hand-off.
+func (o *serverOps) runAfterAdmit() {
+	if o.afterAdmit != nil {
+		o.afterAdmit()
+	}
 }
 
 // emitMessageOpProjection re-emits a finished message op's terminal event for
@@ -371,7 +486,11 @@ func replayedFailureMessage(id string, arm opjournal.Arm, reason string) string 
 }
 
 // messageReplayErrorCode is the request.failed error code a replay projects
-// from a failed or skipped message op's reason (DES-O0API §6.3).
+// from a failed or skipped message op's reason (DES-O0API §6.3). The reason
+// keeps the failure's class, not the step that failed, so a replay's code
+// can differ from the original's: a session closed or gone during the
+// delivery replays as resolve_failed, a deadline inside /submit as timeout
+// (engdocs/design/async-request-result.md, request_id rule 7).
 func messageReplayErrorCode(operation, reason string) string {
 	switch reason {
 	case opjournal.ReasonUnsupported:
@@ -401,25 +520,27 @@ func releaseOnPanic(adm *legacyop.Admission, handedOff *bool) {
 	}
 }
 
-// opsDegradeInterval latches ops.recording_degraded per (gate, surface,
-// stage, reason), the recorder's log interval.
+// opsDegradeInterval is the least time between two ops.recording_degraded
+// events of one (gate, surface, stage, reason), the recorder's log interval.
 const opsDegradeInterval = legacyop.DegradeLogInterval
 
 // opsDegradeDetailMax bounds the event's detail.
 const opsDegradeDetailMax = 512
 
 // OpsDegradeReporter turns operation-journal recording degrades into
-// ops.recording_degraded city events (DES-O0API D13): at most one event per
-// (gate, surface, stage, reason) per legacyop.DegradeLogInterval, so a store
-// outage emits once per interval instead of once per request. The API's
-// recorders and the controller's op sweeper report through one each. It is
+// ops.recording_degraded city events (DES-O0API D13, §5.5): one event on the
+// first failure of a (gate, surface, stage, reason) after a healthy period,
+// and at most one per legacyop.DegradeLogInterval, so a store outage emits
+// once instead of once per request. A class is healthy until it fails, and
+// again once its stage reports success (Healthy). The API reports through one
+// per city per process, the controller's op sweeper through its own. It is
 // safe for concurrent use.
 type OpsDegradeReporter struct {
 	recorder func() events.Recorder
 	clk      clock.Clock
 
-	mu   sync.Mutex
-	last map[opsDegradeKey]time.Time
+	mu      sync.Mutex
+	classes map[opsDegradeKey]opsDegradeLatch
 }
 
 // opsDegradeKey is the latch key of one degrade class.
@@ -427,17 +548,25 @@ type opsDegradeKey struct {
 	gate, surface, stage, reason string
 }
 
+// opsDegradeLatch is one degrade class's state: when it last raised an event
+// and whether it has failed since its stage last reported success.
+type opsDegradeLatch struct {
+	lastEvent time.Time
+	degraded  bool
+}
+
 // NewOpsDegradeReporter returns a reporter that records to the recorder
 // recorder returns at each report (nil there drops the event) and dates its
 // latch with clk.
 func NewOpsDegradeReporter(recorder func() events.Recorder, clk clock.Clock) *OpsDegradeReporter {
-	return &OpsDegradeReporter{recorder: recorder, clk: clk, last: map[opsDegradeKey]time.Time{}}
+	return &OpsDegradeReporter{recorder: recorder, clk: clk, classes: map[opsDegradeKey]opsDegradeLatch{}}
 }
 
 // Report records one ops.recording_degraded event for d under gate (a
-// rollout key: ops.content, ops.control or ops.lifecycle), unless the latch
-// for its class is still closed. A degrade under a mode that does not record
-// (off) is not a degrade and is ignored.
+// rollout key: ops.content, ops.control or ops.lifecycle) when d's class was
+// healthy and its last event is at least opsDegradeInterval old; either way
+// the class is degraded until its stage reports success. A degrade under a
+// mode that does not record (off) is not a degrade and is ignored.
 func (r *OpsDegradeReporter) Report(gateKey string, d legacyop.Degrade) {
 	if r == nil || (d.Mode != gate.Auto && d.Mode != gate.Require) {
 		return
@@ -445,12 +574,17 @@ func (r *OpsDegradeReporter) Report(gateKey string, d legacyop.Degrade) {
 	key := opsDegradeKey{gate: gateKey, surface: d.Surface, stage: d.Stage, reason: d.Reason}
 	now := r.clk.Now()
 	r.mu.Lock()
-	if last, seen := r.last[key]; seen && now.Before(last.Add(opsDegradeInterval)) {
-		r.mu.Unlock()
+	latch, seen := r.classes[key]
+	due := !latch.degraded && (!seen || !now.Before(latch.lastEvent.Add(opsDegradeInterval)))
+	latch.degraded = true
+	if due {
+		latch.lastEvent = now
+	}
+	r.classes[key] = latch
+	r.mu.Unlock()
+	if !due {
 		return
 	}
-	r.last[key] = now
-	r.mu.Unlock()
 	rec := r.recorder()
 	if rec == nil {
 		return
@@ -478,6 +612,24 @@ func (r *OpsDegradeReporter) Report(gateKey string, d legacyop.Degrade) {
 		Message: fmt.Sprintf("op recording degraded: gate=%s mode=%s surface=%s stage=%s reason=%s", gateKey, d.Mode, d.Surface, d.Stage, d.Reason),
 		Payload: payload,
 	})
+}
+
+// Healthy marks every degrade class of gate and surface at stages healthy:
+// those stages just worked (a recorded admission for open and propose, an
+// adoption for adopt, a close, a clean sweep pass), so their next failure is
+// news again, subject to the interval.
+func (r *OpsDegradeReporter) Healthy(gateKey, surface string, stages ...string) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	for key, latch := range r.classes {
+		if key.gate == gateKey && key.surface == surface && latch.degraded && slices.Contains(stages, key.stage) {
+			latch.degraded = false
+			r.classes[key] = latch
+		}
+	}
 }
 
 // truncateUTF8 cuts s to at most n bytes without splitting a rune.

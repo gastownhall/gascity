@@ -168,9 +168,13 @@ func contractAsyncFamily(t *testing.T, h *contractHarness) {
 }
 
 // submitReplayAndExpectOneDelivery drives submit-session twice under one
-// Idempotency-Key. The retry is answered as the first request (the LRU in
-// front, or the op row behind it under an ops.content gate), so a waiter on
-// either answer sees the one terminal event, and nothing is delivered twice.
+// Idempotency-Key. The retry is answered as the first request by the
+// Idempotency-Key LRU, so a waiter on either answer sees the one terminal
+// event, and nothing is delivered twice. It exercises the LRU only: the
+// harness's file bead store has no id prefix, so an ops.content gate would
+// run unrecorded here (no_namespace); the op-row replay across a restart is
+// covered over a real Server in internal/api
+// (TestClientSubmitSessionWithKeyReplaysAcrossARestart).
 func (h *contractHarness) submitReplayAndExpectOneDelivery(t *testing.T, sess genclient.SessionResponse) {
 	t.Helper()
 	const text = "contract submit replay"

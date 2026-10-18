@@ -76,9 +76,10 @@ type Server struct {
 	// idem caches responses for Idempotency-Key replay on create endpoints.
 	idem *idempotencyCache
 
-	// ops is the operation-journal state of the O0 shadow ops: the in-flight
-	// registry, the per-gate recorders and the lazily opened op store
-	// (session_ops.go). Built once, after bootFlags is latched.
+	// ops is the operation-journal state of the O0 shadow ops: the per-gate
+	// recorders over the city's shared in-flight registry, and the lazily
+	// opened op store (session_ops.go). Built once, after bootFlags is
+	// latched.
 	ops *serverOps
 
 	// rigIdem is the in-process live index + request_id state machine backing
@@ -273,6 +274,19 @@ func NewReadOnly(state State) *Server {
 }
 
 func newServer(state State, readOnly bool) *Server {
+	return newServerFor(state, readOnly, nil)
+}
+
+// newCityServer is New or NewReadOnly over city, the operation-journal state
+// the process shares across every Server it builds for the city (session_ops.go).
+func newCityServer(state State, readOnly bool, city *cityOps) *Server {
+	syncFeatureFlags(state.Config())
+	return newServerFor(state, readOnly, city)
+}
+
+// newServerFor builds a Server over city's shared op state; nil gives the
+// Server a city state of its own.
+func newServerFor(state State, readOnly bool, city *cityOps) *Server {
 	mux := http.NewServeMux()
 	s := &Server{
 		state:          state,
@@ -295,7 +309,7 @@ func newServer(state State, readOnly bool) *Server {
 	} else if cfg := state.Config(); cfg != nil {
 		s.bootFlags, _ = rollout.Resolve(cfg, rollout.ResolveOptions{})
 	}
-	s.ops = newServerOps(s)
+	s.ops = newServerOps(s, city)
 	mux.HandleFunc("/svc/", s.handleServiceProxy)
 	// /hook/* webhook receiver — the fourth sanctioned non-Huma surface. Like
 	// /svc/* it is a raw-body pass-through (HMAC/ed25519 sign the exact bytes),

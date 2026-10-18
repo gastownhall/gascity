@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"slices"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
@@ -54,5 +56,45 @@ func TestOpSweepDegradeRaisesOpsRecordingDegraded(t *testing.T) {
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("events = %+v, want %+v (one per gate on, latched across the two passes)", got, want)
+	}
+}
+
+// TestOpSweepCleanPassRearmsTheDegradeEvent proves the sweeper's latch is
+// "first failure after a healthy period" (DES-O0API §5.5): an outage raises
+// one event however long it lasts, and a clean pass re-arms it, so the next
+// outage, an interval after the last event, raises another.
+func TestOpSweepCleanPassRearmsTheDegradeEvent(t *testing.T) {
+	broken := &beads.MemStore{HonorExplicitIDs: true} // no id prefix: no op namespace
+	healthy := newOpSweepStore()
+	cs := newOpSweepCS(broken, rollout.WithOpsContent(rollout.Auto))
+	rec := events.NewFake()
+	cs.eventProv = rec
+	s := cs.newOpSweeper()
+	s.logf = func(string, ...any) {}
+	clk := &opSweepClock{now: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)}
+	s.events = api.NewOpsDegradeReporter(func() events.Recorder { return rec }, clk)
+	count := func() int {
+		evs, _ := rec.List(events.Filter{Type: events.OpsRecordingDegraded})
+		return len(evs)
+	}
+	setStore := func(st beads.Store) {
+		cs.mu.Lock()
+		cs.cityBeadStore = st
+		cs.mu.Unlock()
+	}
+
+	s.safePass()
+	clk.Advance(3 * legacyop.DegradeLogInterval)
+	s.safePass()
+	if n := count(); n != 1 {
+		t.Fatalf("one outage across two intervals raised %d events, want 1", n)
+	}
+	setStore(healthy)
+	s.safePass()
+	setStore(broken)
+	clk.Advance(legacyop.DegradeLogInterval)
+	s.safePass()
+	if n := count(); n != 2 {
+		t.Fatalf("an outage after a clean pass raised %d events in total, want 2", n)
 	}
 }

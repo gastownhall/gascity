@@ -790,7 +790,8 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
 	body := acceptedMessageBody(adm, reqID, eventCursor)
-	adm.Accept(body)
+	adm.Accept(inflightAnswer{operation: RequestOperationSessionSubmit, body: body})
+	s.ops.runAfterAdmit()
 
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
@@ -812,7 +813,7 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 				return
 			}
 			id = resolved
-			noteTargetMoved(adm, id)
+			s.noteTargetMoved(adm, id)
 		}
 		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, resume)
 		op := s.finishMessageOp(adm, messageOpResult(outcome.Queued, submitErr, outcome.Interrupt))
@@ -899,7 +900,8 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
 	}
 	body := acceptedMessageBody(adm, reqID, eventCursor)
-	adm.Accept(body)
+	adm.Accept(inflightAnswer{operation: RequestOperationSessionMessage, body: body})
+	s.ops.runAfterAdmit()
 
 	message, resume := input.Body.Message, input.Body.Resume
 	sessionTarget := input.ID
@@ -947,7 +949,7 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 					return
 				}
 				id = resolved
-				noteTargetMoved(adm, id)
+				s.noteTargetMoved(adm, id)
 			}
 			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
 			if err != nil {

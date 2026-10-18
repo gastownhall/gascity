@@ -1,21 +1,24 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
-	"math/rand/v2"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"reflect"
 	"regexp"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
@@ -46,6 +49,8 @@ type opsTestStore struct {
 	panicAfterCreate bool
 	// updateFails fails this many op-row conditional updates.
 	updateFails int
+	// onOpCreate runs once after the next op-row create commits.
+	onOpCreate func()
 	// creates counts committed op rows.
 	creates atomic.Int32
 }
@@ -61,8 +66,8 @@ func (s *opsTestStore) Create(b beads.Bead) (beads.Bead, error) {
 		return s.MemStore.Create(b)
 	}
 	s.mu.Lock()
-	createErr, ambiguous, panicAfter := s.createErr, s.ambiguous, s.panicAfterCreate
-	s.panicAfterCreate = false
+	createErr, ambiguous, panicAfter, onCreate := s.createErr, s.ambiguous, s.panicAfterCreate, s.onOpCreate
+	s.panicAfterCreate, s.onOpCreate = false, nil
 	s.mu.Unlock()
 	if createErr != nil {
 		return beads.Bead{}, createErr
@@ -72,6 +77,9 @@ func (s *opsTestStore) Create(b beads.Bead) (beads.Bead, error) {
 		return created, err
 	}
 	s.creates.Add(1)
+	if onCreate != nil {
+		onCreate()
+	}
 	if panicAfter {
 		panic("injected crash after the op row committed")
 	}
@@ -102,11 +110,14 @@ func (s *opsTestStore) set(f func(*opsTestStore)) {
 	f(s)
 }
 
-// opsEnv is a fake city whose sessions store records ops under mode.
+// opsEnv is a fake city whose sessions store records ops under mode, served
+// by one supervisor (one API process).
 type opsEnv struct {
-	fs    *fakeState
-	store *opsTestStore
-	h     http.Handler
+	fs       *fakeState
+	store    *opsTestStore
+	resolver *stateCityResolver
+	sm       *SupervisorMux
+	h        http.Handler
 }
 
 func newOpsEnv(t *testing.T, mode string) *opsEnv {
@@ -116,12 +127,40 @@ func newOpsEnv(t *testing.T, mode string) *opsEnv {
 	store := newOpsTestStore()
 	fs.cityBeadStore = store
 	fs.cfg.Ops.ContentMode = mode
-	return &opsEnv{fs: fs, store: store, h: newTestCityHandler(t, fs)}
+	e := &opsEnv{fs: fs, store: store}
+	e.restart(t)
+	return e
 }
 
-// restart is a new API server (an empty LRU and in-flight registry) over
-// the same city, as after an API restart.
-func (e *opsEnv) restart(t *testing.T) { e.h = newTestCityHandler(t, e.fs) }
+// restart is a new API process over the same city: a new supervisor, so an
+// empty LRU and in-flight registry.
+func (e *opsEnv) restart(t *testing.T) {
+	t.Helper()
+	e.resolver = &stateCityResolver{state: e.fs}
+	e.sm = NewSupervisorMux(e.resolver, nil, false, "test", "", time.Now())
+	e.h = wrapTestSupervisorMiddleware(e.sm)
+}
+
+// rebuiltState is the same city under a new State value, as after the city
+// restarts under a running supervisor.
+type rebuiltState struct{ *fakeState }
+
+// rebuild makes the supervisor build a new Server for the city, in the same
+// process, as it does whenever the city's State changes.
+func (e *opsEnv) rebuild(t *testing.T) {
+	t.Helper()
+	old := e.server(t)
+	e.resolver.state = &rebuiltState{fakeState: e.fs}
+	if e.server(t) == old {
+		t.Fatal("the supervisor kept the old Server")
+	}
+}
+
+// server is the Server the supervisor serves the city with now.
+func (e *opsEnv) server(t *testing.T) *Server {
+	t.Helper()
+	return e.sm.getCityServer(e.fs.CityName(), e.resolver.state)
+}
 
 func (e *opsEnv) session(t *testing.T, title string) session.Info {
 	t.Helper()
@@ -206,20 +245,6 @@ func waitTerminalEvents(t *testing.T, prov events.Provider, requestID string, n 
 	return nil
 }
 
-func jsonKeys(t *testing.T, raw []byte) []string {
-	t.Helper()
-	var m map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &m); err != nil {
-		t.Fatalf("decode %s: %v", raw, err)
-	}
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	slices.Sort(keys)
-	return keys
-}
-
 // deliveredCalls are the runtime calls that carry text to name.
 func deliveredCalls(sp *runtime.Fake, name string) []runtime.Call {
 	var out []runtime.Call
@@ -233,38 +258,122 @@ func deliveredCalls(sp *runtime.Fake, name string) []runtime.Call {
 
 var mintedKeyRE = regexp.MustCompile(`^k-[a-z2-7]{26}$`)
 
-// I5: in off no op row is written and the 202 body and terminal events keep
-// their legacy fields, whether or not the request carries a key.
+// I5: in off no op row is written, and the 202 body and each terminal
+// event, envelope and payload, are the legacy ones in full, keyed or not and
+// failed or not. The one field off shares with the other modes is an
+// interrupt_now's "interrupt" report (DES-T3I §14 item 2), which ops.content
+// does not gate.
 func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
-	e := newOpsEnv(t, "")
-	info := e.session(t, "Off")
-	for _, tc := range []struct{ path, key, body, eventType string }{
-		{"/submit", "", `{"message":"one"}`, events.RequestResultSessionSubmit},
-		{"/submit", "k1", `{"message":"two"}`, events.RequestResultSessionSubmit},
-		{"/messages", "", `{"message":"three"}`, events.RequestResultSessionMessage},
-		{"/messages", "k2", `{"message":"four"}`, events.RequestResultSessionMessage},
+	for _, tc := range []struct {
+		name, path, key, body string
+		setup                 func(*testing.T, *opsEnv) session.Info
+		eventType             string
+		subject               bool
+		payload               string
+	}{
+		{
+			name: "submit", path: "/submit", body: `{"message":"one"}`, eventType: events.RequestResultSessionSubmit, subject: true,
+			payload: `{"request_id":"$R","session_id":"$S","queued":false,"intent":"default"}`,
+		},
+		{
+			name: "submit keyed", path: "/submit", key: "k1", body: `{"message":"two","intent":"follow_up"}`, eventType: events.RequestResultSessionSubmit, subject: true,
+			payload: `{"request_id":"$R","session_id":"$S","queued":true,"intent":"follow_up"}`,
+		},
+		{
+			name: "messages", path: "/messages", body: `{"message":"three"}`, eventType: events.RequestResultSessionMessage, subject: true,
+			payload: `{"request_id":"$R","session_id":"$S","queued":false}`,
+		},
+		{
+			name: "messages keyed", path: "/messages", key: "k2", body: `{"message":"four"}`, eventType: events.RequestResultSessionMessage, subject: true,
+			payload: `{"request_id":"$R","session_id":"$S","queued":false}`,
+		},
+		{
+			name: "submit failed", path: "/submit", key: "k3", body: `{"message":"five"}`, eventType: events.RequestFailed,
+			setup: func(t *testing.T, e *opsEnv) session.Info {
+				info := e.session(t, "Off failed")
+				e.fs.sp.NudgeErrors = map[string]error{info.SessionName: errors.New("boom")}
+				return info
+			},
+			payload: `{"request_id":"$R","operation":"session.submit","error_code":"submit_failed","error_message":"sending message to session: boom"}`,
+		},
+		{
+			name: "messages failed", path: "/messages", body: `{"message":"six"}`, eventType: events.RequestFailed,
+			setup: func(t *testing.T, e *opsEnv) session.Info {
+				info := e.session(t, "Off failed")
+				e.fs.sp.NudgeErrors = map[string]error{info.SessionName: errors.New("boom")}
+				return info
+			},
+			payload: `{"request_id":"$R","operation":"session.message","error_code":"message_failed","error_message":"sending message to session: boom"}`,
+		},
+		{
+			name: "submit interrupt_now", path: "/submit", body: `{"message":"now","intent":"interrupt_now"}`, eventType: events.RequestResultSessionSubmit, subject: true,
+			setup: func(t *testing.T, e *opsEnv) session.Info {
+				e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+				e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
+				info, err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider).CreateSession(context.Background(), session.CreateOptions{
+					Template: "helper", Title: "Off interrupt", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"},
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return info
+			},
+			payload: `{"request_id":"$R","session_id":"$S","queued":false,"intent":"interrupt_now","interrupt":{"outcome":"no_turn"}}`,
+		},
 	} {
-		rec := e.post(t, "/session/"+info.ID+tc.path, tc.key, tc.body)
-		if rec.Code != http.StatusAccepted {
-			t.Fatalf("%s: status %d: %s", tc.path, rec.Code, rec.Body.String())
-		}
-		if got := jsonKeys(t, rec.Body.Bytes()); !slices.Equal(got, []string{"event_cursor", "request_id", "status"}) {
-			t.Fatalf("%s: 202 keys = %v", tc.path, got)
-		}
-		acc := decodeAsyncAccepted(t, rec.Body)
-		if !strings.HasPrefix(acc.RequestID, "req-") {
-			t.Fatalf("%s: request_id = %q, want req-", tc.path, acc.RequestID)
-		}
-		evs := waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
-		if evs[0].Type != tc.eventType {
-			t.Fatalf("%s: event %s: %s", tc.path, evs[0].Type, evs[0].Payload)
-		}
-		if strings.Contains(string(evs[0].Payload), `"op"`) {
-			t.Fatalf("%s: off event carries an op: %s", tc.path, evs[0].Payload)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			e := newOpsEnv(t, "")
+			var info session.Info
+			if tc.setup != nil {
+				info = tc.setup(t, e)
+			} else {
+				info = e.session(t, "Off")
+			}
+			e.recordUnrelatedEvent()
+			seq, err := e.fs.eventProv.LatestSeq()
+			if err != nil {
+				t.Fatal(err)
+			}
+			cursor := strconv.FormatUint(seq, 10)
+			rec := e.post(t, "/session/"+info.ID+tc.path, tc.key, tc.body)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			acc := decodeAsyncAccepted(t, bytes.NewReader(rec.Body.Bytes()))
+			if !strings.HasPrefix(acc.RequestID, "req-") {
+				t.Fatalf("request_id = %q, want req-", acc.RequestID)
+			}
+			wantBody := fmt.Sprintf(`{"status":"accepted","request_id":%q,"event_cursor":%q}`, acc.RequestID, cursor)
+			assertJSONEqual(t, "202 body", rec.Body.Bytes(), wantBody)
+			evs := waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			wantSubject := ""
+			if tc.subject {
+				wantSubject = info.ID
+			}
+			if evs[0].Type != tc.eventType || evs[0].Subject != wantSubject {
+				t.Fatalf("event %s subject %q, want %s subject %q", evs[0].Type, evs[0].Subject, tc.eventType, wantSubject)
+			}
+			want := strings.NewReplacer("$R", acc.RequestID, "$S", info.ID).Replace(tc.payload)
+			assertJSONEqual(t, "event payload", evs[0].Payload, want)
+			if rows := e.opRows(t); len(rows) != 0 {
+				t.Fatalf("off wrote %d op rows", len(rows))
+			}
+		})
 	}
-	if rows := e.opRows(t); len(rows) != 0 {
-		t.Fatalf("off wrote %d op rows", len(rows))
+}
+
+// assertJSONEqual compares two JSON documents structurally.
+func assertJSONEqual(t *testing.T, what string, got []byte, want string) {
+	t.Helper()
+	var g, w any
+	if err := json.Unmarshal(got, &g); err != nil {
+		t.Fatalf("%s: decode %s: %v", what, got, err)
+	}
+	if err := json.Unmarshal([]byte(want), &w); err != nil {
+		t.Fatalf("%s: decode want %s: %v", what, want, err)
+	}
+	if !reflect.DeepEqual(g, w) {
+		t.Fatalf("%s = %s, want %s", what, got, want)
 	}
 }
 
@@ -430,39 +539,55 @@ func (p *gatedProvider) NudgeFenced(ctx context.Context, name string, content []
 	return p.Fake.NudgeFenced(ctx, name, content, n)
 }
 
-// §6.2 in-flight rows and §6.1: while the first request delivers, a same-key
-// request on the other endpoint gets the cached 202 (same request_id and
-// cursor), another body under the key is refused 422, and the op existed
-// before the delivery ran.
-func TestSessionContentOpsAutoInFlightReplay(t *testing.T) {
-	e := newOpsEnv(t, "auto")
-	info := e.session(t, "In flight")
+// newGatedProvider installs a provider whose deliveries wait for release.
+// The returned release is idempotent and also runs at cleanup.
+func (e *opsEnv) gatedProvider(t *testing.T) (*gatedProvider, func()) {
+	t.Helper()
 	gp := &gatedProvider{Fake: e.fs.sp, release: make(chan struct{}), entered: make(chan struct{})}
-	gp.opExisted = func() bool { return len(e.opRows(t)) == 1 }
 	e.fs.sessionProvider = gp
-	released := false
-	defer func() {
-		if !released {
-			close(gp.release)
-		}
-	}()
+	var once sync.Once
+	release := func() { once.Do(func() { close(gp.release) }) }
+	t.Cleanup(release)
+	return gp, release
+}
 
-	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-f", `{"message":"hi"}`).Body)
+func (p *gatedProvider) waitEntered(t *testing.T) {
+	t.Helper()
 	select {
-	case <-gp.entered:
+	case <-p.entered:
 	case <-time.After(testEventTimeout):
 		t.Fatal("delivery never ran")
 	}
-	rec := e.post(t, "/session/"+info.ID+"/messages", "key-f", `{"message":"hi"}`)
+}
+
+// recordUnrelatedEvent moves the city's event cursor.
+func (e *opsEnv) recordUnrelatedEvent() {
+	e.fs.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "test", Subject: "unrelated"})
+}
+
+// §6.2 in-flight rows and §6.1: while the first request delivers, a same-key
+// request on the same endpoint under another spelling of the target (past
+// the per-path LRU) gets the cached 202 (same request_id and the original
+// cursor, though events landed since), another body under the key is refused
+// 422, and the op existed before the delivery ran.
+func TestSessionContentOpsAutoInFlightReplay(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "In flight")
+	gp, release := e.gatedProvider(t)
+	gp.opExisted = func() bool { return len(e.opRows(t)) == 1 }
+
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-f", `{"message":"hi"}`).Body)
+	gp.waitEntered(t)
+	e.recordUnrelatedEvent()
+	rec := e.post(t, "/session/"+info.SessionName+"/submit", "key-f", `{"message":"hi"}`)
 	second := decodeAsyncAccepted(t, rec.Body)
 	if rec.Code != http.StatusAccepted || second.RequestID != first.RequestID || second.EventCursor != first.EventCursor || second.Replayed {
 		t.Fatalf("in-flight replay = %d %+v, want the first answer %+v", rec.Code, second, first)
 	}
-	if mismatch := e.post(t, "/session/"+info.ID+"/messages", "key-f", `{"message":"other"}`); mismatch.Code != http.StatusUnprocessableEntity {
+	if mismatch := e.post(t, "/session/"+info.SessionName+"/submit", "key-f", `{"message":"other"}`); mismatch.Code != http.StatusUnprocessableEntity {
 		t.Fatalf("other body under the key = %d: %s", mismatch.Code, mismatch.Body.String())
 	}
-	close(gp.release)
-	released = true
+	release()
 	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
 	if !gp.sawOp.Load() {
 		t.Fatal("the delivery ran before the op row was written")
@@ -470,6 +595,116 @@ func TestSessionContentOpsAutoInFlightReplay(t *testing.T) {
 	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
 		t.Fatalf("deliveries = %d, want 1", got)
 	}
+}
+
+// §6.2: a same-key request on the other endpoint while the first is in
+// flight is busy (409 in_flight), not the cached 202: the running request
+// emits its terminal event for its own operation only, so a waiter on the
+// other endpoint would never match it. Once the first finishes, the retry
+// replays the stored outcome with an event for its own endpoint.
+func TestSessionContentOpsAutoInFlightOtherEndpointIsBusy(t *testing.T) {
+	for _, tc := range []struct{ first, other, otherEvent string }{
+		{"/submit", "/messages", events.RequestResultSessionMessage},
+		{"/messages", "/submit", events.RequestResultSessionSubmit},
+	} {
+		t.Run(tc.first+" then "+tc.other, func(t *testing.T) {
+			e := newOpsEnv(t, "auto")
+			info := e.session(t, "Other endpoint")
+			gp, release := e.gatedProvider(t)
+			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+tc.first, "key-e", `{"message":"hi"}`).Body)
+			gp.waitEntered(t)
+			if rec := e.post(t, "/session/"+info.ID+tc.other, "key-e", `{"message":"hi"}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "in_flight") {
+				t.Fatalf("other endpoint in flight = %d: %s", rec.Code, rec.Body.String())
+			}
+			release()
+			waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+			e.waitClosed(t, first.RequestID)
+			// The LRU in front is per path, so the retry reaches the op row.
+			rec := e.post(t, "/session/"+info.ID+tc.other, "key-e", `{"message":"hi"}`)
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || !acc.Replayed {
+				t.Fatalf("retry after the first finished = %d %+v", rec.Code, acc)
+			}
+			evs := waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 2)
+			if evs[1].Type != tc.otherEvent {
+				t.Fatalf("replayed event %s, want %s", evs[1].Type, tc.otherEvent)
+			}
+			if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+				t.Fatalf("deliveries = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// I3 across a Server rebuild: the supervisor builds a new Server for a city
+// whose State changed while the old Server still delivers. A same-key retry
+// on the new Server finds the request in flight (the registry is the
+// city's, per process) and gets the cached 202: it does not adopt and
+// deliver a second time. The old Server is shut down.
+func TestSessionContentOpsServerRebuildKeepsTheInflightRequest(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Rebuild")
+	gp, release := e.gatedProvider(t)
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-r", `{"message":"once"}`).Body)
+	gp.waitEntered(t)
+	old := e.server(t)
+	e.rebuild(t)
+	select {
+	case <-old.ops.done:
+	default:
+		t.Fatal("the replaced Server was not shut down")
+	}
+	rec := e.post(t, "/session/"+info.ID+"/submit", "key-r", `{"message":"once"}`)
+	retry := decodeAsyncAccepted(t, rec.Body)
+	if rec.Code != http.StatusAccepted || retry.RequestID != first.RequestID || retry.Op == nil || retry.Op.Attempt != 0 {
+		t.Fatalf("retry on the rebuilt Server = %d %+v op %+v, want the cached 202", rec.Code, retry, retry.Op)
+	}
+	release()
+	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	if op := e.waitClosed(t, first.RequestID); op.Attempt != 0 {
+		t.Fatalf("op = %+v, want the first attempt only", op)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+		t.Fatalf("deliveries = %d, want 1", got)
+	}
+	if n := len(terminalEvents(t, e.fs.eventProv, first.RequestID)); n != 1 {
+		t.Fatalf("terminal events = %d, want 1", n)
+	}
+}
+
+// A dropped Server's close retry ends: in require the terminal event waits
+// for a close that keeps failing, and the replaced Server's shutdown ends
+// that wait at once instead of at finish_by. The op stays open and leaves the
+// registry, so a same-key retry adopts it.
+func TestSessionContentOpsShutdownEndsTheCloseRetry(t *testing.T) {
+	e := newOpsEnv(t, "require")
+	info := e.session(t, "Shutdown")
+	gp, release := e.gatedProvider(t)
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-s", `{"message":"x"}`).Body)
+	gp.waitEntered(t)
+	e.store.set(func(s *opsTestStore) { s.updateFails = 1 << 30 })
+	e.rebuild(t)
+	release()
+	evs := waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	var p SessionSubmitSucceededPayload
+	if err := json.Unmarshal(evs[0].Payload, &p); err != nil || p.Op == nil || p.Op.Status == "closed" {
+		t.Fatalf("event = %s (%v), want the op still open", evs[0].Payload, err)
+	}
+	e.store.set(func(s *opsTestStore) { s.updateFails = 0 })
+	deadline := time.Now().Add(testEventTimeout)
+	for e.sm.cityOpsFor(e.fs.CityName(), e.fs).inflight.Len() != 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the in-flight entry was never released")
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	rec := e.post(t, "/session/"+info.ID+"/submit", "key-s", `{"message":"x"}`)
+	acc := decodeAsyncAccepted(t, rec.Body)
+	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 1 {
+		t.Fatalf("retry = %d %+v op %+v, want an adoption", rec.Code, acc, acc.Op)
+	}
+	e.waitClosed(t, first.RequestID)
 }
 
 // seedAPIOp proposes the op a submit of text under key would record, under
@@ -548,30 +783,49 @@ func TestSessionContentOpsAutoAnswersBusyForAnOpenCLIOp(t *testing.T) {
 	}
 }
 
-// I11: the text the runtime receives is the same in off, auto and require,
-// and carries no op id, key or request_id.
+// I11: on each endpoint the text the runtime receives is the same in off,
+// auto and require, and on an adopted re-execution, and carries no op id,
+// key or request_id.
 func TestSessionContentOpsDeliveredTextIsTheSameInEveryMode(t *testing.T) {
 	const text = "exactly these bytes;\n  and these"
-	var want []runtime.Call
-	for _, mode := range []string{"off", "auto", "require"} {
-		e := newOpsEnv(t, mode)
-		info := e.session(t, "Text "+mode)
-		body, _ := json.Marshal(map[string]string{"message": text})
-		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-t", string(body)).Body)
+	body, _ := json.Marshal(map[string]string{"message": text})
+	delivered := func(t *testing.T, e *opsEnv, info session.Info, acc asyncAcceptedBody) []runtime.Call {
+		t.Helper()
 		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
 		calls := deliveredCalls(e.fs.sp, info.SessionName)
 		if len(calls) != 1 || calls[0].Message != text {
-			t.Fatalf("%s: delivered %+v", mode, calls)
+			t.Fatalf("delivered %+v", calls)
 		}
 		assertNoOpIDs(t, calls, acc.RequestID, acc.IdempotencyKey)
-		got := []runtime.Call{{Method: calls[0].Method, Message: calls[0].Message, Content: calls[0].Content, DeliveryKey: calls[0].DeliveryKey}}
-		if want == nil {
-			want = got
-			continue
-		}
-		if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
-			t.Fatalf("%s delivered %+v, off delivered %+v", mode, got, want)
-		}
+		return []runtime.Call{{Method: calls[0].Method, Message: calls[0].Message, Content: calls[0].Content, DeliveryKey: calls[0].DeliveryKey}}
+	}
+	for _, path := range []string{"/submit", "/messages"} {
+		t.Run(path, func(t *testing.T) {
+			var want []runtime.Call
+			for _, mode := range []string{"off", "auto", "require", "adopted"} {
+				gateMode := mode
+				if mode == "adopted" {
+					gateMode = "auto"
+				}
+				e := newOpsEnv(t, gateMode)
+				info := e.session(t, "Text "+mode)
+				if mode == "adopted" {
+					e.seedOp(t, info.ID, "key-t", text, legacyop.ExecutorAPI)
+				}
+				acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+path, "key-t", string(body)).Body)
+				if mode == "adopted" && (acc.Op == nil || acc.Op.Attempt != 1) {
+					t.Fatalf("adopted: 202 %+v op %+v, want attempt 1", acc, acc.Op)
+				}
+				got := delivered(t, e, info, acc)
+				if want == nil {
+					want = got
+					continue
+				}
+				if fmt.Sprintf("%+v", got) != fmt.Sprintf("%+v", want) {
+					t.Fatalf("%s delivered %+v, off delivered %+v", mode, got, want)
+				}
+			}
+		})
 	}
 }
 
@@ -585,10 +839,14 @@ func TestSessionContentOpsRequireRefusesWhatItCannotRecord(t *testing.T) {
 		status int
 		code   string
 	}{
-		{"store unavailable", func(e *opsEnv) { e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") }) },
-			`{"message":"x"}`, http.StatusServiceUnavailable, "op_journal_unavailable"},
-		{"payload too large", func(*opsEnv) {}, `{"message":"` + strings.Repeat("y", opjournal.MaxInlinePayload+1) + `"}`,
-			http.StatusUnprocessableEntity, "payload_too_large"},
+		{
+			"store unavailable", func(e *opsEnv) { e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") }) },
+			`{"message":"x"}`, http.StatusServiceUnavailable, "op_journal_unavailable",
+		},
+		{
+			"payload too large", func(*opsEnv) {}, `{"message":"` + strings.Repeat("y", opjournal.MaxInlinePayload+1) + `"}`,
+			http.StatusUnprocessableEntity, "payload_too_large",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := newOpsEnv(t, "require")
@@ -767,8 +1025,10 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 			if res.Outcome.Arm != tc.arm || res.Outcome.Reason != tc.reason || res.Outcome.Result.Via != tc.via || res.LeaveOpen {
 				t.Fatalf("result = %+v", res)
 			}
-			op := opjournal.Op{ID: "gc-op-1", Conversation: "gc-1", Kind: opjournal.KindMessage, Status: opjournal.StatusClosed, Outcome: res.Outcome,
-				Policy: messageOpPolicy(session.SubmitIntentFollowUp)}
+			op := opjournal.Op{
+				ID: "gc-op-1", Conversation: "gc-1", Kind: opjournal.KindMessage, Status: opjournal.StatusClosed, Outcome: res.Outcome,
+				Policy: messageOpPolicy(session.SubmitIntentFollowUp),
+			}
 			for _, ep := range []struct{ operation, code, success string }{
 				{RequestOperationSessionSubmit, tc.submitCode, events.RequestResultSessionSubmit},
 				{RequestOperationSessionMessage, tc.msgCode, events.RequestResultSessionMessage},
@@ -830,37 +1090,109 @@ func (r *fakeRecorder) events() []events.Event {
 	return slices.Clone(r.evs)
 }
 
-// D13: the reporter latches one event per (gate, surface, stage, reason) per
-// interval, ignores off, and bounds the detail.
+// D13 and §5.5: the reporter raises one event per (gate, surface, stage,
+// reason) on its first failure after a healthy period, at most once per
+// interval: a sustained outage raises one event however long it lasts, and a
+// stage that reports success re-arms only its own classes. Off is ignored,
+// and the detail is cut to a valid UTF-8 prefix.
 func TestOpsDegradeReporterLatchesPerClass(t *testing.T) {
 	rec := &fakeRecorder{}
 	clk := &clock.Fake{Time: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)}
 	r := NewOpsDegradeReporter(func() events.Recorder { return rec }, clk)
-	d := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StagePropose, Reason: legacyop.DegradeStoreError, Err: errors.New(strings.Repeat("é", 400))}
+	// One byte ahead of 400 two-byte runes: the 512-byte cut falls inside a
+	// rune and must back off to 511 bytes.
+	d := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StagePropose, Reason: legacyop.DegradeStoreError, Err: errors.New("x" + strings.Repeat("é", 400))}
 	r.Report(rollout.KeyOpsContent, d)
 	r.Report(rollout.KeyOpsContent, d)
-	off := d
-	off.Mode = gate.Off
-	r.Report(rollout.KeyOpsContent, off)
 	other := d
 	other.Stage = legacyop.StageClose
 	r.Report(rollout.KeyOpsContent, other)
 	r.Report(rollout.KeyOpsControl, d)
+	off := d
+	off.Mode, off.Reason = gate.Off, legacyop.DegradeContention // a class no report has latched
+	r.Report(rollout.KeyOpsContent, off)
 	if n := len(rec.events()); n != 3 {
-		t.Fatalf("events = %d, want 3 (one per class)", n)
+		t.Fatalf("events = %d, want 3 (one per class, none for off)", n)
 	}
-	clk.Time = clk.Time.Add(opsDegradeInterval)
-	r.Report(rollout.KeyOpsContent, d)
 	evs := rec.events()
-	if len(evs) != 4 {
-		t.Fatalf("events after the interval = %d, want 4", len(evs))
-	}
 	var p events.OpsRecordingDegradedPayload
 	if err := json.Unmarshal(evs[0].Payload, &p); err != nil {
 		t.Fatal(err)
 	}
-	if len(p.Detail) > opsDegradeDetailMax || !strings.HasPrefix(p.Detail, "é") || evs[0].Type != events.OpsRecordingDegraded || evs[0].Actor != "api" || evs[0].Subject != rollout.KeyOpsContent {
-		t.Fatalf("event = %+v payload %+v", evs[0], p)
+	if len(p.Detail) != opsDegradeDetailMax-1 || !utf8.ValidString(p.Detail) || evs[0].Type != events.OpsRecordingDegraded || evs[0].Actor != "api" || evs[0].Subject != rollout.KeyOpsContent {
+		t.Fatalf("event = %+v payload detail %d bytes valid=%v", evs[0], len(p.Detail), utf8.ValidString(p.Detail))
+	}
+
+	// A sustained outage: no new event however many intervals pass.
+	clk.Time = clk.Time.Add(3 * opsDegradeInterval)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 3 {
+		t.Fatalf("a sustained outage re-emitted: events = %d, want 3", n)
+	}
+	// Healthy at another stage or gate re-arms nothing here.
+	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StageClose)
+	r.Healthy(rollout.KeyOpsControl, legacyop.SurfaceAPI, legacyop.StagePropose)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 3 {
+		t.Fatalf("healthy elsewhere re-armed propose: events = %d, want 3", n)
+	}
+	// Healthy at propose re-arms it: the next failure is news.
+	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 4 {
+		t.Fatalf("after a healthy period: events = %d, want 4", n)
+	}
+	// Flapping inside the interval stays at one event per interval.
+	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 4 {
+		t.Fatalf("flapping within the interval: events = %d, want 4", n)
+	}
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 4 {
+		t.Fatalf("still failing since the suppressed report: events = %d, want 4", n)
+	}
+	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 5 {
+		t.Fatalf("healthy, then failing an interval later: events = %d, want 5", n)
+	}
+}
+
+// §5.5 end to end: an outage of the content gate's store raises one event;
+// a request that records again re-arms it, so the next outage, an interval
+// later, raises another. The latch is per city per process: a rebuilt Server
+// does not re-emit for the same outage.
+func TestSessionContentOpsDegradeRearmsAfterARecordedRequest(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Rearm")
+	clk := &clock.Fake{Time: time.Now()}
+	city := e.sm.cityOpsFor(e.fs.CityName(), e.fs)
+	city.degraded.clk = clk
+	submit := func() {
+		t.Helper()
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`).Body)
+		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+	}
+	count := func() int {
+		evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+		return len(evs)
+	}
+	e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
+	submit()
+	e.rebuild(t)
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	submit()
+	if n := count(); n != 1 {
+		t.Fatalf("one outage across a rebuild and an interval raised %d events, want 1", n)
+	}
+	e.store.set(func(s *opsTestStore) { s.createErr = nil })
+	submit()
+	e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
+	submit()
+	if n := count(); n != 2 {
+		t.Fatalf("an outage after a recorded request raised %d events in total, want 2", n)
 	}
 }
 
@@ -912,121 +1244,135 @@ func (p *panickingProvider) NudgeFenced(ctx context.Context, name string, conten
 	return p.Fake.NudgeFenced(ctx, name, content, n)
 }
 
-// The durable-202 property (DES-O0API §15): under randomized faults —
-// Propose errors, a create that commits then errors, failing closes, a crash
-// after the commit, a delivery panic — every answer keeps I1 (require: a 2xx
-// is preceded by a committed op whose id is the request_id), I2 (each op
-// ends with exactly one outcome), I4 (request_id is op.id, and a same-key
-// retry gets it again) and I10 (the op closes before its terminal event).
+// The durable-202 property (DES-O0API §15): over every combination of mode,
+// fault, keyed or minted key and endpoint — Propose errors, a create that
+// commits then errors, a close that fails within the foreground retries and
+// one that outlasts them, a crash after the commit, a delivery panic — every
+// answer keeps I1 (require: a 2xx is preceded by a committed op whose id is
+// the request_id), I2 (each op ends with exactly one outcome), I4
+// (request_id is op.id, and a same-key retry gets it again) and I10 (the op
+// closes before its terminal event; auto may emit first only when the close
+// outlasts its foreground retries).
 func TestSessionContentOpsDurable202Property(t *testing.T) {
-	const runs = 24
-	seed := time.Now().UnixNano()
-	t.Logf("seed %d", seed)
-	rng := rand.New(rand.NewPCG(uint64(seed), 0))
-	faults := []string{"none", "propose_error", "ambiguous", "close_error", "crash_after_commit", "delivery_panic"}
-	for i := range runs {
-		mode := []string{"auto", "require"}[rng.IntN(2)]
-		fault := faults[rng.IntN(len(faults))]
-		keyed := rng.IntN(2) == 0
-		t.Run(fmt.Sprintf("%02d_%s_%s_keyed=%v", i, mode, fault, keyed), func(t *testing.T) {
-			e := newOpsEnv(t, mode)
-			checker := &closeCheckingEvents{Provider: e.fs.eventProv, st: func() *opjournal.Store { return e.opStore(t) }}
-			e.fs.eventProv = checker
-			pp := &panickingProvider{Fake: e.fs.sp}
-			e.fs.sessionProvider = pp
-			info := e.session(t, "Property")
-			key := ""
-			if keyed {
-				key = fmt.Sprintf("prop-%d", i)
-			}
-			switch fault {
-			case "propose_error":
-				e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
-			case "ambiguous":
-				e.store.set(func(s *opsTestStore) { s.ambiguous = true })
-			case "close_error":
-				n := 1 + rng.IntN(5)
-				e.store.set(func(s *opsTestStore) { s.updateFails = n })
-			case "crash_after_commit":
-				e.store.set(func(s *opsTestStore) { s.panicAfterCreate = true })
-			case "delivery_panic":
-				pp.armed.Store(true)
-			}
-			path := "/session/" + info.ID + []string{"/submit", "/messages"}[rng.IntN(2)]
-			post := func() (rec *httptest.ResponseRecorder, crashed bool) {
-				defer func() {
-					if recover() != nil {
-						crashed = true
-					}
-				}()
-				return e.post(t, path, key, `{"message":"property"}`), false
-			}
-			rec, crashed := post()
-			if crashed || rec.Code >= 500 && fault == "crash_after_commit" {
-				if !keyed {
-					return // a minted key is lost with the crash; the sweeper owns the op
-				}
-				rec, crashed = post()
-				if crashed {
-					t.Fatal("the retry crashed too")
+	faults := []string{"none", "propose_error", "ambiguous", "close_error", "close_error_background", "crash_after_commit", "delivery_panic"}
+	i := 0
+	for _, mode := range []string{"auto", "require"} {
+		for _, fault := range faults {
+			for _, keyed := range []bool{false, true} {
+				for _, endpoint := range []string{"/submit", "/messages"} {
+					i++
+					runDurable202Case(t, i, mode, fault, keyed, endpoint)
 				}
 			}
-			var acc asyncAcceptedBody
-			if rec.Code == http.StatusAccepted {
-				acc = decodeAsyncAccepted(t, rec.Body)
-				if acc.Op != nil && acc.Op.ID != acc.RequestID {
-					t.Fatalf("I4: request_id %s, op %s", acc.RequestID, acc.Op.ID)
-				}
-				if mode == "require" {
-					if acc.Op == nil {
-						t.Fatalf("I1: require answered 202 without an op: %+v", acc)
-					}
-					if _, err := e.opStore(t).Get(acc.RequestID); err != nil {
-						t.Fatalf("I1: the 202's op %s is not committed: %v", acc.RequestID, err)
-					}
-				}
-				waitTerminalEvents(t, checker, acc.RequestID, 1)
-			} else if mode != "require" || fault != "propose_error" {
-				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
-			}
-			pp.armed.Store(false)
-			for _, row := range e.opRows(t) {
-				op := e.waitClosed(t, row.ID)
-				closes := 0
-				for _, tr := range op.Transitions {
-					if tr.Status == opjournal.StatusClosed {
-						closes++
-					}
-				}
-				if closes != 1 || !op.Outcome.Arm.Valid() {
-					t.Fatalf("I2: op %s closed %d times: %+v", op.ID, closes, op.Outcome)
-				}
-			}
-			if acc.Op != nil && keyed {
-				again := e.post(t, path, key, `{"message":"property"}`)
-				if got := decodeAsyncAccepted(t, again.Body); again.Code != http.StatusAccepted || got.RequestID != acc.RequestID {
-					t.Fatalf("I4: the same-key retry got %d %+v, want request_id %s", again.Code, got, acc.RequestID)
-				}
-			}
-			if acc.Op != nil && checker.checked.Load() == 0 {
-				t.Fatal("I10 was never checked: no terminal event named the op")
-			}
-			if fault == "delivery_panic" && acc.Op != nil {
-				if op := e.waitClosed(t, acc.RequestID); op.Outcome.Arm != opjournal.ArmFailed || op.Outcome.Reason != opjournal.ReasonOther {
-					t.Fatalf("a panicked delivery closed %+v, want failed{other}", op.Outcome)
-				}
-				if f := waitForRequestFailed(t, checker, acc.RequestID); f.ErrorCode != "internal_error" && f.ErrorCode != "message_failed" {
-					t.Fatalf("a panicked delivery reported %+v", f)
-				}
-			}
-			checker.mu.Lock()
-			open := slices.Clone(checker.open)
-			checker.mu.Unlock()
-			if len(open) > 0 && (mode == "require" || fault != "close_error") {
-				t.Fatalf("I10: terminal events emitted before their op closed: %v", open)
-			}
-		})
+		}
 	}
+}
+
+// runDurable202Case is one cell of the durable-202 property; i keys it.
+func runDurable202Case(t *testing.T, i int, mode, fault string, keyed bool, endpoint string) {
+	t.Helper()
+	t.Run(fmt.Sprintf("%s_%s_keyed=%v_%s", mode, fault, keyed, strings.TrimPrefix(endpoint, "/")), func(t *testing.T) {
+		e := newOpsEnv(t, mode)
+		checker := &closeCheckingEvents{Provider: e.fs.eventProv, st: func() *opjournal.Store { return e.opStore(t) }}
+		e.fs.eventProv = checker
+		pp := &panickingProvider{Fake: e.fs.sp}
+		e.fs.sessionProvider = pp
+		info := e.session(t, "Property")
+		key := ""
+		if keyed {
+			key = fmt.Sprintf("prop-%d", i)
+		}
+		switch fault {
+		case "propose_error":
+			e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
+		case "ambiguous":
+			e.store.set(func(s *opsTestStore) { s.ambiguous = true })
+		case "close_error":
+			e.store.set(func(s *opsTestStore) { s.updateFails = 2 }) // within the 3 foreground tries
+		case "close_error_background":
+			e.store.set(func(s *opsTestStore) { s.updateFails = 5 }) // outlasts them
+		case "crash_after_commit":
+			e.store.set(func(s *opsTestStore) { s.panicAfterCreate = true })
+		case "delivery_panic":
+			pp.armed.Store(true)
+		}
+		path := "/session/" + info.ID + endpoint
+		post := func() (rec *httptest.ResponseRecorder, crashed bool) {
+			defer func() {
+				if recover() != nil {
+					crashed = true
+				}
+			}()
+			return e.post(t, path, key, `{"message":"property"}`), false
+		}
+		rec, crashed := post()
+		if crashed || rec.Code >= 500 && fault == "crash_after_commit" {
+			if !keyed {
+				return // a minted key is lost with the crash; the sweeper owns the op
+			}
+			rec, crashed = post()
+			if crashed {
+				t.Fatal("the retry crashed too")
+			}
+		}
+		var acc asyncAcceptedBody
+		if rec.Code == http.StatusAccepted {
+			acc = decodeAsyncAccepted(t, rec.Body)
+			if acc.Op != nil && acc.Op.ID != acc.RequestID {
+				t.Fatalf("I4: request_id %s, op %s", acc.RequestID, acc.Op.ID)
+			}
+			if mode == "require" {
+				if acc.Op == nil {
+					t.Fatalf("I1: require answered 202 without an op: %+v", acc)
+				}
+				if _, err := e.opStore(t).Get(acc.RequestID); err != nil {
+					t.Fatalf("I1: the 202's op %s is not committed: %v", acc.RequestID, err)
+				}
+			}
+			waitTerminalEvents(t, checker, acc.RequestID, 1)
+		} else if mode != "require" || fault != "propose_error" {
+			t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+		}
+		pp.armed.Store(false)
+		for _, row := range e.opRows(t) {
+			op := e.waitClosed(t, row.ID)
+			closes := 0
+			for _, tr := range op.Transitions {
+				if tr.Status == opjournal.StatusClosed {
+					closes++
+				}
+			}
+			if closes != 1 || !op.Outcome.Arm.Valid() {
+				t.Fatalf("I2: op %s closed %d times: %+v", op.ID, closes, op.Outcome)
+			}
+		}
+		if acc.Op != nil && keyed {
+			again := e.post(t, path, key, `{"message":"property"}`)
+			if got := decodeAsyncAccepted(t, again.Body); again.Code != http.StatusAccepted || got.RequestID != acc.RequestID {
+				t.Fatalf("I4: the same-key retry got %d %+v, want request_id %s", again.Code, got, acc.RequestID)
+			}
+		}
+		if acc.Op != nil && checker.checked.Load() == 0 {
+			t.Fatal("I10 was never checked: no terminal event named the op")
+		}
+		if fault == "delivery_panic" && acc.Op != nil {
+			if op := e.waitClosed(t, acc.RequestID); op.Outcome.Arm != opjournal.ArmFailed || op.Outcome.Reason != opjournal.ReasonOther {
+				t.Fatalf("a panicked delivery closed %+v, want failed{other}", op.Outcome)
+			}
+			if f := waitForRequestFailed(t, checker, acc.RequestID); f.ErrorCode != "internal_error" && f.ErrorCode != "message_failed" {
+				t.Fatalf("a panicked delivery reported %+v", f)
+			}
+		}
+		checker.mu.Lock()
+		open := slices.Clone(checker.open)
+		checker.mu.Unlock()
+		if len(open) > 0 && (mode == "require" || fault != "close_error_background") {
+			t.Fatalf("I10: terminal events emitted before their op closed: %v", open)
+		}
+		if mode == "auto" && fault == "close_error_background" && acc.Op != nil && len(open) == 0 {
+			t.Fatal("auto waited for a background close before emitting")
+		}
+	})
 }
 
 // §6.5: SubmitSessionWithKey sends the key; SubmitSession sends none; a
@@ -1044,15 +1390,27 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 		queued  bool
 	}{
 		{name: "no key", answer: map[string]any{"status": "accepted", "request_id": "req-1", "event_cursor": "3"}, stream: true},
-		{name: "keyed, live", key: "key-1", answer: map[string]any{"status": "accepted", "request_id": "gc-op-a", "event_cursor": "3",
-			"idempotency_key": "key-1", "op": map[string]any{"id": "gc-op-a", "conversation": "sess-1", "kind": "message", "status": "submitted"}}, stream: true},
-		{name: "keyed, replayed success", key: "key-2", queued: true, answer: map[string]any{"status": "accepted", "request_id": "gc-op-b", "event_cursor": "3",
-			"replayed": true, "op": map[string]any{"id": "gc-op-b", "conversation": "sess-1", "kind": "message", "status": "closed",
-				"outcome": map[string]any{"arm": "succeeded", "via": queued}}}},
-		{name: "keyed, replayed failure", key: "key-3", wantErr: "submit failed: resolve_failed: replayed: operation gc-op-c already closed failed{session_gone}",
-			answer: map[string]any{"status": "accepted", "request_id": "gc-op-c", "event_cursor": "3", "replayed": true,
-				"op": map[string]any{"id": "gc-op-c", "conversation": "sess-1", "kind": "message", "status": "closed",
-					"outcome": map[string]any{"arm": "failed", "reason": gone}}}},
+		{name: "keyed, live", key: "key-1", answer: map[string]any{
+			"status": "accepted", "request_id": "gc-op-a", "event_cursor": "3",
+			"idempotency_key": "key-1", "op": map[string]any{"id": "gc-op-a", "conversation": "sess-1", "kind": "message", "status": "submitted"},
+		}, stream: true},
+		{name: "keyed, replayed success", key: "key-2", queued: true, answer: map[string]any{
+			"status": "accepted", "request_id": "gc-op-b", "event_cursor": "3",
+			"replayed": true, "op": map[string]any{
+				"id": "gc-op-b", "conversation": "sess-1", "kind": "message", "status": "closed",
+				"outcome": map[string]any{"arm": "succeeded", "via": queued},
+			},
+		}},
+		{
+			name: "keyed, replayed failure", key: "key-3", wantErr: "submit failed: resolve_failed: replayed: operation gc-op-c already closed failed{session_gone}",
+			answer: map[string]any{
+				"status": "accepted", "request_id": "gc-op-c", "event_cursor": "3", "replayed": true,
+				"op": map[string]any{
+					"id": "gc-op-c", "conversation": "sess-1", "kind": "message", "status": "closed",
+					"outcome": map[string]any{"arm": "failed", "reason": gone},
+				},
+			},
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			var gotKey atomic.Value
@@ -1139,4 +1497,321 @@ func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	if err != nil || env.Type != events.RequestResultSessionSubmit {
 		t.Fatalf("waiting from the replay's cursor: %+v, %v", env, err)
 	}
+}
+
+// sessionRowsAndStarts counts the city's session rows and runtime starts.
+func (e *opsEnv) sessionRowsAndStarts(t *testing.T) (rows, starts int) {
+	t.Helper()
+	all, err := e.store.List(beads.ListQuery{Type: session.BeadType, IncludeClosed: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range e.fs.sp.SnapshotCalls() {
+		if c.Method == "Start" {
+			starts++
+		}
+	}
+	return len(all), starts
+}
+
+// D12 and §6.4: in require, a request to a configured named session with no
+// row is refused before the session is materialized when it cannot be
+// recorded whatever its conversation: a payload over the limit, an invalid
+// key, an op store that does not open. No session row is written and no
+// runtime starts.
+func TestSessionContentOpsRequireRefusesBeforeMaterializing(t *testing.T) {
+	for _, tc := range []struct {
+		name, key, body string
+		setup           func(*testing.T, *opsEnv)
+		status          int
+		code            string
+	}{
+		{
+			name: "payload too large", body: `{"message":"` + strings.Repeat("y", opjournal.MaxInlinePayload+1) + `"}`,
+			status: http.StatusUnprocessableEntity, code: "payload_too_large",
+		},
+		{
+			name: "invalid key", key: strings.Repeat("k", 513), body: `{"message":"wake up"}`,
+			status: http.StatusUnprocessableEntity, code: "invalid_idempotency_key",
+		},
+		{name: "store does not open", body: `{"message":"wake up"}`, setup: func(t *testing.T, e *opsEnv) {
+			e.server(t).ops.openStore = func(beads.SessionStore, clock.Clock) (*opjournal.Store, error) {
+				return nil, errors.New("transport: down")
+			}
+		}, status: http.StatusServiceUnavailable, code: "op_journal_unavailable"},
+	} {
+		for _, path := range []string{"/submit", "/messages"} {
+			t.Run(tc.name+" "+path, func(t *testing.T) {
+				e := newOpsEnv(t, "require")
+				if tc.setup != nil {
+					tc.setup(t, e)
+				}
+				rowsBefore, startsBefore := e.sessionRowsAndStarts(t)
+				rec := e.post(t, "/session/"+url.PathEscape("myrig/worker")+path, tc.key, tc.body)
+				if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.code) {
+					t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+				}
+				rows, starts := e.sessionRowsAndStarts(t)
+				if rows != rowsBefore || starts != startsBefore {
+					t.Fatalf("refused after materializing: session rows %d -> %d, starts %d -> %d", rowsBefore, rows, startsBefore, starts)
+				}
+				if n := len(e.opRows(t)); n != 0 {
+					t.Fatalf("op rows = %d", n)
+				}
+			})
+		}
+	}
+}
+
+// D12: require refuses an Idempotency-Key the journal cannot record under
+// with 422 invalid_idempotency_key and delivers nothing; auto runs the same
+// request unrecorded.
+func TestSessionContentOpsRequireRefusesAnInvalidKey(t *testing.T) {
+	key := strings.Repeat("k", 513)
+	for _, path := range []string{"/submit", "/messages"} {
+		t.Run(path, func(t *testing.T) {
+			e := newOpsEnv(t, "require")
+			info := e.session(t, "Bad key")
+			rec := e.post(t, "/session/"+info.ID+path, key, `{"message":"x"}`)
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "invalid_idempotency_key") {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			time.Sleep(20 * time.Millisecond)
+			if n := len(deliveredCalls(e.fs.sp, info.SessionName)); n != 0 || len(e.opRows(t)) != 0 {
+				t.Fatalf("require delivered %d times, wrote %d op rows", n, len(e.opRows(t)))
+			}
+
+			auto := newOpsEnv(t, "auto")
+			info = auto.session(t, "Bad key")
+			acc := decodeAsyncAccepted(t, auto.post(t, "/session/"+info.ID+path, key, `{"message":"x"}`).Body)
+			if acc.Op != nil || !strings.HasPrefix(acc.RequestID, "req-") {
+				t.Fatalf("auto = %+v, want an unrecorded request", acc)
+			}
+			waitTerminalEvents(t, auto.fs.eventProv, acc.RequestID, 1)
+		})
+	}
+}
+
+// driftEnv is a city where the alias "drifty" names session a until the
+// request's op row commits, then names session b: the target moves between
+// the 202 and the delivery.
+func driftEnv(t *testing.T, mode string) (e *opsEnv, a, b session.Info, logs func() []string) {
+	t.Helper()
+	e = newOpsEnv(t, mode)
+	a, b = e.session(t, "Drift A"), e.session(t, "Drift B")
+	if err := e.store.SetMetadata(a.ID, "alias", "drifty"); err != nil {
+		t.Fatal(err)
+	}
+	e.store.set(func(s *opsTestStore) {
+		s.onOpCreate = func() {
+			if err := e.store.SetMetadata(a.ID, "alias", ""); err != nil {
+				t.Error(err)
+			}
+			if err := e.store.SetMetadata(b.ID, "alias", "drifty"); err != nil {
+				t.Error(err)
+			}
+		}
+	})
+	var mu sync.Mutex
+	var lines []string
+	e.server(t).ops.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	return e, a, b, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(lines)
+	}
+}
+
+// §6.1 target drift: in auto the delivery re-resolves the target, as it
+// always has, so it reaches the session the alias names now; the op, which
+// names the session the 202 resolved, closes from that result and the drift
+// is logged and counted. In require the delivery goes to the op's
+// conversation: the op is the request.
+func TestSessionContentOpsTargetDrift(t *testing.T) {
+	for _, path := range []string{"/submit", "/messages"} {
+		t.Run("auto "+path, func(t *testing.T) {
+			e, a, b, logs := driftEnv(t, "auto")
+			acc := decodeAsyncAccepted(t, e.post(t, "/session/drifty"+path, "key-d", `{"message":"moved"}`).Body)
+			if acc.Op == nil || acc.Op.Conversation != a.ID {
+				t.Fatalf("202 = %+v op %+v, want an op for %s", acc, acc.Op, a.ID)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			if op := e.waitClosed(t, acc.RequestID); op.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("op = %+v", op)
+			}
+			if na, nb := len(deliveredCalls(e.fs.sp, a.SessionName)), len(deliveredCalls(e.fs.sp, b.SessionName)); na != 0 || nb != 1 {
+				t.Fatalf("delivered to a %d, b %d; want b once", na, nb)
+			}
+			got := logs()
+			if len(got) != 1 || !strings.Contains(got[0], acc.RequestID) || !strings.Contains(got[0], b.ID) {
+				t.Fatalf("drift log = %q", got)
+			}
+		})
+		t.Run("require "+path, func(t *testing.T) {
+			e, a, b, logs := driftEnv(t, "require")
+			acc := decodeAsyncAccepted(t, e.post(t, "/session/drifty"+path, "key-d", `{"message":"moved"}`).Body)
+			if acc.Op == nil || acc.Op.Conversation != a.ID {
+				t.Fatalf("202 = %+v op %+v, want an op for %s", acc, acc.Op, a.ID)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+			e.waitClosed(t, acc.RequestID)
+			if na, nb := len(deliveredCalls(e.fs.sp, a.SessionName)), len(deliveredCalls(e.fs.sp, b.SessionName)); na != 1 || nb != 0 {
+				t.Fatalf("delivered to a %d, b %d; want a once", na, nb)
+			}
+			if got := logs(); len(got) != 0 {
+				t.Fatalf("require logged drift: %q", got)
+			}
+		})
+	}
+}
+
+// §15 handler crash after the op commits: a panic after admission and
+// before the delivery goroutine owns the request leaves the op open and out
+// of the in-flight registry, so the same-key retry adopts it (attempt 1) and
+// delivers once.
+func TestSessionContentOpsHandlerPanicAfterAdmitLeavesTheOpForAdoption(t *testing.T) {
+	for _, path := range []string{"/submit", "/messages"} {
+		t.Run(path, func(t *testing.T) {
+			e := newOpsEnv(t, "auto")
+			info := e.session(t, "Handler panic")
+			var armed atomic.Bool
+			armed.Store(true)
+			e.server(t).ops.afterAdmit = func() {
+				if armed.CompareAndSwap(true, false) {
+					panic("injected handler panic")
+				}
+			}
+			func() {
+				defer func() { _ = recover() }()
+				if rec := e.post(t, "/session/"+info.ID+path, "key-h", `{"message":"after panic"}`); rec.Code < 500 {
+					t.Fatalf("the panicked request answered %d: %s", rec.Code, rec.Body.String())
+				}
+			}()
+			rows := e.opRows(t)
+			if len(rows) != 1 {
+				t.Fatalf("op rows = %d, want 1", len(rows))
+			}
+			op, err := e.opStore(t).Get(rows[0].ID)
+			if err != nil || op.Status == opjournal.StatusClosed || op.Attempt != 0 {
+				t.Fatalf("op after the panic = %+v (%v), want open at attempt 0", op, err)
+			}
+			if n := e.sm.cityOpsFor(e.fs.CityName(), e.fs).inflight.Len(); n != 0 {
+				t.Fatalf("in-flight entries after the panic = %d", n)
+			}
+			if n := len(deliveredCalls(e.fs.sp, info.SessionName)); n != 0 {
+				t.Fatalf("the panicked request delivered %d times", n)
+			}
+			rec := e.post(t, "/session/"+info.ID+path, "key-h", `{"message":"after panic"}`)
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if rec.Code != http.StatusAccepted || acc.RequestID != op.ID || acc.Op == nil || acc.Op.Attempt != 1 {
+				t.Fatalf("retry = %d %+v op %+v", rec.Code, acc, acc.Op)
+			}
+			waitTerminalEvents(t, e.fs.eventProv, op.ID, 1)
+			if closed := e.waitClosed(t, op.ID); closed.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("op = %+v", closed)
+			}
+			if n := len(deliveredCalls(e.fs.sp, info.SessionName)); n != 1 {
+				t.Fatalf("deliveries = %d, want 1", n)
+			}
+		})
+	}
+}
+
+// An interrupt_now the runtime accepted without fencing it to the turn
+// closes its op with the unfenced_interrupt degradation (DES-T3I §14 item 2).
+func TestSessionContentOpsUnfencedInterruptReachesTheOp(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
+	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Unfenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.fs.sp.TurnScripts = map[string][]string{info.SessionName: {"t1", "t1", ""}}
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"now","intent":"interrupt_now"}`).Body)
+	success, failure := waitForSessionSubmitResult(t, e.fs.eventProv, acc.RequestID)
+	if success == nil {
+		t.Fatalf("submit failed: %+v", failure)
+	}
+	if success.Interrupt == nil || success.Interrupt.Degradation != session.DegradationUnfencedInterrupt {
+		t.Fatalf("interrupt = %+v, want unfenced", success.Interrupt)
+	}
+	if op := e.waitClosed(t, acc.RequestID); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Degradation != session.DegradationUnfencedInterrupt {
+		t.Fatalf("op outcome = %+v, want succeeded with unfenced_interrupt", op.Outcome)
+	}
+}
+
+// closes counts an op's transitions to closed.
+func closes(op opjournal.Op) int {
+	n := 0
+	for _, tr := range op.Transitions {
+		if tr.Status == opjournal.StatusClosed {
+			n++
+		}
+	}
+	return n
+}
+
+// §6.3 for /messages under auto: a message queued on a held session closes
+// succeeded{via: legacy.queued}, never legacy.delivered (D2); the 4-minute
+// timeout and a delivery canceled by it close failed{deadline_in_flight}
+// with error_code timeout; each op closes exactly once and a late result
+// after the timeout changes nothing.
+func TestSessionContentOpsMessagesOutcomes(t *testing.T) {
+	t.Run("queued", func(t *testing.T) {
+		e := newOpsEnv(t, "auto")
+		info := e.session(t, "Held")
+		if err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath)).Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
+			t.Fatal(err)
+		}
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "", `{"message":"later"}`).Body)
+		success, failure := waitForSessionMessageResult(t, e.fs.eventProv, acc.RequestID)
+		if success == nil || !success.Queued || success.Op == nil || success.Op.Outcome == nil || success.Op.Outcome.Via != legacyop.ViaLegacyQueued {
+			t.Fatalf("result = %+v (failure %+v), want queued via legacy.queued", success, failure)
+		}
+		if op := e.waitClosed(t, acc.RequestID); op.Outcome.Result.Via != legacyop.ViaLegacyQueued || closes(op) != 1 {
+			t.Fatalf("op = %+v closed %d times", op.Outcome, closes(op))
+		}
+	})
+	t.Run("timeout", func(t *testing.T) {
+		prev := sessionMessageAsyncTimeout
+		sessionMessageAsyncTimeout = 50 * time.Millisecond
+		t.Cleanup(func() { sessionMessageAsyncTimeout = prev })
+		e := newOpsEnv(t, "auto")
+		info := e.session(t, "Slow")
+		gp, release := e.gatedProvider(t)
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "", `{"message":"slow"}`).Body)
+		gp.waitEntered(t)
+		failure := waitForRequestFailed(t, e.fs.eventProv, acc.RequestID)
+		if failure.ErrorCode != "timeout" || failure.Op == nil || failure.Op.Outcome == nil || failure.Op.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+			t.Fatalf("failure = %+v op %+v", failure, failure.Op)
+		}
+		release()
+		time.Sleep(50 * time.Millisecond)
+		op := e.waitClosed(t, acc.RequestID)
+		if op.Outcome.Arm != opjournal.ArmFailed || op.Outcome.Reason != opjournal.ReasonDeadlineInFlight || closes(op) != 1 {
+			t.Fatalf("op = %+v closed %d times", op.Outcome, closes(op))
+		}
+		if n := len(terminalEvents(t, e.fs.eventProv, acc.RequestID)); n != 1 {
+			t.Fatalf("terminal events = %d, want 1", n)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		e := newOpsEnv(t, "auto")
+		info := e.session(t, "Canceled")
+		e.fs.sp.NudgeErrors = map[string]error{info.SessionName: fmt.Errorf("nudge: %w", context.Canceled)}
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "", `{"message":"x"}`).Body)
+		failure := waitForRequestFailed(t, e.fs.eventProv, acc.RequestID)
+		if failure.ErrorCode != "timeout" {
+			t.Fatalf("failure = %+v, want timeout", failure)
+		}
+		if op := e.waitClosed(t, acc.RequestID); op.Outcome.Reason != opjournal.ReasonDeadlineInFlight || closes(op) != 1 {
+			t.Fatalf("op = %+v closed %d times", op.Outcome, closes(op))
+		}
+	})
 }

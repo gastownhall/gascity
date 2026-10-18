@@ -252,6 +252,7 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 		s.fail(mode, legacyop.StageOpen, reason, err)
 		return opSweepRetryable(reason)
 	}
+	s.healthy(legacyop.StageOpen)
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)
 	// A read that stopped at the limit or its page cap may have ops behind
@@ -268,6 +269,8 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 		}
 		s.report(mode, legacyop.StageSweep, reason, err)
 		left = left || opSweepRetryable(reason)
+	} else {
+		s.healthy(legacyop.StageSweep)
 	}
 	if mode == rollout.Off && !left && (stats.Full || stats.Truncated) {
 		s.logStoppedRead(stats)
@@ -284,6 +287,14 @@ func (s *opSweeper) logStoppedRead(stats legacyop.SweepStats) {
 	}
 	s.logf("op-sweep: every ops gate is off and this pass closed no op after its read stopped at %s, "+
 		"so the sweeper stops and leaves the expired legacy ops it did not close open; gc doctor's ops-recording check reports them", at)
+}
+
+// healthy tells the degrade reporter that the sweeper's stages just worked,
+// for every ops gate, so their next failure raises a fresh event.
+func (s *opSweeper) healthy(stages ...string) {
+	for _, key := range []string{rollout.KeyOpsContent, rollout.KeyOpsControl, rollout.KeyOpsLifecycle} {
+		s.events.Healthy(key, legacyop.SurfaceController, stages...)
+	}
 }
 
 // opSweepRetryable reports whether a failure of reason may clear by itself,
