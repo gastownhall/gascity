@@ -149,7 +149,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq, genera
 		// Only a held row's close is announced, once: a held row already
 		// closed was announced by whoever installed it, unless a read queued
 		// that close and has not drained it yet.
-		notifyClosed = notifyClosed && !announcedElsewhere && c.claimCloseLocked(id, false, raced)
+		notifyClosed = notifyClosed && !announcedElsewhere && c.claimCloseLocked(id, &closed, false, raced)
 		if !raced {
 			seq := c.noteLocalMutationLocked(id)
 			c.tombstoneLocked(id, seq)
@@ -455,7 +455,7 @@ func (c *CachingStore) Close(id string) error {
 	setBeadStatus(&closed, "closed")
 	// A concurrent read that installed and announced this close first owns
 	// the announcement; announcing again here would duplicate it.
-	announce := found && !announcedElsewhere && c.claimCloseLocked(id, true, raced)
+	announce := found && !announcedElsewhere && c.claimCloseLocked(id, &closed, true, raced)
 	if announce {
 		c.noteCloseClaimedLocked(id, generation)
 	}
@@ -620,7 +620,7 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 		// CloseAll announces only closes of rows it had cached, and only the
 		// ones no concurrent read announced first.
 		_, skip := raced[item.id]
-		announce := item.bead.Status == "closed" && c.claimCloseLocked(item.id, false, skip)
+		announce := item.bead.Status == "closed" && c.claimCloseLocked(item.id, &item.bead, false, skip)
 		if !skip {
 			opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 			if item.bead.Status == "closed" {
@@ -921,7 +921,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 			}
 			// A closed row this refresh owns is announced as bead.closed; one
 			// a concurrent read already announced is not.
-			announceClose := fresh.Status == "closed" && c.claimCloseLocked(item.id, true, skip)
+			announceClose := fresh.Status == "closed" && c.claimCloseLocked(item.id, &fresh, true, skip)
 			if !skip {
 				c.absorbFreshLocked(item.id, fresh, now, absorbOpts{
 					depsMode:   depsFromFieldsIfCarried,
@@ -948,7 +948,7 @@ func (c *CachingStore) refreshTxTouchedBeads(ids []string, closed map[string]str
 		}
 		if item.closed {
 			if b, ok := c.patchedCachedRowLocked(item.id, func(b *Bead) { setBeadStatus(b, "closed") }); ok {
-				announceClose := c.claimCloseLocked(item.id, true, skip)
+				announceClose := c.claimCloseLocked(item.id, &b, true, skip)
 				if !skip {
 					// The patch reflects only this write, so any mark stands.
 					c.absorbFreshLocked(item.id, b, now, absorbOpts{

@@ -318,3 +318,70 @@ func silentCloseCount(cache *CachingStore) int {
 	defer cache.mu.RUnlock()
 	return len(cache.silentCloses)
 }
+
+// A close of this cache's own that finds the row closed already, with the
+// close announced and the row evicted since, announces nothing more: the
+// backing close was a no-op, and announcedCloses shows the close went out.
+func TestCachingStoreOwnCloseOfAnAnnouncedEvictedCloseIsQuiet(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name  string
+		first func(t *testing.T, cache *CachingStore, id string)
+	}{
+		{name: "scan_then_close", first: func(_ *testing.T, cache *CachingStore, _ string) {
+			cache.ReconcileNowForTest()
+		}},
+		{name: "refresh_then_scan_then_close", first: func(t *testing.T, cache *CachingStore, id string) {
+			if _, err := cache.RefreshRowReport(id, feedRefreshOpts); err != nil {
+				t.Fatal(err)
+			}
+			cache.ReconcileNowForTest()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backing := &casBackingStore{Store: NewMemStore()}
+			cache, rec := newReportCacheForTest(t, backing)
+			id := mustCreateCached(t, cache).ID
+			rec.take()
+			if err := backing.Close(id); err != nil {
+				t.Fatal(err)
+			}
+			tc.first(t, cache, id)
+			if err := cache.Close(id); err != nil {
+				t.Fatal(err)
+			}
+			got := rec.take()
+			if n := closedCount(got, id); n != 1 {
+				t.Errorf("bead.closed for %s = %d (%q), want 1 for one close", id, n, got)
+			}
+		})
+	}
+}
+
+// A closing write of a row the cache holds closed only silently owns its
+// close, as it would an unheld row's: nobody announced it.
+func TestCachingStoreClosingWriteOwnsASilentlyHeldClose(t *testing.T) {
+	t.Parallel()
+
+	backing := &casBackingStore{Store: NewMemStore()}
+	cache, rec := newReportCacheForTest(t, backing)
+	id := outOfBandClosedRow(t, backing, "").ID
+	if err := cache.SetMetadata(id, "gc.note", "x"); err != nil {
+		t.Fatal(err)
+	}
+	row, err := backing.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cache.CloseIfMatch(id, row.Revision); err != nil {
+		t.Fatalf("CloseIfMatch: %v", err)
+	}
+	if _, err := cache.RefreshRowReport(id, feedRefreshOpts); err != nil {
+		t.Fatalf("RefreshRowReport: %v", err)
+	}
+	if n := closedCount(rec.take(), id); n != 1 {
+		t.Errorf("bead.closed for %s = %d, want 1", id, n)
+	}
+}

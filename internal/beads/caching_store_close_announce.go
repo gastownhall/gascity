@@ -273,9 +273,15 @@ func (c *CachingStore) announceUnannouncedCloses() {
 // It owns it when it cancels a close a read queued but has not drained yet, or
 // when the cached row it replaces is not closed. A cached row that is already
 // closed and not queued was announced by whoever installed it, so the write
-// does not announce again. With no cached row, uncachedOwns decides: a write
-// that itself closed the bead owns its close; one that merely refreshed an
-// uncached row does not.
+// does not announce again. With no cached row, or one held only silently
+// (heldSilentlyLocked), uncachedOwns decides: a write that itself closed the
+// bead owns its close; one that merely refreshed an uncached row does not.
+// Even a write that closed the bead declines when closed, the row it is
+// about to announce, is a close this cache announced recently
+// (announcedCloseCoversLocked): its backing close was a no-op on a row
+// closed already, whose close a re-scan or refresh announced before the row
+// left the cache. A nil closed (a write that has not read its row back yet)
+// skips that check.
 //
 // fenced is racedWriteLocked's verdict: the write installs nothing. A held row
 // that is not closed would then stay cached under the dirty mark, and the read
@@ -284,13 +290,16 @@ func (c *CachingStore) announceUnannouncedCloses() {
 // claim drops that row, as evictForConditionalClose does: the dirty mark keeps
 // readers on the backing, and a read that finds no held row announces nothing.
 // Caller must hold c.mu in write mode.
-func (c *CachingStore) claimCloseLocked(id string, uncachedOwns, fenced bool) bool {
+func (c *CachingStore) claimCloseLocked(id string, closed *Bead, uncachedOwns, fenced bool) bool {
 	if c.dropQueuedCloseLocked(id) {
 		return true
 	}
 	previous, held := c.beads[id]
-	if !held {
-		return uncachedOwns
+	if !held || c.heldSilentlyLocked(id, previous) {
+		if !uncachedOwns {
+			return false
+		}
+		return closed == nil || !c.announcedCloseCoversLocked(id, *closed, c.clockNow(), false)
 	}
 	if previous.Status == "closed" {
 		return false
@@ -317,7 +326,7 @@ func (c *CachingStore) updateEventTypeLocked(id string, installed Bead, opts Upd
 	if installed.Status != "closed" || announcedElsewhere {
 		return "bead.updated"
 	}
-	if c.claimCloseLocked(id, updateCloses(opts), fenced) {
+	if c.claimCloseLocked(id, &installed, updateCloses(opts), fenced) {
 		c.noteCloseClaimedLocked(id, generation)
 		return "bead.closed"
 	}
@@ -439,13 +448,13 @@ func (c *CachingStore) noteNotClosedLocked(id string) {
 // (claimCloseLocked) under the same lock, so no read can queue the close
 // between the two. A close something else announced while the write was in
 // flight is not claimed (endCloseIntentLocked); a claimed close is noted for
-// the write's generation (noteCloseClaimedLocked). fenced is
+// the write's generation (noteCloseClaimedLocked). closed and fenced are
 // claimCloseLocked's. Caller must hold c.mu in write mode.
-func (c *CachingStore) claimCloseIntentLocked(id string, generation uint64, uncachedOwns, fenced bool) bool {
+func (c *CachingStore) claimCloseIntentLocked(id string, generation uint64, closed *Bead, uncachedOwns, fenced bool) bool {
 	if c.endCloseIntentLocked(id, generation) {
 		return false
 	}
-	own := c.claimCloseLocked(id, uncachedOwns, fenced)
+	own := c.claimCloseLocked(id, closed, uncachedOwns, fenced)
 	if own {
 		c.noteCloseClaimedLocked(id, generation)
 	}

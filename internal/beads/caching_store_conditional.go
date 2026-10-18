@@ -446,7 +446,9 @@ func (c *CachingStore) evictForConditionalUpdate(id string, opts UpdateOpts) con
 func (c *CachingStore) evictForConditionalClose(id string, generation uint64) (conditionalEviction, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	own := c.claimCloseIntentLocked(id, generation, true, false)
+	// The write's backing close changed the row (it was fenced on a
+	// revision), so it is a new close whatever was announced before.
+	own := c.claimCloseIntentLocked(id, generation, nil, true, false)
 	ev := c.evictForConditionalWriteLocked(id)
 	ev.closing = true
 	return ev, own
