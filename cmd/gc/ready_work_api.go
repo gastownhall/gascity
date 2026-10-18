@@ -91,27 +91,40 @@ func (cr *CityRuntime) freshness() *configFreshness {
 }
 
 // ReadyWork answers `gc ready` (GET /v0/city/{cityName}/work/ready) from the
-// stores this controller already holds open, with the reader the CLI runs
-// in-process (internal/readywork).
+// config this controller has published and the stores it already holds open,
+// with the reader the CLI runs in-process (internal/readywork).
 //
-// It answers only under a config it can show is the one on disk
-// (configFreshness), and otherwise refuses with api.ErrReadyWorkConfigNotCurrent,
-// which the CLI answers by reading in-process. The check spans the store reads
-// as well as the leg assembly. A change that begins mid-read may publish a
+// The legs are assembled over that config by the functions a fresh `gc ready`
+// uses: the serving frame (readyServingRigs), the same topology constructor
+// over the class-binding routes this controller resolved when it started
+// (assembleResidencyTopology over residencyBindingsFromRoutes, which is how the
+// controller's census builds its topology), and the same plan. readywork reads
+// every leg through its live handle, so a CachingStore leg answers from its
+// backing store and never from its read cache: the answer is as fresh as an
+// in-process read, whoever wrote the bead. Opening nothing is the whole saving.
+//
+// The config is read under cs.mu with the stores controllerState.update
+// published alongside it, so the two are one generation. The answer is
+// therefore not a fresh read of the config on disk: a rig added, removed or
+// rebound there reaches it at the next config reload, as it reaches the
+// controller's sessions.
+//
+// It refuses with api.ErrReadyWorkConfigNotCurrent, which the CLI answers by
+// reading in-process, while a reload or API config write is in progress, after
+// a reload failed until one applies or finds no change, and when a change
+// began during the read (configFreshness). The check spans the store reads as
+// well as the leg assembly. A change that begins mid-read may publish a
 // different set of stores and close the ones the legs are reading
 // (controllerStateStoreCloseDelay); every store swap happens inside such a
 // change, so a read one overlapped is refused, whatever the closed stores
 // returned. Each leg is read bound to ctx as far as its store allows
 // (readyLegsBoundTo).
 //
-// The legs are the ones a fresh `gc ready` assembles, from the same functions:
-// the serving frame (readyServingRigs), the same topology constructor over this
-// controller's own class-binding routes (assembleResidencyTopology over
-// residencyBindingsFromRoutes, which is how the controller's census builds its
-// topology), and the same plan. readywork reads every leg through its live
-// handle, so a CachingStore leg answers from its backing store and never from
-// its read cache: the answer is as fresh as an in-process read, whoever wrote
-// the bead. Opening nothing is the whole saving.
+// configDirty is not a reason to refuse. It records that a reload is due, for
+// instance after the config watcher has seen a file change, after `gc reload`,
+// or after an API config mutation has already published, and a reconcile tick
+// clears it when it starts that reload. It says nothing about whether the
+// config and the stores agree: they are one generation whatever it reads.
 func (cs *controllerState) ReadyWork(ctx context.Context, q readywork.Query) ([]readywork.ReadyBead, error) {
 	if err := q.Validate(); err != nil {
 		return nil, err
@@ -121,7 +134,11 @@ func (cs *controllerState) ReadyWork(ctx context.Context, q readywork.Query) ([]
 	// The refusal outranks an error from the same read: a read taken under a
 	// changing config shows nothing, and the in-process read the refusal sends
 	// the CLI to meets any failure that persists.
-	if !cs.freshness.read(cs.configDirty, func() {
+	//
+	// The dirty flag is not passed (nil): it records only that a reload is
+	// due, and a refusal keyed on it turned the endpoint off on
+	// maintainer-city (8d5: 0 of 60 requests answered).
+	if !cs.freshness.read(nil, func() {
 		var legs []readywork.Leg
 		if legs, err = cs.readyWorkLegs(ctx); err == nil {
 			rows, err = readywork.ReadContext(ctx, legs, q)
