@@ -127,6 +127,8 @@ type diffCity struct {
 	// scaleCheckAge is how long before diffNow the published run ended. The
 	// lane serves a result for FreshFor (3 × patrol) after it ended.
 	scaleCheckAge time.Duration
+	// deps are the stores' dependencies, seeded before either side reads.
+	deps []beads.Dep
 	// explain maps each aspect this city differs on to its difference and
 	// the two sides' values there.
 	explain map[string]explained
@@ -214,7 +216,7 @@ func diffProvider(t *testing.T, alive []string) *runtime.Fake {
 func legacyAllocation(t *testing.T, c diffCity) allocOutcome {
 	t.Helper()
 	cityPath := t.TempDir()
-	store := beads.NewMemStoreFrom(0, cloneDiffBeads(c.beads), nil)
+	store := beads.NewMemStoreFrom(0, cloneDiffBeads(c.beads), c.deps)
 	snap, err := loadSessionBeadSnapshot(store)
 	if err != nil {
 		t.Fatal(err)
@@ -231,7 +233,8 @@ func legacyAllocation(t *testing.T, c diffCity) allocOutcome {
 	// compute over the build's result (city_runtime.go, POOL-063).
 	open := snap.OpenInfos()
 	work := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, store, open, result.AssignedWorkBeads, result.AssignedWorkStoreRefs)
-	counts := retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(ComputePoolDesiredStatesTracedAt(cfg, work, open, result.ScaleCheckCounts, diffNow, nil)),
+	counts := retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, open, result.ScaleCheckCounts, nil, diffNow,
+		parkSeatsForResult(cfg, open, result, diffNow), nil)),
 		snap, effectivePoolPartialRetentionTemplates(result))
 	if counts == nil {
 		counts = map[string]int{}
@@ -275,7 +278,7 @@ func legacyAllocation(t *testing.T, c diffCity) allocOutcome {
 // v2Allocation gathers c's World as the planner does and runs the decide.
 func v2Allocation(t *testing.T, c diffCity) allocOutcome {
 	t.Helper()
-	cache, _ := newDemandCache(t, true, cloneDiffBeads(c.beads)...)
+	cache, _ := newDemandCacheDeps(t, true, c.deps, cloneDiffBeads(c.beads)...)
 	sp := diffProvider(t, c.alive)
 	cityPath := t.TempDir()
 	env := &reconcileEnv{Gen: 1, Cfg: c.cfg, SP: sp, ConfigRev: "rev-1"}
@@ -472,6 +475,19 @@ func diffCities(t *testing.T) []diffCity {
 				poolRow("dr-1", "worker", 1, "asleep"),
 				diffWork("dw-1", "worker"), diffWork("dw-2", "worker"),
 			},
+		},
+		{
+			// A seat asleep on its drain holding only a blocked pin is
+			// parked (ga-ylpbsy.16): both sides keep it selected and count
+			// none of its pin as pool demand.
+			name: "a parked seat stays selected and is no pool demand",
+			cfg:  diffConfig(diffAgent("worker", 3)),
+			beads: []beads.Bead{
+				poolRow("dr-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", diffNow.Add(-time.Hour).Format(time.RFC3339)),
+				{ID: "db-1", Title: "db-1", Type: "task", Status: "open", CreatedAt: diffNow.Add(-time.Hour)},
+				{ID: "dp-1", Title: "dp-1", Type: "task", Status: "open", Assignee: "dr-1", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			deps: []beads.Dep{{IssueID: "dp-1", DependsOnID: "db-1", Type: "blocks"}},
 		},
 		{
 			name:  "demand over max_active_sessions stops at the cap",

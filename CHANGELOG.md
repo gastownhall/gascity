@@ -653,6 +653,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A pool seat waiting on a pre-assigned step that is still blocked is no
+  longer reported stranded, and the same seat resumes to run it.** A graph
+  claim pre-assigns its continuation group's later steps to the claiming
+  session. When that session finished its step and drained while such a step
+  was blocked, the controller emitted `session.stranded` and, 2 minutes later,
+  released the step and closed the seat, so the step ran in a fresh seat
+  without the conversation. The seat now stays parked (asleep, holding the
+  step) until the step is ready, then wakes in place and resumes its
+  conversation. A parked seat takes no pool cap headroom; a slot-bounded pool
+  unparks its oldest seats while its slots are full (a seat it unparks parks
+  again, unrepaired, if a slot frees first); and a seat parked for 24 hours
+  falls back to the stranded repair. `session.stranded` now fires only for
+  seats that cannot run their work: a seat holding started work, a crashed
+  seat, a fresh-wake seat, or a parked seat past its bound. The core pack's
+  `cascade-nudge-on-blocker-close` order no longer nudges (and so wakes) the
+  assignee of a dependent that another open blocker still holds.
+
 - **`gc prime --strict` fails on a `prompt_template` that does not render.**
   A `.template.md` (or `.md.tmpl`) prompt_template that failed to parse or
   execute, such as one calling an undefined function `{{base_branch}}`, was

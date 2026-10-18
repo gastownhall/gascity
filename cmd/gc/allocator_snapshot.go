@@ -164,6 +164,10 @@ type selectionEntry struct {
 	// rule 4; the awake set's explicit-wake desire): the row is never Sleep
 	// or Drain, and no finalize closes it.
 	WakeHonored bool
+	// Park is the row's park verdict (parkSeats): a pool seat asleep on its
+	// own stop holding only blocked pre-assigned work, which A21 holds
+	// without the stranded branch until its bound (ga-ylpbsy.16).
+	Park parkVerdict
 }
 
 // rowBasis is the row incarnation the pass saw.

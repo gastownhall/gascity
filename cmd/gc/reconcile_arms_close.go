@@ -25,6 +25,7 @@ const (
 	decideFailedCreateLeased = "close-held:pending-create-leased" // SESS-058
 	decideClosePoolSlot      = "close-pool-slot"
 	decideStrandedHold       = "stranded-hold"
+	decideParkedHold         = "parked-hold" // a seat parked on pre-assigned blocked work (ga-ylpbsy.16)
 	decideCloseOrphan        = "close-orphan"
 )
 
@@ -51,7 +52,12 @@ type closeSpec struct {
 	Orphaned bool
 	Killed   bool
 	Repair   bool
-	Template string
+	// ParkEligible marks a pool slot the allocation found eligible to park
+	// (parkVerdict.Eligible) whose view of its work did not show it parked:
+	// the effect's live read of the work decides between the parked hold and
+	// the stranded branch.
+	ParkEligible bool
+	Template     string
 	// Row is the row the pass decided on, which the effect's work precheck
 	// reads (closeWorthRunning); the effect itself decides on the fresh row.
 	Row session.Info
@@ -79,12 +85,19 @@ func armClose(r *rowFacts) (intent, bool) {
 		it.Closing = closeSpec{Kind: closeFailedCreate}
 	case e.Desired == desireSleep && isPoolManagedSessionInfo(info) && !isNamedSessionInfo(info) && isPoolSessionSlotFreeableInfo(info, now):
 		killed := strings.TrimSpace(info.SleepReason) == string(session.SleepReasonKilled)
+		if e.Park.Parked && !killed {
+			// Parked on pre-assigned blocked work (ga-ylpbsy.16): not
+			// stranded. The assigned-work wake restarts this seat once its
+			// work is ready; past the bound the stranded branch takes it.
+			r.after(requeueUntil(now, e.Park.Until))
+			return intent{Reason: decideParkedHold}, true
+		}
 		aged, held := r.strandedMarker()
 		if held && !killed {
 			return intent{Reason: decideStrandedHold}, true
 		}
 		it.Reason, it.Patch = decideClosePoolSlot, session.ClosePatch(now, cmp.Or(strings.TrimSpace(info.SleepReason), "drained"))
-		it.Closing = closeSpec{Kind: closePoolSlot, Killed: killed, Repair: aged && !killed, Template: e.Template}
+		it.Closing = closeSpec{Kind: closePoolSlot, Killed: killed, Repair: aged && !killed, ParkEligible: e.Park.Eligible && !killed, Template: e.Template}
 	case e.Desired == desireDrain && e.DrainReason != "" && !info.PendingCreateClaim && !deliberatelyHeldRow(info, now):
 		// An undesired pending create is A10's rollback, never a close. The
 		// close reason is the drain's: orphaned, or suspended (§12.2 #17).

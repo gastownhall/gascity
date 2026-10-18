@@ -2122,6 +2122,10 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 	tick := newReconcileTick(orderedInfos)
 	healAlive := &healAliveConfirmer{sp: sp}
 	infoByID := tick.infoByID
+	// The tick's park verdicts (ga-ylpbsy.16, withParkedSeats): pool seats
+	// asleep on their own stop holding only blocked pre-assigned work, which
+	// the pool-free branch holds instead of stranding.
+	parked := reconcileOpts.parkedSeats
 	orderedIDs := tick.orderedIDs
 
 	phaseStart = time.Now()
@@ -5179,7 +5183,11 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				hasAssignedWork = true
 			}
 		}
-		if poolFreeable && hasAssignedWork && !killedSeat {
+		// A seat parked on pre-assigned blocked work (ga-ylpbsy.16) is not
+		// stranded: no diagnostic, no repair. The assigned-work wake restarts
+		// it once its work is ready; past its bound it strands as below.
+		parkedSeat := poolFreeable && hasAssignedWork && !killedSeat && holdsParkedSeat(sw, infoByID[target.info.ID], parked[target.info.ID], clk.Now().UTC(), stderr)
+		if poolFreeable && hasAssignedWork && !killedSeat && !parkedSeat {
 			// The runtime is gone but the session bead still owns
 			// in_progress work — almost always a CLI process that
 			// exited or hung without going through the clean drain

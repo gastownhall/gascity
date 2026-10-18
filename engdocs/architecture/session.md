@@ -117,6 +117,52 @@ Optional provider extensions also live in `runtime/runtime.go`:
 - `IdleWaitProvider`
 - `ImmediateNudgeProvider`
 
+### Parked Pool Seats
+
+A graph claim pre-assigns the open siblings of its step's
+`gc.continuation_group` to the claiming session (`preassignHookContinuationGroup`,
+`cmd/gc/cmd_hook_claim.go`), so the same session runs the later steps with the
+conversation it built. When the seat finishes its step while such a pin is
+still blocked, it drains, and `gc runtime drain-ack` keeps the pin (it releases
+only unexecuted `in_progress` claims). The finalize then leaves the seat
+asleep with `sleep_reason=idle`.
+
+That seat is **parked**, not stranded (`cmd/gc/seat_parked.go`). A pool seat
+is parked when it is asleep on its own stop (`sleep_reason=idle`) with no hold,
+its template is not `wake_mode=fresh`, it slept less than `parkedWorkMaxHold`
+(24 hours) ago, and every bead assigned to it is open, unstarted (no claim,
+wake or `work_started` record names it), not deferred and not ready. The
+verdict is recomputed each pass from those persisted fields; there is no
+parked state to store or clear.
+
+- The pool-slot close (v2 A21; legacy's pool-free branch) holds a parked seat
+  with no `session.stranded`, no marker and no repair. A seat the pass only
+  found eligible is re-read live by the close, which holds it if its live work
+  is still only blocked pins. A live read that fails neither parks nor strands
+  the seat: v2's close refuses and retries, legacy holds it for the tick.
+- The hold comes before the repair: a seat a pass sent down the stranded path
+  (its pool was full, or a read failed) parks again, unrepaired, once it is
+  parked-shaped and eligible.
+- The pool planner keeps a parked seat selected, so it sleeps instead of
+  draining as an orphan, but its pin takes no cap headroom and is not pool
+  demand until it is ready (`SessionRequest.Parked`).
+- When the pin turns ready, the assigned-work wake restarts the same seat. With
+  the default `wake_mode=resume` it resumes its provider conversation (the
+  `session_key` stays while its transcript exists), and `gc hook --claim`
+  claims the pin by session ID.
+- A slot-bounded pool (`max_active_sessions`, or a namepool) parks only while
+  it keeps a free slot: once its open rows (a workless asleep seat the close
+  ends this pass aside) reach the bound, its oldest parked seats fall back to
+  the stranded path until one slot is free.
+- A parked seat's pin turns into a counted resume when it is ready, and takes
+  its place by bead priority among the other existing seats' requests. At a
+  full rig or city cap it can outrank a live seat, which then finishes its
+  claimed work as an undesired row (SESS-074) before it drains, so the cap is
+  briefly exceeded by that one seat.
+- Everything else strands as before: a seat holding started work, a seat whose
+  runtime died (`runtime-missing`), a fresh-wake seat, a seat past its bound. The
+  stranded repair then returns the pin to the pool.
+
 ### Providers
 
 - **tmux**: Primary interactive runtime in

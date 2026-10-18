@@ -443,6 +443,8 @@ type startExecutionOptions struct {
 	// Zero or negative leaves prepare unbounded.
 	prepareBudget      time.Duration
 	readyAssignedFlags []bool
+	// parkedSeats are the pass's park verdicts (withParkedSeats).
+	parkedSeats parkedSeats
 	// assignedWorkStores is index-aligned with the assignedWorkBeads passed to
 	// the same reconcile pass: the store each row was read through. The
 	// orphan-close tie-break releases through it instead of re-deriving an owner
@@ -613,6 +615,16 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 // to set AwakeWorkBead.Ready from the store's deps gate rather than guessing
 // from status, so a blocked open bead does not hold its session awake. Nil
 // leaves every open assigned bead non-ready.
+// withParkedSeats hands the reconciler the pass's park verdicts (parkSeats),
+// decided by the caller over its whole assigned-work read and readiness: the
+// pool-free branch holds a parked seat instead of stranding it. Without it
+// the reconciler parks nothing.
+func withParkedSeats(parked parkedSeats) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.parkedSeats = parked
+	}
+}
+
 func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.readyAssignedFlags = readyAssignedFlags
