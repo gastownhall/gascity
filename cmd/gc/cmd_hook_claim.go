@@ -189,6 +189,11 @@ type hookClaimOptions struct {
 	// under a legacy spelling only when this equals Assignee, so the rewrite
 	// always makes the stored assignee match the actor bd will check.
 	RuntimeActor string
+	// StartedFence is this incarnation's instance token and generation, which
+	// fence the started write. It comes from the process env, never Env: Env is
+	// built for subprocesses, and its inherited-secret filter drops
+	// GC_INSTANCE_TOKEN.
+	StartedFence hookStartedFence
 }
 
 // continuationPinAssignee returns the identity a continuation sibling is pinned
@@ -1415,7 +1420,7 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 	if minted {
 		via = session.WorkStartedViaClaim
 	}
-	fence := hookStartedFenceOf(opts.Env)
+	fence := opts.StartedFence
 	var (
 		res hookStartedResult
 		err error

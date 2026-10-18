@@ -200,8 +200,9 @@ type hookStartedFence struct {
 	HasGen bool
 }
 
-// hookStartedFenceOf reads the fence from the claim env. An unparsable
-// generation is no generation: the token alone fences the write.
+// hookStartedFenceOf reads the fence from env, the process env in
+// production. An unparsable generation is no generation: the token alone
+// fences the write.
 func hookStartedFenceOf(env []string) hookStartedFence {
 	f := hookStartedFence{Token: strings.TrimSpace(hookClaimEnvValue(env, runtime.InstanceTokenEnv))}
 	if raw := strings.TrimSpace(hookClaimEnvValue(env, runtime.RuntimeEpochEnv)); raw != "" {

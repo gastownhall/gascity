@@ -214,6 +214,7 @@ func startedOpts(env []string) hookClaimOptions {
 		SessionID:    startedSessionID,
 		RouteTargets: []string{"worker"},
 		Env:          env,
+		StartedFence: hookStartedFenceOf(env),
 		DrainAck:     true,
 		JSON:         true,
 	}

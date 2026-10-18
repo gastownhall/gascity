@@ -557,6 +557,9 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			JSON:               opts.JSON,
 			StrictDrainAck:     drainAckStrictConfig(cfg),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			// The process env, as the pre-claim fence reads the token:
+			// queryEnv has GC_INSTANCE_TOKEN filtered out.
+			StartedFence: hookStartedFenceOf(os.Environ()),
 		}
 		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
