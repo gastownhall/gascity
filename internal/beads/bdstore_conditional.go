@@ -396,6 +396,16 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // (bd exits 13 under --force). An edit that also closes the bead does not
 // carry it: bd's --force also waives the close policy (open children, a live
 // blocker), which no assignee edit asked to override.
+//
+// The native store waives more, deliberately: each guard has a request member
+// of its own there, and its UpdateIfMatch waives the transfer guard on every
+// assignee edit and the close policy on every status edit, closing edits
+// included, as its unconditional Update does; bd's one flag cannot waive the
+// transfer guard without the close policy. The exclusion keys on "closed",
+// the done status Gas City writes: bd's close policy covers every status that
+// crosses into the workspace's done category, which this store does not read,
+// so a fenced assignee edit to another done status still carries --force, and
+// with it the close-policy waiver.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := validateConditionalUpdateOpts(opts, false); err != nil {

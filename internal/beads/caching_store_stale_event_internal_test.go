@@ -978,15 +978,17 @@ func (h *historyStore) UpdateIfMatch(id string, rev int64, opts UpdateOpts) erro
 // full and partial events, in and out of order; CAS consumers decide on
 // cached rows; a local writer, reconciles and Live refreshes race them. Every
 // CAS that lands must have been decided on the fields the backing held at the
-// fenced revision. The local writer touches only its own key: a local Update
-// that overlays its own value on the refetched row is a separate, known gap.
+// fenced revision, and some must land. The local writer touches only its own
+// key: a local Update that overlays its own value on the refetched row is a
+// separate, known gap. The consumers make a fixed number of attempts, and the
+// rest run until they finish, so the operation count, not a deadline, bounds
+// the run.
 func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
 	if testing.Short() {
 		t.Skip("stress")
 	}
 	t.Parallel()
-	seed := time.Now().UnixNano()
-	t.Logf("seed %d", seed)
+	const seed, casAttempts = 1, 10000
 	h := &historyStore{MemStore: NewMemStore(), hist: map[string]map[int64]Bead{}}
 	const nrows = 4
 	var ids []string
@@ -998,7 +1000,7 @@ func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
 		ids = append(ids, b.ID)
 	}
 	cache := newConditionalCacheForTest(t, h)
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	var casOK, violations atomic.Int64
 	var mu sync.Mutex
@@ -1079,12 +1081,13 @@ func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
 			}
 		}
 	}()
+	var consumers sync.WaitGroup
 	for c := 0; c < 3; c++ {
-		wg.Add(1)
+		consumers.Add(1)
 		go func(c int) {
-			defer wg.Done()
+			defer consumers.Done()
 			r := rand.New(rand.NewSource(seed + 200 + int64(c)))
-			for ctx.Err() == nil {
+			for range casAttempts {
 				id := ids[r.Intn(nrows)]
 				got, err := cache.Get(id)
 				if err != nil {
@@ -1135,11 +1138,16 @@ func TestCachingStoreCASLandsOnlyOnTheFencedRow(t *testing.T) {
 			runtime.Gosched()
 		}
 	}()
+	consumers.Wait()
+	cancel()
 	wg.Wait()
 	for _, v := range first {
 		t.Log(v)
 	}
 	if n := violations.Load(); n > 0 {
 		t.Errorf("%d of %d CAS landed on fields the backing never held at the fenced revision", n, casOK.Load())
+	}
+	if casOK.Load() == 0 {
+		t.Errorf("none of the %d CAS attempts landed; the stress fenced nothing", 3*casAttempts)
 	}
 }

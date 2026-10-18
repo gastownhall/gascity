@@ -23,13 +23,14 @@ import (
 
 // Boot states, for the pass record and the startup watchdog.
 const (
-	plannerBootCensus  = "census" // C11's boot census has not passed
-	plannerBootGate    = "gate"   // no pass has completed with the boot gate open
-	plannerBootReady   = "ready"
-	plannerBootNoStore = "no-store" // no bead store: boot never runs (MAINT-003)
+	plannerBootCapabilities = "capabilities" // C0.7's read of the class stores has not passed
+	plannerBootCensus       = "census"       // C11's boot census has not passed
+	plannerBootGate         = "gate"         // no pass has completed with the boot gate open
+	plannerBootReady        = "ready"
+	plannerBootNoStore      = "no-store" // no bead store: boot never runs (MAINT-003)
 )
 
-// The boot census retry backoff (laneBackoff).
+// The boot read retry backoff (laneBackoff).
 const (
 	v2LaneBaseBackoff = time.Second
 	v2LaneMaxBackoff  = 30 * time.Second
@@ -68,6 +69,7 @@ type plannerRuntime struct {
 	env     atomic.Pointer[reconcileEnv]
 	// softReload amends a reload's reply (acceptSoftReload, v5 M2).
 	softReload func(ctx context.Context, intent reloadIntent, r *reloadControlReply)
+	capable    atomic.Bool   // C0.7's read of the class stores passed
 	census     atomic.Bool   // C11's boot census passed
 	ready      chan struct{} // closed by the first completed pass with the gate open
 	readyOnce  sync.Once
@@ -162,14 +164,18 @@ func (rt *plannerRuntime) publishEnv() *reconcileEnv {
 // boot gate open (CONTRACT v5 P2), or with ctx's error. It is idempotent, so a
 // startup retry after a panic resumes it (MAINT-005).
 func (rt *plannerRuntime) boot(ctx context.Context) error {
-	for failures := 0; rt.host.capabilities != nil; {
-		verdict := rt.host.capabilities()
+	for failures := 0; !rt.capable.Load(); {
+		var verdict error
+		if rt.host.capabilities != nil {
+			verdict = rt.host.capabilities()
+		}
 		var unread *v2CapabilityUnreadError
 		if !errors.As(verdict, &unread) {
 			if verdict != nil {
 				rt.planner.alert(alertBootRefused, "", verdict.Error())
 				return verdict
 			}
+			rt.capable.Store(true)
 			break
 		}
 		failures++
@@ -322,6 +328,8 @@ func (rt *plannerRuntime) bootState() string {
 	switch {
 	case rt.noStore.Load():
 		return plannerBootNoStore
+	case !rt.capable.Load():
+		return plannerBootCapabilities
 	case !rt.census.Load():
 		return plannerBootCensus
 	}

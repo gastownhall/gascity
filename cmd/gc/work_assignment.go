@@ -377,6 +377,13 @@ func releaseAssignmentFenced(store beads.Store, wb beads.Bead, opts beads.Update
 // row moved since), and the release is left to the legacy tiers
 // (handled=false), which fence on the live status and assignee; refusing those
 // would strand every claim on a store whose lists carry no revision.
+//
+// The live read is HandlesFor(store).Live, as releaseAssignmentFenced's is, so
+// store must be a leaf store or carry Handles of its own (a CachingStore reads
+// its backing): the unwrapped work store, not a class wrapper. Over a cache, a
+// class wrapper's live read is the cached row, and a stale 0 there fences the
+// release on a revision the row no longer holds, refused on every tick rather
+// than left to the tiers.
 func releaseWorkAssignmentIfRevisionMatches(store beads.Store, item beads.Bead, update beads.UpdateOpts) (released, handled bool, err error) {
 	writer, _, err := beads.ResolveConditionalWriter(store)
 	if err != nil {

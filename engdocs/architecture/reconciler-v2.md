@@ -208,13 +208,21 @@ exactly as before. Under v2 it hands them to the router.
   `reconcileEnv` (config, provider, config revision). They never read
   `CityRuntime` fields, which a reload writes without a lock (F2).
   `TestV2RuntimeDoesNotReferenceCityRuntime` enforces this.
-- **Boot.** Boot runs the first resync pass synchronously. It retries a
-  failed sessions census, because a failed read is not an empty city. Then
-  it starts the workers and lanes, and reports ready once every boot key
-  has been reconciled once and the allocator has completed a pass. Boot is
-  idempotent (MAINT-005). While it waits, it records the queue at every
-  patrol interval (see [Observability](#observability)). A city with no
-  bead store latches `no-store` and never boots (MAINT-003).
+- **Boot.** Boot first reads the sessions and graph class stores (C0.7). A
+  store that cannot fence, or whose list reads drop the revision its live
+  reads carry (`beads.CheckListRevisionFidelity`), refuses the boot. A
+  store it could not read is retried with backoff, because a failed read is
+  no verdict on the store. A sample with no row able to decide (no open or
+  in-progress row, or legacy rows alone) is not decided: boot proceeds
+  without a verdict and records nothing, and only `gc doctor` names the
+  outcome, for a store it reads (it skips the read over native Dolt). Boot
+  runs the first resync pass synchronously. It retries a failed sessions
+  census, because a failed read is not an empty city. Then it starts the
+  workers and lanes, and reports ready once a pass has completed with the
+  boot gate open. Boot is idempotent (MAINT-005). While it waits, it
+  records the queue at every patrol interval (see
+  [Observability](#observability)). A city with no bead store latches
+  `no-store` and never boots (MAINT-003).
 - **Shutdown.** Shutdown cancels, closes admission, then joins the workers
   and lanes, bounded by the shutdown timeout and outside any lock.
 
@@ -297,7 +305,7 @@ Every other field is cumulative or current.
 
 | Fields | What |
 |---|---|
-| `boot` | What boot still waits on: `census`, `coverage` (a boot key not yet reconciled), `allocator` (no successful pass yet), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
+| `boot` | What boot still waits on: `capabilities` (C0.7's read of the class stores has not passed), `census` (the boot census has not passed), `gate` (no pass has completed with the boot gate open), `ready`, or `no-store` (MAINT-003: the startup step found no bead store, so no workers; latched) |
 | `keys`, `depth_hot`, `depth_resync`, `processing`, `dirty`, `deferred`, `timers` | Queue state |
 | `oldest_hot_ms`, `oldest_resync_ms`, `longest_in_flight_ms` | The oldest queued key per lane, and the longest reconcile in flight |
 | `adds`, `dropped_adds` | Accepted adds by reason kind since the last record; adds refused after shutdown |
