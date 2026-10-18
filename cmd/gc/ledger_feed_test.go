@@ -1183,22 +1183,25 @@ func TestLedgerFeedAnnouncesAReopenAndCloseOfAHeldClosedRow(t *testing.T) {
 		h.step()
 		assertReclosed(t, h, id)
 	})
-	// yieldedReclose reads the reclose inside a local create, whose write in
-	// flight the refresh yields to: the row is kept for a retry, unannounced.
+	// yieldedReclose reads the reclose inside a local Tx, whose write in
+	// flight fences every row (its backing decides which it touches), so the
+	// refresh yields: the row is kept for a retry, unannounced. A local
+	// create would not do: it fences only rows the cache does not hold.
 	yieldedReclose := func(t *testing.T) (*feedHarness, string) {
 		t.Helper()
 		h := newFeedHarness(t, newJournalingStore())
 		id := reclosedOutOfBand(t, h)
-		h.store.afterCreate = func(string) { h.step() }
-		if _, err := h.cache.Create(beads.Bead{Title: "local"}); err != nil {
+		if err := h.cache.Tx("local", func(beads.Tx) error {
+			h.step()
+			return nil
+		}); err != nil {
 			t.Fatal(err)
 		}
-		h.store.afterCreate = nil
 		if got := h.eventsFor(id); countFeedEvents(got, closedEvent) != 1 || !slices.Equal(h.deferred, []string{id}) {
 			t.Fatalf("after the yield: events = %v, deferred = %v, want the reclose left to the retry", got, h.deferred)
 		}
-		if st := h.feed.status(time.Now()); st.PendingRetries != 2 {
-			t.Fatalf("status pending=%d, want the reclose and the local create kept for a retry", st.PendingRetries)
+		if st := h.feed.status(time.Now()); st.PendingRetries != 1 {
+			t.Fatalf("status pending=%d, want the reclose kept for a retry", st.PendingRetries)
 		}
 		return h, id
 	}

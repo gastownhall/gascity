@@ -296,6 +296,60 @@ func TestCachingStoreRefreshRowReportYieldsOnlyToWritesThatMayTouchTheRow(t *tes
 	}
 }
 
+// A create makes a row the cache does not hold, so while one is in flight a
+// yielding refresh yields for every row the cache does not hold (the created
+// one among them) but not for a held row: a steady stream of creates does not
+// stall the refresh of the rows the cache already holds.
+func TestCachingStoreRefreshRowReportYieldsToACreateOnlyForUnheldRows(t *testing.T) {
+	t.Parallel()
+
+	backing := &writeHookStore{MemStore: NewMemStore()}
+	cache, rec := newReportCacheForTest(t, backing)
+	held := mustCreateCached(t, cache)
+	if err := backing.MemStore.SetMetadata(held.ID, "k", "out of band"); err != nil {
+		t.Fatal(err)
+	}
+	unheld, err := backing.MemStore.Create(Bead{Title: "out of band"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.take()
+
+	yield := RowRefreshOptions{YieldToLocalWrites: true}
+	var created string
+	var heldErr, unheldErr, createdErr error
+	var heldEvent string
+	backing.onWrite = func(id string) {
+		created = id
+		var rep RowRefresh
+		rep, heldErr = cache.RefreshRowReport(held.ID, yield)
+		heldEvent = rep.Event
+		_, unheldErr = cache.RefreshRowReport(unheld.ID, yield)
+		_, createdErr = cache.RefreshRowReport(id, yield)
+	}
+	if _, err := cache.Create(Bead{Title: "local"}); err != nil {
+		t.Fatal(err)
+	}
+	backing.onWrite = nil
+	if created == "" {
+		t.Fatal("the backing hook never ran")
+	}
+	if heldErr != nil || heldEvent != "bead.updated" {
+		t.Errorf("refresh of a held row during a create = %q, %v; want its out-of-band update", heldEvent, heldErr)
+	}
+	if !errors.Is(unheldErr, ErrRowRefreshYielded) {
+		t.Errorf("refresh of an unheld row during a create = %v, want ErrRowRefreshYielded", unheldErr)
+	}
+	if !errors.Is(createdErr, ErrRowRefreshYielded) {
+		t.Errorf("refresh of the created row during its create = %v, want ErrRowRefreshYielded", createdErr)
+	}
+	for _, e := range refreshNotifications(rec.take()) {
+		if strings.HasSuffix(e, " "+created) {
+			t.Errorf("the in-flight refresh notified %q for the cache's own create", e)
+		}
+	}
+}
+
 // batchCallHookStore runs onCall as each CloseAll or ApplyGuarded reaches the
 // backing, whatever rows it names, before the backing applies it.
 type batchCallHookStore struct {

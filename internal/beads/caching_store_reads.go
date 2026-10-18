@@ -759,8 +759,9 @@ type RowRefreshOptions struct {
 	AnnounceUnheldClose bool
 	// YieldToLocalWrites refuses with ErrRowRefreshYielded, installing and
 	// notifying nothing, while a local write of this cache that may touch
-	// the row is in flight: one naming id, or one whose rows its backing
-	// call decides (Create, Tx, a graph apply). Between that write's backing
+	// the row is in flight: one naming id, a create while the cache does not
+	// hold the row (a create makes a row the cache does not hold), or any
+	// other write whose rows its backing call decides (Tx, a graph apply). Between that write's backing
 	// commit and its absorb the backing read would see the write before the
 	// cache holds it, and the refresh would announce the cache's own write.
 	// The write absorbs and announces it; a refresh after it returns finds
@@ -820,11 +821,12 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	c.mu.RLock()
 	live := c.state == cacheLive || c.state == cachePartial
 	startSeq, startScan := c.mutationSeq, c.scanGen
+	_, heldAtStart := c.beads[id]
 	c.mu.RUnlock()
 	if !live {
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
 	}
-	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id, heldAtStart) {
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
 	}
 	fresh, readErr := c.backing.Get(id)
@@ -851,11 +853,11 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 		c.mu.Unlock()
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
 	}
-	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id) {
+	cached, held := c.beads[id]
+	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id, held) {
 		c.mu.Unlock()
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
 	}
-	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
 	announceClose := found && c.announcesCloseLocked(id, opts, cached, held, fresh)
 	// A close announced over a row held only silently (heldSilentlyLocked) is

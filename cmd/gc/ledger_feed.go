@@ -64,7 +64,11 @@ package main
 // controller's own write in flight, is left to the retry. A refresh that
 // yields to such a write spends none of the row's retries, and one that
 // starts while the write is in flight reads nothing: the row waits for the
-// write, for a minute at most. A row whose retries or wait run out is
+// write, for a minute at most. A create fences only the rows the cache does
+// not hold, but a Tx or graph apply fences every row, so such writes back to
+// back, or one whose backing call hangs, keep those rows waiting until the
+// limit; a refresh's own backing read takes no context, so a hung read
+// stalls the feed until it returns. A row whose retries or wait run out is
 // logged and falls back to a re-scan and, if closing, the sweep. A gap
 // skips its rows outright, so the close of a never-held row inside it is
 // announced only if an edit of the row lands within its close's window.

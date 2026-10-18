@@ -35,7 +35,7 @@ func (c *CachingStore) CreateWithStorage(b Bead, storage StorageClass) (Bead, er
 }
 
 func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
-	startSeq, endWrite := c.beginLocalWrite()
+	startSeq, endWrite := c.beginLocalCreate()
 	defer endWrite()
 	created, err := create()
 	if err != nil {

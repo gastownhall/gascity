@@ -173,8 +173,9 @@ func localWriteCensus(t *testing.T, files []string) (map[string]bool, []string) 
 // censusFiles reports, for every method of CachingStore and of each type with
 // a *CachingStore field, whether it registers a local write, and lists the
 // exported ones as "Type.Method". A method registers when it calls
-// beginLocalWrite, or calls a registering CachingStore method, on its
-// receiver (a CachingStore) or its receiver's *CachingStore field (a handle).
+// beginLocalWrite or beginLocalCreate, or calls a registering CachingStore
+// method, on its receiver (a CachingStore) or its receiver's *CachingStore
+// field (a handle).
 func censusFiles(files []*ast.File) (map[string]bool, []string) {
 	const cacheType = "CachingStore"
 	cacheFields := map[string]map[string]bool{} // type -> its *CachingStore fields
@@ -254,7 +255,7 @@ func censusFiles(files []*ast.File) (map[string]bool, []string) {
 				continue
 			}
 			for _, callee := range callees {
-				if callee == cacheType+".beginLocalWrite" || registers[callee] {
+				if callee == cacheType+".beginLocalWrite" || callee == cacheType+".beginLocalCreate" || registers[callee] {
 					registers[m] = true
 					changed = true
 					break
