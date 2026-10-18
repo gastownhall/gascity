@@ -5018,7 +5018,7 @@ func TestCityRuntimeReloadLifecycleFailureKeepsOldConfig(t *testing.T) {
 	oldRev := cr.configRev
 
 	prev := cityRuntimeStartBeadsLifecycle
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		return fmt.Errorf("boom")
 	}
 	t.Cleanup(func() {
@@ -5103,7 +5103,7 @@ func TestCityRuntimeReloadRetriesTransientLifecycleFailure(t *testing.T) {
 	prevStart := cityRuntimeStartBeadsLifecycle
 	prevDelay := cityRuntimeReloadLifecycleRetryDelay
 	var calls int
-	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, io.Writer) error {
+	cityRuntimeStartBeadsLifecycle = func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 		calls++
 		if calls == 1 {
 			return fmt.Errorf("init city beads: exec beads init: signal: terminated")

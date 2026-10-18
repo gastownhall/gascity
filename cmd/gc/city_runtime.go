@@ -114,13 +114,16 @@ type CityRuntime struct {
 	// drainedLastTick records, per suspended scope root, whether its sessions
 	// were already drained on the previous tick (retireSuspendedScopes).
 	drainedLastTick map[string]bool
-	cityPath        string
-	cityName        string
-	configName      string
-	tomlPath        string
-	watchTargets    []config.WatchTarget
-	configRev       string
-	configDirty     *atomic.Bool
+	// bootCityStore is the city's bd store binding as of construction, which
+	// follows the boot lifecycle; reload refuses to run against any other.
+	bootCityStore cityStoreRecord
+	cityPath      string
+	cityName      string
+	configName    string
+	tomlPath      string
+	watchTargets  []config.WatchTarget
+	configRev     string
+	configDirty   *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration
@@ -523,6 +526,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	cr := &CityRuntime{
 		storageRoutes:           routes,
+		bootCityStore:           recordCityStore(p.CityPath),
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -2701,7 +2705,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {
-		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr)
+		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.bootCityStore, cr.stderr)
 		if lifecycleErr == nil {
 			break
 		}

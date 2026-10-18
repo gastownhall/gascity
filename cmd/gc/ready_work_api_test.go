@@ -283,7 +283,7 @@ func TestControllerReadyWorkRefusesWhileAReloadIsBeingApplied(t *testing.T) {
 			releaseReload := func() { releaseOnce.Do(func() { close(release) }) }
 			// The reload parks in its bead lifecycle step: after it cleared the
 			// dirty flag, before it publishes.
-			stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error {
+			stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error {
 				parkOnce.Do(func() { close(parked) })
 				<-release
 				return nil
@@ -326,7 +326,7 @@ func TestControllerReadyWorkRefusesWhileAReloadIsBeingApplied(t *testing.T) {
 // applies.
 func TestControllerReadyWorkRefusesAfterAFailedReloadUntilOneApplies(t *testing.T) {
 	f := newReadyWorkReloadFixture(t)
-	stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+	stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 	if err := os.WriteFile(f.tomlPath, []byte("[workspace\n"), 0o644); err != nil {
 		t.Fatalf("write a malformed config: %v", err)
 	}
@@ -439,7 +439,7 @@ func TestControllerReadyWorkRefusesAfterAFailedAPIConfigWriteChangedDisk(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newReadyWorkReloadFixture(t)
-			stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+			stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 			sitePath := filepath.Join(filepath.Dir(f.tomlPath), ".gc", "site.toml")
 			if _, err := os.Lstat(sitePath); !os.IsNotExist(err) {
 				t.Fatalf(".gc/site.toml before the write: %v, want it absent", err)
@@ -570,7 +570,7 @@ func TestControllerReadyWorkRefusesWhenAConfigChangeOvertakesTheRead(t *testing.
 	// stores.
 	t.Run("a reload applied", func(t *testing.T) {
 		f := newReadyWorkReloadFixture(t)
-		stubReloadBeadsLifecycle(t, func(string, string, *config.City, io.Writer) error { return nil })
+		stubReloadBeadsLifecycle(t, func(string, string, *config.City, cityStoreRecord, io.Writer) error { return nil })
 		oldRevision := f.cr.configRev
 		writeCityRuntimeConfigWithOneSecondShutdownTimeout(t, f.tomlPath)
 		var outcome reloadOutcome

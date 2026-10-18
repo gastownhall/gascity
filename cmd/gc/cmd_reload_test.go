@@ -951,18 +951,19 @@ func TestReloadConfigTracedRebuildsProviderWhenPackRuntimeCommandChanges(t *test
 	}
 	var stdout, stderr bytes.Buffer
 	cr := &CityRuntime{
-		cityPath:   dir,
-		cityName:   "test",
-		configName: "test",
-		tomlPath:   tomlPath,
-		configRev:  result.Revision,
-		cfg:        cfg,
-		sp:         runtime.NewFake(),
-		dops:       newDrainOps(runtime.NewFake()),
-		rec:        events.Discard,
-		stdout:     &stdout,
-		stderr:     &stderr,
-		logPrefix:  "gc test",
+		bootCityStore: recordCityStore(dir),
+		cityPath:      dir,
+		cityName:      "test",
+		configName:    "test",
+		tomlPath:      tomlPath,
+		configRev:     result.Revision,
+		cfg:           cfg,
+		sp:            runtime.NewFake(),
+		dops:          newDrainOps(runtime.NewFake()),
+		rec:           events.Discard,
+		stdout:        &stdout,
+		stderr:        &stderr,
+		logPrefix:     "gc test",
 	}
 	// The reload restarts the config watcher; stop it with the test.
 	t.Cleanup(cr.stopConfigWatcher)

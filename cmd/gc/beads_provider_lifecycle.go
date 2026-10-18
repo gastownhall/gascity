@@ -192,6 +192,14 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
+	return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil)
+}
+
+// startBeadsLifecycleResolvingCityDatabase is startBeadsLifecycle with the
+// city scope's Dolt database name supplied by resolveCityDatabase instead of
+// read from metadata with a default-name fallback. A nil resolver keeps the
+// fallback (boot); reload passes one that refuses it.
+func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City, stderr io.Writer, resolveCityDatabase func() (string, error)) error {
 	if err := ensureFreshRigProviderOwnership(cityPath, cfg); err != nil {
 		return err
 	}
@@ -277,7 +285,7 @@ func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer)
 	// identity that differs from the bead prefix. New managed bd stores still
 	// default to prefix-named databases, but older/imported metadata may carry
 	// a different dolt_database that gc-beads-bd should preserve.
-	if err := initAndHookDir(cityPath, cityPath, beadsPrefix); err != nil {
+	if err := initAndHookDirResolvingDatabase(cityPath, cityPath, beadsPrefix, resolveCityDatabase); err != nil {
 		return fmt.Errorf("init city beads: %w", err)
 	}
 	suspended := suspendedBeadsScopes(cityPath, cfg)
@@ -940,6 +948,13 @@ func normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase s
 // wipe existing hooks. installBeadHooks only removes gc-stamped hooks and
 // is always safe to run regardless of event_hooks config.
 func initAndHookDir(cityPath, dir, prefix string) error {
+	return initAndHookDirResolvingDatabase(cityPath, dir, prefix, nil)
+}
+
+// initAndHookDirResolvingDatabase is initAndHookDir with the managed-Dolt
+// database name taken from resolveDatabase when it is non-nil, so a caller
+// that already knows the scope's store never falls back to a default name.
+func initAndHookDirResolvingDatabase(cityPath, dir, prefix string, resolveDatabase func() (string, error)) error {
 	if owned, err := scopeProviderOwned(cityPath, dir); err != nil {
 		return err
 	} else if owned {
@@ -1001,7 +1016,16 @@ func initAndHookDir(cityPath, dir, prefix string) error {
 		}
 		return nil
 	}
-	doltDatabase := canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	var doltDatabase string
+	if resolveDatabase != nil {
+		db, err := resolveDatabase()
+		if err != nil {
+			return err
+		}
+		doltDatabase = db
+	} else {
+		doltDatabase = canonicalScopeDoltDatabase(cityPath, dir, prefix)
+	}
 	if err := normalizeCanonicalBdScopeFilesForInit(cityPath, dir, prefix, doltDatabase); err != nil {
 		return err
 	}
