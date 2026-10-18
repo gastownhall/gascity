@@ -133,13 +133,20 @@ type CachingStore struct {
 	// announcedCloses holds the closes this cache announced (announcedClose):
 	// every bead.closed emitChange sends, and the closes a reconcile announces
 	// as it evicts a row the cache held open, recorded under the lock before
-	// the notification goes out. A RefreshRowReport that then finds the row
-	// closed and unheld does not announce that close again
+	// the notification goes out. A RefreshRowReport that then reads the same
+	// version of the row closed does not announce that close again
 	// (announcedCloseCoversLocked). A row installed not closed drops its entry,
 	// and entries older than recentWriteVerifyWindow are pruned at each
-	// reconcile merge and, once it holds announcedClosesPruneAt entries, as
-	// each announcement is recorded.
+	// reconcile merge and, once the record holds announcedClosesPruneAt
+	// entries and announcedClosesPruneNext, as each announcement is recorded.
 	announcedCloses map[string]announcedClose
+	// announcedClosesPruneNext is twice the entries the last prune of
+	// announcedCloses kept: recording a close prunes again only once the
+	// record has grown to it, so between prunes the record grows to at most
+	// twice what the last one kept (or announcedClosesPruneAt), and a burst
+	// of closes whose prunes free nothing scans it a logarithmic number of
+	// times.
+	announcedClosesPruneNext int
 	// localWrites tracks the local writes between their start and their
 	// return, so a yielding RefreshRowReport does not announce a write's row
 	// before the write absorbs it (localWritesInFlight).

@@ -765,6 +765,20 @@ type RowRefreshOptions struct {
 	// A caller that passes it must retry a yielded row for as long as the
 	// write may run: a graph apply holds the fence for seconds.
 	YieldToLocalWrites bool
+	// SeenOpen tells the refresh the caller saw the row open recently (a
+	// journal page's open post-image), so a closed row it reads may be a new
+	// close. It implies AnnounceUnheldClose, and also announces the close of
+	// a row the cache holds closed already, unless the cache holds this very
+	// version of the row (the same nonzero Revision). Without a revision to
+	// compare, the announced-close record does not cover the row, however
+	// its updated_at compares: a whole-second updated_at cannot tell a
+	// reopen and close inside one second from the close it ties, while the
+	// duplicate announcing may cost (this cache's own close of a row the
+	// caller saw open) is what at-least-once delivery allows. A row the cache
+	// holds closed at an older revision than the backing's, installed from a
+	// bus event (which carries none) or a lagged read, has its close
+	// announced again, a duplicate too. Pass it with YieldToLocalWrites.
+	SeenOpen bool
 }
 
 // RowRefresh reports what one RefreshRowReport did.
@@ -780,13 +794,16 @@ type RowRefresh struct {
 	// Event is the notification the refresh emitted: "", "bead.created",
 	// "bead.updated" or "bead.closed".
 	Event string
+	// Reclosed reports the announced close of a row the cache held closed
+	// already, which opts.SeenOpen showed reopened since.
+	Reclosed bool
 }
 
 // RefreshRowReport is RefreshRow, reporting what the refresh found and what
 // it notified, for a caller that acts on whether anything changed (the
 // controller's journal feed). Errors are RefreshRow's; on ErrNotFound the
-// report is filled in too. opts.AnnounceUnheldClose is the one difference in
-// behavior (RowRefreshOptions).
+// report is filled in too. opts.AnnounceUnheldClose and opts.SeenOpen are the
+// differences in behavior (RowRefreshOptions).
 func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowRefresh, error) {
 	if !c.ownsBeadID(id) {
 		return RowRefresh{}, fmt.Errorf("refresh %s: not this cache's id: %w", id, ErrCacheUnavailable)
@@ -831,16 +848,15 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	}
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
-	announceUnheld := opts.AnnounceUnheldClose && found && !held && fresh.Status == "closed" &&
-		c.closeIntents[id] == nil && !c.announcedCloseCoversLocked(id, fresh, c.clockNow())
+	announceClose := found && c.announcesCloseLocked(id, opts, cached, held, fresh)
 	var installed Bead
 	evicted := false
 	if found {
 		absorb := absorbOpts{depsMode: depsFromFieldsIfCarried, seqMode: seqKeep, clearDirty: true}
 		// RefreshRowReport announces the close of a row it held open itself
-		// (rowRefreshChange), and of an unheld row when asked to, so neither
-		// close is queued as well.
-		absorb.closeAnnounced = (held && cached.Status != "closed" && fresh.Status == "closed") || announceUnheld
+		// (rowRefreshChange), and of an unheld or reclosed row when asked to
+		// (announcesCloseLocked), so no close is queued as well.
+		absorb.closeAnnounced = (held && cached.Status != "closed" && fresh.Status == "closed") || announceClose
 		if depsFromBacking {
 			absorb.depsMode, absorb.deps = depsExplicit, freshDeps
 		}
@@ -851,8 +867,8 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 		evicted = true
 	}
 	eventType, changed := rowRefreshChange(held, cached, cachedDeps, found, installed, c.deps[id])
-	if announceUnheld {
-		eventType = "bead.closed"
+	if announceClose {
+		eventType, changed = "bead.closed", true
 	}
 	if eventType == "bead.closed" {
 		c.noteCloseAnnouncedLocked(id)
@@ -869,7 +885,7 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	}
 	c.mu.Unlock()
 
-	rep := RowRefresh{Found: found, Held: held, Event: eventType}
+	rep := RowRefresh{Found: found, Held: held, Event: eventType, Reclosed: announceClose && held}
 	if !found {
 		if held {
 			rep.Bead = cloneBead(cached)

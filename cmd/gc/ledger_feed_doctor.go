@@ -59,9 +59,10 @@ func (*ledgerFeedDoctorCheck) WarmupEligible() bool { return false }
 func (*ledgerFeedDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
 // Run implements doctor.Check: OK when the feed is off or its state cannot be
-// read, an advisory warning for a mode change pending reload, a stopped feed,
-// writes the feed missed, a feed far behind or stuck, or a wake rate that
-// looks like an echo loop. Each scope's figures are listed as details.
+// read, an advisory warning for a mode change pending reload, a feed still
+// running while the mode is off, a stopped feed, writes the feed missed, a
+// feed far behind or stuck, or a wake rate that looks like an echo loop. Each
+// scope's figures are listed as details.
 func (c *ledgerFeedDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	onDisk := config.BeadsLedgerFeedOff
@@ -92,9 +93,14 @@ func (c *ledgerFeedDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResul
 	if st.Mode != onDisk {
 		warnings = append(warnings, fmt.Sprintf("ledger_feed on disk is %s; the controller runs %s until its next reload", onDisk, st.Mode))
 	}
-	if st.Mode == config.BeadsLedgerFeedOff && len(warnings) == 0 {
-		r.Message = ledgerFeedOffMessage
-		return r
+	if st.Mode == config.BeadsLedgerFeedOff {
+		if n := ledgerFeedRunningScopes(st.Scopes); n > 0 {
+			warnings = append(warnings, fmt.Sprintf("ledger_feed is off, but %d scope(s) still run a feed: a store the controller kept when a reload could not reopen it keeps its feed until a later reload reopens it", n))
+		}
+		if len(warnings) == 0 {
+			r.Message = ledgerFeedOffMessage
+			return r
+		}
 	}
 	tailed, scanOnly := 0, 0
 	for _, s := range st.Scopes {
@@ -119,6 +125,18 @@ func (c *ledgerFeedDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResul
 
 // ledgerFeedOffMessage is the check's answer for a city with the feed off.
 const ledgerFeedOffMessage = "ledger feed off: out-of-process writes reach the controller at its re-scan"
+
+// ledgerFeedRunningScopes counts the scopes whose feed still runs: every one
+// but a scan-only scope and a stopped feed.
+func ledgerFeedRunningScopes(scopes []ledgerFeedScopeStatus) int {
+	n := 0
+	for _, s := range scopes {
+		if s.State != ledgerFeedStateScanOnly && s.State != ledgerFeedStateStopped {
+			n++
+		}
+	}
+	return n
+}
 
 // ledgerFeedScopeWarnings are one tailed scope's advisories.
 func ledgerFeedScopeWarnings(s ledgerFeedScopeStatus) []string {

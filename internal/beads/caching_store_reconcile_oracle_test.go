@@ -238,6 +238,10 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	exp.deletedSeq = expectedDeletedSeq(st, in, exp)
 	exp.retainedIDs = expectedRetainedIDs(in, exp)
 	exp.announcedCloseIDs = expectedAnnouncedCloseIDs(st, in, exp)
+	// The merge prunes the record after its last announcement, which sets the
+	// next prune threshold to twice what the prune kept. The frozen branches
+	// predate the record, so the reference end state cannot supply it.
+	exp.announcedPruneNext = 2 * len(exp.announcedCloseIDs)
 	return exp
 }
 

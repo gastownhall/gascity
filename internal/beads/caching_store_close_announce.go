@@ -69,28 +69,33 @@ type queuedClose struct {
 	generation uint64
 }
 
-// announcedClose is a close the cache announced: when, and the announced row's
-// UpdatedAt, which tells that close from a later one.
+// announcedClose is a close the cache announced: when, and which version of
+// the row it announced, by Revision where the backing stamps one and by
+// UpdatedAt where it does not.
 type announcedClose struct {
 	at        time.Time
 	updatedAt time.Time
+	revision  int64
 }
 
-// announcedClosesPruneAt is the record size from which recording a close
-// prunes the expired ones first. Below it, the reconcile merge's prune keeps
-// the record small, and a close costs no scan of it.
+// announcedClosesPruneAt is the smallest record size from which recording a
+// close prunes the expired ones first. Below it, the reconcile merge's prune
+// keeps the record small, and a close costs no scan of it.
 const announcedClosesPruneAt = 4096
 
 // recordAnnouncedClose records that the cache is announcing b's close now.
 // emitChange calls it for every bead.closed, before the announcement reaches
-// onChange. From announcedClosesPruneAt records on it prunes the expired ones
-// first, so a cache whose reconcile loop does not run keeps a bounded record.
-// Callers must not hold c.mu.
+// onChange. Once the record holds announcedClosesPruneAt entries, and
+// announcedClosesPruneNext, it prunes the expired ones first, so a cache whose
+// reconcile loop does not run keeps a bounded record, and a burst of closes
+// inside one recentWriteVerifyWindow, whose prunes free nothing, scans the
+// record a logarithmic number of times rather than at every close. Callers
+// must not hold c.mu.
 func (c *CachingStore) recordAnnouncedClose(b Bead) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clockNow()
-	if len(c.announcedCloses) >= announcedClosesPruneAt {
+	if len(c.announcedCloses) >= max(announcedClosesPruneAt, c.announcedClosesPruneNext) {
 		c.pruneAnnouncedClosesLocked(now)
 	}
 	c.recordAnnouncedCloseLocked(b.ID, b, now)
@@ -103,30 +108,68 @@ func (c *CachingStore) recordAnnouncedCloseLocked(id string, closed Bead, now ti
 	if c.announcedCloses == nil {
 		c.announcedCloses = make(map[string]announcedClose)
 	}
-	c.announcedCloses[id] = announcedClose{at: now, updatedAt: closed.UpdatedAt}
+	c.announcedCloses[id] = announcedClose{at: now, updatedAt: closed.UpdatedAt, revision: closed.Revision}
+}
+
+// announcesCloseLocked reports whether RefreshRowReport announces fresh, the
+// row it read for id, as a close rowRefreshChange does not: the close of a
+// row the cache does not hold, with opts.AnnounceUnheldClose or
+// opts.SeenOpen, or, with opts.SeenOpen, of a row the cache holds closed at
+// another version. Neither is announced while a closing write of this cache
+// is in flight for the row (that write announces it), or when the cache
+// announced this close recently (announcedCloseCoversLocked). Caller must
+// hold c.mu.
+func (c *CachingStore) announcesCloseLocked(id string, opts RowRefreshOptions, cached Bead, held bool, fresh Bead) bool {
+	switch {
+	case fresh.Status != "closed" || c.closeIntents[id] != nil:
+		return false
+	case !held:
+		if !opts.AnnounceUnheldClose && !opts.SeenOpen {
+			return false
+		}
+	case !opts.SeenOpen || cached.Status != "closed" || sameRowVersion(cached, fresh):
+		return false
+	}
+	return !c.announcedCloseCoversLocked(id, fresh, c.clockNow(), opts.SeenOpen)
+}
+
+// sameRowVersion reports whether a and b carry the same nonzero Revision, so
+// are the same version of one row. Rows without one are never known to be.
+func sameRowVersion(a, b Bead) bool {
+	return a.Revision != 0 && a.Revision == b.Revision
 }
 
 // announcedCloseCoversLocked reports whether fresh, a closed row read for id,
-// is a close the cache announced within recentWriteVerifyWindow of now: its
-// UpdatedAt is the announced row's. A write since, an edit or a reopen and
-// close read together, moves UpdatedAt, so that close is announced again, as
-// bead.closed delivery allows; so is a close announced with a row read before
-// it committed (a lagged read after a closing write). A backing that stamps
-// whole seconds can tie a reopen and close inside the second of the announced
-// close, and the new close then goes unannounced. Caller must hold c.mu.
-func (c *CachingStore) announcedCloseCoversLocked(id string, fresh Bead, now time.Time) bool {
+// is a close the cache announced within recentWriteVerifyWindow of now. When
+// both the announced row and fresh carry a Revision, it is that close if the
+// revisions match: every write since, an edit or a reopen and close, mints a
+// new one. Otherwise it is that close if UpdatedAt matches, unless seenOpen
+// (RowRefreshOptions.SeenOpen): a backing that stamps whole seconds can tie
+// a reopen and close inside the second of the announced close. A close that
+// is not covered is announced again, as bead.closed delivery allows; so is a
+// close announced with a row read before it committed (a lagged read after a
+// closing write). Caller must hold c.mu.
+func (c *CachingStore) announcedCloseCoversLocked(id string, fresh Bead, now time.Time, seenOpen bool) bool {
 	ac, ok := c.announcedCloses[id]
-	return ok && now.Sub(ac.at) <= recentWriteVerifyWindow && fresh.UpdatedAt.Equal(ac.updatedAt)
+	switch {
+	case !ok || now.Sub(ac.at) > recentWriteVerifyWindow:
+		return false
+	case ac.revision != 0 && fresh.Revision != 0:
+		return fresh.Revision == ac.revision
+	}
+	return !seenOpen && fresh.UpdatedAt.Equal(ac.updatedAt)
 }
 
 // pruneAnnouncedClosesLocked drops the announcedCloses entries older than
-// recentWriteVerifyWindow. Caller must hold c.mu in write mode.
+// recentWriteVerifyWindow, and sets announcedClosesPruneNext to twice the
+// entries it kept. Caller must hold c.mu in write mode.
 func (c *CachingStore) pruneAnnouncedClosesLocked(now time.Time) {
 	for id, ac := range c.announcedCloses {
 		if now.Sub(ac.at) > recentWriteVerifyWindow {
 			delete(c.announcedCloses, id)
 		}
 	}
+	c.announcedClosesPruneNext = 2 * len(c.announcedCloses)
 }
 
 // dropQueuedCloseLocked removes id's queued close and reports whether one was

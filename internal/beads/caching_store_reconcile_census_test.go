@@ -95,6 +95,9 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
+		// announcedClosesPruneNext is set by the merge's prune and compared as
+		// mergeEndState.announcedPruneNext.
+		"announcedClosesPruneNext": true,
 	}
 	excludedStore := map[string]bool{
 		// observationRevision is a process-local publication fence, orthogonal to

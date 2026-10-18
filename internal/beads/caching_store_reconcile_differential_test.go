@@ -98,6 +98,10 @@ type mergeEndState struct {
 	// whose close the merge announced from a confirmed closed row. Its stamps
 	// are the pass clock.
 	announcedCloseIDs map[string]struct{}
+	// announcedPruneNext is announcedClosesPruneNext, the record size from
+	// which recording a close prunes the record again; the merge's prune sets
+	// it.
+	announcedPruneNext int
 	// fenceFloor rises only when a retention older than the window is
 	// pruned; no seeded state carries one, so it must stay put.
 	fenceFloor     uint64
@@ -322,6 +326,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		readyLost:            cloneDirty(c.readyProjectionLost),
 		retainedIDs:          keySet(c.retainedAt),
 		announcedCloseIDs:    keySet(c.announcedCloses),
+		announcedPruneNext:   c.announcedClosesPruneNext,
 		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,

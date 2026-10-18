@@ -995,7 +995,8 @@ func newReportCacheForTest(t *testing.T, backing Store) (*CachingStore, *sourced
 // TestCachingStoreRefreshRowReport pins what RefreshRowReport says it did:
 // the row, whether the backing has it, whether the cache held it, and the one
 // notification it emitted, which is RefreshRow's except for a closed row the
-// cache never held, announced only with AnnounceUnheldClose.
+// cache never held, announced only with AnnounceUnheldClose or SeenOpen, and a
+// closed row the cache held closed, announced only with SeenOpen.
 func TestCachingStoreRefreshRowReport(t *testing.T) {
 	t.Parallel()
 
@@ -1009,7 +1010,8 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 		wantHeld  bool
 		wantEvent string
 		// wantStatus is the reported row's status ("" skips the check).
-		wantStatus string
+		wantStatus   string
+		wantReclosed bool
 	}{
 		{
 			name: "new_open_row",
@@ -1140,6 +1142,78 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
 			wantFound: true, wantHeld: true, wantStatus: "closed",
 		},
+		{
+			// The cache's own close, then a reopen and a close out of band,
+			// read together as the closed row the cache held: the page's open
+			// image shows the row reopened since, so the newer close is
+			// announced.
+			name: "held_closed_reclosed_seen_open",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := cache.Close(id); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				if err := backing.Reopen(id); err != nil {
+					t.Fatalf("backing Reopen: %v", err)
+				}
+				if err := backing.Close(id); err != nil {
+					t.Fatalf("backing Close: %v", err)
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true, SeenOpen: true},
+			wantFound: true, wantHeld: true, wantEvent: "bead.closed", wantStatus: "closed", wantReclosed: true,
+		},
+		{
+			// The open image the page shows is the one before the cache's
+			// own close: the cache holds the very row the refresh reads.
+			name: "held_own_close_seen_open",
+			setup: func(t *testing.T, cache *CachingStore, _ Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := cache.Close(id); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true, SeenOpen: true},
+			wantFound: true, wantHeld: true, wantStatus: "closed",
+		},
+		{
+			name: "held_own_close_then_edit_seen_open",
+			setup: func(t *testing.T, cache *CachingStore, _ Store) string {
+				id := mustCreateCached(t, cache).ID
+				if err := cache.Close(id); err != nil {
+					t.Fatalf("Close: %v", err)
+				}
+				if err := cache.SetMetadata(id, "k", "v"); err != nil {
+					t.Fatalf("SetMetadata: %v", err)
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true, SeenOpen: true},
+			wantFound: true, wantHeld: true, wantStatus: "closed",
+		},
+		{
+			// A close a refresh announced, read again on the open image a
+			// later page shows from before it.
+			name: "held_announced_close_seen_open",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := unheldClosedRow(t, cache, backing)
+				rep, err := cache.RefreshRowReport(id, RowRefreshOptions{AnnounceUnheldClose: true})
+				if err != nil || rep.Event != "bead.closed" {
+					t.Fatalf("RefreshRowReport = %q, %v, want the close announced", rep.Event, err)
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true, SeenOpen: true},
+			wantFound: true, wantHeld: true, wantStatus: "closed",
+		},
+		{
+			name:      "unheld_closed_seen_open",
+			setup:     unheldClosedRow,
+			opts:      RowRefreshOptions{SeenOpen: true},
+			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
@@ -1156,9 +1230,9 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 			} else if err != nil {
 				t.Fatalf("RefreshRowReport: %v", err)
 			}
-			if rep.Found != tc.wantFound || rep.Held != tc.wantHeld || rep.Event != tc.wantEvent {
-				t.Fatalf("report found=%v held=%v event=%q, want found=%v held=%v event=%q",
-					rep.Found, rep.Held, rep.Event, tc.wantFound, tc.wantHeld, tc.wantEvent)
+			if rep.Found != tc.wantFound || rep.Held != tc.wantHeld || rep.Event != tc.wantEvent || rep.Reclosed != tc.wantReclosed {
+				t.Fatalf("report found=%v held=%v event=%q reclosed=%v, want found=%v held=%v event=%q reclosed=%v",
+					rep.Found, rep.Held, rep.Event, rep.Reclosed, tc.wantFound, tc.wantHeld, tc.wantEvent, tc.wantReclosed)
 			}
 			if rep.Bead.ID != id {
 				t.Fatalf("report bead id = %q, want %q", rep.Bead.ID, id)
@@ -1367,6 +1441,118 @@ func announcedCloseCount(cache *CachingStore) int {
 	cache.mu.RLock()
 	defer cache.mu.RUnlock()
 	return len(cache.announcedCloses)
+}
+
+// TestCachingStoreAnnouncedClosesPruneIsAmortized records a burst of closes
+// inside one recentWriteVerifyWindow, past announcedClosesPruneAt and with no
+// re-scan to prune the record: each prune frees nothing live, so it raises
+// the size the next one waits for, and the burst scans the record a
+// logarithmic number of times rather than once per close.
+func TestCachingStoreAnnouncedClosesPruneIsAmortized(t *testing.T) {
+	t.Parallel()
+	now := time.Unix(1_800_000_000, 0)
+	cache := NewCachingStore(NewMemStore(), nil, WithClock(func() time.Time { return now }))
+	fillAnnouncedCloses(cache, announcedClosesPruneAt)
+	// The expired canary is what a prune drops: its absence counts one.
+	plantExpired := func() {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		cache.announcedCloses["gc-expired"] = announcedClose{at: now.Add(-recentWriteVerifyWindow - 1)}
+	}
+	plantExpired()
+	const burst = 3 * announcedClosesPruneAt
+	prunes := 0
+	for i := range burst {
+		cache.recordAnnouncedClose(Bead{ID: "gc-burst-" + strconv.Itoa(i)})
+		if !announcedCloseRecorded(cache, "gc-expired") {
+			prunes++
+			plantExpired()
+		}
+	}
+	if prunes > 4 {
+		t.Fatalf("recording %d closes past the bound pruned the record %d times, want at most 4", burst, prunes)
+	}
+	for _, id := range []string{"gc-filler-0", "gc-burst-0", "gc-burst-" + strconv.Itoa(burst-1)} {
+		if !announcedCloseRecorded(cache, id) {
+			t.Fatalf("a prune dropped the live record of %s", id)
+		}
+	}
+}
+
+// wholeSecondStore reads every row as stamped in one whole second, as a
+// backing that stamps whole seconds does for the writes inside one, and with
+// revisions false, as a backing that has no revisions.
+type wholeSecondStore struct {
+	Store
+	second    time.Time
+	revisions bool
+}
+
+func (s *wholeSecondStore) present(b Bead) Bead {
+	b.UpdatedAt = s.second
+	if !s.revisions {
+		b.Revision = 0
+	}
+	return b
+}
+
+func (s *wholeSecondStore) Get(id string) (Bead, error) {
+	b, err := s.Store.Get(id)
+	if err != nil {
+		return b, err
+	}
+	return s.present(b), nil
+}
+
+func (s *wholeSecondStore) List(q ListQuery) ([]Bead, error) {
+	rows, err := s.Store.List(q)
+	for i := range rows {
+		rows[i] = s.present(rows[i])
+	}
+	return rows, err
+}
+
+// TestCachingStoreRefreshRowReportTellsSameSecondClosesApart reopens and
+// closes again, inside the second of a close a re-scan announced, a row the
+// re-scan evicted: the record of the announced close does not cover the new
+// one, so the refresh announces it. The backing's revision tells the two
+// closes apart; without one, the page's open image (SeenOpen) does.
+func TestCachingStoreRefreshRowReportTellsSameSecondClosesApart(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name      string
+		revisions bool
+		opts      RowRefreshOptions
+	}{
+		{"revisions", true, RowRefreshOptions{AnnounceUnheldClose: true}},
+		{"no_revisions", false, RowRefreshOptions{AnnounceUnheldClose: true, SeenOpen: true}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			backing := &wholeSecondStore{Store: NewMemStore(), second: time.Unix(1_800_000_000, 0), revisions: tc.revisions}
+			cache, rec := newReportCacheForTest(t, backing)
+			id := scanClosedHeldRow(t, cache, backing)
+			if !announcedCloseRecorded(cache, id) {
+				t.Fatal("the re-scan left no record of the close it announced")
+			}
+			if err := backing.Reopen(id); err != nil {
+				t.Fatalf("backing Reopen: %v", err)
+			}
+			if err := backing.Close(id); err != nil {
+				t.Fatalf("backing Close: %v", err)
+			}
+			rec.take()
+
+			rep, err := cache.RefreshRowReport(id, tc.opts)
+			if err != nil {
+				t.Fatalf("RefreshRowReport: %v", err)
+			}
+			if rep.Held || rep.Event != "bead.closed" {
+				t.Fatalf("report held=%v event=%q, want the new close of the unheld row announced", rep.Held, rep.Event)
+			}
+			assertEvents(t, rec.take(), "refresh bead.closed "+id)
+		})
+	}
 }
 
 // closeHookStore runs onClose after the backing close commits, before the
