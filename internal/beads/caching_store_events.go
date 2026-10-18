@@ -319,10 +319,15 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 			// fence and tier fields the merge never takes and beadChanged
 			// does not compare. A CAS at the stale revision would otherwise
 			// be refused once for nothing. A merge that differs from the read
-			// keeps the cached row: pairing the read's revision with fields
-			// the read does not show is the mc-03lk4 hazard. The readiness
-			// projection is not stored state, and a point read carries none,
-			// so the cached one is kept and not compared.
+			// keeps the merged row, and the guard is what keeps it safe: the
+			// difference may be a field the event's own write has no event
+			// for yet (pairing the read's revision with it is the mc-03lk4
+			// hazard), a local write that landed after the read (installing
+			// the read would roll this process's own write back), or edges
+			// the event carries and a point read omits (installing the read
+			// would wipe a live blocker). The readiness projection is not
+			// stored state, and a point read carries none, so the cached one
+			// is kept and not compared.
 			read := verifiedFresh
 			read.IsBlocked = b.IsBlocked
 			if verifiedRecentLocal && !beadChanged(b, read, false) {

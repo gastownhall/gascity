@@ -204,6 +204,30 @@ func TestCheckListRevisionFidelityRefusesBehindPointReadRows(t *testing.T) {
 	}
 }
 
+// The sample-wide listing goes past the cache even when the full prime has
+// finished, as it may have by v2 boot: a fully primed cache answers every
+// List from rows its own writes installed from point reads. Kills that
+// listing reading the cache (dropping its Live).
+func TestCheckListRevisionFidelityRefusesBehindPointReadRowsInALiveCache(t *testing.T) {
+	mem := NewMemStore()
+	for i := 0; i < 3; i++ {
+		if _, err := mem.Create(Bead{Title: "old"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cache := NewCachingStoreForTest(listRevisionStripper{mem}, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Create(Bead{Title: "created through the cache"}); err != nil {
+		t.Fatal(err)
+	}
+	var blind *ListRevisionsBlindError
+	if err := CheckListRevisionFidelity(cache); !errors.As(err, &blind) {
+		t.Fatalf("C0.7 over a fully primed cache whose backing drops list revisions = %v, want a refusal", err)
+	}
+}
+
 // backingListCounter counts the List calls that reach it.
 type backingListCounter struct {
 	Store
@@ -231,6 +255,28 @@ func TestCheckListRevisionFidelitySamplesFromTheCache(t *testing.T) {
 	}
 	if n := backing.lists.Load(); n != 0 {
 		t.Fatalf("the sample reached the backing %d times, want it served from the cache", n)
+	}
+}
+
+// The cost predicate doctor reads: native Dolt is a scan unless a cache
+// answers the sample, followed through declared resolve targets either way.
+func TestListRevisionSampleIsCheap(t *testing.T) {
+	native := newNativeDoltStoreForTest(newNativeDoltMemStorage())
+	cache := NewCachingStoreForTest(native, nil)
+	for name, tc := range map[string]struct {
+		store Store
+		cheap bool
+	}{
+		"native":            {native, false},
+		"class over native": {SessionStore{Store: native}, false},
+		"cache over native": {cache, true},
+		"class over cache":  {SessionStore{Store: cache}, true},
+		"mem":               {NewMemStore(), true},
+		"class over mem":    {SessionStore{Store: NewMemStore()}, true},
+	} {
+		if got := ListRevisionSampleIsCheap(tc.store); got != tc.cheap {
+			t.Errorf("%s: cheap = %v, want %v", name, got, tc.cheap)
+		}
 	}
 }
 

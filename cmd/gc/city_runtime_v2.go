@@ -159,9 +159,10 @@ type v2StoreCapability struct {
 // (beads.CheckListRevisionFidelity): a writer fenced on revisions its listings
 // report as 0 fences nothing (mc-3c8h5). The read is skipped for a store that
 // already lacks a writer or a closer, which refuses regardless, and is made
-// once when both classes resolve to the same store. Doctor skips it over a
-// store no cache answers: there the sample is a backing scan (seconds at 80k
-// rows), and boot, over the controller's cache, makes the read that decides.
+// once when both classes resolve to the same store. Doctor skips it only
+// where the sample is a backing scan (native Dolt with no cache in front:
+// seconds at 80k rows), and boot, over the controller's cache, makes the read
+// that decides there.
 func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2StoreCapability {
 	out := make([]v2StoreCapability, 0, 2)
 	for _, c := range []struct {
@@ -194,8 +195,8 @@ func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2Sto
 		case !got.Writer || !got.Closer:
 		case len(out) == 1 && sameClassStore(sessions, graph) && out[0].Writer && out[0].Closer:
 			got.ListRevisions, got.ListReason, got.ListErr, got.ListSkipped = out[0].ListRevisions, out[0].ListReason, out[0].ListErr, out[0].ListSkipped
-		case inspect && !beads.ListsFromCache(c.store):
-			got.ListSkipped = "not read without the controller's cache; boot reads it"
+		case inspect && !listRevisionSampleIsCheap(c.store):
+			got.ListSkipped = "not read over native Dolt without the controller's cache; boot reads it"
 		default:
 			var blind *beads.ListRevisionsBlindError
 			switch err := beads.CheckListRevisionFidelity(c.store); {
@@ -211,6 +212,10 @@ func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2Sto
 	}
 	return out
 }
+
+// listRevisionSampleIsCheap is beads.ListRevisionSampleIsCheap, a var so a
+// test can stand in a native store's answer.
+var listRevisionSampleIsCheap = beads.ListRevisionSampleIsCheap
 
 // sameClassStore reports whether two class stores are one store. == on two
 // interface values panics when their dynamic type is not comparable, or holds

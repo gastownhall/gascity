@@ -826,6 +826,91 @@ func TestCachingStoreVerifiedPartialEventKeepsTheCachedRevision(t *testing.T) {
 	}
 }
 
+// The verified-event install is guarded by the merged row equalling the read
+// for more than the stale-field case. A local write that lands between the
+// event's backing read and its install leaves the merged row newer than that
+// read: installing the read would roll this process's own write back, at an
+// older revision. Kills dropping the merged-row-equals-read guard.
+func TestCachingStoreVerifiedEventKeepsALocalWriteFromItsWindow(t *testing.T) {
+	backing := NewMemStore()
+	row, err := backing.Create(Bead{Title: "t0", Metadata: map[string]string{"y": "0"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	t1 := "t1"
+	if err := backing.Update(row.ID, UpdateOpts{Title: &t1}); err != nil {
+		t.Fatal(err)
+	}
+	payload, err := json.Marshal(map[string]any{"id": row.ID, "title": "t1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ran := false
+	cache.applyEventBeforeCommitForTest = func() {
+		cache.applyEventBeforeCommitForTest = nil
+		ran = true
+		if err := cache.SetMetadata(row.ID, "y", "local"); err != nil {
+			t.Error(err)
+		}
+	}
+	cache.ApplyEvent("bead.updated", payload)
+	if !ran {
+		t.Fatal("the read-to-install window never ran; the test is vacuous")
+	}
+	got, err := cache.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	live, err := backing.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Metadata["y"] != "local" || got.Revision != live.Revision {
+		t.Fatalf("cached y=%q at revision %d, backing y=%q at %d: the cache lost this process's own write",
+			got.Metadata["y"], got.Revision, live.Metadata["y"], live.Revision)
+	}
+}
+
+// Over a backing whose point read omits edges (MemStore), a verified event that
+// carries the row's edges merges them; installing the edge-less read would
+// take the edge set from it, wipe a live blocker, and let Ready list the
+// blocked row. Kills dropping the merged-row-equals-read guard.
+func TestCachingStoreVerifiedEventKeepsEdgesAnEdgelessReadOmits(t *testing.T) {
+	backing := NewMemStore()
+	row, err := backing.Create(Bead{Title: "row"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := backing.Create(Bead{Title: "blocker"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.DepAdd(row.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	cache := newConditionalCacheForTest(t, backing)
+	writeMetadata(t, backing, row.ID, "k", "1")
+	payload := json.RawMessage(fmt.Sprintf(`{"id":%q,"metadata":{"k":"1"},"dependencies":[{"issue_id":%q,"depends_on_id":%q,"type":"blocks"}]}`,
+		row.ID, row.ID, blocker.ID))
+	cache.ApplyEvent("bead.updated", payload)
+	cache.mu.RLock()
+	edges := cloneDeps(cache.deps[row.ID])
+	cache.mu.RUnlock()
+	ready, err := cache.Ready(ReadyQuery{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, b := range ready {
+		if b.ID == row.ID {
+			t.Fatalf("Ready lists %s, blocked by %s (cached edges %v)", row.ID, blocker.ID, edges)
+		}
+	}
+	if len(edges) != 1 {
+		t.Fatalf("cached edges %v, want the live blocker kept", edges)
+	}
+}
+
 // historyStore records the row at every revision it writes, so a CAS that
 // landed can be checked against what the backing held at its fence.
 type historyStore struct {

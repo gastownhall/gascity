@@ -439,17 +439,14 @@ func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 // Kills a C0.7 that checks the conditional-writer interface alone: a store
 // that fences but lists every row at revision 0 while it reads live at a real
 // one (BdStore's `bd list --json`, mc-3c8h5) is refused, bare and under the
-// controller's CachingStore, naming its list revisions. Doctor reads it only
-// under the cache (TestDoctorC07SkipsTheUncachedRevisionRead).
+// controller's CachingStore, naming its list revisions, by boot and by doctor
+// alike (TestDoctorC07SkipsOnlyTheScanningRevisionRead).
 func TestBootRefusesARevisionZeroLister(t *testing.T) {
 	atomic := fencingAtomicCloseStore(t)
 	seedWrittenRow(t, atomic)
 	blind := listRevisionZeroStore{atomic}
 	for name, store := range map[string]beads.Store{"bare": blind, "cached": primedCacheOver(t, blind)} {
 		for _, inspect := range []bool{false, true} {
-			if inspect && name == "bare" {
-				continue
-			}
 			caps := v2ClassStoreCapabilities(store, store, inspect)
 			if !caps[0].Writer || !caps[0].Closer {
 				t.Fatalf("%s (inspect=%v): capabilities %+v, want a writer and a closer, so only list revisions refuse", name, inspect, caps)
@@ -462,21 +459,33 @@ func TestBootRefusesARevisionZeroLister(t *testing.T) {
 	}
 }
 
-// Kills a doctor that scans a store no cache answers: there the revision
-// read is a backing scan, so doctor names it unread and lists nothing, refuses
-// nothing, and still reads it under the controller's cache.
-func TestDoctorC07SkipsTheUncachedRevisionRead(t *testing.T) {
+// Kills a doctor that scans native Dolt with no cache in front (a backing
+// scan of seconds), and one that drops its pre-flight read where the sample
+// is cheap. Over a store whose sample is a scan, doctor lists nothing,
+// refuses nothing and names the skip, for both classes when they share the
+// store; over any other store, cached or not, it reads the revisions.
+func TestDoctorC07SkipsOnlyTheScanningRevisionRead(t *testing.T) {
 	inner := fencingAtomicCloseStore(t)
 	seedWrittenRow(t, inner)
 	bare := &c07ListStore{Store: listRevisionZeroStore{inner}}
-	caps := v2ClassStoreCapabilities(bare, bare, true)
-	if n := bare.lists.Load(); n != 0 || caps[0].ListRevisions || v2CapabilityRefusal(caps) != nil ||
-		!strings.Contains(caps[0].String(), "list revisions not read without the controller's cache") {
-		t.Fatalf("doctor over an uncached store: %d lists, %s, refusal %v; want no list, no refusal, and the skip named", n, caps[0], v2CapabilityRefusal(caps))
+	if refusal := v2CapabilityRefusal(v2ClassStoreCapabilities(bare, bare, true)); refusal == nil {
+		t.Fatal("doctor over a cheap uncached store did not read the revisions")
 	}
-	cached := primedCacheOver(t, listRevisionZeroStore{inner})
-	if refusal := v2CapabilityRefusal(v2ClassStoreCapabilities(cached, cached, true)); refusal == nil {
-		t.Fatal("doctor under the cache did not read the revisions")
+	prev := listRevisionSampleIsCheap
+	listRevisionSampleIsCheap = func(beads.Store) bool { return false }
+	t.Cleanup(func() { listRevisionSampleIsCheap = prev })
+	bare.lists.Store(0)
+	caps := v2ClassStoreCapabilities(bare, bare, true)
+	if n := bare.lists.Load(); n != 0 || v2CapabilityRefusal(caps) != nil {
+		t.Fatalf("doctor over a scanning store: %d lists, refusal %v; want neither", n, v2CapabilityRefusal(caps))
+	}
+	for _, c := range caps {
+		if c.ListRevisions || !strings.Contains(c.String(), "list revisions not read over native Dolt without the controller's cache") {
+			t.Errorf("doctor over a scanning store: %s; want the skip named", c)
+		}
+	}
+	if v2ClassStoreCapabilities(bare, bare, false); bare.lists.Load() == 0 {
+		t.Error("boot skipped the revision read too")
 	}
 }
 

@@ -74,7 +74,7 @@ func CheckListRevisionFidelity(store Store) error {
 		case current.Revision == 0:
 			continue
 		}
-		again, err := store.List(ListQuery{IDs: []string{row.ID}, IncludeClosed: true, Live: true})
+		again, err := store.List(ListQuery{IDs: []string{row.ID}, IncludeClosed: true, TierMode: TierBoth, Live: true})
 		if err != nil {
 			return fmt.Errorf("listing %s live: %w", row.ID, err)
 		}
@@ -90,7 +90,7 @@ func CheckListRevisionFidelity(store Store) error {
 	for _, row := range rows {
 		ids = append(ids, row.ID)
 	}
-	listed, err := store.List(ListQuery{IDs: ids, IncludeClosed: true, Live: true})
+	listed, err := store.List(ListQuery{IDs: ids, IncludeClosed: true, TierMode: TierBoth, Live: true})
 	if err != nil {
 		return fmt.Errorf("listing the sample live: %w", err)
 	}
@@ -102,16 +102,24 @@ func CheckListRevisionFidelity(store Store) error {
 	return blind
 }
 
-// ListsFromCache reports whether store's list reads are answered by a
-// CachingStore, followed through declared resolve targets: whether
-// CheckListRevisionFidelity's sample costs no backing read.
-func ListsFromCache(store Store) bool {
+// ListRevisionSampleIsCheap reports whether CheckListRevisionFidelity's
+// sample over store is cheap: a CachingStore answers it (store, or the store
+// its declared resolve targets lead to), or the store is not a NativeDoltStore,
+// whose uncached listing runs a counts query over whole tables (seconds at
+// 80k rows) whatever the bound.
+func ListRevisionSampleIsCheap(store Store) bool {
 	if store == nil {
-		return false
+		return true
 	}
 	if _, ok := store.(*CachingStore); ok {
 		return true
 	}
-	_, ok := followConditionalWritesResolveTarget(store).(*CachingStore)
-	return ok
+	switch followConditionalWritesResolveTarget(store).(type) {
+	case *CachingStore:
+		return true
+	case *NativeDoltStore:
+		return false
+	default:
+		return true
+	}
 }
