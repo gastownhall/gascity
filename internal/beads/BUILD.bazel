@@ -97,6 +97,7 @@ go_test(
         "caching_store_internal_test.go",
         "caching_store_local_write_census_test.go",
         "caching_store_local_write_inflight_internal_test.go",
+        "caching_store_local_write_window_internal_test.go",
         "caching_store_observation_test.go",
         "caching_store_overlay_test.go",
         "caching_store_partial_list_internal_test.go",
