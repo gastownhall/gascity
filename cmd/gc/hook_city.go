@@ -17,9 +17,13 @@ import (
 // Before it, each step reached the city on its own. The session fence opened
 // the city store; the drain-pending probe, the session work-dir lookup and the
 // current-claim stamp (and its clear) each resolved the city again, reloaded its
-// config and reopened the store (sessionCurrentClaimFrontDoor); and every claim
-// event resolved the city again to open its event log. On maintainer-city that
-// was ~0.5 s per front-door open and ~0.15 s per event.
+// config and opened the store again (sessionCurrentClaimFrontDoor); and every
+// claim event resolved the city again to open its event log. On maintainer-city
+// that was ~0.5 s per front-door open and ~0.15 s per event. The store handle
+// itself was already shared: `gc hook` runs under the invocation store memo
+// (invocationStoreMemoCommands), which answers a repeat open with the handle
+// already open, so the cost was resolving the city and loading its config. The
+// invocation's other store opens still rely on that memo.
 //
 // Sharing changes no answer. Nothing here caches a read: every session read and
 // write goes to the store live, exactly as through a freshly opened one, and the

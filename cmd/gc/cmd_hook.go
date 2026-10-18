@@ -659,6 +659,9 @@ func fenceHookClaimSession(city *hookCity, sessionID string, opts hookCommandOpt
 // hookClaimSessionStoreUnavailable (transient, fails open), so an infrastructure
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
+//
+// It and classifyHookClaimSessionInfo are test-only: `gc hook`'s fence calls
+// classifyHookClaimSessionVia with the invocation's session front door.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
 	verdict, reason, _ := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
 	return verdict, reason
@@ -668,8 +671,8 @@ func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, inst
 // session Info it read when the verdict is eligible (nil otherwise), so the
 // claim can act on the session bead's persisted identity without a second read.
 func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
-	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
-	// rather than reloading the whole city config inside the open.
+	// cfg is the caller's loaded city config; reuse it rather than reloading
+	// the whole city config inside the open.
 	return classifyHookClaimSessionVia(newHookCity(cityPath, cfg).sessionFront, sessionID, instanceToken)
 }
 
@@ -1010,10 +1013,10 @@ func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 }
 
 // singleStoreHookWorkQuery returns the agent's work query built for the SAME
-// city with the federated reader turned off — the command the hook ran against
-// every store before the reader was swapped. It is the command
-// scopeFederatedHookStores gives the federated extras, so their cost and
-// coverage stay exactly what they were.
+// city with the federated reader turned off. Nothing runs it: the hook compares
+// it with the federated form (hookStoresScopeToPrimary), and where the two
+// differ the claim reads only the primary store, for the reasons
+// scopeFederatedHookStores gives.
 //
 // It returns "" on a city that federates nothing, so the caller's scoping is a
 // no-op there rather than a second build of the identical string.

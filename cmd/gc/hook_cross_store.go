@@ -68,6 +68,13 @@ func hookStoreCommand(st hookStore, command string) string {
 // relocates nothing, and the call is then a no-op returning stores unchanged.
 // That is not an optimization detail: a custom work_query reads one store
 // whatever the topology, so the fan-out is its only coverage and must survive.
+//
+// # Callers
+//
+// Only tests call it. The hook takes the same decision before it builds the
+// fan-out (hookStoresScopeToPrimary) and builds only the entry this keeps
+// (hookWorkQueryPrimaryStore), so the legs this drops are never built;
+// TestHookWorkQueryPrimaryStoreIsTheScopedStore pins that entry.
 func scopeFederatedHookStores(stores []hookStore, federatedCommand, singleStoreCommand string) []hookStore {
 	if len(stores) < 2 || !hookStoresScopeToPrimary(federatedCommand, singleStoreCommand) {
 		return stores
