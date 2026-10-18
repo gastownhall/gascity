@@ -65,7 +65,7 @@ type strandCity struct {
 
 func newStrandCity(t *testing.T, status string, seatMeta map[string]string) *strandCity {
 	t.Helper()
-	c := &strandCity{path: t.TempDir(), store: fencedMemStore(t), claim: map[string]beads.Bead{}, rec: events.NewFake()}
+	c := &strandCity{path: t.TempDir(), store: beads.NewMemStore(), claim: map[string]beads.Bead{}, rec: events.NewFake()}
 	c.cfg = &config.City{Workspace: config.Workspace{Name: "strand-town"}, Agents: []config.Agent{persistentWorker(), otherLane()}}
 	meta := map[string]string{"session_name": "repo--worker-1", "template": "repo/worker", "pool_managed": "true", "state": "asleep"}
 	for k, v := range seatMeta {
@@ -499,9 +499,6 @@ func TestOrphanCloseCompletesOverStrandedClaims(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			env := newCloseOrphanEnv(t)
-			if err := beads.StampOpenedStore(env.store, "MemStore", gate.Auto, nil, nil); err != nil {
-				t.Fatal(err) // the stamp is a fenced write
-			}
 			if err := env.store.SetMetadataBatch(env.work.ID, tc.meta); err != nil {
 				t.Fatal(err)
 			}
@@ -536,9 +533,6 @@ func TestKilledSingletonSeatClosesOverAStrandedClaim(t *testing.T) {
 	agent := persistentWorker()
 	agent.MaxActiveSessions = intPtr(1)
 	e := newKilledSeatEnv(t, agent)
-	if err := beads.StampOpenedStore(e.mem, "MemStore", gate.Auto, nil, nil); err != nil {
-		t.Fatal(err) // the stamp is a fenced write
-	}
 	work := e.addWork(t, "open", e.seat.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
 	e.tick(t, claims(e.reload(t, work.ID)))
 	seat, w := e.reload(t, e.seat.ID), e.reload(t, work.ID)
@@ -582,7 +576,7 @@ func TestDetectorFollowsTheStamp(t *testing.T) {
 		}
 	})
 	t.Run("retired named session", func(t *testing.T) {
-		store := fencedMemStore(t)
+		store := beads.NewMemStore()
 		b, err := store.Create(beads.Bead{Title: "retired reviewer", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
 			"session_name": "reviewer-runtime", "template": "worker", "state": "asleep", "alias": "reviewer",
 			namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "reviewer", namedSessionModeMetadata: "on_demand",
@@ -706,7 +700,7 @@ func TestDetectorKeepsEpisodesOverADarkLeg(t *testing.T) {
 func TestDetectorDropsStaleStamps(t *testing.T) {
 	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
 	stamped := func(t *testing.T, seatState string, closed bool) (*beads.MemStore, beads.Bead, beads.Bead) {
-		store := fencedMemStore(t)
+		store := beads.NewMemStore()
 		seat, err := store.Create(beads.Bead{Title: "seat", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{"session_name": "s-1", "template": "repo/worker", "state": seatState, "alias": "repo/ada"}})
 		if err != nil {
 			t.Fatal(err)
@@ -920,12 +914,13 @@ func TestStrandedStampUnderConditionalWrites(t *testing.T) {
 	}
 }
 
-// Kills a stamp that skips the resolver's legacy path, or fences on no token
-// (mc-3c8h5): with no conditional writer (conditional writes off, the
-// default, or auto on a store that cannot fence) the stamp is written after
-// the live read; require on such a store refuses; and a store that can fence
-// refuses a live read carrying no revision (zero is "no token", never
-// revision 0) with ErrConditionalWriteUnsupported. A refusal stamps nothing.
+// Kills a stamp that skips the resolver's legacy path, writes where it was
+// asked to fence and cannot, or refuses revision 0: with conditional writes
+// off, the default, the stamp is written after the live read; auto on a store
+// that cannot fence (a degraded resolve) refuses with
+// ErrConditionalWriteUnsupported, and require refuses as the resolver does;
+// and a live read at revision 0 is fenced at 0 like any revision, so a write
+// landing after the read refuses the stamp. A refusal stamps nothing.
 func TestStampStrandedFollowsTheConditionalWriteMode(t *testing.T) {
 	incapable := func(t *testing.T, mode gate.Mode) *beads.MemStore {
 		t.Helper()
@@ -937,17 +932,18 @@ func TestStampStrandedFollowsTheConditionalWriteMode(t *testing.T) {
 		return store
 	}
 	off, auto := beads.NewMemStore(), fencedMemStore(t)
+	unsupported := func(err error) bool { return errors.Is(err, beads.ErrConditionalWriteUnsupported) }
 	for _, c := range []struct {
 		name         string
 		store, write beads.Store
 		refused      func(error) bool // nil: the stamp lands
 	}{
 		{"conditional writes off", off, off, nil},
-		{"auto on a store that cannot fence", incapable(t, gate.Auto), nil, nil},
+		{"auto on a store that cannot fence", incapable(t, gate.Auto), nil, unsupported},
 		{"require on a store that cannot fence", incapable(t, gate.Require), nil, beads.IsConditionalWritesRequired},
-		{"live read without a revision", auto, zeroRevisionStore{Store: auto}, func(err error) bool {
-			return errors.Is(err, beads.ErrConditionalWriteUnsupported)
-		}},
+		// The live read says revision 0 while the row has moved on: the
+		// stamp is fenced at 0 and loses, rather than refused or written blind.
+		{"live read at revision 0", auto, zeroRevisionStore{Store: auto}, beads.IsPreconditionFailed},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			write := c.write
@@ -1006,10 +1002,9 @@ func TestDetectorReAlertsWithConditionalWritesOff(t *testing.T) {
 }
 
 // Kills a SQLite claim refused its stamp for never having been written since
-// its insert (a stored revision of 0 reads as "no token"): the insert mints
-// revision 1, so a claim created assigned and never updated is stamped by a
-// write fenced on its stored revision, which a write landing between the
-// live read and the stamp refuses.
+// its insert: the insert mints revision 1, so a claim created assigned and
+// never updated is stamped by a write fenced on its stored revision, which a
+// write landing between the live read and the stamp refuses.
 func TestStampStrandedFencesANeverUpdatedSQLiteClaim(t *testing.T) {
 	open := func(t *testing.T) beads.Store {
 		t.Helper()
@@ -1056,7 +1051,7 @@ func TestStampStrandedFencesANeverUpdatedSQLiteClaim(t *testing.T) {
 // which a clear for another seat, or for a seat not reopened whose assignee
 // still holds the claim, leaves alone.
 func TestClearStrandedStampRechecksTheLiveRow(t *testing.T) {
-	store := fencedMemStore(t)
+	store := beads.NewMemStore()
 	claim := createWork(t, store, "in_progress", "gc-2", map[string]string{
 		beadmeta.StrandedMetadataKey: "true", beadmeta.StrandedSessionMetadataKey: "gc-2", beadmeta.StrandedAssigneeMetadataKey: "gc-2",
 	})

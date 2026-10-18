@@ -1267,10 +1267,14 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 // bumping the claim fence when the edit moves ownership. An edit that leaves
 // the stored row as it is commits nothing: the store decides the no-op against
 // the row its own transaction read, so the revision and updated_at stay put
-// and no CAS token another writer holds goes stale.
+// and no CAS token another writer holds goes stale. A read-only store refuses
+// every edit up front, so a same-value one is refused as a changing one is.
 func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
+	}
+	if s.readOnly {
+		return fmt.Errorf("sqlite update %q: store is read-only", id)
 	}
 	return retryOnBusy(func() error {
 		ctx := context.Background()

@@ -114,12 +114,14 @@ func clearStrandedStamp(store beads.Store, id, seat string, reopened bool) {
 }
 
 // fencedClaimMeta writes decide's metadata on claim id, decided on the live
-// row, by one write fenced on that row's revision. With no conditional
-// writer (conditional writes off, or auto on a store that cannot fence) it
-// writes after the read, the resolver's legacy path; require on such a store
-// refuses. It never fences on no token: a live read carrying no revision
-// (zero is no token, not revision 0: mc-3c8h5) refuses with
-// beads.ErrConditionalWriteUnsupported and writes nothing. A nil patch writes
+// row, by one write fenced on that row's revision. The revision is used as
+// read, 0 included: 0 is a real revision (a native row_lock never rewritten,
+// a SQLite row an older binary inserted and nothing has written since, and
+// bd's --if-revision 0 compares exactly), never "no token". With conditional
+// writes off it writes after the read, the resolver's legacy path. A store
+// asked to fence that cannot (auto that degraded, which the resolver reports
+// with a diagnostic, or require, which it refuses) writes nothing: auto
+// refuses with beads.ErrConditionalWriteUnsupported. A nil patch writes
 // nothing.
 func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[string]string) error {
 	b, err := liveBeadRead(store, id)
@@ -130,14 +132,14 @@ func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[s
 	if len(patch) == 0 {
 		return nil
 	}
-	writer, _, err := beads.ResolveConditionalWriter(store)
+	writer, diag, err := beads.ResolveConditionalWriter(store)
 	switch {
 	case err != nil:
 		return err
+	case writer == nil && diag != nil:
+		return fmt.Errorf("claim %s: %w: %s", id, beads.ErrConditionalWriteUnsupported, diag.PreflightReason)
 	case writer == nil:
 		return store.SetMetadataBatch(id, patch)
-	case b.Revision == 0:
-		return fmt.Errorf("claim %s: %w: its live read carries no revision", id, beads.ErrConditionalWriteUnsupported)
 	}
 	return writer.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: patch})
 }
