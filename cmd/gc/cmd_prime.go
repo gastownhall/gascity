@@ -346,11 +346,18 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 	// The step reminder is the slowest read a hook makes: in process it opens
 	// the rig store at GC_RIG_ROOT and scans that rig by gc.routed_to once per
 	// identity. Ask the controller for it now, so the request runs while this
-	// invocation proves its session, loads its config and reads its mail.
+	// invocation proves its session, loads its config and starts its poller.
 	var stepLookup *wispStepLookup
 	if hookMode {
 		stepLookup = startWispStepLookup(cityPath, stderr)
 		defer stepLookup.stop()
+	}
+	// Starting a SessionStart hook's poller below reaps the pollers directory
+	// first; reap it now instead, alongside the hook's reads
+	// (startNudgePollerReap). Other hook shapes reap where they start it.
+	reapedEarly := hookMode && primeHookSessionStart(hookContext)
+	if reapedEarly {
+		defer startNudgePollerReap(cityPath)()
 	}
 	// A SessionStart hook proves its live managed session against the city
 	// store; the SessionStart mail context below reuses that same handle rather
@@ -455,7 +462,7 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 			if sessionName == "" {
 				sessionName = cliSessionName(cityPath, cityName, a.QualifiedName(), cfg.Workspace.SessionTemplate)
 			}
-			maybeStartNudgePoller(withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
+			target := withNudgeTargetFenceFromLiveSession(openNudgeBeadStore(cityPath).Store, sessionStart.liveInfo(), nudgeTarget{
 				cityPath:          cityPath,
 				cityName:          cityName,
 				cfg:               cfg,
@@ -464,7 +471,12 @@ func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode
 				sessionID:         os.Getenv("GC_SESSION_ID"),
 				continuationEpoch: os.Getenv("GC_CONTINUATION_EPOCH"),
 				sessionName:       sessionName,
-			}))
+			})
+			if reapedEarly {
+				startNudgePollerUnlessDispatched(target)
+			} else {
+				maybeStartNudgePoller(target)
+			}
 		}
 		if hookMode && isClientProviderChat(&a, os.Getenv("GC_SESSION_ORIGIN"), os.Getenv("GC_ALIAS")) {
 			// A client's provider chat gets no worker persona (see
@@ -722,6 +734,13 @@ func primeHookLiveManagedSession(cityPath string, stderr io.Writer) *primeSessio
 	sessionName := strings.TrimSpace(os.Getenv("GC_SESSION_NAME"))
 	if sessionName == "" {
 		return nil
+	}
+	// The store open loads the city config first (loadCityConfigForStoreOpen:
+	// this loader, this writer), which runs the builtin readiness pass the
+	// routing read needs. Loading it here instead lets the routing read run
+	// alongside the open (prewarmCLIStorageRoutes); the open then reuses it.
+	if _, err := loadCityConfig(cityPath, io.Discard); err == nil {
+		defer prewarmCLIStorageRoutes(cityPath)()
 	}
 	store, err := openCityStoreAt(cityPath)
 	if err != nil {

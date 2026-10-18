@@ -118,6 +118,34 @@ func cliStorageRoutes(cityPath string) *storageRoutes {
 	return entry.routes
 }
 
+// prewarmCLIStorageRoutes resolves cityPath's routes in the background and
+// returns the wait for it. A session hook calls it right after its own city
+// config load and before it opens the city store: the routing read composes
+// the config again and opens the class binding (0.16 s on maintainer-city),
+// and the store open is independent of it, so the two overlap. Every class
+// resolver the hook reaches then takes the routes this resolved, which are
+// exactly the routes it would have resolved itself (one resolution per city per
+// process).
+//
+// It must follow a load that ran the builtin readiness pass
+// (ensureBuiltinPacksForConfigLoad), as loadCityConfig does: the routing read's
+// composition needs the builtin pack caches that pass prepares, and a
+// composition that fails reads as a city with no [storage], whose classes all
+// route to the work store.
+func prewarmCLIStorageRoutes(cityPath string) (wait func()) {
+	resolve := cliStorageRoutesPrewarm
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		resolve(cityPath)
+	}()
+	return func() { <-done }
+}
+
+// cliStorageRoutesPrewarm is the resolution prewarmCLIStorageRoutes runs: a
+// seam, so a test can see when it starts.
+var cliStorageRoutesPrewarm = func(cityPath string) { _ = cliStorageRoutes(cityPath) }
+
 // cliStorageRoutesLoad declines the load-time revision snapshot. This is a
 // routing read for a one-shot command: nothing downstream ever calls
 // config.Revision() on the result, and building the snapshot content-hashes

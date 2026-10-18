@@ -1808,6 +1808,8 @@ go_test(
         "scoped_store_test.go",
         "script_resolve_test.go",
         "seat_hook_config_compose_test.go",
+        "seat_hook_overlap_test.go",
+        "seat_hook_split_city_test.go",
         "seat_work_helpers_test.go",
         "session_action_json_test.go",
         "session_alias_assignment_guard_test.go",
