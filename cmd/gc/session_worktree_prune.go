@@ -24,6 +24,7 @@ type gitProbe interface {
 	CurrentBranch() (string, error)
 	HasUncommittedWork() bool
 	HasUnpushedCommitsResult() (bool, error)
+	HasStashesForBranchResult(branch string) (bool, error)
 	WorktreeRemove(path string, force bool) error
 }
 
@@ -112,6 +113,24 @@ func pruneAgentHomeWorktreeIfSafe(session beads.Bead, cityPath string, cfg *conf
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
 		return false
 	}
+	branch, branchErr := gp.CurrentBranch()
+	if branchErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: branch probe failed: %v\n", workerDir, branchErr) //nolint:errcheck
+		return false
+	}
+	// Scoped to this worktree's own branch (gascity#8093): git stash list
+	// is repository-wide, so an unscoped check refuses to prune a clean
+	// worktree whenever ANY sibling worktree of the same repo has a stash.
+	hasStashes, err := gp.HasStashesForBranchResult(branch)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return false
+	}
+	if hasStashes {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
+		return false
+	}
 
 	// Run `git worktree remove` from the rig root rather than from the
 	// worktree being removed: git refuses to remove a worktree whose path
@@ -175,6 +194,24 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 	if hasUnpushed {
 		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has unpushed commits\n", workerDir) //nolint:errcheck
 		writeWorktreeStaleMarker(gp, workerDir, "unpushed-commits", stderr)
+		return
+	}
+	branch, branchErr := gp.CurrentBranch()
+	if branchErr != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: branch probe failed: %v\n", workerDir, branchErr) //nolint:errcheck
+		return
+	}
+	// Scoped to this worktree's own branch (gascity#8093): git stash list
+	// is repository-wide, so an unscoped check refuses to prune a clean
+	// worktree whenever ANY sibling worktree of the same repo has a stash.
+	hasStashes, err := gp.HasStashesForBranchResult(branch)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: stash probe failed: %v\n", workerDir, err) //nolint:errcheck
+		return
+	}
+	if hasStashes {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: has stashed work\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(gp, workerDir, "stashed-work", stderr)
 		return
 	}
 
