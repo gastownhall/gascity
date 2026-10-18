@@ -192,7 +192,12 @@ func isRetryableManagedDoltLifecycleError(err error) bool {
 // Called by gc start and controller config reload. Rigs must have absolute
 // paths before calling (resolve relative paths first).
 func startBeadsLifecycle(cityPath, _ string, cfg *config.City, stderr io.Writer) error {
-	return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil)
+	if err := startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil); err != nil {
+		return err
+	}
+	// The binding boot leaves behind is the one every reload must keep.
+	recordBootCityStore(cityPath)
+	return nil
 }
 
 // startBeadsLifecycleResolvingCityDatabase is startBeadsLifecycle with the
@@ -303,7 +308,7 @@ func startBeadsLifecycleResolvingCityDatabase(cityPath string, cfg *config.City,
 			return fmt.Errorf("init rig %q beads: %w", cfg.Rigs[i].Name, err)
 		}
 	}
-	if err := normalizeCanonicalBdScopeFiles(cityPath, cfg, stderr); err != nil {
+	if err := normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, resolveCityDatabase, stderr); err != nil {
 		return err
 	}
 	// Regenerate routes for cross-rig routing.
@@ -3116,6 +3121,14 @@ func preInitScopeDoltMode(cityPath, dir string) string {
 // suppress, or a stderr writer from the caller to show them). When omitted,
 // warning output is suppressed.
 func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...io.Writer) error {
+	return normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, nil, warns...)
+}
+
+// normalizeCanonicalBdScopeFilesResolvingCityDatabase is
+// normalizeCanonicalBdScopeFiles with the city's database name supplied by
+// resolveCityDatabase, when non-nil, instead of the default name a missing
+// city metadata.json would otherwise be stamped with.
+func normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath string, cfg *config.City, resolveCityDatabase func() (string, error), warns ...io.Writer) error {
 	if cfg == nil {
 		return nil
 	}
@@ -3136,6 +3149,13 @@ func normalizeCanonicalBdScopeFiles(cityPath string, cfg *config.City, warns ...
 			return fmt.Errorf("classifying city backend: %w", err)
 		} else if !skipsManagedDolt {
 			doltDatabase := defaultScopeDoltDatabase(cityPath, cityPath, config.EffectiveHQPrefix(cfg))
+			if resolveCityDatabase != nil {
+				db, err := resolveCityDatabase()
+				if err != nil {
+					return err
+				}
+				doltDatabase = db
+			}
 			if cityUsesDoltliteBeadsBackend(cityPath) {
 				if err := ensureCanonicalDoltliteScopeMetadataForInit(fsys.OSFS{}, cityPath, doltDatabase); err != nil {
 					return fmt.Errorf("canonicalizing city doltlite metadata: %w", err)

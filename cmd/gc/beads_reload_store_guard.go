@@ -7,9 +7,12 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/gitcred"
 )
 
 // cityStoreBinding is the part of a city's .beads/metadata.json that says
@@ -26,7 +29,7 @@ func (b cityStoreBinding) String() string {
 	for _, f := range []struct{ key, value string }{
 		{"backend", b.Backend},
 		{"dolt_database", b.DoltDatabase},
-		{"storage_endpoint", b.StorageEndpoint},
+		{"storage_endpoint", gitcred.RedactUserinfo(b.StorageEndpoint)},
 		{"storage_database", b.StorageDatabase},
 	} {
 		if f.value != "" {
@@ -36,20 +39,35 @@ func (b cityStoreBinding) String() string {
 	return strings.Join(parts, " ")
 }
 
-// cityStoreRecord is the bd store binding a city runtime was constructed on.
-// Runtimes are constructed only after the boot lifecycle has initialized the
-// city scope, so this is the store every later reload must keep.
+// doltFamily reports whether the binding names a Dolt database gc's managed
+// lifecycle initializes (and so resolves a name for).
+func (b cityStoreBinding) doltFamily() bool {
+	switch b.Backend {
+	case "", "dolt", "doltlite":
+		return true
+	default:
+		return false
+	}
+}
+
+// cityStoreRecord is the bd store binding a city booted on. Every later
+// reload must keep it: rebinding the city store is restart-only.
 type cityStoreRecord struct {
 	Recorded bool
 	Binding  cityStoreBinding
-	// Database is the Dolt database the boot lifecycle used for the city:
-	// dolt_database, or the historical default for legacy metadata.
+	// Database is the Dolt database boot used for a Dolt-family binding:
+	// dolt_database, or the historical default for legacy metadata. Empty
+	// for any other backend.
 	Database string
+	// BdBoot is set when the city booted on a bd-contract provider. With
+	// Recorded false it separates a provider switch (restart initializes the
+	// bd store) from a bd city whose metadata was already unusable when the
+	// record was taken (Problem), which a restart would re-bind to a default.
+	BdBoot  bool
+	Problem string
 }
 
-// recordCityStore captures the city's bd store binding at runtime
-// construction. Not recorded for non-bd providers or unusable metadata; a
-// reload of such a city then refuses to initialize a bd store.
+// recordCityStore reads the city's bd store binding.
 func recordCityStore(cityPath string) cityStoreRecord {
 	if cityPath == "" || !cityUsesBdStoreContract(cityPath) {
 		return cityStoreRecord{}
@@ -57,13 +75,35 @@ func recordCityStore(cityPath string) cityStoreRecord {
 	data, readErr := os.ReadFile(scopeMetadataJSONPath(cityPath))
 	binding, err := parseCityStoreBinding(data, readErr)
 	if err != nil {
-		return cityStoreRecord{}
+		return cityStoreRecord{BdBoot: true, Problem: err.Error()}
 	}
-	database := binding.DoltDatabase
-	if database == "" {
-		database = defaultScopeDoltDatabase(cityPath, cityPath, "")
+	rec := cityStoreRecord{Recorded: true, BdBoot: true, Binding: binding}
+	if binding.doltFamily() {
+		rec.Database = binding.DoltDatabase
+		if rec.Database == "" {
+			rec.Database = defaultScopeDoltDatabase(cityPath, cityPath, "")
+		}
 	}
-	return cityStoreRecord{Recorded: true, Binding: binding, Database: database}
+	return rec
+}
+
+// bootCityStores holds, per city path, the store binding the last successful
+// boot lifecycle left behind, for the runtime constructed after it.
+var bootCityStores sync.Map
+
+// recordBootCityStore records the city's binding as the boot lifecycle
+// leaves it, so the runtime does not depend on re-reading metadata later.
+func recordBootCityStore(cityPath string) {
+	bootCityStores.Store(filepath.Clean(cityPath), recordCityStore(cityPath))
+}
+
+// bootCityStoreFor returns the binding recorded by the city's boot
+// lifecycle. Runtimes built without one (tests) record it now.
+func bootCityStoreFor(cityPath string) cityStoreRecord {
+	if v, ok := bootCityStores.Load(filepath.Clean(cityPath)); ok {
+		return v.(cityStoreRecord)
+	}
+	return recordCityStore(cityPath)
 }
 
 // parseCityStoreBinding reads a binding out of metadata.json content. Missing,
@@ -104,27 +144,48 @@ func parseCityStoreBinding(data []byte, readErr error) (cityStoreBinding, error)
 	return binding, nil
 }
 
-// reloadCityStoreDatabase decides whether a reload may run the bead lifecycle
-// against the city store, given the binding recorded at boot and the current
-// metadata.json content, and returns the Dolt database the lifecycle must use.
-func reloadCityStoreDatabase(rec cityStoreRecord, path string, data []byte, readErr error) (string, error) {
+// doNotRestartUnrestored is the warning every lost-binding refusal carries:
+// boot has no record to hold the city to.
+const doNotRestartUnrestored = "do NOT restart until it is restored: boot treats a missing binding as a new city and creates the default database"
+
+// reloadCityStoreError decides whether a reload may proceed against the city
+// store, given the binding recorded at boot and the current metadata.json.
+func reloadCityStoreError(rec cityStoreRecord, path string, data []byte, readErr error) error {
 	if !rec.Recorded {
-		return "", fmt.Errorf("city booted without a bd store binding in %s; reload will not run bd init or create a database; restart the city to initialize its bd store", path)
+		if !rec.BdBoot {
+			return fmt.Errorf("city booted on a non-bd beads provider, so no bd store binding was recorded for %s; reload will not run bd init or create a database; restart the city to initialize its bd store", path)
+		}
+		return fmt.Errorf("city bead store metadata %s was already unusable when the city's binding was recorded at boot (%s), so the store this city runs on is unknown; reload will not run bd init or create a database; restore metadata.json to the city's real binding, and %s", path, rec.Problem, doNotRestartUnrestored)
 	}
 	current, err := parseCityStoreBinding(data, readErr)
 	if err != nil {
-		return "", fmt.Errorf("city bead store metadata %s is unusable (%w); the city booted on store [%s], so reload will not run bd init or create a database; restore metadata.json to that binding, or restart the city", path, err, rec.Binding)
+		return fmt.Errorf("city bead store metadata %s is unusable (%w); reload will not run bd init or create a database; restore metadata.json to the booted binding [%s], and %s", path, err, rec.Binding, doNotRestartUnrestored)
 	}
 	if current != rec.Binding {
-		return "", fmt.Errorf("city bead store metadata %s now names store [%s], but the city booted on [%s]; reload will not rebind the city or create a database; restore metadata.json to the booted binding, or restart the city to adopt the new one", path, current, rec.Binding)
+		return fmt.Errorf("city bead store metadata %s now names store [%s], but the city booted on [%s]; reload will not rebind the city store or create a database; if the change is deliberate, restart the city to adopt it (boot binds to whatever metadata.json names and creates that database if absent), otherwise restore metadata.json to the booted binding", path, current, rec.Binding)
 	}
-	return rec.Database, nil
+	return nil
 }
 
-func checkReloadCityStore(cityPath string, rec cityStoreRecord) (string, error) {
+// checkReloadCityStore checks the city's current metadata.json against the
+// binding recorded at boot.
+func checkReloadCityStore(cityPath string, rec cityStoreRecord) error {
 	path := scopeMetadataJSONPath(cityPath)
 	data, readErr := os.ReadFile(path)
-	return reloadCityStoreDatabase(rec, path, data, readErr)
+	return reloadCityStoreError(rec, path, data, readErr)
+}
+
+// reloadCityStoreDatabase is the city's Dolt database name for the reload
+// lifecycle: the booted one, confirmed against metadata at the point of use.
+// It never falls back to a default.
+func reloadCityStoreDatabase(cityPath string, rec cityStoreRecord) (string, error) {
+	if err := checkReloadCityStore(cityPath, rec); err != nil {
+		return "", err
+	}
+	if rec.Database == "" {
+		return "", fmt.Errorf("city booted on store [%s], which has no managed Dolt database; reload will not initialize one", rec.Binding)
+	}
+	return rec.Database, nil
 }
 
 // startBeadsLifecycleForReload is the bead lifecycle a config reload runs.
@@ -135,17 +196,17 @@ func checkReloadCityStore(cityPath string, rec cityStoreRecord) (string, error) 
 // the city is rebound to (mc-s8duk, where a git fast-forward in the city
 // checkout deleted a once-tracked metadata.json). A reload therefore checks
 // the metadata against the binding recorded at boot before any lifecycle step,
-// and again at init's point of use — after the provider start op, which can
-// take seconds — handing init the booted database instead of letting it
-// resolve one.
-func startBeadsLifecycleForReload(cityPath, cityName string, cfg *config.City, rec cityStoreRecord, stderr io.Writer) error {
+// and again wherever the lifecycle would resolve the city's database — after
+// the provider start op, which can take seconds — handing it the booted
+// database instead of letting it resolve one.
+func startBeadsLifecycleForReload(cityPath, _ string, cfg *config.City, rec cityStoreRecord, stderr io.Writer) error {
 	if !cityUsesBdStoreContract(cityPath) {
-		return startBeadsLifecycle(cityPath, cityName, cfg, stderr)
+		return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil)
 	}
-	if _, err := checkReloadCityStore(cityPath, rec); err != nil {
+	if err := checkReloadCityStore(cityPath, rec); err != nil {
 		return err
 	}
 	return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, func() (string, error) {
-		return checkReloadCityStore(cityPath, rec)
+		return reloadCityStoreDatabase(cityPath, rec)
 	})
 }

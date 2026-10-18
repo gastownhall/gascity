@@ -103,6 +103,23 @@ Reload failure is defined at the config-load boundary:
 If any of those fail, reload returns non-zero and the old live config
 stays active.
 
+**The city's bead store binding is restart-only.** The runtime records
+the store binding its boot lifecycle left in `.beads/metadata.json`
+(`backend`, `dolt_database`, `storage_endpoint`, `storage_database`). A
+reload, including a same-revision reload that would otherwise adopt
+changed store metadata live, fails before any bead lifecycle step in
+these cases:
+
+- the file is missing, unreadable, `null`, or names no store;
+- the file names a store other than the recorded one;
+- the city booted without a bd binding.
+
+During a reload, the city init step uses the recorded database and never
+the default name (`hq`). Rebinding the city to another store requires a
+restart, and only once metadata.json names the intended store: boot treats
+a missing binding as a new city and creates the default database. Rig
+metadata is still adopted live.
+
 After a config is successfully applied, subsequent runtime-execution
 issues are warnings rather than rollback triggers. Examples include:
 

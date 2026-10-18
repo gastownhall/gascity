@@ -114,8 +114,8 @@ type CityRuntime struct {
 	// drainedLastTick records, per suspended scope root, whether its sessions
 	// were already drained on the previous tick (retireSuspendedScopes).
 	drainedLastTick map[string]bool
-	// bootCityStore is the city's bd store binding as of construction, which
-	// follows the boot lifecycle; reload refuses to run against any other.
+	// bootCityStore is the bd store binding the city's boot lifecycle left
+	// behind; reload refuses to run against, or adopt, any other.
 	bootCityStore cityStoreRecord
 	cityPath      string
 	cityName      string
@@ -526,7 +526,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	cr := &CityRuntime{
 		storageRoutes:           routes,
-		bootCityStore:           recordCityStore(p.CityPath),
+		bootCityStore:           bootCityStoreFor(p.CityPath),
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -2586,6 +2586,24 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
+			// Rig metadata may be adopted live; the city's store binding may
+			// not, since rebinding the city store is restart-only.
+			if cityUsesBdStoreContract(cityRoot) {
+				if storeErr := checkReloadCityStore(cityRoot, cr.bootCityStore); storeErr != nil {
+					err := fmt.Errorf("config reload: %w", storeErr)
+					fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+					telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+					if trace != nil {
+						trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+					}
+					return reloadControlReply{
+						Outcome:  reloadOutcomeFailed,
+						Error:    err.Error(),
+						Revision: result.Revision,
+						Warnings: warnings,
+					}
+				}
+			}
 			if !cr.cs.updateFromRuntime(result.Cfg, cr.sp, result.Revision) {
 				return rejectSuperseded("during same-revision metadata publication")
 			}

@@ -1375,7 +1375,7 @@ func controllerLoop(
 		loopCfg = &cfgCopy
 	}
 	cr := &CityRuntime{
-		bootCityStore:       recordCityStore(cityPath),
+		bootCityStore:       bootCityStoreFor(cityPath),
 		cityPath:            cityPath,
 		cityName:            cityName,
 		tomlPath:            tomlPath,
