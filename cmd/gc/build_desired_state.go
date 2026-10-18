@@ -788,13 +788,17 @@ func buildDesiredStateWithSessionBeadsAtOpts(
 		bp.assignedWorkBeads = poolWorkBeads
 		bp.poolScaleCheckPartialTemplates = poolScaleCheckPartialTemplates
 		bp.providerHealthSnapshot = loadProviderHealthSnapshot(cityPath)
-		poolDesiredStates := ComputePoolDesiredStatesWithDemandTracedAt(
+		// A seat parked on pre-assigned blocked work stays desired but takes
+		// no cap headroom (ga-ylpbsy.16). A partial work read parks nothing.
+		parked := parkSeatsForDemand(cfg, [][]session.Info{sessionBeads.OpenInfos()}, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, storePartial, poolDecisionTime.UTC())
+		poolDesiredStates := computePoolDesiredStatesParkedAt(
 			cfg,
 			poolWorkBeads,
 			sessionBeads.OpenInfos(),
 			scaleCheckCounts,
 			scaleCheckDemandByTemplate,
 			poolDecisionTime,
+			parked,
 			trace,
 		)
 		bp.configurePoolSessionCreateFairShare(poolDesiredStates)

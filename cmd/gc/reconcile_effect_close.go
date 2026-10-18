@@ -62,6 +62,8 @@ const (
 	causeLivePane      = "live-pane"          // the fresh read shows a live pane: not stopped
 	causeStranded      = "stranded-unstamped" // work on an unmarked pool slot whose detached probes all report alive
 	causeReleaseFailed = "release-failed"     // the stranded repair's release failed on a claim or a leg
+	causeParked        = "parked"             // a pool slot whose live work is only pre-assigned, unstarted, blocked pins (ga-ylpbsy.16)
+	causeParkUnread    = "park-unread"        // a pool slot eligible to park whose live work read failed: no stamp, no repair
 )
 
 // closeSections are C8.8 with its corpse kill, the work branches with their
@@ -190,21 +192,37 @@ type strandedWork struct {
 	ids      []string
 	alive    bool // every claim read reports a detached probe alive
 	searched bool
+	// parked: the close is eligible to park (closeSpec.ParkEligible), and
+	// the live read found only open pins the seat never started, none
+	// deferred or ready (ga-ylpbsy.16). parkErr: that read failed, so it is
+	// no answer either way.
+	parked  bool
+	parkErr error
 }
 
 // strandedProbe reads the stranded branch's work, only when it applies: L5
-// found work on a pool slot that is not killed and carries no marker. The
-// detached probes run concurrently after the read, each on its own bound
+// found work on a pool slot that is not killed and carries no marker, or one
+// the allocation found eligible to park, whose live read decides the park
+// (a marked row's included: the hold comes before the repair). The detached
+// probes run concurrently after the read, each on its own bound
 // (detachedProbeDefaultTimeout) apart from the read's; a probe that times
 // out reads not alive, as legacy's does. One the Probe's own bound cut
 // short leaves the work unsearched, so this attempt refuses.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
+	unmarked := strings.TrimSpace(v.Row.StrandedEventEmittedAt) == ""
 	if c.Kind != closePoolSlot || c.Killed || v.Fence.Work == nil || v.Fence.Work.Free ||
-		strings.TrimSpace(v.Row.StrandedEventEmittedAt) != "" || v.World.Env == nil {
+		!unmarked && !c.ParkEligible || v.World.Env == nil {
 		return strandedWork{}, nil
 	}
 	work, err := collectSessionAssignedWorkInfo(seatWorkFor(r.legs, releaseScope(v.Row, v.World.Env.Cfg)), v.Row)
+	var out strandedWork
+	if c.ParkEligible {
+		out.parked, out.parkErr = liveParkedWork(work, err, releaseSeatOfInfo(v.Row), v.World.Now)
+		if out.parked || out.parkErr != nil || !unmarked {
+			return out, nil
+		}
+	}
 	alive := make([]bool, len(work))
 	var wg sync.WaitGroup
 	for i, item := range work {
@@ -220,7 +238,7 @@ func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, 
 	if ctx.Err() != nil {
 		return strandedWork{}, nil
 	}
-	out := strandedWork{searched: true}
+	out.searched = true
 	for i, item := range work {
 		if !alive[i] {
 			out.ids = append(out.ids, item.bead.ID)
@@ -261,6 +279,15 @@ func closeWorkStep(v txView, stranded strandedWork, _ error) txStep {
 	case !work || c.Phantom:
 	case c.Kind == closeOrphan && c.Orphaned:
 		return release(releaseOrphan)
+	case c.Kind == closePoolSlot && c.ParkEligible && stranded.parkErr != nil:
+		// No answer on whether the seat is parked: neither stamp nor repair
+		// on it; the refusal backs the next attempt off.
+		return txStep{Refuse: causeParkUnread, Err: stranded.parkErr}
+	case c.Kind == closePoolSlot && c.ParkEligible && stranded.parked:
+		// Parked, not stranded (ga-ylpbsy.16): no marker, no event, no
+		// release, whatever marker an earlier pass left. A no-op settles it,
+		// so the row's wake is never paced.
+		return txStep{Done: true, Cause: causeParked}
 	case c.Kind == closePoolSlot && c.Repair:
 		return release(releaseStrandedRepair)
 	case c.Kind == closePoolSlot && strings.TrimSpace(v.Row.StrandedEventEmittedAt) == "":

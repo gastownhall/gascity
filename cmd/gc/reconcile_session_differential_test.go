@@ -97,6 +97,9 @@ type parityFixture struct {
 	Acks []string
 	// StartErr fails each copy's first provider Start (S3's abandon).
 	StartErr error
+	// Deps seeds the city leg's dependencies in both copies: a blocks dep
+	// keeps its IssueID not ready while its DependsOnID is open.
+	Deps []beads.Dep
 	// Panes is each row's pane output, by row ID, as a peek reads it.
 	Panes   map[string]string
 	Explain map[string]string
@@ -539,7 +542,7 @@ func newLegacyWorld(t testing.TB, f parityFixture, cityPath string, rows []beads
 	sim := &simProvider{Fake: runtime.NewFake(), rts: make(map[string]*simRuntime), changed: make(map[string]uint64), now: clk.Now}
 	f.place(sim)
 	w := &legacyWorld{
-		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, nil), sp: twinProvider{sim},
+		cfg: f.city(), cityPath: cityPath, store: beads.NewMemStoreFrom(0, rows, f.Deps), sp: twinProvider{sim},
 		clk: clk, rec: &memRecorder{}, dt: newDrainTracker(),
 	}
 	w.dops = newDrainOps(w.sp)
@@ -632,7 +635,8 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 	poolDesired := result.PoolDesiredCounts
 	if poolDesired == nil {
 		work := filterAssignedWorkBeadsForPoolDemand(cfg, w.cityPath, w.store, open, assigned, refs)
-		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(ComputePoolDesiredStatesAt(cfg, work, open, result.ScaleCheckCounts, now)),
+		poolDesired = retainScaleCheckPartialPoolDesired(cfg, PoolDesiredCounts(computePoolDesiredStatesParkedAt(cfg, work, open, result.ScaleCheckCounts, nil, now,
+			parkSeatsForResult(cfg, open, result, now.UTC()), nil)),
 			updated, effectivePoolPartialRetentionTemplates(result))
 	}
 	if poolDesired == nil {
@@ -659,6 +663,7 @@ func (w *legacyWorld) tick(t *testing.T, reconcile bool) {
 		result.snapshotQueryPartial(), map[string]bool{}, cfg.Workspace.Name, w.it, w.clk, w.rec, cfg.Session.StartupTimeoutDuration(), cfg.Daemon.DriftDrainTimeoutDuration(),
 		io.Discard, io.Discard,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awake, awakeRefs)), withAssignedWorkStores(awakeStores),
+		withParkedSeats(parkSeatsForResult(cfg, open, result, now.UTC())),
 		withAsyncDrainAckStopTracker(&w.stops), withAssignedWorkDeferTracker(w.adt),
 		withStartStabilityWaiter(immediateStartStabilityWaiter), withSessionStaleKeyDetectionWaiter(immediateSessionStaleKeyDetectionWaiter))
 	for _, gate := range gates {
@@ -839,7 +844,7 @@ func newV2World(t *testing.T, f parityFixture, cityPath string, rows, rig []bead
 	s := newSim(t, 1, simOpts{rows: func(s *sim) ([]beads.Bead, []beads.Bead) {
 		f.place(s.sp)
 		return cloneDiffBeads(rows), cloneDiffBeads(rig)
-	}, arms: arms})
+	}, deps: f.Deps, arms: arms})
 	s.lag, s.env.CityPath = false, cityPath
 	sp := twinProvider{s.sp}
 	cfg := f.city()
@@ -1195,6 +1200,43 @@ func parityFixtures() []parityFixture {
 			Name: "a stranded row past its confirmation window is repaired", Behaviors: []string{"SESS-625"},
 			Rows: []parityRow{awake("last_woke_at", at(-2*time.Hour), "quarantined_until", at(time.Hour), "stranded_event_emitted_at", at(-time.Hour))}, Work: assigned,
 			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// A seat asleep on its own drain holding only a pre-assigned pin
+			// that is blocked is parked, not stranded (ga-ylpbsy.16): both
+			// copies keep it open and unmarked, the pin on it, with no
+			// session.stranded and no repair.
+			Name: "a seat asleep on its drain holding only a blocked pin stays parked", Behaviors: []string{"SESS-624", "SESS-625"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour), "session_key", "conversation-1")},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// The same seat past its bound strands, as before.
+			Name: "a parked seat past its bound strands", Behaviors: []string{"SESS-624"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-parkedWorkMaxHold-time.Hour), "last_woke_at", at(-parkedWorkMaxHold-2*time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
+			// Once the pin is ready the same seat wakes in place (the
+			// assigned-work wake, resume tier), for the pin.
+			Name: "a parked seat whose pin is ready wakes in place", Behaviors: []string{"SESS-624"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "closed"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
 		},
 		{
 			Name: "a workless idle pool slot whose runtime is gone closes", Behaviors: []string{"SESS-626"},

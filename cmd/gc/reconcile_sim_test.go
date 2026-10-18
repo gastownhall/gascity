@@ -463,7 +463,9 @@ type sim struct {
 // simOpts scripts a run: rows replaces the seeded rows, and the other fields
 // seed one fault into the code under test through a test seam.
 type simOpts struct {
-	rows     func(s *sim) (city, rig []beads.Bead)
+	rows func(s *sim) (city, rig []beads.Bead)
+	// deps seeds the city leg's dependencies before its cache is primed.
+	deps     []beads.Dep
 	inflight func(*inflightMap) plannerInflight
 	specs    func(map[string]effectSpec)
 	// rowLock replaces runTx's session mutation lock, unobserved.
@@ -492,7 +494,11 @@ func newSim(t *testing.T, seed uint64, o simOpts) *sim {
 	s.noPendingCreates = o.noPendingCreates
 	city, rig := o.rows(s)
 	for name, rows := range map[string][]beads.Bead{simCityLeg: city, simRigLeg: rig} {
-		m := beads.NewMemStoreFrom(0, rows, nil)
+		var deps []beads.Dep
+		if name == simCityLeg {
+			deps = o.deps
+		}
+		m := beads.NewMemStoreFrom(0, rows, deps)
 		if err := beads.StampOpenedStore(m, "MemStore", gate.Require, false, nil, nil); err != nil {
 			t.Fatalf("stamp: %v", err)
 		}

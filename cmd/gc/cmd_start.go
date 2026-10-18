@@ -1143,8 +1143,9 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	poolDecisionTime := time.Now()
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
-		PoolDesiredCounts(ComputePoolDesiredStatesAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, poolDecisionTime)),
+		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime,
+			parkSeatsForResult(cfg, openInfos, dsResult, poolDecisionTime.UTC()), nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1163,6 +1164,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
+		withParkedSeats(parkSeatsForResult(cfg, openInfos, dsResult, time.Now().UTC())),
 		withAssignedWorkStores(awakeAssignedStores),
 	)
 

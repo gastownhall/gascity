@@ -933,3 +933,176 @@ func TestFailedCreateHeldWhileLeased(t *testing.T) {
 		}
 	}
 }
+
+// A21 on a seat parked on pre-assigned blocked work (ga-ylpbsy.16): the
+// allocation's verdict holds the row with no effect until its bound, and a
+// row only eligible to park carries that to its close, whose live read decides.
+func TestArmCloseHoldsAParkedSeat(t *testing.T) {
+	slept := gatherNow.Add(-time.Hour)
+	idle := []string{"state", "asleep", "sleep_reason", "idle", "slept_at", slept.UTC().Format(time.RFC3339)}
+	until := slept.Add(parkedWorkMaxHold)
+	t.Run("a parked seat holds, requeued at its bound", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireSleep, idle...)
+		c.entry().Park = parkVerdict{Eligible: true, Parked: true, Until: until}
+		it, next := decideRow(c.w, c.a, c.k)
+		if it.Reason != decideParkedHold || it.Kind != "" {
+			t.Fatalf("decideRow = (%q, %q), want the parked hold", it.Kind, it.Reason)
+		}
+		if !next.Equal(until) {
+			t.Fatalf("requeue %v, want the bound %v", next, until)
+		}
+	})
+	t.Run("a seat eligible to park closes, and its close re-reads the work", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireSleep, idle...)
+		c.entry().Park = parkVerdict{Eligible: true, Until: until}
+		it := c.decide()
+		if it.Reason != decideClosePoolSlot || !it.Closing.ParkEligible || it.Closing.Repair {
+			t.Fatalf("decideRow = %q closing %+v, want a pool-slot close eligible to park", it.Reason, it.Closing)
+		}
+	})
+	t.Run("without a verdict the close is today's", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireSleep, idle...)
+		if it := c.decide(); it.Reason != decideClosePoolSlot || it.Closing.ParkEligible {
+			t.Fatalf("decideRow = %q closing %+v, want a pool-slot close not eligible to park", it.Reason, it.Closing)
+		}
+	})
+	t.Run("a killed seat takes B1, verdict or not", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "killed", "slept_at", slept.UTC().Format(time.RFC3339))
+		c.entry().Park = parkVerdict{Eligible: true, Parked: true, Until: until}
+		if it := c.decide(); it.Reason != decideClosePoolSlot || !it.Closing.Killed || it.Closing.ParkEligible {
+			t.Fatalf("decideRow = %q closing %+v, want B1's killed close", it.Reason, it.Closing)
+		}
+	})
+	t.Run("a parked seat the allocation wakes is A18's", func(t *testing.T) {
+		c := newCloseCase(t, livenessGone, desireWake, idle...)
+		c.entry().Park = parkVerdict{Eligible: true, Parked: true, Until: until}
+		if it := c.decide(); it.Reason == decideParkedHold || it.Kind == intentClose {
+			t.Fatalf("decideRow = (%q, %q), want no park hold and no close on a Wake row", it.Kind, it.Reason)
+		}
+	})
+}
+
+// blockedPin is an open pin assigned to the case's row, blocked by an open
+// bead it depends on.
+func (c *closeCase) blockedPin(t *testing.T) beads.Bead {
+	t.Helper()
+	blocker, err := c.store.Create(beads.Bead{Title: "blocker", Type: "task", Status: "open"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p := c.work(t, "open", routedClaim())
+	if err := c.store.DepAdd(p.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	return p
+}
+
+// The close effect on a seat eligible to park: its live read of the work
+// decides between the hold and the stranded branch (ga-ylpbsy.16).
+func TestCloseEffectParksASeatHoldingOnlyBlockedPins(t *testing.T) {
+	for _, bare := range []bool{false, true} {
+		t.Run(map[bool]string{false: "around", true: "bare"}[bare], func(t *testing.T) {
+			slept := gatherNow.Add(-time.Hour)
+			mk := func(t *testing.T, eligible bool) *closeCase {
+				c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", slept.UTC().Format(time.RFC3339))
+				c.bare = bare
+				if eligible {
+					c.entry().Park = parkVerdict{Eligible: true, Until: slept.Add(parkedWorkMaxHold)}
+				}
+				return c
+			}
+			t.Run("a blocked pin parks: no marker, no event, no release, no close", func(t *testing.T) {
+				c := mk(t, true)
+				p := c.blockedPin(t)
+				s := c.run(t, gone().tmux())
+				b := c.row(t)
+				if s.Outcome != settledNoop || s.Cause != causeParked || b.Status == "closed" || b.Metadata[strandedEventEmittedKey] != "" {
+					t.Fatalf("settlement %+v row %s %v, want the parked no-op on an open, unmarked row", s, b.Status, b.Metadata)
+				}
+				if len(s.Facts.Events) != 0 {
+					t.Fatalf("events %+v, want none", s.Facts.Events)
+				}
+				if got, _ := c.store.Get(p.ID); got.Assignee != c.k.ID || got.Status != "open" {
+					t.Fatalf("pin %s/%q, want still open and assigned to the seat", got.Status, got.Assignee)
+				}
+			})
+			t.Run("a started claim is a real stranding", func(t *testing.T) {
+				c := mk(t, true)
+				c.blockedPin(t)
+				c.work(t, "in_progress", routedClaim())
+				s := c.run(t, gone().tmux())
+				if b := c.row(t); s.Outcome != settledLanded || b.Metadata[strandedEventEmittedKey] == "" {
+					t.Fatalf("settlement %+v row %v, want the stranded stamp", s, b.Metadata)
+				}
+				if len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.SessionStranded {
+					t.Fatalf("events %+v, want session.stranded", s.Facts.Events)
+				}
+			})
+			t.Run("an open bead the seat claimed is started", func(t *testing.T) {
+				c := mk(t, true)
+				p := c.blockedPin(t)
+				if err := c.store.SetMetadataBatch(c.k.ID, map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: p.ID}); err != nil {
+					t.Fatal(err)
+				}
+				c.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c.store))
+				s := c.run(t, gone().tmux())
+				if b := c.row(t); s.Outcome != settledLanded || b.Metadata[strandedEventEmittedKey] == "" {
+					t.Fatalf("settlement %+v row %v, want the stranded stamp", s, b.Metadata)
+				}
+			})
+			t.Run("a ready pin does not park", func(t *testing.T) {
+				c := mk(t, true)
+				c.work(t, "open", routedClaim())
+				s := c.run(t, gone().tmux())
+				if b := c.row(t); s.Outcome != settledLanded || b.Metadata[strandedEventEmittedKey] == "" {
+					t.Fatalf("settlement %+v row %v, want the stranded stamp", s, b.Metadata)
+				}
+			})
+			t.Run("a seat a pass stranded is held, not repaired, once it parks again", func(t *testing.T) {
+				c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", slept.UTC().Format(time.RFC3339),
+					strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
+				c.bare = bare
+				c.entry().Park = parkVerdict{Eligible: true, Until: slept.Add(parkedWorkMaxHold)}
+				p := c.blockedPin(t)
+				if it := c.decide(); !it.Closing.Repair || !it.Closing.ParkEligible {
+					t.Fatalf("closing %+v, want a repair eligible to park", it.Closing)
+				}
+				s := c.run(t, gone().tmux())
+				if b := c.row(t); s.Outcome != settledNoop || s.Cause != causeParked || b.Status == "closed" {
+					t.Fatalf("settlement %+v row %s, want the parked no-op", s, b.Status)
+				}
+				if got, _ := c.store.Get(p.ID); got.Assignee != c.k.ID {
+					t.Fatalf("pin assignee %q, want kept: no repair", got.Assignee)
+				}
+			})
+			t.Run("a ready read that fails is no answer: no stamp, a refusal", func(t *testing.T) {
+				c := mk(t, true)
+				c.blockedPin(t)
+				c.w.WorkLegs = testWorkLegs(c.w.CityPath, c.cfg, failingReadyStore{c.store}, nil)
+				s := c.run(t, gone().tmux())
+				if b := c.row(t); s.Outcome != settledRefused || s.Cause != causeParkUnread || s.Err == nil || b.Metadata[strandedEventEmittedKey] != "" {
+					t.Fatalf("settlement %+v row %v, want refused park-unread with no stamp", s, b.Metadata)
+				}
+			})
+			t.Run("a seat not eligible to park strands as today", func(t *testing.T) {
+				c := mk(t, false)
+				c.blockedPin(t)
+				s := c.run(t, gone().tmux())
+				if b := c.row(t); s.Outcome != settledLanded || b.Metadata[strandedEventEmittedKey] == "" {
+					t.Fatalf("settlement %+v row %v, want the stranded stamp", s, b.Metadata)
+				}
+			})
+		})
+	}
+}
+
+// failingReadyStore fails every ready query: a store whose readiness the
+// parked check cannot read.
+type failingReadyStore struct{ beads.Store }
+
+// ConditionalWritesResolveTarget keeps the inner store's fenced writes.
+func (s failingReadyStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+func (failingReadyStore) Ready(...beads.ReadyQuery) ([]beads.Bead, error) {
+	return nil, errors.New("ready query down")
+}
