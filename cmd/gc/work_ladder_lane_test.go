@@ -1373,3 +1373,103 @@ func TestWorkLadderReleaseOfAClosedClaimIsSilent(t *testing.T) {
 		t.Fatalf("cell %s: want the release cleared, nothing unfinished", c.row().Metadata[session.WorkLadderKey])
 	}
 }
+
+// stripHolds is c's allocation as a snapshot taken before any hold: the
+// live beads may carry one the snapshot does not.
+func stripHolds(c *ladderCity) func() *allocSummary {
+	return func() *allocSummary {
+		s := c.summary()
+		for i := range s.AssignedWork {
+			s.AssignedWork[i].Labels = nil
+		}
+		for i := range s.ReadyRouted {
+			s.ReadyRouted[i].Labels = nil
+		}
+		return s
+	}
+}
+
+// A hold placed between the release decision and the release's live read
+// keeps the claim (owner ruling 2026-10-18): the release settles silently,
+// nothing unfinished.
+func TestWorkLadderReleaseRespectsAHoldPlacedLate(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("parked as the release decided")
+	c.lane.summary = stripHolds(c)
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
+		Key: workladder.ClaimKey{Store: "city", Bead: id}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
+		Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
+	}}})})
+	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.HoldMayorLabel}}); err != nil {
+		t.Fatal(err)
+	}
+	c.pass()
+	if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+		t.Fatalf("held claim %q %q: released", b.Status, b.Assignee)
+	}
+	if n := len(c.events(events.WorkReleaseUnfinished)) + len(c.events(events.WorkReleased)); n != 0 || c.cell().Release != nil {
+		t.Fatalf("release events %d, cell %s: want a silent settle", n, c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// A trigger put on hold after the snapshot is re-read live: never nudged
+// or recycled.
+func TestWorkLadderRereadsATriggerHold(t *testing.T) {
+	c := newLadderCity(t)
+	b, err := c.work.Create(beads.Bead{Title: "trigger", Type: "task", Labels: []string{beadmeta.HoldExternalLabel}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.trigger = b.ID
+	c.lane.summary = stripHolds(c)
+	c.setRow(map[string]string{beadmeta.TriggerBeadIDMetadataKey: b.ID})
+	c.run(time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 || len(c.posted) != 0 {
+		t.Fatalf("a trigger held since the snapshot: nudges %v, recycles %+v", c.nudgedAt, c.posted)
+	}
+}
+
+// Carried work (an incomplete snapshot) that is put on hold is re-read live
+// and dropped: never nudged.
+func TestWorkLadderRereadsACarriedHold(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("carried, then parked")
+	c.run(2*time.Minute, 30*time.Second, nil)
+	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.HoldExternalLabel}}); err != nil {
+		t.Fatal(err)
+	}
+	c.partial, c.claims = true, nil // the snapshot lost it; the ladder carries it
+	before := len(c.nudgedAt)
+	c.run(2*time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != before || len(c.cell().Entries) != 0 {
+		t.Fatalf("carried held claim: nudges %v, cell %s", c.nudgedAt[before:], c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// A paused nudge (the provider degraded) that the seat cannot take records
+// no refusal: it counted nothing, so there is nothing to re-count, and the
+// degraded pace already holds it to PausedCap.
+func TestWorkLadderPausedRefusalRecordsNothing(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("degraded and at a prompt")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.sp.NudgeErrors = map[string]error{ladderSeatName: fmt.Errorf("prompt up: %w", runtime.ErrPendingInteraction)}
+	writeHealth := func() {
+		dir := filepath.Join(c.env.CityPath, ".gc", "cache")
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		data, _ := json.Marshal(providerHealthFileFormat{Providers: []providerHealthRecord{{Provider: "claude", Status: "unhealthy", ProbedAt: float64(time.Now().Unix())}}})
+		if err := os.WriteFile(filepath.Join(dir, "provider-health.json"), data, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeHealth()
+	c.run(time.Hour, 30*time.Second, writeHealth)
+	if len(c.nudgedAt) == 0 {
+		t.Fatal("no paused nudge was attempted")
+	}
+	if e := c.entry(id); e.Refused != 0 || e.Attempts != 0 || len(escalations(c)) != 0 {
+		t.Fatalf("entry %+v, escalations %v: a paused nudge's refusal was recorded", e, escalations(c))
+	}
+}

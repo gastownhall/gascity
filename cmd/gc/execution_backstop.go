@@ -497,22 +497,29 @@ func (p poolExecutionBackstop) content(s beads.Bead) string {
 // CachingStore-backed, so a plain read can still show a claim the agent finished
 // seconds ago. A failed read HOLDS: it is not proof the claim went away.
 func (p poolExecutionBackstop) revalidate(target backstopTarget) backstopResolution {
+	res, _ := revalidateExecutionClaim(target)
+	return res
+}
+
+// revalidateExecutionClaim is revalidate's verdict on target, with the
+// claim as the live read found it (the zero bead when it held).
+func revalidateExecutionClaim(target backstopTarget) (backstopResolution, beads.Bead) {
 	if target.Store == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	if !strings.EqualFold(strings.TrimSpace(current.Status), "in_progress") ||
 		strings.TrimSpace(current.Assignee) != target.Assignee {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
-	return backstopResolutionOutstanding
+	return backstopResolutionOutstanding, current
 }
 
 // executionEvidenceTailBytes bounds how far back the execution-evidence read

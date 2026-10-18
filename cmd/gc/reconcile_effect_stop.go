@@ -261,17 +261,19 @@ func workLadderOn(w *World) bool {
 // metadata is meta gives back the execution backstop's claim (X7): only
 // with the ladder rolled back, and only a marker the backstops wrote for the
 // row's own incarnation, and not when the row's work_ladder cell records a
-// recycle at the row's generation (the switch flipped mid-recycle): either
-// way the stop is the ladder's, which keeps the claim.
+// recycle at the row's generation (the switch flipped mid-recycle), or is
+// unreadable: each way the stop is, or may be, the ladder's, which keeps the
+// claim.
 func x7Releases(w *World, meta map[string]string) bool {
 	token := strings.TrimSpace(meta["instance_token"])
 	if workLadderOn(w) || token == "" || strings.TrimSpace(meta[executionClaimNudgeTokenKey]) != token {
 		return false
 	}
 	// A recycle the ladder asked for at this generation, with the switch
-	// flipped to off before the stop landed, is still the ladder's.
+	// flipped to off before the stop landed, is still the ladder's; so is
+	// one a cell it cannot read might record (keep the work).
 	cell, err := workladder.DecodeLadder(meta[session.WorkLadderKey])
-	return err != nil || cell.V == 0 || cell.RecycledGen != rowGeneration(meta)
+	return err == nil && (cell.V == 0 || cell.RecycledGen != rowGeneration(meta))
 }
 
 // releaseStalledClaim gives back, after a confirmed stop, the claim an

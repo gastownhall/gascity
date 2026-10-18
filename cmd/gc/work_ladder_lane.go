@@ -187,7 +187,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			target := backstopTarget{ID: c.WorkBeadID, RootID: c.RootBeadID, StoreRef: c.StoreRef, Assignee: c.Assignee, Store: c.Store}
 			ts = append(ts, ladderTarget{
 				work:    workladder.Work{Key: workladder.ClaimKey{Store: normalizeIdleClaimStoreRef(c.StoreRef), Bead: c.WorkBeadID}, Kind: workladder.KindContinuation},
-				recheck: func() backstopResolution { return unlessHeld(target, poolContinuationBackstop{}.revalidate(target)) },
+				recheck: func() backstopResolution { return unlessHeld(revalidateContinuation(target)) },
 			})
 		}
 		for _, c := range claims.forIdentities(currentSessionAssigneeIdentities(row)) {
@@ -198,7 +198,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 			ts = append(ts, ladderTarget{
 				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
 				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
-				recheck:      func() backstopResolution { return unlessHeld(target, poolExecutionBackstop{}.revalidate(target)) },
+				recheck:      func() backstopResolution { return unlessHeld(revalidateExecutionClaim(target)) },
 			})
 		}
 		if len(ts) > 0 {
@@ -247,22 +247,11 @@ func (p *ladderPass) triggerRecheck(id string) func() backstopResolution {
 	}
 }
 
-// unlessHeld is res, a live re-read's verdict on target, except that work a
-// dispatch hold parks is clear: not the ladder's while the hold stands. The
-// hold is read live, as res was.
-func unlessHeld(target backstopTarget, res backstopResolution) backstopResolution {
-	if res != backstopResolutionOutstanding || target.Store == nil {
-		return res
-	}
-	live := beads.HandlesFor(target.Store).Live
-	if live == nil {
-		return backstopResolutionHold
-	}
-	b, err := live.Get(target.ID)
-	switch {
-	case err != nil:
-		return backstopResolutionHold
-	case beadmeta.HasDispatchHold(b.Labels):
+// unlessHeld is res, a live re-read's verdict, except that work a dispatch
+// hold parks (b, the bead that read found) is clear: not the ladder's while
+// the hold stands.
+func unlessHeld(res backstopResolution, b beads.Bead) backstopResolution {
+	if res == backstopResolutionOutstanding && beadmeta.HasDispatchHold(b.Labels) {
 		return backstopResolutionClear
 	}
 	return res

@@ -259,8 +259,15 @@ func (p poolContinuationBackstop) content(s beads.Bead) string {
 }
 
 func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopResolution {
+	res, _ := revalidateContinuation(target)
+	return res
+}
+
+// revalidateContinuation is revalidate's verdict on target, with the step as
+// the live read found it (the zero bead when it held).
+func revalidateContinuation(target backstopTarget) (backstopResolution, beads.Bead) {
 	if target.Store == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// Assigned-work snapshots normally carry a CachingStore. A plain Get can
 	// therefore return the pre-claim row after another process has already
@@ -280,11 +287,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	// leg-vs-owner grouping work in ga-m4sj2.
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// target.StoreRef is the OWNER scope selectReadyContinuationClaimCandidates
 	// proved for this row, not the leg it was read from: inside a class binding a
@@ -298,11 +305,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(current.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(current.Metadata[beadmeta.ContinuationGroupMetadataKey]) == "" ||
 		strings.TrimSpace(current.Metadata[beadmeta.SessionAffinityMetadataKey]) != "require" {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
 	root, err := live.Get(target.RootID)
 	if err != nil || root.ID != target.RootID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
 	// live, not who owns this step. gc.session_name on the root is a dashboard
@@ -315,9 +322,9 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
 		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
-	return backstopResolutionOutstanding
+	return backstopResolutionOutstanding, current
 }
 
 func (p poolContinuationBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {

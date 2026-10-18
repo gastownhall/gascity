@@ -866,6 +866,7 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		hold     string // a dispatch hold label on the claim
 		stale    bool   // the backstop's marker is another incarnation's
 		recycled bool   // the ladder recycled the seat at its generation, then the switch flipped off
+		badCell  bool   // the row's work_ladder cell is unreadable
 	}{
 		{name: "execution-stalled", reason: executionStalledDrainReason, release: true},
 		{name: "execution-stalled, a second claim held", reason: executionStalledDrainReason, release: true, other: true},
@@ -876,6 +877,7 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		{name: "ladder off: stamped but hold:mayor, released", reason: executionStalledDrainReason, release: true, started: "stamp", hold: beadmeta.HoldMayorLabel},
 		{name: "ladder off: a stale marker, kept", reason: executionStalledDrainReason, stale: true},
 		{name: "ladder off mid-recycle: the ladder's recycle at this generation, kept", reason: executionStalledDrainReason, recycled: true},
+		{name: "ladder off, an unreadable ladder cell: maybe the ladder's recycle, kept", reason: executionStalledDrainReason, badCell: true},
 		{name: "ladder on: kept whatever the records say (the recycle gives back nothing)", reason: executionStalledDrainReason, ladder: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -915,6 +917,9 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				}
 				if err := store.SetMetadataBatch(id, map[string]string{executionClaimNudgeWorkKey: claim.ID, executionClaimNudgeTokenKey: token}); err != nil {
 					t.Fatal(err)
+				}
+				if c.badCell {
+					casSetMeta(t, store, id, session.WorkLadderKey, "{")
 				}
 				if c.recycled {
 					gen, _ := strconv.ParseInt(row.Metadata["generation"], 10, 64)
