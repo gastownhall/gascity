@@ -1729,7 +1729,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
-	addOpKeyFlag(cmd, &key)
+	addOpKeyFlag(cmd, &key, cliOpKeyNoModeNote)
 	return cmd
 }
 
@@ -1870,7 +1870,7 @@ longer resolves.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
-	addOpKeyFlag(cmd, &key)
+	addOpKeyFlag(cmd, &key, cliOpKeyNoWithdrawnNote)
 	return cmd
 }
 
@@ -2467,6 +2467,17 @@ restarts in place on its bead; while its started work is blocked, it holds its
 slot asleep. A task assigned directly to the seat with no route is kept, not
 released, and the seat holds its slot until that task is ready.
 
+With --key, a rerun after the controller restarted the session under the same
+ID reports the first kill, noting the restart, instead of killing the new run.
+A pool seat replaced as above is a new session with a new ID, though it may
+keep the killed seat's alias: a rerun must name the killed session by its ID,
+since by the alias it would kill the replacement.
+
+While the ops.lifecycle gate is require, a kill whose session row cannot be
+read is refused (op_journal_unavailable, naming unreadable_target and the read
+error) and nothing is killed. At auto, or with GC_OPS_LIFECYCLE=auto set to
+break glass, it runs the best-effort kill unrecorded.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
@@ -2479,7 +2490,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
 	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired")
-	addOpKeyFlag(cmd, &key)
+	addOpKeyFlag(cmd, &key, cliOpKeyRestartedNote)
 	return cmd
 }
 
@@ -2563,16 +2574,16 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 
 	// The kill op (DES-O0API §8.4) is scoped to the generation the row
 	// already loaded names, and proposed after the live-subagent refusal,
-	// before the lease and the fence. A row with no generation is not
-	// recordable.
-	scope, unrecordable := cliOpSessionScope(info, infoErr)
+	// before the lease and the fence. A row that did not read, or read with
+	// no generation, is not recordable.
+	scope, unrecordable, unrecordableErr := cliOpSessionScope(info, infoErr)
 	var unreplayed []string
 	if force {
 		unreplayed = []string{"--force"}
 	}
 	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
 		verb: "gc session kill", kind: opjournal.KindKill, key: key, conversation: sessionID,
-		scope: scope, unrecordable: unrecordable, cfgErr: cfgErr, unreplayed: unreplayed,
+		scope: scope, unrecordable: unrecordable, unrecordableErr: unrecordableErr, cfgErr: cfgErr, unreplayed: unreplayed,
 		asJSON: asJSON, stdout: stdout, stderr: stderr,
 	})
 	switch start {

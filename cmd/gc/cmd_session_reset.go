@@ -50,7 +50,7 @@ the rollback released its alias.`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
-	addOpKeyFlag(cmd, &key)
+	addOpKeyFlag(cmd, &key, "")
 	return cmd
 }
 

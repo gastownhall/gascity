@@ -712,11 +712,11 @@ func RecordDrainTransition(ctx context.Context, sessionName, reason, transition 
 // unrecordedReason says why a request ran unrecorded or, in require mode, was
 // refused (store_unavailable, type_unregistered, no_namespace,
 // payload_too_large, invalid_key, invalid_request, unmaterialized_target,
-// no_generation, propose_error), or, for a sweeper pass that failed as a
-// whole, the failure's degrade class (store_error, contention,
-// conditional_writes_unsupported, type_unregistered, no_namespace); it is
-// empty for every other result. Every value is a closed token, so the label
-// set stays bounded; no op id or key is ever a label.
+// no_generation, unreadable_target, propose_error), or, for a sweeper pass
+// that failed as a whole, the failure's degrade class (store_error,
+// contention, conditional_writes_unsupported, type_unregistered,
+// no_namespace); it is empty for every other result. Every value is a closed
+// token, so the label set stays bounded; no op id or key is ever a label.
 func RecordOpRecord(ctx context.Context, kind, surface, stage, result, unrecordedReason string) {
 	initInstruments()
 	inst.opsRecordTotal.Add(ctx, 1,

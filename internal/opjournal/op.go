@@ -58,6 +58,10 @@ const (
 	RefusedReasonPrefix       = "refused:"
 )
 
+// MaxRefusedWhyLen is the longest <why> a refused:<why> reason can carry and
+// still be the token every outcome reason must be.
+const MaxRefusedWhyLen = maxTokenLen - len(RefusedReasonPrefix)
+
 // Known skipped reasons.
 const (
 	ReasonSuperseded         = "superseded"

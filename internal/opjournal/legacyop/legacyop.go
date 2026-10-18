@@ -400,9 +400,9 @@ func (r *Recorder) cannotRecord(kind opjournal.Kind, key string, minted bool, st
 }
 
 // Unrecorded is an Execute admission for a request the caller knows it cannot
-// record (an unmaterialized named target, a session with no generation),
-// counted under reason. The caller decides that only in auto; require
-// resolves the cause first or refuses.
+// record (an unmaterialized named target, a session with no generation or
+// whose row cannot be read), counted under reason. The caller decides that
+// only in auto; require resolves the cause first or refuses.
 func (r *Recorder) Unrecorded(kind opjournal.Kind, key, reason string) *Admission {
 	if r.recording() {
 		r.count(kind, StageAdmit, ResultUnrecorded, reason)

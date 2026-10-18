@@ -29,6 +29,12 @@ After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
 has no wake reasons, it remains asleep.
 
+When a configured named session has no session to wake or reopen, the wake
+creates one as it resolves the target, before the wake is recorded. While the
+ops.lifecycle gate is require, a wake whose op the journal then cannot record
+is refused (op_journal_unavailable): the wake did not run, but the session it
+created stays and may start.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Example: `  gc session wake gc-42
   gc session wake mayor`,
@@ -42,7 +48,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
-	addOpKeyFlag(cmd, &key)
+	addOpKeyFlag(cmd, &key, cliOpKeyNoWithdrawnNote)
 	return cmd
 }
 
@@ -113,30 +119,27 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
 	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
 	// Resolving the target may materialize a named session's row, so under
-	// require the op store is checked before it.
+	// require the op store and the key are checked before it.
 	op := newCLIOp(deps.cfg, sessStore, cliOpRequest{
 		verb: "gc session wake", kind: opjournal.KindWake, key: deps.opKey,
 		cfgErr: deps.cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
 	})
-	if !op.preflight(sessStore) {
+	if !op.preflight() {
 		return 1
 	}
-	id, err := resolveSessionIDMaterializingNamed(deps.cityPath, deps.cfg, sessStore, target)
+	defer op.end()
+	id, start, err := admitWake(op, deps, sessStore, target)
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
 	}
-
-	// The wake op (DES-O0API §8.4) is proposed once the target is resolved
-	// (and materialized), before the wake writes the row.
-	op.req.conversation = id
-	switch op.start() {
+	switch start {
 	case cliOpRefused:
 		return 1
 	case cliOpReplayed:
 		return emitSessionWakeResult(stdout, stderr, asJSON, id, 0, op)
 	}
-	defer op.end()
 
 	sessFront := sessionFrontDoor(sessStore)
 	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
@@ -228,6 +231,40 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 	}
 	op.finishErr(nil)
 	return emitSessionWakeResult(stdout, stderr, asJSON, id, len(nudgeIDs), op)
+}
+
+// errWakeNotAdmitted stops a wake's resolution from reopening a closed named
+// row its op did not admit.
+var errWakeNotAdmitted = errors.New("wake not admitted")
+
+// admitWake resolves the wake's target and starts its op (DES-O0API §8.4)
+// before the wake writes the row. A closed named row's op starts before
+// resolution reopens the row, so a refusal or a replay leaves it closed. A
+// named session with no row is created first (§6.4), under a new id no
+// earlier op can name, so admission neither replays it nor refuses it for
+// an earlier op; but under require a journal that then cannot record the op
+// refuses the wake after that create, and the created session stays,
+// started or left for the controller to start. An op admitted for a row
+// resolution did not end up returning is closed as target_moved, and the op
+// started over for the row it returned.
+func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target string) (string, cliOpStart, error) {
+	admitted, start := "", cliOpStart(0)
+	id, err := resolveSessionIDMaterializingNamedBeforeReopen(deps.cityPath, deps.cfg, sessStore, target, func(closedID string) error {
+		admitted, start = closedID, op.retarget(closedID)
+		if start != cliOpExecute {
+			return errWakeNotAdmitted
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errWakeNotAdmitted):
+		return admitted, start, nil
+	case err != nil:
+		return "", 0, err
+	case admitted != "" && admitted == id:
+		return id, start, nil
+	}
+	return id, op.retarget(id), nil
 }
 
 // emitSessionWakeResult prints a wake's success output, a replay's included.

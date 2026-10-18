@@ -4,6 +4,9 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -113,6 +116,71 @@ func (c *cliOpCity) row(t *testing.T) beads.Bead {
 	return b
 }
 
+// restartAs brings the session back as generation gen, as the controller
+// reviving it after a kill would.
+func (c *cliOpCity) restartAs(t *testing.T, gen int) {
+	t.Helper()
+	if err := c.reload(t).SetMetadataBatch(c.bead.ID, map[string]string{
+		"generation": strconv.Itoa(gen), "state": "awake", "state_reason": "",
+	}); err != nil {
+		t.Fatalf("reviving the session row: %v", err)
+	}
+	if err := c.sp.Start(context.Background(), c.name, runtime.Config{Command: "true"}); err != nil {
+		t.Fatalf("restarting fake runtime: %v", err)
+	}
+}
+
+// closeForReopen closes the session row as a suspend closes a configured
+// named session's row: under the configured runtime name, so a wake of the
+// named session reopens it.
+func (c *cliOpCity) closeForReopen(t *testing.T) {
+	t.Helper()
+	cfg, err := loadCityConfig(c.dir, io.Discard)
+	if err != nil {
+		t.Fatalf("loading city config: %v", err)
+	}
+	spec, ok := findNamedSessionSpec(cfg, config.EffectiveCityName(cfg, filepath.Base(c.dir)), killPokeSessionIdentity)
+	if !ok {
+		t.Fatalf("no configured named session %q", killPokeSessionIdentity)
+	}
+	store := c.reload(t)
+	if err := store.SetMetadataBatch(c.bead.ID, map[string]string{
+		"session_name": spec.SessionName, "close_reason": "suspended",
+	}); err != nil {
+		t.Fatalf("readying the session row to reopen: %v", err)
+	}
+	if err := store.Close(c.bead.ID); err != nil {
+		t.Fatalf("closing the session row: %v", err)
+	}
+}
+
+// unreadableAtRead makes the session row unreadable to the kill's
+// front-door read, after the target resolved, and readable again once the
+// kill builds its handle, so only the read the op is scoped from fails.
+func (c *cliOpCity) unreadableAtRead(t *testing.T) {
+	t.Helper()
+	oldBuild, oldHandle := buildSessionProviderByName, sessionKillHandle
+	damaged := false
+	buildSessionProviderByName = func(cfg *config.City, name string, sc config.SessionConfig, cityName, cityPath string) (runtime.Provider, error) {
+		if !damaged {
+			damaged = true
+			task := "task"
+			if err := c.reload(t).Update(c.bead.ID, beads.UpdateOpts{Type: &task, RemoveLabels: []string{session.LabelSession}}); err != nil {
+				t.Fatalf("damaging the session row: %v", err)
+			}
+		}
+		return oldBuild(cfg, name, sc, cityName, cityPath)
+	}
+	sessionKillHandle = func(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City, id string) (worker.Handle, error) {
+		typ := session.BeadType
+		if err := c.reload(t).Update(c.bead.ID, beads.UpdateOpts{Type: &typ, Labels: []string{session.LabelSession}}); err != nil {
+			t.Fatalf("repairing the session row: %v", err)
+		}
+		return oldHandle(cityPath, store, sp, cfg, id)
+	}
+	t.Cleanup(func() { buildSessionProviderByName, sessionKillHandle = oldBuild, oldHandle })
+}
+
 // expectUntouchedAtOpen fails the test unless the session row reads, field
 // for field, as it did before the command ran, and its runtime is as it was,
 // when the recorder opens the op store, just before it proposes: no legacy
@@ -178,6 +246,98 @@ func TestSessionKillOpKeyReplaysWithoutKillingAgain(t *testing.T) {
 	}
 }
 
+// A kill retried under its key after the controller revived the session (a
+// new generation) reports the first kill, noting the restart, instead of
+// killing the new run or refusing the key as another request.
+func TestSessionKillOpKeyReplaysAcrossARestart(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	c := newCLIOpCity(t, h, nil)
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionKillWithForce([]string{killPokeSessionIdentity}, "kill-1", &stdout, &stderr, true, false); code != 0 {
+		t.Fatalf("kill = %d; stderr=%s", code, stderr.String())
+	}
+	first := cliOpOnly(t, h.opStore)
+	c.restartAs(t, 5)
+	stdout.Reset()
+	stderr.Reset()
+	if code := cmdSessionKillWithForce([]string{killPokeSessionIdentity}, "kill-1", &stdout, &stderr, true, false); code != 0 {
+		t.Fatalf("kill retried after a restart = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+	}
+	if m := cliOpJSON(t, stdout.Bytes()); m["replayed"] != true || m["op_id"] != first.ID || m["key"] != "kill-1" {
+		t.Fatalf("retry JSON %v, want replayed op %s under key kill-1", m, first.ID)
+	}
+	validateJSONAgainstResultSchema(t, []string{"session", "kill"}, stdout.Bytes())
+	if !strings.Contains(stderr.String(), "replayed op "+first.ID) || !strings.Contains(stderr.String(), "restarted as generation 5") {
+		t.Fatalf("retry stderr = %q, want the replay of %s noting the restart as generation 5", stderr.String(), first.ID)
+	}
+	if !c.sp.IsRunning(c.name) {
+		t.Fatal("a kill retried under its key killed the restarted session")
+	}
+	if ops := cliOpRows(t, h.opStore); len(ops) != 1 {
+		t.Fatalf("op rows = %+v, want only the first kill's", ops)
+	}
+}
+
+// A kill retried under its key across a restart answers from the earlier
+// kill whatever its state: in progress, or closed failed. A key that names
+// anything but an earlier kill of the session is still another request.
+// Every refusal names the op the key belongs to.
+func TestSessionKillOpKeyAcrossARestartAnswersFromTheEarlierOp(t *testing.T) {
+	earlier := opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 3}
+	for _, tc := range []struct {
+		name      string
+		plant     func(t *testing.T, store beads.Store, conv string) opjournal.Op
+		code      string
+		restarted bool
+	}{{
+		name: "earlier kill in progress",
+		plant: func(t *testing.T, store beads.Store, conv string) opjournal.Op {
+			return cliOpProposeOpen(t, store, opjournal.KindKill, conv, "kill-1", earlier, cliOpT0, opjournal.Policy{})
+		},
+		code: cliOpCodeInProgress, restarted: true,
+	}, {
+		name: "earlier kill failed",
+		plant: func(t *testing.T, store beads.Store, conv string) opjournal.Op {
+			return cliOpPlantClosed(t, store, opjournal.KindKill, conv, "kill-1", earlier, opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonOther})
+		},
+		code: cliOpCodeAlreadyFailed, restarted: true,
+	}, {
+		name: "the key names a close",
+		plant: func(t *testing.T, store beads.Store, conv string) opjournal.Op {
+			return cliOpProposeOpen(t, store, opjournal.KindClose, conv, "kill-1", opjournal.Scope{}, cliOpT0, opjournal.Policy{})
+		},
+		code: cliOpCodeKeyMismatch,
+	}, {
+		name: "the key names a kill of a later generation",
+		plant: func(t *testing.T, store beads.Store, conv string) opjournal.Op {
+			return cliOpProposeOpen(t, store, opjournal.KindKill, conv, "kill-1", opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 9}, cliOpT0, opjournal.Policy{})
+		},
+		code: cliOpCodeKeyMismatch,
+	}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+			c := newCLIOpCity(t, h, nil)
+			planted := tc.plant(t, h.opStore, c.bead.ID)
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionKillWithForce([]string{killPokeSessionIdentity}, "kill-1", &stdout, &stderr, true, false); code != 1 {
+				t.Fatalf("kill = %d, want 1; stderr=%s", code, stderr.String())
+			}
+			if got := cliOpFailureCode(t, stdout.Bytes()); got != tc.code {
+				t.Fatalf("failure code = %q, want %s; stderr=%s", got, tc.code, stderr.String())
+			}
+			if m := cliOpJSON(t, stdout.Bytes()); m["op_id"] != planted.ID || m["key"] != "kill-1" {
+				t.Fatalf("failure envelope %v, want op_id %s and key kill-1", m, planted.ID)
+			}
+			if got := strings.Contains(stderr.String(), "restarted as generation 4"); got != tc.restarted {
+				t.Fatalf("stderr = %q; restart noted = %t, want %t", stderr.String(), got, tc.restarted)
+			}
+			if !c.sp.IsRunning(c.name) {
+				t.Fatal("a refused kill killed the runtime")
+			}
+		})
+	}
+}
+
 func TestSessionKillOpWithoutGeneration(t *testing.T) {
 	t.Run("auto runs unrecorded", func(t *testing.T) {
 		h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
@@ -205,6 +365,56 @@ func TestSessionKillOpWithoutGeneration(t *testing.T) {
 		}
 		if !c.sp.IsRunning(c.name) {
 			t.Fatal("require killed the runtime it could not record")
+		}
+	})
+}
+
+// A kill whose session row cannot be read has no generation to scope its op
+// to, and says why: unreadable_target, with the read error. require refuses
+// it with no effect; auto runs the best-effort kill unrecorded.
+func TestSessionKillOpUnreadableRow(t *testing.T) {
+	t.Run("require refuses with no effect", func(t *testing.T) {
+		h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+		c := newCLIOpCity(t, h, nil)
+		c.unreadableAtRead(t)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionKillWithForce([]string{killPokeSessionIdentity}, "", &stdout, &stderr, true, false); code != 1 {
+			t.Fatalf("kill = %d, want 1; stderr=%s", code, stderr.String())
+		}
+		if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeUnavailable {
+			t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+		}
+		if !strings.Contains(stdout.String(), legacyop.ReasonUnreadableTarget+": ") {
+			t.Fatalf("failure envelope %s, want the %s reason with its read error", stdout.String(), legacyop.ReasonUnreadableTarget)
+		}
+		if !c.sp.IsRunning(c.name) {
+			t.Fatal("require killed the runtime it could not record")
+		}
+		if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
+			t.Fatalf("op rows = %+v, want none", ops)
+		}
+	})
+	t.Run("auto kills unrecorded", func(t *testing.T) {
+		reader := installManualMetricReader(t)
+		h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+		c := newCLIOpCity(t, h, nil)
+		c.unreadableAtRead(t)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionKillWithForce([]string{killPokeSessionIdentity}, "unread-1", &stdout, &stderr, true, false); code != 0 {
+			t.Fatalf("kill = %d, want 0; stderr=%s", code, stderr.String())
+		}
+		if c.sp.IsRunning(c.name) {
+			t.Fatal("auto did not run the best-effort kill")
+		}
+		if ops := cliOpRows(t, h.opStore); len(ops) != 0 {
+			t.Fatalf("op rows = %+v, want none for an unreadable row", ops)
+		}
+		if !strings.Contains(stderr.String(), "--key not recorded ("+legacyop.ReasonUnreadableTarget+": ") {
+			t.Fatalf("stderr = %q, want the --key warning naming %s and its read error", stderr.String(), legacyop.ReasonUnreadableTarget)
+		}
+		want := string(opjournal.KindKill) + "|cli|admit|unrecorded|" + legacyop.ReasonUnreadableTarget
+		if got := cliOpRecordCounts(t, reader); got[want] != 1 {
+			t.Fatalf("counts = %v, want %s counted once", got, want)
 		}
 	})
 }
@@ -744,10 +954,10 @@ func TestSessionWakeOpFailureNamesTheOpAndKey(t *testing.T) {
 	}
 }
 
-// Under require, a wake of a configured named session that has no row yet
-// checks that the op store can record before it creates the row.
-func TestSessionWakeOpRequireChecksTheStoreBeforeMaterializing(t *testing.T) {
-	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+// newCLIOpNamedCityWithoutRow builds a file-backed city whose configured
+// named session has no row yet, on a fake runtime. It returns the city dir.
+func newCLIOpNamedCityWithoutRow(t *testing.T) string {
+	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_SESSION", "fake")
 	dir := shortSocketTempDir(t, "gc-cli-op-")
@@ -759,11 +969,12 @@ func TestSessionWakeOpRequireChecksTheStoreBeforeMaterializing(t *testing.T) {
 		return sp, nil
 	}
 	t.Cleanup(func() { buildSessionProviderByName = oldBuild })
-	h.opStore = cliOpIncapableStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionWake([]string{killPokeSessionIdentity}, "", &stdout, &stderr, false); code != 1 {
-		t.Fatalf("wake = %d, want 1; stderr=%s", code, stderr.String())
-	}
+	return dir
+}
+
+// cliOpSessionRows counts the city's session rows, closed ones included.
+func cliOpSessionRows(t *testing.T, dir string) int {
+	t.Helper()
 	store, err := openCityStoreAt(dir)
 	if err != nil {
 		t.Fatalf("openCityStoreAt: %v", err)
@@ -772,9 +983,117 @@ func TestSessionWakeOpRequireChecksTheStoreBeforeMaterializing(t *testing.T) {
 	if err != nil {
 		t.Fatalf("listing session rows: %v", err)
 	}
-	if len(rows) != 0 {
-		t.Fatalf("session rows = %d, want none: require refused, so nothing may be created", len(rows))
+	return len(rows)
+}
+
+// Under require, a wake of a configured named session that has no row yet
+// checks that the op store can record before it creates the row.
+func TestSessionWakeOpRequireChecksTheStoreBeforeMaterializing(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+	dir := newCLIOpNamedCityWithoutRow(t)
+	h.opStore = cliOpIncapableStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionWake([]string{killPokeSessionIdentity}, "", &stdout, &stderr, false); code != 1 {
+		t.Fatalf("wake = %d, want 1; stderr=%s", code, stderr.String())
 	}
+	if n := cliOpSessionRows(t, dir); n != 0 {
+		t.Fatalf("session rows = %d, want none: require refused, so nothing may be created", n)
+	}
+}
+
+// Under require, a wake of a configured named session that has no row yet
+// checks its --key before it creates the row: an invalid key refuses, and
+// is counted, with nothing created.
+func TestSessionWakeOpRequireRefusesAnInvalidKeyBeforeMaterializing(t *testing.T) {
+	reader := installManualMetricReader(t)
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+	dir := newCLIOpNamedCityWithoutRow(t)
+	h.opStore = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionWake([]string{killPokeSessionIdentity}, " padded", &stdout, &stderr, true); code != 1 {
+		t.Fatalf("wake = %d, want 1; stderr=%s", code, stderr.String())
+	}
+	if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeInvalidKey {
+		t.Fatalf("failure code = %q, want %s; stderr=%s", got, cliOpCodeInvalidKey, stderr.String())
+	}
+	if n := cliOpSessionRows(t, dir); n != 0 {
+		t.Fatalf("session rows = %d, want none: the key was refused, so nothing may be created", n)
+	}
+	want := string(opjournal.KindWake) + "|cli|admit|refused|" + legacyop.ReasonInvalidKey
+	if got := cliOpRecordCounts(t, reader); got[want] != 1 {
+		t.Fatalf("counts = %v, want %s counted once", got, want)
+	}
+}
+
+// A wake of a configured named session whose row is closed is admitted
+// before the row is reopened: a new key records the wake of the reopened
+// row, a key the reopened row's conversation already holds for another
+// request refuses with the row still closed, in every recording mode, and a
+// key that names an earlier successful wake replays it without reopening
+// anything.
+func TestSessionWakeOpAdmitsBeforeReopeningANamedRow(t *testing.T) {
+	for _, mode := range []string{"auto", "require"} {
+		t.Run(mode+" records the wake that reopens the row", func(t *testing.T) {
+			h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": mode})
+			c := newCLIOpCity(t, h, nil)
+			c.closeForReopen(t)
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionWake([]string{killPokeSessionIdentity}, "reopen-2", &stdout, &stderr, true); code != 0 {
+				t.Fatalf("wake = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if row := c.row(t); row.Status == "closed" {
+				t.Fatal("session row still closed: an admitted wake reopens it")
+			}
+			op := cliOpOnly(t, h.opStore)
+			if op.Kind != opjournal.KindWake || op.Conversation != c.bead.ID {
+				t.Fatalf("op %+v, want the wake of the reopened row %s", op, c.bead.ID)
+			}
+			cliOpWantOutcome(t, op, opjournal.ArmSucceeded, "", legacyop.ViaLegacy)
+			if m := cliOpJSON(t, stdout.Bytes()); m["op_id"] != op.ID || m["key"] != "reopen-2" || m["replayed"] == true {
+				t.Fatalf("wake JSON %v, want op %s under key reopen-2, not replayed", m, op.ID)
+			}
+		})
+		t.Run(mode+" refuses a key reused for a close", func(t *testing.T) {
+			h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": mode})
+			c := newCLIOpCity(t, h, nil)
+			c.closeForReopen(t)
+			planted := cliOpProposeOpen(t, h.opStore, opjournal.KindClose, c.bead.ID, "reopen-1", opjournal.Scope{}, cliOpT0, opjournal.Policy{})
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionWake([]string{killPokeSessionIdentity}, "reopen-1", &stdout, &stderr, true); code != 1 {
+				t.Fatalf("wake = %d, want 1; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+			}
+			if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeKeyMismatch {
+				t.Fatalf("failure code = %q, want %s; stderr=%s", got, cliOpCodeKeyMismatch, stderr.String())
+			}
+			if m := cliOpJSON(t, stdout.Bytes()); m["op_id"] != planted.ID || m["key"] != "reopen-1" {
+				t.Fatalf("failure envelope %v, want op_id %s and key reopen-1", m, planted.ID)
+			}
+			if row := c.row(t); row.Status != "closed" {
+				t.Fatalf("session row status = %q, want closed: the wake was refused, so nothing may be reopened", row.Status)
+			}
+		})
+	}
+	t.Run("auto replays an earlier wake without reopening", func(t *testing.T) {
+		h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+		c := newCLIOpCity(t, h, nil)
+		c.closeForReopen(t)
+		planted := cliOpPlantClosed(t, h.opStore, opjournal.KindWake, c.bead.ID, "reopen-1", opjournal.Scope{},
+			opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacy}})
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionWake([]string{killPokeSessionIdentity}, "reopen-1", &stdout, &stderr, true); code != 0 {
+			t.Fatalf("wake = %d, want 0; stdout=%s stderr=%s", code, stdout.String(), stderr.String())
+		}
+		if m := cliOpJSON(t, stdout.Bytes()); m["replayed"] != true || m["op_id"] != planted.ID {
+			t.Fatalf("wake JSON %v, want the replay of op %s", m, planted.ID)
+		}
+		validateJSONAgainstResultSchema(t, []string{"session", "wake"}, stdout.Bytes())
+		if row := c.row(t); row.Status != "closed" {
+			t.Fatalf("session row status = %q, want closed: a replay acts on nothing", row.Status)
+		}
+		if ops := cliOpRows(t, h.opStore); len(ops) != 1 {
+			t.Fatalf("op rows = %+v, want only the planted wake", ops)
+		}
+	})
 }
 
 // A kill replayed under --force says --force was not reapplied: it is outside

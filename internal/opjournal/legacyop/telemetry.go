@@ -55,6 +55,7 @@ const (
 	ReasonInvalidRequest       = "invalid_request"
 	ReasonUnmaterializedTarget = "unmaterialized_target"
 	ReasonNoGeneration         = "no_generation"
+	ReasonUnreadableTarget     = "unreadable_target"
 	ReasonProposeError         = "propose_error"
 )
 

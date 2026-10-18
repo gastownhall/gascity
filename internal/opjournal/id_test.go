@@ -273,3 +273,17 @@ func TestValidateConversation(t *testing.T) {
 		}
 	}
 }
+
+// TestMaxRefusedWhyLen pins the exported refused-reason budget to the token
+// limit a close applies: refused:<why> with a why of MaxRefusedWhyLen bytes
+// is a valid outcome reason, and one byte more is refused.
+func TestMaxRefusedWhyLen(t *testing.T) {
+	fits := Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + strings.Repeat("x", MaxRefusedWhyLen)}
+	if err := validateOutcome(fits, Cancel{}); err != nil {
+		t.Fatalf("validateOutcome(a %d-byte why) = %v, want nil", MaxRefusedWhyLen, err)
+	}
+	over := Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + strings.Repeat("x", MaxRefusedWhyLen+1)}
+	if err := validateOutcome(over, Cancel{}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("validateOutcome(a %d-byte why) = %v, want ErrInvalidRequest", MaxRefusedWhyLen+1, err)
+	}
+}

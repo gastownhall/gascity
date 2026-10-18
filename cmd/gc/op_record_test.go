@@ -171,6 +171,23 @@ func cliOpProposeOpen(t *testing.T, store beads.Store, kind opjournal.Kind, conv
 	return op
 }
 
+// cliOpPlantClosed writes a legacy:cli op for conv under the operator
+// principal and key, closed with outcome, as an earlier CLI run would leave
+// it.
+func cliOpPlantClosed(t *testing.T, store beads.Store, kind opjournal.Kind, conv, key string, scope opjournal.Scope, outcome opjournal.Outcome) opjournal.Op {
+	t.Helper()
+	op := cliOpProposeOpen(t, store, kind, conv, key, scope, cliOpT0, opjournal.Policy{})
+	st, err := opjournal.NewStore(beads.SessionStore{Store: store}, &clock.Fake{Time: cliOpT0}, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("opening op store: %v", err)
+	}
+	closed, err := st.Close(op.ID, outcome, legacyop.PrincipalOperator)
+	if err != nil {
+		t.Fatalf("closing op %s: %v", op.ID, err)
+	}
+	return closed
+}
+
 // cliOpIncapableStore hides the conditional-write family, as an old bd does.
 type cliOpIncapableStore struct{ beads.Store }
 
@@ -550,30 +567,10 @@ func TestSessionWakeOpInvalidKey(t *testing.T) {
 	})
 }
 
-func TestSessionKillOpKeyReusedForAnotherGenerationIsAMismatch(t *testing.T) {
-	newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
-	f := newCLIOpWakeFixture(t)
-	// An earlier kill under the same key named generation 2; this row is at 3.
-	cliOpProposeOpen(t, f.rec, opjournal.KindKill, f.id, "kill-key",
-		opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 2}, cliOpT0, opjournal.Policy{})
-	var stdout, stderr bytes.Buffer
-	op, start := startCLIOp(f.deps.cfg, f.rec, cliOpRequest{
-		verb: "gc session kill", kind: opjournal.KindKill, key: "kill-key", conversation: f.id,
-		scope:  opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 3},
-		asJSON: true, stdout: &stdout, stderr: &stderr,
-	})
-	if start != cliOpRefused || op.adm != nil {
-		t.Fatalf("start = %v, want refused", start)
-	}
-	if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeKeyMismatch {
-		t.Fatalf("failure code = %q, want %s", got, cliOpCodeKeyMismatch)
-	}
-}
-
 func TestCLIOpWakeConflictReasonIsAlwaysAValidToken(t *testing.T) {
 	for _, state := range []string{"", strings.Repeat("Very-Long State ", 20)} {
 		why := cliOpWakeConflictReason(state)
-		if why == "" || len(opjournal.RefusedReasonPrefix+why) > 128 {
+		if why == "" || len(why) > opjournal.MaxRefusedWhyLen {
 			t.Errorf("cliOpWakeConflictReason(%q) = %q, want a non-empty reason that fits a token", state, why)
 		}
 	}
