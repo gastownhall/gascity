@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -654,8 +656,18 @@ func TestCreateStartedTakesTheRuntimeLease(t *testing.T) {
 		store := openLeaseStore(t, t.TempDir())
 		sp := &createLeaseProvider{Fake: runtime.NewFake(), store: store, remint: true}
 		mgr := newTestManager(t, store, sp)
-		if _, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude"}); !errors.Is(err, ErrMintSuperseded) {
-			t.Fatalf("CreateSession over a re-minted row = %v, want ErrMintSuperseded", err)
+		_, err := mgr.CreateSession(context.Background(), CreateOptions{ExplicitName: "named-worker", Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude"})
+		if !errors.Is(err, ErrMintSuperseded) || !errors.Is(err, ErrStateSync) {
+			t.Fatalf("CreateSession over a re-minted row = %v, want ErrStateSync wrapping ErrMintSuperseded", err)
+		}
+		// The runtime is the newer incarnation's owner's: never stopped by
+		// name, and its row never closed under it.
+		if !sp.IsRunning("named-worker") || sp.CountCalls("Stop", "named-worker") != 0 {
+			t.Fatal("the refused confirm stopped the runtime by name")
+		}
+		all, err := store.List(beads.ListQuery{Type: BeadType, IncludeClosed: true})
+		if err != nil || len(all) != 1 || all[0].Status == "closed" {
+			t.Fatalf("rows %v (%v), want the created row left open", all, err)
 		}
 	})
 }
@@ -719,5 +731,304 @@ func TestRuntimeOnlyStartRunsTheCallersIncarnation(t *testing.T) {
 	if len(sp.seen) != 1 || sp.seen[0].env[runtime.RuntimeEpochEnv] != fmt.Sprint(current.Generation) || !current.recordedBy(sp.seen[0].row) ||
 		sp.seen[0].env[runtime.InstanceTokenEnv] != sp.seen[0].row["instance_token"] {
 		t.Fatalf("Start saw %+v, want the caller's incarnation %v", sp.seen, current)
+	}
+}
+
+// TestStartNeverMintsOverALiveRuntime: under its lease a start reads the
+// runtime fresh, and a runtime that is up with its agent alive is never
+// minted over: the row and the only live runtime keep naming one
+// incarnation, and nothing starts.
+//   - A managed suspend (`gc session suspend`) leaves the runtime to the
+//     controller's drain; an operator's attach or submit before it lands
+//     resumes the suspended row on that runtime.
+//   - A provider whose cached IsRunning reads a runtime gone that another
+//     start brought up before this one read the row (the tmux state cache's
+//     TTL, its degraded mode).
+func TestStartNeverMintsOverALiveRuntime(t *testing.T) {
+	for _, verb := range []string{"attach", "submit"} {
+		t.Run("managed suspend then "+verb, func(t *testing.T) {
+			store := openLeaseStore(t, t.TempDir())
+			sp := runtime.NewFake()
+			mgr := newTestManager(t, store, sp)
+			info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "claude", WorkDir: "/tmp", Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			runEnv := sp.LastStartConfig(info.SessionName).Env
+			if _, err := mgr.PersistedStore().OperatorSuspend(info.ID, time.Now()); err != nil {
+				t.Fatal(err)
+			}
+			by := testActor(mgr, ActorOperator)
+			if verb == "attach" {
+				err = mgr.Attach(context.Background(), by, info.ID, "claude", runtime.Config{})
+			} else {
+				_, err = mgr.Submit(context.Background(), by, info.ID, "hi", "claude", runtime.Config{}, SubmitIntentDefault)
+			}
+			if err != nil {
+				t.Fatalf("%s: %v", verb, err)
+			}
+			after := rowMeta(t, store, info.ID)
+			if after["generation"] != runEnv[runtime.RuntimeEpochEnv] || after["instance_token"] != runEnv[runtime.InstanceTokenEnv] {
+				t.Fatalf("row gen=%s tok=%s, but the only live runtime runs gen=%s tok=%s", after["generation"], after["instance_token"], runEnv[runtime.RuntimeEpochEnv], runEnv[runtime.InstanceTokenEnv])
+			}
+			if n := sp.CountCalls("Start", info.SessionName); n != 1 {
+				t.Fatalf("starts = %d, want the create's only", n)
+			}
+			if after["state"] != string(StateActive) || after["sleep_intent"] != "" {
+				t.Fatalf("row = %v, want the operator's resume converged: active, the hold consumed", after)
+			}
+		})
+	}
+	t.Run("stale provider cache", func(t *testing.T) {
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store)
+		sp := &staleCacheProvider{Fake: runtime.NewFake(), stale: true}
+		mgr := newTestManager(t, store, sp)
+		city, _ := mgr.CityDir()
+		// The controller's start, wholly under its lease, before the operator reads.
+		lease, err := TryRuntimeLease(mgr.PersistedStore(), RuntimeLeaseRequest{City: city.Path(), Name: "s-mint", ID: b.ID, TTL: leaseTTL})
+		if err != nil {
+			t.Fatal(err)
+		}
+		inc := mintUnder(t, mgr, lease, b.ID)
+		if err := sp.Fake.Start(context.Background(), "s-mint", runtime.Config{Env: inc.Env()}); err != nil {
+			t.Fatal(err)
+		}
+		lease.Release()
+		if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{}); err != nil {
+			t.Fatalf("Attach: %v", err)
+		}
+		if after := rowMeta(t, store, b.ID); after["generation"] != "4" || after["instance_token"] != inc.token || sp.CountCalls("Start", "s-mint") != 1 {
+			t.Fatalf("row %v, starts %d; want the controller's live generation 4 kept and no second start", after, sp.CountCalls("Start", "s-mint"))
+		}
+	})
+}
+
+// staleCacheProvider answers IsRunning from a snapshot taken before another
+// start, until its own Start invalidates it, as the tmux provider's state
+// cache does; its fresh read (ObserveLivenessSince, as tmux's
+// FreshLivenessObserver) goes past it.
+type staleCacheProvider struct {
+	*runtime.Fake
+	stale bool
+}
+
+func (p *staleCacheProvider) IsRunning(name string) bool {
+	if p.stale {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func (p *staleCacheProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	p.stale = false
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+func (p *staleCacheProvider) ObserveLivenessSince(name string, _ []string, _ time.Time) (runtime.Liveness, error) {
+	running := p.Fake.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+// recyclingProvider's Start replaces a pane whose agent died (a zombie), as
+// the tmux provider's zombie recycle does, instead of reporting it exists.
+type recyclingProvider struct{ *runtime.Fake }
+
+func (p *recyclingProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	if p.Zombies[name] {
+		_ = p.Stop(name)
+		delete(p.Zombies, name)
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+// TestStartReplacesAZombieUnderANewIncarnation: resuming a suspended row
+// whose pane is up with its agent dead (a zombie) is a start, not a
+// converge: the start mints and its Start replaces the pane, so the row and
+// the new process name the new incarnation. A start that still finds the
+// name taken (a provider that does not recycle) converges and withdraws its
+// mint. (A row not suspended keeps ensureRunning's: an operator attaches to
+// a crashed pane to read it.)
+func TestStartReplacesAZombieUnderANewIncarnation(t *testing.T) {
+	for _, recycles := range []bool{true, false} {
+		t.Run(fmt.Sprintf("recycles=%v", recycles), func(t *testing.T) {
+			store := openLeaseStore(t, t.TempDir())
+			b := mintRow(t, store, "state", string(StateSuspended))
+			fake := runtime.NewFake()
+			if err := fake.Start(context.Background(), "s-mint", runtime.Config{Env: map[string]string{runtime.RuntimeEpochEnv: "3", runtime.InstanceTokenEnv: "tok-3"}}); err != nil {
+				t.Fatal(err)
+			}
+			fake.Zombies["s-mint"] = true
+			var sp runtime.Provider = fake
+			if recycles {
+				sp = &recyclingProvider{Fake: fake}
+			}
+			mgr := newTestManager(t, store, sp)
+			hints := runtime.Config{ProcessNames: []string{"claude"}}
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", hints); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			after := rowMeta(t, store, b.ID)
+			env := fake.LastStartConfig("s-mint").Env
+			if !recycles {
+				if after["generation"] != "3" || after["instance_token"] != "tok-3" || after["last_woke_at"] != "" {
+					t.Fatalf("row %v, want the converged start's mint withdrawn", after)
+				}
+				return
+			}
+			if after["generation"] != "4" || env[runtime.RuntimeEpochEnv] != "4" || env[runtime.InstanceTokenEnv] != after["instance_token"] {
+				t.Fatalf("row %v, recycled pane env %v; want both on the new generation 4", after, env)
+			}
+		})
+	}
+}
+
+// TestFailedStartWithdrawsItsMint: a start that launches nothing (its Start
+// fails, its stale-key relaunch fails) leaves the row as it found it: the
+// generation, token, continuation epoch, last_woke_at and a consumed reset
+// marker are written back while the row still records the mint.
+func TestFailedStartWithdrawsItsMint(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		meta []string
+		sp   func(*runtime.Fake, beads.Store, string) runtime.Provider
+	}{
+		{"start error", []string{"continuation_reset_pending", "true", "last_woke_at", "2099-01-01T00:00:00Z"}, func(f *runtime.Fake, _ beads.Store, _ string) runtime.Provider {
+			return &startOverrideProvider{Fake: f, startErr: errors.New("out of memory")}
+		}},
+		{"stale-key relaunch fails", []string{"session_key", "k-stale", "resume_flag", "--resume"}, func(f *runtime.Fake, store beads.Store, id string) runtime.Provider {
+			return &mintSeeingProvider{Fake: f, store: store, id: id, failFirst: 2}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := openLeaseStore(t, t.TempDir())
+			b := mintRow(t, store, tc.meta...)
+			before := rowMeta(t, store, b.ID)
+			mgr := newTestManager(t, store, tc.sp(runtime.NewFake(), store, b.ID), WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+			if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume k-stale", runtime.Config{}); err == nil {
+				t.Fatal("Start succeeded, want its failure")
+			}
+			after := rowMeta(t, store, b.ID)
+			for _, k := range []string{"generation", "instance_token", "continuation_epoch", "last_woke_at"} {
+				if after[k] != before[k] {
+					t.Errorf("%s = %q after the failed start, want %q", k, after[k], before[k])
+				}
+			}
+			if tc.name == "start error" && after["continuation_reset_pending"] != "true" {
+				t.Errorf("continuation_reset_pending = %q, want the consumed reset restored", after["continuation_reset_pending"])
+			}
+		})
+	}
+}
+
+// TestUnmintOnlyWhileTheRowRecordsTheMint: a withdrawal writes nothing over
+// a row that moved on, and an empty confirm still reads whether the row
+// records its incarnation.
+func TestUnmintOnlyWhileTheRowRecordsTheMint(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, backing)
+	front := NewStore(beads.SessionStore{Store: backing})
+	first, err := front.MintIncarnation(context.Background(), nil, mintReq(infoOf(t, backing, b.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	newer, err := front.MintIncarnation(context.Background(), nil, mintReq(infoOf(t, backing, b.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if landed, err := front.unmintIncarnation(first); err != nil || landed {
+		t.Fatalf("withdrawing a superseded mint = %v, %v; want refused", landed, err)
+	}
+	if meta := rowMeta(t, backing, b.ID); !newer.recordedBy(meta) {
+		t.Fatalf("row %v, want the newer mint kept", meta)
+	}
+	if landed, err := front.ConfirmIncarnation(first, nil); err != nil || landed {
+		t.Fatalf("empty confirm of a superseded mint = %v, %v; want false", landed, err)
+	}
+	if landed, err := front.ConfirmIncarnation(newer, nil); err != nil || !landed {
+		t.Fatalf("empty confirm of the current mint = %v, %v; want true", landed, err)
+	}
+	if landed, err := front.unmintIncarnation(newer); err != nil || !landed {
+		t.Fatalf("withdrawing the current mint = %v, %v; want landed", landed, err)
+	}
+	if meta := rowMeta(t, backing, b.ID); !first.recordedBy(meta) {
+		t.Fatalf("row %v, want the mint before it back", meta)
+	}
+}
+
+// TestMintRefusesALapsedLease: a lease past its SafeUntil on its own clock
+// mints nothing, though no other holder took it yet.
+func TestMintRefusesALapsedLease(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, backing, "session_name", "s-lease")
+	front := NewStore(beads.SessionStore{Store: backing})
+	now := mintT0
+	lease, err := TryRuntimeLease(front, RuntimeLeaseRequest{City: t.TempDir(), Name: "s-lease", ID: b.ID, TTL: leaseTTL, now: func() time.Time { return now }})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lease.Release()
+	now = lease.SafeUntil()
+	_, err = front.MintIncarnation(context.Background(), lease, mintReq(infoOf(t, backing, b.ID)))
+	if !errors.Is(err, ErrMintSuperseded) || !errors.Is(err, ErrRuntimeLeaseLost) {
+		t.Fatalf("mint under a lapsed lease = %v, want ErrMintSuperseded wrapping ErrRuntimeLeaseLost", err)
+	}
+	if meta := rowMeta(t, backing, b.ID); meta["generation"] != "3" {
+		t.Fatalf("row %v, want generation 3 left", meta)
+	}
+}
+
+// TestRuntimeOnlyStartConsumesALateReset: a continuation reset recorded
+// after the caller's PreWake (its prepared start's stale-resume clear) is
+// consumed by the legacy runtime-only start: the env publishes the bumped
+// epoch, which the row records, under the caller's generation and token.
+func TestRuntimeOnlyStartConsumesALateReset(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store)
+	sp := &mintSeeingProvider{Fake: runtime.NewFake(), store: store, id: b.ID}
+	mgr := newTestManager(t, store, sp)
+	by := runtimeOnlyActor(t, mgr, b.ID)
+	inc := mintUnder(t, mgr, by.Lease, b.ID)
+	if err := store.SetMetadataBatch(b.ID, map[string]string{"continuation_reset_pending": "true"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.StartRuntimeOnly(context.Background(), by, b.ID, inc, "claude", runtime.Config{}); err != nil {
+		t.Fatalf("StartRuntimeOnly: %v", err)
+	}
+	env, meta := sp.seen[0].env, rowMeta(t, store, b.ID)
+	want := fmt.Sprint(inc.ContinuationEpoch + 1)
+	if env[runtime.ContinuationEpochEnv] != want || meta["continuation_epoch"] != want || meta["continuation_reset_pending"] != "" ||
+		env[runtime.InstanceTokenEnv] != inc.token || !inc.recordedBy(meta) {
+		t.Fatalf("env %v, row %v; want epoch %s under the caller's incarnation", env, meta, want)
+	}
+}
+
+// TestRecordedIncarnationForTestStaysInTests: production code never builds
+// an incarnation it did not mint; the test-only constructor appears in no
+// non-test file of the packages that start sessions.
+func TestRecordedIncarnationForTestStaysInTests(t *testing.T) {
+	root := repoRoot(t)
+	for _, dir := range []string{"internal/session", "internal/worker", "internal/api", "cmd/gc"} {
+		entries, err := os.ReadDir(filepath.Join(root, dir))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, e := range entries {
+			name := e.Name()
+			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+				continue
+			}
+			src, err := os.ReadFile(filepath.Join(root, dir, name))
+			if err != nil {
+				t.Fatal(err)
+			}
+			n := strings.Count(string(src), "RecordedIncarnationForTest(")
+			if dir == "internal/session" && name == "incarnation.go" {
+				n-- // its definition
+			}
+			if n > 0 {
+				t.Errorf("%s/%s calls RecordedIncarnationForTest outside a test", dir, name)
+			}
+		}
 	}
 }

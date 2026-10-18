@@ -808,7 +808,9 @@ func TestRuntimeStartCallSitesCleanOrphansFirst(t *testing.T) {
 // cleanup's error.
 func orphanCleanupPrecedes(lines []string, before int, idExpr string) bool {
 	needle := "m.killExistingOrphans(ctx, " + idExpr + ")"
-	const window = 10
+	// The start's incarnation mint (and its env) sits between the orphan
+	// kill and the Start (I-MINT), so the window spans it.
+	const window = 24
 	seen := 0
 	for i := before - 1; i >= 0 && seen < window; i-- {
 		if strings.TrimSpace(lines[i]) == "" {
@@ -4256,6 +4258,11 @@ func TestSendClosedSessionReturnsErrSessionClosed(t *testing.T) {
 	}
 }
 
+// A Start's own failure is reported, not taken for a duplicate start, even
+// while the provider reads the name running: here a pane whose agent died (a
+// zombie), which a start replaces rather than converges on. (A runtime up
+// with its agent alive is converged on before any Start: I-MINT.) The
+// failed start withdraws its mint.
 func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	base := runtime.NewFake()
 	sp := &startOverrideProvider{Fake: base}
@@ -4272,11 +4279,17 @@ func TestSendDoesNotSuppressNonDuplicateResumeError(t *testing.T) {
 	if err := sp.Fake.Start(context.Background(), info.SessionName, runtime.Config{WorkDir: "/tmp"}); err != nil {
 		t.Fatalf("fake concurrent Start: %v", err)
 	}
+	base.Zombies[info.SessionName] = true
 	sp.startErr = errors.New("out of memory")
+	before, _ := store.Get(info.ID)
 
-	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp"})
+	_, err = mgr.Send(context.Background(), testActor(mgr, ActorOperator), info.ID, "hello", "claude --resume", runtime.Config{WorkDir: "/tmp", ProcessNames: []string{"claude"}})
 	if err == nil || !strings.Contains(err.Error(), "out of memory") {
 		t.Fatalf("Send error = %v, want underlying non-duplicate start failure", err)
+	}
+	after, _ := store.Get(info.ID)
+	if after.Metadata["generation"] != before.Metadata["generation"] || after.Metadata["instance_token"] != before.Metadata["instance_token"] {
+		t.Fatalf("row after the failed start = gen %s token %s, want its incarnation (gen %s) kept", after.Metadata["generation"], after.Metadata["instance_token"], before.Metadata["generation"])
 	}
 }
 

@@ -1040,7 +1040,10 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		// taken before any provider call: the name's flock excludes another
 		// starter or stopper of the same runtime name on this host, and the
 		// row's record those on other hosts. A held lease is busy
-		// (ErrSessionStarting).
+		// (ErrSessionStarting). Lock order: the process's identifier
+		// reservation locks (held here), then the lease; the session mutation
+		// lock is not taken, and the lease is tried, never waited for, so no
+		// holder of the lease can be waiting on a reservation lock held here.
 		lease, leaseErr := m.leaseCreatedRuntime(b.ID, sessName)
 		if leaseErr != nil {
 			if rbErr := rollbackFailedCreate(); rbErr != nil {
@@ -1110,6 +1113,11 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("starting session: %w", err)
 		}
 		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
+			if errors.Is(metaErr, ErrMintSuperseded) {
+				// The row records a newer incarnation: the runtime is its
+				// owner's to keep or reap, never stopped by name here.
+				return metaErr
+			}
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
 				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
 			}
@@ -1139,7 +1147,7 @@ func (m *Manager) confirmStartedRuntimeMetadata(inc Incarnation, sessName string
 	case err != nil:
 		return fmt.Errorf("storing started runtime metadata: %w", err)
 	case !landed:
-		return fmt.Errorf("storing started runtime metadata: session %s no longer records %s: %w", inc.ID, inc, ErrMintSuperseded)
+		return fmt.Errorf("%w: storing started runtime metadata: session %s no longer records %s: %w", ErrStateSync, inc.ID, inc, ErrMintSuperseded)
 	}
 	if b != nil {
 		if b.Metadata == nil {

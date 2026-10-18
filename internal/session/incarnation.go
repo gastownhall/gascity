@@ -37,6 +37,9 @@ type Incarnation struct {
 	MintedAt          time.Time
 	By                ActorKind
 	minted            bool
+	// prior is what the mint replaced, its identity keys as the row held
+	// them: the withdrawal of a mint no process ran under (unmintIncarnation).
+	prior MetadataPatch
 }
 
 // Valid reports whether i was minted and names a whole incarnation.
@@ -198,6 +201,10 @@ func (s *Store) MintIncarnation(ctx context.Context, lease *RuntimeLease, req Mi
 			return Incarnation{}, fmt.Errorf("%w: %s", ErrMintSuperseded, id)
 		}
 		inc := nextIncarnation(fresh, req)
+		inc.prior = MetadataPatch{}
+		for k := range inc.IdentityPatch(req.FreshContext) {
+			inc.prior[k] = bead.Metadata[k]
+		}
 		patch := MetadataPatch{}
 		if req.Patch != nil {
 			maps.Copy(patch, req.Patch(fresh, inc))
@@ -278,8 +285,12 @@ func (s *Store) ConfirmIncarnation(inc Incarnation, patch MetadataPatch) (bool, 
 	if !inc.Valid() {
 		return false, fmt.Errorf("confirming session %q: %w", inc.ID, ErrIncarnationNotMinted)
 	}
-	if len(patch) == 0 {
-		return true, nil
+	if len(patch) == 0 { // nothing to write: whether the row still records inc
+		b, err := s.freshBead(inc.ID)
+		if err != nil {
+			return false, err
+		}
+		return b.Status != "closed" && inc.recordedBy(b.Metadata), nil
 	}
 	res, err := s.commitIf(inc.ID, patch, nil, startCommitMaxAttempts, s.freshBead, func(b beads.Bead) bool {
 		return inc.recordedBy(b.Metadata)
@@ -289,6 +300,29 @@ func (s *Store) ConfirmIncarnation(inc Incarnation, patch MetadataPatch) (bool, 
 		return false, err
 	case res == CommitContended:
 		return false, fmt.Errorf("confirming session %q: lost the revision fence %d times", inc.ID, startCommitMaxAttempts)
+	}
+	return res == CommitLanded, nil
+}
+
+// unmintIncarnation withdraws a mint no process ran under (a start that
+// converged on a runtime already up, or failed before or at its launch): it
+// writes back what the mint replaced (the generation, token, continuation
+// epoch, last_woke_at and, where the mint consumed one, the reset marker),
+// fenced like ConfirmIncarnation and only while the row still records inc.
+// False means the row moved on and nothing was written. A legacy PreWake's
+// own keys (MintRequest.Patch) are its caller's to undo.
+func (s *Store) unmintIncarnation(inc Incarnation) (bool, error) {
+	if !inc.Valid() || inc.prior == nil {
+		return false, fmt.Errorf("withdrawing session %q: %w", inc.ID, ErrIncarnationNotMinted)
+	}
+	res, err := s.commitIf(inc.ID, inc.prior, nil, startCommitMaxAttempts, s.freshBead, func(b beads.Bead) bool {
+		return inc.recordedBy(b.Metadata)
+	})
+	switch {
+	case err != nil:
+		return false, err
+	case res == CommitContended:
+		return false, fmt.Errorf("withdrawing session %q: lost the revision fence %d times", inc.ID, startCommitMaxAttempts)
 	}
 	return res == CommitLanded, nil
 }

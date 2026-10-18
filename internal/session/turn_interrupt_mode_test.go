@@ -89,7 +89,9 @@ func checkInterruptNow(t *testing.T, fam turnInterruptFamily, mgr *Manager, sp *
 // sequence it had before turn-interrupt modes existed: these call sequences
 // were recorded from the code before the change. (A delivery's two cached
 // IsRunning reads after its fresh read went with mc-ir8qp: whether the
-// runtime runs is the fresh read's.)
+// runtime runs is the fresh read's. pi's restart reads the runtime fresh
+// once more under its lease before it mints (I-MINT): a start never mints
+// over a live runtime.)
 func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 	golden := map[string]struct{ stop, now string }{
 		"claude": {
@@ -118,7 +120,7 @@ func TestKeystrokeTurnInterruptKeepsProviderSequences(t *testing.T) {
 		},
 		"pi": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
-			now:  "IsRunning IsRunning IsRunning Pending IsRunning Stop IsRunning IsRunning FindRuntimesBySessionID Start IsRunning NudgeNow(msg)",
+			now:  "IsRunning IsRunning IsRunning Pending IsRunning Stop IsRunning IsRunning IsRunning FindRuntimesBySessionID Start IsRunning NudgeNow(msg)",
 		},
 		"opencode": {
 			stop: "IsRunning IsRunning IsRunning Interrupt",
