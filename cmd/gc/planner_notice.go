@@ -213,14 +213,13 @@ func plannerNoticeLaneFor(store beads.Store) plannerNoticeLane {
 	return found
 }
 
-// laneStoreChainHops bounds the wrapper walk in laneStoreChain.
-const laneStoreChainHops = 8
+// laneStoreWrapHops bounds the wrapper walk in laneStoresShare.
+const laneStoreWrapHops = 8
 
 // laneStoresShare reports whether a and b are, or wrap, the same store.
 func laneStoresShare(a, b beads.Store) bool {
-	chainA := laneStoreChain(a)
-	for _, sb := range laneStoreChain(b) {
-		for _, sa := range chainA {
+	for sa, i := a, 0; i < laneStoreWrapHops && !isNilBeadStore(sa); sa, i = laneStoreWrapped(sa), i+1 {
+		for sb, j := b, 0; j < laneStoreWrapHops && !isNilBeadStore(sb); sb, j = laneStoreWrapped(sb), j+1 {
 			if sameBeadStore(sa, sb) {
 				return true
 			}
@@ -229,26 +228,17 @@ func laneStoresShare(a, b beads.Store) bool {
 	return false
 }
 
-// laneStoreChain is store and every store it wraps: a class view's store, the
-// lane's live view, a cache's backing, a wrapper's conditional-writes target.
-func laneStoreChain(store beads.Store) []beads.Store {
-	var chain []beads.Store
-	cur := store
-	for range laneStoreChainHops {
-		if isNilBeadStore(cur) {
-			break
-		}
-		chain = append(chain, cur)
-		switch s := cur.(type) {
-		case beads.SessionStore:
-			cur = s.Store
-		case laneLiveSessions:
-			cur = s.Store
-		default:
-			cur = laneUnwrapStore(cur)
-		}
+// laneStoreWrapped is the store store wraps, nil when it wraps none: a class
+// view's store, the lane's live view's store, a cache's backing, or a
+// wrapper's conditional-writes target.
+func laneStoreWrapped(store beads.Store) beads.Store {
+	switch s := store.(type) {
+	case beads.SessionStore:
+		return s.Store
+	case laneLiveSessions:
+		return s.Store
 	}
-	return chain
+	return laneUnwrapStore(store)
 }
 
 // plannerNoticeToken is a session row's incarnation token for a notice key.
