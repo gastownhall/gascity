@@ -1682,6 +1682,16 @@ resource = "fixed_sleep"
 calls = 1
 
 [[count]]
+path = "internal/api/session_ops_test.go"
+resource = "fixed_sleep"
+calls = 9
+
+[[count]]
+path = "internal/api/session_ops_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
 path = "internal/api/session_stream_capability_test.go"
 resource = "fixed_sleep"
 calls = 1
