@@ -37,8 +37,8 @@ import (
 // open with MaxOpenConns=1) then serializes those callers on that connection. So no caller may hold a
 // transaction or a connection-scoped operation open while it calls code that
 // opens the same scope: under the memo that open is the same pool, and the
-// inner call would wait on the outer one's connection forever. The hook verbs
-// in invocationStoreMemoCommands make one store call at a time.
+// inner call would wait on the outer one's connection forever. The verbs in
+// invocationStoreMemoCommands make one store call at a time.
 //
 // The memo is opt-in per command. run() enables it only for the one-shot verbs
 // in invocationStoreMemoCommands; long-lived entry points (the supervisor and
@@ -46,11 +46,15 @@ import (
 // close and reopen is really closed and reopened.
 
 // invocationStoreMemoCommands are the command paths run() opens the memo for:
-// the session-side hook verbs, each of which runs once and exits.
+// the session-side hook verbs and the read-only patrol verbs that reach one
+// scope more than once, each of which runs once and exits. gc mail inbox opens
+// the city store for its mail provider and again to resolve its target, and
+// holds no transaction across either.
 var invocationStoreMemoCommands = map[string]bool{
 	"gc handoff":     true,
 	"gc hook":        true,
 	"gc mail check":  true,
+	"gc mail inbox":  true,
 	"gc mail send":   true,
 	"gc nudge drain": true,
 	"gc prime":       true,
