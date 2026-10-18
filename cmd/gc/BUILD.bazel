@@ -1327,6 +1327,7 @@ go_test(
         "convergence_integration_test.go",
         "conversation_lane_exec_test.go",
         "conversation_lane_host_test.go",
+        "conversation_lane_steer_test.go",
         "convoy_chargolden_test.go",
         "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",
