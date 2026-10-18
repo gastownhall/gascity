@@ -359,7 +359,7 @@ func runSequence(seed uint64) error {
 			s.rec = r
 		}
 		for _, a := range d.Actions {
-			if n, ok := a.(Nudge); ok && s.event(10) {
+			if n, ok := a.(Nudge); ok && !n.Paused && s.event(10) { // only a counted nudge is refused (the lane's rule)
 				if r, _, ok := NudgeRefused(s.rec, n.Key, n.Attempt, o.Now); ok {
 					s.rec = r
 				}
