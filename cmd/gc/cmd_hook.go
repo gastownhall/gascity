@@ -270,6 +270,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	if opts.Inject {
 		return 0
 	}
+	// One composed city config for the whole invocation. The front door loads
+	// it, and the claim's helpers and the drain-ack load it again on their own;
+	// each composition walks city.toml and every pack include, ~0.15-0.2 s on
+	// maintainer-city (see beginInvocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// Accepted for compatibility with installed hook commands; non-inject
 	// gc hook output ignores provider-specific formatting.
 	_ = opts.HookFormat
@@ -300,7 +305,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	cityPath, err := resolveCity()
+	// The rig context `gc hook` resolves agents against is its own
+	// (currentRigContext), so the city resolution skips the full config load a
+	// rig name costs.
+	cityPath, err := resolveCityPathOnly()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
