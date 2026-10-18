@@ -242,6 +242,7 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// next prune threshold to twice what the prune kept. The frozen branches
 	// predate the record, so the reference end state cannot supply it.
 	exp.announcedPruneNext = 2 * len(exp.announcedCloseIDs)
+	exp.announcedPrunedAt = in.now
 	exp.silentCloseIDs = expectedSilentCloseIDs(st, exp)
 	return exp
 }

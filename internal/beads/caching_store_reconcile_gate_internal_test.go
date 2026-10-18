@@ -204,42 +204,53 @@ func TestRequestReconcileSurvivesARunThatDiscardsItsMerge(t *testing.T) {
 }
 
 // Before the first reconcile, the backstop is due an interval after the
-// Prime's scan: refreshes that change rows (a journal feed's steady
-// out-of-band activity) mark the cache fresh but do not postpone it.
+// Prime's (or PrimeActive's, as the controller boots) scan: refreshes that
+// change rows (a journal feed's steady out-of-band activity) mark the cache
+// fresh but do not postpone it.
 func TestFirstReconcileIsDueAnIntervalAfterThePrime(t *testing.T) {
-	var mu sync.Mutex
-	now := time.Unix(1_000_000, 0)
-	clock := func() time.Time {
-		mu.Lock()
-		defer mu.Unlock()
-		return now
-	}
-	advance := func(d time.Duration) {
-		mu.Lock()
-		defer mu.Unlock()
-		now = now.Add(d)
-	}
-	backing := NewMemStore()
-	cs := NewCachingStoreForTest(backing, nil, WithClock(clock))
-	if err := cs.Prime(context.Background()); err != nil {
-		t.Fatalf("Prime: %v", err)
-	}
-	primedAt := clock()
-	cs.mu.RLock()
-	interval := cs.adaptiveIntervalLocked()
-	cs.mu.RUnlock()
-	for elapsed := time.Duration(0); elapsed < 2*interval; elapsed += interval / 4 {
-		advance(interval / 4)
-		row, err := backing.Create(Bead{Title: "out of band"})
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := cs.RefreshRow(row.ID); err != nil {
-			t.Fatalf("RefreshRow: %v", err)
-		}
-	}
-	if d := cs.nextReconcileDelay(clock()); d != 0 {
-		t.Fatalf("delay %v after the Prime at %v with refreshes since = %v, want due", clock().Sub(primedAt), primedAt, d)
+	for _, tc := range []struct {
+		name  string
+		prime func(cs *CachingStore) error
+	}{
+		{name: "prime", prime: func(cs *CachingStore) error { return cs.Prime(context.Background()) }},
+		{name: "prime_active", prime: func(cs *CachingStore) error { return cs.PrimeActive() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			now := time.Unix(1_000_000, 0)
+			clock := func() time.Time {
+				mu.Lock()
+				defer mu.Unlock()
+				return now
+			}
+			advance := func(d time.Duration) {
+				mu.Lock()
+				defer mu.Unlock()
+				now = now.Add(d)
+			}
+			backing := NewMemStore()
+			cs := NewCachingStoreForTest(backing, nil, WithClock(clock))
+			if err := tc.prime(cs); err != nil {
+				t.Fatalf("prime: %v", err)
+			}
+			primedAt := clock()
+			cs.mu.RLock()
+			interval := cs.adaptiveIntervalLocked()
+			cs.mu.RUnlock()
+			for elapsed := time.Duration(0); elapsed < 2*interval; elapsed += interval / 4 {
+				advance(interval / 4)
+				row, err := backing.Create(Bead{Title: "out of band"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				if _, err := cs.RefreshRow(row.ID); err != nil {
+					t.Fatalf("RefreshRow: %v", err)
+				}
+			}
+			if d := cs.nextReconcileDelay(clock()); d != 0 {
+				t.Fatalf("delay %v after the prime at %v with refreshes since = %v, want due", clock().Sub(primedAt), primedAt, d)
+			}
+		})
 	}
 }
 

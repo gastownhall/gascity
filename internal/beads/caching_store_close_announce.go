@@ -107,13 +107,17 @@ const announcedClosesPruneAt = 4096
 // announcedClosesPruneNext, it prunes the expired ones first, so a cache whose
 // reconcile loop does not run keeps a bounded record, and a burst of closes
 // inside one recentWriteVerifyWindow, whose prunes free nothing, scans the
-// record a logarithmic number of times rather than at every close. Callers
-// must not hold c.mu.
+// record a logarithmic number of times rather than at every close. A record
+// of at least announcedClosesPruneAt entries is also pruned once the last
+// prune is a window old, so the size a burst raised announcedClosesPruneNext
+// to does not hold its expired entries until the record grows back to it.
+// Callers must not hold c.mu.
 func (c *CachingStore) recordAnnouncedClose(b Bead) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clockNow()
-	if len(c.announcedCloses) >= max(announcedClosesPruneAt, c.announcedClosesPruneNext) {
+	if n := len(c.announcedCloses); n >= max(announcedClosesPruneAt, c.announcedClosesPruneNext) ||
+		(n >= announcedClosesPruneAt && now.Sub(c.announcedClosesPrunedAt) > recentWriteVerifyWindow) {
 		c.pruneAnnouncedClosesLocked(now)
 	}
 	c.recordAnnouncedCloseLocked(b.ID, b, now)
@@ -204,8 +208,9 @@ func (c *CachingStore) announcedCloseCoversLocked(id string, fresh Bead, now tim
 }
 
 // pruneAnnouncedClosesLocked drops the announcedCloses entries older than
-// recentWriteVerifyWindow, and sets announcedClosesPruneNext to twice the
-// entries it kept. Caller must hold c.mu in write mode.
+// recentWriteVerifyWindow, sets announcedClosesPruneNext to twice the entries
+// it kept, and dates the prune (announcedClosesPrunedAt). Caller must hold
+// c.mu in write mode.
 func (c *CachingStore) pruneAnnouncedClosesLocked(now time.Time) {
 	for id, ac := range c.announcedCloses {
 		if now.Sub(ac.at) > recentWriteVerifyWindow {
@@ -213,6 +218,7 @@ func (c *CachingStore) pruneAnnouncedClosesLocked(now time.Time) {
 		}
 	}
 	c.announcedClosesPruneNext = 2 * len(c.announcedCloses)
+	c.announcedClosesPrunedAt = now
 }
 
 // dropQueuedCloseLocked removes id's queued close and reports whether one was

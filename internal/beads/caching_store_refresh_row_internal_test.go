@@ -1495,6 +1495,29 @@ func TestCachingStoreAnnouncedClosesPruneIsAmortized(t *testing.T) {
 	}
 }
 
+// TestCachingStoreAnnouncedClosesPruneDoesNotRatchet records a burst that
+// raises the size the next prune waits for, then lets the burst expire: the
+// first close recorded a window after the last prune prunes the record,
+// though it has not grown back to that size, so a record whose re-scan does
+// not run shrinks back after a burst.
+func TestCachingStoreAnnouncedClosesPruneDoesNotRatchet(t *testing.T) {
+	t.Parallel()
+	clock := time.Unix(1_800_000_000, 0)
+	cache := NewCachingStore(NewMemStore(), nil, WithClock(func() time.Time { return clock }))
+	const burst = 3 * announcedClosesPruneAt
+	for i := range burst {
+		cache.recordAnnouncedClose(Bead{ID: "gc-burst-" + strconv.Itoa(i)})
+	}
+	if n := announcedCloseCount(cache); n != burst {
+		t.Fatalf("record after the burst = %d, want %d", n, burst)
+	}
+	clock = clock.Add(recentWriteVerifyWindow + time.Second)
+	cache.recordAnnouncedClose(Bead{ID: "gc-after"})
+	if n := announcedCloseCount(cache); n != 1 {
+		t.Fatalf("record a window after the burst = %d, want 1 (the expired burst pruned)", n)
+	}
+}
+
 // wholeSecondStore reads every row as stamped in one whole second, as a
 // backing that stamps whole seconds does for the writes inside one, and with
 // revisions false, as a backing that has no revisions.
@@ -1640,4 +1663,24 @@ func TestCachingStoreRefreshRowNeverAnnouncesUnheldCloses(t *testing.T) {
 		t.Fatalf("RefreshRow = %q, %v; want the closed row", got.Status, err)
 	}
 	assertEvents(t, rec.take())
+}
+
+// sameRowVersion knows two rows for one version only by a matching nonzero
+// Revision: rows without one are never known to be the same version.
+func TestSameRowVersion(t *testing.T) {
+	t.Parallel()
+	for _, tc := range []struct {
+		name string
+		a, b int64
+		want bool
+	}{
+		{name: "same_revision", a: 7, b: 7, want: true},
+		{name: "other_revision", a: 7, b: 8},
+		{name: "both_revision_less", a: 0, b: 0},
+		{name: "one_revision_less", a: 7, b: 0},
+	} {
+		if got := sameRowVersion(Bead{Revision: tc.a}, Bead{Revision: tc.b}); got != tc.want {
+			t.Errorf("%s: sameRowVersion(%d, %d) = %v, want %v", tc.name, tc.a, tc.b, got, tc.want)
+		}
+	}
 }

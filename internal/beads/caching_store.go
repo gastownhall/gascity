@@ -156,6 +156,10 @@ type CachingStore struct {
 	// of closes whose prunes free nothing scans it a logarithmic number of
 	// times.
 	announcedClosesPruneNext int
+	// announcedClosesPrunedAt is when announcedCloses was last pruned: a
+	// record a window past it is pruned at the next announcement, whatever
+	// announcedClosesPruneNext says.
+	announcedClosesPrunedAt time.Time
 	// localWrites tracks the local writes between their start and their
 	// return, so a yielding RefreshRowReport does not announce a write's row
 	// before the write absorbs it (localWritesInFlight).

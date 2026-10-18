@@ -473,6 +473,46 @@ func TestCachingStoreRefreshRowReportYieldsBeforeItsBackingRead(t *testing.T) {
 	}
 }
 
+// A local write that began during the refresh's backing read and absorbed
+// its row before the refresh took the lock, but has not returned yet, makes
+// the refresh yield rather than fence: the yield spends none of the ledger
+// feed's retries, and the row is the write's.
+func TestCachingStoreRefreshRowReportYieldsBeforeItFencesOnAnInFlightWrite(t *testing.T) {
+	t.Parallel()
+
+	mem := NewMemStore()
+	backing := &getHookStore{Store: mem}
+	cache, rec := newReportCacheForTest(t, backing)
+	seed := mustCreateCached(t, cache)
+	rec.take()
+
+	var end func()
+	backing.onGet = func(id string) {
+		// The write starts and absorbs its row while the refresh reads.
+		_, end = cache.beginLocalWrite(id)
+		cache.mu.Lock()
+		cache.noteLocalMutationLocked(id)
+		cache.mu.Unlock()
+	}
+	_, err := cache.RefreshRowReport(seed.ID, RowRefreshOptions{YieldToLocalWrites: true})
+	if end == nil {
+		t.Fatal("the refresh never read the row")
+	}
+	end()
+	if !errors.Is(err, ErrRowRefreshYielded) {
+		t.Fatalf("refresh = %v, want ErrRowRefreshYielded", err)
+	}
+	// Without the yield option the same race is a fence.
+	backing.onGet = func(id string) {
+		cache.mu.Lock()
+		cache.noteLocalMutationLocked(id)
+		cache.mu.Unlock()
+	}
+	if _, err := cache.RefreshRowReport(seed.ID, RowRefreshOptions{}); !errors.Is(err, ErrRowRefreshFenced) || errors.Is(err, ErrRowRefreshYielded) {
+		t.Fatalf("refresh without the yield = %v, want ErrRowRefreshFenced only", err)
+	}
+}
+
 // RefreshRow (v2's lag repair) does not yield: its fences are unchanged.
 func TestCachingStoreRefreshRowDoesNotYieldToInFlightWrites(t *testing.T) {
 	t.Parallel()

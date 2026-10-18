@@ -849,14 +849,17 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 		c.mu.Unlock()
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrCacheUnavailable)
 	}
-	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
-		c.mu.Unlock()
-		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
-	}
+	// The yield is checked before the fences: a write still in flight that
+	// absorbed during the read owns the row, and a yield, unlike a fence,
+	// costs the caller no retry.
 	cached, held := c.beads[id]
 	if opts.YieldToLocalWrites && c.localWrites.mayTouch(id, held) {
 		c.mu.Unlock()
 		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshYielded)
+	}
+	if c.refetchFencedLocked(id, startSeq) || c.scanGen != startScan {
+		c.mu.Unlock()
+		return RowRefresh{}, fmt.Errorf("refresh %s: %w", id, ErrRowRefreshFenced)
 	}
 	cachedDeps := c.deps[id]
 	announceClose := found && c.announcesCloseLocked(id, opts, cached, held, fresh)

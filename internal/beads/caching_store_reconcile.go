@@ -82,12 +82,7 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 			return
 		case <-timer.C:
 		case <-c.reconcileKick:
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
+			// Reset below discards a fire the kick raced (Go 1.23 timers).
 		}
 
 		c.reconcileIfDue(c.clockNow())
