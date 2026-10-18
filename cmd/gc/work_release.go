@@ -207,7 +207,7 @@ func startedClaimsKept(sw *SeatWork, scope ReleaseScope, seat releaseSeat) ([]se
 	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: startedOnly}, false)
 	var kept []seatWorkHit
 	for _, c := range claims {
-		if c.bead.Status == "in_progress" && seat.keepsStarted(c.bead) {
+		if seat.keepsStarted(c.bead) {
 			kept = append(kept, c)
 		}
 	}
