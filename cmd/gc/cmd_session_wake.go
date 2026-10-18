@@ -48,7 +48,9 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 
 type sessionWakeDeps struct {
 	// opKey is --key, the wake op's client key; empty mints one.
-	opKey                     string
+	opKey string
+	// cfgErr is the city config's load error, when cfg did not load.
+	cfgErr                    error
 	store                     beads.Store
 	cfg                       *config.City
 	cityPath                  string
@@ -86,11 +88,13 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
+	var cfgErr error
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
+		cfg, cfgErr = loadCityConfig(cityPath, stderr)
 	}
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
 		opKey:                     key,
+		cfgErr:                    cfgErr,
 		sp:                        wakeVerdictProvider(),
 		store:                     store,
 		cfg:                       cfg,
@@ -108,6 +112,15 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 
 func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
 	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
+	// Resolving the target may materialize a named session's row, so under
+	// require the op store is checked before it.
+	op := newCLIOp(deps.cfg, sessStore, cliOpRequest{
+		verb: "gc session wake", kind: opjournal.KindWake, key: deps.opKey,
+		cfgErr: deps.cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	if !op.preflight(sessStore) {
+		return 1
+	}
 	id, err := resolveSessionIDMaterializingNamed(deps.cityPath, deps.cfg, sessStore, target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
@@ -116,17 +129,14 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 
 	// The wake op (DES-O0API §8.4) is proposed once the target is resolved
 	// (and materialized), before the wake writes the row.
-	op, start := startCLIOp(deps.cfg, sessStore, cliOpRequest{
-		verb: "gc session wake", kind: opjournal.KindWake, key: deps.opKey, conversation: id,
-		asJSON: asJSON, stdout: stdout, stderr: stderr,
-	})
-	switch start {
+	op.req.conversation = id
+	switch op.start() {
 	case cliOpRefused:
 		return 1
 	case cliOpReplayed:
 		return emitSessionWakeResult(stdout, stderr, asJSON, id, 0, op)
 	}
-	defer op.abandon()
+	defer op.end()
 
 	sessFront := sessionFrontDoor(sessStore)
 	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})

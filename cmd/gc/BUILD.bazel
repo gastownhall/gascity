@@ -1582,6 +1582,7 @@ go_test(
         "oneshot_class_routes_test.go",
         "op_sweep_events_test.go",
         "op_record_test.go",
+        "op_record_verbs_matrix_test.go",
         "op_record_verbs_test.go",
         "op_sweep_test.go",
         "order_args_channel_test.go",

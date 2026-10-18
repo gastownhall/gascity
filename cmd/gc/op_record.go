@@ -16,7 +16,14 @@ package main
 // op_id, key and replayed when an op backs the run. The key, minted when
 // --key is absent, is printed only in JSON and on failures, never on a
 // successful plain-text run. A replayed success prints the original success
-// output and names the op on stderr; a refusal names the op and the key.
+// output and names the op on stderr, with any execution option it was given
+// that the op's digest leaves out (kill's --force) noted as not reapplied; a
+// refusal, and a recorded run that fails, names the op and the key on stderr
+// and, under --json, in the failure envelope.
+//
+// A replay finds its op only once the target resolves: a closed session's
+// alias no longer does, so a same-key rerun of a close (or of a reset that
+// rolled back) must name the session by its ID.
 
 import (
 	"errors"
@@ -45,16 +52,26 @@ const (
 	cliOpCodeUnavailable   = "op_journal_unavailable"
 	cliOpCodeInvalidKey    = "invalid_key"
 	cliOpCodeKeyMismatch   = "idempotency_mismatch"
+	// cliOpCodeFailed is a recorded run whose legacy path failed.
+	cliOpCodeFailed = "op_failed"
 )
 
 // Refusal reasons the CLI verbs close an op with, after refused:.
 const (
-	cliOpRefusedWillNotStart   = "will_not_start"
-	cliOpRefusedSessionStarted = "session_starting"
+	cliOpRefusedWillNotStart    = "will_not_start"
+	cliOpRefusedSessionStarting = "session_starting"
+	cliOpRefusedSessionInactive = "session_inactive"
+	cliOpRefusedSessionClosed   = "session_closed"
+	// cliOpRefusedWakeConflict stands in for a wake conflict state that
+	// leaves no token characters.
+	cliOpRefusedWakeConflict = "wake_conflict"
 )
 
+// cliOpMaxRefusedWhy bounds a refused reason so refused:<why> stays a token.
+const cliOpMaxRefusedWhy = 128 - len(opjournal.RefusedReasonPrefix)
+
 // cliOpKeyFlagUsage is the --key flag's help text.
-const cliOpKeyFlagUsage = "idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run)"
+const cliOpKeyFlagUsage = "idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run)"
 
 // addOpKeyFlag adds --key to a recorded CLI verb.
 func addOpKeyFlag(cmd *cobra.Command, key *string) {
@@ -87,8 +104,8 @@ var sessionVerbSentinels = legacyop.Sentinels{
 		runtime.ErrRuntimeUnavailable,
 	},
 	Refusals: []legacyop.Refusal{
-		{Err: session.ErrSessionStarting, Why: cliOpRefusedSessionStarted},
-		{Err: session.ErrRuntimeLeaseBusy, Why: cliOpRefusedSessionStarted},
+		{Err: session.ErrSessionStarting, Why: cliOpRefusedSessionStarting},
+		{Err: session.ErrRuntimeLeaseBusy, Why: cliOpRefusedSessionStarting},
 		{Err: session.ErrSessionStopping, Why: "session_stopping"},
 		{Err: session.ErrSessionKillPending, Why: "kill_pending"},
 		{Err: session.ErrIllegalTransition, Why: "illegal_transition"},
@@ -110,9 +127,15 @@ type cliOpRequest struct {
 	// recorded for (a session with no generation): auto runs it unrecorded,
 	// require refuses it.
 	unrecordable string
-	asJSON       bool
-	stdout       io.Writer
-	stderr       io.Writer
+	// cfgErr is the city config's load error, when it did not load: the
+	// config's [ops] gates were not read.
+	cfgErr error
+	// unreplayed names the execution options outside the op's digest this
+	// run was given (kill's --force); a replay says they were not reapplied.
+	unreplayed []string
+	asJSON     bool
+	stdout     io.Writer
+	stderr     io.Writer
 }
 
 // cliOpStart is what startCLIOp decided.
@@ -130,31 +153,82 @@ const (
 
 // cliOp is one CLI verb's op.
 type cliOp struct {
-	req    cliOpRequest
+	req cliOpRequest
+	rec *legacyop.Recorder
+	// opened is the op store preflight opened, which the recorder reuses.
+	opened *opjournal.Store
 	adm    *legacyop.Admission
 	warned map[string]bool
+	// closedWith is the outcome finish closed the op with; nil until then.
+	closedWith *opjournal.Outcome
 }
 
-// startCLIOp records req under its kind's gate, resolved from cfg, over the
-// op store opened lazily on sessStore. It reports every refusal itself.
-func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cliOp, cliOpStart) {
+// newCLIOp resolves req's gate from cfg and builds its recorder over the op
+// store opened lazily on sessStore. It records nothing yet.
+func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp {
 	op := &cliOp{req: req}
-	rec := &legacyop.Recorder{
+	op.rec = &legacyop.Recorder{
 		Mode:     op.mode(cfg),
 		Executor: legacyop.ExecutorCLI,
-		Open:     func() (*opjournal.Store, error) { return cliOpenOpStore(sessStore) },
+		Open: func() (*opjournal.Store, error) {
+			if op.opened != nil {
+				return op.opened, nil
+			}
+			return cliOpenOpStore(sessStore)
+		},
 		Clock:    cliOpClock,
 		Degraded: op.warnDegrade,
-		// The CLI prints its own one-line warning per stage (warnDegrade).
+		// The CLI prints its own one-line warning per stage (warnDegrade) and
+		// reports a late or unrecordable close itself (finish).
 		Logger: slog.New(slog.DiscardHandler),
 	}
+	return op
+}
+
+// startCLIOp records req, resolved under cfg, over sessStore (newCLIOp, then
+// start). It reports every refusal itself.
+func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cliOp, cliOpStart) {
+	op := newCLIOp(cfg, sessStore, req)
+	return op, op.start()
+}
+
+// preflight opens the op store ahead of a verb's resolution, which may
+// itself write (wake materializes a named session's row): under require a
+// store that cannot record refuses before anything is written. It reports
+// false after reporting the refusal. Other modes open nothing here.
+func (o *cliOp) preflight(sessStore beads.Store) bool {
+	if o.rec.Mode != rollout.Require {
+		return true
+	}
+	st, err := cliOpenOpStore(sessStore)
+	if err != nil {
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.req.key)
+		return false
+	}
+	o.opened = st
+	return true
+}
+
+// unavailableMessage is the require refusal of a request the journal cannot
+// record.
+func (o *cliOp) unavailableMessage(cause any) string {
+	return fmt.Sprintf("op journal cannot record this request (%v); the %s did not run", cause, o.req.kind)
+}
+
+// start records the op. It reports every refusal itself.
+func (o *cliOp) start() cliOpStart {
+	req := o.req
+	rec := o.rec
 	if req.unrecordable != "" && rec.Mode == rollout.Require {
-		op.refuse(cliOpCodeUnavailable, fmt.Sprintf("op journal cannot record this request (%s); nothing was done", req.unrecordable), "", req.key)
-		return op, cliOpRefused
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(req.unrecordable), "", req.key)
+		return cliOpRefused
 	}
 	if req.unrecordable != "" {
-		op.adm = rec.Unrecorded(req.kind, req.key, req.unrecordable)
-		return op, cliOpExecute
+		if req.key != "" && rec.Mode == rollout.Auto {
+			fmt.Fprintf(req.stderr, "%s: warning: --key not recorded (%s); running unrecorded, so a rerun acts again\n", req.verb, req.unrecordable) //nolint:errcheck // best-effort stderr
+		}
+		o.adm = rec.Unrecorded(req.kind, req.key, req.unrecordable)
+		return cliOpExecute
 	}
 	principal, actor := cliPrincipal(cliOpLookupEnv)
 	adm, err := rec.Admit(legacyop.Request{
@@ -167,35 +241,43 @@ func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cli
 		Scope:        req.scope,
 	})
 	if err != nil {
-		op.refuseAdmit(err)
-		return op, cliOpRefused
+		o.refuseAdmit(err)
+		return cliOpRefused
 	}
-	op.adm = adm
+	o.adm = adm
 	if adm.Decision != legacyop.Replay {
-		if !adm.Recorded && req.key != "" {
+		if !adm.Recorded && req.key != "" && rec.Mode == rollout.Auto {
 			if kerr := opjournal.ValidateClientKey(req.key); kerr != nil {
 				fmt.Fprintf(req.stderr, "%s: warning: invalid --key (%v); running unrecorded, so a rerun acts again\n", req.verb, kerr) //nolint:errcheck // best-effort stderr
 			}
 		}
-		return op, cliOpExecute
+		return cliOpExecute
 	}
-	if cliOpReplaysAsSuccess(adm.Op) {
-		if !req.asJSON {
-			fmt.Fprintf(req.stderr, "%s: replayed op %s\n", req.verb, adm.Op.ID) //nolint:errcheck // best-effort stderr
+	if cliOpReplaysAsSuccess(adm.Op.Kind, adm.Op.Outcome) {
+		note := "replayed op " + adm.Op.ID
+		if len(req.unreplayed) > 0 {
+			note += fmt.Sprintf("; %s was not reapplied (outside the op's request)", strings.Join(req.unreplayed, ", "))
 		}
-		return op, cliOpReplayed
+		fmt.Fprintf(req.stderr, "%s: %s\n", req.verb, note) //nolint:errcheck // best-effort stderr
+		return cliOpReplayed
 	}
-	op.refuse(cliOpCodeAlreadyFailed,
+	o.refuse(cliOpCodeAlreadyFailed,
 		fmt.Sprintf("op %s closed %s; rerun without --key to act again", adm.Op.ID, cliOpOutcomeText(adm.Op.Outcome)),
 		adm.Op.ID, adm.Key)
-	return op, cliOpRefused
+	return cliOpRefused
 }
 
 // mode is the gate mode of the op's kind, resolved from cfg and the env
 // break-glass. A gate that does not resolve (a misspelled config value) is
-// off, with a warning: a config typo never records, and never refuses.
+// off, with a warning: a config typo never records, and never refuses. A
+// config that did not load at all leaves only the env break-glass, with a
+// warning that the config's gates were not read; a malformed env value is
+// ignored with a warning.
 func (o *cliOp) mode(cfg *config.City) rollout.Mode {
 	if cfg == nil {
+		if o.req.cfgErr != nil {
+			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: city config did not load (%v); its [ops] gates were not read, so only their environment overrides apply\n", o.req.verb, o.req.cfgErr) //nolint:errcheck // best-effort stderr
+		}
 		cfg = &config.City{}
 	}
 	flags, err := rollout.Resolve(cfg, rollout.ResolveOptions{LookupEnv: cliOpLookupEnv})
@@ -208,14 +290,19 @@ func (o *cliOp) mode(cfg *config.City) rollout.Mode {
 		fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %v; not recording\n", o.req.verb, err) //nolint:errcheck // best-effort stderr
 		return rollout.Off
 	}
+	key, mode := rollout.KeyOpsLifecycle, flags.OpsLifecycle()
 	switch spec.Class {
 	case opjournal.ClassContent:
-		return flags.OpsContent()
+		key, mode = rollout.KeyOpsContent, flags.OpsContent()
 	case opjournal.ClassControl:
-		return flags.OpsControl()
-	default:
-		return flags.OpsLifecycle()
+		key, mode = rollout.KeyOpsControl, flags.OpsControl()
 	}
+	for _, n := range flags.Notices() {
+		if n.Kind == rollout.NoticeInvalidEnvIgnored && n.FlagKey == key {
+			fmt.Fprintf(o.req.stderr, "%s: warning: op journal: %s\n", o.req.verb, n.Message) //nolint:errcheck // best-effort stderr
+		}
+	}
+	return mode
 }
 
 // cliPrincipal is the CLI's principal and actor (DES-O0API §3.3): the agent
@@ -228,12 +315,13 @@ func cliPrincipal(lookup func(string) (string, bool)) (principal, actor string) 
 	return legacyop.PrincipalOperator, opjournal.ActorOperator
 }
 
-// cliOpReplaysAsSuccess reports whether a closed op replays as the command's
-// success: it succeeded, or a kill found nothing to kill.
-func cliOpReplaysAsSuccess(op opjournal.Op) bool {
-	arm, reason := op.Outcome.Effective()
+// cliOpReplaysAsSuccess reports whether an op of kind closed with outcome
+// replays as the command's success: it succeeded, or a kill found nothing to
+// kill (a named session's, which exits 0).
+func cliOpReplaysAsSuccess(kind opjournal.Kind, outcome opjournal.Outcome) bool {
+	arm, reason := outcome.Effective()
 	return arm == opjournal.ArmSucceeded ||
-		(op.Kind == opjournal.KindKill && arm == opjournal.ArmSkipped && reason == opjournal.ReasonNotNeeded)
+		(kind == opjournal.KindKill && arm == opjournal.ArmSkipped && reason == opjournal.ReasonNotNeeded)
 }
 
 // cliOpOutcomeText renders an outcome as arm{reason}.
@@ -245,7 +333,8 @@ func cliOpOutcomeText(o opjournal.Outcome) string {
 	return string(arm) + "{" + reason + "}"
 }
 
-// refuseAdmit reports an Admit refusal.
+// refuseAdmit reports an Admit refusal. A store that cannot record is
+// reported before an invalid key: the recorder opens the store first.
 func (o *cliOp) refuseAdmit(err error) {
 	var busy *legacyop.BusyError
 	switch {
@@ -253,10 +342,12 @@ func (o *cliOp) refuseAdmit(err error) {
 		o.refuse(cliOpCodeInProgress, fmt.Sprintf("%v; rerun later or without --key", busy), busy.ID, o.req.key)
 	case errors.Is(err, opjournal.ErrKeyReuse):
 		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), "", o.req.key)
+	case errors.Is(err, legacyop.ErrUnavailable):
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.req.key)
 	case o.req.key != "" && opjournal.ValidateClientKey(o.req.key) != nil:
 		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), "", o.req.key)
 	default:
-		o.refuse(cliOpCodeUnavailable, fmt.Sprintf("op journal cannot record this request (%v); nothing was done", err), "", o.req.key)
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.req.key)
 	}
 }
 
@@ -276,6 +367,11 @@ func (o *cliOp) refuse(code, message, opID, key string) {
 		line = fmt.Sprintf("%s (key %s)", message, key)
 	}
 	fmt.Fprintf(o.req.stderr, "%s: %s\n", o.req.verb, line) //nolint:errcheck // best-effort stderr
+	o.writeFailure(code, message, opID, key)
+}
+
+// writeFailure writes the failure envelope on stdout under --json.
+func (o *cliOp) writeFailure(code, message, opID, key string) {
 	if !o.req.asJSON {
 		return
 	}
@@ -311,12 +407,27 @@ func (o *cliOp) warnDegrade(d legacyop.Degrade) {
 	fmt.Fprintf(o.req.stderr, "%s: warning: op journal %s failed (%s): %v; %s\n", o.req.verb, d.Stage, d.Reason, d.Err, consequence) //nolint:errcheck // best-effort stderr
 }
 
-// finish closes the op with res. It acts once; later calls do nothing.
+// finish closes the op with res. It acts once; later calls do nothing. A
+// close someone else got to first (the op sweeper past finish_by), or one
+// the store refused as invalid, is reported; a store failure was reported
+// by warnDegrade already.
 func (o *cliOp) finish(res legacyop.Result) {
-	if o == nil || o.adm == nil {
+	if o == nil || o.adm == nil || o.closedWith != nil {
 		return
 	}
-	o.adm.Finish(res)
+	outcome := res.Outcome
+	o.closedWith = &outcome
+	if !o.adm.Recorded || o.adm.Decision != legacyop.Execute {
+		return
+	}
+	done := o.adm.Finish(res)
+	switch {
+	case done.Closed:
+	case done.Late:
+		fmt.Fprintf(o.req.stderr, "%s: warning: op %s was already closed (by the op sweeper past its deadline); this run's outcome %s was not recorded\n", o.req.verb, o.adm.Op.ID, cliOpOutcomeText(outcome)) //nolint:errcheck // best-effort stderr
+	case !o.warned[legacyop.StageClose]:
+		fmt.Fprintf(o.req.stderr, "%s: warning: op %s left open: the journal refused its outcome %s; the controller's op sweeper closes it at its deadline\n", o.req.verb, o.adm.Op.ID, cliOpOutcomeText(outcome)) //nolint:errcheck // best-effort stderr
+	}
 }
 
 // finishErr closes the op from the legacy error err (nil is success).
@@ -332,10 +443,20 @@ func (o *cliOp) finishOutcome(outcome opjournal.Outcome) {
 	o.finish(legacyop.Result{Outcome: outcome})
 }
 
-// abandon closes an op the command left without a result as failed{other}.
-// Defer it after starting the op: it does nothing once the op finished.
-func (o *cliOp) abandon() {
+// end closes an op the command left without a result as failed{other}, and
+// names a recorded op that did not succeed, with its key, on stderr and in
+// the --json failure envelope. Defer it after starting the op.
+func (o *cliOp) end() {
+	if o == nil || o.adm == nil {
+		return
+	}
 	o.finishOutcome(opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonOther})
+	if !o.adm.Recorded || o.adm.Decision != legacyop.Execute || cliOpReplaysAsSuccess(o.req.kind, *o.closedWith) {
+		return
+	}
+	message := fmt.Sprintf("op %s (key %s): %s", o.adm.Op.ID, o.adm.Key, cliOpOutcomeText(*o.closedWith))
+	fmt.Fprintf(o.req.stderr, "%s: %s\n", o.req.verb, message) //nolint:errcheck // best-effort stderr
+	o.writeFailure(cliOpCodeFailed, message, o.adm.Op.ID, o.adm.Key)
 }
 
 // outcome is the replayed op's stored outcome; zero unless replayed.
@@ -362,10 +483,25 @@ func cliOpRefusedOutcome(why string) opjournal.Outcome {
 	return opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.RefusedReasonPrefix + why}
 }
 
+// cliOpKillFailure is the outcome of a kill that exits 1. A kill's
+// already-inactive session is not "nothing to do" here: only a named
+// session's gone runtime exits 0 (skipped{not_needed}), so any other
+// inactive or closed target closes failed and replays as the failure.
+func cliOpKillFailure(err error) opjournal.Outcome {
+	switch {
+	case errors.Is(err, session.ErrSessionClosed):
+		return cliOpRefusedOutcome(cliOpRefusedSessionClosed)
+	case errors.Is(err, session.ErrSessionInactive):
+		return cliOpRefusedOutcome(cliOpRefusedSessionInactive)
+	}
+	return sessionVerbSentinels.SyncResult(opjournal.KindKill, err, true).Outcome
+}
+
 // cliOpWakeConflictReason turns a wake conflict state into its refused
-// reason token: lowercase, with anything outside [a-z0-9_] as '_'.
+// reason token: lowercase, with anything outside [a-z0-9_] as '_', cut to
+// fit a token, and wake_conflict when nothing is left.
 func cliOpWakeConflictReason(state string) string {
-	return strings.Map(func(r rune) rune {
+	why := strings.Map(func(r rune) rune {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '_':
 			return r
@@ -375,6 +511,13 @@ func cliOpWakeConflictReason(state string) string {
 			return '_'
 		}
 	}, state)
+	if why == "" {
+		return cliOpRefusedWakeConflict
+	}
+	if len(why) > cliOpMaxRefusedWhy {
+		why = why[:cliOpMaxRefusedWhy]
+	}
+	return why
 }
 
 // cliOpSessionScope is the session(gen) scope of a kill, from the row's

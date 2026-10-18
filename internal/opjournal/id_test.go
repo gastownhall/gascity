@@ -257,9 +257,10 @@ func declaredIDInfixConstants(t *testing.T) []string {
 	return names
 }
 
-// TestValidateConversation pins the exported conversation check to the one
-// Propose applies: an id it accepts proposes, an id it refuses is refused as
-// ErrInvalidRequest.
+// TestValidateConversation pins the exported conversation check's verdicts:
+// it accepts well-formed ids up to the length limit and refuses every
+// malformed one as ErrInvalidRequest. It is validateConversation, the check
+// Propose applies, so the two cannot drift.
 func TestValidateConversation(t *testing.T) {
 	for _, conv := range []string{"gc-1", "gc-abc.def", strings.Repeat("a", maxConversationLen)} {
 		if err := ValidateConversation(conv); err != nil {

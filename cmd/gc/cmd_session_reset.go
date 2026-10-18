@@ -37,7 +37,9 @@ session back instead: it closes the bead as a failed create and releases the
 alias so the controller can create a replacement. A create that is still
 starting, or whose runtime is running, is never rolled back.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key of a reset that rolled back must name the session by ID:
+the rollback released its alias.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionReset(args, key, stdout, stderr, jsonOutput) != 0 {
@@ -83,7 +85,7 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 		return 1
 	}
 
-	cfg, _ := loadCityConfig(cityPath, stderr)
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 
 	// Every store consumer here is session-class (ID resolution, worker handle,
 	// session-bead load), so route the whole flow through the session
@@ -118,7 +120,7 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
 		verb: "gc session reset", kind: opjournal.KindRestart, key: key, conversation: sessionID,
 		policy: opjournal.Policy{Restart: opjournal.RestartPolicy{Mode: opjournal.RestartFresh}},
-		asJSON: asJSON, stdout: stdout, stderr: stderr,
+		cfgErr: cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
 	})
 	switch start {
 	case cliOpRefused:
@@ -126,7 +128,7 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 	case cliOpReplayed:
 		return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, op.outcome().Result.Via == legacyop.ViaLegacyRollback, op)
 	}
-	defer op.abandon()
+	defer op.end()
 
 	if identity != "" {
 		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {

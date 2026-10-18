@@ -569,3 +569,12 @@ func TestSessionKillOpKeyReusedForAnotherGenerationIsAMismatch(t *testing.T) {
 		t.Fatalf("failure code = %q, want %s", got, cliOpCodeKeyMismatch)
 	}
 }
+
+func TestCLIOpWakeConflictReasonIsAlwaysAValidToken(t *testing.T) {
+	for _, state := range []string{"", strings.Repeat("Very-Long State ", 20)} {
+		why := cliOpWakeConflictReason(state)
+		if why == "" || len(opjournal.RefusedReasonPrefix+why) > 128 {
+			t.Errorf("cliOpWakeConflictReason(%q) = %q, want a non-empty reason that fits a token", state, why)
+		}
+	}
+}

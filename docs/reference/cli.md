@@ -4354,7 +4354,9 @@ gc session attach <session-id-or-alias>
 
 End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key must name the session by ID: a closed session's alias no
+longer resolves.
 
 ```
 gc session close <session-id-or-alias> [flags]
@@ -4363,7 +4365,7 @@ gc session close <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
-| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc session kill
 
@@ -4394,7 +4396,7 @@ gc session kill <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired |
 | `--json` | bool |  | emit JSONL |
-| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc session list
 
@@ -4588,7 +4590,9 @@ session back instead: it closes the bead as a failed create and releases the
 alias so the controller can create a replacement. A create that is still
 starting, or whose runtime is running, is never rolled back.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key of a reset that rolled back must name the session by ID:
+the rollback released its alias.
 
 ```
 gc session reset <session-id-or-alias> [flags]
@@ -4597,7 +4601,7 @@ gc session reset <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
-| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc session submit
 
@@ -4637,7 +4641,7 @@ gc session suspend <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
-| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc session unpin
 
@@ -4693,7 +4697,7 @@ gc session wake mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
-| `--key` | string |  | idempotency key: rerunning with the same key reports the first run's outcome instead of acting again (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc shell
 

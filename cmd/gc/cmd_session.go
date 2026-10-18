@@ -1755,8 +1755,9 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 
 	cityPath, cityErr := resolveCity()
 	var cfg *config.City
+	var cfgErr error
 	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
+		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, held_until
 	// suspend patch, session worker handle), so route the whole flow through the
@@ -1770,7 +1771,7 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 
 	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
 		verb: "gc session suspend", kind: opjournal.KindSuspend, key: key, conversation: sessionID,
-		asJSON: asJSON, stdout: stdout, stderr: stderr,
+		cfgErr: cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
 	})
 	switch start {
 	case cliOpRefused:
@@ -1778,7 +1779,7 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 	case cliOpReplayed:
 		return emitSessionSuspendResult(stdout, stderr, asJSON, sessionID, "", op)
 	}
-	defer op.abandon()
+	defer op.end()
 
 	// Try reconciler-first path: set held_until metadata, poke controller.
 	// Only use this path when the city is managed by a standalone controller
@@ -1856,7 +1857,9 @@ func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key must name the session by ID: a closed session's alias no
+longer resolves.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionClose(args, key, stdout, stderr, jsonOutput) != 0 {
@@ -1932,7 +1935,7 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// close writes the row.
 	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
 		verb: "gc session close", kind: opjournal.KindClose, key: key, conversation: sessionID,
-		asJSON: asJSON, stdout: stdout, stderr: stderr,
+		cfgErr: cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
 	})
 	switch start {
 	case cliOpRefused:
@@ -1940,10 +1943,10 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	case cliOpReplayed:
 		return emitSessionCloseResult(stdout, stderr, asJSON, sessionID, 0, op)
 	}
-	defer op.abandon()
+	defer op.end()
 	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))
-	op.finishErr(err)
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1979,6 +1982,10 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
 	}
 
+	// The op closes once the close's cleanup ran: a run killed before here
+	// leaves the op to the sweeper, and a same-key rerun is not told the
+	// cleanup happened.
+	op.finishErr(nil)
 	return emitSessionCloseResult(stdout, stderr, asJSON, sessionID, len(closeResult.WaitNudgeIDs), op)
 }
 
@@ -2496,8 +2503,9 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 
 	cityPath, err := resolveCity()
 	var cfg *config.City
+	var cfgErr error
 	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
+		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
 	}
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
@@ -2558,9 +2566,13 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 	// before the lease and the fence. A row with no generation is not
 	// recordable.
 	scope, unrecordable := cliOpSessionScope(info, infoErr)
+	var unreplayed []string
+	if force {
+		unreplayed = []string{"--force"}
+	}
 	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
 		verb: "gc session kill", kind: opjournal.KindKill, key: key, conversation: sessionID,
-		scope: scope, unrecordable: unrecordable,
+		scope: scope, unrecordable: unrecordable, cfgErr: cfgErr, unreplayed: unreplayed,
 		asJSON: asJSON, stdout: stdout, stderr: stderr,
 	})
 	switch start {
@@ -2569,7 +2581,7 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 	case cliOpReplayed:
 		return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
 	}
-	defer op.abandon()
+	defer op.end()
 
 	// Record the kill intent BEFORE tearing the runtime down. Stopping first left
 	// a window in which the row still claimed a live runtime next to a dead one,
@@ -2618,8 +2630,11 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 	} else {
 		killErr = handle.Kill(killCtx, killBy)
 	}
+	// The op closes only after the lease is released, so no op store write
+	// runs under it.
 	if killErr != nil && (identity == "" || !runtimeAlreadyInactive) {
-		op.finishErr(killErr)
+		releaseLease()
+		op.finishOutcome(cliOpKillFailure(killErr))
 		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2630,18 +2645,19 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, sessStore, sessionID, identity); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			if killErr != nil {
+				releaseLease()
 				op.finishErr(err)
 				fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
 	}
+	outcome := sessionVerbSentinels.SyncResult(opjournal.KindKill, nil, true).Outcome
 	if killErr != nil {
 		// The runtime was already gone: nothing was killed.
-		op.finishOutcome(opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded})
+		outcome = opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}
 		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
 	}
-	op.finishErr(nil)
 
 	// Poke the controller after the asleep sync so the reconciler observes the
 	// killed state immediately instead of waiting a full patrol interval to
@@ -2651,6 +2667,7 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 	// and a spurious poke when the asleep sync was skipped is harmless — the
 	// reconciler observes unchanged state and continues.
 	releaseLease()
+	op.finishOutcome(outcome)
 	if err := sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
