@@ -14,7 +14,9 @@ import (
 // → backoff → give-up, see decideBackstopAction) to one class of session.
 // Each predicate owns its own eligibility test, outstanding-work resolution,
 // nudge content, and persisted-metadata shape; the engine drives only the
-// shared timing decision and the actual runtime.Provider.Nudge delivery.
+// shared timing decision and the delivery: a direct runtime.Provider.Nudge,
+// or, when the controller's lane host executes message ops, a planner notice
+// op (proposeBackstopNotice).
 //
 // poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) are the two
 // predicates: initial trigger delivery and later graph-v2 successor delivery.
@@ -44,8 +46,10 @@ type backstopPredicate interface {
 	// observe persists the start of a new assignment's grace window.
 	observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer)
 
-	// reserve durably records a nudge attempt before delivery. false means the
-	// write failed and the provider must not be nudged.
+	// reserve durably records a delivery attempt: before a direct nudge, or
+	// after its planner notice is proposed. false means the write failed:
+	// the provider must not be nudged, and a proposed notice's attempt is
+	// re-proposed (idempotently) on a later tick.
 	reserve(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool
 
 	// exhausted is invoked once attempts reach the shared max attempts.
@@ -214,6 +218,9 @@ func runNudgeBackstop(
 			continue
 		case backstopActionExhausted:
 			clearBackstopHold(pred, store, s, stdout)
+			if backstopLastNoticeStands(store, s, target, label, stdout) {
+				continue
+			}
 			pred.exhausted(store, s, stdout)
 			continue
 		case backstopActionNudge:
@@ -251,8 +258,8 @@ func runNudgeBackstop(
 				pred.exhausted(store, s, stdout)
 				continue
 			}
-			if lane := plannerNoticeLaneFor(store); lane != nil {
-				proposeBackstopNotice(lane, pred, store, s, target, attempts, content, now, stdout, label)
+			if lane := plannerNoticeLaneFor(store); lane != nil &&
+				proposeBackstopNotice(lane, pred, store, s, target, attempts, last, content, now, stdout, label) {
 				continue
 			}
 			// Write ahead of the external delivery. If the process crashes
@@ -271,11 +278,21 @@ func runNudgeBackstop(
 }
 
 // proposeBackstopNotice is the backstop's delivery through the conversation
-// lane: attempt attempts+1 of label's notice for target, proposed before its
-// reservation (the op is idempotent by key, so a crash between the two
-// re-proposes the same op and then reserves). While the previous attempt's
-// notice is still pending nothing is written and the attempt is not spent; a
-// notice that cannot be written spends nothing and falls back to nothing.
+// lane: attempt attempts+1 of label's notice for target, in the pacing
+// episode last names, proposed before its reservation (the op is idempotent
+// by key, so a crash between the two re-proposes the same op and then
+// reserves). It reports false when no lane can type into the session, for
+// the caller to nudge directly; otherwise the attempt is handled:
+//   - while an earlier notice for target is still pending nothing is written
+//     and the attempt is not spent;
+//   - an attempt whose op already stood is spent, with its own line;
+//   - a notice the op store refuses for the request itself is spent at once,
+//     and one that fails plannerNoticeMaxFailures times in a row is spent
+//     then; a failure is logged at most once per laneErrorLogInterval, so a
+//     journal that cannot be written never spams a tick nor holds the
+//     backstop from its terminal action.
+//
+// Nothing falls back to a direct nudge once a lane serves the session.
 func proposeBackstopNotice(
 	lane plannerNoticeLane,
 	pred backstopPredicate,
@@ -283,28 +300,75 @@ func proposeBackstopNotice(
 	s *beads.Bead,
 	target backstopTarget,
 	attempts int,
+	last time.Time,
 	content string,
 	now time.Time,
 	stdout io.Writer,
 	label string,
-) {
+) bool {
 	sessName := strings.TrimSpace(s.Metadata["session_name"])
-	outcome, _, err := proposePlannerNotice(lane, s.ID, plannerNoticeToken(*s), plannerNotice{
+	n := plannerNotice{
 		Purpose:     label,
 		Trigger:     backstopNoticeTrigger(target),
+		Causation:   target.ID,
+		Episode:     plannerNoticeEpisode(last),
 		Attempt:     attempts + 1,
 		Content:     content,
-		StartWithin: idleClaimNudgeBackoff,
-	})
+		StartWithin: plannerNoticeStartWithin(idleClaimNudgeBackoff),
+	}
+	failKey := plannerNoticeFailureKey(s.ID, n)
+	outcome, op, err := proposePlannerNotice(lane, *s, n)
+	if err != nil && !plannerNoticeRefused(err) {
+		failures, logNow := lane.noticeFailed(failKey)
+		if failures < plannerNoticeMaxFailures {
+			if logNow {
+				fmt.Fprintf(stdout, "%s: notice for %s for %s failed (%d of %d before attempt %d/%d is spent): %v\n", label, sessName, target.ID, failures, plannerNoticeMaxFailures, n.Attempt, idleClaimNudgeMaxAttempts, err) //nolint:errcheck // best-effort
+			}
+			return true
+		}
+	}
+	lane.noticeRecovered(failKey)
+	var line string
+	switch {
+	case err != nil && plannerNoticeRefused(err):
+		line = fmt.Sprintf("notice for %s for %s refused; attempt %d/%d spent: %v", sessName, target.ID, n.Attempt, idleClaimNudgeMaxAttempts, err)
+	case err != nil:
+		line = fmt.Sprintf("notice for %s for %s failed %d times in a row; attempt %d/%d spent: %v", sessName, target.ID, plannerNoticeMaxFailures, n.Attempt, idleClaimNudgeMaxAttempts, err)
+	case outcome == plannerNoticeDirect:
+		return false
+	case outcome == plannerNoticePending:
+		return true
+	case outcome == plannerNoticeAlreadyProposed:
+		line = fmt.Sprintf("notice for %s for %s attempt %d/%d was already proposed (%s, %s); attempt spent", sessName, target.ID, n.Attempt, idleClaimNudgeMaxAttempts, op.ID, op.Status)
+	default:
+		line = fmt.Sprintf("queued notice for %s for %s (attempt %d/%d)", sessName, target.ID, n.Attempt, idleClaimNudgeMaxAttempts)
+	}
+	if !pred.reserve(store, s, target, n.Attempt, now, stdout) {
+		return true
+	}
+	fmt.Fprintf(stdout, "%s: %s\n", label, line) //nolint:errcheck // best-effort
+	return true
+}
+
+// backstopLastNoticeStands reports whether an exhausted backstop's terminal
+// action must wait: the controller's lane host executes message ops for
+// store and label's last notice for target is still open and due, so the
+// last reminder has not yet had its chance at the session's boundary. A
+// failed read does not hold the terminal action; it is logged at most once
+// per laneErrorLogInterval.
+func backstopLastNoticeStands(store beads.Store, s *beads.Bead, target backstopTarget, label string, stdout io.Writer) bool {
+	lane := plannerNoticeLaneFor(store)
+	if lane == nil {
+		return false
+	}
+	failKey := s.ID + "\x00" + label + "\x00" + target.ID + "\x00exhausted"
+	open, err := plannerNoticeOpen(lane, *s, label, target.ID)
 	if err != nil {
-		fmt.Fprintf(stdout, "%s: notice for %s failed: %v\n", label, sessName, err) //nolint:errcheck // best-effort
-		return
+		if _, logNow := lane.noticeFailed(failKey); logNow {
+			fmt.Fprintf(stdout, "%s: reading the last notice for %s failed; not holding the terminal action: %v\n", label, strings.TrimSpace(s.Metadata["session_name"]), err) //nolint:errcheck // best-effort
+		}
+		return false
 	}
-	if outcome == plannerNoticePending {
-		return
-	}
-	if !pred.reserve(store, s, target, attempts+1, now, stdout) {
-		return
-	}
-	fmt.Fprintf(stdout, "%s: queued notice for %s for %s (attempt %d/%d)\n", label, sessName, target.ID, attempts+1, idleClaimNudgeMaxAttempts) //nolint:errcheck // best-effort
+	lane.noticeRecovered(failKey)
+	return open
 }

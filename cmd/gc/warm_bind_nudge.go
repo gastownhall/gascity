@@ -132,9 +132,10 @@ func buildWarmClaimTriggerProbe(cfg *config.City, resolve warmClaimTriggerResolv
 // idle wait run only on the tick(s) right after a new binding, before the marker
 // is set. Best-effort throughout: it never fails the (already-successful) warm start.
 //
-// When the controller's lane host executes message ops for store, the nudge is a
-// planner notice op (proposePlannerNotice) the lane delivers at the slot's
-// boundary, and the marker records that it was proposed.
+// When the controller's lane host executes message ops for store and a lane can
+// type into the slot, the nudge is a planner notice op (warmBindNotice) the lane
+// delivers at the slot's boundary, and the marker records that it was proposed,
+// or given up on.
 func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
 	if sp == nil || store == nil || session == nil || probe == nil {
 		return
@@ -164,24 +165,19 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	if !probe(*session) {
 		return
 	}
+	result := warmBindNoticeDirect
 	if lane := plannerNoticeLaneFor(store); lane != nil {
-		// The lane waits for the slot's boundary itself, so there is no idle
-		// wait here. The op is idempotent by key, so a marker write that fails
-		// below re-proposes the same op on a later tick.
-		if _, _, err := proposePlannerNotice(lane, session.ID, plannerNoticeToken(*session), plannerNotice{
-			Purpose:     warmBindNoticePurpose,
-			Trigger:     triggerID,
-			Attempt:     1,
-			Content:     claimText,
-			StartWithin: warmBindNoticeStartWithin,
-		}); err != nil {
-			log.Printf("warm-bind claim nudge: notice for %s failed for trigger %s: %v", name, triggerID, err)
+		result = warmBindNotice(lane, *session, name, triggerID, claimText)
+	}
+	switch result {
+	case warmBindNoticeRetry:
+		return
+	case warmBindNoticeDirect:
+		if !nudgeWarmBindSlot(ctx, sp, name, triggerID, claimText) {
 			return
 		}
-	} else if !nudgeWarmBindSlot(ctx, sp, name, triggerID, claimText) {
-		return
 	}
-	// Delivered (or proposed): stamp the marker so this binding never nudges again. Persisted on
+	// Delivered, proposed or given up on: stamp the marker so this binding never nudges again. Persisted on
 	// the session bead → restart-safe; mirrored in-memory so the rest of this tick
 	// reads the just-written value.
 	if err := sessionFrontDoor(store).SetMarker(session.ID, warmBindNudgedForTriggerKey, triggerID); err != nil {
@@ -192,7 +188,73 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 		session.Metadata = map[string]string{}
 	}
 	session.Metadata[warmBindNudgedForTriggerKey] = triggerID
-	log.Printf("warm-bind claim nudge: nudged %s to claim %s", name, triggerID)
+	switch result {
+	case warmBindNoticeProposed:
+		log.Printf("warm-bind claim nudge: queued a claim notice for %s to claim %s", name, triggerID)
+	case warmBindNoticeSpent:
+		log.Printf("warm-bind claim nudge: gave up on the claim notice for %s to claim %s; the claim backstop owns re-delivery", name, triggerID)
+	default:
+		log.Printf("warm-bind claim nudge: nudged %s to claim %s", name, triggerID)
+	}
+}
+
+// warmBindNoticeResult is what warmBindNotice did with a binding's claim
+// nudge.
+type warmBindNoticeResult int
+
+const (
+	// warmBindNoticeDirect: no lane can type into the slot; nudge it
+	// directly. Nothing was written.
+	warmBindNoticeDirect warmBindNoticeResult = iota
+	// warmBindNoticeProposed: the notice op stands; stamp the marker.
+	warmBindNoticeProposed
+	// warmBindNoticeSpent: the notice was refused, or failed
+	// plannerNoticeMaxFailures times in a row; stamp the marker, and the
+	// claim backstop owns re-delivery.
+	warmBindNoticeSpent
+	// warmBindNoticeRetry: the notice failed; leave the marker unset so a
+	// later tick retries.
+	warmBindNoticeRetry
+)
+
+// warmBindNotice proposes the binding's claim nudge as a planner notice. The
+// lane waits for the slot's boundary itself, so there is no idle wait here.
+// The op is idempotent by key, so a marker write that fails re-proposes the
+// same op on a later tick. A failure is logged at most once per
+// laneErrorLogInterval.
+func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID, claimText string) warmBindNoticeResult {
+	n := plannerNotice{
+		Purpose:     warmBindNoticePurpose,
+		Trigger:     triggerID,
+		Causation:   triggerID,
+		Attempt:     1,
+		Content:     claimText,
+		StartWithin: warmBindNoticeStartWithin,
+	}
+	failKey := plannerNoticeFailureKey(session.ID, n)
+	outcome, _, err := proposePlannerNotice(lane, session, n)
+	switch {
+	case err != nil && plannerNoticeRefused(err):
+		lane.noticeRecovered(failKey)
+		log.Printf("warm-bind claim nudge: notice for %s refused for trigger %s: %v", name, triggerID, err)
+		return warmBindNoticeSpent
+	case err != nil:
+		failures, logNow := lane.noticeFailed(failKey)
+		if failures >= plannerNoticeMaxFailures {
+			lane.noticeRecovered(failKey)
+			log.Printf("warm-bind claim nudge: notice for %s failed %d times in a row for trigger %s: %v", name, failures, triggerID, err)
+			return warmBindNoticeSpent
+		}
+		if logNow {
+			log.Printf("warm-bind claim nudge: notice for %s failed for trigger %s (%d of %d): %v", name, triggerID, failures, plannerNoticeMaxFailures, err)
+		}
+		return warmBindNoticeRetry
+	}
+	lane.noticeRecovered(failKey)
+	if outcome == plannerNoticeDirect {
+		return warmBindNoticeDirect
+	}
+	return warmBindNoticeProposed
 }
 
 // nudgeWarmBindSlot types the claim nudge into the slot directly, after
@@ -218,6 +280,6 @@ func nudgeWarmBindSlot(ctx context.Context, sp runtime.Provider, name, triggerID
 const warmBindNoticePurpose = "warm-bind-claim-nudge"
 
 // warmBindNoticeStartWithin bounds how long the warm-bind notice waits for
-// the slot's boundary: the claim backstop's observe grace, after which that
-// backstop owns re-delivery to a slot that still has not claimed.
-const warmBindNoticeStartWithin = idleClaimNudgeGrace
+// the slot's boundary: within the claim backstop's observe grace, after which
+// that backstop owns re-delivery to a slot that still has not claimed.
+const warmBindNoticeStartWithin = idleClaimNudgeGrace - plannerNoticeStartMargin

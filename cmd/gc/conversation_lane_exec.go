@@ -220,7 +220,7 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (l
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
-		Live:     runtime.TurnInterruptModeFor(e.deps.sp, name) != runtime.TurnInterruptProtocol,
+		Live:     laneTypesLive(e.deps.sp, name),
 		Input:    laneFenceMode(runtime.InputFencingFor(e.deps.sp, name)),
 		Text:     opjournal.TextReminder,
 		LinkWait: opjournal.DefaultLinkWait,
@@ -239,6 +239,13 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 		}
 	}
 	return caps, nil
+}
+
+// laneTypesLive reports whether the live executor can type content into
+// the runtime named name: a keystroke-mode runtime, not a protocol-mode one
+// (runtime.TurnInterruptProtocol), whose turns no keystroke starts.
+func laneTypesLive(sp runtime.Provider, name string) bool {
+	return runtime.TurnInterruptModeFor(sp, name) != runtime.TurnInterruptProtocol
 }
 
 // hostedElsewhere reports whether stamp says another host serves message for

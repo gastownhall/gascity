@@ -1052,7 +1052,7 @@ func TestWarnSupervisorLaneHostGap(t *testing.T) {
 		{
 			name: "kind listed",
 			cfg:  &config.City{Ops: config.OpsConfig{Authoritative: []string{"message"}}},
-			want: "gc supervisor: city 'alpha': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [message] goes unserved; to serve it, run `gc unregister /srv/alpha`, then `gc start --foreground /srv/alpha` (hidden from --help), or empty the list\n",
+			want: "gc supervisor: city 'alpha': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [message] goes unserved (planner notices are typed directly, as with the list empty); to serve it, run `gc unregister /srv/alpha`, then `gc start --foreground /srv/alpha` (hidden from --help), or empty the list\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

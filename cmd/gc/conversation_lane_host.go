@@ -299,6 +299,9 @@ type conversationLaneHost struct {
 	lastErr      string
 	quarantined  map[string][]string
 	waits        map[string]laneConversationWaits
+	// noticeFailures tallies each planner notice's failed proposals
+	// (planner_notice.go); nil until the first.
+	noticeFailures map[string]*laneNoticeFailures
 }
 
 // laneWorker is one conversation's slot; poke wakes its worker.
@@ -360,7 +363,7 @@ func warnSupervisorLaneHostGap(stderr io.Writer, cityName, cityPath string, cfg 
 	if cfg == nil || len(cfg.Ops.Authoritative) == 0 {
 		return
 	}
-	fmt.Fprintf(stderr, "gc supervisor: city '%s': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [%s] goes unserved; to serve it, %s, or empty the list\n", //nolint:errcheck // best-effort stderr
+	fmt.Fprintf(stderr, "gc supervisor: city '%s': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [%s] goes unserved (planner notices are typed directly, as with the list empty); to serve it, %s, or empty the list\n", //nolint:errcheck // best-effort stderr
 		cityName, strings.Join(cfg.Ops.Authoritative, ", "), laneHostStandaloneRemedy(cityPath))
 }
 
