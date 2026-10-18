@@ -87,8 +87,10 @@ func (h *RuntimeHandle) Start(ctx context.Context, _ sessionpkg.Actor) (err erro
 	return err
 }
 
-// StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, cfg runtime.Config) (err error) {
+// StartResolved starts a runtime-only handle using the provided resolved
+// command. It has no session row, so it has no incarnation to run under: the
+// legacy bead-less start (§3.3 S8), allowlisted until legacy is deleted.
+func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, _ sessionpkg.Incarnation, startCommand string, cfg runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 

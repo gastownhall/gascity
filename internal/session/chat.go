@@ -324,7 +324,18 @@ func (m *Manager) retainFailedResume(id, sessName string, env map[string]string,
 
 // retryFreshStartAfterStaleKey recovers a resume that died during startup by
 // relaunching the session fresh. startErr is the failed Start's error, nil
-// when the launch started and then exited.
+// when the launch started and then exited. A Manager start's relaunch first
+// reads the runtime fresh under lease (leasedLiveness), before it clears the
+// key: a read that cannot answer refuses it, the key kept and nothing
+// minted, and a runtime up with its agent alive is the start's own launch,
+// which stands under inc with the key kept and nothing relaunched; a pane
+// whose agent died is relaunched over. The relaunch is a new process, so it
+// mints again under lease over inc, the failed start's incarnation, after
+// the orphan kill, and runs under the new one, which it leaves in inc once
+// the Start succeeds; a failed Start withdraws it. A nil inc relaunches under
+// the failed start's identity with no read: the legacy runtime-only start,
+// whose caller commits against the incarnation its PreWake minted, so a mint
+// under it would make its own commit stale (deleted with legacy at P6).
 func (m *Manager) retryFreshStartAfterStaleKey(
 	ctx context.Context,
 	id string,
@@ -334,6 +345,8 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	cfg runtime.Config,
 	startErr error,
 	unroute func(),
+	lease *RuntimeLease,
+	inc *Incarnation,
 ) (bool, error) {
 	if retainsCommittedConversation(infoFromPersistedBead(*b)) {
 		return false, m.retainFailedResume(id, sessName, cfg.Env, startErr, unroute)
@@ -410,6 +423,22 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	if sessionKey == "" && freshCmd == resumeCommand {
 		return false, nil
 	}
+	// Under the lease, a runtime up with its agent alive is the start's own
+	// launch, whose death its Start reported or a cached read took for gone:
+	// the start converges on it, as on one it finds up before its mint
+	// (ensureRunningOn), and like that converge reads no token (ga-9yerfq).
+	if inc != nil {
+		upAndAlive, err := m.leasedLiveness(id, sessName, cfg.ProcessNames)
+		if err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return false, fmt.Errorf("fresh start after stale key: %w", err)
+		}
+		if upAndAlive {
+			return true, nil
+		}
+	}
 	if err := m.clearStaleResumeMetadata(id, b); err != nil {
 		if unroute != nil {
 			unroute()
@@ -427,13 +456,116 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		}
 		return false, fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 	}
+	// The relaunch keeps the failed start's continuation epoch and leaves the
+	// reset the clear just recorded to the next start, as it always has: only
+	// its generation and token are new. A relaunch that fails withdraws its
+	// mint, leaving the row on inc, unless its process may have survived
+	// (launchedUnder): then the row stays on the relaunch's, left in inc.
+	var next Incarnation
+	if inc != nil {
+		var err error
+		if next, err = m.mintStart(ctx, lease, inc.By, b, false); err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return false, fmt.Errorf("fresh start after stale key: %w", err)
+		}
+		cfg.Env = mergeEnv(cfg.Env, next.Env())
+	}
 	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+		switch {
+		case inc == nil:
+		case m.launchedUnder(sessName, cfg.ProcessNames, next):
+			*inc = next // the failed relaunch's process may run under it
+		default:
+			m.unmintStart(next, b)
+		}
 		if unroute != nil {
 			unroute()
 		}
 		return false, fmt.Errorf("fresh start after stale key: %w", err)
 	}
+	if inc != nil {
+		*inc = next
+	}
 	return true, nil
+}
+
+// mintStart mints the incarnation a Manager start of row b runs under, under
+// lease, with nothing beyond the identity keys; consumeReset also consumes
+// the continuation reset b records in the same CAS (the epoch bumped, the
+// marker cleared), as commitPendingContinuationReset does, when the mint's
+// read still records it. The start was decided on b, so a reset recorded
+// after b was read stays pending for the next start, and one consumed since
+// bumps nothing. What it wrote is folded onto b.
+func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKind, b *beads.Bead, consumeReset bool) (Incarnation, error) {
+	expect := infoFromPersistedBead(*b)
+	inc, err := m.PersistedStore().MintIncarnation(ctx, lease, MintRequest{
+		Expect: expect, By: by, Now: m.now(),
+		FreshContext: func(fresh Info) bool {
+			return consumeReset && strings.TrimSpace(fresh.ContinuationResetPending) != ""
+		},
+	})
+	if err != nil {
+		return Incarnation{}, err
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	maps.Copy(b.Metadata, inc.IdentityPatch())
+	return inc, nil
+}
+
+// unmintStart withdraws inc, a start's mint no process ran under
+// (unmintIncarnation), folds what it wrote back onto b when b is not nil, and
+// reports whether the withdrawal landed. One the row refused (it moved on)
+// or that failed is logged.
+func (m *Manager) unmintStart(inc Incarnation, b *beads.Bead) bool {
+	landed, err := m.PersistedStore().unmintIncarnation(inc)
+	switch {
+	case err != nil:
+		log.Printf("session: %s: withdrawing the unlaunched %s: %v", inc.ID, inc, err)
+	case !landed:
+		log.Printf("session: %s: not withdrawing the unlaunched %s: the row moved on", inc.ID, inc)
+	case b != nil:
+		maps.Copy(b.Metadata, inc.prior)
+	}
+	return err == nil && landed
+}
+
+// launchedUnder reports whether a failed start may have left a process
+// running under inc: the runtime under sessName carries inc's token, or the
+// read cannot say. A Start can fail after its launch (a readiness wait that
+// timed out) with a cleanup that could not kill what it launched (tmux's
+// is best-effort), so a mint is withdrawn only on positive evidence that no
+// process carries it: the runtime is gone, or carries another token. No
+// token is no evidence: t3bridge records none, tmux and subprocess have
+// none before they seed it, and k8s reads none when its exec fails. Then a
+// fresh read decides, as it decides a converge: a runtime up with its agent
+// (processNames) alive may carry the mint, and one that is down, or a pane
+// whose agent died, carries nothing. A mint no process carries is benign; a
+// live process its row no longer records is not.
+func (m *Manager) launchedUnder(sessName string, processNames []string, inc Incarnation) bool {
+	tok, err := runtime.MetaValue(m.sp.GetMeta(sessName, runtime.InstanceTokenEnv))
+	switch {
+	case errors.Is(err, runtime.ErrSessionNotFound):
+		return false
+	case err != nil:
+		return true
+	}
+	if tok = strings.TrimSpace(tok); tok != "" {
+		return tok == inc.token
+	}
+	live, err := m.freshLiveness(sessName, processNames)
+	return err != nil || (live.Running && live.Alive)
+}
+
+// startEnv is the runtime environment of a start of info's session under
+// inc: the session's context, with every identity key inc's. The context is
+// built without identity values: inc.Env() sets each of them at full width,
+// so its int64 generation and epoch never narrow to RuntimeEnv's int.
+func startEnv(info Info, inc Incarnation) map[string]string {
+	return mergeEnv(RuntimeEnvWithSessionContext(info, 0, 0, ""), inc.Env())
 }
 
 var (
@@ -700,25 +832,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	transport, transportVerified := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
 	if State(b.Metadata["state"]) != StateSuspended && running {
-		if b.Metadata["transport"] == "" && transportVerified {
-			m.persistTransport(id, b.Metadata["provider"], transport)
-		}
-		// An operator's resume of a live row the operator holds (a suspend
-		// whose drain has not stopped it yet) consumes the hold too, under the
-		// runtime lease (tried, not waited for: a busy lease is the
-		// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable).
-		if consume, ok := liveUserHoldDecision(b, by); ok {
-			_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
-			if err != nil {
-				return err
-			}
-			defer release()
-			return m.consumeUserHold(consume, m.now(), nil)
-		}
-		if err := m.confirmLiveSessionState(id, &b, false, nil); err != nil {
-			return err
-		}
-		return nil
+		return m.ensureLive(ctx, by, id, b, sessName, transport, transportVerified)
 	}
 	if resumeCommand == "" {
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
@@ -763,98 +877,116 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		return err
 	}
 	b = fresh
+	// Under the lease, a runtime that is up with its agent alive is the
+	// incarnation the row already records (or another start's that ran
+	// before this one took the lease): a start never mints over it. Whether
+	// it is up is a fresh read, never the provider's cache, which can read a
+	// live runtime gone (the tmux state cache's TTL and degraded mode), and
+	// a pane whose agent is dead is not alive: Start recycles it. The row,
+	// suspended (a managed suspend whose drain has not stopped it yet) or
+	// not, converges below without a mint or a Start, as a Start that found
+	// the runtime up always has: its binding recorded, an operator's hold
+	// consumed, the row confirmed unfenced. The converge takes that runtime
+	// for the row's incarnation without reading its token, so one running
+	// under an incarnation the row no longer records is confirmed too
+	// (ga-9yerfq).
+	// A read that cannot answer refuses the start (fail closed): nothing is
+	// minted over a runtime that may be live.
+	upAndAlive, err := m.leasedLiveness(id, sessName, hints.ProcessNames)
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
-	generation, err := strconv.Atoi(b.Metadata["generation"])
-	if err != nil || generation <= 0 {
-		generation = DefaultGeneration
-	}
-	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
-	if err != nil {
-		return err
-	}
-	instanceToken := b.Metadata["instance_token"]
-	if instanceToken == "" {
-		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["instance_token"] = instanceToken
-	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		infoFromPersistedBead(b),
-		generation,
-		continuationEpoch,
-		instanceToken,
-	))
-	if gcProvider := providerKind(b); gcProvider != "" {
-		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
-	}
-	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
-	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
-	converged := false
-	// An operator's resume of a row the operator holds consumes the hold, but
-	// only once the runtime is up (resume_user_hold.go).
-	var consume Decided
-	consumes := false
-	if by.consumesHold() {
-		consume, consumes = userHoldDecision(b)
-	}
-	// Refuse to resume if a prior escaped process for this session could not be
-	// confirmed dead: a survivor would race this replacement for the same work
-	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
-	// exact "old process survives alongside its replacement" scenario. No
-	// fresh-create to roll back, so unroute and propagate before Start.
-	if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
-		if unroute != nil {
-			unroute()
+	converged := upAndAlive
+	// inc is the start's incarnation, minted under the lease right before
+	// the Start and provisional until a process runs under it: a start that
+	// launches nothing withdraws it (unmintStart), so the row never records
+	// an incarnation no process carries. A failed start withdraws it only on
+	// evidence that no process survived under it (launchedUnder).
+	var inc *Incarnation
+	provisional := false
+	defer func() {
+		if provisional && !m.launchedUnder(sessName, hints.ProcessNames, *inc) {
+			m.unmintStart(*inc, nil)
 		}
-		return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
-	}
-	if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-		switch {
-		// A capacity refusal is also a startup death, but the endpoint refused
-		// the launch: that says nothing about the resume key, so it falls
-		// through to the plain failure below instead of the stale-key recovery.
-		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
-			if retryErr != nil {
-				return retryErr
+	}()
+	if !converged {
+		// Refuse to resume if a prior escaped process for this session could
+		// not be confirmed dead: a survivor would race this replacement for
+		// the same work bead (duplicate bd close). This is the
+		// stable/reused-bead-ID path — the exact "old process survives
+		// alongside its replacement" scenario. No fresh-create to roll back,
+		// so unroute and propagate before Start.
+		if orphanErr := m.killExistingOrphans(ctx, id); orphanErr != nil {
+			if unroute != nil {
+				unroute()
 			}
-			if !retried {
-				// The recovery declined: the command carries no resume shape to
-				// strip, so a relaunch would repeat this failure verbatim.
-				// Propagate the original start error rather than reporting a
-				// start that never happened.
+			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
+		}
+		minted, err := m.mintStart(ctx, lease, by.Kind, &b, strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "")
+		if err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return err
+		}
+		inc, provisional = &minted, true
+		cfg = startConfig(cfg, b, minted)
+		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
+			switch {
+			// A capacity refusal is also a startup death, but the endpoint
+			// refused the launch: that says nothing about the resume key, so
+			// it falls through to the plain failure below instead of the
+			// stale-key recovery.
+			case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
+				retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, inc)
+				if retryErr != nil {
+					return retryErr
+				}
+				if !retried {
+					// The recovery declined: the command carries no resume shape
+					// to strip, so a relaunch would repeat this failure
+					// verbatim. Propagate the original start error rather than
+					// reporting a start that never happened.
+					if unroute != nil {
+						unroute()
+					}
+					return fmt.Errorf("resuming session: %w", err)
+				}
+				started = retried
+			case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
+				// The runtime came up past the fresh read (a start that took
+				// no lease, or a resume of ours that returned before
+				// confirming it: the canceled stale-key wait below). The
+				// resume converged on it: the mint is withdrawn, and active
+				// state is persisted below with the binding of that runtime.
+				if !m.unmintStart(*inc, &b) {
+					provisional = false
+					// The route stays: the runtime it routes to is up.
+					return fmt.Errorf("%w: session %s converged on a runtime already up, but the row still records %s", ErrStateSync, id, *inc)
+				}
+				inc, provisional, converged = nil, false, true
+			default:
 				if unroute != nil {
 					unroute()
 				}
 				return fmt.Errorf("resuming session: %w", err)
 			}
-			started = retried
-		case errors.Is(err, runtime.ErrSessionExists) && m.sp.IsRunning(sessName):
-			// Another caller may have resumed the same session after we loaded the
-			// bead but before we reached Start, or a resume of ours came up but
-			// returned before confirming it (the canceled stale-key wait below).
-			// The runtime is already up, so the resume converged: persist active
-			// state below, with the binding of the runtime it converged on.
-			converged = true
-		default:
-			if unroute != nil {
-				unroute()
-			}
-			return fmt.Errorf("resuming session: %w", err)
+		} else {
+			started = true
 		}
-	} else {
-		started = true
+		if started {
+			provisional = false // a process runs under inc
+		}
 	}
 
 	// Stale session key detection: if we just started a session with a
@@ -866,16 +998,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			// Context canceled during stale-key sleep: the runtime session
 			// may already be running but we skip setting state="active".
 			// This is self-healing via NDI — the next ensureRunning call
-			// sees the suspended-state bead, attempts sp.Start, gets
-			// ErrSessionExists (IsRunning=true), and persists "active"
-			// with the runtime's binding.
+			// sees the suspended-state bead, reads the runtime up, and
+			// persists "active" with the runtime's binding. The mint stands:
+			// the process launched carries it.
 			if unroute != nil {
 				unroute()
 			}
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute)
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, inc)
 			if err != nil {
 				return err
 			}
@@ -892,6 +1024,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if started || converged {
 		binding = m.startedRuntimeBindingPatch(sessName)
 	}
+	// An operator's resume of a row the operator holds consumes the hold, but
+	// only once the runtime is up (resume_user_hold.go). It decides on the row
+	// as this start read it under the lease, with the incarnation it minted
+	// last (a stale-key relaunch mints again) or, converged, the one the row
+	// records, so only another's start since refuses the consume.
+	var consume Decided
+	consumes := false
+	if by.consumesHold() {
+		consume, consumes = userHoldDecision(b)
+	}
 	if consumes {
 		clears := MetadataPatch{}
 		if started {
@@ -900,13 +1042,42 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		maps.Copy(clears, binding)
 		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b, started, binding); err != nil {
-		if started && !errors.Is(err, ErrStateSync) {
-			_ = m.sp.Stop(sessName)
-		}
-		return err
+	// A start confirms its own incarnation (fenced); a converged resume,
+	// which minted nothing, confirms the row as it is.
+	return m.confirmLiveSessionState(id, &b, started, binding, inc)
+}
+
+// ensureLive is ensureRunningOn's tail for a row not suspended whose runtime
+// its caller read running before any lease: nothing starts and nothing is
+// minted. It records a verified transport, consumes the operator's hold of a
+// live row the operator holds (a suspend whose drain has not stopped it yet)
+// under the runtime lease (tried, not waited for: a busy lease is the
+// controller's stop deciding, and ErrRuntimeLeaseBusy is retryable), and
+// confirms the row active.
+func (m *Manager) ensureLive(ctx context.Context, by Actor, id string, b beads.Bead, sessName, transport string, transportVerified bool) error {
+	if b.Metadata["transport"] == "" && transportVerified {
+		m.persistTransport(id, b.Metadata["provider"], transport)
 	}
-	return nil
+	if consume, ok := liveUserHoldDecision(b, by); ok {
+		_, release, err := m.leaseRuntime(ctx, by, id, sessName, 0)
+		if err != nil {
+			return err
+		}
+		defer release()
+		return m.consumeUserHold(consume, m.now(), nil)
+	}
+	return m.confirmLiveSessionState(id, &b, false, nil, nil)
+}
+
+// startConfig is cfg for row b's start under inc: its identity env inc's,
+// the provider family, SSH keepalives and the work dir env.
+func startConfig(cfg runtime.Config, b beads.Bead, inc Incarnation) runtime.Config {
+	cfg.Env = mergeEnv(cfg.Env, startEnv(infoFromPersistedBead(b), inc))
+	if gcProvider := providerKind(b); gcProvider != "" {
+		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
+	}
+	cfg.Env = git.ApplySSHKeepaliveEnv(cfg.Env)
+	return runtime.SyncWorkDirEnv(cfg)
 }
 
 // ensureDeliverable is ensureRunning for a delivery. Past ensureRunning's
@@ -946,6 +1117,21 @@ func (m *Manager) freshLiveness(sessName string, processNames []string) (runtime
 	return runtime.ObserveLivenessSince(m.sp, sessName, processNames, time.Now())
 }
 
+// leasedLiveness is the fresh read (freshLiveness) a start of row id decides
+// on under its lease: whether sessName's runtime is up with its agent alive.
+// A read that cannot answer is runtime.ErrRuntimeUnavailable, so the start
+// refuses (fail closed) rather than launch over a runtime that may be live.
+func (m *Manager) leasedLiveness(id, sessName string, processNames []string) (bool, error) {
+	live, err := m.freshLiveness(sessName, processNames)
+	if err != nil {
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			err = fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err)
+		}
+		return false, fmt.Errorf("session %s: reading its runtime under the lease: %w", id, err)
+	}
+	return live.Running && live.Alive, nil
+}
+
 // liveAgent reports a fresh read of sessName that finds its pane up and its
 // agent alive, which a live-only send needs.
 func (m *Manager) liveAgent(sessName string, processNames []string) bool {
@@ -953,7 +1139,7 @@ func (m *Manager) liveAgent(sessName string, processNames []string) bool {
 	return err == nil && live.Running && live.Alive
 }
 
-func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	// It runs under its caller's lease (by.Lease) and takes none: without
 	// one it refuses rather than start outside the lease.
 	if by.Lease == nil {
@@ -961,6 +1147,13 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	if err := checkBorrowed(by.Lease, id, sessName); err != nil {
 		return err
+	}
+	// It starts under the incarnation its caller's PreWake minted, while the
+	// row still records it. A runtime already up starts nothing and is left
+	// to the caller's start commit, which refuses a row that no longer
+	// records inc (CommitStartedIfCurrentUnder).
+	if !inc.Valid() || inc.ID != id {
+		return fmt.Errorf("%w: session %q (%s)", ErrIncarnationNotMinted, id, inc)
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -971,36 +1164,23 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
+	if !inc.recordedBy(b.Metadata) {
+		return fmt.Errorf("%w: session %s no longer records %s", ErrMintSuperseded, id, inc)
+	}
+
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
-	generation, err := strconv.Atoi(b.Metadata["generation"])
-	if err != nil || generation <= 0 {
-		generation = DefaultGeneration
-	}
+	// A continuation reset recorded since the PreWake (the prepared start's
+	// stale-resume clear) is consumed here, as legacy always has.
 	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
 	if err != nil {
 		return err
 	}
-	instanceToken := b.Metadata["instance_token"]
-	if instanceToken == "" {
-		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["instance_token"] = instanceToken
-	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		infoFromPersistedBead(b),
-		generation,
-		continuationEpoch,
-		instanceToken,
-	))
+	inc = inc.withContinuationEpoch(continuationEpoch)
+	cfg.Env = mergeEnv(cfg.Env, startEnv(infoFromPersistedBead(b), inc))
 	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
@@ -1024,7 +1204,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -1056,7 +1236,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute); err != nil {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil); err != nil {
 				return err
 			}
 		}
@@ -1066,8 +1246,12 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 
 // confirmLiveSessionState marks the row of a session found or brought live as
 // active. extra rides the same write (the runtime binding of a start, or of a
-// resume that converged on a runtime already up).
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch) error {
+// resume that converged on a runtime already up). A start's confirm (inc, the
+// incarnation it minted) lands only while the row still records inc
+// (ConfirmIncarnation); a row that moved on is ErrStateSync wrapping
+// ErrMintSuperseded, and the runtime is left to its newer owner. A live row
+// found running, which minted nothing, is confirmed without a fence.
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch, inc *Incarnation) error {
 	if b == nil {
 		return nil
 	}
@@ -1085,11 +1269,17 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool
 		batch["pending_create_claim"] = ""
 		batch["pending_create_started_at"] = ""
 	}
-	if len(batch) == 0 {
+	if len(batch) == 0 && inc == nil {
 		return nil
 	}
-	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+	if inc == nil {
+		if err := m.store.SetMetadataBatch(id, batch); err != nil {
+			return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+		}
+	} else if landed, err := m.PersistedStore().ConfirmIncarnation(*inc, batch); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+	} else if !landed {
+		return fmt.Errorf("%w: session %s no longer records %s: %w", ErrStateSync, id, *inc, ErrMintSuperseded)
 	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
@@ -1371,8 +1561,10 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // StartRuntimeOnly brings the runtime live for a bead-backed session without
 // mutating persisted lifecycle metadata. Legacy reconciler callers use this
 // bridge while they still own commit/rollback bookkeeping above the worker
-// boundary. It runs under by.Lease, the caller's.
-func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
+// boundary. It runs under by.Lease, the caller's, and under inc, the
+// incarnation the caller's PreWake minted under that lease
+// (MintIncarnation).
+func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, resumeCommand string, hints runtime.Config) error {
 	if err := m.checkStarter(by); err != nil {
 		return err
 	}
@@ -1381,7 +1573,7 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeComm
 		if err != nil {
 			return err
 		}
-		return m.ensureRunningRuntimeOnly(ctx, by, id, b, sessName, resumeCommand, hints)
+		return m.ensureRunningRuntimeOnly(ctx, by, id, inc, b, sessName, resumeCommand, hints)
 	})
 }
 

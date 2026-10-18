@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -125,6 +126,7 @@ type controllerState struct {
 	pokeCh                 chan struct{}   // wakeOf's fallback when no wake is wired; triggers immediate reconciler tick
 	controlDispatcherCh    chan struct{}   // wakeOf's fallback when no wake is wired; triggers the control-dispatcher-only reconcile
 	configDirty            *atomic.Bool    // optional dirty flag shared with the reconciler reload path
+	freshness              configFreshness // reloads and API config writes in progress, for ReadyWork
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
@@ -3362,6 +3364,16 @@ func (s *configMutationSnapshot) restore() error {
 	return restoreErr
 }
 
+// changedOnDisk reports whether the files a captureConfigMutationSnapshot
+// snapshot holds no longer match it on disk, or can no longer be read to tell.
+func (s *configMutationSnapshot) changedOnDisk() bool {
+	now, err := captureConfigMutationSnapshot(s.cityPath)
+	return err != nil ||
+		!maps.Equal(s.existed, now.existed) ||
+		!maps.EqualFunc(s.files, now.files, bytes.Equal) ||
+		!s.agentTree.Equal(now.agentTree)
+}
+
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	// Keep unvalidated writes and rollback inside the publication transaction.
 	// A reload must not cache a rejected raw patch while publishing an older
@@ -3375,16 +3387,34 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 // mutateAndPokeLocked is mutateAndPoke for a config transaction, which
 // already holds publishMu (withConfigTransaction takes it before the
 // configedit.Editor lock).
-func (cs *controllerState) mutateAndPokeLocked(mutate func() error) error {
+func (cs *controllerState) mutateAndPokeLocked(mutate func() error) (err error) {
+	// The write changes the config files before it marks the reload pending,
+	// so ReadyWork must see it in progress throughout (configFreshness).
+	cs.freshness.beginChange()
+	defer cs.freshness.endChange()
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
-		var err error
 		snapshot, err = captureConfigMutationSnapshot(cs.cityPath)
 		if err != nil {
 			return fmt.Errorf("snapshotting current city config: %w", err)
 		}
 	}
-	if err := mutate(); err != nil {
+	// Deferred after endChange, so it runs first: the reload is pending before
+	// the write stops being in progress. A failed write marks it too when it
+	// left disk off the snapshot, failing partway or failing to roll back: the
+	// controller still holds the config it published, and the config watcher
+	// may never see the change (it skips .gc/, where a rig rebind writes
+	// site.toml first). One that left disk as it found it marks nothing.
+	defer func() {
+		if err != nil && (snapshot == nil || !snapshot.changedOnDisk()) {
+			return
+		}
+		if cs.configDirty != nil {
+			cs.configDirty.Store(true)
+		}
+		cs.wakeOf().WakeMaintenance()
+	}()
+	if err = mutate(); err != nil {
 		return err
 	}
 	revision, err := cs.refreshConfigSnapshot()
@@ -3400,10 +3430,6 @@ func (cs *controllerState) mutateAndPokeLocked(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	if cs.configDirty != nil {
-		cs.configDirty.Store(true)
-	}
-	cs.wakeOf().WakeMaintenance()
 	return nil
 }
 

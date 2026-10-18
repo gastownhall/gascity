@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beadmeta"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -55,7 +56,17 @@ func sessionCurrentClaimFrontDoor() (*session.Store, error) {
 // reason). SetCurrentClaim also compare-and-skips, so the per-tick adoption
 // re-run issues no write once the value is current.
 func hookStampSessionCurrentClaim(sessionID, beadID string) error {
-	sessFront, err := sessionCurrentClaimFrontDoor()
+	return stampSessionCurrentClaimVia(sessionCurrentClaimFrontDoor, sessionID, beadID)
+}
+
+// sessionFrontGetter yields the session front door a session seam reads or
+// writes through: sessionCurrentClaimFrontDoor opens one per call, a
+// hookCity's sessionFront shares one across an invocation.
+type sessionFrontGetter func() (*session.Store, error)
+
+// stampSessionCurrentClaimVia is hookStampSessionCurrentClaim through front.
+func stampSessionCurrentClaimVia(front sessionFrontGetter, sessionID, beadID string) error {
+	sessFront, err := front()
 	if err != nil {
 		return err
 	}
@@ -80,11 +91,16 @@ func hookStampSessionCurrentClaim(sessionID, beadID string) error {
 // it. Errors are returned rather than swallowed: the caller fails OPEN on them,
 // and it can only make that choice if it can see them.
 func hookSessionDrainPending(sessionID string) (bool, error) {
+	return sessionDrainPendingVia(sessionCurrentClaimFrontDoor, sessionID)
+}
+
+// sessionDrainPendingVia is hookSessionDrainPending through front.
+func sessionDrainPendingVia(front sessionFrontGetter, sessionID string) (bool, error) {
 	sessionID = strings.TrimSpace(sessionID)
 	if sessionID == "" {
 		return false, nil
 	}
-	sessFront, err := sessionCurrentClaimFrontDoor()
+	sessFront, err := front()
 	if err != nil {
 		return false, err
 	}
@@ -113,10 +129,15 @@ func hookSessionDrainPending(sessionID string) (bool, error) {
 // execution identity. Every failure yields "" -- an unset gc.work_dir is the
 // honest outcome, and the caller stamps nothing rather than guessing a path.
 func hookResolveSessionWorkDir(sessionID string) string {
+	return resolveSessionWorkDirVia(sessionCurrentClaimFrontDoor, sessionID)
+}
+
+// resolveSessionWorkDirVia is hookResolveSessionWorkDir through front.
+func resolveSessionWorkDirVia(front sessionFrontGetter, sessionID string) string {
 	if strings.TrimSpace(sessionID) == "" {
 		return ""
 	}
-	sessFront, err := sessionCurrentClaimFrontDoor()
+	sessFront, err := front()
 	if err != nil {
 		// Each failure below returns the same "" as a session that simply has no
 		// stampable checkout, so without naming the step a lookup fault is
@@ -260,11 +281,16 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 // hookRecordWorkStarted is the production RecordWorkStarted seam, through the
 // same routed session front door as the current-claim stamp.
 func hookRecordWorkStarted(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
-	front, err := sessionCurrentClaimFrontDoor()
+	return recordWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, fence, key, via)
+}
+
+// recordWorkStartedVia is hookRecordWorkStarted through front.
+func recordWorkStartedVia(front sessionFrontGetter, sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+	sessFront, err := front()
 	if err != nil {
 		return hookStartedUnrecorded, err
 	}
-	return recordWorkStarted(front, sessionID, fence, key, via, time.Now())
+	return recordWorkStarted(sessFront, sessionID, fence, key, via, time.Now())
 }
 
 // recordWorkStarted runs decideWorkStarted under UpdateRowFenced. A CAS lost
@@ -293,11 +319,16 @@ func recordWorkStarted(front *session.Store, sessionID string, fence hookStarted
 
 // hookForgetWorkStarted is the production ForgetWorkStarted seam.
 func hookForgetWorkStarted(sessionID string, key hookStartedKey) error {
-	front, err := sessionCurrentClaimFrontDoor()
+	return forgetWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID, key)
+}
+
+// forgetWorkStartedVia is hookForgetWorkStarted through front.
+func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookStartedKey) error {
+	sessFront, err := front()
 	if err != nil {
 		return err
 	}
-	return forgetWorkStarted(front, sessionID, key)
+	return forgetWorkStarted(sessFront, sessionID, key)
 }
 
 // forgetWorkStarted drops key from the row's work_started cell by a CAS, for
@@ -318,11 +349,16 @@ func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKe
 // hookSessionWorkStarted is the production ReadWorkStarted seam: the session
 // row's raw work_started cell, read through the routed front door.
 func hookSessionWorkStarted(sessionID string) (string, error) {
-	front, err := sessionCurrentClaimFrontDoor()
+	return sessionWorkStartedVia(sessionCurrentClaimFrontDoor, sessionID)
+}
+
+// sessionWorkStartedVia is hookSessionWorkStarted through front.
+func sessionWorkStartedVia(front sessionFrontGetter, sessionID string) (string, error) {
+	sessFront, err := front()
 	if err != nil {
 		return "", err
 	}
-	info, err := front.Get(strings.TrimSpace(sessionID))
+	info, err := sessFront.Get(strings.TrimSpace(sessionID))
 	if err != nil {
 		return "", err
 	}
@@ -338,6 +374,12 @@ func hookClaimStoreRefForDir(dir string) string {
 		return ""
 	}
 	cfg, _ := loadCityConfigWithoutBuiltinPackRefresh(cityPath, io.Discard)
+	return claimStoreRefAt(cityPath, cfg, dir)
+}
+
+// claimStoreRefAt is hookClaimStoreRefForDir in the city at cityPath, loaded
+// as cfg.
+func claimStoreRefAt(cityPath string, cfg *config.City, dir string) string {
 	if cfg == nil {
 		return ""
 	}
@@ -353,15 +395,17 @@ func hookClaimStoreRefForDir(dir string) string {
 // emitDrainFenceUnavailable, whose posture it shares: the hook failed open,
 // and this record is the only sign of it off the pane.
 func emitWorkStartedUnrecorded(sessionID, template, beadID string, cause error) {
-	sessionID = strings.TrimSpace(sessionID)
-	if sessionID == "" || cause == nil {
-		return
-	}
-	rec := openCityRecorder(io.Discard)
+	emitWorkStartedUnrecordedTo(openCityRecorder(io.Discard), sessionID, template, beadID, cause)
+}
+
+// emitWorkStartedUnrecordedTo is emitWorkStartedUnrecorded into rec, which it
+// closes.
+func emitWorkStartedUnrecordedTo(rec events.Recorder, sessionID, template, beadID string, cause error) {
 	if closer, ok := rec.(interface{ Close() error }); ok {
 		defer closer.Close() //nolint:errcheck // best-effort event recorder cleanup
 	}
-	if rec == nil {
+	sessionID = strings.TrimSpace(sessionID)
+	if sessionID == "" || cause == nil || rec == nil {
 		return
 	}
 	template = strings.TrimSpace(template)

@@ -2426,7 +2426,7 @@ gc init --template gascity --default-provider claude \
 |------|------|---------|-------------|
 | `--allow-supervisor-mismatch` | bool |  | register the city even when the running supervisor is a different gc installation than this binary |
 | `--beads-target` | string |  | beads target selector: local or external (or GC_BEADS_TARGET); give with --beads-transport. Default local. external requires --dolt-host, --dolt-port and --dolt-database (or GC_DOLT_HOST/GC_DOLT_PORT/GC_DOLT_DATABASE); bd resolves the project_id itself, so --dolt-project-id is not needed with a selector |
-| `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every fresh provider-owned init requires bd &gt;= 1.3.0, selector or not; only the legacy --dolt-host alias given without a selector stays on the 1.0.4 floor |
+| `--beads-transport` | string |  | beads transport selector: direct or proxied (or GC_BEADS_TRANSPORT); give with --beads-target. Default proxied: bd owns the Dolt process, any bd read restarts it, and gc stop stops it. direct is the escape hatch and is also bd-owned (bd init --server), not the legacy gc-managed server. Every init requires bd &gt;= 1.3.0, selector or not, including the legacy --dolt-host alias |
 | `--bootstrap-profile` | string |  | bootstrap profile to apply for hosted/container defaults |
 | `--default-provider` | string |  | default readiness-aware provider to select from --providers |
 | `--dolt-database` | string |  | hosted beads project database, e.g. bd_prj_… (or GC_DOLT_DATABASE); required with --dolt-host |
@@ -3595,13 +3595,31 @@ Every leg is read across both storage tiers, so the wisp/ephemeral rows an
 orchestration step runs as are claimable work here whether or not
 --include-ephemeral is passed.
 
+Suspended rigs are not read: rigs suspended with "gc rig suspend", or declared
+suspended_on_start and not resumed. Their agents claim nothing and the
+controller counts no demand in them, so this reads the same rigs the controller
+does; their work comes back when the rig is resumed. The city store and a
+relocated graph store are always read.
+
+When the city's controller is running, it answers the query from the stores it
+already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), reading every store
+live, never from a cache, so the answer is the one this command would compute
+itself, without opening a store. That holds only while the controller's config
+is current, so it refuses while a config change is pending or being applied,
+and after a failed reload until one succeeds; a [storage] change fails every
+reload until it is reverted or the city restarts. The controller learns of an
+edit to the config files from its config watcher and answers under the config
+it holds until then. If the controller is not running, refuses, or does not
+answer within 10s, this command reads the stores itself. GC_NO_API=1 forces
+the local read.
+
 ```
 gc ready [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--assignee` | string |  | only work assigned to this identity |
+| `--assignee` | string |  | only work assigned to exactly this identity |
 | `--exclude-label` | stringArray |  | drop beads carrying this label (repeatable) |
 | `--exclude-type` | stringArray |  | drop beads of this issue type (repeatable) |
 | `--include-ephemeral` | bool |  | accept --include-ephemeral for bd-ready parity (every leg already spans the wisp tier) |

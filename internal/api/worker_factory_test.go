@@ -945,7 +945,7 @@ func TestWorkerFactorySessionByIDUsesResolvedTemplateRuntime(t *testing.T) {
 	}
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Chat", Command: "", WorkDir: t.TempDir(), Provider: "", Transport: "", Resume: session.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
@@ -988,7 +988,7 @@ func TestWorkerFactorySessionByIDPreservesStoredResolvedCommand(t *testing.T) {
 	}
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Chat", Command: "/bin/echo --composed", WorkDir: t.TempDir(), Provider: "resolved-worker", Transport: "", Resume: session.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)
@@ -1126,7 +1126,7 @@ func TestWorkerFactoryHandleForTargetUsesResolvedTemplateRuntimeForSessionMeta(t
 	}
 
 	srv := New(fs)
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{BeadOnly: true, Template: "myrig/worker", Title: "Chat", Command: "", WorkDir: t.TempDir(), Provider: "", Transport: "", Resume: session.ProviderResume{SessionIDFlag: "--stale-session-id"}})
 	if err != nil {
 		t.Fatalf("CreateBeadOnly: %v", err)

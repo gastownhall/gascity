@@ -199,6 +199,13 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest beads first"))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// Ready work as `gc ready` answers it: live, the serving frame, fail-loud
+	// (see ReadyWorkReader). Distinct from /beads/ready, which prefers the
+	// controller's read cache and degrades a failing rig to a partial answer.
+	// An unknown query parameter is refused: a misspelled filter would
+	// otherwise widen the answer to everything.
+	cityGet(sm, "/work/ready", (*Server).humaHandleWorkReady, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), describes(workReadyDescription),
+		func(o *huma.Operation) { o.RejectUnknownQueryParameters = true })
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,

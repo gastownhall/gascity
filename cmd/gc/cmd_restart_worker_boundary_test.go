@@ -17,7 +17,7 @@ func intPtrRestartBoundary(n int) *int { return &n }
 func TestDoRigRestartUsesWorkerBoundaryForKnownSession(t *testing.T) {
 	sp := runtime.NewFake()
 	store := beads.NewMemStore()
-	mgr := newSessionManagerWithConfig("", store, sp, nil)
+	mgr := newSessionManagerWithConfig(t.TempDir(), store, sp, nil) // the create's start takes the runtime lease in its city
 	info, err := mgr.CreateSession(context.Background(), sessionpkg.CreateOptions{Template: "frontend/worker", Title: "Worker", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: sessionpkg.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)

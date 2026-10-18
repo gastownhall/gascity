@@ -110,7 +110,7 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
-			if err := pokeControlDispatch(cityPath); err != nil {
+			if err := pokeControlDispatch(cityPath); err != nil && !noteWorkerSitePoke(stderr, "gc convoy poke", err) {
 				_, _ = fmt.Fprintf(stderr, "gc convoy poke: %v\n", err)
 				return errExit
 			}
@@ -120,7 +120,13 @@ func newConvoyPokeCmd(_ io.Writer, stderr io.Writer) *cobra.Command {
 	return cmd
 }
 
+// pokeControlDispatch asks the controller to run its control dispatcher now,
+// falling back to an ordinary poke. On a worker site it returns
+// errWorkerSiteNoController without trying either.
 func pokeControlDispatch(cityPath string) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	if _, err := sendControllerCommand(cityPath, "control-dispatcher"); err == nil {
 		return nil
 	}

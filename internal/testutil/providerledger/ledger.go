@@ -145,6 +145,7 @@ type Entry struct {
 // Catalog returns fresh entries from the checked runtime-provider ledger.
 func Catalog() []Entry {
 	autoConstructor := repoSymbol("internal/runtime/auto", "New")
+	guardConstructor := repoSymbol("internal/runtime/guard", "New")
 	return []Entry{
 		reusableBuiltin(
 			"fake", "exact:fake", repoSymbol("internal/runtime", "Fake"),
@@ -280,6 +281,21 @@ func Catalog() []Entry {
 				SymbolRef{ImportPath: "sync/atomic", Name: "AddInt64"},
 			),
 		),
+		{
+			ID:           "runtime.worker-site.guard",
+			Roles:        []Role{RoleProductionProvider},
+			Port:         PortRuntimeProvider,
+			Constructors: []SymbolRef{guardConstructor},
+			Source: &SourceRef{
+				File:     "cmd/gc/providers.go",
+				Function: "resolveWorkerSpec",
+				Reason:   "a worker site's control-plane descriptor selects the guard, outside the runtime registry",
+			},
+			Claims: []ContractClaim{notApplicableRuntime(
+				guardConstructor,
+				"worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable",
+			)},
+		},
 		{
 			ID:           "runtime.composition.auto",
 			Roles:        []Role{RoleProductionProvider},

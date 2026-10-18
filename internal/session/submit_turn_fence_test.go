@@ -334,14 +334,16 @@ func newFenceFixture(t *testing.T, o fenceFixtureOpts) fenceFixture {
 	}
 	f := runtime.NewFake()
 	city := t.TempDir()
-	mgrCity := city
-	if o.noQueue {
-		mgrCity = ""
-	}
-	mgr := newTestManager(t, o.store, o.wrap(f), WithCityPath(mgrCity))
+	sp := o.wrap(f)
+	// The create's first start leases in the city (createStarted); a noQueue
+	// fixture's Manager then has none.
+	mgr := newTestManager(t, o.store, sp, WithCityPath(city))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: o.provider, WorkDir: t.TempDir(), Provider: o.provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
+	}
+	if o.noQueue {
+		mgr = newTestManager(t, o.store, sp, WithCityPath(""))
 	}
 	polls := &atomic.Int32{}
 	origPoller := startSessionSubmitPoller

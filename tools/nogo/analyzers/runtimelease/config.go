@@ -100,10 +100,10 @@ var allowed = map[string]Allowance{
 	},
 	session + ":Manager.ensureRunningRuntimeOnly": {Reason: "the legacy start's runtime bring-up, under the candidate's lease", Callers: []string{"Manager.StartRuntimeOnly"}},
 	session + ":Manager.killExistingOrphans": {
-		Reason:  "a start's pre-start orphan kill, under the start's lease (CreateSession's: a residual)",
+		Reason:  "a start's pre-start orphan kill, under the start's lease",
 		Callers: []string{"Manager.createStarted", "Manager.ensureRunningOn", "Manager.ensureRunningRuntimeOnly", "Manager.retryFreshStartAfterStaleKey"},
 	},
-	session + ":Manager.createStarted":             {Reason: "CreateSession's first start of a new row (a residual, CONTRACT §12.5)", Callers: []string{"Manager.CreateSession"}},
+	session + ":Manager.createStarted":             {Reason: "CreateSession's first start of a new row: takes the runtime lease (leaseCreatedRuntime) before it", Callers: []string{"Manager.CreateSession"}},
 	session + ":Manager.Suspend":                   {Reason: "a suspend takes the lease (leaseForStop); the city stop's sweep (ActorSweep) takes none"},
 	session + ":Manager.tearDownRuntimeForSuspend": {Reason: "a suspend's stop, under its lease", Callers: []string{"Manager.Suspend"}},
 	session + ":Manager.CloseDetailed":             {Reason: "takes the lease (leaseForStop)"},

@@ -52,7 +52,8 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 //
 // This command intentionally requires a managed controller. The controller owns
 // the fresh restart lifecycle, including key rotation and immediate restart of
-// already-desired sessions.
+// already-desired sessions. A worker site refuses before writing anything: its
+// controller is remote, and the reset needs that controller's socket.
 func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
 	asJSON := sessionJSONRequested(jsonOutput)
 	store, code := openCityStore(stderr, "gc session reset")
@@ -63,6 +64,10 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc session reset: %v\n", errWorkerSiteResetNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !cityUsesManagedReconciler(cityPath) {

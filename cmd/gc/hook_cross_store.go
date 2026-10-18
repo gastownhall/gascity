@@ -68,13 +68,32 @@ func hookStoreCommand(st hookStore, command string) string {
 // relocates nothing, and the call is then a no-op returning stores unchanged.
 // That is not an optimization detail: a custom work_query reads one store
 // whatever the topology, so the fan-out is its only coverage and must survive.
+//
+// # Callers
+//
+// Only tests call it. The hook takes the same decision before it builds the
+// fan-out (hookStoresScopeToPrimary) and builds only the entry this keeps
+// (hookWorkQueryPrimaryStore), so the legs this drops are never built;
+// TestHookWorkQueryPrimaryStoreIsTheScopedStore pins that entry.
 func scopeFederatedHookStores(stores []hookStore, federatedCommand, singleStoreCommand string) []hookStore {
-	singleStoreCommand = strings.TrimSpace(singleStoreCommand)
-	if len(stores) < 2 || singleStoreCommand == "" || singleStoreCommand == strings.TrimSpace(federatedCommand) {
+	if len(stores) < 2 || !hookStoresScopeToPrimary(federatedCommand, singleStoreCommand) {
 		return stores
 	}
 	return stores[:1:1]
 }
+
+// hookStoresScopeToPrimary reports whether a claim running federatedCommand
+// reads only the primary entry of its store fan-out: the federated form of the
+// agent's query differs from its single-store form. Decided before the fan-out
+// is built, so only that entry need be (hookWorkQueryPrimaryStore).
+func hookStoresScopeToPrimary(federatedCommand, singleStoreCommand string) bool {
+	singleStoreCommand = strings.TrimSpace(singleStoreCommand)
+	return singleStoreCommand != "" && singleStoreCommand != strings.TrimSpace(federatedCommand)
+}
+
+// hookStoreQueryEnv builds one fan-out leg's work-query environment. A
+// variable so tests can count the legs built.
+var hookStoreQueryEnv = hookQueryEnv
 
 // hookStoreRunner runs a work query against one federated store's dir and env.
 // Injectable so the cross-store selection and claim paths can be tested without
@@ -105,8 +124,24 @@ type hookStoreRunner func(command, dir string, env []string) (string, error)
 // (conformanceClaimRouting); closing the gap makes the claim stop being a bd
 // subprocess call, and I15 pins the see-but-cannot-claim asymmetry until it does.
 func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) []hookStore {
+	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, false)
+}
+
+// hookWorkQueryPrimaryStore is the first entry of hookWorkQueryStores, built
+// without building any other: what a federated claim reads (see
+// scopeFederatedHookStores).
+func hookWorkQueryPrimaryStore(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string) hookStore {
+	return hookWorkQueryStoreFanOut(cityPath, cfg, a, agentForQuery, workDir, queryEnv, identityOverrides, true)[0]
+}
+
+// hookWorkQueryStoreFanOut is hookWorkQueryStores, stopping after the first
+// entry when primaryOnly.
+func hookWorkQueryStoreFanOut(cityPath string, cfg *config.City, a *config.Agent, agentForQuery, workDir string, queryEnv []string, identityOverrides map[string]string, primaryOnly bool) []hookStore {
 	stores := []hookStore{{dir: workDir, env: queryEnv}}
 	if agentIsCrossStoreEligible(a) {
+		if primaryOnly {
+			return stores
+		}
 		return appendRigHookStores(stores, cityPath, cfg, a, identityOverrides)
 	}
 	rig := rigScopedHookRig(cfg, agentForQuery)
@@ -114,7 +149,13 @@ func hookWorkQueryStores(cityPath string, cfg *config.City, a *config.Agent, age
 		return stores
 	}
 	if rigStores := appendOneRigHookStore(nil, cityPath, cfg, a, rig, identityOverrides); len(rigStores) > 0 {
+		if primaryOnly {
+			return rigStores
+		}
 		stores = append(rigStores, stores...)
+	}
+	if primaryOnly {
+		return stores
 	}
 	// A rig-backed agent's own env above is ALSO rig-scoped, so without this no
 	// entry reaches the CITY store and root-only beads assigned to the agent
@@ -173,7 +214,7 @@ func appendOneRigHookStore(stores []hookStore, cityPath string, cfg *config.City
 	}
 	view := *a
 	view.Dir = rigName
-	rigEnv, err := hookQueryEnv(cityPath, cfg, &view)
+	rigEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
 	if err != nil || rigEnv == nil {
 		return stores
 	}
@@ -207,7 +248,7 @@ func appendCityHookStore(stores []hookStore, cityPath string, cfg *config.City, 
 	}
 	view := *a
 	view.Dir = ""
-	cityEnv, err := hookQueryEnv(cityPath, cfg, &view)
+	cityEnv, err := hookStoreQueryEnv(cityPath, cfg, &view)
 	if err != nil || cityEnv == nil {
 		return stores
 	}
