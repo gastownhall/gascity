@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
@@ -440,7 +441,11 @@ func TestResolveTemplateFingerprintChangePolicy(t *testing.T) {
 func TestReconcileSessionBeads_PrePolicyLiveDriftReapplied(t *testing.T) {
 	env := newReconcilerTestEnv(t)
 	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
-	env.addDesiredLive("worker", "worker", true, []string{"echo live-updated"})
+	live := []string{"echo live-updated"}
+	env.desiredState["worker"] = TemplateParams{Command: "test-cmd", SessionName: "worker", TemplateName: "worker", Hints: agent.StartupHints{SessionLive: live}}
+	if err := env.sp.Start(context.Background(), "worker", runtime.Config{Command: "test-cmd", SessionLive: live}); err != nil {
+		t.Fatal(err)
+	}
 	session := env.createSessionBead("worker", "worker")
 	env.markSessionActive(&session)
 	const v6NoLive = "v6:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a" // the v6 binary's live hash of no session_live
