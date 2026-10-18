@@ -41,7 +41,7 @@ const (
 	laneContentBlockIncarnation = "incarnation"
 	// lanePendingUnknown is Probe.Pending for a pending interaction the
 	// runtime names no request id for.
-	lanePendingUnknown = "?"
+	lanePendingUnknown = opjournal.PendingUnknown
 	// laneProbeBudget bounds one probe's runtime calls.
 	laneProbeBudget = 10 * time.Second
 )
@@ -265,6 +265,9 @@ func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.Convers
 		p.ContentAdmit = []opjournal.ContentClass{laneDrainNoticeClass}
 	}
 	p.TurnLive, p.Turn, p.KnownTurns = look.turn.live, look.turn.turn, look.turn.known
+	if look.noResponses {
+		p.Caps.Respond = false
+	}
 	e.live, e.lastTurn = look.handle, look.turn
 	return p, nil
 }
@@ -281,6 +284,9 @@ type laneLook struct {
 	boundary         opjournal.Tri
 	handle           worker.Handle
 	turn             laneTurnLook
+	// noResponses is PendingStatus's answer that the session takes no
+	// responses; a look that failed says nothing.
+	noResponses bool
 }
 
 // look observes the runtime, gates content on the row (session.ContentGate,
@@ -289,7 +295,9 @@ type laneLook struct {
 // resolves its handle once and reads the pending interaction through it
 // and, with withTurns, the session's turns. The boundary is the quiescence
 // rule for a keystroke-mode runtime, and for a protocol-mode one its turns:
-// never the quiescence rule.
+// never the quiescence rule. A running live runtime no content may reach
+// reads lanePendingUnknown: nothing looked, so a respond waits rather than
+// take the prompt for gone.
 //
 // A draining row admits the drain notice, so its look resolves the handle
 // and reads the pending interaction and the boundary whatever its open ops
@@ -315,7 +323,11 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 			l.block, l.drainNoticeBlock = laneContentBlockIncarnation, laneContentBlockIncarnation
 		}
 	}
-	if !l.running || (l.block != "" && l.drainNoticeBlock != "") || !caps.Live {
+	if !l.running || !caps.Live {
+		return l, nil
+	}
+	if l.block != "" && l.drainNoticeBlock != "" {
+		l.pending = lanePendingUnknown
 		return l, nil
 	}
 	h, err := e.handle(e.target)
@@ -323,7 +335,7 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 		return laneLook{}, fmt.Errorf("resolving session %s's handle: %w", e.info.ID, err)
 	}
 	l.handle = h
-	if l.pending, err = lanePending(h.PendingStatus(ctx)); err != nil {
+	if l.pending, l.noResponses, err = lanePending(h.PendingStatus(ctx)); err != nil {
 		return laneLook{}, fmt.Errorf("reading session %s's pending interaction: %w", e.info.ID, err)
 	}
 	if withTurns && e.traits.readable {
@@ -347,8 +359,9 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // stamp as hosted elsewhere for its current generation (DES-BX D7). Dedup is
 // the worker boundary's read of whether the routed runtime deduplicates
 // keyed deliveries. A live runtime steers where its steer mode and the
-// session row allow it (e.steerable; D-STEER), per laneSteerCap. Nothing
-// responds or injects in band here.
+// session row allow it (e.steerable; D-STEER), per laneSteerCap, and
+// responds when its provider is an InteractionProvider (a probe whose
+// session says otherwise clears it). Nothing injects in band here.
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
@@ -362,6 +375,7 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 	if e.target.sessionTransport() == "acp" {
 		caps.Text = opjournal.TextPlain
 	}
+	_, interactive := e.deps.sp.(runtime.InteractionProvider)
 	if caps.Live && e.deps.lane != nil {
 		row, _, found, err := e.deps.lane.Runtime(conv.ID)
 		if err != nil {
@@ -372,6 +386,7 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 		}
 	}
 	caps.Steer = laneSteerCap(caps, e.steerable(e.info, runtime.SteerModeFor(e.deps.sp, name)))
+	caps.Respond = caps.Live && interactive
 	return caps, nil
 }
 
@@ -404,17 +419,18 @@ func hostedElsewhere(stamp opjournal.HostStamp, gen int64) bool {
 
 // lanePending is the pending interaction's request id from a PendingStatus
 // answer: "" for none, lanePendingUnknown for one with no request id, and the
-// look's error when it failed, so a failed look is never read as a prompt.
-func lanePending(p *worker.PendingInteraction, _ bool, err error) (string, error) {
+// look's error when it failed, so a failed look is never read as a prompt;
+// and whether the answer says the session takes no responses.
+func lanePending(p *worker.PendingInteraction, supported bool, err error) (pending string, noResponses bool, _ error) {
 	switch {
 	case err != nil:
-		return "", err
+		return "", false, err
 	case p == nil:
-		return "", nil
+		return "", !supported, nil
 	case p.RequestID == "":
-		return lanePendingUnknown, nil
+		return lanePendingUnknown, !supported, nil
 	default:
-		return p.RequestID, nil
+		return p.RequestID, !supported, nil
 	}
 }
 
@@ -534,11 +550,6 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 
 // Interrupt implements opjournal.Executor: unsupported until OJ-15.
 func (e *conversationLaneExec) Interrupt(context.Context, opjournal.InterruptCall) opjournal.ControlResult {
-	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
-}
-
-// Respond implements opjournal.Executor: unsupported until OJ-16.
-func (e *conversationLaneExec) Respond(context.Context, opjournal.RespondCall) opjournal.ControlResult {
 	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 }
 

@@ -466,16 +466,13 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 	}
 }
 
-// TestLaneExecControlUnsupported proves interrupt and respond are refused
-// until their slices land.
+// TestLaneExecControlUnsupported proves interrupt is refused until its slice
+// lands.
 func TestLaneExecControlUnsupported(t *testing.T) {
 	e := &conversationLaneExec{}
 	want := opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 	if got := e.Interrupt(context.Background(), opjournal.InterruptCall{}); got != want {
 		t.Fatalf("Interrupt = %#v, want %#v", got, want)
-	}
-	if got := e.Respond(context.Background(), opjournal.RespondCall{}); got != want {
-		t.Fatalf("Respond = %#v, want %#v", got, want)
 	}
 }
 

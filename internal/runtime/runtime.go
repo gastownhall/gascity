@@ -636,6 +636,11 @@ type PendingInteraction struct {
 
 // InteractionResponse is the client's answer to a pending interaction.
 type InteractionResponse struct {
+	// RequestID names the request the answer is for. A provider answers only
+	// that request and refuses the response when another one is pending, so
+	// a caller answering one raising sets it (the conversation lane always
+	// does: request ids may repeat, and an answer must not reach a prompt it
+	// was not meant for). Empty answers whatever is pending.
 	RequestID string            `json:"request_id,omitempty"`
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`
