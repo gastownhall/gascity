@@ -354,7 +354,7 @@ func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 			setup: func(t *testing.T, e *opsEnv) session.Info {
 				e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 				e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-				info, err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider).CreateSession(context.Background(), session.CreateOptions{
+				info, err := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath)).CreateSession(context.Background(), session.CreateOptions{
 					Template: "helper", Title: "Off interrupt", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"},
 				})
 				if err != nil {
@@ -1617,7 +1617,7 @@ func TestSessionSubmitInterruptNowReportsTheTurnFence(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider)
+	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Fenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
@@ -2752,7 +2752,7 @@ func TestSessionContentOpsUnfencedInterruptReachesTheOp(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	e.fs.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
-	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider)
+	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "Unfenced", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatal(err)
