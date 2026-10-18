@@ -248,6 +248,13 @@ type Delivered struct {
 	Evidence    TurnEvidence
 	Via         string
 	Degradation string
+	// SettleBy, when set, is the last instant on the lane's clock the lane
+	// may record the delivery, set by an executor whose delivery is kept only
+	// if its process outlives the record (a hook's output, which its runner
+	// discards on a timeout). The Done's context ends at SettleBy: a Done that
+	// has not landed by then leaves the batch executing, and a pass takes it
+	// again, as maybe delivered, once its lease lapses.
+	SettleBy time.Time
 }
 
 // Settled is a control effect that took place.
@@ -462,7 +469,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return context.Cause(ctx)
 	case <-t.C:
 		return nil
 	}

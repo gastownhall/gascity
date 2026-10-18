@@ -900,7 +900,8 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	}
 	var writeErr error
 	// lane records the in-band lane pass's part in the hook context; when it
-	// wrote the context, its deadline answer covers the legacy nudges too.
+	// wrote the context, its deadline answer of no releases the legacy nudges
+	// too.
 	if inject {
 		// Fold the clock, the due lane notices and the active formula step
 		// into the nudge so a single provider-formatted payload carries all;
@@ -927,9 +928,12 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if inject {
 		// gc hook run discards this output if the hook overruns its deadline,
 		// so ack only while there is time to finish; otherwise release the
-		// claims so the next drain delivers the nudges again.
-		ackAllowed := lane.ackAllowed
-		if !lane.emitted {
+		// claims so the next drain delivers the nudges again. A lane pass that
+		// wrote the context and found no time already said so for both; one
+		// that found time has run its Done since, so the deadline is asked
+		// again.
+		ackAllowed := !lane.emitted || lane.ackAllowed
+		if ackAllowed {
 			ackAllowed = hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", len(items)), stderr)
 		}
 		if !ackAllowed {

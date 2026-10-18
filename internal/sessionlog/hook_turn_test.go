@@ -42,3 +42,28 @@ func TestHookPayloadTurnIDReadsTheVerifiedField(t *testing.T) {
 		}
 	}
 }
+
+// TestHookFamily pins the family a provider's name places its hooks in: the
+// canonical one, with groq and cerebras on the opencode plugin and a claude
+// spelling no other family claims read as claude.
+func TestHookFamily(t *testing.T) {
+	for _, tc := range []struct{ provider, want string }{
+		{"claude", "claude"},
+		{" Claude ", "claude"},
+		{"claude-eco", "claude"},
+		{"claude/tmux-cli", "claude"},
+		{"opencode", "opencode"},
+		{"groq", "opencode"},
+		{"cerebras", "opencode"},
+		{"opencode-claude", "opencode"},
+		{"mimocode", "mimocode"},
+		{"codex", "codex"},
+		{"kiro", "kiro"},
+		{"omp", "pi"},
+		{"", ""},
+	} {
+		if got := HookFamily(tc.provider); got != tc.want {
+			t.Errorf("HookFamily(%q) = %q, want %q", tc.provider, got, tc.want)
+		}
+	}
+}

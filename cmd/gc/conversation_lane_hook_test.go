@@ -688,15 +688,21 @@ func (f *hookLaneDrainFixture) ageRetry(t *testing.T, op opjournal.Op) {
 
 // TestHookLaneReachesModel pins which prompt hooks put their output in front
 // of the model: the JSON formats, and plain text only for the claude family
-// and the opencode and mimocode plugins.
+// and the opencode and mimocode plugins, the family read from the provider's
+// name, so groq and cerebras (the opencode plugin) and claude spellings count.
 func TestHookLaneReachesModel(t *testing.T) {
 	for _, tc := range []struct {
-		format, family string
-		want           bool
+		format, provider string
+		want             bool
 	}{
 		{"", "claude", true},
 		{"", "opencode", true},
 		{"", "mimocode", true},
+		{"", "groq", true},
+		{"", "cerebras", true},
+		{"", "claude-eco", true},
+		{"", "claude/tmux-cli", true},
+		{"", " Claude ", true},
 		{hookOutputFormatCodex, "codex", true},
 		{hookOutputFormatGemini, "gemini", true},
 		{hookOutputFormatAntigravity, "antigravity", true},
@@ -704,12 +710,15 @@ func TestHookLaneReachesModel(t *testing.T) {
 		{"", "cursor", false},
 		{"", "copilot", false},
 		{"", "kiro", false},
+		{"", "kimi", false},
+		{"", "pi", false},
+		{"", "omp", false},
 		{"", "codex", false},
 		{"", "", false},
 		{"unknown", "claude", false},
 	} {
-		if got := hookLaneReachesModel(tc.format, tc.family); got != tc.want {
-			t.Errorf("hookLaneReachesModel(%q, %q) = %v, want %v", tc.format, tc.family, got, tc.want)
+		if got := hookLaneReachesModel(tc.format, tc.provider); got != tc.want {
+			t.Errorf("hookLaneReachesModel(%q, %q) = %v, want %v", tc.format, tc.provider, got, tc.want)
 		}
 	}
 }
@@ -820,6 +829,32 @@ func (s hookLaneListCounter) List(q beads.ListQuery) ([]beads.Bead, error) {
 	return s.Store.List(q)
 }
 
+// TestHookLaneSettleBy proves the pass records a delivery only by the
+// inherited hook deadline less the archive margin the drain keeps to ack its
+// legacy nudges and exit, and has no bound without a deadline.
+func TestHookLaneSettleBy(t *testing.T) {
+	prevStart := hookProcessStart
+	t.Cleanup(func() { hookProcessStart = prevStart })
+	deadline := time.Now().Add(time.Minute).Truncate(time.Millisecond)
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(deadline))
+	hookProcessStart = deadline.Add(-100 * time.Hour)
+	if got, want := hookLaneSettleBy(), deadline.Add(-hookDeadlineArchiveMarginMax); !got.Equal(want) {
+		t.Fatalf("long-lived process: settle by %s, want the deadline less the full margin, %s", got, want)
+	}
+	hookProcessStart = deadline.Add(-3 * time.Second)
+	if got, want := hookLaneSettleBy(), deadline.Add(-time.Second); !got.Equal(want) {
+		t.Fatalf("3s process: settle by %s, want the deadline less a third of its time, %s", got, want)
+	}
+	t.Setenv(hookDeadlineEnv, "")
+	if got := hookLaneSettleBy(); !got.IsZero() {
+		t.Fatalf("no deadline: settle by %s, want no bound", got)
+	}
+	t.Setenv(hookDeadlineEnv, "soon")
+	if got := hookLaneSettleBy(); !got.IsZero() {
+		t.Fatalf("unparseable deadline: settle by %s, want no bound (the ack check refuses the delivery)", got)
+	}
+}
+
 // TestHookLaneLeaseTTL proves the hook's lease outlives the inherited hook
 // deadline by laneHookLeaseGrace (DES-O1 §4.6), never below the minimum.
 func TestHookLaneLeaseTTL(t *testing.T) {
@@ -835,6 +870,26 @@ func TestHookLaneLeaseTTL(t *testing.T) {
 	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(now.Add(-time.Minute)))
 	if got := hookLaneLeaseTTL(now); got != opjournal.MinLeaseTTL {
 		t.Fatalf("passed deadline: ttl %s, want the minimum %s", got, opjournal.MinLeaseTTL)
+	}
+}
+
+// TestHookLanePassNotesAnAbsentConversation proves a pass over a conversation
+// with no session row says so on stderr, as the lane host logs it, since the
+// conversation's open ops close for the absence.
+func TestHookLanePassNotesAnAbsentConversation(t *testing.T) {
+	h := newHookLaneHarness(t)
+	ghost := "gc-ghost"
+	r := h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary))
+	r.Conversation = ghost
+	op := h.f.propose(t, h.st, r)
+	p := h.pass()
+	p.conv = ghost
+	p.run(context.Background())
+	if got := h.f.get(t, h.st, op.ID); got.Outcome.Arm != opjournal.ArmSkipped {
+		t.Fatalf("op = %+v, want it closed skipped", got.Outcome)
+	}
+	if want := "conversation " + ghost + " has no session row on two reads"; !strings.Contains(h.stderr.String(), want) {
+		t.Fatalf("stderr = %q, want %q", h.stderr.String(), want)
 	}
 }
 
@@ -1172,6 +1227,90 @@ func TestNudgeDrainInjectLaneLeaseOutlivesTheHookDeadline(t *testing.T) {
 	want := deadline.Add(laneHookLeaseGrace)
 	if got := leases[0].Deadline; got.Before(want.Add(-2*time.Second)) || got.After(want.Add(time.Second)) {
 		t.Fatalf("lease deadline = %s, want about %s (hook deadline + %s)", got, want, laneHookLeaseGrace)
+	}
+}
+
+// doneStallingStore holds the guarded batch of a pass's Done until its
+// context ends, as a ledger too slow to settle in the hook's time would, and
+// records the deadline each held batch ran under.
+type doneStallingStore struct {
+	laneTestStore
+	deadlines *[]time.Time
+}
+
+func (s doneStallingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) {
+	inner, ok := beads.GuardedBatcherFor(s.laneTestStore)
+	if !ok {
+		return nil, false
+	}
+	return doneStallingBatcher{inner: inner, deadlines: s.deadlines}, true
+}
+
+type doneStallingBatcher struct {
+	inner     beads.GuardedBatcher
+	deadlines *[]time.Time
+}
+
+// ApplyGuarded holds the batch the lane labels as its Done and applies every
+// other one.
+func (b doneStallingBatcher) ApplyGuarded(ctx context.Context, batch beads.GuardedBatch) (beads.GuardedResult, error) {
+	if batch.Reason != "opjournal: lane done" {
+		return b.inner.ApplyGuarded(ctx, batch)
+	}
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return beads.GuardedResult{}, errors.New("the Done's batch ran with no deadline")
+	}
+	*b.deadlines = append(*b.deadlines, deadline)
+	<-ctx.Done()
+	return beads.GuardedResult{}, ctx.Err()
+}
+
+// TestNudgeDrainInjectLaneSlowDoneReleasesLegacy proves a pass whose deadline
+// answer was yes, but whose Done outlasts the archive margin, retires
+// nothing: the Done ends at the pass's settle-by time and leaves the lane op
+// executing, to be taken again as maybe delivered once its lease lapses, and
+// the drain asks the deadline again before its ack, so it releases the
+// legacy nudge it wrote beside the notice.
+func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	f.queueNudge(t)
+	op := f.propose(t, "mail arrived")
+	var deadlines []time.Time
+	prev := hookLaneSessionStore
+	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store {
+		return doneStallingStore{laneTestStore: f.sessions, deadlines: &deadlines}
+	}
+	t.Cleanup(func() { hookLaneSessionStore = prev })
+	prevStart := hookProcessStart
+	hookProcessStart = time.Now().Add(-100 * time.Hour)
+	t.Cleanup(func() { hookProcessStart = prevStart })
+	// The full archive margin and 2s more: the pass's deadline answer comes
+	// well inside the 2s, and its Done is held past them.
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(hookDeadlineArchiveMarginMax+2*time.Second)))
+	settleBy := hookLaneSettleBy()
+	run := f.drain(t)
+	if !strings.Contains(run.stdout, "review queued work") || !strings.Contains(run.stdout, "mail arrived") {
+		t.Fatalf("combined output missing a part:\n%s\nstderr=%s", run.stdout, run.stderr)
+	}
+	if strings.Contains(run.stderr, "2 injected nudge(s)") {
+		t.Fatalf("the pass's own deadline answer was no; it must come before %s:\n%s", settleBy, run.stderr)
+	}
+	if len(deadlines) != 1 || deadlines[0].After(settleBy.Add(100*time.Millisecond)) {
+		t.Fatalf("Done batch deadlines = %v; want one, by the settle-by time %s", deadlines, settleBy)
+	}
+	if !strings.Contains(run.stderr, "too close to ack 1 injected nudge(s)") {
+		t.Fatalf("stderr = %q; want the deadline asked again after the Done, refusing the legacy ack", run.stderr)
+	}
+	state, err := nudgequeue.LoadState(f.cityDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Pending) != 1 {
+		t.Fatalf("legacy nudge not released: pending %d in flight %d dead %d; stderr=%s", len(state.Pending), len(state.InFlight), len(state.Dead), run.stderr)
+	}
+	if cur, err := f.st.Get(op.ID); err != nil || cur.Status != opjournal.StatusExecuting {
+		t.Fatalf("lane op = %+v, %v; want it executing, its delivery unrecorded", cur, err)
 	}
 }
 

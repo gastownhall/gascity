@@ -17,6 +17,10 @@ import (
 // effect inside the lease.
 var errLeaseTooShort = errors.New("opjournal: no time left in the lease to run the effect")
 
+// errSettleByPassed ends a Done whose delivery's SettleBy passed before the
+// Done landed: the batch stays executing until its lease lapses.
+var errSettleByPassed = errors.New("opjournal: the delivery's settle-by time passed before its Done landed; it is taken again, as maybe delivered, once its lease lapses")
+
 // resultKind is an effect result's arm.
 type resultKind int
 
@@ -379,7 +383,9 @@ type doneItem struct {
 // done settles a Take with one guarded batch (DES-O1 §4.7), reconciled after
 // a refusal or an unknown error by re-reading what moved: a row still under
 // this Take's lease is rewritten at its fresh revision; an op another lane
-// re-took, or that closed otherwise, is left alone (I9).
+// re-took, or that closed otherwise, is left alone (I9). It runs on past ctx,
+// for the time left in the lease bounded by doneMinBudget and doneMaxBudget,
+// but never past a delivery's SettleBy.
 func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectResult, preCall time.Time, res *PassResult) error {
 	er, success := l.settle(tb, er, preCall)
 	now := l.now()
@@ -400,8 +406,12 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 		f.ID = id
 		items = append(items, &doneItem{kind: doneFact, id: id, fact: f})
 	}
-	remaining := tb.lease.Deadline.Sub(now) - doneBudgetSlack
-	dctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), min(max(remaining, doneMinBudget), doneMaxBudget))
+	budget := min(max(tb.lease.Deadline.Sub(now)-doneBudgetSlack, doneMinBudget), doneMaxBudget)
+	var cause error
+	if settleBy := er.delivered.SettleBy; er.kind == resultDelivered && !settleBy.IsZero() && settleBy.Sub(now) < budget {
+		budget, cause = settleBy.Sub(now), errSettleByPassed
+	}
+	dctx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), budget, cause)
 	defer cancel()
 	err := l.writeDone(dctx, tb, er, success, items)
 	if err == nil {
@@ -425,11 +435,15 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 
 // writeDone applies Done's items until every one is written or dropped. A
 // refusal or an unknown error leaves the items stale; a transient error
-// re-reading them backs off and retries, like an unknown batch error.
+// re-reading them backs off and retries, like an unknown batch error. Once
+// ctx ends it writes nothing more.
 func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er effectResult, success Outcome, items []*doneItem) error {
 	backoff := doneBackoffStart
 	var lastErr error
 	for range casAttempts {
+		if err := context.Cause(ctx); err != nil {
+			return errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, err), lastErr)
+		}
 		var readErr error
 		for _, it := range items {
 			if it.done || !it.stale {

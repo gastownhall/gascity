@@ -33,3 +33,11 @@ func hookPayloadTurnID(field string, payload []byte) string {
 	id, _ = validTurnID(id)
 	return id
 }
+
+// HookFamily is the family whose hooks a provider runs, read from its name
+// alone, as a hook's GC_PROVIDER names it: its turn family (turnFamilyKey),
+// so groq and cerebras run the opencode plugin and a claude spelling no other
+// family claims ("claude-eco", "claude/tmux-cli") is claude.
+func HookFamily(provider string) string {
+	return turnFamilyKey(provider)
+}

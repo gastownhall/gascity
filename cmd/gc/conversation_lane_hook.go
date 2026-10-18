@@ -18,7 +18,11 @@ package main
 // delivery links none (no_source). When the hook deadline leaves no time to
 // record the delivery, the batch is released as maybe delivered, so the next
 // delivery carries the plain redelivery note (D-NOTE) and an at_most_once op
-// closes failed{ambiguous_delivery}.
+// closes failed{ambiguous_delivery}. A delivery is recorded only by the
+// deadline less the archive margin (hookLaneSettleBy): a Done that has not
+// landed by then leaves the batch executing, and the lane takes it again as
+// maybe delivered once the hook's lease lapses, so a slow store never records
+// a delivery whose output gc hook run then discards.
 //
 // An empty prompt costs one keyed list (hookLaneDue), and nothing on a store
 // that cannot host a lane; the lane store, the session row and the runtime row
@@ -68,18 +72,20 @@ const (
 	laneHookPokeLegFloor = 20 * time.Millisecond
 )
 
-// hookLaneReachesModel reports whether a prompt hook of hookFormat, run by a
-// provider of family (as GC_PROVIDER names it), puts its output in front of
-// the model: the JSON formats gc writes for codex, gemini and antigravity,
-// and plain text for the claude family and the opencode and mimocode plugins. Other families' prompt hooks
-// read stdout as a control document (cursor) or drop plain text (copilot), so
-// an in-band delivery there would be recorded and never seen.
-func hookLaneReachesModel(hookFormat, family string) bool {
+// hookLaneReachesModel reports whether a prompt hook of hookFormat, run by
+// provider (as GC_PROVIDER names it), puts its output in front of the model:
+// the JSON formats gc writes for codex, gemini and antigravity, and plain
+// text for the claude family and the opencode and mimocode plugins, the
+// family read from the name (worker.HookFamily), so groq and cerebras run the
+// opencode plugin. Other families' prompt hooks read stdout as a control
+// document (cursor) or drop plain text (copilot), so an in-band delivery
+// there would be recorded and never seen.
+func hookLaneReachesModel(hookFormat, provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(hookFormat)) {
 	case hookOutputFormatCodex, hookOutputFormatGemini, hookOutputFormatAntigravity:
 		return true
 	case "":
-		switch strings.ToLower(strings.TrimSpace(family)) {
+		switch worker.HookFamily(provider) {
 		case "claude", "opencode", "mimocode":
 			return true
 		}
@@ -121,7 +127,7 @@ func hookLaneDue(sessions beads.Store, conv string, stderr io.Writer) bool {
 // hook's own session (GC_SESSION_ID). It is none for a drain that names its
 // target, since the fence the pass checks is the hook's own environment, and
 // none when the hook's output does not reach the model (hookLaneReachesModel,
-// with the family the session's runtime environment names in GC_PROVIDER).
+// with the provider the session's runtime environment names in GC_PROVIDER).
 func hookLaneConversation(args []string, hookFormat string) string {
 	if len(args) > 0 || !hookLaneReachesModel(hookFormat, os.Getenv("GC_PROVIDER")) {
 		return ""
@@ -155,6 +161,19 @@ func hookLaneLeaseTTL(now time.Time) time.Duration {
 	return max(opjournal.MinLeaseTTL, deadline.Sub(now)+laneHookLeaseGrace)
 }
 
+// hookLaneSettleBy is the last instant the in-band pass may record a
+// delivery: the deadline gc hook run handed this process less the archive
+// margin, the time the drain keeps to ack or release its legacy nudges and
+// exit before the runner discards its output. It is zero without a deadline,
+// and with one that does not parse, whose ack check refuses the delivery.
+func hookLaneSettleBy() time.Time {
+	deadline, ok, err := inheritedHookDeadline()
+	if err != nil || !ok {
+		return time.Time{}
+	}
+	return deadline.Add(-hookArchiveMargin(deadline, hookProcessStart))
+}
+
 // hookLanePayloadTurnID is the turn id a hook payload names for provider; a
 // seam so tests can stand in for a family X11's live arm verified.
 var hookLanePayloadTurnID = worker.HookPayloadTurnID
@@ -168,6 +187,9 @@ type hookLanePass struct {
 	fence runtime.InputFence
 	// leaseTTL is the lease the pass takes its batch under (hookLaneLeaseTTL).
 	leaseTTL time.Duration
+	// settleBy is the last instant the pass may record a delivery
+	// (hookLaneSettleBy), zero for no bound.
+	settleBy time.Time
 	// provider is the session's provider family; payload the hook's stdin.
 	provider string
 	payload  []byte
@@ -191,8 +213,10 @@ type hookLaneOutcome struct {
 	// emitErr its error.
 	emitted bool
 	emitErr error
-	// ackAllowed is the deadline's answer when emitted without error: the
-	// drain records its legacy nudges by the same answer.
+	// ackAllowed is the deadline's answer when emitted without error, asked
+	// before the pass's Done. A no releases the legacy nudges the context
+	// carries too; after a yes the drain asks again before it acks them,
+	// since the Done has run in between.
 	ackAllowed bool
 	// accepted reports that the pass recorded a delivery.
 	accepted bool
@@ -216,10 +240,13 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 		p.notef("%v", err)
 		return hookLaneOutcome{}
 	}
-	view, info, _, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv)
+	view, info, absent, err := readConversationLaneView(sessionFrontDoor(p.sessions), p.conv)
 	if err != nil {
 		p.notef("reading conversation %s: %v", p.conv, err)
 		return hookLaneOutcome{}
+	}
+	if absent {
+		p.notef("conversation %s has no session row on two reads; its open ops close as skipped{conversation_closed}", p.conv)
 	}
 	exec := &hookLaneExec{pass: p, info: info}
 	res, err := lane.Pass(ctx, view, exec)
@@ -341,8 +368,9 @@ func hookLaneFenceMatches(hook runtime.InputFence, conv opjournal.ConversationVi
 }
 
 // Deliver implements opjournal.Executor: it writes the delivery's text into
-// the hook context, then accepts it when the deadline leaves time to record
-// it, and otherwise reports it maybe delivered.
+// the hook context, then accepts it, to be recorded by the pass's settleBy,
+// when the deadline leaves time to record it, and otherwise reports it maybe
+// delivered.
 func (e *hookLaneExec) Deliver(_ context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	if e.emitted {
 		return opjournal.NotDelivered{Transient: true, Cause: errors.New("conversation lane: the hook context was already written")}
@@ -365,6 +393,7 @@ func (e *hookLaneExec) Deliver(_ context.Context, d opjournal.Delivery) opjourna
 		},
 		Evidence: opjournal.TurnEvidence{HasSource: false},
 		Via:      laneViaHook,
+		SettleBy: e.pass.settleBy,
 	}
 }
 
@@ -397,9 +426,11 @@ func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Write
 // conv holds an open lane op; knownDue says the drain's fast path already
 // found one, so the probe is not run again. write writes the drain's one hook
 // context with the lane text; legacy is the count of legacy nudges that
-// context also carries, so one deadline answer covers both. With nothing due
-// it costs the one keyed probe and writes nothing. The drain rings the lane
-// host itself (hookLaneRing) when it is done.
+// context also carries, which the pass's deadline answer counts beside its
+// own ops. The pass records its delivery by hookLaneSettleBy, which leaves
+// the drain the archive margin to ack or release them. With nothing due it
+// costs the one keyed probe and writes nothing. The drain rings the lane host
+// itself (hookLaneRing) when it is done.
 func hookDrainLane(sessions beads.Store, conv string, knownDue bool, provider string, payload []byte, legacy int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
 	if !knownDue && !hookLaneDue(sessions, conv, stderr) {
 		return hookLaneOutcome{}
@@ -411,6 +442,7 @@ func hookDrainLane(sessions beads.Store, conv string, knownDue bool, provider st
 		conv:     conv,
 		fence:    hookLaneFence(),
 		leaseTTL: hookLaneLeaseTTL(time.Now()),
+		settleBy: hookLaneSettleBy(),
 		provider: provider,
 		payload:  payload,
 		clk:      clock.Real{},
