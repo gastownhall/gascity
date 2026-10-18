@@ -200,20 +200,6 @@ func (s releaseSeat) keepsStarted(b beads.Bead) bool {
 	return (s.recordedUnread || s.recorded[strings.TrimSpace(b.ID)]) && !beadmeta.HasDispatchHold(b.Labels)
 }
 
-// startedClaimsKept is the in_progress claims scope holds on sw's legs that
-// the drain-ack release would keep as started (keepsStarted): what a seat
-// that acks its own drain still has to finish.
-func startedClaimsKept(sw *SeatWork, scope ReleaseScope, seat releaseSeat) ([]seatWorkHit, error) {
-	claims, err := sw.snapshot(seatWorkQuery{scope: scope, statuses: startedOnly}, false)
-	var kept []seatWorkHit
-	for _, c := range claims {
-		if seat.keepsStarted(c.bead) {
-			kept = append(kept, c)
-		}
-	}
-	return kept, err
-}
-
 // startedClaimBead is the bead an execution_claim_started stamp names
 // ("<instance_token>|<bead>", startedValue), whichever incarnation wrote it.
 func startedClaimBead(stamp string) string {
@@ -228,6 +214,11 @@ func startedClaimBead(stamp string) string {
 type ReleaseOpts struct {
 	Late     bool      // add the close-time re-read of the seat's legs (the cascade)
 	Deadline time.Time // zero: none; a write past it fails with failedBudget
+	// RefuseStarted refuses the whole release when the claims read include
+	// one the seat keeps as started (releaseSeat.keepsStarted): nothing is
+	// released, and the outcome is Refused with those claims Kept. A seat's
+	// own drain-ack uses it: it must finish such work before it acks.
+	RefuseStarted bool
 }
 
 // ReleaseOutcome is what a release did with each claim.
@@ -235,6 +226,7 @@ type ReleaseOutcome struct {
 	Released, Kept, Failed []seatWorkHit
 	Why                    map[string]string // by bead ID, for Kept and Failed
 	Route                  map[string]string // by bead ID, for a claim kept unserved: the route it would take
+	Refused                bool              // RefuseStarted refused the release: Kept are the started claims
 }
 
 // strandedClaim is one claim kept because no lane serves it.
@@ -267,6 +259,17 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 	}
 	if err != nil && p.startedKeeps {
 		return ReleaseOutcome{}, err
+	}
+	if opts.RefuseStarted {
+		out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
+		for _, c := range claims {
+			if seat.keepsStarted(c.bead) {
+				out.Kept, out.Why[c.bead.ID], out.Refused = append(out.Kept, c), keptStarted, true
+			}
+		}
+		if out.Refused {
+			return out, err
+		}
 	}
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }

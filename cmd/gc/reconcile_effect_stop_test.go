@@ -841,13 +841,13 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 // in-progress bead of the seat's, or the same drain for another reason,
 // keeps its work as before.
 //
-// T9 (mc-358yo, PHASE1-2 §6.5): a claim the seat records that a turn began
-// is kept, whoever requested the stop, unless a dispatch hold parks it. With
-// the work ladder off (until W3), that record is execution_claim_started at
-// the row's current token only: a work_started entry, or an earlier
-// incarnation's stamp, would keep a claim the seat was woken on and never
-// ran, and bring the v5.10x loop back, so the claim goes back as before. With
-// the ladder on, either record keeps it, and an unreadable cell does too.
+// T9 (mc-358yo, PHASE1-2 §6.5). With the work ladder off (until W3), only an
+// execution_claim_started stamp at the row's current instance token keeps
+// the claim, unless a dispatch hold parks it: a work_started entry, or an
+// earlier incarnation's stamp, would keep a claim the seat was woken on and
+// never ran and bring the v5.10x loop back, so such a claim goes back as
+// before. With the ladder on, the stop is the ladder's recycle, which gives
+// back nothing (§8 W3): every claim is kept.
 func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 	for _, c := range []struct {
 		name    string
@@ -866,10 +866,8 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		{"ladder off: this incarnation's stamp, kept", executionStalledDrainReason, false, false, "stamp", false, ""},
 		{"ladder off: stamped but hold:mayor, released", executionStalledDrainReason, true, false, "stamp", false, beadmeta.HoldMayorLabel},
 		{"ladder on: work_started names it, kept", executionStalledDrainReason, false, false, "cell", true, ""},
-		{"ladder on: an earlier incarnation's stamp, kept", executionStalledDrainReason, false, false, "old-stamp", true, ""},
-		{"ladder on: work_started unreadable, kept", executionStalledDrainReason, false, false, "unreadable", true, ""},
-		{"ladder on: started but hold:external, released", executionStalledDrainReason, true, false, "cell", true, beadmeta.HoldExternalLabel},
-		{"ladder on: no record, released", executionStalledDrainReason, true, false, "", true, ""},
+		{"ladder on: no record, kept (the recycle gives back nothing)", executionStalledDrainReason, false, false, "", true, ""},
+		{"ladder on: on hold:external, kept (the recycle gives back nothing)", executionStalledDrainReason, false, false, "", true, beadmeta.HoldExternalLabel},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string

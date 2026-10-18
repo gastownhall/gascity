@@ -1243,6 +1243,15 @@ func releaseUnexecutedClaimsOnDrainAck(
 	budget time.Duration,
 	stderr io.Writer,
 ) {
+	releaseDrainAckClaims(legs, sessionBead, false, budget, stderr)
+}
+
+// releaseDrainAckClaims is releaseUnexecutedClaimsOnDrainAck that, with
+// refuseStarted (a seat acking its own drain), refuses the whole pass when
+// the seat holds a claim the release keeps as started (PHASE1-2 §6.5): it
+// releases nothing and returns those claims' IDs. The check is the pass's own
+// read, under its budget: one scan, one deadline.
+func releaseDrainAckClaims(legs WorkLegs, sessionBead beads.Bead, refuseStarted bool, budget time.Duration, stderr io.Writer) []string {
 	if stderr == nil {
 		stderr = io.Discard
 	}
@@ -1251,15 +1260,23 @@ func releaseUnexecutedClaimsOnDrainAck(
 	}
 	if budget <= 0 {
 		spent()
-		return
+		return nil
 	}
 	scope := releaseScopeOwn(sessionBead)
 	sw := seatWorkFor(legs, scope)
-	out, err := ReleaseClaims(sw, scope, releaseSeatOfBead(sessionBead), releaseDrainAck, ReleaseOpts{Deadline: time.Now().Add(budget)})
+	out, err := ReleaseClaims(sw, scope, releaseSeatOfBead(sessionBead), releaseDrainAck, ReleaseOpts{Deadline: time.Now().Add(budget), RefuseStarted: refuseStarted})
+	if out.Refused {
+		held := make([]string, 0, len(out.Kept))
+		for _, c := range out.Kept {
+			held = append(held, c.bead.ID)
+		}
+		return held
+	}
 	if slices.ContainsFunc(out.Failed, func(c seatWorkHit) bool { return out.Why[c.bead.ID] == failedBudget }) {
 		spent()
 	}
 	logRelease(stderr, "draining", sessionBead.ID, out, err)
+	return nil
 }
 
 // logRelease reports what a release could not do: a failed read, a failed

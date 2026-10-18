@@ -121,37 +121,31 @@ type stalledClaim struct {
 
 // stalledClaimOf is the claim an execution-stalled stop of row gives back,
 // and whether the seat records that a turn began it (mc-358yo, PHASE1-2
-// §6.5).
+// §6.5). It runs with the work ladder off only: with it on, the stop is the
+// ladder's recycle, which gives back nothing (§8 W3), and the ladder releases
+// an unstarted claim itself.
 //
-// With the work ladder off, the execution backstop requests the stop, and its
-// own record is execution_claim_started at the row's current instance token
-// (startedValue), the stamp that already vetoes its drain. Only that names the
-// claim started: work_started names every claim the hook handed out, and a
-// stamp from an earlier incarnation names one the seat was woken on and never
-// ran, so keeping either would leave the seat asleep holding the claim, the
+// The execution backstop requests the stop, and its own record is
+// execution_claim_started at the row's current instance token (startedValue),
+// the stamp that already vetoes its drain. Only that keeps the claim:
+// work_started names every claim the hook handed out, and a stamp from an
+// earlier incarnation names one the seat was woken on and never ran, so
+// keeping either would leave the seat asleep holding the claim, the
 // assigned-work wake would restart it on it, and the backstop would drain it
-// again: the v5.10x loop. With the ladder on, the stop is the ladder's
-// recycle, and either record keeps the claim (work_started unreadable keeps
-// it too).
-func stalledClaimOf(row session.Info, meta map[string]string, ladderOn bool) stalledClaim {
+// again: the v5.10x loop.
+func stalledClaimOf(row session.Info, meta map[string]string) stalledClaim {
 	beadID := strings.TrimSpace(meta[executionClaimNudgeWorkKey])
 	if beadID == "" {
 		return stalledClaim{}
 	}
-	stamp := strings.TrimSpace(meta[executionClaimStartedKey])
-	started := stamp == strings.TrimSpace(meta["instance_token"])+"|"+beadID
-	if ladderOn {
-		seat := releaseSeat{}
-		seat.nameRecorded(startedClaimBead(stamp))
-		seat.nameWorkStarted(row.WorkStartedRaw)
-		started = seat.recordedUnread || seat.recorded[beadID]
-	}
+	started := strings.TrimSpace(meta[executionClaimStartedKey]) == strings.TrimSpace(meta["instance_token"])+"|"+beadID
 	return stalledClaim{beadID: beadID, row: row, started: started}
 }
 
 // workLadderOn reports whether w's city runs the work-progress ladder
-// ([daemon] work_ladder, PHASE1-2 W3). Until W3 ships the lane step and the
-// switch, no city does: W3 replaces this body with the config read.
+// ([daemon] work_ladder, PHASE1-2 W3). With it on, an execution-stalled stop
+// gives back no claim. Until W3 ships the lane step and the switch, no city
+// runs it: W3 replaces this body with the config read.
 func workLadderOn(*World) bool { return workLadderDeployed }
 
 // workLadderDeployed is false until W3 lands; tests set it to exercise the
@@ -188,8 +182,8 @@ func stopDecide(v txView) txStep {
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
-	if stopReason(v.It) == executionStalledDrainReason {
-		plan.stalled = stalledClaimOf(v.Row, v.Meta, workLadderOn(v.World))
+	if stopReason(v.It) == executionStalledDrainReason && !workLadderOn(v.World) {
+		plan.stalled = stalledClaimOf(v.Row, v.Meta)
 	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:

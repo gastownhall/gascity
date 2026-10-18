@@ -1413,9 +1413,15 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 	} else {
 		res, err = ops.RecordWorkStarted(sessionID, fence, hookStartedKey{Store: ops.StoreRef(dir), Bead: beadID}, via)
 	}
-	if err != nil {
-		fmt.Fprintf(stderr, "gc hook --claim: recording %s as started on session %s: %v; delivering it anyway\n", beadID, sessionID, err) //nolint:errcheck
+	switch {
+	case errors.Is(err, errWorkStartedReset):
+		// Recorded, over a cell no reader could use: report what was lost.
+		fmt.Fprintf(stderr, "gc hook --claim: recorded %s as started on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
 		ops.EmitWorkStartedUnrecorded(sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), beadID, err)
+		return res
+	case err != nil:
+		fmt.Fprintf(stderr, "gc hook --claim: recording %s as started on session %s: %v; delivering it anyway\n", beadID, sessionID, err) //nolint:errcheck
+		ops.EmitWorkStartedUnrecorded(sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), beadID, fmt.Errorf("delivered without a work_started record: %w", err))
 		return hookStartedUnrecorded
 	}
 	return res
