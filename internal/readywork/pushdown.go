@@ -44,9 +44,9 @@ import (
 // set in that order after every readiness veto (beads.OrderedReadyReader) is
 // asked for its first Limit+boundedSlack rows instead of all of them. Every leg
 // that returned fewer rows than it was asked for returned all of them, and a
-// leg whose rows the Go-only predicates thin below the limit is asked again for
-// more (boundedRead), so each leg's top N is in hand and the merged top N is
-// the city's.
+// leg is asked again for more while fewer than the limit of its rows pass the
+// Go-only predicates and survive the merge (boundedRead), so each leg's top N
+// is in hand and the merged top N is the city's.
 //
 // --sort newest is never pushed: no store cuts in that order.
 //
@@ -57,13 +57,33 @@ import (
 // to another, and an id in a class binding's reserved namespace belongs to the
 // binding alone. The exception is the class binding's work-shaped ids: `gc
 // storage migrate` copies beads into the binding under their original ids and
-// never deletes the work store's copy. An unbounded read keeps the work store's
-// copy (first leg wins) and the predicates judge THAT copy; a narrowed read can
-// leave it behind and serve the binding's. So when the binding serves a row of
-// the answer under a work-shaped id, the earlier legs are asked whether they
-// hold it, and if one does, or cannot say, the answer is read again without any
-// narrowing (readNarrowed). On a migrated city that is the relics alone; the
-// binding's own rows, every routed graph step included, need no check.
+// then clears the work store's copies, but a copy survives wherever that clear
+// has not run: a city migrated by a build that kept its source, or a clear
+// that did not finish. An unbounded read keeps the work store's copy (first
+// leg wins) and the predicates judge THAT copy. A narrowed read can go wrong
+// over such a relic in two directions:
+//
+//   - It can leave the work store's copy behind (a predicate it fails, or a
+//     bound it falls past) and serve the binding's. So when the binding serves
+//     a row of the answer under a work-shaped id, the earlier legs are asked
+//     whether they hold it, and if one does, or cannot say, the answer is read
+//     again without any narrowing (readNarrowed).
+//   - It can count the binding's relic toward the binding's bound and then
+//     drop the relic for the work store's copy in the merge, ending the
+//     binding's read before rows of its own the answer needs. So a relic never
+//     counts toward a bound (mergeKeeps).
+//
+// On a migrated city both concern the relics alone; the binding's own rows,
+// every routed graph step included, need no check.
+//
+// The reserved-namespace half of that fact holds only while no work leg's
+// prefix shadows a reserved one, and config only warns about a work prefix
+// that does (config.ReservedPrefixWarnings). A city that ignored the warning
+// and split anyway holds its relics under reserved-shaped ids. mergeKeeps
+// trusts those, so they count toward the binding's bound and are never
+// probed, and a narrowed read on such a city can differ from the plain one.
+// Leaving every shadowed prefix out of the binding leg's ReservedPrefixes
+// would close that gap (ga-xdtyo2).
 
 // boundedSlack is how many rows past the limit a bounded leg read asks for.
 // It absorbs the rows a Go-only predicate drops without a second read, and any
@@ -162,7 +182,10 @@ func predicatesPushed(q beads.ReadyQuery) bool {
 // fails, or a bound it falls past) and serve the binding's instead. So when the
 // binding serves a row of the answer under a work-shaped id, every earlier leg
 // that was narrowed is asked whether it holds that id; if one does, or cannot
-// say, the answer is read again with plain.
+// say, the answer is read again with plain. The other direction, a bounded
+// binding read ended by relics the merge then drops, cannot occur while no work
+// prefix shadows a reserved one: boundedRead counts only the rows mergeKeeps
+// trusts (Co-resident ids above).
 func readNarrowed(legs []Leg, c compiled, narrowed, plain legRead) ([]beads.Bead, map[string]int, error) {
 	results := readLegs(legs, narrowed)
 	if err := firstLegError(legs, results); err != nil {
@@ -176,8 +199,11 @@ func readNarrowed(legs []Leg, c compiled, narrowed, plain legRead) ([]beads.Bead
 }
 
 // boundedRead asks one leg for its first Limit+boundedSlack ready rows in order,
-// and asks again for more while the rows the Go-only predicates keep fall short
-// of the limit. A store that cannot cut in order returns its whole set.
+// and asks again for more while the rows the answer can use fall short of the
+// limit: rows the Go-only predicates keep and the merge keeps too (mergeKeeps).
+// A relic the merge drops for an earlier leg's copy is not a row in hand, and
+// counting it could end a binding's read before rows of its own the answer
+// needs. A store that cannot cut in order returns its whole set.
 func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead {
 	limit := c.query.Limit
 	return func(leg Leg) legResult {
@@ -194,7 +220,7 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead
 			}
 			kept := 0
 			for _, b := range rows {
-				if c.matches(b) {
+				if mergeKeeps(leg, b.ID) && c.matches(b) {
 					kept++
 				}
 			}
@@ -223,7 +249,7 @@ func narrowedAnswerIsExact(legs []Leg, c compiled, items []beads.Bead, owners ma
 	var probes []probe
 	for _, row := range answer {
 		src := owners[row.ID]
-		if !legs[src].ClassBinding || inAnyNamespace(row.ID, legs[src].ReservedPrefixes) {
+		if mergeKeeps(legs[src], row.ID) {
 			continue
 		}
 		for i := range src {
@@ -236,6 +262,16 @@ func narrowedAnswerIsExact(legs []Leg, c compiled, items []beads.Bead, owners ma
 		held[i] = !errors.Is(err, beads.ErrNotFound)
 	})
 	return !slices.Contains(held, true)
+}
+
+// mergeKeeps reports whether no earlier leg can hold id, so the merge is sure
+// to keep leg's copy of it: every id a work leg holds, and every id in one of a
+// class binding's reserved namespaces. Only a binding's work-shaped ids, the
+// relics an uncleared migration leaves, can lose to an earlier leg's copy;
+// reserved-shaped ids can too where a work prefix shadows a reserved one (see
+// Co-resident ids above).
+func mergeKeeps(leg Leg, id string) bool {
+	return !leg.ClassBinding || inAnyNamespace(id, leg.ReservedPrefixes)
 }
 
 // inAnyNamespace reports whether id is in one of the prefixes' namespaces: the

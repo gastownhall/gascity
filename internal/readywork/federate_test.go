@@ -15,6 +15,7 @@ package readywork
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -288,4 +289,69 @@ func TestFederateReadyBeadsReportsTheFirstFailingLegByPosition(t *testing.T) {
 			t.Fatalf("error = %v, want the first-POSITION failing leg (rig alpha) named", err)
 		}
 	})
+}
+
+// snapshotStore is a leg whose read cache holds a stale snapshot: the shape of
+// a CachingStore whose last reconcile predates writes an agent's own `bd` made.
+// Its own reads and its Cached handle answer from the snapshot, the embedded
+// store; only its Live handle reads the backing store.
+type snapshotStore struct {
+	beads.Store
+	backing beads.Store
+}
+
+func (s snapshotStore) Handles() beads.StoreHandles {
+	return beads.StoreHandles{
+		Cached: beads.HandlesFor(s.Store).Cached,
+		Live:   beads.HandlesFor(s.backing).Live,
+		Writer: s.backing,
+	}
+}
+
+// TestReadAnswersEveryStatusFromTheLiveHandle pins the package's
+// every-read-is-live rule on every arm: the ready default, each --status list,
+// and the in_progress rows' blocked_by enrichment. Every row, and the one
+// dependency edge, is written after the leg's cache took its snapshot, so an
+// arm that read the cache, through the Cached handle or through the store's
+// own reads, would answer short; each arm must answer exactly as the backing
+// store.
+func TestReadAnswersEveryStatusFromTheLiveHandle(t *testing.T) {
+	backing := beads.NewMemStore()
+	ids := map[string]string{}
+	for _, status := range KnownStatuses() {
+		ids[status] = mustCreate(t, backing, beads.Bead{Title: status + " work", Type: "task"}).ID
+	}
+	for _, status := range []string{StatusInProgress, StatusBlocked} {
+		if err := backing.Update(ids[status], beads.UpdateOpts{Status: &status}); err != nil {
+			t.Fatalf("set %s: %v", status, err)
+		}
+	}
+	if err := backing.Close(ids[StatusClosed]); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	if err := backing.DepAdd(ids[StatusInProgress], ids[StatusOpen], "blocks"); err != nil {
+		t.Fatalf("dep add: %v", err)
+	}
+	stale := []Leg{testLeg("city", snapshotStore{Store: beads.NewMemStore(), backing: backing})}
+	live := []Leg{testLeg("city", backing)}
+	for _, status := range append([]string{""}, KnownStatuses()...) {
+		q := Query{Status: status}
+		want, err := Read(live, q)
+		if err != nil {
+			t.Fatalf("--status=%q over the backing store: %v", status, err)
+		}
+		if len(want) == 0 {
+			t.Fatalf("--status=%q: the backing store answers no rows; the fixture must give every arm a row", status)
+		}
+		if status == StatusInProgress && len(want[0].BlockedBy) == 0 {
+			t.Fatal("--status=in_progress: the backing store's row carries no blocked_by; the fixture's edge must give the enrichment a blocker to read")
+		}
+		got, err := Read(stale, q)
+		if err != nil {
+			t.Fatalf("--status=%q: %v", status, err)
+		}
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("--status=%q over a leg whose cache is stale answered %+v, want the backing store's %+v", status, got, want)
+		}
+	}
 }

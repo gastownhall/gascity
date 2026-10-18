@@ -332,87 +332,252 @@ func TestReadBoundedAnswerTrustsTheBindingWhenNoCutLegHoldsItsRow(t *testing.T) 
 	}
 }
 
+// TestReadBoundedBindingReadIsNeverEndedByRelics pins the other direction of
+// co-residency. The merge drops a binding's relic for the work store's copy of
+// the same id, so a relic must not count toward the rows a bounded binding read
+// has in hand. Counted, relics at the head of the binding end its read before
+// the binding's own answer rows. The answer then comes back short or wrong,
+// and the guard, which probes only the rows the answer serves, has nothing to
+// probe.
+func TestReadBoundedBindingReadIsNeverEndedByRelics(t *testing.T) {
+	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
+	routed := func(b *beads.Bead) { b.Metadata = beads.StringMap{"gc.routed_to": "gascity/worker"} }
+	held := func(b *beads.Bead) { b.Labels = []string{"hold:mayor"} }
+	// The routed claim tier, flag for flag (config.bdReadyPoolDemandShell).
+	claimTier := func(limit int) Query {
+		return Query{
+			MetadataFields: []string{"gc.routed_to=gascity/worker"},
+			Unassigned:     true,
+			ExcludeTypes:   []string{"epic"},
+			ExcludeLabels:  []string{"hold:mayor", "hold:external", "human"},
+			Limit:          limit,
+		}
+	}
+	// ownRows is the binding's own rows, minted after every relic: held rows
+	// g-00.. first, then ready ones.
+	ownRows := func(heldRows, readyRows int) []beads.Bead {
+		var rows []beads.Bead
+		for i := range heldRows + readyRows {
+			mutate := []func(*beads.Bead){routed}
+			if i < heldRows {
+				mutate = append(mutate, held)
+			}
+			rows = append(rows, readyRow(fmt.Sprintf("g-%02d", i), 1, base.Add(time.Hour+time.Duration(i)*time.Second), mutate...))
+		}
+		return rows
+	}
+	var heldWork, releasedRelics []beads.Bead
+	for i := range 20 {
+		id, created := fmt.Sprintf("w-r%02d", i), base.Add(time.Duration(i)*time.Second)
+		heldWork = append(heldWork, readyRow(id, 1, created, routed, held))
+		releasedRelics = append(releasedRelics, readyRow(id, 1, created, routed))
+	}
+	for _, tc := range []struct {
+		name        string
+		work, graph []beads.Bead
+		query       Query
+		want        []string
+	}{
+		{
+			name:  "the hold the binding released is still on every work copy",
+			work:  heldWork,
+			graph: append(slices.Clone(releasedRelics), ownRows(20, 5)...),
+			query: claimTier(20),
+			want:  []string{"g-20", "g-21", "g-22", "g-23", "g-24"},
+		},
+		{
+			name:  "one ready row past the relics",
+			work:  heldWork,
+			graph: append(slices.Clone(releasedRelics), ownRows(20, 1)...),
+			query: claimTier(1),
+			want:  []string{"g-20"},
+		},
+		{
+			name:  "the work copy kept a stale priority",
+			work:  []beads.Bead{readyRow("w-r00", 3, base, routed)},
+			graph: append([]beads.Bead{readyRow("w-r00", 0, base, routed)}, ownRows(20, 1)...),
+			query: claimTier(1),
+			want:  []string{"g-20"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			binding := func(store beads.Store) Leg {
+				return Leg{Label: "graph", Store: store, ClassBinding: true, ReservedPrefixes: []string{"g"}}
+			}
+			legs := []Leg{testLeg("city", newNarrowingStore(tc.work...)), binding(newNarrowingStore(tc.graph...))}
+			plain := []Leg{testLeg("city", ignoringStore{beads.NewMemStoreFrom(0, tc.work, nil)}), binding(ignoringStore{beads.NewMemStoreFrom(0, tc.graph, nil)})}
+			if got := readIDs(t, plain, tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("unpushed answer = %v, want %v", got, tc.want)
+			}
+			if got := readIDs(t, legs, tc.query); !slices.Equal(got, tc.want) {
+				t.Fatalf("pushed answer = %v, want the unpushed %v", got, tc.want)
+			}
+		})
+	}
+}
+
 // TestReadPushdownNeverChangesTheAnswer is the property the pushdown rests on:
 // over random cities and random queries, every arm, legs that apply every pushed
 // predicate and cut bounded reads in order give exactly the answer of legs that
 // apply none of them, row for row and field for field, including on a city
 // whose class binding carries relics of earlier legs' beads.
 func TestReadPushdownNeverChangesTheAnswer(t *testing.T) {
-	rng := rand.New(rand.NewSource(20261017))
-	assignees := []string{"", "", "", "w1", "w2", " w1", "  "}
-	routes := []string{"", "pool/a", "pool/b", "true", "42"}
-	labels := []string{"", "hold:mayor", "human", "x"}
-	types := []string{"task", "task", "bug", "epic"}
 	base := time.Date(2026, 10, 1, 0, 0, 0, 0, time.UTC)
-	for trial := range 300 {
-		legCount := 1 + rng.Intn(4)
-		bindingHasRelics := rng.Intn(2) == 0
-		var narrowLegs, plainLegs []Leg
-		var earlierIDs []string
-		for l := range legCount {
-			isBinding := l == legCount-1 && legCount > 1
-			var rows []beads.Bead
-			n := rng.Intn(60)
-			for i := range n {
-				id := fmt.Sprintf("l%d-%03d", l, i)
-				if isBinding && bindingHasRelics && len(earlierIDs) > 0 && rng.Intn(3) == 0 {
-					id = earlierIDs[rng.Intn(len(earlierIDs))]
-				}
-				b := readyRow(id, rng.Intn(4), base.Add(time.Duration(rng.Intn(500))*time.Second), func(b *beads.Bead) {
-					b.Status = []string{"open", "open", "open", "in_progress", "blocked", "closed"}[rng.Intn(6)]
-					b.Assignee = assignees[rng.Intn(len(assignees))]
-					b.Type = types[rng.Intn(len(types))]
-					if r := routes[rng.Intn(len(routes))]; r != "" {
-						b.Metadata = beads.StringMap{"gc.routed_to": r}
+	t.Run("random cities", func(t *testing.T) {
+		rng := rand.New(rand.NewSource(20261017))
+		assignees := []string{"", "", "", "w1", "w2", " w1", "  "}
+		routes := []string{"", "pool/a", "pool/b", "true", "42"}
+		labels := []string{"", "hold:mayor", "human", "x"}
+		types := []string{"task", "task", "bug", "epic"}
+		for trial := range 300 {
+			legCount := 1 + rng.Intn(4)
+			bindingHasRelics := rng.Intn(2) == 0
+			var narrowLegs, plainLegs []Leg
+			var earlierIDs []string
+			for l := range legCount {
+				isBinding := l == legCount-1 && legCount > 1
+				var rows []beads.Bead
+				n := rng.Intn(60)
+				for i := range n {
+					id := fmt.Sprintf("l%d-%03d", l, i)
+					if isBinding && bindingHasRelics && len(earlierIDs) > 0 && rng.Intn(3) == 0 {
+						id = earlierIDs[rng.Intn(len(earlierIDs))]
 					}
-					if lb := labels[rng.Intn(len(labels))]; lb != "" {
-						b.Labels = []string{lb}
+					b := readyRow(id, rng.Intn(4), base.Add(time.Duration(rng.Intn(500))*time.Second), func(b *beads.Bead) {
+						b.Status = []string{"open", "open", "open", "in_progress", "blocked", "closed"}[rng.Intn(6)]
+						b.Assignee = assignees[rng.Intn(len(assignees))]
+						b.Type = types[rng.Intn(len(types))]
+						if r := routes[rng.Intn(len(routes))]; r != "" {
+							b.Metadata = beads.StringMap{"gc.routed_to": r}
+						}
+						if lb := labels[rng.Intn(len(labels))]; lb != "" {
+							b.Labels = []string{lb}
+						}
+					})
+					if slices.ContainsFunc(rows, func(r beads.Bead) bool { return r.ID == b.ID }) {
+						continue
+					}
+					rows = append(rows, b)
+					earlierIDs = append(earlierIDs, b.ID)
+				}
+				label := fmt.Sprintf("leg %d", l)
+				var reserved []string
+				if isBinding {
+					// The binding's own ids are in its reserved namespace; only the
+					// relics it carries are work-shaped.
+					reserved = []string{fmt.Sprintf("l%d", l)}
+				}
+				narrowLegs = append(narrowLegs, Leg{Label: label, Store: newNarrowingStore(rows...), ClassBinding: isBinding, ReservedPrefixes: reserved})
+				plainLegs = append(plainLegs, Leg{Label: label, Store: ignoringStore{beads.NewMemStoreFrom(0, rows, nil)}, ClassBinding: isBinding, ReservedPrefixes: reserved})
+			}
+			q := Query{
+				Assignee:   []string{"", "", "w1", "w2"}[rng.Intn(4)],
+				Unassigned: rng.Intn(3) == 0,
+				Limit:      []int{0, 1, 3, 20}[rng.Intn(4)],
+				Sort:       []string{"", "", SortOldest, SortNewest}[rng.Intn(4)],
+				Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked}[rng.Intn(6)],
+			}
+			if rng.Intn(2) == 0 {
+				q.MetadataFields = []string{"gc.routed_to=" + routes[1+rng.Intn(len(routes)-1)]}
+			}
+			if rng.Intn(3) == 0 {
+				q.ExcludeTypes = []string{"epic"}
+			}
+			if rng.Intn(3) == 0 {
+				q.ExcludeLabels = []string{"hold:mayor"}
+			}
+			assertPushdownKeepsTheAnswer(t, trial, narrowLegs, plainLegs, q)
+		}
+	})
+	// A migrated city: `gc storage migrate` copied the work legs' beads into the
+	// class binding under their ids, and each binding copy then drifted from the
+	// frozen copy left behind (a hold released or taken, a priority re-rolled).
+	// The relics are older than every row the binding mints itself, and the
+	// binding holds enough routed rows that a bounded read's cut fills, which is
+	// where a relic the merge drops could end the binding's read early. The
+	// queries are routed claim tiers.
+	t.Run("migrated cities", func(t *testing.T) {
+		rng := rand.New(rand.NewSource(20261018))
+		for trial := range 300 {
+			// Each city draws how many of its rows are held and how many of its
+			// work beads were migrated.
+			holdRate, relicRate := rng.Intn(10), 1+rng.Intn(4)
+			routedRow := func(id string, created time.Time) beads.Bead {
+				return readyRow(id, rng.Intn(4), created, func(b *beads.Bead) {
+					b.Metadata = beads.StringMap{"gc.routed_to": []string{"pool/a", "pool/a", "pool/a", "pool/b"}[rng.Intn(4)]}
+					if rng.Intn(5) == 0 {
+						b.Assignee = "w1"
+					}
+					if rng.Intn(6) == 0 {
+						b.Type = "epic"
+					}
+					if rng.Intn(10) < holdRate {
+						b.Labels = []string{"hold:mayor"}
 					}
 				})
-				if slices.ContainsFunc(rows, func(r beads.Bead) bool { return r.ID == b.ID }) {
-					continue
+			}
+			q := Query{
+				MetadataFields: []string{"gc.routed_to=pool/a"},
+				Unassigned:     rng.Intn(4) != 0,
+				ExcludeTypes:   []string{"epic"},
+				ExcludeLabels:  []string{"hold:mayor"},
+				Limit:          []int{1, 3, 20}[rng.Intn(3)],
+				Sort:           []string{"", SortOldest}[rng.Intn(2)],
+			}
+			workLegs := 1 + rng.Intn(3)
+			var narrowLegs, plainLegs []Leg
+			var graphRows []beads.Bead
+			for l := range workLegs {
+				var rows []beads.Bead
+				for i := range rng.Intn(40) {
+					rows = append(rows, routedRow(fmt.Sprintf("l%d-%03d", l, i), base.Add(time.Duration(rng.Intn(500))*time.Second)))
 				}
-				rows = append(rows, b)
-				earlierIDs = append(earlierIDs, b.ID)
+				for _, w := range rows {
+					if rng.Intn(4) >= relicRate {
+						continue
+					}
+					relic := w
+					if rng.Intn(2) == 0 {
+						relic.Labels = nil
+						if len(w.Labels) == 0 {
+							relic.Labels = []string{"hold:mayor"}
+						}
+					} else {
+						relic.Priority = intRef(rng.Intn(4))
+					}
+					graphRows = append(graphRows, relic)
+				}
+				label := fmt.Sprintf("leg %d", l)
+				narrowLegs = append(narrowLegs, testLeg(label, newNarrowingStore(rows...)))
+				plainLegs = append(plainLegs, testLeg(label, ignoringStore{beads.NewMemStoreFrom(0, rows, nil)}))
 			}
-			label := fmt.Sprintf("leg %d", l)
-			var reserved []string
-			if isBinding {
-				// The binding's own ids are in its reserved namespace; only the
-				// relics it carries are work-shaped.
-				reserved = []string{fmt.Sprintf("l%d", l)}
+			own := fmt.Sprintf("l%d", workLegs)
+			for i := range 2*(q.Limit+boundedSlack) + rng.Intn(40) {
+				graphRows = append(graphRows, routedRow(fmt.Sprintf("%s-%03d", own, i), base.Add(time.Duration(500+rng.Intn(500))*time.Second)))
 			}
-			narrowLegs = append(narrowLegs, Leg{Label: label, Store: newNarrowingStore(rows...), ClassBinding: isBinding, ReservedPrefixes: reserved})
-			plainLegs = append(plainLegs, Leg{Label: label, Store: ignoringStore{beads.NewMemStoreFrom(0, rows, nil)}, ClassBinding: isBinding, ReservedPrefixes: reserved})
+			label := fmt.Sprintf("leg %d", workLegs)
+			narrowLegs = append(narrowLegs, Leg{Label: label, Store: newNarrowingStore(graphRows...), ClassBinding: true, ReservedPrefixes: []string{own}})
+			plainLegs = append(plainLegs, Leg{Label: label, Store: ignoringStore{beads.NewMemStoreFrom(0, graphRows, nil)}, ClassBinding: true, ReservedPrefixes: []string{own}})
+			assertPushdownKeepsTheAnswer(t, trial, narrowLegs, plainLegs, q)
 		}
-		q := Query{
-			Assignee:   []string{"", "", "w1", "w2"}[rng.Intn(4)],
-			Unassigned: rng.Intn(3) == 0,
-			Limit:      []int{0, 1, 3, 20}[rng.Intn(4)],
-			Sort:       []string{"", "", SortOldest, SortNewest}[rng.Intn(4)],
-			Status:     []string{"", "", "", StatusInProgress, StatusOpen, StatusBlocked}[rng.Intn(6)],
-		}
-		if rng.Intn(2) == 0 {
-			q.MetadataFields = []string{"gc.routed_to=" + routes[1+rng.Intn(len(routes)-1)]}
-		}
-		if rng.Intn(3) == 0 {
-			q.ExcludeTypes = []string{"epic"}
-		}
-		if rng.Intn(3) == 0 {
-			q.ExcludeLabels = []string{"hold:mayor"}
-		}
-		got, err := Read(narrowLegs, q)
-		if err != nil {
-			t.Fatalf("trial %d: Read: %v", trial, err)
-		}
-		want, err := Read(plainLegs, q)
-		if err != nil {
-			t.Fatalf("trial %d: Read (no pushdown): %v", trial, err)
-		}
-		if !reflect.DeepEqual(got, want) {
-			gotJSON, _ := json.Marshal(got)
-			wantJSON, _ := json.Marshal(want)
-			t.Fatalf("trial %d, query %+v:\npushed   %s\nunpushed %s", trial, q, gotJSON, wantJSON)
-		}
+	})
+}
+
+// assertPushdownKeepsTheAnswer fails the test unless legs that apply every
+// pushed predicate and bound answer q exactly as legs that apply none of them.
+func assertPushdownKeepsTheAnswer(t *testing.T, trial int, narrowLegs, plainLegs []Leg, q Query) {
+	t.Helper()
+	got, err := Read(narrowLegs, q)
+	if err != nil {
+		t.Fatalf("trial %d: Read: %v", trial, err)
+	}
+	want, err := Read(plainLegs, q)
+	if err != nil {
+		t.Fatalf("trial %d: Read (no pushdown): %v", trial, err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		gotJSON, _ := json.Marshal(got)
+		wantJSON, _ := json.Marshal(want)
+		t.Fatalf("trial %d, query %+v:\npushed   %s\nunpushed %s", trial, q, gotJSON, wantJSON)
 	}
 }

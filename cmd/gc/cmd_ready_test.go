@@ -342,7 +342,7 @@ func (s readyCanonicalLegStore) Ready(query ...beads.ReadyQuery) ([]beads.Bead, 
 // beads.Bead is the domain model: it changes for internal reasons, and every one
 // of those changes would be published as a silent break in an array other
 // programs parse. The reader therefore projects onto its dedicated wire type,
-// readywork.Row, which `gc ready` and GET /v0/city/{cityName}/work/ready share.
+// readywork.Row.
 func TestReadyEmitsADedicatedWireTypeNotTheDomainBead(t *testing.T) {
 	store := splittest.NewWorkStore(t, "gc")
 	mustCreateReadyBead(t, store, beads.Bead{Title: "work", Type: "task"})

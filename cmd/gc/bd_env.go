@@ -195,8 +195,11 @@ func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	// choice, so carry it through managed lifecycle subprocesses for that
 	// first initialization (and for callers that intentionally keep the pin
 	// process-scoped). Once workspace.env has a PATH or BD_BIN, the branches
-	// above remain authoritative.
-	if raw := strings.TrimSpace(os.Getenv("BD_BIN")); raw != "" {
+	// above remain authoritative. Read it through the native-open env guard: a
+	// concurrent scope's proxied native open withholds every BD_* key from the
+	// process env for its whole library open, and a bare os.Getenv inside that
+	// window would see no pin at all.
+	if raw := strings.TrimSpace(ambientNativeDoltOpenEnv("BD_BIN")); raw != "" {
 		if !filepath.IsAbs(raw) {
 			warnIgnoredAmbientBdBin(raw, "not an absolute path")
 			return "", nil

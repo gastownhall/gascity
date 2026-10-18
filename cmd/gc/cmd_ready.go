@@ -11,9 +11,8 @@ import (
 // newReadyCmd builds `gc ready`: the in-process, city-wide claimable-work reader
 // that federates the stores a split city spreads its work across.
 //
-// The reader itself is internal/readywork, shared with the supervisor's
-// GET /v0/city/{cityName}/work/ready; this file is its CLI projection. On a city
-// that relocates nothing it reads the stores it always read.
+// The reader itself is internal/readywork; this file is its CLI projection.
+// On a city that relocates nothing it reads the stores it always read.
 //
 // The output is a bare JSON array in bd's row shape, because it is a drop-in for
 // the `bd ready --json` the default work_query builds; see readywork.Row.

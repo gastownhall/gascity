@@ -7,7 +7,7 @@ import (
 )
 
 // Row is one row of the ready-work answer: the external wire shape `gc ready`
-// prints and GET /v0/city/{cityName}/work/ready serves.
+// prints.
 //
 // It is a DEDICATED type, not beads.Bead, and that is the point: beads.Bead is
 // the domain model, its fields change for internal reasons, and marshaling it

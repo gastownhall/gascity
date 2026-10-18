@@ -1,8 +1,7 @@
 package main
 
 // The leg assembly behind `gc ready`. The reader over the legs is
-// internal/readywork, shared with the supervisor's GET
-// /v0/city/{cityName}/work/ready.
+// internal/readywork, and this command is its only caller.
 //
 // # Why this exists
 //
@@ -193,7 +192,8 @@ func readyLegsForTopology(topo storeref.Topology) ([]readywork.Leg, error) {
 
 // readyLegReservedPrefixes is the reserved id namespaces a class-binding leg
 // holds: the prefixes of every binding the topology serves from that store. A
-// work leg holds none.
+// work leg holds none. It does not yet leave out a prefix that a work leg's
+// prefix shadows (readywork's Co-resident ids; ga-xdtyo2).
 func readyLegReservedPrefixes(topo storeref.Topology, leg storeref.Leg, classBinding bool) []string {
 	if !classBinding {
 		return nil

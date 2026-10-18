@@ -23,14 +23,16 @@ type Leg struct {
 	OnError storeref.ErrPolicy
 	// ClassBinding marks a relocated coordination-class binding. It is the one
 	// leg whose rows can also live in an earlier leg: `gc storage migrate`
-	// copies beads across with their original, work-shaped ids and never
-	// deletes back, so a migrated bead can be held both by the work store it was
-	// minted in and by the binding. The pushdown's exactness guard reads it
-	// (pushdown.go).
+	// copies beads across with their original, work-shaped ids, so until its
+	// clear of the work store has run a migrated bead can be held both by the
+	// work store it was minted in and by the binding. The pushdown's exactness
+	// guard reads it (pushdown.go).
 	ClassBinding bool
 	// ReservedPrefixes are the reserved id namespaces a class binding holds.
-	// An id in one of them belongs to the binding and nowhere else, so it cannot
-	// also live in an earlier leg; only the binding's other, work-shaped ids can.
+	// The pushdown treats an id in one of them as the binding's alone, one no
+	// earlier leg can also hold; only the binding's other, work-shaped ids can.
+	// That holds only while no work leg's prefix shadows a reserved one
+	// (pushdown.go, Co-resident ids).
 	ReservedPrefixes []string
 }
 

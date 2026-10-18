@@ -277,3 +277,44 @@ func TestReadyPreferCacheFallsBackForPlainStores(t *testing.T) {
 		t.Fatalf("backing Ready calls = %d after a warm cache read, want still 1", len(calls))
 	}
 }
+
+// TestReadyQueryIsZeroConsultsEveryField pins IsZero to ReadyQuery's field set.
+// CachingStore.Ready answers a query IsZero calls zero from its snapshot, which
+// applies no selector at all, so a field IsZero does not consult would have a
+// query that sets it served the unnarrowed cached answer. Each field is set on
+// its own and must make the query non-zero; a field of a kind this test cannot
+// set fails it until the test learns that kind.
+func TestReadyQueryIsZeroConsultsEveryField(t *testing.T) {
+	if !(ReadyQuery{}).IsZero() {
+		t.Fatal("ReadyQuery{}.IsZero() = false, want true")
+	}
+	typ := reflect.TypeOf(ReadyQuery{})
+	for i := range typ.NumField() {
+		field := typ.Field(i)
+		t.Run(field.Name, func(t *testing.T) {
+			var q ReadyQuery
+			v := reflect.ValueOf(&q).Elem().Field(i)
+			switch v.Kind() {
+			case reflect.String:
+				v.SetString("x")
+			case reflect.Bool:
+				v.SetBool(true)
+			case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:
+				v.SetInt(1)
+			case reflect.Map:
+				m := reflect.MakeMap(v.Type())
+				m.SetMapIndex(reflect.New(v.Type().Key()).Elem(), reflect.New(v.Type().Elem()).Elem())
+				v.Set(m)
+			case reflect.Slice:
+				v.Set(reflect.MakeSlice(v.Type(), 1, 1))
+			case reflect.Pointer:
+				v.Set(reflect.New(v.Type().Elem()))
+			default:
+				t.Fatalf("ReadyQuery.%s is a %s, which this test cannot set; teach it that kind", field.Name, v.Kind())
+			}
+			if q.IsZero() {
+				t.Fatalf("ReadyQuery{%s: %#v}.IsZero() = true: IsZero does not consult %s, so CachingStore.Ready would answer a query that sets it from the unnarrowed cache", field.Name, v.Interface(), field.Name)
+			}
+		})
+	}
+}

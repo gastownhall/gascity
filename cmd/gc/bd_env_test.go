@@ -5735,14 +5735,16 @@ func stubAmbientNativeDoltOpenEnv(t *testing.T, ambient map[string]string) {
 }
 
 // TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard pins that every
-// ambient BEADS_* fallback on the scope env-build path reads through the
-// native-open env guard. gc ready opens its rig stores concurrently, and a
-// native open projects its scope's socket, credential command and credentials
-// file into the process env under nativeDoltOpenEnvMu for the whole library
-// open. A bare os.Getenv in a second scope's concurrent env build would adopt
-// the first scope's endpoint or credentials. Each case holds another scope's
-// projection in the process env and asserts the build carries this scope's own
-// ambient value, or nothing when there is none.
+// ambient BEADS_* fallback on the scope env-build path, and the ambient BD_BIN
+// pin, reads through the native-open env guard. gc ready opens its rig stores
+// concurrently, and a native open projects its scope's socket, credential
+// command and credentials file into the process env under nativeDoltOpenEnvMu
+// for the whole library open; a proxied native open withholds every BD_* key
+// for that window instead. A bare os.Getenv in a second scope's concurrent env
+// build would adopt the first scope's endpoint or credentials, or lose the
+// operator's bd pin. Each BEADS_* case holds another scope's projection in the
+// process env and asserts the build carries this scope's own ambient value, or
+// nothing when there is none.
 func TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard(t *testing.T) {
 	const (
 		otherSocket    = "/run/other-rig/dolt.sock"
@@ -5822,6 +5824,20 @@ func TestScopeEnvBuildReadsAmbientBeadsEnvViaNativeOpenGuard(t *testing.T) {
 			}
 		})
 	}
+	t.Run("workspace bd pin/withheld by a proxied open", func(t *testing.T) {
+		cityDir, _, _ := writeAmbientBdBinCity(t, "")
+		operatorBd := filepath.Join(t.TempDir(), "bd")
+		writeExecutable(t, operatorBd, "#!/bin/sh\nexit 0\n")
+		t.Setenv("BD_BIN", "")
+		stubAmbientNativeDoltOpenEnv(t, map[string]string{"BD_BIN": operatorBd})
+		env := map[string]string{}
+		if err := applyWorkspacePinnedBdBinary(env, cityDir); err != nil {
+			t.Fatal(err)
+		}
+		if got := env["BD_BIN"]; got != operatorBd {
+			t.Fatalf("BD_BIN = %q, want the operator's pin %q (a proxied open withholding BD_* is not an unset pin)", got, operatorBd)
+		}
+	})
 }
 
 // TestBeadsDoltServerTLSIsPassthroughNotProjected documents the intentional
