@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -1051,8 +1052,11 @@ func TestRecordedIncarnationForTestStaysInTests(t *testing.T) {
 // with nothing launched; "launch-fail" launches the session under the
 // start's env, then fails (a readiness wait that timed out) with a cleanup
 // that could not kill it, as tmux's best-effort cleanupFailedStart can;
-// anything else starts. Unscripted Starts start. Its GetMeta reads a running
-// session's environment, as tmux's show-environment does.
+// "launch-cleaned" launches, fails, and its cleanup did kill what it
+// launched; anything else starts. Unscripted Starts start. Its GetMeta reads
+// a running session's environment, as tmux's show-environment does, and
+// reports a session that is not running as runtime.ErrSessionNotFound, as
+// tmux's GetMeta does.
 type launchThenFailProvider struct {
 	*runtime.Fake
 	script []string
@@ -1060,10 +1064,11 @@ type launchThenFailProvider struct {
 }
 
 func (p *launchThenFailProvider) GetMeta(name, key string) (string, error) {
-	if p.IsRunning(name) {
-		if v, ok := p.LastStartConfig(name).Env[key]; ok {
-			return v, nil
-		}
+	if !p.IsRunning(name) {
+		return "", fmt.Errorf("reading %s from session %q: %w", key, name, runtime.ErrSessionNotFound)
+	}
+	if v, ok := p.LastStartConfig(name).Env[key]; ok {
+		return v, nil
 	}
 	return p.Fake.GetMeta(name, key)
 }
@@ -1078,9 +1083,12 @@ func (p *launchThenFailProvider) Start(ctx context.Context, name string, cfg run
 	case "die":
 		p.Calls = append(p.Calls, runtime.Call{Method: "Start", Name: name, Config: cfg})
 		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
-	case "launch-fail":
+	case "launch-fail", "launch-cleaned":
 		if err := p.Fake.Start(ctx, name, cfg); err != nil {
 			return err
+		}
+		if step == "launch-cleaned" {
+			_ = p.Stop(name)
 		}
 		return errors.New("waiting for the agent: readiness timed out")
 	}
@@ -1111,6 +1119,20 @@ func TestFailedStartKeepsAMintItsProcessCarries(t *testing.T) {
 		}
 		if n, after := sp.CountCalls("Start", "s-mint"), rowMeta(t, store, b.ID); n != 1 || after["instance_token"] != env[runtime.InstanceTokenEnv] {
 			t.Fatalf("starts %d, row %v; want the second start converged on the survivor", n, after)
+		}
+	})
+	t.Run("launched, failed and cleaned up", func(t *testing.T) {
+		// The failed start's session is gone (GetMeta: ErrSessionNotFound):
+		// no process carries the mint, so it is withdrawn.
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store)
+		sp := &launchThenFailProvider{Fake: runtime.NewFake(), script: []string{"launch-cleaned"}}
+		mgr := newTestManager(t, store, sp)
+		if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{}); err == nil {
+			t.Fatal("Start succeeded, want its failure")
+		}
+		if row := rowMeta(t, store, b.ID); row["generation"] != "3" || row["instance_token"] != "tok-3" || row["last_woke_at"] != "" {
+			t.Fatalf("row %v, want the mint of a start whose session is gone withdrawn", row)
 		}
 	})
 	t.Run("token unreadable", func(t *testing.T) {
@@ -1381,4 +1403,69 @@ func TestIncarnationFencesReadTheWholeIdentity(t *testing.T) {
 	if landed, err := front.ConfirmIncarnation(cinc, nil); err != nil || landed {
 		t.Fatalf("empty confirm on a closed row = %v, %v; want false", landed, err)
 	}
+}
+
+// failingBatchStore fails every plain metadata write: a blind write that
+// does not land.
+type failingBatchStore struct{ *beads.MemStore }
+
+func (s failingBatchStore) SetMetadataBatch(string, map[string]string) error {
+	return errors.New("database is locked")
+}
+
+// TestLostMintWritesLeaveNoDispositionMint: a mint whose request patch
+// carries a disposition cell (the legacy PreWake's) and whose write does
+// not land, whether every conditional attempt loses its fence or the blind
+// write of a store without conditional writes fails, leaves no open mint
+// for the cell, so a later hand-built write of the same keys still fails
+// the disposition guard.
+func TestLostMintWritesLeaveNoDispositionMint(t *testing.T) {
+	cellPatch := func(minted *int) func(Info, Incarnation) MetadataPatch {
+		return func(fresh Info, _ Incarnation) MetadataPatch {
+			patch := CellInfo(fresh, ActorController, DispEvent{Kind: EvIdleStopEnd}, mintT0).Into(fresh.ID, nil)
+			*minted += len(patch)
+			return patch
+		}
+	}
+	t.Run("every fence lost", func(t *testing.T) {
+		stamped := stampedMemStore(t, gate.Auto, beads.NewMemStore())
+		b, err := stamped.Create(sessionBeadFixture("s-mint", "open", mintRowMeta("state", string(StateActive), "sleep_intent", "idle-stop-pending")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := OpenDispositionMints(b.ID)
+		minted := 0
+		loser := &wakeCASLoser{rowWriteRecorder: &rowWriteRecorder{Store: stamped}, backing: stamped}
+		req := mintReq(infoOf(t, stamped, b.ID))
+		req.Patch = cellPatch(&minted)
+		if _, err := NewStore(beads.SessionStore{Store: loser}).MintIncarnation(context.Background(), nil, req); !errors.Is(err, ErrMintSuperseded) {
+			t.Fatalf("mint under a CAS that always loses = %v, want ErrMintSuperseded", err)
+		}
+		if minted == 0 {
+			t.Fatal("the request patch carried no disposition cell; the test proves nothing")
+		}
+		if n := OpenDispositionMints(b.ID) - before; n != 0 {
+			t.Fatalf("the lost mint left %d open disposition mints", n)
+		}
+	})
+	t.Run("blind write failed", func(t *testing.T) {
+		mem := beads.NewMemStore()
+		b, err := mem.Create(sessionBeadFixture("s-mint", "open", mintRowMeta("state", string(StateActive), "sleep_intent", "idle-stop-pending")))
+		if err != nil {
+			t.Fatal(err)
+		}
+		before := OpenDispositionMints(b.ID)
+		minted := 0
+		req := mintReq(infoOf(t, mem, b.ID))
+		req.Patch = cellPatch(&minted)
+		if _, err := NewStore(beads.SessionStore{Store: failingBatchStore{mem}}).MintIncarnation(context.Background(), nil, req); err == nil {
+			t.Fatal("mint over a failing blind write succeeded")
+		}
+		if minted == 0 {
+			t.Fatal("the request patch carried no disposition cell; the test proves nothing")
+		}
+		if n := OpenDispositionMints(b.ID) - before; n != 0 {
+			t.Fatalf("the failed blind mint left %d open disposition mints", n)
+		}
+	})
 }
