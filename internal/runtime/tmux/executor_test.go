@@ -161,6 +161,92 @@ func TestRespawnAgentRejectsUnsafeWithheldBeadsKey(t *testing.T) {
 	}
 }
 
+// clientPATHExecutor is a fakeExecutor that also records the client PATH each
+// call ran with (see withClientPATH), index for index with calls.
+type clientPATHExecutor struct {
+	fakeExecutor
+	paths []string
+}
+
+func (e *clientPATHExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	e.paths = append(e.paths, clientPATHFrom(ctx))
+	return e.fakeExecutor.executeCtx(ctx, args)
+}
+
+// assertClientPATHOnlyOn checks that the one call carrying subcommand ran with
+// path as its client PATH and every other call ran with none. A PATH on, say,
+// the has-session probe reaches no pane, and one on every call would hide which
+// call the pane's PATH depends on.
+func assertClientPATHOnlyOn(t *testing.T, exec *clientPATHExecutor, subcommand, path string) {
+	t.Helper()
+	var spawns int
+	for i, call := range exec.calls {
+		want := ""
+		if slices.Contains(call, subcommand) {
+			spawns++
+			want = path
+		}
+		if exec.paths[i] != want {
+			t.Errorf("%v ran with client PATH %q, want %q", call, exec.paths[i], want)
+		}
+	}
+	if spawns != 1 {
+		t.Fatalf("calls = %v, want exactly one %s", exec.calls, subcommand)
+	}
+}
+
+// PATH is not argv-safe, so a session env that carries one is always staged, and
+// the client that sources the staged new-session is the one tmux takes the
+// pane's PATH from.
+func TestNewSessionWithCommandAndEnvRunsClientWithSessionPATH(t *testing.T) {
+	t.Setenv("TMPDIR", t.TempDir())
+	exec := &clientPATHExecutor{}
+	tm := NewTmux()
+	tm.exec = exec
+
+	const path = "/gc/bin:/usr/bin:/bin"
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-client-path", "", "claude", map[string]string{"PATH": path}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	assertClientPATHOnlyOn(t, exec, "source-file", path)
+}
+
+func TestRespawnAgentRunsClientWithSessionPATH(t *testing.T) {
+	exec := &clientPATHExecutor{fakeExecutor: fakeExecutor{out: "agent\t@1.%0"}}
+	tm := NewTmux()
+	tm.exec = exec
+
+	const path = "/gc/bin:/usr/bin:/bin"
+	if err := (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-client-path", "/proj", "claude", map[string]string{"PATH": path}); err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+	assertClientPATHOnlyOn(t, exec, "respawn-pane", path)
+}
+
+func TestNewTmuxCommandRunsClientWithCarriedPATH(t *testing.T) {
+	t.Setenv("GC_TEST_CLIENT_ENV", "kept")
+	var stdout, stderr bytes.Buffer
+	if cmd := newTmuxCommand(context.Background(), []string{"-V"}, &stdout, &stderr); cmd.Env != nil {
+		t.Fatalf("Env = %v with no client PATH, want nil so the client inherits gc's environment", cmd.Env)
+	}
+
+	cmd := newTmuxCommand(withClientPATH(context.Background(), "/gc/bin:/usr/bin"), []string{"-V"}, &stdout, &stderr)
+	var paths []string
+	var kept bool
+	for _, kv := range cmd.Environ() {
+		if v, ok := strings.CutPrefix(kv, "PATH="); ok {
+			paths = append(paths, v)
+		}
+		kept = kept || kv == "GC_TEST_CLIENT_ENV=kept"
+	}
+	if !slices.Equal(paths, []string{"/gc/bin:/usr/bin"}) {
+		t.Errorf("client PATH entries = %q, want only the carried one", paths)
+	}
+	if !kept {
+		t.Error("the client lost the rest of gc's environment")
+	}
+}
+
 type promptFooterExecutor struct {
 	calls [][]string
 }

@@ -1516,6 +1516,10 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // the controller's real value for the rest of the box's life. Re-marking a key
 // already marked is a no-op, and only controller-scope keys are marked, so a
 // relaunch that withholds no credential costs no extra tmux call at all.
+//
+// PATH is the exception to the session environment: tmux gives the respawned
+// process the client's PATH, so the respawn runs its client with the session's
+// (see withClientPATH).
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
@@ -1523,7 +1527,7 @@ func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[strin
 	// A warm box created before the agent-pane marker (or whose mark failed)
 	// is marked here while it still has only the agent's pane.
 	o.tm.adoptAgentPane(name)
-	if err := o.tm.RespawnPaneWithWorkDir(name, workDir, command); err != nil {
+	if err := o.tm.respawnPaneWithWorkDir(withClientPATH(context.Background(), env["PATH"]), name, workDir, command); err != nil {
 		return err
 	}
 	// The respawned process inherits the session environment's identity;

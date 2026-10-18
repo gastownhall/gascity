@@ -4425,3 +4425,67 @@ func TestNewSessionWithCommandAndEnvWithholdsEmptyVarFromPaneChild(t *testing.T)
 		t.Fatalf("pane child received the controller token: %s", got)
 	}
 }
+
+// TestNewSessionWithCommandAndEnvStartsPaneWithSessionPATH is the pane-level
+// proof that a session's PATH reaches the process tmux starts.
+//
+// tmux gives a pane that an unattached client creates the CLIENT's PATH, not
+// the session's (spawn.c: "The session one is replaced from the client if there
+// is one"), so show-environment reads right while the pane runs on the
+// controller's own PATH. The first entry names a directory no inherited PATH
+// holds: a pane that reports it can only have taken it from the session env.
+func TestNewSessionWithCommandAndEnvStartsPaneWithSessionPATH(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	// The pane shell runs between tmux and the probe, and /bin/sh reads no rc
+	// file that could edit PATH there. A private server takes it from SHELL.
+	t.Setenv("SHELL", "/bin/sh")
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("pp")
+	tm := NewTmuxWithConfig(cfg)
+
+	dir := t.TempDir()
+	path := filepath.Join(dir, "gc-bin") + string(os.PathListSeparator) + os.Getenv("PATH")
+	report := filepath.Join(dir, "pane-path")
+	sessionName := "gc-test-pane-path"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	command := fmt.Sprintf(`sh -c 'printf %%s "$PATH" > %s; sleep 30'`, report)
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, command, map[string]string{"PATH": path}); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+
+	if got, err := tm.GetEnvironment(sessionName, "PATH"); err != nil || got != path {
+		t.Fatalf("session env PATH = %q (err %v), want %q", got, err, path)
+	}
+	waitForMarker(t, report, path)
+}
+
+// TestRespawnAgentStartsPaneWithSessionPATH is the same proof for a relaunch
+// into a warm box. respawn-pane takes its PATH from the client the same way, and
+// the session env cannot help it: tmux applies the client's PATH after it.
+func TestRespawnAgentStartsPaneWithSessionPATH(t *testing.T) {
+	if !hasTmux() {
+		t.Skip("tmux not installed")
+	}
+	t.Setenv("SHELL", "/bin/sh")
+	cfg := DefaultConfig()
+	cfg.SocketName = privateSocketName("rp")
+	tm := NewTmuxWithConfig(cfg)
+
+	dir := t.TempDir()
+	env := map[string]string{"PATH": filepath.Join(dir, "gc-bin") + string(os.PathListSeparator) + os.Getenv("PATH")}
+	report := filepath.Join(dir, "pane-path")
+	sessionName := "gc-test-respawn-path"
+	defer func() { _ = tm.KillSession(sessionName) }()
+
+	if err := tm.NewSessionWithCommandAndEnv(sessionName, dir, "sleep 60", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	command := fmt.Sprintf(`sh -c 'printf %%s "$PATH" > %s; sleep 30'`, report)
+	if err := (&tmuxStartOps{tm: tm}).respawnAgent(sessionName, dir, command, env); err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+	waitForMarker(t, report, env["PATH"])
+}

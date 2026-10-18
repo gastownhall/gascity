@@ -355,10 +355,38 @@ type realExecutor struct{}
 // IsRunning and liveness caller blocks behind it.
 const tmuxWaitDelay = 2 * time.Second
 
+// clientPATHKey carries the PATH a tmux client runs with; see withClientPATH.
+type clientPATHKey struct{}
+
+// withClientPATH returns ctx with path as the PATH of every tmux client run
+// under it. An empty path changes nothing.
+//
+// tmux starts a pane that an unattached client creates with that client's PATH
+// and drops the session's (spawn.c: "The session one is replaced from the
+// client if there is one"). gc's client is always unattached, so a PATH passed
+// to new-session as -e lands in the session environment, where show-environment
+// reads it, and never reaches the pane. Running the spawning client with the
+// session's PATH is the only way to start the pane with it.
+func withClientPATH(ctx context.Context, path string) context.Context {
+	if path == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, clientPATHKey{}, path)
+}
+
+// clientPATHFrom returns the client PATH ctx carries, or "" when it carries none.
+func clientPATHFrom(ctx context.Context) string {
+	path, _ := ctx.Value(clientPATHKey{}).(string)
+	return path
+}
+
 // newTmuxCommand builds a tmux subprocess capturing stdout and stderr, with
-// tmuxWaitDelay set.
+// tmuxWaitDelay set and the client PATH ctx carries, if any.
 func newTmuxCommand(ctx context.Context, args []string, stdout, stderr *bytes.Buffer) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "tmux", args...)
+	if path := clientPATHFrom(ctx); path != "" {
+		cmd.Env = append(os.Environ(), "PATH="+path)
+	}
 	cmd.Stdout = stdout
 	cmd.Stderr = stderr
 	cmd.WaitDelay = tmuxWaitDelay
@@ -5733,6 +5761,12 @@ func (t *Tmux) SetMailClickBinding(_ string) error {
 // (agentPaneTarget), never the active pane: "=name:" would kill whichever pane
 // a human left focused and leave the old agent running.
 func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
+	return t.respawnPaneWithWorkDir(context.Background(), pane, workDir, command)
+}
+
+// respawnPaneWithWorkDir is RespawnPaneWithWorkDir run under ctx, which can
+// carry the PATH the new process starts with (see withClientPATH).
+func (t *Tmux) respawnPaneWithWorkDir(ctx context.Context, pane, workDir, command string) error {
 	target, err := t.agentPaneTarget(pane)
 	if err != nil {
 		return err
@@ -5742,7 +5776,7 @@ func (t *Tmux) RespawnPaneWithWorkDir(pane, workDir, command string) error {
 		args = append(args, "-c", workDir)
 	}
 	args = append(args, t.wrapPaneCommand(command))
-	_, err = t.run(args...)
+	_, err = t.runCtx(ctx, args...)
 	return err
 }
 

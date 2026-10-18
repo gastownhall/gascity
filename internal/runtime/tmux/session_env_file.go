@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -49,13 +50,17 @@ const (
 //
 // It returns the command's output (new-session -P prints the new pane's id,
 // which source-file passes through).
+//
+// Either way the client runs with the session's PATH, the only PATH tmux gives
+// the new pane (see withClientPATH).
 func (t *Tmux) runNewSession(args []string, env map[string]string) (string, error) {
+	ctx := withClientPATH(context.Background(), env["PATH"])
 	if !runtime.EnvHasArgvSecrets(env) {
-		return t.run(args...)
+		return t.runCtx(ctx, args...)
 	}
 	// source-file needs a server to talk to and, unlike new-session, cannot
 	// create one, so start-server leads.
-	return t.runFromCommandFileOutput(args, "start-server", ";")
+	return t.runFromCommandFileOutput(ctx, args, "start-server", ";")
 }
 
 // runFromCommandFile executes one tmux command by writing it to a private
@@ -65,12 +70,13 @@ func (t *Tmux) runNewSession(args []string, env map[string]string) (string, erro
 // It fails closed: when the file cannot be staged the command is not run at
 // all. Callers must not fall back to argv — that fallback is the leak.
 func (t *Tmux) runFromCommandFile(args []string, lead ...string) error {
-	_, err := t.runFromCommandFileOutput(args, lead...)
+	_, err := t.runFromCommandFileOutput(context.Background(), args, lead...)
 	return err
 }
 
-// runFromCommandFileOutput is runFromCommandFile returning the output.
-func (t *Tmux) runFromCommandFileOutput(args []string, lead ...string) (string, error) {
+// runFromCommandFileOutput is runFromCommandFile returning the output, run
+// under ctx.
+func (t *Tmux) runFromCommandFileOutput(ctx context.Context, args []string, lead ...string) (string, error) {
 	// Opportunistic, best-effort: a process killed between MkdirTemp and its
 	// deferred cleanup leaves a secret-bearing file behind with nothing to
 	// remove it. Staging is the only moment we know the staging directory is in
@@ -85,7 +91,7 @@ func (t *Tmux) runFromCommandFileOutput(args []string, lead ...string) (string, 
 	sourceArgs := make([]string, 0, len(lead)+2)
 	sourceArgs = append(sourceArgs, lead...)
 	sourceArgs = append(sourceArgs, "source-file", path)
-	return t.run(sourceArgs...)
+	return t.runCtx(ctx, sourceArgs...)
 }
 
 // stageTmuxCommandFile writes line to a private file and returns its path plus a
