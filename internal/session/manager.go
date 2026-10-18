@@ -1060,6 +1060,19 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return watchErr
 		}
 		defer cancel()
+		// Under the lease the first start reads the runtime fresh, as a
+		// Manager start does before its mint (leasedLiveness), and a read
+		// that cannot answer refuses the create (fail closed). The create is
+		// already the row's mint, so a runtime up under the new row's name is
+		// left to the Start: it reports the name taken (ErrSessionNameExists
+		// below), reuses it under the created incarnation as t3bridge's
+		// reuses the name's thread, or replaces one whose agent died.
+		if _, readErr := m.leasedLiveness(b.ID, sessName, hints.ProcessNames); readErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(readErr, rbErr)
+			}
+			return readErr
+		}
 
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
@@ -1071,13 +1084,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		runtimeInfo := m.infoFromBead(b)
-		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), mergeEnv(RuntimeEnvWithSessionContext(
-			runtimeInfo,
-			int(inc.Generation),
-			int(inc.ContinuationEpoch),
-			inc.token,
-		), inc.Env()))
+		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), startEnv(m.infoFromBead(b), inc))
 		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}

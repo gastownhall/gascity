@@ -70,10 +70,14 @@ var errPreWakeSuperseded = errors.New("pre-wake refused: the session row moved s
 // (sessions.Store.MintIncarnation, I-MINT): PreWakePatch lands with the new
 // generation and token only on a re-read row whose lifecycle facts,
 // generation and token are still info's and that still records lease, fenced
-// at that read's revision, with g+1 computed from that read. A moved or closed
-// row writes nothing and returns errPreWakeSuperseded. Without a conditional
-// writer the check is the re-read alone. It returns the minted incarnation,
-// which the runtime-only start runs under, and the batch it wrote.
+// at that read's revision, with g+1 computed from that read. The patch, the
+// continuation reset it consumes and the wake trace are decided on that read
+// too, never on info: a reset marker that a writer outside the in-process
+// mutation lock records or clears after info was read is consumed whole or
+// not at all. A moved or closed row writes nothing and returns
+// errPreWakeSuperseded. Without a conditional writer the check is the re-read
+// alone. It returns the minted incarnation, which the runtime-only start runs
+// under, and the batch it wrote.
 func preWakeCommitUnder(
 	info sessions.Info,
 	sessFront *sessions.Store,
@@ -85,6 +89,8 @@ func preWakeCommitUnder(
 		return sessions.Incarnation{}, nil, fmt.Errorf("invalid session_name %q", name)
 	}
 	now := clk.Now()
+	var resetPrior map[string]string
+	freshWake := false
 	inc, err = sessFront.MintIncarnation(context.Background(), lease, sessions.MintRequest{
 		Expect: info,
 		By:     sessions.ActorController,
@@ -94,9 +100,11 @@ func preWakeCommitUnder(
 		Patch: func(fresh sessions.Info, _ sessions.Incarnation) sessions.MetadataPatch {
 			_, _, batch, class := preWakePatch(fresh, now, "")
 			fold = class.Into(fresh.ID, batch)
+			resetPrior = freshWakeResetPriorValues(fresh)
+			freshWake = fresh.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(fresh)
 			return fold
 		},
-		FreshContext: shouldBumpContinuationEpoch(info),
+		FreshContext: shouldBumpContinuationEpoch,
 	})
 	switch {
 	case errors.Is(err, sessions.ErrMintSuperseded) || errors.Is(err, sessions.ErrMintClosed):
@@ -104,8 +112,8 @@ func preWakeCommitUnder(
 	case err != nil:
 		return sessions.Incarnation{}, nil, fmt.Errorf("pre-wake metadata commit: %w", err)
 	}
-	maps.Copy(fold, inc.IdentityPatch(shouldBumpContinuationEpoch(info)))
-	traceFreshWakeMetadataReset(name, freshWakeResetPriorValues(info), fold, info.WakeMode == "fresh" || pendingContinuationResetNeedsFreshStart(info))
+	maps.Copy(fold, inc.IdentityPatch())
+	traceFreshWakeMetadataReset(name, resetPrior, fold, freshWake)
 	return inc, fold, nil
 }
 

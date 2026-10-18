@@ -1,8 +1,12 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"log"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -141,5 +145,74 @@ func TestLegacyPreWakeMintsFromTheFreshRow(t *testing.T) {
 	}
 	if after := mustGetBead(t, store, id).Metadata; after["generation"] != "2" || after["instance_token"] != meta["instance_token"] {
 		t.Fatalf("row after the refused PreWake = %v, want it untouched", after)
+	}
+}
+
+// TestLegacyPreWakeDecidesTheResetOnTheRowItMints: the legacy PreWake
+// decides a continuation reset on the row its mint reads, as it decides the
+// rest of its patch, not on the tick's snapshot: a writer in another process
+// does not take the in-process mutation lock the PreWake holds. A fresh-
+// restart marker recorded after the snapshot is consumed whole (the epoch
+// bumped once, the marker cleared, the conversation reset) in the row, the
+// incarnation, the fold the start is built from and the wake trace alike. A
+// marker the snapshot read but the row no longer records bumps and resets
+// nothing.
+func TestLegacyPreWakeDecidesTheResetOnTheRowItMints(t *testing.T) {
+	for _, tc := range []struct {
+		name               string
+		atSnapshot, atMint string // continuation_reset_pending
+		wantEpoch          string
+		wantReset          bool
+	}{
+		{name: "recorded after the snapshot", atMint: "true", wantEpoch: "5", wantReset: true},
+		{name: "cleared after the snapshot", atSnapshot: "true", wantEpoch: "4"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_TMUX_TRACE", "1")
+			var trace bytes.Buffer
+			prevWriter, prevFlags, prevPrefix := log.Writer(), log.Flags(), log.Prefix()
+			log.SetOutput(&trace)
+			log.SetFlags(0)
+			log.SetPrefix("")
+			t.Cleanup(func() {
+				log.SetOutput(prevWriter)
+				log.SetFlags(prevFlags)
+				log.SetPrefix(prevPrefix)
+			})
+			store := beads.NewMemStore()
+			f := newLeaseStartFixture(t, store)
+			id := f.cand.info.ID
+			if err := store.SetMetadataBatch(id, map[string]string{
+				"state": "asleep", "pending_create_claim": "", "continuation_epoch": "4",
+				"session_key": "conv-old", "started_config_hash": "hash-old",
+				"continuation_reset_pending": tc.atSnapshot,
+			}); err != nil {
+				t.Fatal(err)
+			}
+			info := fieldInfo(t, store, id)
+			// The marker moves between the tick's snapshot and the mint's read.
+			if err := store.SetMetadataBatch(id, map[string]string{"continuation_reset_pending": tc.atMint}); err != nil {
+				t.Fatal(err)
+			}
+			clk := &clock.Fake{Time: time.Date(2026, 10, 9, 12, 0, 0, 0, time.UTC)}
+			inc, fold, err := preWakeCommitUnder(info, sessionFrontDoor(store), clk, nil)
+			if err != nil {
+				t.Fatalf("PreWake: %v", err)
+			}
+			meta := mustGetBead(t, store, id).Metadata
+			if meta["continuation_epoch"] != tc.wantEpoch || meta["continuation_reset_pending"] != "" || (meta["session_key"] == "") != tc.wantReset {
+				t.Fatalf("row after PreWake = %v, want epoch %s, the marker cleared, the conversation reset %v", meta, tc.wantEpoch, tc.wantReset)
+			}
+			folded := info.ApplyPatch(fold)
+			if strconv.FormatInt(inc.ContinuationEpoch, 10) != tc.wantEpoch || folded.ContinuationEpoch != tc.wantEpoch ||
+				folded.ContinuationResetPending != "" || folded.SessionKey != meta["session_key"] {
+				t.Fatalf("incarnation %v, folded snapshot epoch %s marker %q key %q; want the row's %v",
+					inc, folded.ContinuationEpoch, folded.ContinuationResetPending, folded.SessionKey, meta)
+			}
+			got := trace.String()
+			if traced := strings.Contains(got, "[WAKE-TRACE]"); traced != tc.wantReset || (traced && !strings.Contains(got, "session_key")) {
+				t.Fatalf("wake trace %q, want a conversation-reset line naming session_key %v", got, tc.wantReset)
+			}
+		})
 	}
 }

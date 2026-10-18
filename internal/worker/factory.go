@@ -22,8 +22,11 @@ type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metad
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
-	Store                 beads.Store
-	Provider              runtime.Provider
+	Store    beads.Store
+	Provider runtime.Provider
+	// CityPath is the city whose runtime leases the manager's starts and
+	// stops take. A factory whose handles create, start or stop sessions
+	// needs it: without one, those refuse with session.ErrRuntimeLeaseNoCity.
 	CityPath              string
 	SearchPaths           []string
 	Recorder              events.Recorder

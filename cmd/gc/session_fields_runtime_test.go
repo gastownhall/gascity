@@ -407,7 +407,7 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			func(t *testing.T, meta []string) map[string]string {
 				m, _ := stampedMem(t, gate.Require)
 				id := fieldRow(t, m, meta...)
-				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: true}
+				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: func(session.Info) bool { return true }}
 				if _, err := sessionFrontDoor(m).MintIncarnation(context.Background(), nil, req); err != nil {
 					t.Fatal(err)
 				}

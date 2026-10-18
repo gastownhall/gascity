@@ -37,6 +37,9 @@ type Incarnation struct {
 	MintedAt          time.Time
 	By                ActorKind
 	minted            bool
+	// freshContext is whether the mint opened a fresh context: it bumped the
+	// continuation epoch and consumed the row's pending reset.
+	freshContext bool
 	// prior is what the mint replaced, its identity keys as the row held
 	// them: the withdrawal of a mint no process ran under (unmintIncarnation).
 	prior MetadataPatch
@@ -89,16 +92,16 @@ func (i Incarnation) withContinuationEpoch(epoch int) Incarnation {
 
 // IdentityPatch is the row write that records i, as MintIncarnation writes
 // it: generation, instance_token, continuation_epoch and last_woke_at, and
-// the continuation reset consumed when freshContext. A caller folds it onto
-// its snapshot of the row.
-func (i Incarnation) IdentityPatch(freshContext bool) MetadataPatch {
+// the continuation reset consumed when the mint opened a fresh context. A
+// caller folds it onto its snapshot of the row.
+func (i Incarnation) IdentityPatch() MetadataPatch {
 	patch := MetadataPatch{
 		"generation":         strconv.FormatInt(i.Generation, 10),
 		"instance_token":     i.token,
 		"continuation_epoch": strconv.FormatInt(i.ContinuationEpoch, 10),
 		"last_woke_at":       i.MintedAt.UTC().Format(time.RFC3339),
 	}
-	if freshContext {
+	if i.freshContext {
 		patch["continuation_reset_pending"] = ""
 	}
 	return patch
@@ -131,9 +134,11 @@ type MintRequest struct {
 	// attempt's read: PreWakePatch's for the legacy start; nil for the
 	// Manager's starts. The mint's identity keys win over its own.
 	Patch func(fresh Info, inc Incarnation) MetadataPatch
-	// FreshContext bumps continuation_epoch and consumes a pending
-	// continuation reset (a fresh wake, or the reset the row records).
-	FreshContext bool
+	// FreshContext reports whether the mint opens a fresh context, decided
+	// on that attempt's read as Patch is: one bumps continuation_epoch and
+	// consumes a pending continuation reset (a fresh wake, or the reset the
+	// row records). nil opens none.
+	FreshContext func(fresh Info) bool
 }
 
 var (
@@ -202,14 +207,14 @@ func (s *Store) MintIncarnation(ctx context.Context, lease *RuntimeLease, req Mi
 		}
 		inc := nextIncarnation(fresh, req)
 		inc.prior = MetadataPatch{}
-		for k := range inc.IdentityPatch(req.FreshContext) {
+		for k := range inc.IdentityPatch() {
 			inc.prior[k] = bead.Metadata[k]
 		}
 		patch := MetadataPatch{}
 		if req.Patch != nil {
 			maps.Copy(patch, req.Patch(fresh, inc))
 		}
-		maps.Copy(patch, inc.IdentityPatch(req.FreshContext))
+		maps.Copy(patch, inc.IdentityPatch())
 		if writer == nil {
 			if err := s.ApplyPatch(id, patch); err != nil {
 				UnmintDisposition(id, patch)
@@ -235,8 +240,8 @@ func (s *Store) MintIncarnation(ctx context.Context, lease *RuntimeLease, req Mi
 
 // nextIncarnation is the incarnation after fresh's: generation g+1 from this
 // read (a missing or malformed generation reads 0, as PreWake reads it), a
-// new token, and the continuation epoch carried or, for a fresh context,
-// bumped.
+// new token, and the continuation epoch carried or, for a context
+// req.FreshContext opens on this read, bumped.
 func nextIncarnation(fresh Info, req MintRequest) Incarnation {
 	gen, err := strconv.ParseInt(strings.TrimSpace(fresh.Generation), 10, 64)
 	if err != nil || gen < 0 {
@@ -246,12 +251,13 @@ func nextIncarnation(fresh Info, req MintRequest) Incarnation {
 	if err != nil || epoch <= 0 {
 		epoch = DefaultContinuationEpoch
 	}
-	if req.FreshContext {
+	freshContext := req.FreshContext != nil && req.FreshContext(fresh)
+	if freshContext {
 		epoch++
 	}
 	return Incarnation{
 		ID: fresh.ID, Generation: gen + 1, ContinuationEpoch: epoch, token: NewInstanceToken(),
-		MintedAt: req.Now.UTC().Truncate(time.Second), By: req.By, minted: true,
+		MintedAt: req.Now.UTC().Truncate(time.Second), By: req.By, minted: true, freshContext: freshContext,
 	}
 }
 
