@@ -162,6 +162,10 @@ const (
 	executionHoldSnapshotError = "snapshot_error"
 )
 
+// executionClaimNudgeLabel names the execution backstop in its log lines and
+// its planner notices.
+const executionClaimNudgeLabel = "execution-claim-nudge"
+
 // executionStalledLatchRetryAfter bounds how long a latch silences
 // re-escalation of the SAME incarnation. The drain it requested normally
 // finishes within defaultDrainTimeout; a latch this old whose session is still
@@ -198,7 +202,7 @@ func nudgeStalledPoolExecution(
 	if sess, ok := store.(beads.SessionStore); ok && sess.Store == nil {
 		return
 	}
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "execution-claim-nudge", poolExecutionBackstop{
+	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, executionClaimNudgeLabel, poolExecutionBackstop{
 		cfg:          cfg,
 		sp:           sp,
 		now:          now,
@@ -576,8 +580,13 @@ func (p poolExecutionBackstop) markedStarted(s beads.Bead, beadID string) bool {
 // markStarted stamps the row's execution evidence for its incarnation and
 // beadID, and reports whether the evidence holds (it does even when the write
 // fails: the sighting is this pass's evidence, and the next pass reads again).
+// Once the stamp lands, the backstop's open notices are withdrawn: they carry
+// the unstarted claim text, whose --drain-ack a started seat must not run
+// (mc-ilr3b), and the next attempt carries the held-claim text.
 func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
-	writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout)
+	if writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout) {
+		withdrawBackstopNotices(p.store, s, executionClaimNudgeLabel, "the claimed step started", p.stdout)
+	}
 	return true
 }
 
@@ -668,7 +677,7 @@ func (p poolExecutionBackstop) exhausted(store beads.Store, s *beads.Bead, stdou
 	if !writeSessionMetadata(store, s, map[string]string{
 		executionClaimNudgeStalledKey:      p.now.UTC().Format(time.RFC3339),
 		executionClaimNudgeStalledTokenKey: strings.TrimSpace(s.Metadata["instance_token"]),
-	}, "execution-claim-nudge", stdout) {
+	}, executionClaimNudgeLabel, stdout) {
 		return
 	}
 	// Report the attempts actually DELIVERED, not the cap. An agent with no
@@ -717,8 +726,8 @@ func (p poolExecutionBackstop) emitStepStalled(s *beads.Bead, beadID string, att
 	})
 }
 
-func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	clearExecutionClaimMarker(store, s, stdout)
+func (p poolExecutionBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
+	return clearExecutionClaimMarker(store, s, stdout)
 }
 
 func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstopTarget, attempts int, now time.Time, stdout io.Writer) bool {
@@ -729,14 +738,14 @@ func writeExecutionClaimMarker(store beads.Store, s *beads.Bead, target backstop
 		executionClaimNudgeCountKey:    strconv.Itoa(attempts),
 		executionClaimNudgeAtKey:       now.UTC().Format(time.RFC3339),
 		executionClaimNudgeTokenKey:    strings.TrimSpace(s.Metadata["instance_token"]),
-	}, "execution-claim-nudge", stdout)
+	}, executionClaimNudgeLabel, stdout)
 }
 
 // clearExecutionClaimMarker wipes the state machine — including the escalation
 // latch and the hold breadcrumb — so the next claim this slot takes starts a
-// fresh window. No-op when there is nothing to clear, so steady-state ticks
-// stay write-free.
-func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+// fresh window, and reports whether it wiped any. No-op when there is nothing
+// to clear, so steady-state ticks stay write-free.
+func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
 	keys := []string{
 		executionClaimNudgeWorkKey,
 		executionClaimNudgeRootKey,
@@ -756,18 +765,19 @@ func clearExecutionClaimMarker(store beads.Store, s *beads.Bead, stdout io.Write
 		}
 	}
 	if !dirty {
-		return
+		return false
 	}
 	kvs := make(map[string]string, len(keys))
 	for _, key := range keys {
 		kvs[key] = ""
 	}
-	if !writeSessionMetadata(store, s, kvs, "execution-claim-nudge", stdout) {
-		return
+	if !writeSessionMetadata(store, s, kvs, executionClaimNudgeLabel, stdout) {
+		return false
 	}
 	for _, key := range keys {
 		delete(s.Metadata, key)
 	}
+	return true
 }
 
 // writeSessionMetadata persists a marker patch and mirrors it into the in-memory

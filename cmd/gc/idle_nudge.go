@@ -338,8 +338,8 @@ func (p poolContinuationBackstop) reserve(store beads.Store, s *beads.Bead, targ
 func (p poolContinuationBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
 }
 
-func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	clearContinuationClaimMarker(store, s, stdout)
+func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
+	return clearContinuationClaimMarker(store, s, stdout)
 }
 
 type poolContinuationCandidateSnapshot struct {
@@ -554,8 +554,15 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	}
 }
 
-func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	clearIdleClaimMarker(store, s, stdout)
+// clear wipes the claim backstop's pacing marker. A wipe also withdraws the
+// slot's warm-bind claim notice: the backstop clears once the slot's trigger
+// is claimed, gone or unbound, which leaves that notice nothing to claim.
+func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
+	if !clearIdleClaimMarker(store, s, stdout) {
+		return false
+	}
+	withdrawBackstopNotices(store, s, warmBindNoticePurpose, "the claim backstop found no work outstanding", stdout)
+	return true
 }
 
 type idleClaimWorkSnapshot struct {
@@ -713,16 +720,17 @@ func clearIdleClaimLatch(store beads.Store, s *beads.Bead, stdout io.Writer) {
 }
 
 // clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
-// work, so the next assignment starts its grace clock fresh. No-op (no store
-// write) when there is nothing to clear, so steady-state ticks stay silent.
-func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+// work, so the next assignment starts its grace clock fresh, and reports
+// whether it wiped one. No-op (no store write) when there is nothing to clear,
+// so steady-state ticks stay silent.
+func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
 	if s.Metadata[idleClaimNudgeTriggerKey] == "" &&
 		s.Metadata[idleClaimNudgeCountKey] == "" &&
 		s.Metadata[idleClaimNudgeAtKey] == "" &&
 		s.Metadata[idleClaimNudgeTokenKey] == "" &&
 		s.Metadata[idleClaimNudgeStalledKey] == "" &&
 		s.Metadata[idleClaimNudgeStalledTokenKey] == "" {
-		return
+		return false
 	}
 	kvs := map[string]string{
 		idleClaimNudgeTriggerKey:      "",
@@ -734,11 +742,12 @@ func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "idle-claim-nudge: clearing %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	for k := range kvs {
 		delete(s.Metadata, k)
 	}
+	return true
 }
 
 func writeContinuationClaimMarker(
@@ -770,14 +779,16 @@ func writeContinuationClaimMarker(
 	return true
 }
 
-func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+// clearContinuationClaimMarker wipes the continuation marker and reports
+// whether it wiped one. No-op (no store write) when there is nothing to clear.
+func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
 	if s.Metadata[continuationClaimNudgeWorkKey] == "" &&
 		s.Metadata[continuationClaimNudgeRootKey] == "" &&
 		s.Metadata[continuationClaimNudgeStoreRefKey] == "" &&
 		s.Metadata[continuationClaimNudgeGenerationKey] == "" &&
 		s.Metadata[continuationClaimNudgeCountKey] == "" &&
 		s.Metadata[continuationClaimNudgeAtKey] == "" {
-		return
+		return false
 	}
 	kvs := map[string]string{
 		continuationClaimNudgeWorkKey:       "",
@@ -789,11 +800,12 @@ func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Wr
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "continuation-claim-nudge: clearing %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	for key := range kvs {
 		delete(s.Metadata, key)
 	}
+	return true
 }
 
 func atoiOr0(s string) int {

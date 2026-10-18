@@ -17,6 +17,25 @@ package main
 // and v2's C8, which call the same reminder functions, take the same route
 // with no new parameter.
 //
+// A reminder's notices share one correlation, its purpose, incarnation and
+// trigger. Only one of them stands at a time: a new attempt cancels an
+// earlier one that has not started, and waits while one is in flight. An
+// Exclusive purpose (the warm-bind claim nudge: a slot holds one binding at a
+// time) keeps one notice per conversation, whatever its trigger or
+// incarnation.
+//
+// A reminder whose cause clears or moves withdraws its open notices,
+// best-effort and once, on the tick that writes the marker saying so: a
+// backstop's clear withdraws its own (the claim backstop's also the warm-bind
+// claim nudge's), a backstop that observes a new target its own for the
+// target it replaces, and a started execution seat the execution backstop's.
+// A notice the lane already started keeps the cancel as a request for the
+// lane to decide. A stale notice the withdraw misses stands until its
+// start_by, within one cadence of its reminder: after a withdraw whose write
+// failed, in a v2 city on the work ladder (where the claim backstop does not
+// run), or for a trigger claimed before the claim backstop first saw it (no
+// marker to wipe).
+//
 // The drain reminder stays on its direct delivery: its audience is a row in
 // state=draining, which the lane's content gate (I7, session.ContentGate)
 // blocks, so a drain-reminder notice op would never start.
@@ -72,6 +91,10 @@ type plannerNotice struct {
 	// (plannerNoticeStartWithin of the reminder's cadence), past which the
 	// next attempt replaces it.
 	StartWithin time.Duration
+	// Exclusive makes the notice its purpose's only one in the conversation:
+	// proposing it supersedes, or waits on, the purpose's other notices
+	// whatever their trigger or incarnation, not only its reminder's.
+	Exclusive bool
 }
 
 // plannerNoticeOutcome is what proposePlannerNotice did.
@@ -85,10 +108,11 @@ const (
 	plannerNoticeProposed
 	// plannerNoticeAlreadyProposed: the attempt's op was already written,
 	// by an earlier call that did not get to spend the attempt (a crash
-	// between the op and the producer's marker). Nothing new was written.
+	// between the op and the producer's marker), perhaps with a reminder
+	// text since edited. Nothing new was written.
 	plannerNoticeAlreadyProposed
-	// plannerNoticePending: an earlier notice for the same reminder is
-	// still open and due, so nothing was written.
+	// plannerNoticePending: an earlier notice for the same reminder (for an
+	// Exclusive notice, of its purpose) is in flight, so nothing was written.
 	plannerNoticePending
 	// plannerNoticeDirect: no lane host can type into the session, so the
 	// caller delivers the reminder itself. Nothing was written.
@@ -129,12 +153,21 @@ func plannerNoticeEpisode(last time.Time) string {
 	return strconv.FormatInt(last.Unix(), 10)
 }
 
+// plannerNoticeCorrelation is the correlation every notice of one reminder
+// carries, <purpose>:<token>:<trigger>: the reminder for one trigger in one
+// incarnation, whatever its episode or attempt. It is matched whole, never by
+// prefix, because a trigger's provenance may itself contain ':'.
+func plannerNoticeCorrelation(n plannerNotice, token string) string {
+	return strings.Join([]string{n.Purpose, token, n.Trigger}, ":")
+}
+
 // plannerNoticeKey is the notice's client key,
-// <purpose>:<token>:<trigger>[:<episode>]:<attempt>. The token scopes it to
-// one incarnation, so a respawned session is reminded afresh, and the
-// episode to one pacing episode of the incarnation.
+// <purpose>:<token>:<trigger>[:<episode>]:<attempt>, its correlation then its
+// episode and attempt. The token scopes it to one incarnation, so a respawned
+// session is reminded afresh, and the episode to one pacing episode of the
+// incarnation.
 func plannerNoticeKey(n plannerNotice, token string) string {
-	parts := []string{n.Purpose, token, n.Trigger}
+	parts := []string{plannerNoticeCorrelation(n, token)}
 	if n.Episode != "" {
 		parts = append(parts, n.Episode)
 	}
@@ -154,7 +187,8 @@ func plannerNoticeRequest(conv, token string, n plannerNotice, now time.Time) op
 		Policy: opjournal.Policy{Message: opjournal.MessagePolicy{
 			Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly,
 		}},
-		Causation: n.Causation,
+		Causation:   n.Causation,
+		Correlation: plannerNoticeCorrelation(n, token),
 	}
 	if n.StartWithin > 0 {
 		req.StartBy = now.Add(n.StartWithin)
@@ -168,13 +202,20 @@ func plannerNoticeRequest(conv, token string, n plannerNotice, now time.Time) op
 //
 // When no lane can type into the session it writes nothing and returns
 // plannerNoticeDirect. Otherwise it first lists the conversation's open ops
-// (one read): while an earlier notice for the same reminder in this
-// incarnation is open and still due (executing, or not yet past its
-// start_by), the reminder is pending and nothing is proposed, unless that
-// notice is this very attempt, which is plannerNoticeAlreadyProposed.
-// Proposing is idempotent by key, so a retry after a crash between the op
-// and the producer's marker writes nothing new. The lane never drops a
-// notice on the producer's behalf.
+// (one read) for the reminder's notices in this incarnation that are still
+// due (plannerNoticesDue, by correlation, so a same-id trigger from another
+// store, root or generation is not this reminder; for an Exclusive notice,
+// every notice of its purpose):
+//   - this very attempt among them is plannerNoticeAlreadyProposed;
+//     proposing is idempotent by key, so a retry after a crash between the
+//     op and the producer's marker writes nothing new;
+//   - one in flight leaves the reminder pending, and nothing is proposed;
+//   - any other, not yet started, is superseded (supersedePlannerNotices):
+//     canceled before this attempt is proposed, so an earlier episode's or
+//     an earlier text's notice never reaches the boundary after it.
+//
+// An attempt whose op was written with a text since edited is that op,
+// plannerNoticeAlreadyProposed (proposePlannerNoticeOp).
 func proposePlannerNotice(lane plannerNoticeLane, s beads.Bead, n plannerNotice) (plannerNoticeOutcome, opjournal.Op, error) {
 	if lane == nil {
 		return plannerNoticeNone, opjournal.Op{}, errors.New("proposing a planner notice: no conversation lane")
@@ -200,17 +241,24 @@ func proposePlannerNotice(lane plannerNoticeLane, s beads.Bead, n plannerNotice)
 	if err != nil {
 		return plannerNoticeNone, opjournal.Op{}, fmt.Errorf("deriving planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, conv, err)
 	}
-	due, err := plannerNoticesDue(st, conv, token, n.Purpose, n.Causation, now)
+	due, err := plannerNoticesDue(st, conv, req.Producer.Principal, plannerNoticeScope(n, req.Correlation), now)
 	if err != nil {
 		return plannerNoticeNone, opjournal.Op{}, err
 	}
 	if i := slices.IndexFunc(due, func(op opjournal.Op) bool { return op.ID == id }); i >= 0 {
 		return plannerNoticeAlreadyProposed, due[i], nil
 	}
-	if len(due) > 0 {
-		return plannerNoticePending, due[0], nil
+	if i := slices.IndexFunc(due, plannerNoticeInFlight); i >= 0 {
+		return plannerNoticePending, due[i], nil
 	}
-	op, created, err := st.Propose(req)
+	started, raced, err := supersedePlannerNotices(st, due, id, req.Producer.Principal)
+	if err != nil {
+		return plannerNoticeNone, opjournal.Op{}, fmt.Errorf("superseding planner notices %s for %s: %w", n.Purpose, conv, err)
+	}
+	if raced {
+		return plannerNoticePending, started, nil
+	}
+	op, created, err := proposePlannerNoticeOp(st, req)
 	if err != nil {
 		return plannerNoticeNone, opjournal.Op{}, fmt.Errorf("proposing planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, conv, err)
 	}
@@ -221,33 +269,54 @@ func proposePlannerNotice(lane plannerNoticeLane, s beads.Bead, n plannerNotice)
 	return plannerNoticeProposed, op, nil
 }
 
-// plannerNoticeOpen reports whether a notice of purpose about causation is
-// still open and due in session row s's conversation, for its current
-// incarnation: what holds a reminder's terminal action until its last
-// notice has had its chance.
-func plannerNoticeOpen(lane plannerNoticeLane, s beads.Bead, purpose, causation string) (bool, error) {
+// plannerNoticeScope is the correlation of the notices that proposing n
+// waits on or supersedes: its reminder's, or "" (every notice of its
+// purpose) for an Exclusive notice.
+func plannerNoticeScope(n plannerNotice, correlation string) string {
+	if n.Exclusive {
+		return ""
+	}
+	return correlation
+}
+
+// proposePlannerNoticeOp proposes req. A key already written with another
+// request (opjournal.KeyReuseError: the digest leaves out deadlines, and a
+// notice's kind and policy are fixed, so another reminder text) is that op,
+// not created: the attempt's op stands, and its proposal is spent.
+func proposePlannerNoticeOp(st *opjournal.Store, req opjournal.Request) (opjournal.Op, bool, error) {
+	op, created, err := st.Propose(req)
+	if reused := (*opjournal.KeyReuseError)(nil); errors.As(err, &reused) {
+		return reused.Existing, false, nil
+	}
+	return op, created, err
+}
+
+// plannerNoticeOpen reports whether a notice of reminder n (its purpose and
+// trigger, any episode or attempt) is still open and due in session row s's
+// conversation, for its current incarnation: what holds a reminder's
+// terminal action until its last notice has had its chance.
+func plannerNoticeOpen(lane plannerNoticeLane, s beads.Bead, n plannerNotice) (bool, error) {
 	st, err := lane.noticeStore()
 	if err != nil {
-		return false, fmt.Errorf("reading planner notices %s for %s: %w", purpose, s.ID, err)
+		return false, fmt.Errorf("reading planner notices %s for %s: %w", n.Purpose, s.ID, err)
 	}
-	due, err := plannerNoticesDue(st, s.ID, plannerNoticeToken(s), purpose, causation, lane.noticeNow())
+	due, err := plannerNoticesDue(st, s.ID, plannerNoticePrincipalPrefix+n.Purpose,
+		plannerNoticeCorrelation(n, plannerNoticeToken(s)), lane.noticeNow())
 	return len(due) > 0, err
 }
 
-// plannerNoticesDue are conv's open notices of purpose about causation for
-// incarnation token that are still due, in CompareOrder order. It issues one
-// read; a row the lane quarantines is the lane's to report, not a notice
-// that holds a reminder.
-func plannerNoticesDue(st *opjournal.Store, conv, token, purpose, causation string, now time.Time) ([]opjournal.Op, error) {
+// plannerNoticesDue are conv's open notices from principal with correlation
+// (one reminder's, plannerNoticeCorrelation; "" for any) that are still due,
+// in CompareOrder order. It issues one read; a row the lane quarantines is
+// the lane's to report, not a notice that holds a reminder.
+func plannerNoticesDue(st *opjournal.Store, conv, principal, correlation string, now time.Time) ([]opjournal.Op, error) {
 	ops, _, err := st.ListOpenTolerant(conv)
 	if err != nil {
-		return nil, fmt.Errorf("listing planner notices %s for %s: %w", purpose, conv, err)
+		return nil, fmt.Errorf("listing planner notices from %s for %s: %w", principal, conv, err)
 	}
-	principal, keyPrefix := plannerNoticePrincipalPrefix+purpose, purpose+":"+token+":"
 	var due []opjournal.Op
 	for _, op := range ops {
-		if op.Producer.Principal == principal && op.Causation == causation &&
-			strings.HasPrefix(op.ClientKey, keyPrefix) && plannerNoticeStillDue(op, now) {
+		if op.Producer.Principal == principal && (correlation == "" || op.Correlation == correlation) && plannerNoticeStillDue(op, now) {
 			due = append(due, op)
 		}
 	}
@@ -259,28 +328,94 @@ func plannerNoticesDue(st *opjournal.Store, conv, token, purpose, causation stri
 // attempt past its start_by that never started is one the lane closes as
 // expired, so the next attempt replaces it.
 func plannerNoticeStillDue(op opjournal.Op, now time.Time) bool {
-	switch op.Status {
-	case opjournal.StatusClosed:
+	switch {
+	case op.Status == opjournal.StatusClosed:
 		return false
-	case opjournal.StatusExecuting, opjournal.StatusSettling:
+	case plannerNoticeInFlight(op):
 		return true
 	}
 	return now.Before(op.StartBy)
 }
 
+// plannerNoticeInFlight reports whether a lane has started notice op: it is
+// being delivered, or its outcome is being decided.
+func plannerNoticeInFlight(op opjournal.Op) bool {
+	return op.Status == opjournal.StatusExecuting || op.Status == opjournal.StatusSettling
+}
+
+// supersedePlannerNotices cancels due, a reminder's earlier notices that have
+// not started, as principal, ahead of proposing its attempt id. When op id is
+// already stored (a retry, whose proposal writes nothing new) it cancels
+// nothing, so no notice is withdrawn without a successor. A notice the lane
+// started before its cancel landed keeps the cancel as a request for the lane
+// to decide, and is returned with true: the reminder waits on it.
+func supersedePlannerNotices(st *opjournal.Store, due []opjournal.Op, id, principal string) (opjournal.Op, bool, error) {
+	if len(due) == 0 {
+		return opjournal.Op{}, false, nil
+	}
+	switch _, err := st.Get(id); {
+	case err == nil:
+		return opjournal.Op{}, false, nil
+	case !errors.Is(err, beads.ErrNotFound):
+		return opjournal.Op{}, false, err
+	}
+	for _, old := range due {
+		result, op, err := st.Cancel(old.ID, principal, "superseded by "+id)
+		if err != nil {
+			return opjournal.Op{}, false, fmt.Errorf("canceling %s: %w", old.ID, err)
+		}
+		if result == opjournal.CancelRequested || result == opjournal.CancelAlreadyDecided {
+			return op, true, nil
+		}
+	}
+	return opjournal.Op{}, false, nil
+}
+
+// withdrawPlannerNotices cancels every open notice of purpose in session row
+// s's conversation, whatever its trigger or incarnation, because the
+// reminder's cause has cleared or moved (reason says how). A notice already
+// in flight keeps the cancel as a request for the lane to decide. It issues
+// one read, and writes only for an open notice.
+func withdrawPlannerNotices(lane plannerNoticeLane, s beads.Bead, purpose, reason string) error {
+	st, err := lane.noticeStore()
+	if err != nil {
+		return fmt.Errorf("withdrawing planner notices %s for %s: %w", purpose, s.ID, err)
+	}
+	ops, _, err := st.ListOpenTolerant(s.ID)
+	if err != nil {
+		return fmt.Errorf("withdrawing planner notices %s for %s: %w", purpose, s.ID, err)
+	}
+	principal := plannerNoticePrincipalPrefix + purpose
+	var errs []error
+	for _, op := range ops {
+		if op.Producer.Principal != principal {
+			continue
+		}
+		if _, _, err := st.Cancel(op.ID, principal, reason); err != nil {
+			errs = append(errs, fmt.Errorf("withdrawing planner notice %s for %s: %w", op.ID, s.ID, err))
+		}
+	}
+	return errors.Join(errs...)
+}
+
 // plannerNoticeRefused reports a proposal the op store refuses for the
 // request itself, so retrying the same request can never succeed: an
-// invalid request, an oversized payload, or a key reused with another
-// request.
+// invalid request or an oversized payload.
 func plannerNoticeRefused(err error) bool {
-	return errors.Is(err, opjournal.ErrInvalidRequest) || errors.Is(err, opjournal.ErrPayloadTooLarge) ||
-		errors.Is(err, opjournal.ErrKeyReuse)
+	return errors.Is(err, opjournal.ErrInvalidRequest) || errors.Is(err, opjournal.ErrPayloadTooLarge)
 }
 
 // plannerNoticeFailureKey names one reminder attempt in the lane's failure
 // tally.
 func plannerNoticeFailureKey(conv string, n plannerNotice) string {
-	return conv + "\x00" + n.Purpose + "\x00" + n.Trigger + "\x00" + n.Episode + "\x00" + strconv.Itoa(n.Attempt)
+	return plannerNoticeTallyKey(conv, n, n.Episode, strconv.Itoa(n.Attempt))
+}
+
+// plannerNoticeTallyKey names an action on conv's reminder n in the lane's
+// failure tally: its purpose and trigger, then the fields that name the
+// action (an attempt's episode and number, or a read's name).
+func plannerNoticeTallyKey(conv string, n plannerNotice, action ...string) string {
+	return strings.Join(append([]string{conv, n.Purpose, n.Trigger}, action...), "\x00")
 }
 
 // executesMessages reports whether the host is running and latched message

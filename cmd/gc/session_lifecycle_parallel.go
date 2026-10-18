@@ -2589,9 +2589,13 @@ func startPreparedStartCandidate(
 				// (bindPoolSessionTriggerBead) and is still unclaimed, deliver the
 				// claim nudge once — the event-based symmetric counterpart to that
 				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
+				// The text is the claim instruction (warmBindClaimText), never
+				// item.cfg.Nudge: that can carry the startup prompt ahead of it, to
+				// re-prime a resumed or prompt-less launch, which a running slot
+				// already has.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, &raw, warmBindClaimText(cfg, raw), warmClaim)
 					}
 				}
 				return false, nil

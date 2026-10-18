@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -233,41 +234,174 @@ func TestProposePlannerNoticeReproposesTheSameOpAfterTheClockAdvances(t *testing
 	}
 }
 
-func TestProposePlannerNoticeWaitsForAnOpenNotice(t *testing.T) {
+// TestProposePlannerNoticeSupersedesAnUnstartedNotice: a reminder's next
+// attempt cancels its earlier notice that has not started, so one notice
+// stands, with the latest text; another reminder's notice, or another
+// trigger's, is not touched. Once the lane has started a notice, the next
+// attempt waits on it instead.
+func TestProposePlannerNoticeSupersedesAnUnstartedNotice(t *testing.T) {
 	f := newLaneFixture(t)
 	h := newNoticeLaneHost(t, f, "message")
 	st := f.laneStore(t)
 	n := plannerNotice{Purpose: "idle-claim-nudge", Trigger: "wb-1", Causation: "wb-1", Episode: "1", Attempt: 1, Content: "claim it", StartWithin: time.Hour}
-	if _, _, err := proposePlannerNotice(h, f.row(t), n); err != nil {
+	_, first, err := proposePlannerNotice(h, f.row(t), n)
+	if err != nil {
 		t.Fatalf("attempt 1: %v", err)
 	}
-	n.Attempt, n.Episode = 2, "2"
-	outcome, prev, err := proposePlannerNotice(h, f.row(t), n)
-	if err != nil || outcome != plannerNoticePending {
-		t.Fatalf("attempt 2 while 1 is open = %v, %v; want pending", outcome, err)
-	}
-	if prev.ID != noticeOpID(t, f, "idle-claim-nudge", "wb-1", "1", 1) {
-		t.Fatalf("pending names %s, want attempt 1", prev.ID)
-	}
-	noticeOpAbsent(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", "2", 2))
-
-	// Another reminder's notice, or another trigger's, does not hold it.
-	other := plannerNotice{Purpose: "continuation-claim-nudge", Trigger: "wb-1", Causation: "wb-1", Attempt: 1, Content: "x", StartWithin: time.Hour}
-	if outcome, _, err := proposePlannerNotice(h, f.row(t), other); err != nil || outcome != plannerNoticeProposed {
-		t.Fatalf("another purpose = %v, %v; want proposed", outcome, err)
-	}
-	other = plannerNotice{Purpose: "idle-claim-nudge", Trigger: "wb-2", Causation: "wb-2", Attempt: 1, Content: "x", StartWithin: time.Hour}
-	if outcome, _, err := proposePlannerNotice(h, f.row(t), other); err != nil || outcome != plannerNoticeProposed {
-		t.Fatalf("another trigger = %v, %v; want proposed", outcome, err)
+	var others []string
+	for _, o := range []plannerNotice{
+		{Purpose: "continuation-claim-nudge", Trigger: "wb-1", Causation: "wb-1", Attempt: 1, Content: "x", StartWithin: time.Hour},
+		{Purpose: "idle-claim-nudge", Trigger: "wb-2", Causation: "wb-2", Attempt: 1, Content: "x", StartWithin: time.Hour},
+	} {
+		outcome, op, err := proposePlannerNotice(h, f.row(t), o)
+		if err != nil || outcome != plannerNoticeProposed {
+			t.Fatalf("%s for %s = %v, %v; want proposed", o.Purpose, o.Trigger, outcome, err)
+		}
+		others = append(others, op.ID)
 	}
 
-	// Past attempt 1's start_by it never started: the lane closes it as
-	// expired, and attempt 2 replaces it.
-	f.clk.Advance(time.Hour)
-	if outcome, _, err := proposePlannerNotice(h, f.row(t), n); err != nil || outcome != plannerNoticeProposed {
-		t.Fatalf("attempt 2 after 1 expired = %v, %v; want proposed", outcome, err)
+	n.Attempt, n.Episode, n.Content = 2, "2", "claim it now"
+	outcome, second, err := proposePlannerNotice(h, f.row(t), n)
+	if err != nil || outcome != plannerNoticeProposed || second.Payload != "claim it now" {
+		t.Fatalf("attempt 2 while 1 is unstarted = %v %q, %v; want proposed with the new text", outcome, second.Payload, err)
 	}
-	f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", "2", 2))
+	if got := f.get(t, st, first.ID); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "superseded by "+second.ID {
+		t.Fatalf("attempt 1 = %s %+v, want canceled as superseded by attempt 2", got.Status, got.Cancel)
+	}
+	for _, id := range others {
+		if got := f.get(t, st, id); got.Status == opjournal.StatusClosed {
+			t.Errorf("another reminder's notice %s was closed: %+v", id, got.Cancel)
+		}
+	}
+
+	// Once the lane has started attempt 2, attempt 3 waits on it, due or not.
+	if _, err := st.Transition(second.ID, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
+		t.Fatalf("starting attempt 2: %v", err)
+	}
+	n.Attempt, n.Episode = 3, "3"
+	for _, step := range []time.Duration{time.Second, 2 * time.Hour} {
+		f.clk.Advance(step)
+		outcome, prev, err := proposePlannerNotice(h, f.row(t), n)
+		if err != nil || outcome != plannerNoticePending || prev.ID != second.ID {
+			t.Fatalf("attempt 3, %s later, while 2 is in flight = %v %s, %v; want pending on attempt 2", step, outcome, prev.ID, err)
+		}
+	}
+	noticeOpAbsent(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", "3", 3))
+	if got := f.get(t, st, second.ID); got.Status != opjournal.StatusExecuting || got.Cancel.Recorded() {
+		t.Fatalf("attempt 2 = %s, cancel %+v; want executing, not canceled", got.Status, got.Cancel)
+	}
+}
+
+// TestProposePlannerNoticeLateRetryOfASupersededAttemptCancelsNothing: a
+// retry of attempt 1 that lands after attempt 2 superseded it finds its own
+// op, closed, and cancels nothing, so attempt 2's notice still stands.
+func TestProposePlannerNoticeLateRetryOfASupersededAttemptCancelsNothing(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	n1 := plannerNotice{Purpose: "idle-claim-nudge", Trigger: "wb-1", Causation: "wb-1", Episode: "1", Attempt: 1, Content: "claim it", StartWithin: time.Hour}
+	_, first, err := proposePlannerNotice(h, f.row(t), n1)
+	if err != nil {
+		t.Fatalf("attempt 1: %v", err)
+	}
+	n2 := n1
+	n2.Attempt, n2.Episode = 2, "2"
+	_, second, err := proposePlannerNotice(h, f.row(t), n2)
+	if err != nil {
+		t.Fatalf("attempt 2: %v", err)
+	}
+	outcome, op, err := proposePlannerNotice(h, f.row(t), n1)
+	if err != nil || outcome != plannerNoticeAlreadyProposed || op.ID != first.ID || op.Status != opjournal.StatusClosed {
+		t.Fatalf("late retry of attempt 1 = %v %s %s, %v; want its own closed op", outcome, op.ID, op.Status, err)
+	}
+	if got := f.get(t, f.laneStore(t), second.ID); got.Status == opjournal.StatusClosed {
+		t.Fatalf("attempt 2 was closed by attempt 1's retry: %+v", got.Cancel)
+	}
+}
+
+// TestProposePlannerNoticeScopesAReminderToItsTrigger: one bead id in two
+// stores is two triggers, so two reminders. Neither supersedes nor holds
+// the other's notice.
+func TestProposePlannerNoticeScopesAReminderToItsTrigger(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	var notices []plannerNotice
+	var ids []string
+	for _, ref := range []string{"rig:a", "rig:b"} {
+		n := plannerNotice{
+			Purpose: "idle-claim-nudge", Trigger: backstopNoticeTrigger(backstopTarget{ID: "wb-1", StoreRef: ref}),
+			Causation: "wb-1", Episode: "1", Attempt: 1, Content: "claim wb-1", StartWithin: time.Hour,
+		}
+		outcome, op, err := proposePlannerNotice(h, f.row(t), n)
+		if err != nil || outcome != plannerNoticeProposed {
+			t.Fatalf("wb-1 in %s = %v, %v; want proposed", ref, outcome, err)
+		}
+		notices, ids = append(notices, n), append(ids, op.ID)
+	}
+	if n := len(f.openOps(t)); n != 2 {
+		t.Fatalf("open ops = %d, want one per store", n)
+	}
+	if _, _, err := f.laneStore(t).Cancel(ids[0], "test", "done"); err != nil {
+		t.Fatalf("closing rig:a's notice: %v", err)
+	}
+	for i, want := range []bool{false, true} {
+		if open, err := plannerNoticeOpen(h, f.row(t), notices[i]); err != nil || open != want {
+			t.Errorf("notice %d open = %v, %v; want %v", i, open, err, want)
+		}
+	}
+}
+
+// TestWithdrawPlannerNoticesCancelsThePurposesOpenNotices: every open notice
+// of the purpose goes, whatever its trigger or incarnation; one in flight
+// keeps the cancel as a request for the lane, recorded once; another
+// purpose's notice stays.
+func TestWithdrawPlannerNoticesCancelsThePurposesOpenNotices(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	propose := func(purpose, trigger string) opjournal.Op {
+		t.Helper()
+		_, op, err := proposePlannerNotice(h, f.row(t), plannerNotice{
+			Purpose: purpose, Trigger: trigger, Causation: trigger, Episode: "1", Attempt: 1, Content: "claim " + trigger, StartWithin: time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("proposing %s for %s: %v", purpose, trigger, err)
+		}
+		return op
+	}
+	unstarted := propose("idle-claim-nudge", "wb-1")
+	inFlight := propose("idle-claim-nudge", "wb-2")
+	if _, err := st.Transition(inFlight.ID, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
+		t.Fatalf("starting the wb-2 notice: %v", err)
+	}
+	if err := f.store.SetMetadata(f.id, "instance_token", "tok-2"); err != nil {
+		t.Fatalf("respawning: %v", err)
+	}
+	respawned := propose("idle-claim-nudge", "wb-1")
+	other := propose("continuation-claim-nudge", "wb-1")
+
+	const reason = "no work is outstanding"
+	if err := withdrawPlannerNotices(h, f.row(t), "idle-claim-nudge", reason); err != nil {
+		t.Fatalf("withdraw: %v", err)
+	}
+	for _, id := range []string{unstarted.ID, respawned.ID} {
+		if got := f.get(t, st, id); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != reason || got.Cancel.By != "gc:planner/idle-claim-nudge" {
+			t.Errorf("notice %s = %s %+v, want withdrawn by its producer", id, got.Status, got.Cancel)
+		}
+	}
+	requested := f.get(t, st, inFlight.ID)
+	if requested.Status != opjournal.StatusExecuting || !requested.Cancel.Recorded() || requested.Cancel.Reason != reason {
+		t.Fatalf("the in-flight notice = %s %+v, want still executing with the cancel requested", requested.Status, requested.Cancel)
+	}
+	if got := f.get(t, st, other.ID); got.Status == opjournal.StatusClosed {
+		t.Fatalf("another purpose's notice was closed: %+v", got.Cancel)
+	}
+
+	if err := withdrawPlannerNotices(h, f.row(t), "idle-claim-nudge", reason); err != nil {
+		t.Fatalf("withdraw again: %v", err)
+	}
+	if got := f.get(t, st, inFlight.ID); got.Revision != requested.Revision {
+		t.Fatalf("withdrawing again rewrote the in-flight notice: revision %d -> %d", requested.Revision, got.Revision)
+	}
 }
 
 // TestProposePlannerNoticeIgnoresAnotherIncarnationsNotice pins the
@@ -350,13 +484,14 @@ func TestPlannerNoticeStillDue(t *testing.T) {
 	}
 }
 
-// noticeTestBackstop is a backstop predicate that always has one target
-// outstanding and paces through two metadata keys on the session row.
-// exhaustedCalls, when set, counts its terminal actions; failReserve, when
-// set, fails that many reservations first.
+// noticeTestBackstop is a backstop predicate that has one target
+// outstanding, or nothing once done is set, and paces through two metadata
+// keys on the session row. exhaustedCalls, when set, counts its terminal
+// actions; failReserve, when set, fails that many reservations first.
 type noticeTestBackstop struct {
 	target         backstopTarget
 	text           string
+	done           bool
 	exhaustedCalls *int
 	failReserve    *int
 }
@@ -369,6 +504,9 @@ const (
 
 func (noticeTestBackstop) governs(beads.Bead) bool { return true }
 func (p noticeTestBackstop) resolve(beads.Bead, map[string]beads.Bead, string) (backstopTarget, backstopResolution) {
+	if p.done {
+		return backstopTarget{}, backstopResolutionClear
+	}
 	return p.target, backstopResolutionOutstanding
 }
 
@@ -401,7 +539,21 @@ func (p noticeTestBackstop) exhausted(beads.Store, *beads.Bead, io.Writer) {
 		*p.exhaustedCalls++
 	}
 }
-func (noticeTestBackstop) clear(beads.Store, *beads.Bead, io.Writer) {}
+
+// clear wipes the pacing keys and reports whether there were any.
+func (noticeTestBackstop) clear(store beads.Store, s *beads.Bead, _ io.Writer) bool {
+	if s.Metadata[noticeTestAttemptsKey] == "" && s.Metadata[noticeTestAtKey] == "" {
+		return false
+	}
+	kv := map[string]string{noticeTestAttemptsKey: "", noticeTestAtKey: ""}
+	if err := store.SetMetadataBatch(s.ID, kv); err != nil {
+		return false
+	}
+	for k := range kv {
+		delete(s.Metadata, k)
+	}
+	return true
+}
 
 // backstopRows reads f's session row, its pacing set as attempts reserved
 // at last.
@@ -451,22 +603,28 @@ func TestRunNudgeBackstopProposesNoticeOpsWhenTheLaneExecutesMessages(t *testing
 		t.Errorf("journal = %q", out.String())
 	}
 
-	// The next attempt, while attempt 1 is still due, writes nothing.
+	// The next attempt supersedes attempt 1, which has not started.
 	f.clk.Advance(time.Minute)
 	reserved := f.clk.Now().Add(-idleClaimNudgeBackoff)
 	runNoticeBackstop(f, backstopRows(t, f, 1, reserved), pred, &out)
-	noticeOpAbsent(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(reserved), 2))
-	if got := f.meta(t, noticeTestAttemptsKey); got != "1" {
-		t.Fatalf("reserved attempts = %q, want still 1 while attempt 1 is pending", got)
+	second := f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(reserved), 2))
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "superseded by "+second.ID {
+		t.Fatalf("attempt 1 = %s %+v, want canceled as superseded by attempt 2", got.Status, got.Cancel)
 	}
-
-	// Once attempt 1 is past its start_by, attempt 2 goes out.
-	f.clk.Advance(idleClaimNudgeBackoff)
-	reserved = f.clk.Now().Add(-idleClaimNudgeBackoff)
-	runNoticeBackstop(f, backstopRows(t, f, 1, reserved), pred, &out)
-	f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(reserved), 2))
 	if got := f.meta(t, noticeTestAttemptsKey); got != "2" {
 		t.Fatalf("reserved attempts = %q, want 2", got)
+	}
+
+	// While attempt 2 is in flight, attempt 3 writes nothing and is not spent.
+	if _, err := st.Transition(second.ID, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
+		t.Fatalf("starting attempt 2: %v", err)
+	}
+	f.clk.Advance(idleClaimNudgeBackoff)
+	reserved = f.clk.Now().Add(-idleClaimNudgeBackoff)
+	runNoticeBackstop(f, backstopRows(t, f, 2, reserved), pred, &out)
+	noticeOpAbsent(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(reserved), 3))
+	if got := f.meta(t, noticeTestAttemptsKey); got != "2" {
+		t.Fatalf("reserved attempts = %q, want still 2 while attempt 2 is in flight", got)
 	}
 	if n := len(f.nudges()); n != 0 {
 		t.Fatalf("the backstop typed %d nudges itself, want 0", n)
@@ -516,6 +674,193 @@ func TestRunNudgeBackstopRemindsAReobservedTargetAfresh(t *testing.T) {
 	}
 	if n := len(f.openOps(t)); n != 2 {
 		t.Fatalf("open ops = %d, want both episodes' notices", n)
+	}
+}
+
+// TestRunNudgeBackstopReobservedTargetSupersedesItsDueNotice: the target is
+// observed again while its last episode's notice is still due. The new
+// episode's notice supersedes it, so the stale text never reaches the
+// boundary.
+func TestRunNudgeBackstopReobservedTargetSupersedesItsDueNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	var out bytes.Buffer
+	first := f.clk.Now().Add(-time.Hour)
+	runNoticeBackstop(f, backstopRows(t, f, 0, first), noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1"}, &out)
+	stale := f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(first), 1))
+
+	f.clk.Advance(time.Minute)
+	second := f.clk.Now().Add(-idleClaimNudgeGrace)
+	runNoticeBackstop(f, backstopRows(t, f, 0, second), noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1 (edited)"}, &out)
+	fresh := f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(second), 1))
+	if fresh.Payload != "claim wb-1 (edited)" {
+		t.Fatalf("episode 2's notice = %q, want the edited text", fresh.Payload)
+	}
+	if got := f.get(t, st, stale.ID); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "superseded by "+fresh.ID {
+		t.Fatalf("episode 1's notice = %s %+v, want canceled as superseded by episode 2's", got.Status, got.Cancel)
+	}
+	if got := f.meta(t, noticeTestAttemptsKey); got != "1" {
+		t.Fatalf("reserved attempts = %q, want 1; journal %q", got, out.String())
+	}
+	if n := len(f.openOps(t)); n != 1 {
+		t.Fatalf("open ops = %d, want only episode 2's notice", n)
+	}
+}
+
+// targetKeyedBackstop is noticeTestBackstop with its pacing kept for one
+// target at a time, as a real predicate's is: state reads the target its
+// marker names, and observe writes that marker with a fresh grace clock.
+type targetKeyedBackstop struct{ noticeTestBackstop }
+
+// noticeTestTargetKey is targetKeyedBackstop's marker, the claim backstop's.
+const noticeTestTargetKey = idleClaimNudgeTriggerKey
+
+func (targetKeyedBackstop) state(s beads.Bead, target backstopTarget) (bool, int, time.Time) {
+	at, _ := time.Parse(time.RFC3339, s.Metadata[noticeTestAtKey])
+	return s.Metadata[noticeTestTargetKey] == target.ID, atoiOr0(s.Metadata[noticeTestAttemptsKey]), at
+}
+
+func (targetKeyedBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, _ io.Writer) {
+	kv := map[string]string{noticeTestTargetKey: target.ID, noticeTestAttemptsKey: "0", noticeTestAtKey: now.UTC().Format(time.RFC3339)}
+	if err := store.SetMetadataBatch(s.ID, kv); err != nil {
+		return
+	}
+	for k, v := range kv {
+		s.Metadata[k] = v
+	}
+}
+
+// TestRunNudgeBackstopRetargetWithdrawsThePreviousTargetsNotice: the
+// outstanding target changes from A to B with no tick between that finds
+// nothing outstanding. B's notice cannot supersede A's (another trigger is
+// another correlation), so the tick that observes B withdraws A's, and the
+// slot is reminded of B alone, never of A and B in one turn.
+func TestRunNudgeBackstopRetargetWithdrawsThePreviousTargetsNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message") // no pass: the ops stay as written
+	st := f.laneStore(t)
+	var out bytes.Buffer
+	run := func(id string) {
+		pred := targetKeyedBackstop{noticeTestBackstop{target: backstopTarget{ID: id}, text: "claim " + id}}
+		runNudgeBackstop(f.sp, f.store, []beads.Bead{f.row(t)}, []beads.Bead{{ID: id, Status: "open"}}, f.clk.Now(), &out, "idle-claim-nudge", pred)
+	}
+	if err := f.store.SetMetadataBatch(f.id, map[string]string{noticeTestTargetKey: "wb-A"}); err != nil {
+		t.Fatalf("seeding the marker: %v", err)
+	}
+	observed := f.clk.Now().Add(-time.Hour)
+	backstopRows(t, f, 0, observed)
+	run("wb-A")
+	a := f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-A", episode(observed), 1))
+
+	f.clk.Advance(30 * time.Second)
+	swapped := f.clk.Now()
+	run("wb-B")
+	if got := f.get(t, st, a.ID); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "the reminder's target changed" || got.Cancel.By != "gc:planner/idle-claim-nudge" {
+		t.Fatalf("A's notice = %s %+v, want withdrawn by its producer on the tick that observes B; journal %q", got.Status, got.Cancel, out.String())
+	}
+	if got := f.meta(t, noticeTestTargetKey); got != "wb-B" {
+		t.Fatalf("marker = %q, want wb-B", got)
+	}
+
+	f.clk.Advance(idleClaimNudgeGrace)
+	run("wb-B")
+	b := noticeOpID(t, f, "idle-claim-nudge", "wb-B", episode(swapped), 1)
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start() // its boot scan delivers what is queued
+	deadline := time.After(laneWaitBudget)
+	for {
+		if got := f.get(t, st, b); got.Status == opjournal.StatusClosed {
+			if got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("B's notice: outcome = %+v, want succeeded", got.Outcome)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the host never delivered B's notice")
+		case <-hh.passes:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	nudges := f.nudges()
+	if len(nudges) != 1 || !strings.Contains(nudges[0].Message, "claim wb-B") || strings.Contains(nudges[0].Message, "claim wb-A") {
+		t.Fatalf("nudges = %+v, want one delivery carrying only B's claim text", nudges)
+	}
+}
+
+// TestRunNudgeBackstopWithdrawsItsNoticesWhenTheWorkClears: once nothing is
+// outstanding the backstop withdraws its own open notices along with its
+// pacing state, leaves another backstop's alone, and a later tick with
+// nothing to wipe reads no ops.
+func TestRunNudgeBackstopWithdrawsItsNoticesWhenTheWorkClears(t *testing.T) {
+	store := &countingOpListStore{laneTestStore: newLaneTestStore()}
+	f := newLaneFixtureOver(t, store)
+	h := newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1"}
+	var out bytes.Buffer
+	observed := f.clk.Now().Add(-time.Hour)
+	runNoticeBackstop(f, backstopRows(t, f, 0, observed), pred, &out)
+	own := f.get(t, st, noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(observed), 1))
+	_, other, err := proposePlannerNotice(h, f.row(t), plannerNotice{
+		Purpose: "continuation-claim-nudge", Trigger: "wb-1", Causation: "wb-1", Attempt: 1, Content: "x", StartWithin: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("another backstop's notice: %v", err)
+	}
+
+	pred.done = true
+	f.clk.Advance(30 * time.Second)
+	runNoticeBackstop(f, []beads.Bead{f.row(t)}, pred, &out)
+	if got := f.get(t, st, own.ID); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "no work is outstanding" || got.Cancel.By != "gc:planner/idle-claim-nudge" {
+		t.Fatalf("the backstop's notice = %s %+v, want withdrawn by its producer; journal %q", got.Status, got.Cancel, out.String())
+	}
+	if got := f.get(t, st, other.ID); got.Status == opjournal.StatusClosed {
+		t.Fatalf("another backstop's notice was closed: %+v", got.Cancel)
+	}
+	if attempts, at := f.meta(t, noticeTestAttemptsKey), f.meta(t, noticeTestAtKey); attempts != "" || at != "" {
+		t.Fatalf("pacing = %q, %q; want cleared", attempts, at)
+	}
+
+	before := store.opLists.Load()
+	runNoticeBackstop(f, []beads.Bead{f.row(t)}, pred, &out)
+	if n := store.opLists.Load() - before; n != 0 {
+		t.Fatalf("op listings on a tick with nothing to clear = %d, want 0", n)
+	}
+}
+
+// TestExecutionBackstopMarkStartedWithdrawsItsNotices: once the claimed
+// step's start is stamped, the execution backstop's open notices, which
+// carry the unstarted claim text, are withdrawn; another backstop's stay.
+func TestExecutionBackstopMarkStartedWithdrawsItsNotices(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	var ids []string
+	for _, purpose := range []string{executionClaimNudgeLabel, "idle-claim-nudge"} {
+		_, op, err := proposePlannerNotice(h, f.row(t), plannerNotice{
+			Purpose: purpose, Trigger: "wb-1", Causation: "wb-1", Episode: "1", Attempt: 1, Content: "claim wb-1", StartWithin: time.Hour,
+		})
+		if err != nil {
+			t.Fatalf("proposing %s: %v", purpose, err)
+		}
+		ids = append(ids, op.ID)
+	}
+	row := f.row(t)
+	var out bytes.Buffer
+	p := poolExecutionBackstop{store: f.store, stdout: &out}
+	if !p.markStarted(&row, "wb-1") {
+		t.Fatal("markStarted = false, want the evidence to hold")
+	}
+	if got, want := f.meta(t, executionClaimStartedKey), startedValue(row, "wb-1"); got != want {
+		t.Fatalf("started marker = %q, want %q", got, want)
+	}
+	if got := f.get(t, st, ids[0]); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "the claimed step started" {
+		t.Fatalf("the execution notice = %s %+v, want withdrawn; journal %q", got.Status, got.Cancel, out.String())
+	}
+	if got := f.get(t, st, ids[1]); got.Status == opjournal.StatusClosed {
+		t.Fatalf("another backstop's notice was closed: %+v", got.Cancel)
 	}
 }
 
@@ -623,6 +968,35 @@ func TestRunNudgeBackstopHoldsTheTerminalActionForAnOpenLastNotice(t *testing.T)
 	runNoticeBackstop(f, []beads.Bead{f.row(t)}, pred, &out)
 	if calls != 1 {
 		t.Fatalf("terminal action ran %d times after the last notice expired, want 1", calls)
+	}
+}
+
+// TestRunNudgeBackstopHoldsTheTerminalActionWhileTheLastNoticeIsInFlight:
+// the lane is still delivering the last notice a backoff after its
+// reservation, past its start_by. The terminal action waits on it, for at
+// most the lease the lane took it under.
+func TestRunNudgeBackstopHoldsTheTerminalActionWhileTheLastNoticeIsInFlight(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	calls := 0
+	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
+	var out bytes.Buffer
+	paced := f.clk.Now().Add(-time.Hour)
+	runNoticeBackstop(f, backstopRows(t, f, idleClaimNudgeMaxAttempts-1, paced), pred, &out)
+	last := noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(paced), idleClaimNudgeMaxAttempts)
+	if _, err := st.Transition(last, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
+		t.Fatalf("starting the last notice: %v", err)
+	}
+	f.clk.Advance(idleClaimNudgeBackoff)
+	runNoticeBackstop(f, []beads.Bead{f.row(t)}, pred, &out)
+	if calls != 0 {
+		t.Fatalf("terminal action ran %d times while the last notice is in flight; journal %q", calls, out.String())
+	}
+	f.clk.Advance(opjournal.DefaultLeaseTTL)
+	runNoticeBackstop(f, []beads.Bead{f.row(t)}, pred, &out)
+	if calls != 1 {
+		t.Fatalf("terminal action ran %d times once the lease ran out, want 1", calls)
 	}
 }
 
@@ -904,8 +1278,9 @@ func (s *countingOpListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
 
 // TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue: one
 // backoff after the last reservation the last notice is past its start_by,
-// so an exhausted backstop no longer lists the conversation's ops each tick
-// (the continuation backstop stays exhausted indefinitely).
+// and one lease later past any delivery the lane took it for, so an
+// exhausted backstop no longer lists the conversation's ops each tick (the
+// continuation backstop stays exhausted indefinitely).
 func TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue(t *testing.T) {
 	store := &countingOpListStore{laneTestStore: newLaneTestStore()}
 	f := newLaneFixtureOver(t, store)
@@ -913,7 +1288,7 @@ func TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue(t *test
 	calls := 0
 	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
 	var out bytes.Buffer
-	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-idleClaimNudgeBackoff))
+	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-idleClaimNudgeBackoff-opjournal.DefaultLeaseTTL))
 	before := store.opLists.Load()
 	const ticks = 5
 	for i := 0; i < ticks; i++ {
@@ -951,13 +1326,39 @@ func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T
 }
 
 func TestPlannerNoticeRefusedCoversRequestErrors(t *testing.T) {
-	for _, err := range []error{opjournal.ErrInvalidRequest, opjournal.ErrPayloadTooLarge, opjournal.ErrKeyReuse} {
+	for _, err := range []error{opjournal.ErrInvalidRequest, opjournal.ErrPayloadTooLarge} {
 		if !plannerNoticeRefused(fmt.Errorf("proposing: %w", err)) {
 			t.Errorf("plannerNoticeRefused(%v) = false, want true", err)
 		}
 	}
-	if plannerNoticeRefused(errors.New("store unavailable")) {
-		t.Error("plannerNoticeRefused(a transient) = true, want false")
+	// A transient may succeed on a retry, and a reused key is the attempt's
+	// own op, which proposePlannerNotice answers itself.
+	for _, err := range []error{errors.New("store unavailable"), fmt.Errorf("proposing: %w", opjournal.ErrKeyReuse)} {
+		if plannerNoticeRefused(err) {
+			t.Errorf("plannerNoticeRefused(%v) = true, want false", err)
+		}
+	}
+}
+
+// TestProposePlannerNoticeAnswersAnEditedRetryWithItsOp: an attempt whose
+// op, no longer due, was written with text since edited is that op, already
+// proposed, not an error (opjournal.KeyReuseError); nothing new is written.
+func TestProposePlannerNoticeAnswersAnEditedRetryWithItsOp(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	n := plannerNotice{Purpose: "idle-claim-nudge", Trigger: "wb-1", Causation: "wb-1", Episode: "1", Attempt: 1, Content: "claim wb-1", StartWithin: time.Minute}
+	_, first, err := proposePlannerNotice(h, f.row(t), n)
+	if err != nil {
+		t.Fatalf("proposing: %v", err)
+	}
+	f.clk.Advance(2 * time.Minute)
+	n.Content = "claim wb-1 (edited)"
+	outcome, op, err := proposePlannerNotice(h, f.row(t), n)
+	if err != nil || outcome != plannerNoticeAlreadyProposed || op.ID != first.ID || op.Payload != "claim wb-1" {
+		t.Fatalf("the edited retry = %v, %s %q, %v; want already proposed as %s with its text", outcome, op.ID, op.Payload, err, first.ID)
+	}
+	if n := len(f.openOps(t)); n != 1 {
+		t.Fatalf("open ops = %d, want the one", n)
 	}
 }
 
@@ -1004,6 +1405,114 @@ func TestDeliverWarmBindClaimNudgeNoticesARebindingAfresh(t *testing.T) {
 	}
 	if n := len(f.openOps(t)); n != 3 {
 		t.Fatalf("open ops = %d, want one per binding", n)
+	}
+}
+
+// TestDeliverWarmBindClaimNudgeRebindingWithinTheWindowSupersedes: A, then
+// B, then A again while every earlier notice is still due. Each binding
+// supersedes the slot's earlier warm-bind notice that has not started,
+// whatever its trigger, so only the newest binding's stands, with a whole
+// start window.
+func TestDeliverWarmBindClaimNudgeRebindingWithinTheWindowSupersedes(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	logs := captureStdLog(t)
+	bind := func(trigger string) {
+		f.clk.Advance(10 * time.Second)
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), warmClaimText, alwaysUnclaimed)
+	}
+	bind("w-A")
+	bind("w-B")
+	logs.Reset()
+	bind("w-A")
+	st := f.laneStore(t)
+	again := f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-A", "2", 1))
+	if again.Status == opjournal.StatusClosed || !again.StartBy.Equal(f.clk.Now().Add(warmBindNoticeStartWithin)) {
+		t.Fatalf("the rebinding's notice = %s, start_by %s; want open with a whole window from now", again.Status, again.StartBy)
+	}
+	bID := noticeOpID(t, f, warmBindNoticePurpose, "w-B", "", 1)
+	if got := f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-A", "", 1)); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "superseded by "+bID {
+		t.Fatalf("A's first notice = %s %+v, want superseded by B's", got.Status, got.Cancel)
+	}
+	if got := f.get(t, st, bID); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "superseded by "+again.ID {
+		t.Fatalf("B's notice = %s %+v, want superseded by the rebinding's", got.Status, got.Cancel)
+	}
+	if n := len(f.openOps(t)); n != 1 {
+		t.Fatalf("open ops = %d, want only the newest binding's notice", n)
+	}
+	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-A" {
+		t.Fatalf("marker = %q, want w-A", got)
+	}
+	if !strings.Contains(logs.String(), "queued a claim notice for "+f.name+" to claim w-A") {
+		t.Errorf("log = %q, want the queued line", logs.String())
+	}
+}
+
+// TestDeliverWarmBindClaimNudgeRebindingBeforeABoundaryDeliversOnlyTheNewest:
+// A, then B, both proposed before the slot reaches a boundary. The lane
+// delivers the fresh notices it holds in one turn, so only B's claim line
+// may reach the slot, not both bindings' at once.
+func TestDeliverWarmBindClaimNudgeRebindingBeforeABoundaryDeliversOnlyTheNewest(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message") // no pass: both notices queue
+	for _, trigger := range []string{"w-A", "w-B"} {
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), "claim "+trigger, alwaysUnclaimed)
+		f.clk.Advance(10 * time.Second)
+	}
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start() // its boot scan delivers what is queued
+	st := f.laneStore(t)
+	bID := noticeOpID(t, f, warmBindNoticePurpose, "w-B", "", 1)
+	deadline := time.After(laneWaitBudget)
+	for {
+		if got := f.get(t, st, bID); got.Status == opjournal.StatusClosed {
+			if got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("B's notice: outcome = %+v, want succeeded", got.Outcome)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the host never delivered B's notice")
+		case <-hh.passes:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	nudges := f.nudges()
+	if len(nudges) != 1 || !strings.Contains(nudges[0].Message, "claim w-B") || strings.Contains(nudges[0].Message, "claim w-A") {
+		t.Fatalf("nudges = %+v, want one delivery carrying only B's claim line", nudges)
+	}
+	if got := f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-A", "", 1)); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.Reason != "superseded by "+bID {
+		t.Fatalf("A's notice = %s %+v, want superseded by B's", got.Status, got.Cancel)
+	}
+}
+
+// TestDeliverWarmBindClaimNudgeRebindingWithEditedTextGetsItsOwnNotice: A,
+// B, then A again after the claim text was edited. A's first episode is
+// written with the old text (opjournal.KeyReuseError), an earlier binding's
+// notice, so the rebinding takes the next episode instead of giving up.
+func TestDeliverWarmBindClaimNudgeRebindingWithEditedTextGetsItsOwnNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	logs := captureStdLog(t)
+	bind := func(trigger, text string) {
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), text, alwaysUnclaimed)
+		f.clk.Advance(2 * time.Minute)
+	}
+	bind("w-A", warmClaimText)
+	bind("w-B", warmClaimText)
+	logs.Reset()
+	edited := warmClaimText + " (edited)"
+	bind("w-A", edited)
+	if again := f.get(t, f.laneStore(t), noticeOpID(t, f, warmBindNoticePurpose, "w-A", "2", 1)); again.Payload != edited {
+		t.Fatalf("the rebinding's notice = %q, want the edited text", again.Payload)
+	}
+	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-A" {
+		t.Fatalf("marker = %q, want w-A", got)
+	}
+	got := logs.String()
+	if strings.Contains(got, "gave up") || strings.Contains(got, "refused") || !strings.Contains(got, "queued a claim notice for "+f.name+" to claim w-A") {
+		t.Errorf("log = %q, want the queued line and no refusal", got)
 	}
 }
 
@@ -1062,6 +1571,86 @@ func TestDeliverWarmBindClaimNudgeRetryFindsItsDueNotice(t *testing.T) {
 	}
 }
 
+// TestWarmBindNoticeWaitsOnAnInFlightNotice: while the lane is delivering an
+// earlier warm-bind notice, a rebinding of that trigger or a binding of
+// another proposes nothing and leaves the marker unset, so a later tick
+// proposes the binding's own notice once the delivery has finished.
+func TestWarmBindNoticeWaitsOnAnInFlightNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-A"), warmClaimText, alwaysUnclaimed)
+	first := noticeOpID(t, f, warmBindNoticePurpose, "w-A", "", 1)
+	if _, err := st.Transition(first, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
+		t.Fatalf("starting A's notice: %v", err)
+	}
+	f.clk.Advance(10 * time.Second)
+	for _, trigger := range []string{"w-A", "w-B"} {
+		if got := warmBindNotice(h, f.row(t), f.name, trigger, warmClaimText, true); got != warmBindNoticeRetry {
+			t.Fatalf("binding %s with a notice in flight = %v, want retry", trigger, got)
+		}
+	}
+	noticeOpAbsent(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-A", "2", 1))
+	noticeOpAbsent(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-B", "", 1))
+	if got := f.get(t, st, first); got.Status != opjournal.StatusExecuting || got.Cancel.Recorded() {
+		t.Fatalf("A's notice = %s %+v, want executing and not canceled", got.Status, got.Cancel)
+	}
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-B"), warmClaimText, alwaysUnclaimed)
+	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-A" {
+		t.Fatalf("marker = %q, want w-A until B's notice is proposed", got)
+	}
+
+	if _, err := st.Close(first, opjournal.Outcome{Arm: opjournal.ArmSucceeded}, laneHostName); err != nil {
+		t.Fatalf("finishing A's notice: %v", err)
+	}
+	row := f.row(t)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, &row, warmClaimText, alwaysUnclaimed)
+	if got := f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-B", "", 1)); got.Status == opjournal.StatusClosed {
+		t.Fatalf("B's notice = %s %+v, want open", got.Status, got.Cancel)
+	}
+	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-B" {
+		t.Fatalf("marker = %q, want w-B", got)
+	}
+}
+
+// TestPoolClaimBackstopClearWithdrawsTheWarmBindNotice: the claim backstop
+// observes the slot's bound trigger, then sees it claimed. Its clear
+// withdraws the slot's warm-bind claim notice with its own pacing, so the
+// claim line never reaches a slot whose work is taken, and a later tick with
+// nothing to clear reads no ops.
+func TestPoolClaimBackstopClearWithdrawsTheWarmBindNotice(t *testing.T) {
+	store := &countingOpListStore{laneTestStore: newLaneTestStore()}
+	f := newLaneFixtureOver(t, store)
+	newNoticeLaneHost(t, f, "message")
+	f.cfg.Agents = []config.Agent{{Name: "worker", Nudge: warmClaimText}}
+	st := f.laneStore(t)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), warmClaimText, alwaysUnclaimed)
+	warm := noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)
+	var out bytes.Buffer
+	tick := func(work beads.Bead) {
+		nudgeStalledPoolClaims(f.sp, f.cfg, f.store, []beads.Bead{f.row(t)}, []beads.Bead{work}, nil, f.clk.Now(), poolClaimDrain{}, &out)
+	}
+	tick(beads.Bead{ID: "w-1", Status: "open"})
+	if got := f.meta(t, idleClaimNudgeTriggerKey); got != "w-1" {
+		t.Fatalf("claim backstop marker = %q, want w-1; journal %q", got, out.String())
+	}
+
+	f.clk.Advance(10 * time.Second)
+	tick(beads.Bead{ID: "w-1", Status: "in_progress", Assignee: f.name})
+	if got := f.get(t, st, warm); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.By != plannerNoticePrincipalPrefix+warmBindNoticePurpose || got.Cancel.Reason != "the claim backstop found no work outstanding" {
+		t.Fatalf("the warm-bind notice = %s %+v, want withdrawn by its producer; journal %q", got.Status, got.Cancel, out.String())
+	}
+	if got := f.meta(t, idleClaimNudgeTriggerKey); got != "" {
+		t.Fatalf("claim backstop marker = %q, want cleared", got)
+	}
+
+	before := store.opLists.Load()
+	tick(beads.Bead{ID: "w-1", Status: "in_progress", Assignee: f.name})
+	if n := store.opLists.Load() - before; n != 0 {
+		t.Fatalf("op listings on a tick with nothing to clear = %d, want 0", n)
+	}
+}
+
 // TestWarmBindNoticeGivesUpPastItsEpisodeBound: a trigger rebound more than
 // warmBindNoticeMaxEpisodes times in one incarnation is given up on, and the
 // claim backstop owns re-delivery.
@@ -1069,12 +1658,67 @@ func TestWarmBindNoticeGivesUpPastItsEpisodeBound(t *testing.T) {
 	f := newLaneFixture(t)
 	h := newNoticeLaneHost(t, f, "message")
 	for i := 1; i <= warmBindNoticeMaxEpisodes; i++ {
-		if got := warmBindNotice(h, f.row(t), f.name, "w-A", warmClaimText); got != warmBindNoticeProposed {
+		if got := warmBindNotice(h, f.row(t), f.name, "w-A", warmClaimText, i > 1); got != warmBindNoticeProposed {
 			t.Fatalf("binding %d = %v, want proposed", i, got)
 		}
 		f.clk.Advance(2 * time.Minute)
 	}
-	if got := warmBindNotice(h, f.row(t), f.name, "w-A", warmClaimText); got != warmBindNoticeSpent {
+	if got := warmBindNotice(h, f.row(t), f.name, "w-A", warmClaimText, true); got != warmBindNoticeSpent {
 		t.Fatalf("binding past the bound = %v, want spent", got)
+	}
+}
+
+// TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload: the start
+// config of a resumed or prompt-less launch carries the startup prompt ahead
+// of the nudge, to re-prime it. A warm reuse of a running slot reminds it
+// with the claim instruction alone, through the lane or directly: its
+// template's nudge, or the pool default when the template configures none.
+func TestWarmReuseRemindsWithTheClaimInstructionNotTheReprimePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kinds []string
+		nudge string // the template's configured nudge
+		want  string
+	}{
+		{"lane", []string{"message"}, warmClaimText, warmClaimText},
+		{"direct", nil, warmClaimText, warmClaimText},
+		{"lane, no configured nudge", []string{"message"}, "", defaultPoolClaimNudge},
+		{"direct, no configured nudge", nil, "", defaultPoolClaimNudge},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			f.cfg.Agents = []config.Agent{{Name: "worker", Nudge: tc.nudge}}
+			newNoticeLaneHost(t, f, tc.kinds...)
+			warmBindLaneRow(t, f, "w-1")
+			item := preparedStart{
+				candidate: startCandidate{
+					info: sessionpkg.Info{ID: f.id, SessionName: f.name, SessionNameMetadata: f.name},
+					tp:   TemplateParams{Hints: agent.StartupHints{Nudge: tc.nudge}},
+				},
+				cfg: runtime.Config{Nudge: restartPromptNudge("Read the startup prompt first.", tc.nudge)},
+			}
+			started, err := startPreparedStartCandidate(context.Background(), item, f.dir, f.store, f.sp, f.cfg, nil, nil, alwaysUnclaimed)
+			if err != nil || started {
+				t.Fatalf("warm reuse = %v, %v; want the running slot reused", started, err)
+			}
+			if tc.kinds == nil {
+				if nudges := f.nudges(); len(nudges) != 1 || nudges[0].Message != tc.want {
+					t.Fatalf("nudges = %+v, want the one claim instruction %q", nudges, tc.want)
+				}
+				if n := len(f.openOps(t)); n != 0 {
+					t.Fatalf("open ops = %d, want none", n)
+				}
+			} else {
+				if op := f.get(t, f.laneStore(t), noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)); op.Payload != tc.want {
+					t.Fatalf("notice = %q, want the claim instruction %q alone", op.Payload, tc.want)
+				}
+				if n := len(f.nudges()); n != 0 {
+					t.Fatalf("direct nudges = %d, want 0", n)
+				}
+			}
+			if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
+				t.Fatalf("marker = %q, want w-1", got)
+			}
+		})
 	}
 }

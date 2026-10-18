@@ -99,6 +99,18 @@ func buildWarmClaimTriggerProbe(cfg *config.City, resolve warmClaimTriggerResolv
 	}
 }
 
+// warmBindClaimText is the claim instruction a warm reuse reminds slot s
+// with: its template's configured nudge, else the pool default, the text the
+// claim backstop sends later (stalledPoolClaimNudgeFor). A template that
+// suppresses its startup prompt (the deterministic control dispatcher) gets
+// none, as at cold start.
+func warmBindClaimText(cfg *config.City, s beads.Bead) string {
+	if suppressStartupPromptForAgent(findAgentByTemplate(cfg, normalizedSessionTemplate(s, cfg))) {
+		return ""
+	}
+	return stalledPoolClaimNudgeFor(cfg, s)
+}
+
 // deliverWarmBindClaimNudge delivers a pool slot's claim nudge to an already
 // running, idle slot that had on-demand work bound to it (bindPoolSessionTriggerBead)
 // after it was last Started. Cold Provider.Start delivers this nudge as a
@@ -168,7 +180,8 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	}
 	result := warmBindNoticeDirect
 	if lane := plannerNoticeLaneFor(store); lane != nil {
-		result = warmBindNotice(lane, *session, name, triggerID, claimText)
+		rebound := strings.TrimSpace(session.Metadata[warmBindNudgedForTriggerKey]) != ""
+		result = warmBindNotice(lane, *session, name, triggerID, claimText, rebound)
 	}
 	switch result {
 	case warmBindNoticeRetry:
@@ -213,25 +226,36 @@ const (
 	// plannerNoticeMaxFailures times in a row; stamp the marker, and the
 	// claim backstop owns re-delivery.
 	warmBindNoticeSpent
-	// warmBindNoticeRetry: the notice failed; leave the marker unset so a
-	// later tick retries.
+	// warmBindNoticeRetry: the notice failed, or another warm-bind notice is
+	// in flight; leave the marker unset so a later tick retries.
 	warmBindNoticeRetry
 )
 
 // warmBindNotice proposes the binding's claim nudge as a planner notice. The
 // lane waits for the slot's boundary itself, so there is no idle wait here.
 //
+// The notice is Exclusive: a slot holds one binding at a time, so proposing
+// it supersedes the slot's other warm-bind notices that have not started,
+// whatever their trigger, and waits (warmBindNoticeRetry) while one is in
+// flight. Only the newest binding's notice stands.
+//
 // The marker names only the trigger a slot was last nudged for, so a slot
 // bound to A, then B, then A again in one incarnation is a new binding the
 // key must tell apart from the first. Each binding takes the first episode
-// (warmBindNoticeEpisode) whose op is not already written and past due: an
-// op still due is this binding's own (a marker write that failed after its
-// proposal), so the retry finds it pending and writes nothing new; an op no
-// longer due belongs to an earlier binding. A trigger rebound more than
-// warmBindNoticeMaxEpisodes times in one incarnation is given up on, and the
-// claim backstop owns re-delivery. A failure is logged at most once per
-// laneErrorLogInterval.
-func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID, claimText string) warmBindNoticeResult {
+// (warmBindNoticeEpisode) with no op written yet, so the new binding gets a
+// whole start window. A written op is this binding's own only while it is
+// still due and rebound is false, the marker naming no earlier trigger: that
+// is a retry after a marker write that failed, which finds the op and writes
+// nothing new. Any other written op is an earlier binding's, including one
+// whose text has changed since (proposePlannerNotice answers it as already
+// proposed). A retry whose marker names an earlier trigger looks like a
+// rebinding, so it supersedes its own notice with the next episode's, and
+// one notice still stands.
+//
+// A trigger rebound more than warmBindNoticeMaxEpisodes times in one
+// incarnation is given up on, and the claim backstop owns re-delivery. A
+// failure is logged at most once per laneErrorLogInterval.
+func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID, claimText string, rebound bool) warmBindNoticeResult {
 	n := plannerNotice{
 		Purpose:     warmBindNoticePurpose,
 		Trigger:     triggerID,
@@ -239,6 +263,7 @@ func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID,
 		Attempt:     1,
 		Content:     claimText,
 		StartWithin: warmBindNoticeStartWithin,
+		Exclusive:   true,
 	}
 	failKey := plannerNoticeFailureKey(session.ID, n)
 	for i := 1; i <= warmBindNoticeMaxEpisodes; i++ {
@@ -260,12 +285,15 @@ func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID,
 				log.Printf("warm-bind claim nudge: notice for %s failed for trigger %s (%d of %d): %v", name, triggerID, failures, plannerNoticeMaxFailures, err)
 			}
 			return warmBindNoticeRetry
-		case outcome == plannerNoticeAlreadyProposed && !plannerNoticeStillDue(op, lane.noticeNow()):
+		case outcome == plannerNoticeAlreadyProposed && (rebound || !plannerNoticeStillDue(op, lane.noticeNow())):
 			continue // an earlier binding's notice; try the next episode
 		}
 		lane.noticeRecovered(failKey)
-		if outcome == plannerNoticeDirect {
+		switch outcome {
+		case plannerNoticeDirect:
 			return warmBindNoticeDirect
+		case plannerNoticePending:
+			return warmBindNoticeRetry
 		}
 		return warmBindNoticeProposed
 	}
@@ -313,4 +341,4 @@ const warmBindNoticePurpose = "warm-bind-claim-nudge"
 // warmBindNoticeStartWithin bounds how long the warm-bind notice waits for
 // the slot's boundary: within the claim backstop's observe grace, after which
 // that backstop owns re-delivery to a slot that still has not claimed.
-const warmBindNoticeStartWithin = idleClaimNudgeGrace - plannerNoticeStartMargin
+var warmBindNoticeStartWithin = plannerNoticeStartWithin(idleClaimNudgeGrace)

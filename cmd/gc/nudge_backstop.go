@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -18,8 +19,10 @@ import (
 // or, when the controller's lane host executes message ops, a planner notice
 // op (proposeBackstopNotice).
 //
-// poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) are the two
-// predicates: initial trigger delivery and later graph-v2 successor delivery.
+// poolClaimBackstop and poolContinuationBackstop (idle_nudge.go) and
+// poolExecutionBackstop (execution_backstop.go) are the three predicates:
+// initial trigger delivery, later graph-v2 successor delivery, and a claimed
+// bead never executed.
 type backstopPredicate interface {
 	// governs reports whether this predicate applies to the session bead at
 	// all.
@@ -55,8 +58,9 @@ type backstopPredicate interface {
 	// exhausted is invoked once attempts reach the shared max attempts.
 	exhausted(store beads.Store, s *beads.Bead, stdout io.Writer)
 
-	// clear wipes persisted state once nothing is outstanding.
-	clear(store beads.Store, s *beads.Bead, stdout io.Writer)
+	// clear wipes persisted state once nothing is outstanding, and reports
+	// whether it wiped any: false when there was none, or the write failed.
+	clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool
 }
 
 // backstopHoldObserver is an optional predicate extension. A predicate that
@@ -84,6 +88,32 @@ func observeBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bea
 func clearBackstopHold(pred backstopPredicate, store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if ho, ok := pred.(backstopHoldObserver); ok {
 		ho.clearHold(store, s, stdout)
+	}
+}
+
+// clearBackstop acts on a resolution that nothing is outstanding for s: pred
+// wipes its pacing state, label's open notices are withdrawn once that wipe
+// lands (so a later tick with nothing to wipe reads no ops), and the hold
+// breadcrumb is cleared.
+func clearBackstop(pred backstopPredicate, store beads.Store, s *beads.Bead, label string, stdout io.Writer) {
+	if pred.clear(store, s, stdout) {
+		withdrawBackstopNotices(store, s, label, "no work is outstanding", stdout)
+	}
+	clearBackstopHold(pred, store, s, stdout)
+}
+
+// withdrawBackstopNotices withdraws label's open notices in session row s's
+// conversation (withdrawPlannerNotices) when the controller's lane host
+// executes message ops for store, because their cause has cleared or moved
+// (reason). It is best-effort: a failure is logged, and a notice it leaves
+// stands until its start_by.
+func withdrawBackstopNotices(store beads.Store, s *beads.Bead, label, reason string, stdout io.Writer) {
+	lane := plannerNoticeLaneFor(store)
+	if lane == nil {
+		return
+	}
+	if err := withdrawPlannerNotices(lane, *s, label, reason); err != nil {
+		fmt.Fprintf(stdout, "%s: withdrawing notices for %s failed: %v\n", label, strings.TrimSpace(s.Metadata["session_name"]), err) //nolint:errcheck // best-effort
 	}
 }
 
@@ -190,8 +220,7 @@ func runNudgeBackstop(
 		case backstopResolutionHold:
 			continue
 		case backstopResolutionClear:
-			pred.clear(store, s, stdout)
-			clearBackstopHold(pred, store, s, stdout)
+			clearBackstop(pred, store, s, label, stdout)
 			continue
 		case backstopResolutionOutstanding:
 			// Continue below. The hold breadcrumb is cleared where the engine
@@ -206,8 +235,13 @@ func runNudgeBackstop(
 		if !same {
 			// First observation of this assignment: start the grace clock,
 			// don't nudge yet — a normal claim/confirmation almost always
-			// lands within the grace window.
+			// lands within the grace window. The notices of the assignment it
+			// replaces are withdrawn, as this one's share no correlation with
+			// them and so cannot supersede them; that runs before the marker
+			// write, so a tick whose write fails withdraws them again next
+			// tick.
 			clearBackstopHold(pred, store, s, stdout)
+			withdrawBackstopNotices(store, s, label, "the reminder's target changed", stdout)
 			pred.observe(store, s, target, now, stdout)
 			continue
 		}
@@ -229,8 +263,7 @@ func runNudgeBackstop(
 				observeBackstopHold(pred, store, s, backstopHoldRevalidate, stdout)
 				continue
 			case backstopResolutionClear:
-				pred.clear(store, s, stdout)
-				clearBackstopHold(pred, store, s, stdout)
+				clearBackstop(pred, store, s, label, stdout)
 				continue
 			case backstopResolutionOutstanding:
 				clearBackstopHold(pred, store, s, stdout)
@@ -283,9 +316,11 @@ func runNudgeBackstop(
 // by key, so a crash between the two re-proposes the same op and then
 // reserves). It reports false when no lane can type into the session, for
 // the caller to nudge directly; otherwise the attempt is handled:
-//   - while an earlier notice for target is still pending nothing is written
-//     and the attempt is not spent;
-//   - an attempt whose op already stood is spent, with its own line;
+//   - while an earlier notice for target is in flight nothing is written and
+//     the attempt is not spent; one that is still due but not started is
+//     superseded by this attempt's (proposePlannerNotice);
+//   - an attempt whose op already stood, with this text or an earlier one,
+//     is spent, with its own line;
 //   - a notice the op store refuses for the request itself is spent at once,
 //     and one that fails plannerNoticeMaxFailures times in a row is spent
 //     then; a failure is logged at most once per laneErrorLogInterval, so a
@@ -355,20 +390,23 @@ func proposeBackstopNotice(
 // store and label's last notice for target is still open and due, so the
 // last reminder has not yet had its chance at the session's boundary. Once
 // a backoff has passed since the last reservation (last) the last notice is
-// past its start_by, so it is no longer read: an exhausted backstop whose
-// terminal action leaves it exhausted pays no listing per tick. A failed
-// read does not hold the terminal action; it is logged at most once per
-// laneErrorLogInterval.
+// past its start_by, so only one the lane is still delivering (executing or
+// settling) holds the action, and for at most one lease more, the lease the
+// conversation lane takes it under (opjournal.DefaultLeaseTTL). Past that it
+// is no longer read: an exhausted backstop whose terminal action leaves it
+// exhausted pays no listing per tick. A failed read does not hold the
+// terminal action; it is logged at most once per laneErrorLogInterval.
 func backstopLastNoticeStands(store beads.Store, s *beads.Bead, target backstopTarget, last, now time.Time, label string, stdout io.Writer) bool {
-	if !now.Before(last.Add(idleClaimNudgeBackoff)) {
+	if !now.Before(last.Add(idleClaimNudgeBackoff + opjournal.DefaultLeaseTTL)) {
 		return false
 	}
 	lane := plannerNoticeLaneFor(store)
 	if lane == nil {
 		return false
 	}
-	failKey := s.ID + "\x00" + label + "\x00" + target.ID + "\x00exhausted"
-	open, err := plannerNoticeOpen(lane, *s, label, target.ID)
+	n := plannerNotice{Purpose: label, Trigger: backstopNoticeTrigger(target)}
+	failKey := plannerNoticeTallyKey(s.ID, n, "exhausted")
+	open, err := plannerNoticeOpen(lane, *s, n)
 	if err != nil {
 		if _, logNow := lane.noticeFailed(failKey); logNow {
 			fmt.Fprintf(stdout, "%s: reading the last notice for %s failed; not holding the terminal action: %v\n", label, strings.TrimSpace(s.Metadata["session_name"]), err) //nolint:errcheck // best-effort
