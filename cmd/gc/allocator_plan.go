@@ -47,8 +47,8 @@ const (
 // Template causes of a custom scale_check: the template's own check failed;
 // the scale_check source has no fresh run of it (none yet, failed, timed out
 // or stale, or a result carried over a reload that lacks it); or its count
-// was cut by claims newer than its run (claimsAfterRun), which retains
-// nothing.
+// was cut by claims newer than its run (claimsAfterRun), which retains the
+// template's rows while the cut lasts.
 const (
 	causeScaleCheckPartial    = "pool-scale-check-partial"
 	causeScaleCheckUnread     = "scale-check-source-unread"
@@ -90,7 +90,7 @@ func (p *decidePass) demand() {
 			}
 			if k := claimed[template]; k > 0 && count > 0 {
 				count = max(0, count-k)
-				p.markTemplate(template, false, causeScaleCheckStaleClaim)
+				p.markTemplate(template, true, causeScaleCheckStaleClaim)
 			}
 			collected.CustomCounts[template] = count
 			if p.in.ScaleCheck.partial(template) {
@@ -139,8 +139,14 @@ func (p *decidePass) scaleCheckCauses(template string) []string {
 // run may have counted each such bead as new unassigned demand while the
 // pass already counts the claim, so demand subtracts them from the count
 // (never below zero): it removes exactly the possible double counts, can
-// only under-create, and lets a real backlog through. A run that starts
-// after the claims counts them itself, and its publish wakes the planner.
+// only under-create, and lets a real backlog through. A claim the check
+// never counted (work assigned at creation, or after a controller restart
+// every assignment, first seen at the first pass) is cut too, so the cut
+// template retains its rows: creates follow the cut count, but no row the
+// true count keeps is put to sleep or drained. A run that starts after the
+// claims counts them itself, and its publish wakes the planner. The
+// assigned work holds open and in-progress beads only
+// (collectAssignedWorkBeadsWithStores).
 // A claim is the template's that its work routes to, normalized as the pool
 // demand attributes it (computePoolDesiredStatesAt); unrouted work is the
 // claimant row's template's.
@@ -152,9 +158,6 @@ func (p *decidePass) claimsAfterRun() map[string]int {
 	var rowTemplate map[string]string
 	out := make(map[string]int)
 	for i, wb := range d.AssignedWork {
-		if wb.Status != "in_progress" && wb.Status != "open" {
-			continue
-		}
 		c, ok := workClaimOf(d, i)
 		if !ok {
 			continue

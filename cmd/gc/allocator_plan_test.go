@@ -1496,3 +1496,72 @@ func TestScaleCheckClaimStreamStillScalesUp(t *testing.T) {
 		}
 	}
 }
+
+// claimCutPool decides worker (custom check, count 2) with gc-1 working w-0
+// and gc-2, gc-3 awake and idle, kept by the count; extra are more claims
+// by gc-1, each first seen at its value relative to the run's start, and
+// w-0 is first seen at w0Seen.
+func claimCutPool(t *testing.T, w0Seen time.Duration, extra map[string]time.Duration) allocDecision {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4)}}
+	f := newAllocFixture(t, cfg).sessions(
+		poolRow("gc-1", "worker", 1, "active"), poolRow("gc-2", "worker", 2, "active"), poolRow("gc-3", "worker", 3, "active"),
+	).alive("s-gc-1", InventoryAttrs{}).alive("s-gc-2", InventoryAttrs{}).alive("s-gc-3", InventoryAttrs{})
+	started := allocNow.Add(-time.Minute)
+	seen := map[string]time.Duration{"w-0": w0Seen}
+	maps.Copy(seen, extra)
+	ids := slices.Sorted(maps.Keys(seen))
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	for _, id := range ids {
+		f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+			ID: id, Title: id, Type: "task", Status: "in_progress", Assignee: "gc-1",
+			Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+		})
+		f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "")
+	}
+	f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: map[string]int{"worker": 2}}, started
+	f.in.ClaimsSeen = map[workClaim]time.Time{}
+	for i, id := range ids {
+		c, _ := workClaimOf(f.in.Demand, i)
+		f.in.ClaimsSeen[c] = started.Add(seen[id])
+	}
+	return f.decide()
+}
+
+// Kills a claim cut that puts rows to sleep (PAR-SC review must-fix): a
+// claim the check never counted (work assigned at creation) is cut like any
+// newer claim, and the first pass after a controller restart sees every
+// assignment as new. Either way the cut count is below the true one, so the
+// template retains its rows while the cut lasts: no row the true count
+// keeps sleeps or drains, and creates still follow the cut count.
+func TestScaleCheckClaimCutKeepsRows(t *testing.T) {
+	quiet := func(t *testing.T, cut, truth allocDecision) {
+		t.Helper()
+		if tp := cut.Snapshot.Partial.Templates["worker"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckStaleClaim) {
+			t.Fatalf("cut template = %+v, want retained for %s", tp, causeScaleCheckStaleClaim)
+		}
+		for k, e := range cut.Snapshot.Entries {
+			if (e.Desired == desireDrain || e.Desired == desireSleep) && truth.Snapshot.Entries[k].Desired != e.Desired {
+				t.Errorf("row %s: %s/%s under the cut, %s without it", k.ID, e.Desired, e.Reason, truth.Snapshot.Entries[k].Desired)
+			}
+		}
+		if len(cut.Plans) > len(truth.Plans) {
+			t.Errorf("the cut planned %d creates, more than the true count's %d", len(cut.Plans), len(truth.Plans))
+		}
+	}
+	t.Run("a claim the check never counted", func(t *testing.T) {
+		truth := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-9": -time.Second})
+		cut := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-9": time.Second})
+		quiet(t, cut, truth)
+	})
+	t.Run("first pass after a restart", func(t *testing.T) {
+		truth := claimCutPool(t, -time.Hour, map[string]time.Duration{"w-1": -time.Hour})
+		boot := claimCutPool(t, time.Second, map[string]time.Duration{"w-1": time.Second})
+		quiet(t, boot, truth)
+		for k, e := range boot.Snapshot.Entries {
+			if e.Desired == desireDrain || e.Desired == desireSleep {
+				t.Errorf("first pass after a restart: row %s %s/%s", k.ID, e.Desired, e.Reason)
+			}
+		}
+	})
+}

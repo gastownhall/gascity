@@ -274,7 +274,10 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	}
 	w.ScaleCheck, w.ScaleCheckStartedAt = rec.scaleCheckRun(now)
 	var newClaim bool
-	w.ClaimsSeen, newClaim = p.claimsSeenAt(w.Demand, now)
+	// Stamp first sights after the work read, not at the pass's start: a
+	// run that starts between the two may count a bead the read then shows
+	// claimed, and the claim must not predate that run.
+	w.ClaimsSeen, newClaim = p.claimsSeenAt(w.Demand, p.clock.Now())
 	if newClaim && len(w.Demand.CustomCheckTemplates) > 0 && e.WakeReads != nil {
 		e.WakeReads() // a custom count may predate the claim: a newer run ends its subtraction
 	}

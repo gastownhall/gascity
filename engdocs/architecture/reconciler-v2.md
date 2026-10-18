@@ -77,9 +77,14 @@ the run started. So the decide subtracts, from each custom template's
 count, the template's work assignments first seen no earlier than that
 start (never below zero; trace cause `scale-check-stale-vs-claim`). An
 assignment belongs to the template its work routes to, or, for unrouted
-work, to the claimant's template. This can only under-create, and a real
-backlog still scales up. A new claim wakes the lane, and a newer run's
-publish wakes the planner, so a subtraction lasts about one run.
+work, to the claimant's template. The assignment is stamped after the work
+read, so a run that starts during the read is not missed. This can only
+under-create, and a real backlog still scales up. A claim the check never
+counted, or every assignment on the first pass after a controller restart,
+is cut too, so while the cut lasts the template keeps its rows: creates
+follow the cut count, but no row is put to sleep or drained for it. A new
+claim wakes the lane, and a newer run's publish wakes the planner, so a cut
+lasts about one run.
 
 `gc doctor` has a `daemon-session-reconciler` check:
 

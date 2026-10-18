@@ -476,6 +476,15 @@ func TestExternalReadsResumeServesNoPreSuspensionScaleCheck(t *testing.T) {
 	}
 }
 
+// settableClock is a planner clock that reads at, so a test pins when the
+// gather stamps first sights of claims (after its work read).
+type settableClock struct {
+	realPlannerClock
+	at time.Time
+}
+
+func (c *settableClock) Now() time.Time { return c.at }
+
 // claimSkewDecide gathers over store as the planner p does at now, with rec
 // as K1's recording and wakes counting gather's lane wakes, and decides.
 func claimSkewDecide(t *testing.T, p *planner, cfg *config.City, cityPath string, store beads.Store, alive []string, rec *externalReadsRecording, now time.Time, wakes *atomic.Int64) allocDecision {
@@ -551,7 +560,8 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 		}
 		return fmt.Sprint(n), nil
 	}
-	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	clk := &settableClock{}
+	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	alive := []string{"s-gc-1"}
 	var wakes atomic.Int64
 	cut := func(d allocDecision) bool {
@@ -562,6 +572,7 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	if !passAndJoin(ctx, at(lane, t0)) {
 		t.Fatal("pass 1 declined")
 	}
+	clk.at = t0
 	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t0, &wakes); cut(d) {
 		t.Fatalf("before any claim: cut %+v", d.Snapshot.Partial.Templates["worker"])
 	}
@@ -571,6 +582,7 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 		t.Fatal(err)
 	}
 	t1 := t0.Add(time.Second)
+	clk.at = t1
 	d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t1, &wakes)
 	if len(d.Plans) != 0 || !cut(d) || wakes.Load() != 1 {
 		t.Fatalf("claim newer than the run: %d create(s), causes %v, %d lane wakes; want none, %s, one wake",
@@ -579,6 +591,7 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	if e := entryOf(t, d, "gc-1"); e.Desired == desireDrain || e.Desired == desireSleep {
 		t.Fatalf("the claimant's row = %s; want not drained", e.Desired)
 	}
+	clk.at = t1.Add(time.Second)
 	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t1.Add(time.Second), &wakes); len(d.Plans) != 0 || !cut(d) || wakes.Load() != 1 {
 		t.Fatalf("same claim, next pass on the same run: %d create(s), cut %t, %d wakes; want none, cut, no new wake", len(d.Plans), cut(d), wakes.Load())
 	}
@@ -587,6 +600,7 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	if !passAndJoin(ctx, at(lane, t2)) {
 		t.Fatal("pass 2 declined")
 	}
+	clk.at = t2
 	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t2, &wakes); len(d.Plans) != 0 || cut(d) {
 		t.Fatalf("run newer than the claim: %d create(s), cut %t; want none and no cut", len(d.Plans), cut(d))
 	}
@@ -601,6 +615,7 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	if !passAndJoin(ctx, at(lane, t3)) {
 		t.Fatal("pass 3 declined")
 	}
+	clk.at = t3
 	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t3, &wakes); len(d.Plans) != finalCreates || cut(d) {
 		t.Fatalf("new unassigned work after the cut: %d create(s), cut %t; want %d and no cut", len(d.Plans), cut(d), finalCreates)
 	}
@@ -771,5 +786,34 @@ func TestClaimsSeenAtReassignedClaimIsNew(t *testing.T) {
 	}
 	if seen, fresh := p.claimsSeenAt(view("gc-3"), t2); fresh || len(seen) != 1 || !seen[claim("w-1", "gc-3")].Equal(t1) {
 		t.Fatalf("w-2 released: %v, new %t; want only w-1 at %v, nothing new", seen, fresh, t1)
+	}
+}
+
+// Kills a claim stamped before the work read (PAR-SC review): the gather
+// stamps a first sight when its work read has shown the claim, not at the
+// pass's start. A run that started during the read, after the pass began,
+// counted w-1 as unassigned; the read then shows gc-3's claim on it, so the
+// claim is newer than the run and is cut, and no session is planned for
+// work a session holds.
+func TestScaleCheckClaimStampedAfterTheWorkRead(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg := diffConfig(customPool("worker", "count-ready", 4))
+	claimed := beads.Bead{
+		ID: "w-1", Title: "w-1", Type: "task", Status: "in_progress", Assignee: "gc-3", CreatedAt: diffNow.Add(-time.Hour),
+		Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+	}
+	cache, _ := newDemandCache(t, false, poolRow("gc-1", "worker", 1, "active"), poolRow("gc-3", "worker", 2, "active"), claimed)
+	passStart := diffNow
+	runStart := passStart.Add(50 * time.Millisecond)
+	rec := &externalReadsRecording{Seq: 1, FreshFor: time.Minute, Sources: map[sourceKey]sourceResult{
+		{kind: sourceScaleCheck, cfg: cfg}: {StartedAt: runStart, EndedAt: runStart.Add(10 * time.Millisecond), sourcePayload: sourcePayload{ScaleCheck: &scaleCheckResult{Counts: map[string]int{"worker": 1}}}},
+	}}
+	clk := &settableClock{at: passStart.Add(100 * time.Millisecond)} // after the work read
+	p := newPlanner(clk, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	var wakes atomic.Int64
+	d := claimSkewDecide(t, p, cfg, cityPath, cache, []string{"s-gc-1", "s-gc-3"}, rec, passStart, &wakes)
+	if len(d.Plans) != 0 || !slices.Contains(d.Snapshot.Partial.Templates["worker"].Causes, causeScaleCheckStaleClaim) {
+		t.Fatalf("a claim the read showed after the run started: %d create(s), causes %v; want none, cut",
+			len(d.Plans), d.Snapshot.Partial.Templates["worker"].Causes)
 	}
 }
