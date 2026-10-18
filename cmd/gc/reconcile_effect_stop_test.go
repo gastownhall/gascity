@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"github.com/gastownhall/gascity/internal/workladder"
 	"io"
 	"strconv"
 	"sync/atomic"
@@ -15,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 // The stop verb's tests (CONTRACT v5 D3, D4, F2, F3; C6b2).

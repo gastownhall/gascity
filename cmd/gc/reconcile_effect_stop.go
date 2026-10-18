@@ -4,7 +4,6 @@ import (
 	"cmp"
 	"context"
 	"fmt"
-	"github.com/gastownhall/gascity/internal/workladder"
 	"maps"
 	"strings"
 	"time"
@@ -15,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 // The stop verb (CONTRACT v5 D3, D4, F2, F3; C6b2), A4's effect, under the
