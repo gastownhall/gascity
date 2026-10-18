@@ -131,6 +131,10 @@ func buildWarmClaimTriggerProbe(cfg *config.City, resolve warmClaimTriggerResolv
 // so a steady warm fleet pays nothing; the store read (unclaimed probe) and the
 // idle wait run only on the tick(s) right after a new binding, before the marker
 // is set. Best-effort throughout: it never fails the (already-successful) warm start.
+//
+// When the controller's lane host executes message ops for store, the nudge is a
+// planner notice op (proposePlannerNotice) the lane delivers at the slot's
+// boundary, and the marker records that it was proposed.
 func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
 	if sp == nil || store == nil || session == nil || probe == nil {
 		return
@@ -160,21 +164,24 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	if !probe(*session) {
 		return
 	}
-	// Never inject mid-turn: wait for the slot's idle input prompt first. A warm
-	// slot with unclaimed work is normally already idle (returns at once); the
-	// bound only bites on a slot still finishing prior work.
-	if waiter, ok := sp.(runtime.IdleWaitProvider); ok {
-		_ = waiter.WaitForIdle(ctx, name, warmBindNudgeIdleTimeout)
-	}
-	if err := sp.Nudge(name, runtime.TextContent(claimText)); err != nil {
-		// Best-effort: delivery did not confirm (TUI race / transient). Leave the
-		// marker unset so a later tick retries — the unclaimed gate keeps that retry
-		// safe (a claimed bead stops matching), and manual re-nudge remains the
-		// final escape hatch, as it was at the poller's give-up.
-		log.Printf("warm-bind claim nudge: %s failed for trigger %s: %v", name, triggerID, err)
+	if lane := plannerNoticeLaneFor(store); lane != nil {
+		// The lane waits for the slot's boundary itself, so there is no idle
+		// wait here. The op is idempotent by key, so a marker write that fails
+		// below re-proposes the same op on a later tick.
+		if _, _, err := proposePlannerNotice(lane, session.ID, plannerNoticeToken(*session), plannerNotice{
+			Purpose:     warmBindNoticePurpose,
+			Trigger:     triggerID,
+			Attempt:     1,
+			Content:     claimText,
+			StartWithin: warmBindNoticeStartWithin,
+		}); err != nil {
+			log.Printf("warm-bind claim nudge: notice for %s failed for trigger %s: %v", name, triggerID, err)
+			return
+		}
+	} else if !nudgeWarmBindSlot(ctx, sp, name, triggerID, claimText) {
 		return
 	}
-	// Delivered: stamp the marker so this binding never nudges again. Persisted on
+	// Delivered (or proposed): stamp the marker so this binding never nudges again. Persisted on
 	// the session bead → restart-safe; mirrored in-memory so the rest of this tick
 	// reads the just-written value.
 	if err := sessionFrontDoor(store).SetMarker(session.ID, warmBindNudgedForTriggerKey, triggerID); err != nil {
@@ -187,3 +194,30 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	session.Metadata[warmBindNudgedForTriggerKey] = triggerID
 	log.Printf("warm-bind claim nudge: nudged %s to claim %s", name, triggerID)
 }
+
+// nudgeWarmBindSlot types the claim nudge into the slot directly, after
+// waiting for its idle input prompt so it never injects mid-turn: a warm slot
+// with unclaimed work is normally already idle (the wait returns at once);
+// the bound only bites on a slot still finishing prior work. It reports
+// whether the nudge was delivered. On failure (a TUI race, a transient) the
+// marker stays unset so a later tick retries; the unclaimed gate keeps that
+// retry safe (a claimed bead stops matching), and manual re-nudge remains the
+// final escape hatch, as it was at the poller's give-up.
+func nudgeWarmBindSlot(ctx context.Context, sp runtime.Provider, name, triggerID, claimText string) bool {
+	if waiter, ok := sp.(runtime.IdleWaitProvider); ok {
+		_ = waiter.WaitForIdle(ctx, name, warmBindNudgeIdleTimeout)
+	}
+	if err := sp.Nudge(name, runtime.TextContent(claimText)); err != nil {
+		log.Printf("warm-bind claim nudge: %s failed for trigger %s: %v", name, triggerID, err)
+		return false
+	}
+	return true
+}
+
+// warmBindNoticePurpose names the warm-bind claim nudge as a planner notice.
+const warmBindNoticePurpose = "warm-bind-claim-nudge"
+
+// warmBindNoticeStartWithin bounds how long the warm-bind notice waits for
+// the slot's boundary: the claim backstop's observe grace, after which that
+// backstop owns re-delivery to a slot that still has not claimed.
+const warmBindNoticeStartWithin = idleClaimNudgeGrace

@@ -404,6 +404,11 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // write-ahead is what bounds the loop, and unwinding it would let a permanently
 // input-dead pane re-send forever) and records that nothing ARRIVED, so the
 // escalation reports what actually happened.
+//
+// It delivers directly even when the controller's lane host executes message
+// ops, unlike the other planner notices (planner_notice.go): the lane's content
+// gate holds content for a draining row (session.ContentGate), and a draining
+// row is the only one this reminder is for.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
 	if !writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, due.failed, due.now, stdout) {
 		return drainReminderSkipped
