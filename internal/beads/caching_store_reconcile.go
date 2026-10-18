@@ -752,6 +752,7 @@ func (c *CachingStore) mergeSnapshotLocked(
 	}
 	c.pruneRetainedFencesLocked(now)
 	c.pruneAnnouncedClosesLocked(now)
+	c.pruneSilentClosesLocked()
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0

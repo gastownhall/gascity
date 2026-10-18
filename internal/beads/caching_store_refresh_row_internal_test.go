@@ -1131,11 +1131,27 @@ func TestCachingStoreRefreshRowReport(t *testing.T) {
 			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
 		},
 		{
-			name: "held_closed_with_option",
+			// A close RefreshRow installed over no cached row without
+			// announcing it: the cache holds the row only silently, so the
+			// refresh with close evidence announces it as an unheld close.
+			name: "silently_held_closed_with_option",
 			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
 				id := unheldClosedRow(t, cache, backing)
 				if _, err := cache.RefreshRow(id); err != nil {
 					t.Fatalf("RefreshRow: %v", err)
+				}
+				return id
+			},
+			opts:      RowRefreshOptions{AnnounceUnheldClose: true},
+			wantFound: true, wantEvent: "bead.closed", wantStatus: "closed",
+		},
+		{
+			// The same row once that close was announced: held, and quiet.
+			name: "held_closed_with_option",
+			setup: func(t *testing.T, cache *CachingStore, backing Store) string {
+				id := unheldClosedRow(t, cache, backing)
+				if _, err := cache.RefreshRowReport(id, RowRefreshOptions{AnnounceUnheldClose: true}); err != nil {
+					t.Fatalf("RefreshRowReport: %v", err)
 				}
 				return id
 			},

@@ -125,6 +125,7 @@ go_test(
         "caching_store_scan_fences_internal_test.go",
         "caching_store_scan_internal_test.go",
         "caching_store_setequal_internal_test.go",
+        "caching_store_silent_close_internal_test.go",
         "caching_store_sqlite_deps_internal_test.go",
         "caching_store_stale_event_internal_test.go",
         "caching_store_test.go",

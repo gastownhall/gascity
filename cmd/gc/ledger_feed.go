@@ -47,7 +47,9 @@ package main
 // forced re-scan (CachingStore.RequestReconcile), whose list read comes
 // after the rows committed. The re-scan lists active rows only, so it covers
 // every create and update but not the close of a row the cache never held.
-// That close is announced once by the refresh (critic A3), which sends it
+// That close is announced once by the refresh (critic A3), also when a read
+// or write of the cache installed the closed row first without announcing
+// it (the cache reports such a row unheld), which sends it
 // down the live-confirmed close path (applyInferredClose), and handed to the
 // autoclose sweep as a backstop. A row is read as closing on a create or
 // close op or an open post-image, and on a closed post-image whose closed_at

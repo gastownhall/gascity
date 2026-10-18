@@ -102,6 +102,11 @@ type mergeEndState struct {
 	// which recording a close prunes the record again; the merge's prune sets
 	// it.
 	announcedPruneNext int
+	// silentCloseIDs is the key set of silentCloses: the rows held closed
+	// that an install put there over no cached row without announcing the
+	// close. The merge's prune drops every mark of a row it does not hold
+	// closed.
+	silentCloseIDs map[string]struct{}
 	// fenceFloor rises only when a retention older than the window is
 	// pruned; no seeded state carries one, so it must stay put.
 	fenceFloor     uint64
@@ -327,6 +332,7 @@ func captureEndState(c *CachingStore) mergeEndState {
 		retainedIDs:          keySet(c.retainedAt),
 		announcedCloseIDs:    keySet(c.announcedCloses),
 		announcedPruneNext:   c.announcedClosesPruneNext,
+		silentCloseIDs:       keySet(c.silentCloses),
 		fenceFloor:           c.fenceFloor,
 		state:                c.state,
 		lastFreshAt:          c.lastFreshAt,

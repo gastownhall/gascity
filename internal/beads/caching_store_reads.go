@@ -745,6 +745,11 @@ type RowRefreshOptions struct {
 	// it, and a re-scan or full Prime then dropped the closed row. A close
 	// the cache never announced is announced, however recently the cache
 	// wrote the row: a full Prime drops a row closed out of band silently.
+	// So is the close of a row the cache holds closed only because a path
+	// that announces no close installed it over no cached row (a write that
+	// only refreshed the row, a conditional write's refetch, an applied
+	// event, a list read; silentCloses): for the announcement the row counts
+	// as unheld, and is reported so (RowRefresh.Held).
 	// Pass it with YieldToLocalWrites: a closing write of this cache can drop
 	// its row before it announces the close, and without the yield a refresh
 	// in between announces the close too. Pass it only with evidence the row
@@ -759,7 +764,8 @@ type RowRefreshOptions struct {
 	// commit and its absorb the backing read would see the write before the
 	// cache holds it, and the refresh would announce the cache's own write.
 	// The write absorbs and announces it; a refresh after it returns finds
-	// nothing new. The refresh checks before its backing read, so one that
+	// nothing new of the write's, though it still announces an out-of-band
+	// close the write absorbed without announcing (AnnounceUnheldClose). The refresh checks before its backing read, so one that
 	// starts while the write is in flight reads nothing, and again after
 	// the read, for a write that started during it.
 	// A caller that passes it must retry a yielded row for as long as the
@@ -789,7 +795,10 @@ type RowRefresh struct {
 	Bead Bead
 	// Found reports whether the backing has the row.
 	Found bool
-	// Held reports whether the cache held the row before the refresh.
+	// Held reports whether the cache held the row before the refresh. A
+	// closed row held only because an install that announced no close put
+	// it there, whose close the refresh announced, is reported unheld: the
+	// cache held it no more than it holds an uncached row.
 	Held bool
 	// Event is the notification the refresh emitted: "", "bead.created",
 	// "bead.updated" or "bead.closed".
@@ -849,6 +858,9 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	cached, held := c.beads[id]
 	cachedDeps := c.deps[id]
 	announceClose := found && c.announcesCloseLocked(id, opts, cached, held, fresh)
+	// A close announced over a row held only silently (heldSilentlyLocked) is
+	// the close of an unheld row, and is reported as one.
+	announcedUnheld := announceClose && (!held || c.heldSilentlyLocked(id, cached))
 	var installed Bead
 	evicted := false
 	if found {
@@ -885,7 +897,7 @@ func (c *CachingStore) RefreshRowReport(id string, opts RowRefreshOptions) (RowR
 	}
 	c.mu.Unlock()
 
-	rep := RowRefresh{Found: found, Held: held, Event: eventType, Reclosed: announceClose && held}
+	rep := RowRefresh{Found: found, Held: held && !announcedUnheld, Event: eventType, Reclosed: announceClose && !announcedUnheld}
 	if !found {
 		if held {
 			rep.Bead = cloneBead(cached)

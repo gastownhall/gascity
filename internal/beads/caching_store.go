@@ -140,6 +140,15 @@ type CachingStore struct {
 	// reconcile merge and, once the record holds announcedClosesPruneAt
 	// entries and announcedClosesPruneNext, as each announcement is recorded.
 	announcedCloses map[string]announcedClose
+	// silentCloses names the rows the cache holds closed that were installed
+	// over no cached row by a path that announced no close (a write that only
+	// refreshed the row, a conditional write's refetch, an applied event, a
+	// list read): nothing told the bus they closed. A RefreshRowReport with
+	// evidence of a recent close treats such a row as unheld
+	// (announcesCloseLocked). An install that announces the close or leaves
+	// the row open drops the mark, as does an eviction; each reconcile merge
+	// drops the marks of rows it does not hold closed.
+	silentCloses map[string]struct{}
 	// announcedClosesPruneNext is twice the entries the last prune of
 	// announcedCloses kept: recording a close prunes again only once the
 	// record has grown to it, so between prunes the record grows to at most
@@ -1118,6 +1127,7 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 func (c *CachingStore) evictLocked(id string) {
 	c.advanceObservationLocked()
 	delete(c.beads, id)
+	delete(c.silentCloses, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
 	delete(c.beadSeq, id)

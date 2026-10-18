@@ -26,17 +26,22 @@ import (
 // itself, and so is a closed row installed with no cached row before it while
 // a closing write of ours is in flight (closeIntents) and its generation's
 // close is unannounced. A queued close carries the close generation of the
-// writes in flight when it was queued, 0 for none (queuedClose). Caller must
-// hold c.mu in write mode.
+// writes in flight when it was queued, 0 for none (queuedClose). Any other
+// closed row installed with no cached row before it, and not announced, is
+// marked silently installed (silentCloses), so a refresh with evidence of a
+// recent close still announces it; a closed row laid over a closed one keeps
+// the mark it had. Caller must hold c.mu in write mode.
 func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) {
 	if installed.Status != "closed" {
 		c.noteNotClosedLocked(id)
 		c.dropQueuedCloseLocked(id)
 		delete(c.announcedCloses, id)
+		delete(c.silentCloses, id)
 		return
 	}
 	if announced {
 		c.dropQueuedCloseLocked(id)
+		delete(c.silentCloses, id)
 		return
 	}
 	switch intent := c.closeIntents[id]; {
@@ -45,9 +50,17 @@ func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadP
 	case !hadPrevious && intent != nil && intent.announced < intent.generation:
 		// A close a write of ours is making, observed before that write
 		// claims it: queue it so the claim (or the drain) announces it.
+	case !hadPrevious:
+		// A close nobody announced, installed over no cached row.
+		if c.silentCloses == nil {
+			c.silentCloses = make(map[string]struct{})
+		}
+		c.silentCloses[id] = struct{}{}
+		return
 	default:
 		return
 	}
+	delete(c.silentCloses, id)
 	if c.unannouncedCloses == nil {
 		c.unannouncedCloses = make(map[string]queuedClose)
 	}
@@ -113,17 +126,18 @@ func (c *CachingStore) recordAnnouncedCloseLocked(id string, closed Bead, now ti
 
 // announcesCloseLocked reports whether RefreshRowReport announces fresh, the
 // row it read for id, as a close rowRefreshChange does not: the close of a
-// row the cache does not hold, with opts.AnnounceUnheldClose or
-// opts.SeenOpen, or, with opts.SeenOpen, of a row the cache holds closed at
-// another version. Neither is announced while a closing write of this cache
-// is in flight for the row (that write announces it), or when the cache
-// announced this close recently (announcedCloseCoversLocked). Caller must
-// hold c.mu.
+// row the cache does not hold, or holds closed only because an install that
+// announced nothing put it there (heldSilentlyLocked), with
+// opts.AnnounceUnheldClose or opts.SeenOpen, or, with opts.SeenOpen, of a row
+// the cache holds closed at another version. Neither is announced while a
+// closing write of this cache is in flight for the row (that write announces
+// it), or when the cache announced this close recently
+// (announcedCloseCoversLocked). Caller must hold c.mu.
 func (c *CachingStore) announcesCloseLocked(id string, opts RowRefreshOptions, cached Bead, held bool, fresh Bead) bool {
 	switch {
 	case fresh.Status != "closed" || c.closeIntents[id] != nil:
 		return false
-	case !held:
+	case !held || c.heldSilentlyLocked(id, cached):
 		if !opts.AnnounceUnheldClose && !opts.SeenOpen {
 			return false
 		}
@@ -131,6 +145,30 @@ func (c *CachingStore) announcesCloseLocked(id string, opts RowRefreshOptions, c
 		return false
 	}
 	return !c.announcedCloseCoversLocked(id, fresh, c.clockNow(), opts.SeenOpen)
+}
+
+// heldSilentlyLocked reports whether cached, id's cached row, is a closed row
+// installed over no cached row with its close announced by nobody
+// (silentCloses): for announcing its close, the cache holds it no more than
+// it holds an uncached row. Caller must hold c.mu.
+func (c *CachingStore) heldSilentlyLocked(id string, cached Bead) bool {
+	if cached.Status != "closed" {
+		return false
+	}
+	_, silent := c.silentCloses[id]
+	return silent
+}
+
+// pruneSilentClosesLocked drops the silentCloses marks of rows the cache does
+// not hold closed. An install or eviction of a row keeps its own mark in
+// step; this sweeps the marks of rows dropped wholesale. Caller must hold c.mu
+// in write mode.
+func (c *CachingStore) pruneSilentClosesLocked() {
+	for id := range c.silentCloses {
+		if b, held := c.beads[id]; !held || b.Status != "closed" {
+			delete(c.silentCloses, id)
+		}
+	}
 }
 
 // sameRowVersion reports whether a and b carry the same nonzero Revision, so

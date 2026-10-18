@@ -242,7 +242,24 @@ func buildExpectedNewEnd(st storeState, in snapshotInputs, postPreserveFresh map
 	// next prune threshold to twice what the prune kept. The frozen branches
 	// predate the record, so the reference end state cannot supply it.
 	exp.announcedPruneNext = 2 * len(exp.announcedCloseIDs)
+	exp.silentCloseIDs = expectedSilentCloseIDs(st, exp)
 	return exp
+}
+
+// expectedSilentCloseIDs is every row the merge leaves closed that the cache
+// did not hold before it: the merge installs a closed row over no cached row
+// without announcing its close. No seeded state carries a mark, and the
+// merge's prune drops the mark of every row it does not hold closed. The
+// frozen branches predate the record, so the reference end state cannot
+// supply it.
+func expectedSilentCloseIDs(st storeState, exp mergeEndState) map[string]struct{} {
+	out := map[string]struct{}{}
+	for id, b := range exp.beads {
+		if _, before := st.beads[id]; !before && b.Status == "closed" {
+			out[id] = struct{}{}
+		}
+	}
+	return out
 }
 
 // expectedAnnouncedCloseIDs is every row the cache held open that the

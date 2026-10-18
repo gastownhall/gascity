@@ -25,6 +25,7 @@ func diffEndStates(want, got mergeEndState) string {
 	diffStructSet(&b, "readyLost", want.readyLost, got.readyLost)
 	diffStructSet(&b, "retainedIDs", want.retainedIDs, got.retainedIDs)
 	diffStructSet(&b, "announcedCloseIDs", want.announcedCloseIDs, got.announcedCloseIDs)
+	diffStructSet(&b, "silentCloseIDs", want.silentCloseIDs, got.silentCloseIDs)
 	if want.announcedPruneNext != got.announcedPruneNext {
 		fmt.Fprintf(&b, "  announcedPruneNext: want=%v got=%v\n", want.announcedPruneNext, got.announcedPruneNext)
 	}
