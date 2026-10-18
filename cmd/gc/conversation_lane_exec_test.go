@@ -418,6 +418,8 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		{name: "tmux permission prompt", err: permissionPrompt, transient: true},
 		{name: "tmux submit unconfirmed", err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), wantUnknwn: true},
 		{name: "tmux re-send refused after a submit", err: fmt.Errorf("%w: session %q: not re-sent: %s", tmux.ErrNudgeSubmitUnconfirmed, "s", permissionPrompt.Error()), wantUnknwn: true},
+		{name: "steer submit unconfirmed", err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), steer: true, wantUnknwn: true},
+		{name: "steer on a tmux permission prompt", err: permissionPrompt, steer: true, transient: true},
 		{name: "fence miss", err: &runtime.FenceMismatchError{Session: "s", Found: "absent"}, transient: true},
 		{name: "runtime unavailable", err: fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), transient: true},
 		{name: "partial fence miss", err: &runtime.FenceMismatchError{Session: "s", Found: "dead", Partial: true}, wantUnknwn: true},
