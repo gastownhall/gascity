@@ -22,10 +22,12 @@ import (
 //
 // A lane respond is at most once: an attempt that may have answered is never
 // sent again, since the prompt showing by then may be a second, identical
-// raising. The first effective answer wins: an answer that closes with
-// nothing sent (refused, canceled, expired, unsupported) ends its occurrence
-// as well as one that answered, so a prompt still showing becomes the next
-// occurrence, with fresh keys for its answers.
+// raising. The first accepted answer wins (DES-O1 §4.7, §10.2): an answer
+// that may have answered ends its occurrence, and so does the last open
+// answer to it that closes with nothing sent (refused, canceled, expired,
+// unsupported), so a prompt still showing becomes the next occurrence, with
+// fresh keys for its answers. While another principal's answer is open, a
+// refused one leaves the occurrence to it.
 
 const (
 	// occurrenceSep separates the request id from the raising number. The
@@ -47,8 +49,8 @@ const (
 	ResolvedAmbiguous = "ambiguous"
 	// ResolvedUnanswered is the reason of an interaction.resolved the lane
 	// records when a respond closes with nothing sent while its occurrence
-	// is open: the next answer to a prompt still showing is the next
-	// occurrence's, under a fresh key.
+	// is open and no other open answer names it: the next answer to a
+	// prompt still showing is the next occurrence's, under a fresh key.
 	ResolvedUnanswered = "unanswered"
 	// respondKeyPrefix starts a lane respond's client key.
 	respondKeyPrefix = "respond:"

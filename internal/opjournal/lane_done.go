@@ -410,10 +410,23 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	for _, op := range tb.ops {
 		items = append(items, &doneItem{kind: doneOp, id: op.ID, cur: op, next: l.doneNext(tb, er, success, op, now)})
 	}
+	closing := make(map[string]bool, len(tb.ops))
+	for _, op := range tb.ops {
+		closing[op.ID] = true
+	}
+	var endErr error
 	for _, it := range items[1:] {
 		// The end of a respond's occurrence lands with its close (DES-O1
-		// §4.7, §10.2): its answer, or nothing sent.
-		f, ok := respondEnd(it.next, now)
+		// §4.7, §10.2): its answer, or nothing sent while no other answer
+		// to it is open (Store.occurrenceEnd). When the other answers
+		// cannot be read the end lands anyway: an open answer then closes
+		// skipped{stale} and its requester answers the next occurrence,
+		// where leaving the occurrence open could spend its answers.
+		f, ok, err := l.store.occurrenceEnd(it.next, closing, now)
+		if err != nil {
+			endErr = errors.Join(endErr, err)
+			f, ok = respondEnd(it.next, now)
+		}
 		if !ok {
 			continue
 		}
@@ -448,7 +461,7 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 			res.Next = minTime(res.Next, it.next.RetryAt)
 		}
 	}
-	return errors.Join(err, er.contractErr)
+	return errors.Join(err, er.contractErr, endErr)
 }
 
 // writeDone applies Done's items until every one is written or dropped. A

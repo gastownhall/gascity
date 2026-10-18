@@ -118,6 +118,14 @@ func TestRespondKeyIsTheRaisedFactID(t *testing.T) {
 		}(),
 		"id of another": func() Fact { g := f; g.Interaction = "perm-1#2"; return g }(),
 		"bad raising":   func() Fact { g := f; g.Interaction = "perm-1"; return g }(),
+		// A request id with no raising number under its own, consistent
+		// id: only the occurrence check refuses it.
+		"bad raising with its id": func() Fact {
+			g := f
+			g.Interaction = "perm-1"
+			g.ID, _ = FactID("gc", g)
+			return g
+		}(),
 	}
 	for name, g := range bad {
 		if _, err := RespondKey(g); err == nil {

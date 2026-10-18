@@ -669,7 +669,14 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 			result = CancelClosed
 			next := cur
 			next.Cancel = cancel
-			return closed(next, Outcome{Arm: ArmCanceled}, by, s.clk), true, nil
+			next = closed(next, Outcome{Arm: ArmCanceled}, by, s.clk)
+			// A canceled lane respond ends its occurrence before it
+			// closes, as the lane's closes do: a failure or a crash in
+			// between leaves the op open for a retry or the lane.
+			if err := s.endOccurrence(next, nil, utc(s.clk.Now())); err != nil {
+				return Op{}, false, err
+			}
+			return next, true, nil
 		default:
 			result = CancelRequested
 			if cur.Cancel.Recorded() {
@@ -687,12 +694,12 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 		if err := s.closeBead(id); err != nil {
 			return "", Op{}, err
 		}
-		// A canceled lane respond ends its occurrence, as the lane's closes
-		// do (respondEnd); a retried Cancel repairs a crash before it.
-		if f, ok := respondEnd(op, utc(s.clk.Now())); ok {
-			if err := s.endRaising(f); err != nil {
-				return "", Op{}, err
-			}
+	}
+	if result == CancelAlreadyTerminal {
+		// A lane respond closed outside the lane and Cancel (its bead
+		// closed externally) gets its end here.
+		if err := s.endOccurrence(op, nil, utc(s.clk.Now())); err != nil {
+			return "", Op{}, err
 		}
 	}
 	return result, op, nil

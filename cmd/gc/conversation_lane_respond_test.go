@@ -361,3 +361,94 @@ func TestLaneRespondResultMapping(t *testing.T) {
 		}
 	}
 }
+
+// TestLaneExecRespondRestartDoesNotReplayTheAnswer proves an answer made
+// before the runtime stopped never reaches the identical prompt it raises
+// after a restart in the same generation: the pass that saw the runtime not
+// running ended the answer's occurrence.
+func TestLaneExecRespondRestartDoesNotReplayTheAnswer(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	f.prompt(laneTestRequest)
+	op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
+	if err := f.sp.Stop(f.name); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.pass(context.Background(), t, l, st, nil); err != nil {
+		t.Fatalf("pass over a stopped runtime: %v", err)
+	}
+	f.started = false
+	f.startRuntime(t, f.token)
+	f.prompt(laneTestRequest)
+	if _, err := f.pass(context.Background(), t, l, st, nil); err != nil {
+		t.Fatalf("pass after the restart: %v", err)
+	}
+	if calls := f.responses(); len(calls) != 0 {
+		t.Fatalf("the answer to %s reached the re-raised prompt: %+v", raised.Interaction, calls)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSkipped || got.Outcome.Reason != opjournal.ReasonStale {
+		t.Fatalf("op %+v; want skipped{stale}", got.Outcome)
+	}
+}
+
+// TestLaneExecRespondHoldsTheSessionMutationLock proves the lane answers
+// under the lock legacy Manager.Respond takes, so the two paths never both
+// pass the pre-verify and type two keys: while the lock is held past the
+// call's deadline nothing is sent and the op retries.
+func TestLaneExecRespondHoldsTheSessionMutationLock(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	v, info := f.view(t)
+	call := opjournal.RespondCall{Fence: laneFence(v), Interaction: "tmux-abc#1", RequestID: "tmux-abc", Response: opjournal.RespondPayload{Action: "approve"}}
+	e := newConversationLaneExec(f.deps(st), info)
+	f.prompt("tmux-abc")
+	if _, err := e.Probe(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	held, release := make(chan struct{}), make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- session.WithSessionMutationLock(info.ID, func() error {
+			close(held)
+			<-release
+			return nil
+		})
+	}()
+	<-held
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	got, ok := e.Respond(ctx, call).(opjournal.NotDelivered)
+	cancel()
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	if !ok || !got.Transient || !errors.Is(got.Cause, session.ErrSessionMutationBusy) {
+		t.Fatalf("Respond under a held lock = %#v, want a transient NotDelivered", got)
+	}
+	if n := len(f.responses()); n != 0 {
+		t.Fatalf("%d answers reached the runtime under a held lock", n)
+	}
+	if res := e.Respond(context.Background(), call); res != (opjournal.Settled{Via: laneViaLive}) {
+		t.Fatalf("Respond once the lock is free = %#v", res)
+	}
+}
+
+// noInteractions hides the fake provider's interaction methods: a runtime
+// that is no InteractionProvider.
+type noInteractions struct{ runtime.Provider }
+
+// TestLaneExecRespondCapsFromTheHandle proves the probe takes respond from
+// the session's own answer (PendingStatus), not from the provider's type: a
+// provider with no interactions reads no respond.
+func TestLaneExecRespondCapsFromTheHandle(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	v, info := f.view(t)
+	deps := f.deps(st)
+	deps.sp = noInteractions{f.sp}
+	p, err := newConversationLaneExec(deps, info).Probe(context.Background(), v)
+	if err != nil || p.Caps.Respond || !p.Caps.Live {
+		t.Fatalf("Probe = caps %+v, %v; want live with no respond", p.Caps, err)
+	}
+}

@@ -24,11 +24,30 @@ const laneRespondRefusedAction = opjournal.RefusedReasonPrefix + "action"
 // The answer is fenced to the call's incarnation where the runtime fences
 // answers (DES-O1 §6.2: tmux, atomically); where it cannot, or the row names
 // no token, it goes unfenced and records DegradationUnfencedDelivery.
+//
+// The re-check and the answer run under the session mutation lock, which
+// legacy Manager.Respond holds over its own: otherwise both could pass the
+// runtime's pre-verify of one prompt and type two keys, the second landing
+// in whatever shows next. A lock held past ctx sends nothing, and the op
+// retries.
 func (e *conversationLaneExec) Respond(ctx context.Context, c opjournal.RespondCall) opjournal.ControlResult {
 	h := e.live
 	if h == nil {
 		return opjournal.NotDelivered{Transient: true, Cause: errLaneNoProbedHandle}
 	}
+	var res opjournal.ControlResult
+	if err := session.WithSessionMutationLockContext(ctx, e.info.ID, func() error {
+		res = e.respondLocked(ctx, h, c)
+		return nil
+	}); err != nil {
+		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("answering %s: %w", c.Interaction, err)}
+	}
+	return res
+}
+
+// respondLocked is Respond's re-check and answer, under the session
+// mutation lock.
+func (e *conversationLaneExec) respondLocked(ctx context.Context, h worker.Handle, c opjournal.RespondCall) opjournal.ControlResult {
 	pending, supported, err := h.PendingStatus(ctx)
 	switch {
 	case err != nil:

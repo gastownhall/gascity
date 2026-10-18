@@ -95,6 +95,10 @@ type rulesPlan struct {
 	// raisings holds, by op id, the occurrence of each respond candidate as
 	// the pass read it after its probe (noteRaisings).
 	raisings map[string]raisingState
+	// responds are the open respond ops the rules leave open and not in
+	// flight, candidates or waiting: a look that shows a prompt gone ends
+	// their occurrences (clearGone).
+	responds []Op
 }
 
 // isUrgent reports urgent content precedence: steer (OJ-17 adds now and the
@@ -279,6 +283,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 	orderEntries(rp.control)
 	orderEntries(rp.content)
 	rp.groups = replayGroups(past, rp.closes)
+	rp.responds = openResponds(past, rp.closes)
 	rp.closeRow = conv.Closed && remaining == 0 && rowOK && !rt.row.Closed
 	rp.takePossible = rp.decideTake(conv, rt, rowOK, inFlight, now)
 	return rp
@@ -308,6 +313,18 @@ func replayGroups(ops []Op, closes []ruleClose) map[string][]Op {
 		}
 	}
 	return groups
+}
+
+// openResponds returns the respond ops among ops, less the ones closes
+// close.
+func openResponds(ops []Op, closes []ruleClose) []Op {
+	var out []Op
+	for _, op := range ops {
+		if op.Kind == KindRespond && !slices.ContainsFunc(closes, func(c ruleClose) bool { return c.cur.ID == op.ID }) {
+			out = append(out, op)
+		}
+	}
+	return out
 }
 
 // decideTake reports whether a Take is possible and, when it is not because
@@ -561,6 +578,10 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry
 			continue
 		case blocked:
 			tp.wait(e.op, WaitBlocked, "")
+		case e.op.Kind == KindRespond && rp.raisings[e.op.ID].over():
+			// Its occurrence ended (another answer, or a look that saw its
+			// prompt gone): whatever the runtime shows, it answers nothing.
+			tp.close(rp, e, Outcome{Arm: ArmSkipped, Reason: ReasonStale}, now)
 		case !probe.Caps.Live:
 			tp.wait(e.op, WaitNotLive, "")
 		case !probe.Running:

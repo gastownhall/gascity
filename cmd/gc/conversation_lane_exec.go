@@ -370,8 +370,9 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // the worker boundary's read of whether the routed runtime deduplicates
 // keyed deliveries. A live runtime steers where its steer mode and the
 // session row allow it (e.steerable; D-STEER), per laneSteerCap, and
-// responds when its provider is an InteractionProvider (a probe whose
-// session says otherwise clears it). Nothing injects in band here.
+// responds unless its probe's session says it takes no responses
+// (PendingStatus, DES-O1 §7.2: capabilities come from the handle, never a
+// type assertion). Nothing injects in band here.
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
@@ -385,7 +386,6 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 	if e.target.sessionTransport() == "acp" {
 		caps.Text = opjournal.TextPlain
 	}
-	_, interactive := e.deps.sp.(runtime.InteractionProvider)
 	if caps.Live && e.deps.lane != nil {
 		row, _, found, err := e.deps.lane.Runtime(conv.ID)
 		if err != nil {
@@ -396,7 +396,7 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 		}
 	}
 	caps.Steer = laneSteerCap(caps, e.steerable(e.info, runtime.SteerModeFor(e.deps.sp, name)))
-	caps.Respond = caps.Live && interactive
+	caps.Respond = caps.Live
 	return caps, nil
 }
 

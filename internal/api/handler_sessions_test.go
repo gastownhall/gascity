@@ -6760,6 +6760,41 @@ func TestHandleSessionRespondMismatchedRequest(t *testing.T) {
 	}
 }
 
+// TestHandleSessionRespondRuntimeRefusals pins the statuses /respond answers
+// for the refusals the runtime names (OJ-16): a prompt that cleared between
+// the session's pending check and the runtime's own pre-verify, and an action
+// the prompt does not offer, are 409 invalid_interaction; a pane the runtime
+// could not read is 503 runtime_unavailable. Each sent nothing.
+func TestHandleSessionRespondRuntimeRefusals(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		status int
+		code   string
+	}{
+		{"prompt cleared", fmt.Errorf("approval req-1 is gone: %w", runtime.ErrInteractionGone), http.StatusConflict, "invalid_interaction"},
+		{"unknown action", fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, "answer"), http.StatusConflict, "invalid_interaction"},
+		{"pane unreadable", fmt.Errorf("pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, errors.New("server busy")), http.StatusServiceUnavailable, "runtime_unavailable"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fs := newSessionFakeState(t)
+			srv := New(fs)
+			h := newTestCityHandlerWith(t, fs, srv)
+			info := createTestSession(t, fs.cityBeadStore, fs.sp, "Interactive")
+			fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "approve?"})
+			fs.sp.RespondErrors[info.SessionName] = tc.err
+			rec := httptest.NewRecorder()
+			h.ServeHTTP(rec, newPostRequest(cityURL(fs, "/session/")+info.ID+"/respond", strings.NewReader(`{"request_id":"req-1","action":"approve"}`)))
+			if rec.Code != tc.status || !strings.Contains(rec.Body.String(), tc.code) {
+				t.Fatalf("respond = %d %s, want %d %s", rec.Code, rec.Body.String(), tc.status, tc.code)
+			}
+			if got := fs.sp.Responses[info.SessionName]; len(got) != 0 {
+				t.Fatalf("runtime answers %+v, want none", got)
+			}
+		})
+	}
+}
+
 func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	fs := newSessionFakeState(t)
 	searchBase := t.TempDir()

@@ -52,6 +52,7 @@ type Fake struct {
 	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
 	PendingInteractions     map[string]*PendingInteraction
 	PendingErrors           map[string]error // per-session Pending errors for testing
+	RespondErrors           map[string]error // per-session Respond errors for testing; the answer is recorded as a call, not applied
 	Responses               map[string][]InteractionResponse
 	SleepCapabilityValue    SessionSleepCapability
 	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
@@ -211,6 +212,7 @@ func NewFake() *Fake {
 		RemoveMetaErrors:        make(map[string]map[string]error),
 		GetMetaErrors:           make(map[string]map[string]error),
 		PendingErrors:           make(map[string]error),
+		RespondErrors:           make(map[string]error),
 		WaitForIdleGates:        make(map[string]chan struct{}),
 		WaitForIdleStarted:      make(map[string]chan struct{}),
 		RelaunchErrors:          make(map[string]error),
@@ -632,6 +634,9 @@ func (f *Fake) respondLocked(name string, response InteractionResponse, fence In
 	})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
+	}
+	if err := f.RespondErrors[name]; err != nil {
+		return err
 	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {

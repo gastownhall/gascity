@@ -43,27 +43,51 @@ func fenceDisagrees(probe Probe, conv ConversationView) bool {
 	return f != (Fence{}) && (f.Conversation != conv.ID || f.Generation != conv.Generation || f.Epoch != conv.Epoch)
 }
 
-// pendingRequest reports whether the probe looked at the runtime of the view
-// and saw request id Pending: a raising to record (DES-O1 §5.3).
-func pendingRequest(probe Probe, conv ConversationView) bool {
-	return probe.Available && probe.Running && probe.Caps.Live && !fenceDisagrees(probe, conv) &&
-		probe.Pending != "" && probe.Pending != PendingUnknown
+// definitiveLook reports whether the probe looked at the runtime of the view,
+// and what it saw pending there: Pending, or nothing when the runtime is not
+// running, since a runtime that is not running shows no prompt.
+func definitiveLook(probe Probe, conv ConversationView) (pending string, looked bool) {
+	switch {
+	case !probe.Available || !probe.Caps.Live || fenceDisagrees(probe, conv):
+		return "", false
+	case !probe.Running:
+		return "", true
+	case probe.Pending == PendingUnknown:
+		return "", false
+	default:
+		return probe.Pending, true
+	}
 }
 
-// noteRaisings records the raising the probe shows, if any, then reads the
-// occurrence each respond candidate answers. A probe sees one prompt where a
-// runtime's request ids repeat; RecordRaising numbers it the next occurrence
-// once the last is resolved, so it is read after the record. A request id the
-// journal cannot store (too long, control characters, padding) is no
-// occurrence anyone can answer: the probe returned reads it as
-// PendingUnknown, and only a store error fails the pass.
+// undecodableRow reports an error that a retry will not clear: a row this
+// build cannot decode.
+func undecodableRow(err error) bool {
+	return errors.Is(err, ErrCorruptOp) || errors.Is(err, ErrUnsupportedSchema) ||
+		errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrUnsupportedKind)
+}
+
+// noteRaisings records the raising the probe shows, if any, ends the
+// occurrence of every open respond whose prompt the probe shows gone
+// (clearGone), then reads the occurrence each respond candidate answers. A
+// probe sees one prompt where a runtime's request ids repeat; RecordRaising
+// numbers it the next occurrence once the last is resolved, so it is read
+// after the record. A request id the journal cannot store (too long, control
+// characters, padding), or whose raisings do not decode, is no occurrence
+// anyone can answer: the probe returned reads it as PendingUnknown, and only
+// a store error fails the pass.
 func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv ConversationView) (Probe, map[string]raisingState, error) {
-	if pendingRequest(probe, conv) {
-		_, _, err := l.store.RecordRaising(conv.ID, conv.Generation, probe.Pending, FactBasisObserved, l.now())
+	pending, looked := definitiveLook(probe, conv)
+	if looked && pending != "" {
+		_, _, err := l.store.RecordRaising(conv.ID, conv.Generation, pending, FactBasisObserved, l.now())
 		switch {
-		case errors.Is(err, ErrInvalidRequest):
-			probe.Pending = PendingUnknown
+		case errors.Is(err, ErrInvalidRequest), undecodableRow(err):
+			probe.Pending, looked = PendingUnknown, false
 		case err != nil:
+			return probe, nil, err
+		}
+	}
+	if looked {
+		if err := l.clearGone(rp.responds, conv, pending); err != nil {
 			return probe, nil, err
 		}
 	}
@@ -87,6 +111,41 @@ func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv Conversa
 	}
 	return probe, out, nil
 }
+
+// clearGone ends, cleared, the open occurrence of every open respond of the
+// view's generation whose request the look shows gone: another request, or
+// none, is pending (DES-O1 §10.2, "still raised"). That covers a respond the
+// pass would not take now, waiting on a runtime that is not running or
+// backing off after a transient refusal: an identical prompt raised later is
+// another occurrence, which the old answer must not reach. An occurrence
+// whose facts do not decode is left alone; its respond waits on the read.
+func (l *ConversationLane) clearGone(responds []Op, conv ConversationView, pending string) error {
+	for _, op := range responds {
+		if op.Scope.Generation != conv.Generation {
+			continue
+		}
+		req, _, err := ParseInteractionOccurrence(op.Scope.Interaction)
+		if err != nil || req == pending {
+			continue
+		}
+		if err := l.store.endRaising(clearedEnd(op, l.now())); err != nil && !undecodableRow(err) {
+			return fmt.Errorf("ending interaction %s of op %s: %w", op.Scope.Interaction, op.ID, err)
+		}
+	}
+	return nil
+}
+
+// clearedEnd is the interaction.resolved that ends op's occurrence as seen
+// gone with no answer of the lane's: reason cleared, basis observed.
+func clearedEnd(op Op, now time.Time) Fact {
+	f := interactionFact(FactInteractionResolved, op.Conversation, op.Scope.Generation, op.Scope.Interaction)
+	f.At, f.Basis, f.Reason = now, FactBasisObserved, ResolvedCleared
+	return f
+}
+
+// over reports an occurrence read as raised and already resolved: a respond
+// to it answers nothing, whatever the runtime shows now.
+func (st raisingState) over() bool { return st.err == nil && st.raised && st.resolved }
 
 // respondReady decides a respond candidate against its occurrence and the
 // probe (DES-O1 §10.2): ready when the probe shows the occurrence's request
@@ -124,11 +183,12 @@ func interactionRetryAt(op Op, now time.Time) time.Time {
 }
 
 // respondEnd is the interaction.resolved that ends the occurrence of next,
-// a lane respond as it closes (DES-O1 §10.2, first effective answer wins):
-// its answer's, basis lane, caused by it, when it succeeded; cleared,
-// observed, when it closed skipped{stale} (its prompt gone, its incarnation
-// over, or its occurrence already ended); ambiguous when an attempt may have
-// answered (maybe_delivered); unanswered when it closes with nothing sent. ok is false for any
+// a lane respond as it closes (DES-O1 §10.2): its answer's, basis lane,
+// caused by it, when it succeeded; cleared, observed, when it closed
+// skipped{stale} (its prompt gone, its incarnation over, or its occurrence
+// already ended); ambiguous when an attempt may have answered
+// (maybe_delivered); unanswered when it closes with nothing sent, which
+// occurrenceEnd drops while another answer is open. ok is false for any
 // other op, and for one still open.
 //
 // The lane is not the only writer of these facts: two closes of respond ops
@@ -156,18 +216,61 @@ func respondEnd(next Op, now time.Time) (Fact, bool) {
 }
 
 // endOccurrences records the end of the occurrence of every lane respond
-// closes closes (respondEnd), before the closes are written: a crash in
-// between leaves the ops open, and the next pass closes them again on the
-// recorded facts. Written after, a crash would leave an occurrence open
-// whose answers are spent, so the prompt still showing could not be
+// closes closes (Store.endOccurrence), before the closes are written: a
+// crash in between leaves the ops open, and the next pass closes them again
+// on the recorded facts. Written after, a crash would leave an occurrence
+// open whose answers are spent, so the prompt still showing could not be
 // answered under a fresh key.
 func (l *ConversationLane) endOccurrences(closes []ruleClose) error {
+	closing := make(map[string]bool, len(closes))
 	for _, c := range closes {
-		if f, ok := respondEnd(c.next, l.now()); ok {
-			if err := l.store.endRaising(f); err != nil {
-				return err
-			}
+		closing[c.cur.ID] = true
+	}
+	for _, c := range closes {
+		if err := l.store.endOccurrence(c.next, closing, l.now()); err != nil {
+			return err
 		}
+	}
+	return nil
+}
+
+// occurrenceEnd is the end the close of next records for its occurrence
+// (respondEnd), less an unanswered one while another open lane respond,
+// outside closing, still answers the occurrence: an answer that sent
+// nothing leaves the prompt showing for that one (DES-O1 §4.7, §10.2: the
+// first accepted answer wins). The last of them to close with nothing sent
+// ends it. A respond proposed after the read races the end: it then closes
+// skipped{stale}, and its requester answers the next occurrence.
+func (s *Store) occurrenceEnd(next Op, closing map[string]bool, now time.Time) (Fact, bool, error) {
+	f, ok := respondEnd(next, now)
+	if !ok || f.Reason != ResolvedUnanswered {
+		return f, ok, nil
+	}
+	open, _, err := s.ListOpenTolerant(next.Conversation)
+	if err != nil {
+		return Fact{}, false, fmt.Errorf("reading the other answers to interaction %s of op %s: %w", next.Scope.Interaction, next.ID, err)
+	}
+	for _, op := range open {
+		if op.ID != next.ID && !closing[op.ID] && op.Kind == KindRespond && op.Executor == ExecutorLane &&
+			op.Scope.Generation == next.Scope.Generation && op.Scope.Interaction == next.Scope.Interaction {
+			return Fact{}, false, nil
+		}
+	}
+	return f, true, nil
+}
+
+// endOccurrence records the end the close of next gives its occurrence
+// (occurrenceEnd), if any, before that close is written. An occurrence whose
+// facts do not decode gets none, and the close goes on: no one can read or
+// answer that occurrence, and one undecodable row must not stall the
+// conversation (DES-O1 §4.1).
+func (s *Store) endOccurrence(next Op, closing map[string]bool, now time.Time) error {
+	f, ok, err := s.occurrenceEnd(next, closing, now)
+	if err == nil && ok {
+		err = s.endRaising(f)
+	}
+	if err != nil && !undecodableRow(err) {
+		return err
 	}
 	return nil
 }

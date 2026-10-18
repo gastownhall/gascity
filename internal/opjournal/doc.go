@@ -133,9 +133,11 @@
 // id> (RespondKey) for a lane respond, keyed by the interaction occurrence it
 // answers, never the runtime's request id, which can be a content hash: an
 // occurrence is <request id>#<n>, the nth raising of that request id in its
-// generation (RecordRaising). A lane respond is at most once, and any close
-// of one ends its occurrence (respondEnd), so the first effective answer
-// wins and a prompt still showing is the next occurrence. A legacy respond
+// generation (RecordRaising). A lane respond is at most once. The first
+// accepted answer wins: a close that may have answered ends the occurrence,
+// a close with nothing sent ends it once no other open answer names it
+// (occurrenceEnd), and a look that shows its prompt gone ends it as well
+// (clearGone), so a prompt still showing is the next occurrence. A legacy respond
 // keeps its client key. The digest covers the defaulted kind, policy (a
 // deliver-now's now_gen and now_turn included), scope, after and payload
 // (≤16 KiB): same id and digest returns the existing op; another digest is
@@ -146,7 +148,7 @@
 //
 //	message   content   conversation  conversation  create-if-absent delivery; producers decide what to say
 //	interrupt control   conversation  session+turn  turn-fenced, keyed by target; the requester decides to stop
-//	respond   control   conversation  session+occ   at most once; first effective answer wins; a principal answers
+//	respond   control   conversation  session+occ   at most once; first accepted answer wins; a principal answers
 //	create    lifecycle lifecycle     conversation  materializes a captured launch spec; a generator decides
 //	wake      lifecycle lifecycle     conversation  one watermark; a generator (the planner too) decides
 //	suspend   lifecycle lifecycle     conversation  sets an operator hold; the requester decides

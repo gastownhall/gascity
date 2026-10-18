@@ -592,3 +592,261 @@ func TestLaneRespondCanceledAfterAnUnknownAttemptEndsAmbiguous(t *testing.T) {
 		t.Fatalf("%d responds", len(exec.responds))
 	}
 }
+
+// A look that shows a respond's prompt gone ends its occurrence, whatever
+// the respond is doing (finding #1 of the second OJ-16 review): a runtime
+// seen not running shows no prompt, and a respond in retry backoff is not a
+// candidate, yet an identical prompt raised after either is another
+// occurrence and must not get the old answer.
+func TestLaneRespondPromptSeenGoneEndsTheOccurrence(t *testing.T) {
+	t.Run("runtime not running", func(t *testing.T) {
+		h := newLaneHarness(t)
+		first := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, first, "operator", RespondPayload{Action: "approve"}))
+		exec := respondExec(h, "")
+		exec.probe.Running = false
+		l := h.lane(t, "ctl")
+		res := mustPass(t, l, view(), exec)
+		if res.Took != TakeNone || len(exec.responds) != 0 {
+			t.Fatalf("pass over a stopped runtime %+v", res)
+		}
+		if got := h.get(t, op.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
+			t.Fatalf("op %+v, want skipped{stale}", got.Outcome)
+		}
+		if f, ok := resolvedFact(t, h, first.Interaction); !ok || f.Reason != ResolvedCleared || f.Basis != FactBasisObserved {
+			t.Fatalf("occurrence ended %v %+v", ok, f)
+		}
+		// The runtime restarts in the same generation and re-raises the
+		// identical prompt: another occurrence, which the old answer never
+		// reaches.
+		h.clk.Advance(5 * time.Second)
+		exec.probe.Running, exec.probe.Pending = true, "tmux-abc"
+		mustPass(t, l, view(), exec)
+		if len(exec.responds) != 0 {
+			t.Fatalf("the answer to %s reached the re-raised prompt: %+v", first.Interaction, exec.responds)
+		}
+		if next := h.raise(t, "tmux-abc"); next.Interaction != "tmux-abc#2" {
+			t.Fatalf("the re-raised prompt is %s", next.Interaction)
+		}
+	})
+	t.Run("respond in retry backoff", func(t *testing.T) {
+		h := newLaneHarness(t)
+		first := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, first, "operator", RespondPayload{Action: "approve"}))
+		exec := respondExec(h, "tmux-abc")
+		exec.respond = func(RespondCall) ControlResult {
+			return NotDelivered{Transient: true, Cause: errors.New("fence miss before any key")}
+		}
+		l := h.lane(t, "ctl")
+		if res := mustPass(t, l, view(), exec); res.Done != DoneReleased {
+			t.Fatalf("first pass %+v", res)
+		}
+		exec.respond = nil
+		// A message makes the next pass probe while the respond backs off:
+		// the prompt is gone (a human answered it at the terminal).
+		h.clk.Advance(500 * time.Millisecond)
+		msg := h.propose(t, laneMsg("m", RolePrompt, "hello"))
+		exec.probe.Pending = ""
+		res := mustPass(t, l, view(), exec)
+		if waitsOf(res.Waits)[op.ID] != WaitRetryBackoff || !slices.Equal(res.Taken, []string{msg.ID}) {
+			t.Fatalf("pass with the prompt gone %+v", res)
+		}
+		if f, ok := resolvedFact(t, h, first.Interaction); !ok || f.Reason != ResolvedCleared {
+			t.Fatalf("occurrence ended %v %+v", ok, f)
+		}
+		// The identical prompt shows again and the backoff passes.
+		h.clk.Advance(5 * time.Second)
+		exec.probe.Pending = "tmux-abc"
+		mustPass(t, l, view(), exec)
+		if len(exec.responds) != 1 {
+			t.Fatalf("%d responds sent; the old answer reached the re-raised prompt", len(exec.responds))
+		}
+		if got := h.get(t, op.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
+			t.Fatalf("op %+v, want skipped{stale}", got.Outcome)
+		}
+	})
+	t.Run("prompt still showing", func(t *testing.T) {
+		// The same look with the respond's request still pending ends
+		// nothing: the backing-off respond answers it after the backoff.
+		h := newLaneHarness(t)
+		first := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, first, "operator", RespondPayload{Action: "approve"}))
+		exec := respondExec(h, "tmux-abc")
+		exec.respond = func(RespondCall) ControlResult { return NotDelivered{Transient: true, Cause: errors.New("busy")} }
+		l := h.lane(t, "ctl")
+		mustPass(t, l, view(), exec)
+		exec.respond = nil
+		h.propose(t, laneMsg("m", RolePrompt, "hello"))
+		mustPass(t, l, view(), exec)
+		if _, ok := resolvedFact(t, h, first.Interaction); ok {
+			t.Fatal("a look that shows the prompt ended its occurrence")
+		}
+		h.clk.Advance(5 * time.Second)
+		mustPass(t, l, view(), exec)
+		if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded || len(exec.responds) != 2 {
+			t.Fatalf("op %+v after %d responds", got.Outcome, len(exec.responds))
+		}
+	})
+	t.Run("a look that is not definitive", func(t *testing.T) {
+		for _, mod := range []func(*Probe){
+			func(p *Probe) { p.Pending = PendingUnknown },
+			func(p *Probe) { p.Fence = Fence{Conversation: "gc-1", Generation: 2, Epoch: 1} },
+			func(p *Probe) { p.Available = false },
+			func(p *Probe) { p.Caps.Live = false },
+		} {
+			h := newLaneHarness(t)
+			first := h.raise(t, "tmux-abc")
+			h.propose(t, laneRespond(t, first, "operator", RespondPayload{Action: "approve"}))
+			exec := respondExec(h, "")
+			mod(&exec.probe)
+			if _, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec); err != nil {
+				t.Fatalf("probe %+v: %v", exec.probe, err)
+			}
+			if f, ok := resolvedFact(t, h, first.Interaction); ok {
+				t.Fatalf("probe %+v ended the occurrence %+v", exec.probe, f)
+			}
+		}
+	})
+}
+
+// An answer that sends nothing ends its occurrence only when no other
+// principal's answer to it is open (finding #2 of the second review): a
+// refused or canceled answer leaves the prompt showing for the next one.
+func TestLaneRespondNothingSentLeavesTheOccurrenceToAnotherAnswer(t *testing.T) {
+	t.Run("refused", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		bad := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "bogus"}))
+		h.clk.Advance(time.Millisecond)
+		good := h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "approve"}))
+		exec := respondExec(h, "tmux-abc")
+		exec.respond = func(c RespondCall) ControlResult {
+			if c.Response.Action == "bogus" {
+				return Rejected{Arm: ArmFailed, Reason: RefusedReasonPrefix + "action"}
+			}
+			return Settled{Via: "live"}
+		}
+		l := h.lane(t, "ctl")
+		mustPass(t, l, view(), exec)
+		if got := h.get(t, bad.ID); got.Outcome.Reason != RefusedReasonPrefix+"action" {
+			t.Fatalf("refused answer %+v", got.Outcome)
+		}
+		if _, ok := resolvedFact(t, h, raised.Interaction); ok {
+			t.Fatal("the refused answer ended the occurrence another answer still names")
+		}
+		mustPass(t, l, view(), exec)
+		if got := h.get(t, good.ID); got.Outcome.Arm != ArmSucceeded || len(exec.responds) != 2 {
+			t.Fatalf("the other principal's answer %+v after %d responds", got.Outcome, len(exec.responds))
+		}
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != "" || !slices.Equal(f.CauseOps, []string{good.ID}) {
+			t.Fatalf("occurrence ended %v %+v, want the accepted answer's", ok, f)
+		}
+	})
+	t.Run("canceled", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		b := h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "deny"}))
+		if res, _, err := h.store.Cancel(a.ID, "operator", ""); err != nil || res != CancelClosed {
+			t.Fatalf("Cancel = %s, %v", res, err)
+		}
+		if _, ok := resolvedFact(t, h, raised.Interaction); ok {
+			t.Fatal("canceling one answer ended the occurrence another names")
+		}
+		// The last answer to go with nothing sent ends it.
+		if res, _, err := h.store.Cancel(b.ID, "conversation:gc-9", ""); err != nil || res != CancelClosed {
+			t.Fatalf("Cancel = %s, %v", res, err)
+		}
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered || !slices.Equal(f.CauseOps, []string{b.ID}) {
+			t.Fatalf("occurrence ended %v %+v", ok, f)
+		}
+	})
+	t.Run("both close in one pass", func(t *testing.T) {
+		// Two answers expire together: neither is left open, so the
+		// occurrence ends.
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "deny"}))
+		h.clk.Advance(a.StartBy.Sub(h.clk.Now()) + time.Second)
+		mustPass(t, h.lane(t, "ctl"), view(), respondExec(h, "tmux-abc"))
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered {
+			t.Fatalf("occurrence ended %v %+v", ok, f)
+		}
+	})
+}
+
+// Cancel writes a lane respond's end before its close (finding #3 of the
+// second review): when the end cannot be written the op stays open and
+// Cancel fails, so a retry, or the lane, closes it on a recorded end.
+func TestCancelRespondEndsTheOccurrenceBeforeTheClose(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	raised := h.raise(t, "tmux-abc")
+	op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	fs.setFail(func(id string) bool { return id == raised.ID })
+	if _, _, err := h.store.Cancel(op.ID, "operator", ""); !errors.Is(err, errFlakyRead) {
+		t.Fatalf("Cancel = %v, want the read error", err)
+	}
+	fs.setFail(nil)
+	if got := h.get(t, op.ID); got.Status == StatusClosed {
+		t.Fatalf("op closed %+v while its occurrence is open", got.Outcome)
+	}
+	if res, _, err := h.store.Cancel(op.ID, "operator", ""); err != nil || res != CancelClosed {
+		t.Fatalf("retried Cancel = %s, %v", res, err)
+	}
+	if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered {
+		t.Fatalf("occurrence ended %v %+v", ok, f)
+	}
+	// The same principal's corrected answer is the next occurrence's.
+	again := h.raise(t, "tmux-abc")
+	if _, created, err := h.store.Propose(laneRespond(t, again, "operator", RespondPayload{Action: "deny"})); err != nil || !created {
+		t.Fatalf("corrected answer: created %v, %v", created, err)
+	}
+}
+
+// One undecodable interaction fact does not stall its conversation
+// (finding #7 of the second review, DES-O1 §4.1): the respond that names it
+// closes without an end, the other ops close, and so does the runtime row.
+// A raising the lane cannot read is an unknown pending interaction.
+func TestLaneCorruptInteractionFactDoesNotStallTheConversation(t *testing.T) {
+	t.Run("closed conversation", func(t *testing.T) {
+		h := newLaneHarness(t)
+		// A Take stamps the runtime row, which the closed pass must close.
+		h.propose(t, laneMsg("first", RolePrompt, "earlier"))
+		if res := mustPass(t, h.lane(t, "ctl"), view(), respondExec(h, "")); res.Took != TakeContent {
+			t.Fatalf("first pass %+v", res)
+		}
+		raised := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		msg := h.propose(t, laneMsg("m", RolePrompt, "hello"))
+		if err := h.mem.SetMetadata(raised.ID, keyFactBasis, "bad basis!"); err != nil {
+			t.Fatal(err)
+		}
+		v := view()
+		v.Closed = true
+		mustPass(t, h.lane(t, "ctl"), v, respondExec(h, ""))
+		for _, id := range []string{op.ID, msg.ID} {
+			if got := h.get(t, id); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonConversationClosed {
+				t.Fatalf("op %s %s %+v", id, got.Status, got.Outcome)
+			}
+		}
+		if !h.runtime(t).Closed {
+			t.Fatal("the runtime row stayed open")
+		}
+	})
+	t.Run("raising unreadable", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		msg := h.propose(t, laneMsg("m", RolePrompt, "hello"))
+		if err := h.mem.SetMetadata(raised.ID, keyFactBasis, "bad basis!"); err != nil {
+			t.Fatal(err)
+		}
+		exec := respondExec(h, "tmux-abc")
+		res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+		waits := waitsOf(res.Waits)
+		if waits[op.ID] != WaitInteractionUnknown || waits[msg.ID] != WaitPendingInteraction || len(exec.responds) != 0 {
+			t.Fatalf("pass %+v", res)
+		}
+	})
+}
