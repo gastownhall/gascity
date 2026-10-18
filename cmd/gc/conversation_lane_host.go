@@ -28,9 +28,9 @@ package main
 // reports. A sessions store that is missing (the city store did not open) is
 // not a refusal: the host waits for it, re-checking on the scan cadence.
 //
-// Only the standalone controller (runController) starts the host. A
-// supervisor-hosted city runs none until OJ-12b; startOneCity logs a listed
-// kind as unserved instead (warnSupervisorLaneHostGap).
+// Both controller entry points start the host right after the op sweeper:
+// the standalone controller (runController) and each supervisor-hosted city
+// (startOneCity), with the city's context.
 //
 // The view, the op rows and the wake decision read live (laneLiveSessions);
 // the executor resolves the runtime through the controller's cached sessions
@@ -44,7 +44,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"reflect"
@@ -351,25 +350,6 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 	h := newConversationLaneHost(cs, kinds)
 	h.start(ctx)
 	return h
-}
-
-// warnSupervisorLaneHostGap logs that a supervisor-hosted city starting with
-// a kind listed in [ops] authoritative leaves it unserved: startOneCity starts
-// no lane host until OJ-12b. Nothing is logged when no kind is listed.
-func warnSupervisorLaneHostGap(stderr io.Writer, cityName, cityPath string, cfg *config.City) {
-	if cfg == nil || len(cfg.Ops.Authoritative) == 0 {
-		return
-	}
-	fmt.Fprintf(stderr, "gc supervisor: city '%s': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [%s] goes unserved; to serve it, %s, or empty the list\n", //nolint:errcheck // best-effort stderr
-		cityName, strings.Join(cfg.Ops.Authoritative, ", "), laneHostStandaloneRemedy(cityPath))
-}
-
-// laneHostStandaloneRemedy is how the operator of the supervisor-hosted city
-// at cityPath runs it under the standalone controller, the one that starts a
-// lane host. gc start refuses --foreground for a registered city, so the
-// city leaves the supervisor first.
-func laneHostStandaloneRemedy(cityPath string) string {
-	return fmt.Sprintf("run `gc unregister %s`, then `gc start --foreground %s` (hidden from --help)", cityPath, cityPath)
 }
 
 // start decides whether the host runs, publishes it for the city's socket

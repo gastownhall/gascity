@@ -1022,46 +1022,12 @@ func TestConversationLaneHostStartedAfterOpSweep(t *testing.T) {
 	}
 }
 
-// TestSupervisorWarnsItRunsNoLaneHost pins startOneCity's half: it starts no
-// lane host (OJ-12b), so where runController starts one, right after
-// startOpSweep, it logs that a listed kind goes unserved.
-func TestSupervisorWarnsItRunsNoLaneHost(t *testing.T) {
+// TestSupervisorStartsLaneHostAfterOpSweep pins startOneCity's start line:
+// the statement right after cs.startOpSweep(cityCtx), as in runController.
+func TestSupervisorStartsLaneHostAfterOpSweep(t *testing.T) {
 	fn := parseFuncDecl(t, "cmd_supervisor.go", "startOneCity")
-	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "warnSupervisorLaneHostGap" {
-		t.Fatalf("startOneCity: the statements after its startOpSweep calls call %q, want one warnSupervisorLaneHostGap", next)
-	}
-	ast.Inspect(fn, func(n ast.Node) bool {
-		if call, ok := n.(*ast.CallExpr); ok && laneCallName(call) == "startConversationLaneHost" {
-			t.Error("startOneCity starts a lane host: replace warnSupervisorLaneHostGap with the start and pin it here")
-		}
-		return true
-	})
-}
-
-// TestWarnSupervisorLaneHostGap pins the supervisor's start line: a listed
-// kind is named with the remedy for the city's path, and nothing is logged
-// without one.
-func TestWarnSupervisorLaneHostGap(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		cfg  *config.City
-		want string
-	}{
-		{name: "no config"},
-		{name: "list empty", cfg: &config.City{}},
-		{
-			name: "kind listed",
-			cfg:  &config.City{Ops: config.OpsConfig{Authoritative: []string{"message"}}},
-			want: "gc supervisor: city 'alpha': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [message] goes unserved; to serve it, run `gc unregister /srv/alpha`, then `gc start --foreground /srv/alpha` (hidden from --help), or empty the list\n",
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			var out strings.Builder
-			warnSupervisorLaneHostGap(&out, "alpha", "/srv/alpha", tc.cfg)
-			if got := out.String(); got != tc.want {
-				t.Errorf("logged %q, want %q", got, tc.want)
-			}
-		})
+	if next := calleesAfterOpSweep(fn); len(next) != 1 || next[0] != "startConversationLaneHost" {
+		t.Fatalf("startOneCity: the statements after its startOpSweep calls call %q, want one cs.startConversationLaneHost", next)
 	}
 }
 

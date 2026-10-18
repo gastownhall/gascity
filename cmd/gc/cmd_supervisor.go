@@ -2501,7 +2501,7 @@ func startOneCity(
 		cs.startBeadEventWatcher(cityCtx)
 		cs.startAutocloseSweep(cityCtx)
 		cs.startOpSweep(cityCtx)
-		warnSupervisorLaneHostGap(stderr, cityName, path, cfg)
+		cs.startConversationLaneHost(cityCtx)
 		cs.startMaintenanceLoop(cityCtx)
 		return nil
 	})
