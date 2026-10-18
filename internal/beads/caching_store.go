@@ -937,6 +937,16 @@ type absorbOpts struct {
 	// an event already on the bus. Every other absorb that closes a cached row
 	// queues the close for the next notification (see unannouncedCloses).
 	closeAnnounced bool
+	// closeClaimed says the caller is a closing write of this cache that
+	// claimed, or declined because it was announced elsewhere, the
+	// bead.closed of the row it installs (claimCloseLocked): unlike
+	// closeAnnounced it leaves a close a read queued since in the queue, and
+	// it does not mark the row silently installed (silentCloses).
+	closeClaimed bool
+	// evicted is the row a write evicted just before this install, which
+	// stands in for the cached row when none is held: the close tracking
+	// compares the installed row with it (trackCloseTransitionLocked).
+	evicted *Bead
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -951,9 +961,12 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	}
 	c.advanceObservationLocked()
 	previous, hadPrevious := c.beads[id]
+	if !hadPrevious && opts.evicted != nil {
+		previous, hadPrevious = *opts.evicted, true
+	}
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
-	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
+	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced, opts.closeClaimed)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)

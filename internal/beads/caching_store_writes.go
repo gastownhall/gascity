@@ -211,6 +211,7 @@ func (c *CachingStore) absorbUpdate(id string, opts UpdateOpts, startSeq, genera
 		seqMode:        seqKeep,
 		clearDirty:     true,
 		closeAnnounced: eventType == "bead.closed",
+		closeClaimed:   updateCloses(opts),
 	})
 	if opts.Status != nil {
 		c.clearDependentReadyProjectionsLocked(id)
@@ -472,6 +473,7 @@ func (c *CachingStore) Close(id string) error {
 				seqMode:        seqKeep,
 				clearDirty:     refreshed,
 				closeAnnounced: announce,
+				closeClaimed:   true,
 			})
 		}
 		if c.clearDependentReadyProjectionsLocked(id) || found {

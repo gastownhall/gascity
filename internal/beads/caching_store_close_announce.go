@@ -29,9 +29,11 @@ import (
 // writes in flight when it was queued, 0 for none (queuedClose). Any other
 // closed row installed with no cached row before it, and not announced, is
 // marked silently installed (silentCloses), so a refresh with evidence of a
-// recent close still announces it; a closed row laid over a closed one keeps
-// the mark it had. Caller must hold c.mu in write mode.
-func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced bool) {
+// recent close still announces it, unless claimed: a closing write of ours
+// installs it and has claimed its close or found it announced elsewhere. A
+// closed row laid over a closed one keeps the mark it had. Caller must hold
+// c.mu in write mode.
+func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadPrevious bool, installed Bead, announced, claimed bool) {
 	if installed.Status != "closed" {
 		c.noteNotClosedLocked(id)
 		c.dropQueuedCloseLocked(id)
@@ -50,6 +52,9 @@ func (c *CachingStore) trackCloseTransitionLocked(id string, previous Bead, hadP
 	case !hadPrevious && intent != nil && intent.announced < intent.generation:
 		// A close a write of ours is making, observed before that write
 		// claims it: queue it so the claim (or the drain) announces it.
+	case !hadPrevious && claimed:
+		delete(c.silentCloses, id)
+		return
 	case !hadPrevious:
 		// A close nobody announced, installed over no cached row.
 		if c.silentCloses == nil {

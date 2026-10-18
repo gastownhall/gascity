@@ -381,7 +381,9 @@ func (c *CachingStore) applyConditionalWriteFailure(id string, err error) {
 // eviction, against which a row obtained before it is checked. deps are the
 // row's dependencies, which no conditional verb changes; the install carries
 // them when the post-write row has no dependency fields of its own. cached,
-// dirty and revision describe the evicted row.
+// dirty, revision and row describe the evicted row. closing marks the
+// eviction of a closing write, which claimed the row's close before it
+// evicted (evictForConditionalClose).
 type conditionalEviction struct {
 	seq      uint64
 	scanGen  uint64
@@ -391,6 +393,8 @@ type conditionalEviction struct {
 	cached   bool
 	dirty    bool
 	revision int64
+	row      Bead
+	closing  bool
 }
 
 // postWriteRevision reports whether b's revision is consistent with b being
@@ -443,7 +447,9 @@ func (c *CachingStore) evictForConditionalClose(id string, generation uint64) (c
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	own := c.claimCloseIntentLocked(id, generation, true, false)
-	return c.evictForConditionalWriteLocked(id), own
+	ev := c.evictForConditionalWriteLocked(id)
+	ev.closing = true
+	return ev, own
 }
 
 // evictForConditionalWriteLocked is evictForConditionalWrite's body. Caller
@@ -460,6 +466,7 @@ func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEvic
 		cached:   cached,
 		dirty:    dirty,
 		revision: row.Revision,
+		row:      cloneBead(row),
 	}
 	ev.seq = c.noteLocalMutationLocked(id)
 	delete(c.beads, id)
@@ -535,8 +542,11 @@ func (c *CachingStore) refetchAfterConditionalWrite(id string, ev conditionalEvi
 // The evicted row's is_blocked verdict is not carried: a blocker's status
 // change while the row was absent could not invalidate it, so readiness
 // answers from the dependency predicate, as after any refetch of an evicted
-// row. It
-// declines when the cache is not serving, a mutation newer than the eviction
+// row. The close of the row is tracked against the evicted row, which stood
+// where the install lands: a closed row over an evicted open one is a close
+// observed over a cached open row, queued for announcement as any read's is
+// (gastownhall/gascity#6860), while a closing write's eviction already claimed
+// its close, so its install announces nothing more. It declines when the cache is not serving, a mutation newer than the eviction
 // touched id, or a scan merged since the eviction (scanRacedLocked, which
 // leaves id dirty unless the scan's row agrees with row), and it keeps the
 // eviction's beadSeq fence so no older scan, event or refetch can overwrite
@@ -554,6 +564,12 @@ func (c *CachingStore) installAfterConditionalWrite(id string, ev conditionalEvi
 	if ev.hadDeps && !beadCarriesDependencyFields(row) {
 		opts.depsMode = depsExplicit
 		opts.deps = ev.deps
+	}
+	switch {
+	case ev.closing:
+		opts.closeClaimed = true
+	case ev.cached:
+		opts.evicted = &ev.row
 	}
 	c.absorbFreshLocked(id, row, c.clockNow(), opts)
 	c.markFreshLocked(c.clockNow())

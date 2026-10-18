@@ -88,6 +88,7 @@ go_test(
         "caching_store_close_event_test.go",
         "caching_store_close_matrix_test.go",
         "caching_store_close_reason_conformance_test.go",
+        "caching_store_conditional_close_queue_internal_test.go",
         "caching_store_conditional_internal_test.go",
         "caching_store_conditional_test.go",
         "caching_store_count_test.go",
