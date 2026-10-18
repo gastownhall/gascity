@@ -351,10 +351,13 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		{name: "mail check --inject/auto-handoff", seed: handoff, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
 		{name: "mail check --inject/priority window", seed: priorityWindow, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "update " + fmt.Sprint(mailInjectMaxMessages+1)},
 		{name: "mail check --inject/closed predecessors", seed: func(t *testing.T, f hookBudgetFixture) { f.predecessorMail(t) }, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 27, Opens: 1, SessionGets: 1, GetMisses: 4}, wantStdout: "for my predecessor"},
-		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 0, GetMisses: 0}},
-		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}},
-		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
-		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
+		// Every nudge drain --inject row includes the in-band lane pass's one
+		// keyed probe of the hook's conversation (opjournal.HasOpenLaneOps,
+		// DES-O1 §8); the lane store is opened only when an op is open.
+		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 0, GetMisses: 0}},
+		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 10, Opens: 1, SessionGets: 1, GetMisses: 0}},
+		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
+		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},
 		{name: "prime --hook/fresh", seed: none, run: primeHook, ceiling: hookBudgetCeiling{Requests: 11, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "prime --hook/auto-handoff", seed: handoff, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "context cycle"},
 		{name: "prime --hook/auto-handoff and mail", seed: handoffAndMail, run: primeHook, ceiling: hookBudgetCeiling{Requests: 13, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
