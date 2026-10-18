@@ -114,9 +114,11 @@ func clearStrandedStamp(store beads.Store, id, seat string, reopened bool) {
 }
 
 // fencedClaimMeta writes decide's metadata on claim id, decided on the live
-// row, by one write fenced on that row's revision. It never writes blind: a
-// store with no conditional writer, or a live read carrying no revision (zero
-// is no token, not revision 0: mc-3c8h5), refuses with
+// row, by one write fenced on that row's revision. With no conditional
+// writer (conditional writes off, or auto on a store that cannot fence) it
+// writes after the read, the resolver's legacy path; require on such a store
+// refuses. It never fences on no token: a live read carrying no revision
+// (zero is no token, not revision 0: mc-3c8h5) refuses with
 // beads.ErrConditionalWriteUnsupported and writes nothing. A nil patch writes
 // nothing.
 func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[string]string) error {
@@ -133,7 +135,7 @@ func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[s
 	case err != nil:
 		return err
 	case writer == nil:
-		return fmt.Errorf("claim %s: %w: the store has no conditional writer", id, beads.ErrConditionalWriteUnsupported)
+		return store.SetMetadataBatch(id, patch)
 	case b.Revision == 0:
 		return fmt.Errorf("claim %s: %w: its live read carries no revision", id, beads.ErrConditionalWriteUnsupported)
 	}

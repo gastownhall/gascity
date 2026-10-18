@@ -73,7 +73,11 @@ func (c *CachingStore) createWith(create func() (Bead, error)) (Bead, error) {
 // write is skipped because the cached row already matches it: the cache may
 // lag the backing, and a stale match would turn the write into a no-op that
 // reports success. A backend that discards same-value writes does so on its
-// own current row.
+// own current row. Every write verb here follows this rule, so through a
+// pass-through backing (a bd subprocess, a proxied or HTTP store) a
+// same-value write still costs a full call. That cost is deliberate, not a
+// missed optimization: a cached-row skip cannot tell a stale match from a
+// current one.
 func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 	startSeq := c.currentMutationSeq()
 	var generation uint64
@@ -94,8 +98,8 @@ func (c *CachingStore) Update(id string, opts UpdateOpts) error {
 // capability and maintains the cache. Like every write it reaches the backing
 // whatever the cached row says: the guard exists because that row may be
 // stale, and only the backing can evaluate it. A landed update refreshes the
-// row exactly as Update does. A rejected guard proves the cached row stale, so it is
-// evicted and the next read fetches it again.
+// row exactly as Update does. A rejected guard proves the cached row stale,
+// so it is evicted and the next read fetches it again.
 func (c *CachingStore) UpdateIfAssignment(id, expectedStatus, expectedAssignee string, opts UpdateOpts) (bool, error) {
 	updater, ok := AssignmentGuardedUpdaterFor(c.conditionalBacking())
 	if !ok {
@@ -706,8 +710,7 @@ func (c *CachingStore) finishMetadataWrite(id string, kvs map[string]string, sta
 // SetLocalString delegates directly to the backing store. Clone-local data
 // is never cached or notified: it isn't part of Bead.Metadata, so there is
 // no cached Bead field to keep in sync, and (unlike SetMetadata) writing it
-// never invokes bd's subprocess/hook path, so there is no idempotence check
-// to save a redundant call.
+// never invokes bd's subprocess/hook path.
 func (c *CachingStore) SetLocalString(id, key, value string) error {
 	return c.backing.SetLocalString(id, key, value)
 }

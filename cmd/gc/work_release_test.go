@@ -920,42 +920,135 @@ func TestStrandedStampUnderConditionalWrites(t *testing.T) {
 	}
 }
 
-// revisionlessReadStore serves live reads without a revision, the shape of a
-// store whose reads publish no token, while its fenced writes resolve to the
-// inner store.
-type revisionlessReadStore struct{ beads.Store }
-
-func (s revisionlessReadStore) Get(id string) (beads.Bead, error) {
-	b, err := s.Store.Get(id)
-	b.Revision = 0
-	return b, err
-}
-
-func (s revisionlessReadStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
-
-// Kills fencedClaimMeta's blind fallback (mc-3c8h5): a stamp is
-// written fenced or not at all. A store with no conditional writer, and a
-// live read that carries no revision (zero is "no token", never revision 0),
-// refuse with ErrConditionalWriteUnsupported and leave the claim unstamped.
-func TestStampStrandedNeverWritesBlind(t *testing.T) {
-	unstamped, auto := beads.NewMemStore(), fencedMemStore(t)
+// Kills a stamp that skips the resolver's legacy path, or fences on no token
+// (mc-3c8h5): with no conditional writer (conditional writes off, the
+// default, or auto on a store that cannot fence) the stamp is written after
+// the live read; require on such a store refuses; and a store that can fence
+// refuses a live read carrying no revision (zero is "no token", never
+// revision 0) with ErrConditionalWriteUnsupported. A refusal stamps nothing.
+func TestStampStrandedFollowsTheConditionalWriteMode(t *testing.T) {
+	incapable := func(t *testing.T, mode gate.Mode) *beads.MemStore {
+		t.Helper()
+		store := beads.NewMemStore()
+		if err := beads.StampOpenedStore(store, "MemStore", mode, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		store.DisableConditionalWrites = true
+		return store
+	}
+	off, auto := beads.NewMemStore(), fencedMemStore(t)
 	for _, c := range []struct {
 		name         string
 		store, write beads.Store
+		refused      func(error) bool // nil: the stamp lands
 	}{
-		{"no conditional writer", unstamped, unstamped},
-		{"live read without a revision", auto, revisionlessReadStore{Store: auto}},
+		{"conditional writes off", off, off, nil},
+		{"auto on a store that cannot fence", incapable(t, gate.Auto), nil, nil},
+		{"require on a store that cannot fence", incapable(t, gate.Require), nil, beads.IsConditionalWritesRequired},
+		{"live read without a revision", auto, zeroRevisionStore{Store: auto}, func(err error) bool {
+			return errors.Is(err, beads.ErrConditionalWriteUnsupported)
+		}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			claim := createWork(t, c.store, "in_progress", "repo/ada", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
-			if err := stampStranded(c.write, claim.ID, "gc-1", "repo/ada"); !errors.Is(err, beads.ErrConditionalWriteUnsupported) {
-				t.Fatalf("stampStranded = %v, want ErrConditionalWriteUnsupported", err)
+			write := c.write
+			if write == nil {
+				write = c.store
 			}
-			if got, _ := c.store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
-				t.Fatalf("claim stamped %v, want no blind stamp", got.Metadata)
+			claim := createWork(t, c.store, "in_progress", "repo/ada", map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+			err := stampStranded(write, claim.ID, "gc-1", "repo/ada")
+			got, _ := c.store.Get(claim.ID)
+			switch {
+			case c.refused == nil && (err != nil || got.Metadata[beadmeta.StrandedMetadataKey] != "true"):
+				t.Fatalf("stampStranded = %v, claim metadata %v; want stamped", err, got.Metadata)
+			case c.refused != nil && !c.refused(err):
+				t.Fatalf("stampStranded = %v, want refused", err)
+			case c.refused != nil && got.Metadata[beadmeta.StrandedMetadataKey] != "":
+				t.Fatalf("claim stamped %v on a refusal, want unstamped", got.Metadata)
 			}
 		})
 	}
+}
+
+// Kills a stamp refused where the store has no conditional writer (O5): with
+// conditional writes off, the default, a removed named session's retirement
+// stamps its unserved claim, and the detector re-alerts on it every
+// strandedRealertEvery while it stays.
+func TestDetectorReAlertsWithConditionalWritesOff(t *testing.T) {
+	now := time.Date(2026, 10, 11, 12, 0, 0, 0, time.UTC)
+	store := beads.NewMemStore()
+	b, err := store.Create(beads.Bead{Title: "retired reviewer", Type: sessionBeadType, Labels: []string{sessionBeadLabel}, Metadata: map[string]string{
+		"session_name": "reviewer-runtime", "template": "worker", "state": "asleep", "alias": "reviewer",
+		namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "reviewer", namedSessionModeMetadata: "on_demand",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	claim := createWork(t, store, "in_progress", b.ID, map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"})
+	rec := events.NewFake()
+	cfg := servingCity("worker")
+	sw := testSeatWork(t.TempDir(), cfg, store, nil)
+	sw.alerts = &strandedClaimAlerts{rec: rec}
+	if !retireRemovedConfiguredNamedSessionBead(t.TempDir(), store, sw, runtime.NewFake(), b, now, io.Discard) {
+		t.Fatal("retire failed")
+	}
+	if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "true" {
+		t.Fatalf("claim metadata %v, want stamped stranded", got.Metadata)
+	}
+	row, _ := store.Get(b.ID)
+	open, legs := sessionInfosFromBeads([]beads.Bead{row}), testWorkLegs("", cfg, store, nil)
+	sw.alerts.scanned = now
+	for window := 1; window <= 3; window++ {
+		detectStrandedClaims(legs, store, open, sw.alerts, now.Add(time.Duration(window)*strandedRealertEvery))
+	}
+	if evts, _ := rec.List(events.Filter{Type: events.SessionStrandedClaims}); len(evts) != 4 {
+		t.Fatalf("session.stranded_claims = %d, want the retirement's and one per window", len(evts))
+	}
+}
+
+// Kills a SQLite claim refused its stamp for never having been written since
+// its insert (a stored revision of 0 reads as "no token"): the insert mints
+// revision 1, so a claim created assigned and never updated is stamped by a
+// write fenced on its stored revision, which a write landing between the
+// live read and the stamp refuses.
+func TestStampStrandedFencesANeverUpdatedSQLiteClaim(t *testing.T) {
+	open := func(t *testing.T) beads.Store {
+		t.Helper()
+		store, err := beads.OpenSQLiteStore(t.TempDir())
+		if err != nil {
+			t.Fatalf("OpenSQLiteStore: %v", err)
+		}
+		t.Cleanup(func() { _ = store.(*beads.SQLiteStore).CloseStore() })
+		if err := beads.StampOpenedStore(store, "SQLiteStore", gate.Auto, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+		return store
+	}
+	meta := map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"}
+	t.Run("stamped at the stored revision", func(t *testing.T) {
+		store := open(t)
+		claim := createWork(t, store, "open", "repo/ada", meta) // created assigned, never updated
+		if err := stampStranded(store, claim.ID, "gc-1", "repo/ada"); err != nil {
+			t.Fatalf("stampStranded on a claim read at revision %d: %v", claim.Revision, err)
+		}
+		got, err := store.Get(claim.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got.Metadata[beadmeta.StrandedMetadataKey] != "true" || got.Revision == claim.Revision {
+			t.Fatalf("claim metadata %v at revision %d (was %d), want stamped by a write", got.Metadata, got.Revision, claim.Revision)
+		}
+	})
+	t.Run("a write after the live read refuses the stamp", func(t *testing.T) {
+		store := open(t)
+		claim := createWork(t, store, "open", "repo/ada", meta)
+		raced := &interleavedStore{Store: store, id: claim.ID, between: func() { _ = store.SetMetadata(claim.ID, "touched", "yes") }}
+		if err := stampStranded(raced, claim.ID, "gc-1", "repo/ada"); !beads.IsPreconditionFailed(err) {
+			t.Fatalf("stampStranded = %v, want the fence's precondition failure", err)
+		}
+		if got, _ := store.Get(claim.ID); got.Metadata[beadmeta.StrandedMetadataKey] != "" {
+			t.Fatalf("claim stamped %v past the fence, want unstamped", got.Metadata)
+		}
+	})
 }
 
 // Kills a stale-stamp clear judged on a lagging read alone: the live row

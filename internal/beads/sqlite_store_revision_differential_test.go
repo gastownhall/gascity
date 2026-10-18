@@ -184,3 +184,41 @@ func TestSQLiteStoreRevisionMovesWhereMemStoreDoes(t *testing.T) {
 		}
 	}
 }
+
+// TestSQLiteStoreCreateMintsAUsableRevision pins that a new row starts at a
+// nonzero revision, as MemStore's does: zero is "no usable token" (the
+// REVISION CONTRACT on beads.ConditionalWriter), so a row nothing has written
+// since its insert would refuse every caller that fences only on a real
+// token. Create and Tx.Create both return the revision the row reads back
+// with, and a fence at it holds.
+func TestSQLiteStoreCreateMintsAUsableRevision(t *testing.T) {
+	s := newSQLiteForConformance(t)
+	created, err := s.Create(beads.Bead{Title: "created assigned", Assignee: "worker"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	var inTx beads.Bead
+	if err := s.Tx("mint", func(tx beads.Tx) error {
+		var err error
+		inTx, err = tx.Create(beads.Bead{Title: "created in a tx"})
+		return err
+	}); err != nil {
+		t.Fatalf("Tx(Create): %v", err)
+	}
+	w, ok := beads.ConditionalWriterFor(s)
+	if !ok {
+		t.Fatalf("%T does not implement ConditionalWriter", s)
+	}
+	for _, b := range []beads.Bead{created, inTx} {
+		got, err := s.Get(b.ID)
+		if err != nil {
+			t.Fatalf("Get(%s): %v", b.ID, err)
+		}
+		if b.Revision == 0 || got.Revision != b.Revision {
+			t.Fatalf("%s: created at revision %d, reads back at %d; want one nonzero token", b.Title, b.Revision, got.Revision)
+		}
+		if err := w.UpdateIfMatch(b.ID, b.Revision, beads.UpdateOpts{Metadata: map[string]string{"fenced": "yes"}}); err != nil {
+			t.Fatalf("%s: UpdateIfMatch at the created revision: %v", b.Title, err)
+		}
+	}
+}

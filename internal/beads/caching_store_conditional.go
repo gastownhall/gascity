@@ -237,11 +237,11 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 // CloseIfMatch forwards the fenced close and maintains the cache. A post-close
 // refresh that reports ErrNotFound is tolerated silently — backings that hide
 // closed beads from Get do this on every successful close — and resolves to an
-// evict, so the next read reports exactly what the backing itself would.
-// A fenced re-close of an already-closed bead reaches the backing like any
-// write, and only the backing evaluates the fence. Its bead.closed is announced only when
-// the write owns the close (claimCloseLocked), so a close the cache already
-// announced is not announced twice.
+// evict, so the next read reports exactly what the backing itself would. A
+// fenced re-close of an already-closed bead reaches the backing like any
+// write, and only the backing evaluates the fence. Its bead.closed is
+// announced only when the write owns the close (claimCloseLocked), so a close
+// the cache already announced is not announced twice.
 func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
