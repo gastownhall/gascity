@@ -63,7 +63,7 @@ func (m *Manager) StopTurnFenced(ctx context.Context, id string, f runtime.Input
 	if err := f.Validate(); err != nil {
 		return fmt.Errorf("stopping the turn of %s: %w", id, err)
 	}
-	return m.stopTurn(runtime.WithInputFence(ctx, f), id)
+	return m.StopTurnIf(runtime.WithInputFence(ctx, f), id, nil)
 }
 
 // stopFindsNoTurn reports whether a stop of sessName finds no turn to
