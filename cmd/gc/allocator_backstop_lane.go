@@ -69,12 +69,17 @@ import (
 // suspended city's drains keep their work reads. Its custom scale_checks and
 // its steps keep legacy's suspension gate: while the city is suspended a pass
 // runs no check and starts no step, as legacy's demand pass returns before
-// both (POOL-001). The lane serves only v2.
+// both (POOL-001). A run in flight when a reading pass judges the city
+// suspended is discarded, so no check read before a suspension that a
+// reading pass saw is served after it; a suspend and resume that both fall
+// between two reading passes are not seen (collect). The lane serves only
+// v2.
 //
 // The lane is paced at the patrol interval and woken by every enqueue
 // (socket and API pokes; a CLI writer such as gc sling pokes key-less) and
 // every config reload (plannerRuntime.wakeReads), and by a read that ended
-// after its pass published, except a scale_check run, which publishes itself.
+// after its pass published, except a scale_check run, which publishes itself,
+// and by the end of a discarded scale_check run.
 
 const (
 	// externalReadsMinGap is the least idle time between two woken passes,
@@ -305,9 +310,10 @@ type laneStep struct {
 
 // externalReadsLane owns the latest recording.
 type externalReadsLane struct {
-	// interval may change only while the lane is stopped (a patrol change):
-	// a restart keeps the recording, the reads in flight and the steps'
-	// clocks.
+	// interval may change only while the lane is stopped (a patrol change)
+	// with no scale_check run or step in flight, as a late publish and the
+	// steps read it: a restart keeps the recording, the reads in flight and
+	// the steps' clocks.
 	interval time.Duration
 	env      func() (externalReadsEnv, error)
 	onChange func()
@@ -364,6 +370,9 @@ type sourceRead struct {
 	started time.Time
 	// late: a pass has published without it, so its end wakes the lane.
 	late bool
+	// void: a scale_check run a collect no longer read (collect), whose
+	// result is discarded and whose end wakes the lane.
+	void bool
 }
 
 // newExternalReadsLane returns a lane paced at interval (the patrol) that
@@ -498,13 +507,15 @@ func (l *externalReadsLane) collectAndPublish(sources []externalSource) *externa
 // publishLateResult publishes res, a noWait source's read that ended after
 // its pass published, without a pass: the latest recording with key's
 // result replaced, as the next pass would publish it. The lane's next read
-// of the source starts at its next pass. A source the last collect no
-// longer read (a reload changed its key) is not published.
+// of the source starts at its next pass. It publishes nothing when the last
+// collect no longer read the source (a reload changed its key), or when a
+// newer read of it has ended since, which a pass or that read's own late
+// publish publishes.
 func (l *externalReadsLane) publishLateResult(key sourceKey, res sourceResult) {
 	l.pubMu.Lock()
 	defer l.pubMu.Unlock()
 	l.mu.Lock()
-	current := l.collected[key]
+	current := l.collected[key] && !l.results[key].EndedAt.After(res.EndedAt)
 	if current && key.kind == sourceScaleCheck {
 		l.servedScaleCheck = res
 	}
@@ -621,16 +632,20 @@ func (l *externalReadsLane) launch(sources []externalSource, started map[sourceK
 
 // readSource runs one read and stores its result, signals ended unless it
 // is nil, and when the pass that started it has already published, wakes
-// the lane, or for a noWait source publishes the result itself.
+// the lane, or for a noWait source publishes the result itself. A void
+// read's result is discarded, and its end wakes the lane, whose next pass
+// starts a new run.
 func (l *externalReadsLane) readSource(s externalSource, r *sourceRead, ended chan<- struct{}) {
 	defer l.wg.Done()
 	p, err := guardedRead(s.read)
 	res := sourceResult{StartedAt: r.started, EndedAt: l.now(), Err: err, sourcePayload: p}
 	l.mu.Lock()
-	l.results[s.key] = res
 	delete(l.inFlight, s.key)
-	late := r.late
-	l.late = l.late || late
+	void, late := r.void, r.late && !r.void
+	if !void {
+		l.results[s.key] = res
+		l.late = l.late || late
+	}
 	l.mu.Unlock()
 	if ended != nil {
 		ended <- struct{}{}
@@ -638,7 +653,7 @@ func (l *externalReadsLane) readSource(s externalSource, r *sourceRead, ended ch
 	switch {
 	case late && s.noWait:
 		l.publishLateResult(s.key, res)
-	case late:
+	case late, void:
 		l.wake()
 	}
 }
@@ -651,7 +666,15 @@ func (l *externalReadsLane) readSource(s externalSource, r *sourceRead, ended ch
 // new config's whose first run has not ended, serves the scale_check result
 // the last publish served, aged from its own end: a reload holds no creates
 // for a run's length, and a hung run reads partial once that result is
-// stale. A late run of an older config is still never published.
+// stale. A scale_check run still in flight for a source it no longer reads
+// (the city suspended, or a reload changed the key) is void: neither stored
+// nor published (readSource). So no run started before a suspension that a
+// collect saw is served after it, and an older config's run is published
+// only if it ended before the new config's first collect. A collect sees a
+// suspension only when its pass's passEnv falls inside it: a suspend and
+// resume that both fall between two reading passes' passEnv calls are not
+// seen, and a run started before them is served like any other, while it
+// is fresh.
 func (l *externalReadsLane) collect(sources []externalSource) map[sourceKey]sourceResult {
 	now := l.now()
 	l.mu.Lock()
@@ -683,6 +706,11 @@ func (l *externalReadsLane) collect(sources []externalSource) map[sourceKey]sour
 			if s.key.kind == sourceScaleCheck {
 				l.servedScaleCheck = res
 			}
+		}
+	}
+	for key, r := range l.inFlight {
+		if key.kind == sourceScaleCheck && !l.collected[key] {
+			r.void = true
 		}
 	}
 	for key := range l.results {

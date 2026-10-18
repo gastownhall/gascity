@@ -542,3 +542,128 @@ func TestExternalReadsResumeServesNoPreSuspensionScaleCheck(t *testing.T) {
 		t.Error("after the new run ended: ok still partial")
 	}
 }
+
+// suspendSpanLane starts, in the current bubble, a lane over the city at
+// cityPath with one custom scale_check pool, w, whose nth run waits until
+// the test calls end(n) and then counts n; runs counts the runs started.
+func suspendSpanLane(t *testing.T, cityPath string) (lane *externalReadsLane, runs *atomic.Int64, end func(n int)) {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{{Name: "w", ScaleCheck: "check-w"}}}
+	lane = newExternalReadsLane(backstopTestInterval, func() (externalReadsEnv, error) {
+		return externalReadsEnv{CityName: "city", CityPath: cityPath, Cfg: cfg}, nil
+	}, nil, func(fn func(), _ string) bool { fn(); return false }, nil, io.Discard)
+	lane.steps = nil
+	lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
+	gates := [2]chan struct{}{make(chan struct{}), make(chan struct{})}
+	var ended [2]sync.Once
+	end = func(n int) { ended[n-1].Do(func() { close(gates[n-1]) }) }
+	runs = &atomic.Int64{}
+	lane.runner = func(string, string, map[string]string) (string, error) {
+		n := runs.Add(1)
+		if n > int64(len(gates)) {
+			return "", fmt.Errorf("scale_check run %d, want at most %d", n, len(gates))
+		}
+		<-gates[n-1]
+		return fmt.Sprint(n), nil
+	}
+	startBackstopLaneInBubble(t, lane)
+	// Registered after the lane's stop and join, so it runs before them.
+	t.Cleanup(func() { end(1); end(2) })
+	return lane, runs, end
+}
+
+// Kills a scale_check run that spans a suspended pass being served after
+// resume (PAR-SC review): a run that started before the city suspended and
+// ended while it was suspended is discarded, so when the city resumes before
+// the next patrol, the custom templates read partial until the run the
+// resumed pass starts has ended.
+func TestExternalReadsScaleCheckRunEndedWhileSuspendedNotServedAfterResume(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cityPath := t.TempDir()
+		lane, runs, end := suspendSpanLane(t, cityPath)
+		writeSuspension(t, cityPath, `{"city":{"suspended":true}}`)
+		advanceBackstop(backstopTestInterval)
+		if got := runs.Load(); got != 1 {
+			t.Fatalf("after a suspended pass: %d scale_check runs, want 1 (a suspended pass runs none)", got)
+		}
+		end(1)
+		advanceBackstop(externalReadsMinGap)
+		if r := lane.recording().scaleCheck(time.Now()); r != nil {
+			t.Fatalf("run 1 ended while suspended: %+v served, want partial", r)
+		}
+		writeSuspension(t, cityPath, "")
+		lane.wake()
+		advanceBackstop(externalReadsMinGap)
+		if got := runs.Load(); got != 2 {
+			t.Fatalf("after resume: %d scale_check runs, want 2 (the resumed pass starts a new run)", got)
+		}
+		if r := lane.recording().scaleCheck(time.Now()); r != nil {
+			t.Fatalf("after resume, run 2 in flight: %+v served (run 1 started before the suspension), want partial", r)
+		}
+		end(2)
+		synctest.Wait()
+		if r := lane.recording().scaleCheck(time.Now()); r == nil || r.Counts["w"] != 2 {
+			t.Fatalf("after run 2 ended: %+v, want w=2", r)
+		}
+	})
+}
+
+// Kills a scale_check run still in flight when the city resumes being served
+// once it ends (PAR-SC review): the resumed pass starts no second run beside
+// it, its result is discarded, and its end starts the run whose result is
+// the first served after resume.
+func TestExternalReadsScaleCheckRunInFlightAtResumeNotServed(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		cityPath := t.TempDir()
+		lane, runs, end := suspendSpanLane(t, cityPath)
+		writeSuspension(t, cityPath, `{"city":{"suspended":true}}`)
+		advanceBackstop(backstopTestInterval)
+		writeSuspension(t, cityPath, "")
+		lane.wake()
+		advanceBackstop(externalReadsMinGap)
+		if got := runs.Load(); got != 1 {
+			t.Fatalf("after resume with run 1 in flight: %d scale_check runs, want 1 (one run in flight per source)", got)
+		}
+		end(1)
+		synctest.Wait()
+		if r := lane.recording().scaleCheck(time.Now()); r != nil {
+			t.Fatalf("run 1 ended after resume: %+v served (it started before the suspension), want partial", r)
+		}
+		advanceBackstop(externalReadsMinGap)
+		if got := runs.Load(); got != 2 {
+			t.Fatalf("after run 1 ended: %d scale_check runs, want 2 (its end starts a new run)", got)
+		}
+		if r := lane.recording().scaleCheck(time.Now()); r != nil {
+			t.Fatalf("run 2 in flight after run 1 ended: %+v served (run 1 started before the suspension), want partial", r)
+		}
+		end(2)
+		synctest.Wait()
+		if r := lane.recording().scaleCheck(time.Now()); r == nil || r.Counts["w"] != 2 {
+			t.Fatalf("after run 2 ended: %+v, want w=2", r)
+		}
+	})
+}
+
+// Kills an older scale_check run's late publish replacing a newer run
+// (PAR-SC review): when a pass published a newer run before the older run's
+// late publish took the publish lock, the newer result stays served, and
+// stays the one a reload carries over.
+func TestExternalReadsLateScaleCheckDoesNotReplaceANewerRun(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{{Name: "w", ScaleCheck: "check-w"}}}
+	lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: cfg})
+	at(lane, censusNow)
+	key := sourceKey{kind: sourceScaleCheck, cfg: cfg}
+	ran := func(n int, ended time.Time) sourceResult {
+		return sourceResult{StartedAt: ended.Add(-time.Second), EndedAt: ended, sourcePayload: sourcePayload{ScaleCheck: &scaleCheckResult{Counts: map[string]int{"w": n}}}}
+	}
+	older, newer := ran(1, censusNow.Add(-3*time.Second)), ran(2, censusNow.Add(-time.Second))
+	lane.results[key] = newer
+	lane.collectAndPublish([]externalSource{{key: key, noWait: true}})
+	lane.publishLateResult(key, older)
+	if r := lane.recording().scaleCheck(censusNow); r == nil || r.Counts["w"] != 2 {
+		t.Fatalf("after the older run's late publish: %+v served, want the newer run's w=2", r)
+	}
+	if served := lane.servedScaleCheck; !served.EndedAt.Equal(newer.EndedAt) {
+		t.Fatalf("carried-over result ended at %v, want the newer run's %v", served.EndedAt, newer.EndedAt)
+	}
+}

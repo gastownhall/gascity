@@ -77,12 +77,15 @@ type poolRealizeMemo struct {
 
 // freshCursor is where claimFreshSlot resumes in used, the used slots it
 // last claimed from: slot is the slot it claimed. Every slot below slot was
-// held or used at that claim, held never changes, and the realization only
-// adds used slots, except to release the slot it just claimed
-// (selectOrPlanPoolSessionBead). So while the claim scans the same used
-// slots and they still hold slot, no slot below it is free. Without the
-// cursor an unlimited pool's N fresh plans rescan from slot 1 each: O(N²)
-// per pass.
+// held or used at that claim, and held never changes. used is one pool's map
+// for one pass (realizePools), and while its claims run only
+// selectOrPlanPoolSessionBead edits it, which adds used slots and frees only
+// the slot it just claimed. So while the claim scans the same used slots and
+// they still hold slot, no slot below it is free. A lower slot freed between
+// two claims on one map would be skipped: legacy frees a failed create's
+// slot only after its claims, on a map no cursor scans (legacy has no memo).
+// Without the cursor an unlimited pool's N fresh plans rescan from slot 1
+// each: O(N²) per pass.
 type freshCursor struct {
 	used map[int]bool
 	slot int
