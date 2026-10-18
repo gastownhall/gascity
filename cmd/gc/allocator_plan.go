@@ -44,11 +44,13 @@ const (
 )
 
 // Template-partial causes of a custom scale_check: the template's own check
-// failed, or the scale_check source has no fresh run (none yet, failed,
-// timed out or stale), which holds every custom template alike.
+// failed; the scale_check source has no fresh run of it (none yet, failed,
+// timed out or stale, or a result carried over a reload that lacks it); or
+// the run predates a claim the pass already counts (claimHeldTemplates).
 const (
-	causeScaleCheckPartial = "pool-scale-check-partial"
-	causeScaleCheckUnread  = "scale-check-source-unread"
+	causeScaleCheckPartial    = "pool-scale-check-partial"
+	causeScaleCheckUnread     = "scale-check-source-unread"
+	causeScaleCheckStaleClaim = "scale-check-stale-vs-claim"
 )
 
 // standInPrefix marks the ID of an in-flight create's stand-in row.
@@ -76,7 +78,7 @@ func (p *decidePass) plan() {
 func (p *decidePass) demand() {
 	collected := p.in.Demand.Collected
 	collected.CustomCounts, collected.CustomPartials = nil, nil
-	unread := p.in.ScaleCheck == nil
+	held := p.claimHeldTemplates()
 	if templates := p.in.Demand.CustomCheckTemplates; len(templates) > 0 {
 		collected.CustomCounts = make(map[string]int, len(templates))
 		for _, template := range templates {
@@ -85,7 +87,7 @@ func (p *decidePass) demand() {
 				count = p.in.ScaleCheck.Counts[template]
 			}
 			collected.CustomCounts[template] = count
-			if p.in.ScaleCheck.partial(template) {
+			if p.in.ScaleCheck.partial(template) || held[template] {
 				collected.CustomPartials = markScaleCheckPartialTemplate(collected.CustomPartials, template)
 			}
 		}
@@ -95,11 +97,9 @@ func (p *decidePass) demand() {
 	collected.UnassignedRouted = projected
 	p.merged = mergeCollectedDemand(p.cfg, collected)
 	for template := range p.merged.PoolScaleCheckPartial {
-		cause := causeScaleCheckPartial
-		if unread && slices.Contains(p.in.Demand.CustomCheckTemplates, template) {
-			cause = causeScaleCheckUnread
+		for _, cause := range p.scaleCheckCauses(template, held) {
+			p.markTemplate(template, true, cause)
 		}
-		p.markTemplate(template, true, cause)
 	}
 	for template := range p.merged.PoolPartialRetention {
 		p.markTemplate(template, true, "pool-partial-retention")
@@ -114,6 +114,71 @@ func (p *decidePass) demand() {
 	p.named = computeNamedSessionDemandOn(p.in.CityName, p.in.CityPath, p.cfg, func() []string { return refs },
 		p.in.SuspendedRigPaths, p.in.Demand.NamedDefault, p.in.Demand.AssignedWork, p.in.Demand.AssignedStoreRefs,
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
+}
+
+// scaleCheckCauses are the causes of template's scale-check partial: for a
+// custom scale_check template, its own failed check, an unread run of it,
+// and a held claim, each that applies; for any other, its own probe's.
+func (p *decidePass) scaleCheckCauses(template string, held map[string]bool) []string {
+	if !slices.Contains(p.in.Demand.CustomCheckTemplates, template) {
+		return []string{causeScaleCheckPartial}
+	}
+	var causes []string
+	r := p.in.ScaleCheck
+	if _, counted := r.countOf(template); !counted {
+		causes = append(causes, causeScaleCheckUnread)
+	} else if r.Partial[template] {
+		causes = append(causes, causeScaleCheckPartial)
+	}
+	if held[template] {
+		causes = append(causes, causeScaleCheckStaleClaim)
+	}
+	if len(causes) == 0 {
+		causes = append(causes, causeScaleCheckPartial)
+	}
+	return causes
+}
+
+// claimHeldTemplates is the scale_check pairing guard: the custom
+// scale_check templates with a work assignment the planner first saw no
+// earlier than the start of the run their counts are from. That run may have
+// counted the work as new unassigned demand while the pass already counts
+// the claim, so v2 would plan a session for work a session holds. A held
+// template reads as its check failed: it keeps its rows and plans no fresh
+// create until a run that started after the claim, which the gather's wake
+// on a new claim starts within about one run. A claim counts for the
+// template its work routes to and for the template of the row it names.
+func (p *decidePass) claimHeldTemplates() map[string]bool {
+	d := p.in.Demand
+	if p.in.ScaleCheck == nil || len(d.CustomCheckTemplates) == 0 || len(p.in.ClaimsSeen) == 0 {
+		return nil
+	}
+	var rowTemplate map[string]string
+	out := make(map[string]bool)
+	for i, wb := range d.AssignedWork {
+		c, ok := workClaimOf(d, i)
+		if !ok {
+			continue
+		}
+		if seen, ok := p.in.ClaimsSeen[c]; !ok || seen.Before(p.in.ScaleCheckStartedAt) {
+			continue
+		}
+		if rowTemplate == nil {
+			rowTemplate = make(map[string]string)
+			for _, info := range p.decidable {
+				template := normalizedSessionTemplateInfo(info, p.cfg)
+				for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+					rowTemplate[id] = template
+				}
+			}
+		}
+		for _, template := range []string{strings.TrimSpace(wb.Metadata[beadmeta.RoutedToMetadataKey]), rowTemplate[c.assignee]} {
+			if template != "" && slices.Contains(d.CustomCheckTemplates, template) {
+				out[template] = true
+			}
+		}
+	}
+	return out
 }
 
 // withoutSuppressedRoutes returns the default-probe counts and demand

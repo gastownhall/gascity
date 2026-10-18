@@ -1333,3 +1333,79 @@ func TestAllocator_RealizeNeverSelectsANamedRowForAPoolRequest(t *testing.T) {
 		t.Fatalf("a named row realized for a pool request: selected %v plans %+v", maps.Keys(p.selected), p.plans)
 	}
 }
+
+// Kills the pairing guard holding the wrong templates, or none: a custom
+// template is held (scale-check-stale-vs-claim, kept rows, no create) when
+// an assignment the planner first saw no earlier than the run started
+// routes to it or names one of its rows; not for an older claim, another
+// template's claim, a claim the planner never saw, or with no run. Also
+// kills a template the run lacks (a result carried over a reload) traced as
+// its own check failing: it reads scale-check-source-unread.
+func TestAllocator_ScaleCheckClaimHold(t *testing.T) {
+	started := allocNow.Add(-time.Minute)
+	claim := func(id, assignee, routedTo string) beads.Bead {
+		b := beads.Bead{ID: id, Title: id, Type: "task", Status: "in_progress", Assignee: assignee, Metadata: map[string]string{}}
+		if routedTo != "" {
+			b.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
+		}
+		return b
+	}
+	cases := []struct {
+		name    string
+		work    beads.Bead
+		seen    time.Duration // when the planner first saw the claim, after started
+		noSeen  bool
+		noRun   bool
+		counts  map[string]int
+		held    bool
+		unread  bool
+		creates bool
+	}{
+		{name: "routed claim newer than the run", work: claim("w-1", "someone", "custom"), seen: time.Second, held: true},
+		{name: "claim seen as the run started", work: claim("w-1", "someone", "custom"), seen: 0, held: true},
+		{name: "claim on a custom row, unrouted", work: claim("w-1", "gc-1", ""), seen: time.Second, held: true},
+		{name: "claim older than the run", work: claim("w-1", "gc-1", "custom"), seen: -time.Second, creates: true},
+		{name: "another template's claim", work: claim("w-1", "someone", "plain"), seen: time.Second, creates: true},
+		{name: "claim the planner never saw", work: claim("w-1", "gc-1", "custom"), noSeen: true, creates: true},
+		{name: "no run", work: claim("w-1", "gc-1", "custom"), seen: time.Second, noRun: true, unread: true},
+		{name: "run lacks the template", work: claim("w-1", "someone", "plain"), seen: time.Second, counts: map[string]int{"other": 1}, unread: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := &config.City{Agents: []config.Agent{allocPoolAgent("custom", 4), allocPoolAgent("plain", 4)}}
+			f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "custom", 1, "active")).alive("s-gc-1", InventoryAttrs{})
+			f.in.Demand.CustomCheckTemplates = []string{"custom"}
+			f.in.Demand.AssignedWork, f.in.Demand.AssignedStoreRefs = []beads.Bead{tc.work}, []string{""}
+			if !tc.noRun {
+				counts := tc.counts
+				if counts == nil {
+					counts = map[string]int{"custom": 2}
+				}
+				f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: counts}, started
+			}
+			if !tc.noSeen {
+				c, _ := workClaimOf(f.in.Demand, 0)
+				f.in.ClaimsSeen = map[workClaim]time.Time{c: started.Add(tc.seen)}
+			}
+			d := f.decide()
+			tp := d.Snapshot.Partial.Templates["custom"]
+			if got := slices.Contains(tp.Causes, causeScaleCheckStaleClaim); got != tc.held {
+				t.Errorf("held = %t (causes %v), want %t", got, tp.Causes, tc.held)
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckUnread); got != tc.unread {
+				t.Errorf("unread = %t (causes %v), want %t", got, tp.Causes, tc.unread)
+			}
+			if tc.held || tc.unread {
+				if !tp.Retain || slices.Contains(tp.Causes, causeScaleCheckPartial) {
+					t.Errorf("causes %v retain %t; want retained, not %s", tp.Causes, tp.Retain, causeScaleCheckPartial)
+				}
+				if e := entryOf(t, d, "gc-1"); e.Desired == desireDrain || e.Desired == desireSleep {
+					t.Errorf("held template's row = %s, want kept", e.Desired)
+				}
+			}
+			if got := len(d.Plans) > 0; got != tc.creates {
+				t.Errorf("planned %d create(s), want creates %t", len(d.Plans), tc.creates)
+			}
+		})
+	}
+}

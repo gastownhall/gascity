@@ -1648,8 +1648,9 @@ func idleExternalReadsLane() *externalReadsLane {
 // Kills a reload or a poke that marks only the planner dirty (PAR-SC
 // review): the external-reads lane, which runs the custom scale_checks and
 // the bd/PG legs, would wait out its patrol before reading the new config
-// or the poked work. A v2 config reload and an enqueue through the wiring's
-// wake each wake the lane.
+// or the poked work. A v2 config reload and a key-less, allocator or
+// control-dispatch enqueue through the wiring's wake each wake the lane; a
+// session key, which concerns one cached row, does not.
 func TestV2ReloadAndEnqueueWakeTheExternalReadsLane(t *testing.T) {
 	cr, _ := newPhaseFixtureRuntime(t, true, false)
 	cr.activeReload.soft = false
@@ -1673,10 +1674,21 @@ func TestV2ReloadAndEnqueueWakeTheExternalReadsLane(t *testing.T) {
 		t.Fatalf("newControllerWiring: %v", err)
 	}
 	t.Cleanup(w.v2.stop)
-	lane = idleExternalReadsLane()
-	w.v2.lane.Store(lane)
-	w.wake.Enqueue(wakeReasonSocket)
-	if !lane.wantReads.Load() || len(lane.wakeCh) != 1 {
-		t.Fatal("a key-less enqueue did not wake the external-reads lane")
+	for _, c := range []struct {
+		name string
+		keys []reconcilekey.Key
+		wake bool
+	}{
+		{"key-less", nil, true},
+		{"allocator", []reconcilekey.Key{reconcilekey.Allocator()}, true},
+		{"control dispatch", []reconcilekey.Key{reconcilekey.ControlDispatch()}, true},
+		{"session", []reconcilekey.Key{reconcilekey.Session("gc-1")}, false},
+	} {
+		lane = idleExternalReadsLane()
+		w.v2.lane.Store(lane)
+		w.wake.Enqueue(wakeReasonSocket, c.keys...)
+		if woke := lane.wantReads.Load() && len(lane.wakeCh) == 1; woke != c.wake {
+			t.Errorf("%s enqueue: lane woken %t, want %t", c.name, woke, c.wake)
+		}
 	}
 }

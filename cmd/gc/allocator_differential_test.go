@@ -303,7 +303,14 @@ func v2Allocation(t *testing.T, c diffCity) allocOutcome {
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}
-	d := mustDecide(t, allocInputsOf(w, cityPath, c.cfg.Workspace.Name))
+	in := allocInputsOf(w, cityPath, c.cfg.Workspace.Name)
+	// Steady state: every claim predates the scale_check run, as legacy's
+	// single tick reads both at once. The pairing guard's window is
+	// TestScaleCheckClaimSkewHoldsCreates'.
+	for claim := range in.ClaimsSeen {
+		in.ClaimsSeen[claim] = time.Time{}
+	}
+	d := mustDecide(t, in)
 
 	out := newAllocOutcome()
 	for t, n := range d.Snapshot.PoolDesired {
@@ -368,7 +375,8 @@ func allocInputsOf(w World, cityPath, cityName string) allocInputs {
 		Now: w.Now, Epoch: "e1", Cfg: w.Env.Cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen,
 		CityPath: cityPath, CityName: cityName,
 		CitySuspended: w.CitySuspended, SuspendedRigPaths: w.SuspendedRigPaths,
-		Census: w.Census, Demand: w.Demand, ScaleCheck: w.ScaleCheck, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge,
+		Census: w.Census, Demand: w.Demand, ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen,
+		Obs: w.Obs, ObsMaxAge: w.ObsMaxAge,
 		Endpoints: w.Gates, ProviderHealth: w.ProviderHealth, Episodes: w.Episodes,
 		SleepPolicies: w.SleepPolicies, TransportRefused: w.TransportRefused, ReadyWaits: w.ReadyWaits,
 		InFlight: w.InFlight, Backoff: w.Backoff,

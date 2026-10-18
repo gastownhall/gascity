@@ -114,6 +114,7 @@ func (rt *plannerRuntime) bindHost(h plannerHost) {
 		}
 		return nil
 	}
+	h.gather.WakeReads = rt.wakeReads
 	h.gather.ReadyWaits = func() map[string]bool {
 		if l := rt.lane.Load(); l != nil {
 			return l.readyWaitSet()
