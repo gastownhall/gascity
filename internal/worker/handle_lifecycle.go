@@ -382,10 +382,11 @@ func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (er
 
 	if req.Turn != "" {
 		if !req.Fence.IsZero() {
-			err = fmt.Errorf("interrupting turn %q: %w", req.Turn, ErrTurnInterruptFenced)
-			return err
+			if err = req.Fence.Validate(); err != nil {
+				return err
+			}
 		}
-		err = h.interruptTurn(ctx, req.Turn)
+		err = h.interruptTurn(ctx, req.Turn, req.Fence)
 		return err
 	}
 	id := h.currentSessionID()

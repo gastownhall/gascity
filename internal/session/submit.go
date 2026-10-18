@@ -360,28 +360,35 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // fresh read decides the miss, as it may have stopped since its caller read
 // it running.
 func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
+	_, err := m.sendTurnInterruptLocked(ctx, b, sessName, mode)
+	return err
+}
+
+// sendTurnInterruptLocked is stopTurnLocked, also reporting none when it
+// found no turn to interrupt and sent nothing.
+func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) (none bool, err error) {
 	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
-		return err
+		return true, err
 	}
 	switch mode {
 	case runtime.TurnInterruptProtocol:
 		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-			return fmt.Errorf("interrupting session: %w", err)
+			return false, fmt.Errorf("interrupting session: %w", err)
 		}
-		return nil
+		return false, nil
 	case runtime.TurnInterruptUnsupported:
-		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
+		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
 		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
-			return fmt.Errorf("interrupting session: %w", err)
+			return false, fmt.Errorf("interrupting session: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 	if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-		return fmt.Errorf("interrupting session: %w", err)
+		return false, fmt.Errorf("interrupting session: %w", err)
 	}
-	return nil
+	return false, nil
 }
 
 func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {

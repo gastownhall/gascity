@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -65,6 +66,22 @@ func (b inputHookBackend) SendKeys(name string, keys ...string) error {
 	return err
 }
 
+func (b inputHookBackend) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	err := b.idleScript.SendKeysFenced(ctx, name, fence, keys...)
+	if err == nil && b.onInput != nil {
+		b.onInput("SendKeys")
+	}
+	return err
+}
+
+func (b inputHookBackend) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	err := b.idleScript.InterruptFenced(ctx, name, fence)
+	if err == nil && b.onInput != nil {
+		b.onInput("Interrupt")
+	}
+	return err
+}
+
 // racingTurnTiming is a turn clock whose every wait passes at once, moving
 // now by the wait: a settle poll runs to its bound without sleeping.
 func racingTurnTiming(start time.Time) (*turnTiming, *manualTurnClock) {
@@ -103,6 +120,7 @@ func TestTurnInterruptCodexTranscript(t *testing.T) {
 			target: codexTurn1, wantErr: runtime.ErrTurnNotCurrent,
 		},
 		{name: "no turn runs", lines: []string{codexStarted(codexTurn2, "2026-10-08T02:23:01.007Z", 1791426181), codexComplete(codexTurn2, "2026-10-08T02:23:09.250Z")}, target: codexTurn1, wantErr: runtime.ErrTurnNotCurrent},
+		{name: "the last turn was aborted", lines: []string{codexStarted(codexTurn2, "2026-10-08T02:23:01.007Z", 1791426181), codexAborted(codexTurn2, "2026-10-08T02:23:05.000Z")}, target: codexTurn2, wantErr: runtime.ErrTurnNotCurrent},
 		{name: "runtime not running", lines: []string{codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142)}, target: codexTurn1, stopped: true, wantErr: runtime.ErrTurnNotCurrent},
 		{name: "torn transcript is unknown", lines: []string{codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142), `{"timestamp":"2026-10-08T02:22:30.500Z","type":"event_msg","payload":{"type":"task_comp`}, target: codexTurn1, wantErr: runtime.ErrRuntimeUnavailable},
 	}
@@ -221,15 +239,9 @@ func TestTurnInterruptRefusesWithoutAnObservableEnd(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := runtime.NewFake()
 			s := newTurnSession(t, profiled(tc.profile, runtime.FullFake{Fake: fake}), tc.provider, "")
-			turn := claudeTurn1
-			if tc.provider == "codex" {
-				turn = codexTurn1
-				s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
-			} else {
-				s.writeTranscript(t, tc.provider, claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
-			}
+			s.writeTranscript(t, tc.provider, claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
 			fake.Calls = nil
-			if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: turn}); !errors.Is(err, tc.wantErr) {
+			if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1}); !errors.Is(err, tc.wantErr) {
 				t.Fatalf("Interrupt = %v, want %v", err, tc.wantErr)
 			}
 			if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
@@ -280,21 +292,269 @@ func TestTurnInterruptRefusal(t *testing.T) {
 	}
 }
 
-func TestTurnInterruptRefusesAnInputFence(t *testing.T) {
+// An input fence is a separate axis from the turn: on a transcript source
+// every key goes under it, after the turn check, so a stale incarnation's
+// fence is a miss with nothing sent and the live one's keys carry it. A
+// fence that does not validate is refused before anything is read.
+func TestTurnInterruptHonorsTheInputFence(t *testing.T) {
+	for _, stale := range []bool{true, false} {
+		t.Run(map[bool]string{true: "stale fence", false: "live fence"}[stale], func(t *testing.T) {
+			fake := runtime.NewFake()
+			backend := inputHookBackend{idleScript: idleScript{FullFake: runtime.FullFake{Fake: fake}, state: &idleScriptState{}}}
+			var path string
+			backend.onInput = func(string) { appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n") }
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, backend), "codex", "")
+			timing, clock := racingTurnTiming(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+			s.handle.turns.timing = timing
+			path = s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+			ageTranscript(t, path, clock.now().Add(-time.Hour))
+			f, ok := sessionpkg.InputFenceFor(s.info)
+			if !ok {
+				t.Fatal("session names no incarnation")
+			}
+			if stale {
+				f.Token = "previous-incarnation-token"
+			}
+			fake.Calls = nil
+
+			err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1, Fence: f})
+			sent := sentInputs(fake, s.info.SessionName)
+			if stale {
+				var miss *runtime.FenceMismatchError
+				if !errors.As(err, &miss) {
+					t.Fatalf("Interrupt(stale fence) = %v, want *FenceMismatchError", err)
+				}
+				if len(sent) != 0 {
+					t.Fatalf("a stale fence sent %v", sent)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Interrupt(live fence) = %v, want nil", err)
+			}
+			if !slices.Equal(sent, []string{"SendKeys(Escape)"}) {
+				t.Fatalf("sent %v, want [SendKeys(Escape)]", sent)
+			}
+			if c := lastCall(fake.SnapshotCalls(), "SendKeys"); c == nil || c.Fence != f {
+				t.Fatalf("keys = %+v, want them fenced to %+v", c, f)
+			}
+		})
+	}
+	t.Run("invalid fence", func(t *testing.T) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: fake}), "codex", "")
+		s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+		fake.Calls = nil
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1, Fence: runtime.InputFence{Generation: -1, Token: "tok"}})
+		if err == nil || errors.Is(err, runtime.ErrTurnNotEnded) {
+			t.Fatalf("Interrupt(invalid fence) = %v, want the fence's validation error", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("an invalid fence sent %v", got)
+		}
+	})
+}
+
+// The session mutation lock wait and the check are bounded by ctx: a call
+// whose ctx ends before the check can finish sends nothing and reports
+// unknown (runtime.ErrRuntimeUnavailable), never a refusal turned send.
+func TestTurnInterruptCheckHonorsCtx(t *testing.T) {
+	codexSession := func(t *testing.T) (turnSession, *runtime.Fake) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: fake}), "codex", "")
+		s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+		fake.Calls = nil
+		return s, fake
+	}
+	// An idle Claude pane: with a live ctx the check infers the end and
+	// refuses; a check that cannot take its idle readings must not send.
+	idleClaude := func(t *testing.T) (turnSession, *runtime.Fake) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+		path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+		ageTranscript(t, path, time.Now().Add(-time.Minute))
+		idle.Calls = nil
+		return s, idle.Fake
+	}
+	assertUnknownNothingSent := func(t *testing.T, err error, fake *runtime.Fake, name string) {
+		t.Helper()
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("Interrupt = %v, want ErrRuntimeUnavailable alone", err)
+		}
+		if got := sentInputs(fake, name); len(got) != 0 {
+			t.Fatalf("sent %v after ctx ended", got)
+		}
+	}
+	holdLock := func(t *testing.T, id string) (release func()) {
+		t.Helper()
+		held, done := make(chan struct{}), make(chan struct{})
+		go func() {
+			_ = sessionpkg.WithSessionMutationLock(id, func() error { close(held); <-done; return nil })
+		}()
+		<-held
+		var once sync.Once
+		release = func() { once.Do(func() { close(done) }) }
+		t.Cleanup(release)
+		return release
+	}
+
+	for _, tc := range []struct {
+		name  string
+		setup func(*testing.T) (turnSession, *runtime.Fake)
+		turn  string
+	}{{"codex", codexSession, codexTurn1}, {"idle claude", idleClaude, claudeTurn1}} {
+		t.Run(tc.name+"/lock held past the deadline", func(t *testing.T) {
+			s, fake := tc.setup(t)
+			release := holdLock(t, s.info.ID)
+			ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+			defer cancel()
+			done := make(chan error, 1)
+			go func() { done <- s.handle.Interrupt(ctx, InterruptRequest{Turn: tc.turn}) }()
+			select {
+			case err := <-done:
+				release()
+				assertUnknownNothingSent(t, err, fake, s.info.SessionName)
+			case <-time.After(5 * time.Second):
+				release()
+				<-done
+				t.Fatal("Interrupt waited for the session lock past its ctx")
+			}
+		})
+		t.Run(tc.name+"/ctx already ended", func(t *testing.T) {
+			s, fake := tc.setup(t)
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+			assertUnknownNothingSent(t, s.handle.Interrupt(ctx, InterruptRequest{Turn: tc.turn}), fake, s.info.SessionName)
+		})
+	}
+	t.Run("idle claude/deadline shorter than the idle readings", func(t *testing.T) {
+		s, fake := idleClaude(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+		assertUnknownNothingSent(t, s.handle.Interrupt(ctx, InterruptRequest{Turn: claudeTurn1}), fake, s.info.SessionName)
+	})
+	t.Run("idle claude/deadline long enough refuses", func(t *testing.T) {
+		s, fake := idleClaude(t)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := s.handle.Interrupt(ctx, InterruptRequest{Turn: claudeTurn1}); !errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("Interrupt = %v, want ErrTurnNotCurrent", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("sent %v", got)
+		}
+	})
+}
+
+// codexSettleSession is a tmux Codex session whose turn codexTurn1 is open,
+// on a racing clock, with onInput run after each key.
+func codexSettleSession(t *testing.T, onInput func(path string, clock *manualTurnClock)) (turnSession, *runtime.Fake, *turnTiming, *manualTurnClock, string) {
+	t.Helper()
 	fake := runtime.NewFake()
-	s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: fake}), "codex", "")
-	s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
-	f, ok := sessionpkg.InputFenceFor(s.info)
-	if !ok {
-		t.Fatal("session names no incarnation")
+	backend := inputHookBackend{idleScript: idleScript{FullFake: runtime.FullFake{Fake: fake}, state: &idleScriptState{}}}
+	var path string
+	timing, clock := racingTurnTiming(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+	if onInput != nil {
+		backend.onInput = func(string) { onInput(path, clock) }
 	}
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, backend), "codex", "")
+	s.handle.turns.timing = timing
+	path = s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+	ageTranscript(t, path, clock.now().Add(-time.Hour))
 	fake.Calls = nil
-	if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1, Fence: f}); !errors.Is(err, ErrTurnInterruptFenced) {
-		t.Fatalf("Interrupt(turn and fence) = %v, want ErrTurnInterruptFenced", err)
-	}
-	if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
-		t.Fatalf("a refused interrupt sent %v", got)
-	}
+	return s, fake, timing, clock, path
+}
+
+// The settle after the keys: what ends it, what does not, and the error it
+// gives when nothing does.
+func TestTurnInterruptSettle(t *testing.T) {
+	t.Run("a torn record that never completes is not the end", func(t *testing.T) {
+		// X11 I8: an unreadable transcript after the keys is never the
+		// turn's end. The error says sent (ErrTurnNotEnded) and nothing
+		// else, though the last read was unavailable.
+		s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+			appendTranscript(t, path, `{"timestamp":"2026-10-08T02:22:30.500Z","type":"event_msg","payload":{"type":"turn_abo`)
+		})
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1})
+		if !errors.Is(err, runtime.ErrTurnNotEnded) {
+			t.Fatalf("Interrupt = %v, want ErrTurnNotEnded", err)
+		}
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("Interrupt = %v also wraps ErrRuntimeUnavailable: a sent interrupt would read as unknown", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, []string{"SendKeys(Escape)"}) {
+			t.Fatalf("sent %v", got)
+		}
+	})
+	t.Run("a successor turn settles the target", func(t *testing.T) {
+		s, _, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+			appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n"+codexStarted(codexTurn2, "2026-10-08T02:22:41.000Z", 1791426161)+"\n")
+		})
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the target left Current", err)
+		}
+	})
+	t.Run("a failed family wait is re-read from the transcript", func(t *testing.T) {
+		s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+			appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n")
+		})
+		fake.WaitForIdleErrors[s.info.SessionName] = errors.New("still busy")
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the transcript shows the end", err)
+		}
+	})
+	t.Run("past the deadline the transcript is still read once", func(t *testing.T) {
+		var once sync.Once
+		s, _, _, _, _ := codexSettleSession(t, func(path string, clock *manualTurnClock) {
+			once.Do(func() {
+				clock.advance(2 * turnInterruptSettle)
+				appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n")
+			})
+		})
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil from the read past the deadline", err)
+		}
+	})
+	t.Run("a session closed after the keys has ended its turn", func(t *testing.T) {
+		var s turnSession
+		s, _, _, _, _ = codexSettleSession(t, func(string, *manualTurnClock) {
+			if err := s.store.Close(s.info.ID); err != nil {
+				t.Errorf("closing the session: %v", err)
+			}
+		})
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: a gone session's turn ended (WaitTurnEnded's rule)", err)
+		}
+	})
+	t.Run("the bound starts when the check passes", func(t *testing.T) {
+		// The lock wait spends the clock past 15 s: the settle still gets
+		// its full bound after the check, and sees the end on a later poll.
+		s, _, timing, clock, path := codexSettleSession(t, nil)
+		polls := 0
+		after := timing.after
+		timing.after = func(d time.Duration) <-chan time.Time {
+			if polls++; polls == 3 {
+				appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n")
+			}
+			return after(d)
+		}
+		held, release := make(chan struct{}), make(chan struct{})
+		go func() {
+			_ = sessionpkg.WithSessionMutationLock(s.info.ID, func() error { close(held); <-release; return nil })
+		}()
+		<-held
+		done := make(chan error, 1)
+		go func() { done <- s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}) }()
+		time.Sleep(50 * time.Millisecond)
+		clock.advance(2 * turnInterruptSettle)
+		close(release)
+		if err := <-done; err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the end came within the bound after the check", err)
+		}
+		if polls < 3 {
+			t.Fatalf("settled after %d polls, want the end seen on the third", polls)
+		}
+	})
 }
 
 // On a protocol source the runtime fences the interrupt to the turn and
@@ -352,9 +612,57 @@ func TestRuntimeHandleTurnInterruptRefusesWithoutAProtocolSource(t *testing.T) {
 	if got := sentInputs(fake, "turn-worker"); !slices.Equal(got, []string{"Interrupt"}) {
 		t.Fatalf("session-scoped interrupt sent %v, want [Interrupt]", got)
 	}
+}
+
+// A protocol source's runtime takes no input fence on its turn interrupt:
+// a fenced one is refused, nothing sent, on both handles.
+func TestProtocolTurnInterruptRefusesAnInputFence(t *testing.T) {
 	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
-	if err := h.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1, Fence: f}); !errors.Is(err, ErrTurnInterruptFenced) {
-		t.Fatalf("Interrupt(turn and fence) = %v, want ErrTurnInterruptFenced", err)
+	t.Run("session handle", func(t *testing.T) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1", ""}}
+		fake.Calls = nil
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1", Fence: f}); !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+			t.Fatalf("Interrupt(turn and fence) = %v, want ErrInputFenceUnsupported", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("a refused interrupt sent %v", got)
+		}
+	})
+	t.Run("runtime handle", func(t *testing.T) {
+		fake := runtime.NewFake()
+		h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake}))
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{"turn-worker": {"acp-1", ""}}
+		fake.Calls = nil
+		if err := h.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1", Fence: f}); !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+			t.Fatalf("Interrupt(turn and fence) = %v, want ErrInputFenceUnsupported", err)
+		}
+		if got := sentInputs(fake, "turn-worker"); len(got) != 0 {
+			t.Fatalf("a refused interrupt sent %v", got)
+		}
+	})
+}
+
+// On a protocol source a runtime that no longer hosts the session (a bare
+// ErrSessionNotFound from InterruptTurn's read) has no turn: nothing sent,
+// a *TurnNotCurrentError, as on a transcript source.
+func TestProtocolTurnInterruptGoneRuntimeIsNotCurrent(t *testing.T) {
+	fake := runtime.NewFake()
+	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+	fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+	fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1"}}
+	fake.TurnReadErrors = map[string][]error{s.info.SessionName: {runtime.ErrSessionNotFound}}
+	fake.Calls = nil
+	err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"})
+	var nc *runtime.TurnNotCurrentError
+	if !errors.As(err, &nc) || errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("Interrupt(runtime gone) = %v, want *TurnNotCurrentError", err)
+	}
+	if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, []string{"InterruptTurn(acp-1):error"}) {
+		t.Fatalf("sent %v, want only the refused InterruptTurn", got)
 	}
 }
 

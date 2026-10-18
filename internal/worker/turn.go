@@ -234,13 +234,27 @@ type turnPlan struct {
 // planTurns composes the session's turn source now, from the session and the
 // fixed traits of its routed runtime.
 func (h *SessionHandle) planTurns() (turnPlan, error) {
+	return h.planTurnsFrom(h.turnSession)
+}
+
+// planTurnsWithin is planTurns with the session reload bounded by ctx, as a
+// watcher's is (reloadTurnSession): a store that stalls leaves the plan
+// unanswered, runtime.ErrRuntimeUnavailable, when ctx ends.
+func (h *SessionHandle) planTurnsWithin(ctx context.Context) (turnPlan, error) {
+	return h.planTurnsFrom(func(id string) (sessionpkg.Info, error) {
+		return h.reloadTurnSession(ctx, id)
+	})
+}
+
+// planTurnsFrom is planTurns with the session loaded by load.
+func (h *SessionHandle) planTurnsFrom(load func(id string) (sessionpkg.Info, error)) (turnPlan, error) {
 	id := h.currentSessionID()
 	if id == "" {
 		// No session yet: nothing to read turns from, nor a turn to replace.
 		support := h.adapter.TurnSupportFor(h.session.Provider)
 		return turnPlan{caps: composeTurnCapabilities(noTurnCapabilities, runtime.TurnInterruptKeystroke, support, false, false, TurnReplaceNone)}, nil
 	}
-	info, err := h.turnSession(id)
+	info, err := load(id)
 	if err != nil {
 		return turnPlan{}, err
 	}
@@ -311,6 +325,23 @@ func (h *SessionHandle) CurrentTurn(ctx context.Context) (runtime.TurnHistory, e
 	if err != nil {
 		return runtime.TurnHistory{}, err
 	}
+	return h.currentTurnOf(ctx, plan)
+}
+
+// boundedCurrentTurn is CurrentTurn with its session reload bounded by ctx
+// too (planTurnsWithin), for reads made under the session mutation lock or
+// against a deadline.
+func (h *SessionHandle) boundedCurrentTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	plan, err := h.planTurnsWithin(ctx)
+	if err != nil {
+		return runtime.TurnHistory{}, err
+	}
+	return h.currentTurnOf(ctx, plan)
+}
+
+// currentTurnOf reads plan's turns from its source.
+func (h *SessionHandle) currentTurnOf(ctx context.Context, plan turnPlan) (runtime.TurnHistory, error) {
+	var err error
 	switch plan.caps.Source {
 	case TurnSourceProtocol:
 		return h.protocolTurnHistory(ctx, plan)
@@ -572,16 +603,11 @@ func runtimeTurnStatus(s sessionlog.TurnStatus) runtime.TurnStatus {
 
 const (
 	// turnInterruptSettle bounds the wait for an interrupted turn to end,
-	// from the interrupt's start (DES-T3I D6's turnSettleTimeout).
-	turnInterruptSettle = 15 * time.Second
+	// from the moment the check passed.
+	turnInterruptSettle = sessionpkg.TurnInterruptSettle
 	// turnSettlePoll separates the settle reads of a transcript source.
 	turnSettlePoll = 500 * time.Millisecond
 )
-
-// ErrTurnInterruptFenced reports an InterruptRequest that names both a Turn
-// and an input Fence. Nothing is sent: the turn id already confines the
-// interrupt to the incarnation running it.
-var ErrTurnInterruptFenced = errors.New("a turn-scoped interrupt takes no input fence")
 
 // turnInterruptRefusal is why caps cannot carry an interrupt of a named turn,
 // or nil: a runtime that cannot interrupt at all, else a source that does not
@@ -599,10 +625,22 @@ func turnInterruptRefusal(caps TurnCapabilities, session, turn string) error {
 	return nil
 }
 
+// protocolTurnInterruptFenceRefusal refuses an input fence on a protocol
+// source's turn interrupt: the runtime's InterruptTurn reads no input fence,
+// so it could not confine the interrupt to the fence's incarnation, and a
+// fenced request is never sent unfenced (runtime.ErrInputFenceUnsupported).
+func protocolTurnInterruptFenceRefusal(fence runtime.InputFence, session, turn string) error {
+	if fence.IsZero() {
+		return nil
+	}
+	return fmt.Errorf("interrupting turn %q of %s: its runtime interrupts turns by protocol, without an input fence: %w",
+		turn, session, runtime.ErrInputFenceUnsupported)
+}
+
 // interruptTurn interrupts the session's turn turn, as InterruptRequest.Turn
-// documents.
-func (h *SessionHandle) interruptTurn(ctx context.Context, turn string) error {
-	plan, err := h.planTurns()
+// documents. fence, when set, has been validated.
+func (h *SessionHandle) interruptTurn(ctx context.Context, turn string, fence runtime.InputFence) error {
+	plan, err := h.planTurnsWithin(ctx)
 	if err != nil {
 		return err
 	}
@@ -615,32 +653,51 @@ func (h *SessionHandle) interruptTurn(ctx context.Context, turn string) error {
 	}
 	switch plan.caps.Source {
 	case TurnSourceProtocol:
+		if err := protocolTurnInterruptFenceRefusal(fence, name, turn); err != nil {
+			return err
+		}
 		// The runtime's acknowledgement says whether it fenced the
 		// interrupt itself; the capabilities' Fence already tells the
 		// caller which tier it is on, so the result carries no more.
 		_, err := h.manager.InterruptTurn(ctx, plan.info.ID, turn)
 		return err
 	case TurnSourceTranscript:
-		return h.checkedTurnInterrupt(ctx, plan.info, turn)
+		return h.checkedTurnInterrupt(ctx, plan.info, turn, fence)
 	}
 	return h.noTurnSource(plan)
 }
 
 // checkedTurnInterrupt is the checked transcript path: StopTurnIf re-reads
 // the transcript under the session mutation lock and sends the family's
-// sequence only while turn is the open turn; then the transcript is read
-// until turn is no longer current, within turnInterruptSettle of the start.
-// The check's read is bounded by turnWatchReadBound: it holds the lock.
-func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpkg.Info, turn string) error {
+// sequence only while turn is the open turn, each key under fence when one
+// is set; then the transcript is read until turn is no longer current,
+// within turnInterruptSettle of the check passing. ctx bounds the wait for
+// the lock and the check, whose session reload and runtime probes are
+// further bounded by turnWatchReadBound: the check holds the lock. A check
+// that cannot finish within them refuses, nothing sent, with
+// runtime.ErrRuntimeUnavailable: an idle reading it could not take is no
+// proof the turn runs.
+func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpkg.Info, turn string, fence runtime.InputFence) error {
 	timing := h.turns.clock()
-	deadline := timing.now().Add(turnInterruptSettle)
+	var deadline time.Time
 	checked := false
-	err := h.manager.StopTurnIf(ctx, info.ID, func() error {
-		// The check runs under the session mutation lock: bound it, so a
-		// wedged session reload or idle probe cannot hold the lock.
+	unanswered := func(err error) error {
+		return fmt.Errorf("checking turn %q of %s before interrupting it: %w: %w", turn, info.SessionName, runtime.ErrRuntimeUnavailable, err)
+	}
+	stopCtx := ctx
+	if !fence.IsZero() {
+		stopCtx = runtime.WithInputFence(ctx, fence)
+	}
+	err := h.manager.StopTurnIf(stopCtx, info.ID, func() error {
+		if err := ctx.Err(); err != nil {
+			return unanswered(err)
+		}
 		readCtx, cancel := context.WithTimeout(ctx, turnWatchReadBound)
 		defer cancel()
-		hist, err := h.CurrentTurn(readCtx)
+		hist, err := h.boundedCurrentTurn(readCtx)
+		if ctxErr := readCtx.Err(); ctxErr != nil {
+			return unanswered(ctxErr)
+		}
 		if err != nil {
 			return err
 		}
@@ -648,12 +705,17 @@ func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpk
 			return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn, Current: hist.Current}
 		}
 		checked = true
+		deadline = timing.now().Add(turnInterruptSettle)
 		return nil
 	})
 	switch {
 	case err == nil && !checked:
 		// The stop found no turn to interrupt (a suspended row, a runtime
 		// not running) and sent nothing.
+		return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
+	case checked && errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// The runtime stopped between the check and the keys: nothing was
+		// sent, and no turn runs.
 		return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
 	case err != nil && !errors.Is(err, runtime.ErrTurnNotEnded):
 		return err
@@ -662,43 +724,40 @@ func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpk
 }
 
 // awaitTurnEnd reads the session's turns until turn is no longer current,
-// and returns nil then. It reads at least once, even past deadline, since
-// the family's own waits may have spent the bound; past deadline, or when
-// ctx ends, it returns an error wrapping runtime.ErrTurnNotEnded and the last
-// failure (cause, the family wait's, or a failed read). A failed read is
-// never taken as the end. Each read's session reload and runtime probes are
-// bounded by turnWatchReadBound, as a watcher read's are.
+// and returns nil then; a session that is gone or closed has ended its turn,
+// as a protocol runtime's WaitTurnEnded reads one it no longer hosts. It
+// reads at least once, even past deadline, since the family's own waits may
+// have spent the bound; past deadline, or when ctx ends, it returns
+// session.TurnNotEndedError: an error wrapping runtime.ErrTurnNotEnded and
+// no other sentinel, the last failure (cause, the family wait's, or a failed
+// read) in its text. A failed read is never taken as the end. Each read's
+// session reload and runtime probes are bounded by turnWatchReadBound, as a
+// watcher read's are.
 func (h *SessionHandle) awaitTurnEnd(ctx context.Context, name, turn string, deadline time.Time, timing turnTiming, cause error) error {
-	notEnded := func(last error) error {
-		switch {
-		case last == nil:
-			return fmt.Errorf("interrupted turn %q of %s: %w", turn, name, runtime.ErrTurnNotEnded)
-		case errors.Is(last, runtime.ErrTurnNotEnded):
-			return fmt.Errorf("interrupted turn %q of %s: %w", turn, name, last)
-		}
-		return fmt.Errorf("interrupted turn %q of %s: %w: %w", turn, name, runtime.ErrTurnNotEnded, last)
-	}
+	what := fmt.Sprintf("interrupted turn %q of %s", turn, name)
 	read := func() (runtime.TurnHistory, error) {
 		readCtx, cancel := context.WithTimeout(ctx, turnWatchReadBound)
 		defer cancel()
-		return h.CurrentTurn(readCtx)
+		return h.boundedCurrentTurn(readCtx)
 	}
 	last := cause
 	for {
 		hist, err := read()
-		if err == nil && hist.Current.TurnID != turn {
+		switch {
+		case err == nil && hist.Current.TurnID != turn:
 			return nil
-		}
-		if err != nil {
+		case errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+			return nil
+		case err != nil:
 			last = err
 		}
 		left := deadline.Sub(timing.now())
 		if left <= 0 {
-			return notEnded(last)
+			return sessionpkg.TurnNotEndedError(what, last)
 		}
 		select {
 		case <-ctx.Done():
-			return notEnded(ctx.Err())
+			return sessionpkg.TurnNotEndedError(what, ctx.Err())
 		case <-timing.after(min(turnSettlePoll, left)):
 		}
 	}

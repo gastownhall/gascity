@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -208,6 +209,191 @@ func TestManagerInterruptTurn(t *testing.T) {
 		}
 		if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
 			t.Fatalf("an unsupported interrupt sent %v", callMethods(sent))
+		}
+	})
+}
+
+// A checked stop waits for the session mutation lock only as long as ctx
+// allows: a lock still held when ctx ends is unknown, nothing sent, and the
+// check never runs.
+func TestStopTurnIfLockWaitHonorsCtx(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "codex", nil, runtime.TurnInterruptKeystroke)
+	held, release := make(chan struct{}), make(chan struct{})
+	go func() {
+		_ = WithSessionMutationLock(info.ID, func() error { close(held); <-release; return nil })
+	}()
+	<-held
+	defer close(release)
+	sp.Calls = nil
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := mgr.StopTurnIf(ctx, info.ID, func() error {
+		t.Error("the check ran without the lock")
+		return nil
+	})
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, ErrSessionMutationBusy) {
+		t.Fatalf("StopTurnIf(lock held past ctx) = %v, want ErrRuntimeUnavailable and ErrSessionMutationBusy", err)
+	}
+	if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+		t.Fatalf("sent %v without the lock", callMethods(sent))
+	}
+}
+
+// A runtime that stops between a passed check and the keys gets nothing:
+// the checked stop says so (runtime.ErrSessionNotFound, or under a fence
+// the miss), never ErrTurnNotEnded, which would claim the keys went out.
+func TestStopTurnIfRuntimeGoneAfterTheCheck(t *testing.T) {
+	for _, fenced := range []bool{false, true} {
+		t.Run(map[bool]string{false: "unfenced", true: "fenced"}[fenced], func(t *testing.T) {
+			mgr, sp, info, f := newFencedStopSession(t, "codex", nil, runtime.TurnInterruptKeystroke)
+			ctx := context.Background()
+			if fenced {
+				ctx = runtime.WithInputFence(ctx, f)
+			}
+			sp.Calls = nil
+			err := mgr.StopTurnIf(ctx, info.ID, func() error { return sp.Stop(info.SessionName) })
+			if errors.Is(err, runtime.ErrTurnNotEnded) || err == nil {
+				t.Fatalf("StopTurnIf(runtime gone after check) = %v, want a nothing-sent error", err)
+			}
+			if fenced && !errors.Is(err, runtime.ErrFenceMismatch) {
+				t.Fatalf("StopTurnIf(fenced, runtime gone) = %v, want the miss", err)
+			}
+			if !fenced && !errors.Is(err, runtime.ErrSessionNotFound) {
+				t.Fatalf("StopTurnIf(runtime gone) = %v, want ErrSessionNotFound", err)
+			}
+			if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+				t.Fatalf("sent %v to a runtime gone", callMethods(sent))
+			}
+		})
+	}
+}
+
+// failingInterrupt is a runtime whose unfenced Interrupt fails after the
+// check passed: unknown whether it reached the agent.
+type failingInterrupt struct{ runtime.FullFake }
+
+func (failingInterrupt) Interrupt(string) error { return errors.New("tmux: send-keys failed") }
+
+func TestStopTurnIfSendFailureAfterTheCheckIsUnknown(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr, info, _ := newFencedStopSessionOn(t, failingInterrupt{runtime.FullFake{Fake: sp}}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
+	err := mgr.StopTurnIf(context.Background(), info.ID, func() error { return nil })
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+		t.Fatalf("StopTurnIf(send fails) = %v, want ErrRuntimeUnavailable alone", err)
+	}
+	if countMethod(sp.SnapshotCalls(), "WaitForIdle") != 0 {
+		t.Fatalf("waited after a failed send: %v", callMethods(sp.SnapshotCalls()))
+	}
+	// StopTurn, unchecked, keeps its error as it was.
+	usp := runtime.NewFake()
+	umgr, uinfo, _ := newFencedStopSessionOn(t, failingInterrupt{runtime.FullFake{Fake: usp}}, usp, "claude", nil, runtime.TurnInterruptKeystroke)
+	if err := umgr.StopTurn(uinfo.ID); err == nil || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("StopTurn(send fails) = %v, want its send error unwrapped", err)
+	}
+}
+
+// A failed interrupt-boundary wait (Codex) is sent but not seen to end.
+func TestStopTurnBoundaryWaitFailureIsTurnNotEnded(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "codex", nil, runtime.TurnInterruptKeystroke)
+	sp.InterruptBoundaryErrors[info.SessionName] = errors.New("no boundary")
+	err := mgr.StopTurnIf(context.Background(), info.ID, func() error { return nil })
+	if !errors.Is(err, runtime.ErrTurnNotEnded) {
+		t.Fatalf("StopTurnIf with a failed boundary wait = %v, want ErrTurnNotEnded", err)
+	}
+	if countMethod(sp.SnapshotCalls(), "WaitForInterruptBoundary") == 0 {
+		t.Fatalf("calls = %v, want the boundary wait", callMethods(sp.SnapshotCalls()))
+	}
+}
+
+// lockProbingTurns is a turn-fenced runtime whose InterruptTurn tries the
+// session mutation lock, and whose WaitTurnEnded can fail with waitErr.
+type lockProbingTurns struct {
+	runtime.FullFake
+	id      string
+	lockErr *error
+	waitErr error
+}
+
+func (p lockProbingTurns) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	if p.lockErr != nil {
+		probe, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+		defer cancel()
+		*p.lockErr = WithSessionMutationLockContext(probe, p.id, func() error { return nil })
+	}
+	return p.FullFake.InterruptTurn(ctx, name, turnID)
+}
+
+func (p lockProbingTurns) WaitTurnEnded(ctx context.Context, name, turnID string, timeout time.Duration) (runtime.TurnState, error) {
+	if p.waitErr != nil {
+		return runtime.TurnState{}, p.waitErr
+	}
+	return p.FullFake.WaitTurnEnded(ctx, name, turnID, timeout)
+}
+
+func TestManagerInterruptTurnEdges(t *testing.T) {
+	t.Run("runs under the session mutation lock", func(t *testing.T) {
+		sp := runtime.NewFake()
+		var lockErr error
+		rt := &lockProbingTurns{FullFake: runtime.FullFake{Fake: sp}, lockErr: &lockErr}
+		mgr, info, _ := newFencedStopSessionOn(t, rt, sp, "claude", nil, runtime.TurnInterruptProtocol)
+		rt.id = info.ID
+		sp.TurnScripts = map[string][]string{info.SessionName: {"t1", ""}}
+		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); err != nil {
+			t.Fatalf("InterruptTurn = %v", err)
+		}
+		if !errors.Is(lockErr, ErrSessionMutationBusy) {
+			t.Fatalf("taking the lock during InterruptTurn = %v, want ErrSessionMutationBusy", lockErr)
+		}
+	})
+	t.Run("lock wait honors ctx", func(t *testing.T) {
+		mgr, sp, info := newProtocolTurnSession(t, "t1", "")
+		held, release := make(chan struct{}), make(chan struct{})
+		go func() {
+			_ = WithSessionMutationLock(info.ID, func() error { close(held); <-release; return nil })
+		}()
+		<-held
+		defer close(release)
+		ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+		defer cancel()
+		if _, err := mgr.InterruptTurn(ctx, info.ID, "t1"); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("InterruptTurn(lock held past ctx) = %v, want ErrRuntimeUnavailable", err)
+		}
+		if got := turnFenceCalls(sp); len(got) != 0 {
+			t.Fatalf("calls without the lock: %v", got)
+		}
+	})
+	t.Run("a backend without the fence is unsupported", func(t *testing.T) {
+		mgr, sp, info := newProtocolTurnSession(t, "t1")
+		sp.InterruptTurnErrors = map[string]error{info.SessionName: runtime.ErrInteractionUnsupported}
+		if _, err := mgr.InterruptTurn(context.Background(), info.ID, "t1"); !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+			t.Fatalf("InterruptTurn(backend unsupported) = %v, want ErrTurnIdentityUnsupported", err)
+		}
+	})
+	t.Run("a gone runtime is not current", func(t *testing.T) {
+		mgr, sp, info := newProtocolTurnSession(t, "t1")
+		sp.TurnReadErrors = map[string][]error{info.SessionName: {runtime.ErrSessionNotFound}}
+		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		var nc *runtime.TurnNotCurrentError
+		if !errors.As(err, &nc) || errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("InterruptTurn(runtime gone) = %v, want *TurnNotCurrentError", err)
+		}
+	})
+	t.Run("gone after a failed attempt is unknown", func(t *testing.T) {
+		mgr, sp, info := newProtocolTurnSession(t, "t1")
+		sp.InterruptTurnErrors = map[string]error{info.SessionName: fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound)}
+		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("InterruptTurn(gone after an attempt) = %v, want ErrRuntimeUnavailable", err)
+		}
+	})
+	t.Run("a failed wait is not ended, and only that", func(t *testing.T) {
+		sp := runtime.NewFake()
+		rt := lockProbingTurns{FullFake: runtime.FullFake{Fake: sp}, waitErr: fmt.Errorf("bridge: %w", runtime.ErrRuntimeUnavailable)}
+		mgr, info, _ := newFencedStopSessionOn(t, rt, sp, "claude", nil, runtime.TurnInterruptProtocol)
+		sp.TurnScripts = map[string][]string{info.SessionName: {"t1"}}
+		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+		if !errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("InterruptTurn(wait fails) = %v, want ErrTurnNotEnded alone: it was sent", err)
 		}
 	})
 }
