@@ -831,3 +831,41 @@ func TestDecideGenerationClearsUnfinished(t *testing.T) {
 		t.Fatalf("RecycledGen = %d, want the recycle's generation 5", d.Next.RecycledGen)
 	}
 }
+
+// RecycledGen outlives the pass that set it: every later cell carries it, a
+// trigger recycle records it too, and a cell that differs only in it, or in
+// an entry's refusals, is a different cell (a write).
+func TestDecideKeepsRecycledGen(t *testing.T) {
+	prev := rec(4, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 1, Last: t0})
+	prev.RecycledGen = 3
+	d := Decide(prev, startedBy1(quiet(t0.Add(time.Minute), 4, claim("s")), "s", SrcAgent), p)
+	if d.Next.RecycledGen != 3 {
+		t.Fatalf("RecycledGen = %d, want 3 carried", d.Next.RecycledGen)
+	}
+	tr := rec(6, Entry{Key: key("t"), Kind: KindTrigger, Rung: RungAssigned, Since: t0, Attempts: 3, Last: t0})
+	d = Decide(tr, quiet(t0.Add(time.Hour), 6, trig("t")), p)
+	if d.Next.RecycledGen != 6 {
+		t.Fatalf("trigger recycle: RecycledGen = %d, want 6", d.Next.RecycledGen)
+	}
+	a := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0})
+	b := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0})
+	b.RecycledGen = 1
+	if sameRecord(a, b) {
+		t.Fatal("cells differing in RecycledGen compare equal")
+	}
+	c := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Refused: 1})
+	if sameRecord(a, c) {
+		t.Fatal("cells differing in an entry's refusals compare equal")
+	}
+}
+
+// Progress the seat made since its last nudge ends a run of refusals too.
+func TestDecideProgressClearsRefusals(t *testing.T) {
+	last := t0.Add(10 * time.Minute)
+	prev := rec(1, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Paused: 2, Refused: 2, Last: last})
+	o := quiet(last.Add(30*time.Minute), 1, claim("s"))
+	o.Quiet, o.LastActivity = Quiet{State: NotQuiet}, last.Add(DefaultProgressReset)
+	if e := entry(t, Decide(prev, o, p), "s"); e.Refused != 0 {
+		t.Fatalf("entry %+v, want refusals cleared by progress", e)
+	}
+}
