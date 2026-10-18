@@ -1125,6 +1125,11 @@ func laneCallName(call *ast.CallExpr) string {
 // the live executor delivers it to the fake runtime.
 func TestStartConversationLaneHostDelivers(t *testing.T) {
 	f := newLaneFixture(t)
+	// The started host reads the wall clock, so the op is proposed on it
+	// too; a fixed fixture time would expire before the host starts it.
+	f.clk.mu.Lock()
+	f.clk.now = time.Now().UTC()
+	f.clk.mu.Unlock()
 	f.cfg.Ops.Authoritative = []string{"message"}
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
