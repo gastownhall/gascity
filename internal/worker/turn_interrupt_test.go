@@ -647,8 +647,10 @@ func TestTurnInterruptSettle(t *testing.T) {
 		}
 	})
 	t.Run("the bound starts when the check passes", func(t *testing.T) {
-		// The lock wait spends the clock past 15 s: the settle still gets
-		// its full bound after the check, and sees the end on a later poll.
+		// Time spent before the check passes (the lock wait, the check's
+		// own reads) spends the clock past 15 s: the settle still gets its
+		// full bound after the check, and sees the end on a later poll. The
+		// clock's first reading is taken, then jumps.
 		s, _, timing, clock, path := codexSettleSession(t, nil)
 		polls := 0
 		after := timing.after
@@ -658,17 +660,16 @@ func TestTurnInterruptSettle(t *testing.T) {
 			}
 			return after(d)
 		}
-		held, release := make(chan struct{}), make(chan struct{})
-		go func() {
-			_ = sessionpkg.WithSessionMutationLock(s.info.ID, func() error { close(held); <-release; return nil })
-		}()
-		<-held
-		done := make(chan error, 1)
-		go func() { done <- s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}) }()
-		time.Sleep(50 * time.Millisecond)
-		clock.advance(2 * turnInterruptSettle)
-		close(release)
-		if err := <-done; err != nil {
+		jumped := false
+		timing.now = func() time.Time {
+			now := clock.now()
+			if !jumped {
+				jumped = true
+				clock.advance(2 * turnInterruptSettle)
+			}
+			return now
+		}
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
 			t.Fatalf("Interrupt = %v, want nil: the end came within the bound after the check", err)
 		}
 		if polls < 3 {
