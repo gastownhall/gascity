@@ -150,9 +150,17 @@ func (l *externalReadsLane) clearLadderReleases(store beads.Store, raw []beads.B
 // outstanding is each seat's work (§6.2), by session ID, from today's three
 // predicates: its own trigger, open and unclaimed; exactly one ready
 // continuation pinned to it; and the in_progress claims it holds under a
-// current identity.
+// current identity. Work on a dispatch hold (hold:mayor, hold:external) is
+// not the ladder's (owner ruling 2026-10-18): it stays with its agent,
+// unnudged, until the hold lifts, and then the ladder takes it up afresh.
 func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][]ladderTarget {
 	out := make(map[string][]ladderTarget)
+	held := make(map[string]bool)
+	for _, b := range slices.Concat(s.AssignedWork, s.ReadyRouted) {
+		if beadmeta.HasDispatchHold(b.Labels) {
+			held[b.ID] = true
+		}
+	}
 	claimWork := slices.Concat(s.AssignedWork, s.ReadyRouted)
 	refs := make([]string, len(claimWork))
 	copy(refs, s.AssignedStoreRefs)
@@ -174,20 +182,23 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 		if key, ok := p.trigger(triggers, row); ok {
 			ts = append(ts, ladderTarget{work: workladder.Work{Key: key, Kind: workladder.KindTrigger}, recheck: p.triggerRecheck(key.Bead)})
 		}
-		if cs := conts.bySessionID[row.ID]; len(cs) == 1 && !conts.holdBySessionID[row.ID] {
+		if cs := conts.bySessionID[row.ID]; len(cs) == 1 && !conts.holdBySessionID[row.ID] && !held[cs[0].WorkBeadID] {
 			c := cs[0]
 			target := backstopTarget{ID: c.WorkBeadID, RootID: c.RootBeadID, StoreRef: c.StoreRef, Assignee: c.Assignee, Store: c.Store}
 			ts = append(ts, ladderTarget{
 				work:    workladder.Work{Key: workladder.ClaimKey{Store: normalizeIdleClaimStoreRef(c.StoreRef), Bead: c.WorkBeadID}, Kind: workladder.KindContinuation},
-				recheck: func() backstopResolution { return poolContinuationBackstop{}.revalidate(target) },
+				recheck: func() backstopResolution { return unlessHeld(target, poolContinuationBackstop{}.revalidate(target)) },
 			})
 		}
 		for _, c := range claims.forIdentities(currentSessionAssigneeIdentities(row)) {
+			if held[c.BeadID] {
+				continue
+			}
 			target := backstopTarget{ID: c.BeadID, Assignee: c.Assignee, Store: c.Store}
 			ts = append(ts, ladderTarget{
 				work:         workladder.Work{Key: workladder.ClaimKey{Store: c.StoreRef, Bead: c.BeadID}, Kind: workladder.KindClaim},
 				claimSession: c.SessionID != "" && c.SessionID == strings.TrimSpace(row.ID),
-				recheck:      func() backstopResolution { return poolExecutionBackstop{}.revalidate(target) },
+				recheck:      func() backstopResolution { return unlessHeld(target, poolExecutionBackstop{}.revalidate(target)) },
 			})
 		}
 		if len(ts) > 0 {
@@ -214,7 +225,7 @@ func (p *ladderPass) trigger(snap idleClaimWorkSnapshot, row beads.Bead) (workla
 		return workladder.ClaimKey{}, false
 	}
 	w, ok := snap.byScope[key]
-	if !ok || !isUnclaimedTrigger(p.cfg, w) {
+	if !ok || !isUnclaimedTrigger(p.cfg, w) || beadmeta.HasDispatchHold(w.Labels) {
 		return workladder.ClaimKey{}, false
 	}
 	return workladder.ClaimKey{Store: key.StoreRef, Bead: id}, true
@@ -229,11 +240,32 @@ func (p *ladderPass) triggerRecheck(id string) func() backstopResolution {
 		switch {
 		case err != nil:
 			return backstopResolutionHold
-		case !found || !isUnclaimedTrigger(p.cfg, b):
+		case !found || !isUnclaimedTrigger(p.cfg, b) || beadmeta.HasDispatchHold(b.Labels):
 			return backstopResolutionClear
 		}
 		return backstopResolutionOutstanding
 	}
+}
+
+// unlessHeld is res, a live re-read's verdict on target, except that work a
+// dispatch hold parks is clear: not the ladder's while the hold stands. The
+// hold is read live, as res was.
+func unlessHeld(target backstopTarget, res backstopResolution) backstopResolution {
+	if res != backstopResolutionOutstanding || target.Store == nil {
+		return res
+	}
+	live := beads.HandlesFor(target.Store).Live
+	if live == nil {
+		return backstopResolutionHold
+	}
+	b, err := live.Get(target.ID)
+	switch {
+	case err != nil:
+		return backstopResolutionHold
+	case beadmeta.HasDispatchHold(b.Labels):
+		return backstopResolutionClear
+	}
+	return res
 }
 
 // carriedRecheck re-reads, live through the store that owns it, work the
@@ -249,7 +281,7 @@ func (p *ladderPass) carriedRecheck(row beads.Bead, w workladder.Work) func() ba
 		switch {
 		case err != nil:
 			return backstopResolutionHold
-		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)):
+		case !found || !slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee)) || beadmeta.HasDispatchHold(b.Labels):
 			return backstopResolutionClear
 		}
 		status := "in_progress"
@@ -574,7 +606,7 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
 		switch a := a.(type) {
 		case workladder.Nudge:
 			if !released[a.Key] {
-				p.nudge(row, a, gen)
+				p.nudge(row, a, gen, refusedOf(d.Next, a.Key))
 			}
 		case workladder.Recycle:
 			p.event(events.WorkRecycleRequested, row, a.Key, gen, workLadderEventFields{Reason: recycleReason(a)})
@@ -589,6 +621,14 @@ func (p *ladderPass) act(row beads.Bead, d workladder.Decision) {
 	}
 }
 
+// refusedOf is the refusals r records for key's entry.
+func refusedOf(r workladder.Record, key workladder.ClaimKey) int {
+	if i := slices.IndexFunc(r.Entries, func(e workladder.Entry) bool { return e.Key == key }); i >= 0 {
+		return r.Entries[i].Refused
+	}
+	return 0
+}
+
 func recycleReason(r workladder.Recycle) string {
 	if r.KeepClaim {
 		return "started_unanswered"
@@ -601,20 +641,23 @@ func recycleReason(r workladder.Recycle) string {
 // runtime is unavailable, or that the seat is at a prompt only a human can
 // answer (a permission prompt), is re-counted as paused: neither is the
 // agent ignoring its work.
-func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64) {
+func (p *ladderPass) nudge(row beads.Bead, n workladder.Nudge, gen int64, refused int) {
 	text := p.nudgeText(row, n)
 	fields := workLadderEventFields{Kind: n.Kind.String(), Rung: n.Rung.String(), Attempt: n.Attempt, Paused: n.Paused}
 	err := ladderDeliver(p.env.SP, strings.TrimSpace(row.Metadata["session_name"]), text)
 	if err != nil {
 		fields.Reason = err.Error()
 		fmt.Fprintf(p.l.stderr, "work-ladder: nudging %s about %s failed: %v\n", row.ID, n.Key.Bead, err) //nolint:errcheck // best-effort stderr
-		if (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && !n.Paused {
-			p.repause(row.ID, n.Key, n.Attempt)
-		}
 		p.event(events.WorkNudgeFailed, row, n.Key, gen, fields)
+		if (errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrPendingInteraction)) && !n.Paused && p.refused(row.ID, n) {
+			p.event(events.WorkEscalated, row, n.Key, gen, workLadderEventFields{Reason: workladder.AlertNudgeRefused})
+		}
 		return
 	}
 	p.event(events.WorkNudged, row, n.Key, gen, fields)
+	if refused > 0 {
+		p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) { return workladder.NudgeTaken(r, n.Key) })
+	}
 }
 
 // ladderDeliver is the ladder's one delivery seam: today's nudge call
@@ -644,25 +687,36 @@ func (p *ladderPass) nudgeText(row beads.Bead, n workladder.Nudge) string {
 	}
 }
 
-// repause re-counts a nudge attempt the runtime could not take as paused, by
-// CAS, while the cell still holds that attempt.
-func (p *ladderPass) repause(id string, key workladder.ClaimKey, attempt int) {
+// refused records, by CAS, that the seat could not take counted nudge n (a
+// permission prompt, the runtime unavailable): the attempt is re-counted as
+// paused and the entry backs off (workladder.NudgeRefused). It reports
+// whether this refusal is the one to raise the nudge_refused alert for.
+func (p *ladderPass) refused(id string, n workladder.Nudge) bool {
+	var alert bool
+	p.settle(id, func(r workladder.Record) (workladder.Record, bool) {
+		out, a, ok := workladder.NudgeRefused(r, n.Key, n.Attempt, p.now)
+		alert = a
+		return out, ok
+	})
+	return alert
+}
+
+// settle rewrites row id's cell by CAS with change, on a fresh read; change
+// reports false to write nothing.
+func (p *ladderPass) settle(id string, change func(workladder.Record) (workladder.Record, bool)) {
 	_, err := p.front.UpdateRowFenced(id, workLadderCommitAttempts, func(fresh session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
 		r, err := workladder.DecodeLadder(resp.Metadata[session.WorkLadderKey])
 		if err != nil || fresh.Closed {
 			return session.RowPatch{}, false
 		}
-		i := slices.IndexFunc(r.Entries, func(e workladder.Entry) bool { return e.Key == key })
-		if i < 0 || r.Entries[i].Attempts != attempt || !r.Entries[i].Last.Equal(p.now) {
+		r, ok := change(r)
+		if !ok {
 			return session.RowPatch{}, false
 		}
-		r.Entries = slices.Clone(r.Entries)
-		r.Entries[i].Attempts--
-		r.Entries[i].Paused++
 		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(r)}}, true
 	})
 	if err != nil {
-		fmt.Fprintf(p.l.stderr, "work-ladder: re-counting %s's attempt on %s as paused: %v\n", id, key.Bead, err) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(p.l.stderr, "work-ladder: settling %s's cell: %v\n", id, err) //nolint:errcheck // best-effort stderr
 	}
 }
 
@@ -694,8 +748,12 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 	switch {
 	case err != nil:
 		outcome, why = "failed", err.Error()
+	case len(hits) == 0 && p.claimGone(row, key.Bead):
+		outcome = "gone" // finished or moved since the snapshot: nothing to release, nothing to report
 	case len(hits) != 1:
 		outcome, why = "kept", fmt.Sprintf("%d live hits", len(hits))
+	case beadmeta.HasDispatchHold(hits[0].bead.Labels):
+		outcome = "gone" // parked on a hold since the snapshot: not the ladder's
 	case strings.TrimSpace(hits[0].bead.Metadata[beadmeta.SessionIDMetadataKey]) == strings.TrimSpace(row.ID):
 		outcome = "started"
 	default:
@@ -719,29 +777,32 @@ func (p *ladderPass) release(row beads.Bead, key workladder.ClaimKey, gen int64)
 		fmt.Fprintf(p.l.stderr, "work-ladder: releasing %s's claim %s: %s\n", row.ID, key.Bead, fields.Reason) //nolint:errcheck // best-effort stderr
 		p.event(events.WorkReleaseUnfinished, row, key, gen, fields)
 	}
-	_, err = p.front.UpdateRowFenced(row.ID, workLadderCommitAttempts, func(_ session.Info, resp session.PersistedResponse) (session.RowPatch, bool) {
-		r, err := workladder.DecodeLadder(resp.Metadata[session.WorkLadderKey])
-		if err != nil {
-			return session.RowPatch{}, false
-		}
-		var ok bool
+	p.settle(row.ID, func(r workladder.Record) (workladder.Record, bool) {
 		switch outcome {
-		case "released":
-			r, ok = workladder.ClearRelease(r, key, gen)
+		case "released", "gone":
+			return workladder.ClearRelease(r, key, gen)
 		case "started":
-			r, ok = workladder.ReleaseFoundStarted(r, key, gen, workladder.SrcClaimSession, p.now)
+			return workladder.ReleaseFoundStarted(r, key, gen, workladder.SrcClaimSession, p.now)
 		default:
-			r, ok = workladder.ReleaseUnfinished(r, key, gen, p.now)
+			return workladder.ReleaseUnfinished(r, key, gen, p.now)
 		}
-		if !ok {
-			return session.RowPatch{}, false
-		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkLadderKey: workladder.EncodeLadder(r)}}, true
 	})
-	if err != nil {
-		fmt.Fprintf(p.l.stderr, "work-ladder: settling %s's release of %s: %v\n", row.ID, key.Bead, err) //nolint:errcheck // best-effort stderr
-	}
 	return outcome == "released"
+}
+
+// claimGone reports, from a live read, that bead is no longer an
+// in_progress claim of row's seat (closed, released, or moved since the
+// snapshot). A read that fails is not proof.
+func (p *ladderPass) claimGone(row beads.Bead, bead string) bool {
+	b, found, err := p.env.WorkLegs.readLive(bead)
+	switch {
+	case err != nil:
+		return false
+	case !found:
+		return true
+	}
+	return !strings.EqualFold(strings.TrimSpace(b.Status), "in_progress") ||
+		!slices.Contains(currentSessionAssigneeIdentities(row), strings.TrimSpace(b.Assignee))
 }
 
 // workLadderEventFields are the parts of a work.* event's payload beyond the

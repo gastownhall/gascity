@@ -1245,3 +1245,131 @@ func TestWorkLadderAndTheHookShareTheCells(t *testing.T) {
 		t.Fatal("the hook reads a cell the ladder cannot")
 	}
 }
+
+// Owner ruling 2026-10-18: work on a dispatch hold is not the ladder's. A
+// claim the agent parked (hold:external) on a quiet seat gets no nudge, no
+// recycle and no release for as long as the hold stands; once it lifts, the
+// ladder takes the claim up afresh, from its grace.
+func TestWorkLadderIgnoresHeldWork(t *testing.T) {
+	for _, label := range []string{beadmeta.HoldExternalLabel, beadmeta.HoldMayorLabel} {
+		t.Run(label, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("parked")
+			if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{label}, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+				t.Fatal(err)
+			}
+			c.run(8*time.Hour, 30*time.Second, func() {
+				if r, _ := workladder.DecodeLadder(c.row().Metadata[session.WorkLadderKey]); len(r.Entries) != 0 {
+					t.Fatalf("at %v the ladder paces held work: %s", c.now.Sub(c.start), c.row().Metadata[session.WorkLadderKey])
+				}
+			})
+			if len(c.nudgedAt) != 0 || len(c.posted) != 0 || len(c.events(events.WorkReleased)) != 0 || len(escalations(c)) != 0 {
+				t.Fatalf("held claim: nudges %v, recycles %+v, escalations %v", c.nudgedAt, c.posted, escalations(c))
+			}
+			if b, _ := c.work.Get(id); b.Status != "in_progress" || b.Assignee != c.seat {
+				t.Fatalf("held claim %q %q, want it left with its agent", b.Status, b.Assignee)
+			}
+			if err := c.work.Update(id, beads.UpdateOpts{RemoveLabels: []string{label}}); err != nil {
+				t.Fatal(err)
+			}
+			lifted := c.now
+			c.run(5*time.Minute, 30*time.Second, nil)
+			if len(c.nudgedAt) == 0 || c.nudgedAt[0] != lifted.Add(workladder.DefaultGrace).Sub(c.start) {
+				t.Fatalf("after the hold lifted at %v: nudges %v, want the first a grace later", lifted.Sub(c.start), c.nudgedAt)
+			}
+		})
+	}
+}
+
+// A hold placed between the snapshot and the nudge is read live: the held
+// work is dropped, not nudged; a held trigger is not the ladder's either.
+func TestWorkLadderRereadsTheHold(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("parked after the snapshot")
+	c.lane.summary = func() *allocSummary {
+		s := c.summary()
+		for i := range s.AssignedWork {
+			s.AssignedWork[i].Labels = nil // the snapshot predates the hold
+		}
+		return s
+	}
+	c.run(time.Minute, 30*time.Second, nil)
+	if err := c.work.Update(id, beads.UpdateOpts{Labels: []string{beadmeta.HoldExternalLabel}}); err != nil {
+		t.Fatal(err)
+	}
+	c.run(time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v about a claim parked since the snapshot", c.nudgedAt)
+	}
+
+	tc := newLadderCity(t)
+	b, err := tc.work.Create(beads.Bead{Title: "trigger", Type: "task", Labels: []string{beadmeta.HoldMayorLabel}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tc.trigger = b.ID
+	tc.lane.summary = func() *allocSummary {
+		s := tc.summary()
+		s.ReadyRouted = []beads.Bead{{ID: b.ID, Status: "open", Labels: []string{beadmeta.HoldMayorLabel}}}
+		return s
+	}
+	tc.setRow(map[string]string{beadmeta.TriggerBeadIDMetadataKey: b.ID})
+	tc.run(time.Hour, 30*time.Second, func() {
+		if r, _ := workladder.DecodeLadder(tc.row().Metadata[session.WorkLadderKey]); len(r.Entries) != 0 {
+			t.Fatalf("the ladder paces a held trigger: %s", tc.row().Metadata[session.WorkLadderKey])
+		}
+	})
+	if len(tc.nudgedAt) != 0 || len(tc.posted) != 0 {
+		t.Fatalf("held trigger: nudges %v, recycles %+v", tc.nudgedAt, tc.posted)
+	}
+}
+
+// A seat stuck at a permission prompt refuses every nudge: it is retried no
+// more often than every 10 minutes, its count does not move, and one
+// nudge_refused alert is raised.
+func TestWorkLadderBacksOffARefusingSeat(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("waiting on a permission prompt")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.sp.NudgeErrors = map[string]error{ladderSeatName: fmt.Errorf("prompt up: %w", runtime.ErrPendingInteraction)}
+	c.run(6*time.Hour, 30*time.Second, nil)
+	calls := c.sp.CountCalls("Nudge", ladderSeatName)
+	if calls > 6*6+2 {
+		t.Fatalf("%d delivery attempts in 6h", calls)
+	}
+	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertNudgeRefused}) {
+		t.Fatalf("escalations %v, want one nudge_refused", got)
+	}
+	if e := c.entry(id); e.Attempts != 0 || len(c.posted) != 0 {
+		t.Fatalf("entry %+v, recycles %+v: refusals moved it toward a recycle", e, c.posted)
+	}
+	c.sp.NudgeErrors = nil
+	c.run(15*time.Minute, 30*time.Second, nil)
+	if e := c.entry(id); e.Refused != 0 || e.Attempts == 0 {
+		t.Fatalf("entry %+v after a taken nudge, want the refusals over and the count moving", e)
+	}
+}
+
+// A claim closed between the snapshot and the release's live read is not a
+// release that failed: no work.release_unfinished, and the release clears.
+func TestWorkLadderReleaseOfAClosedClaimIsSilent(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("finished just now")
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
+		Key: workladder.ClaimKey{Store: "city", Bead: id}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
+		Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
+	}}})})
+	snap := c.summary()
+	c.lane.summary = func() *allocSummary { snap.At = c.now; return snap }
+	closed := "closed"
+	if err := c.work.Update(id, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	c.pass()
+	if n := len(c.events(events.WorkReleaseUnfinished)); n != 0 {
+		t.Fatalf("work.release_unfinished = %d for a claim that closed", n)
+	}
+	if c.cell().Release != nil || c.entry(id).Unreleased {
+		t.Fatalf("cell %s: want the release cleared, nothing unfinished", c.row().Metadata[session.WorkLadderKey])
+	}
+}
