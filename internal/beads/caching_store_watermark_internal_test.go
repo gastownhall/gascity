@@ -380,8 +380,8 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 }
 
 // TestCachingStoreRevisionMoved pins the revision half of the install
-// predicate: a row still at expectedRevision is a pre-write read, and zero on
-// either side carries no usable token.
+// predicate: a row still at expectedRevision is a pre-write read, and zero is
+// compared exactly, like any revision.
 func TestCachingStoreRevisionMoved(t *testing.T) {
 	t.Parallel()
 
@@ -393,8 +393,9 @@ func TestCachingStoreRevisionMoved(t *testing.T) {
 	}{
 		{"moved", 8, 7, true},
 		{"unmoved", 7, 7, false},
-		{"no_expected_token", 7, 0, true},
-		{"no_row_token", 0, 7, true},
+		{"moved_off_zero", 7, 0, true},
+		{"moved_to_zero", 0, 7, true},
+		{"unmoved_at_zero", 0, 0, false},
 	}
 	for _, tc := range cases {
 		if got := revisionMoved(Bead{Revision: tc.revision}, tc.expected); got != tc.want {
@@ -2161,6 +2162,106 @@ func TestCachingStoreCloseIfMatchRejectsLaggedRowAtExpectedRevision(t *testing.T
 	if !dirty {
 		t.Fatal("a lagged refetch at expectedRevision was installed")
 	}
+}
+
+// TestCachingStoreFencesAtRevisionZero pins the install predicate on a row
+// stored at revision 0, a real token: a fence at 0 lands once and installs the
+// moved row, whether or not the cache held the row; an idempotent write the
+// backend did not re-stamp installs from a row clean at 0; and a refetch still
+// at 0 for a row the cache did not hold is the lagged pre-write read, left for
+// the next Get.
+func TestCachingStoreFencesAtRevisionZero(t *testing.T) {
+	t.Parallel()
+
+	seeded := func(t *testing.T) (*casBackingStore, *CachingStore) {
+		t.Helper()
+		backing := &casBackingStore{Store: NewMemStoreFrom(1, []Bead{{ID: "gc-1", Title: "zero", Status: "open", Type: "task"}}, nil)}
+		if got, err := backing.Store.Get("gc-1"); err != nil || got.Revision != 0 {
+			t.Fatalf("seeded row at revision %d (%v), want stored at 0", got.Revision, err)
+		}
+		return backing, newConditionalCacheForTest(t, backing)
+	}
+	// uncache drops the row from the cache, dirty mark included: a row the
+	// cache does not hold, which the clean-row exception cannot vouch for.
+	uncache := func(cache *CachingStore) {
+		cache.mu.Lock()
+		defer cache.mu.Unlock()
+		delete(cache.beads, "gc-1")
+		delete(cache.deps, "gc-1")
+		delete(cache.dirty, "gc-1")
+	}
+	dirty := func(cache *CachingStore) bool {
+		cache.mu.RLock()
+		defer cache.mu.RUnlock()
+		_, ok := cache.dirty["gc-1"]
+		return ok
+	}
+	for _, tc := range []struct {
+		name string
+		cold bool
+	}{{"lands_once_on_a_cached_row", false}, {"lands_once_on_a_cold_row", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+			_, cache := seeded(t)
+			if tc.cold {
+				uncache(cache)
+			}
+			title := "fenced"
+			if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &title}); err != nil {
+				t.Fatalf("UpdateIfMatch at revision 0: %v", err)
+			}
+			if dirty(cache) {
+				t.Fatal("the landed fence's moved row was not installed")
+			}
+			got, err := cache.Get("gc-1")
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if got.Title != title || got.Revision == 0 {
+				t.Fatalf("row %q at revision %d, want the fenced write's moved row", got.Title, got.Revision)
+			}
+			if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &title}); !IsPreconditionFailed(err) {
+				t.Fatalf("UpdateIfMatch again at revision 0 = %v, want a precondition failure", err)
+			}
+		})
+	}
+	t.Run("idempotent_from_clean_installs", func(t *testing.T) {
+		t.Parallel()
+		backing, cache := seeded(t)
+		backing.noopKeepsRevision = true
+		title := "zero"
+		if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("UpdateIfMatch at revision 0: %v", err)
+		}
+		if after, _ := backing.Store.Get("gc-1"); after.Revision != 0 {
+			t.Fatal("the backing re-stamped the no-op write; the fixture is wrong")
+		}
+		if dirty(cache) {
+			t.Fatal("an idempotent write from a row clean at revision 0 was not installed")
+		}
+	})
+	t.Run("lagged_refetch_of_a_cold_row_stays_dirty", func(t *testing.T) {
+		t.Parallel()
+		backing, cache := seeded(t)
+		uncache(cache)
+		pre, err := backing.Store.Get("gc-1")
+		if err != nil {
+			t.Fatalf("backing Get: %v", err)
+		}
+		backing.staleNextGet = &pre
+		if err := cache.UpdateIfMatch("gc-1", 0, UpdateOpts{Title: &pre.Title}); err != nil {
+			t.Fatalf("UpdateIfMatch at revision 0: %v", err)
+		}
+		if after, _ := backing.Store.Get("gc-1"); after.Revision == 0 {
+			t.Fatal("the backing kept revision 0 under a real write; the fixture is wrong")
+		}
+		if !dirty(cache) {
+			t.Fatal("a lagged refetch still at revision 0 was installed")
+		}
+		if got, err := cache.Get("gc-1"); err != nil || got.Revision == 0 {
+			t.Fatalf("Get = revision %d (%v), want the backing's moved row", got.Revision, err)
+		}
+	})
 }
 
 // TestCachingStoreConditionalEvictionPriorCoversEveryFence pins that the

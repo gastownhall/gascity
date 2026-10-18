@@ -465,9 +465,11 @@ func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEvic
 // revisionMoved reports whether b can be the row a successful fenced write
 // against expectedRevision committed: a store with revisions mints a fresh one
 // on every whole-row write, so a row still at expectedRevision is a lagged
-// pre-write read. Zero on either side means no usable token.
+// pre-write read. Zero is a revision like any other, compared exactly: a fence
+// at 0 landed on a row never rewritten, and a refetch still at 0 is the
+// pre-write row.
 func revisionMoved(b Bead, expectedRevision int64) bool {
-	return expectedRevision == 0 || b.Revision == 0 || b.Revision != expectedRevision
+	return b.Revision != expectedRevision
 }
 
 // updateReflected reports whether b carries every field opts writes.

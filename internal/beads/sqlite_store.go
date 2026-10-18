@@ -770,10 +770,10 @@ func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 }
 
 // insertRevision is the revision upsertBeadTx inserts a new row at: 1, as on
-// MemStore, so a row nothing has written since its insert still carries a
-// usable token (zero means "no usable token" under the REVISION CONTRACT on
-// ConditionalWriter); 0 on a layout with no revision column, whose reads
-// carry none.
+// MemStore, so an insert mints a nonzero token as every other write does (a
+// row at 0 is one an older binary inserted, whose 0 is a real token under the
+// REVISION CONTRACT on ConditionalWriter); 0 on a layout with no revision
+// column, whose reads carry none.
 func (s *SQLiteStore) insertRevision() int64 {
 	if !s.hasRevisionColumn {
 		return 0

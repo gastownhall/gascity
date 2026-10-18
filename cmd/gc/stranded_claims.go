@@ -1,7 +1,6 @@
 package main
 
 import (
-	"fmt"
 	"slices"
 	"strings"
 	"time"
@@ -117,12 +116,12 @@ func clearStrandedStamp(store beads.Store, id, seat string, reopened bool) {
 // row, by one write fenced on that row's revision. The revision is used as
 // read, 0 included: 0 is a real revision (a native row_lock never rewritten,
 // a SQLite row an older binary inserted and nothing has written since, and
-// bd's --if-revision 0 compares exactly), never "no token". With conditional
-// writes off it writes after the read, the resolver's legacy path. A store
-// asked to fence that cannot (auto that degraded, which the resolver reports
-// with a diagnostic, or require, which it refuses) writes nothing: auto
-// refuses with beads.ErrConditionalWriteUnsupported. A nil patch writes
-// nothing.
+// bd's --if-revision 0 compares exactly), never "no token". With no
+// conditional writer (conditional writes off, or auto on a store that cannot
+// fence, a degrade the resolver reports) it writes after the read, the
+// resolver's legacy path: the detector lists only stamped claims, so a stamp
+// refused for want of a fence would end its episode unseen. Require on such a
+// store refuses. A nil patch writes nothing.
 func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[string]string) error {
 	b, err := liveBeadRead(store, id)
 	if err != nil {
@@ -132,12 +131,10 @@ func fencedClaimMeta(store beads.Store, id string, decide func(beads.Bead) map[s
 	if len(patch) == 0 {
 		return nil
 	}
-	writer, diag, err := beads.ResolveConditionalWriter(store)
+	writer, _, err := beads.ResolveConditionalWriter(store)
 	switch {
 	case err != nil:
 		return err
-	case writer == nil && diag != nil:
-		return fmt.Errorf("claim %s: %w: %s", id, beads.ErrConditionalWriteUnsupported, diag.PreflightReason)
 	case writer == nil:
 		return store.SetMetadataBatch(id, patch)
 	}
