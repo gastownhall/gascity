@@ -546,6 +546,66 @@ func TestSessionContentOpsAutoOneKeyIsOneOpAcrossPathsAndSpellings(t *testing.T)
 	}
 }
 
+// request_id rule 8 (engdocs/design/async-request-result.md): the
+// Idempotency-Key cache sits in front of the front door in every mode, so a
+// retry it answers (the same endpoint and spelling) gets the first 202 though
+// the session now waits on a pending interaction, while a retry it misses
+// (another endpoint or spelling) is refused 409 before the stored op is
+// consulted. Once the interaction clears, a recording mode replays the
+// stored op, with no second delivery.
+func TestSessionContentOpsFrontDoorRunsWhenTheCacheMisses(t *testing.T) {
+	for _, mode := range []string{"off", "auto"} {
+		t.Run(mode, func(t *testing.T) {
+			e := newOpsEnv(t, mode)
+			info := e.session(t, "Front door")
+			path, body := "/session/"+info.ID+"/submit", `{"message":"hi"}`
+			rec := e.post(t, path, "key-f", body)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("first status %d: %s", rec.Code, rec.Body.String())
+			}
+			first := decodeAsyncAccepted(t, rec.Body)
+			waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+			e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{
+				RequestID: "approval-1", Kind: "approval", Prompt: "Bash: date", Options: []string{"Yes", "No"},
+			})
+
+			rec = e.post(t, path, "key-f", body)
+			if rec.Code != http.StatusAccepted {
+				t.Fatalf("cache hit: status %d, want the first 202: %s", rec.Code, rec.Body.String())
+			}
+			if hit := decodeAsyncAccepted(t, rec.Body); hit.RequestID != first.RequestID || hit.EventCursor != first.EventCursor || hit.Replayed {
+				t.Fatalf("cache hit = %+v, want the first 202 %+v", hit, first)
+			}
+			for _, miss := range []string{info.ID + "/messages", info.SessionName + "/submit"} {
+				rec := e.post(t, "/session/"+miss, "key-f", body)
+				var problem struct {
+					Detail string `json:"detail"`
+				}
+				if rec.Code != http.StatusConflict || json.Unmarshal(rec.Body.Bytes(), &problem) != nil || !strings.HasPrefix(problem.Detail, "pending_interaction: ") {
+					t.Fatalf("cache miss %s: status %d, want 409 pending_interaction: %s", miss, rec.Code, rec.Body.String())
+				}
+			}
+			if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+				t.Fatalf("deliveries = %d, want 1", got)
+			}
+			if mode == "off" {
+				return // off records no op for a retry to replay
+			}
+
+			e.waitClosed(t, first.RequestID)
+			e.fs.sp.SetPendingInteraction(info.SessionName, nil)
+			rec = e.post(t, "/session/"+info.ID+"/messages", "key-f", body)
+			replay := decodeAsyncAccepted(t, rec.Body)
+			if rec.Code != http.StatusAccepted || replay.RequestID != first.RequestID || !replay.Replayed {
+				t.Fatalf("after the interaction cleared: %d %+v, want the stored op's replay", rec.Code, replay)
+			}
+			if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+				t.Fatalf("deliveries = %d, want 1: the replay delivered again", got)
+			}
+		})
+	}
+}
+
 // gatedProvider is a fake runtime whose deliveries wait for release and
 // note whether an op row existed when they ran.
 type gatedProvider struct {
@@ -1613,8 +1673,9 @@ func (r *fakeRecorder) events() []events.Event {
 
 // D13 and §5.5: the reporter raises one event per (gate, surface, stage,
 // reason) on its first failure after a healthy period, at most once per
-// interval: a sustained outage raises one event however long it lasts, and a
-// stage that reports success re-arms only its own classes. Off is ignored,
+// interval, a failure the interval held back raising it once the interval
+// has passed: a sustained outage raises one event however long it lasts, and
+// a stage that reports success re-arms only its own classes. Off is ignored,
 // and the detail is cut to a valid UTF-8 prefix.
 func TestOpsDegradeReporterLatchesPerClass(t *testing.T) {
 	rec := &fakeRecorder{}
@@ -1664,20 +1725,55 @@ func TestOpsDegradeReporterLatchesPerClass(t *testing.T) {
 		t.Fatalf("after a healthy period: events = %d, want 4", n)
 	}
 	// Flapping inside the interval stays at one event per interval.
-	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
-	r.Report(rollout.KeyOpsContent, d)
+	for range 2 {
+		r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
+		r.Report(rollout.KeyOpsContent, d)
+	}
 	if n := len(rec.events()); n != 4 {
 		t.Fatalf("flapping within the interval: events = %d, want 4", n)
 	}
+	// The interval defers the event of a failure it held back, no more: the
+	// class's first failure once the interval has passed raises it, so an
+	// outage that began inside the interval is reported, once.
 	clk.Time = clk.Time.Add(opsDegradeInterval)
 	r.Report(rollout.KeyOpsContent, d)
-	if n := len(rec.events()); n != 4 {
-		t.Fatalf("still failing since the suppressed report: events = %d, want 4", n)
+	if n := len(rec.events()); n != 5 {
+		t.Fatalf("an outage the interval held back: events = %d, want 5", n)
+	}
+	clk.Time = clk.Time.Add(3 * opsDegradeInterval)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 5 {
+		t.Fatalf("the held-back event raised again: events = %d, want 5", n)
 	}
 	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
 	r.Report(rollout.KeyOpsContent, d)
-	if n := len(rec.events()); n != 5 {
-		t.Fatalf("healthy, then failing an interval later: events = %d, want 5", n)
+	if n := len(rec.events()); n != 6 {
+		t.Fatalf("healthy, then failing an interval later: events = %d, want 6", n)
+	}
+}
+
+// §5.5: an event the interval held back stays owed when the event log
+// refuses it once due, so the class's next failure raises it, once.
+func TestOpsDegradeReporterKeepsARefusedHeldBackEventOwed(t *testing.T) {
+	ev := &closableEvents{Fake: events.NewFake()}
+	clk := &clock.Fake{Time: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)}
+	r := NewOpsDegradeReporter(func() events.Recorder { return ev }, clk)
+	d := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StageClose, Reason: legacyop.DegradeStoreError}
+	r.Report(rollout.KeyOpsContent, d)
+	r.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StageClose)
+	r.Report(rollout.KeyOpsContent, d) // held back by the interval
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	ev.closed.Store(true)
+	r.Report(rollout.KeyOpsContent, d) // due, refused
+	ev.closed.Store(false)
+	r.Report(rollout.KeyOpsContent, d)
+	r.Report(rollout.KeyOpsContent, d)
+	recorded, err := ev.List(events.Filter{Type: events.OpsRecordingDegraded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if refused := len(ev.refusedEvents()); len(recorded) != 2 || refused != 1 {
+		t.Fatalf("recorded events = %d, refused = %d; want 2 and 1: the refused held-back event was dropped or raised twice", len(recorded), refused)
 	}
 }
 

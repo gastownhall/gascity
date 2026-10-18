@@ -713,8 +713,11 @@ func providerHasOption(schema []config.ProviderOption, key string) bool {
 // action on one target. The target comes from the URL, not the body, so it
 // must be part of the scope or the same key + body against two sessions would
 // collide. PathEscape keeps a crafted target from forging the "/<action>"
-// boundary. The scope is the target as addressed: the same key sent once by
-// alias and once by bead ID is two independent requests.
+// boundary. The scope is the target as addressed: the cache treats the same
+// key sent once by alias and once by bead ID as two independent requests. For
+// /submit and /messages in a recording ops.content mode, the operation
+// journal still answers both as one (request_id rule 3 in
+// engdocs/design/async-request-result.md).
 func sessionActionIdempotencyPath(target, action string) string {
 	return "/v0/session/" + url.PathEscape(target) + "/" + action
 }

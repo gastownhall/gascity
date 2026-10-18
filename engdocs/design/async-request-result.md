@@ -31,30 +31,45 @@ progression.
    `newRequestID()` (crypto/rand hex with a `req-` prefix).
 3. Retries that reuse the same `Idempotency-Key` against the same session
    get the same `request_id`, whichever endpoint (`/submit`, `/messages`)
-   or target spelling (alias, id) they use.
+   or target spelling (alias, id) they use, when the server records both
+   the request and the retry (rule 2). Otherwise a retry gets the same
+   `request_id` only when the API's per-city `Idempotency-Key` cache
+   answers it, which it does on the same endpoint and target spelling, for
+   at most 30 minutes, and not across an API or city restart. Any other
+   retry is a new request with its own `request_id`, so the message can be
+   delivered twice.
 4. A request that finishes has **at least one** terminal event matched by
    `payload.request_id`: the executor emits it, and a replay of a finished
    request (`replayed: true` in the 202) re-emits it after the replay's
    `event_cursor`. All terminal events for one `request_id` carry the same
-   outcome class. A request whose executor crashed after the 202 has none
-   until it is retried.
+   outcome class, except for an op whose close kept failing (rule 5). Its
+   executor's event went out with the op still open, and the op can then
+   close with another outcome: failed `deadline_in_flight` when the
+   sweeper closes it after its `finish_by`, or the outcome of a same-key
+   retry that adopted it and ran it again. A later replay reports that
+   outcome, for example `request.failed` with `timeout` for a message that
+   was delivered, so a replayed failure does not prove the message did not
+   land. A request whose executor crashed after the 202 has none until it
+   is retried.
 5. Results are projections of the op: the executor closes the op, then
    emits the terminal event. When the close keeps failing, the event goes
    out at once, in every `ops.content` mode, and carries the op still
    open: the close retries in the background, holding the in-flight entry
    (rule 6), until it lands, the op's `finish_by` passes (the sweeper
    closes it then) or the process shuts down.
-6. A same-key retry on the **same** endpoint while the first request is
-   still running gets the first request's 202 (same `request_id`, same
-   `event_cursor`). A same-key retry on the **other** endpoint while it
-   runs gets 409 `in_flight`: the running request emits its terminal
-   event for its own operation only, so the other endpoint's waiter would
-   never match it. Once the request has finished, a retry answered from
-   the API's per-city `Idempotency-Key` cache (the same endpoint and
-   target spelling, for at most 30 minutes, and not across an API or city
-   restart) gets the first request's 202 again, whose terminal event is
-   after its cursor; any other retry gets the stored outcome and a
-   terminal event for its own operation.
+6. When the server records both requests (rule 2), a same-key retry on
+   the **same** endpoint while the first request is still running gets
+   the first request's 202 (same `request_id`, same `event_cursor`). A
+   same-key retry on the **other** endpoint while it runs gets 409
+   `in_flight`: the running request emits its terminal event for its own
+   operation only, so the other endpoint's waiter would never match it.
+   Once the request has finished, a retry the `Idempotency-Key` cache
+   answers (rule 3) gets the first request's 202 again, whose terminal
+   event is after its cursor; any other retry gets the stored outcome and
+   a terminal event for its own operation. When either request is
+   unrecorded, a retry the cache answers gets the first request's 202,
+   whether that request is still running or has finished, and any other
+   retry is a new request (rule 3).
 7. A replay's `error_code` is derived from the stored outcome, which
    keeps the failure's class but not the step that failed, so it can
    differ from the original's: a session closed or gone during the
@@ -62,11 +77,15 @@ progression.
    `resolve_failed`, and a deadline or cancellation inside `/submit`
    (originally `submit_failed`) replays as `timeout`. The original `error_message` is
    not kept either; a replay says which op it replays and its outcome.
-8. A retry still passes the front-door checks first: an unknown target is
-   404 and a session waiting on a pending interaction (for example an
-   approval the first message raised) is 409, before the retry's key is
-   looked up. Such a retry gets its stored outcome once the target is
-   deliverable again.
+8. A retry the `Idempotency-Key` cache misses still passes the front-door
+   checks first: an unknown target is 404 and a session waiting on a
+   pending interaction (for example an approval the first message raised)
+   is 409, before the in-flight registry or the stored op is consulted.
+   Once the target is deliverable again, such a retry is answered as rule
+   6 says. A retry the cache answers skips those checks: it gets the first
+   request's 202 (or rule 9's 409 `in_flight`) whatever the target's state
+   now, because the cache sits in front of the handler, unchanged, in
+   every `ops.content` mode (DES-O0API D7).
 9. The in-flight registry that answers rule 6 is one per city per API
    process, not one per per-city `Server`: the supervisor builds a new
    `Server` when a city's state changes while the old one may still be

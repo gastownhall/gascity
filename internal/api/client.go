@@ -1474,11 +1474,18 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 	return c.submitSession(id, message, intent, "")
 }
 
-// SubmitSessionWithKey is SubmitSession under an Idempotency-Key: a retry
-// with the same key against the same session gets the first request's
-// outcome instead of a second delivery. A replay of a request that already
-// finished is answered from the 202's stored outcome without waiting on the
-// event stream. An empty key sends none, as SubmitSession does.
+// SubmitSessionWithKey is SubmitSession under an Idempotency-Key. When the
+// server records both requests (a recording ops.content mode), a retry with
+// the same key against the same session gets the first request's outcome
+// instead of a second delivery. Otherwise only a retry the server's
+// Idempotency-Key cache answers gets it (the same id spelling, at most 30
+// minutes later, and not across a restart); any other retry delivers again
+// (request_id rules 3 and 6 in engdocs/design/async-request-result.md). A
+// replay of a request that already finished is answered from the 202's
+// stored outcome without waiting on the event stream. That outcome is the
+// op's, which can differ from the first request's when its close kept
+// failing (request_id rule 4): a replayed failure does not prove the message
+// was not delivered. An empty key sends none, as SubmitSession does.
 func (c *Client) SubmitSessionWithKey(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
 	return c.submitSession(id, message, intent, key)
 }

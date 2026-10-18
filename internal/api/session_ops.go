@@ -795,11 +795,13 @@ const opsDegradeDetailMax = 512
 // OpsDegradeReporter turns operation-journal recording degrades into
 // ops.recording_degraded city events (DES-O0API D13, §5.5): one event on the
 // first failure of a (gate, surface, stage, reason) after a healthy period,
-// and at most one per legacyop.DegradeLogInterval, so a store outage emits
-// once instead of once per request. A class is healthy until it fails, and
-// again once its stage reports success (Healthy). The API reports through one
-// per city per process, the controller's op sweeper through its own. It is
-// safe for concurrent use.
+// and at most one per legacyop.DegradeLogInterval, a failure the interval
+// holds back raising its event with the class's first failure once the
+// interval has passed. So a store outage emits once instead of once per
+// request, even one that begins inside the interval after a short blip. A
+// class is healthy until it fails, and again once its stage reports success
+// (Healthy). The API reports through one per city per process, the
+// controller's op sweeper through its own. It is safe for concurrent use.
 type OpsDegradeReporter struct {
 	recorder func() events.Recorder
 	clk      clock.Clock
@@ -813,11 +815,14 @@ type opsDegradeKey struct {
 	gate, surface, stage, reason string
 }
 
-// opsDegradeLatch is one degrade class's state: when it last raised an event
-// and whether it has failed since its stage last reported success.
+// opsDegradeLatch is one degrade class's state: when it last raised an event,
+// whether it has failed since its stage last reported success, and whether
+// the interval held back the event of that failure (owed), which the class's
+// first failure once the interval has passed raises.
 type opsDegradeLatch struct {
 	lastEvent time.Time
 	degraded  bool
+	owed      bool
 }
 
 // NewOpsDegradeReporter returns a reporter that records to the recorder
@@ -830,8 +835,9 @@ func NewOpsDegradeReporter(recorder func() events.Recorder, clk clock.Clock) *Op
 
 // Report records one ops.recording_degraded event for d under gate (a
 // rollout key: ops.content, ops.control or ops.lifecycle) when d's class was
-// healthy and its last event is at least opsDegradeInterval old; either way
-// the class is degraded until its stage reports success. A degrade under a
+// healthy, or owes the event of a failure the interval held back, and its
+// last event is at least opsDegradeInterval old; either way the class is
+// degraded until its stage reports success. A degrade under a
 // mode that does not record (off) is not a degrade and is ignored. One with
 // no recorder to record to, or whose event the recorder refuses (an
 // AckRecorder's error, such as a closed log's), leaves its class as it was,
@@ -882,16 +888,19 @@ func (r *OpsDegradeReporter) Report(gateKey string, d legacyop.Degrade) {
 }
 
 // markDegraded marks key's class degraded at now and reports whether this
-// failure raises an event (due): the class was healthy and its last event is
-// at least opsDegradeInterval old. A due failure dates the class's last event
-// now. prior and seen are the class's state before the mark, for unmark.
+// failure raises an event (due): the class was healthy or owes an event, and
+// its last event is at least opsDegradeInterval old. A due failure dates the
+// class's last event now; one only the interval holds back leaves the event
+// owed. prior and seen are the class's state before the mark, for unmark.
 func (r *OpsDegradeReporter) markDegraded(key opsDegradeKey, now time.Time) (prior opsDegradeLatch, seen, due bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	prior, seen = r.classes[key]
-	due = !prior.degraded && (!seen || !now.Before(prior.lastEvent.Add(opsDegradeInterval)))
+	news := !prior.degraded || prior.owed
+	due = news && (!seen || !now.Before(prior.lastEvent.Add(opsDegradeInterval)))
 	latch := prior
 	latch.degraded = true
+	latch.owed = news && !due
 	if due {
 		latch.lastEvent = now
 	}
@@ -929,7 +938,7 @@ func (r *OpsDegradeReporter) Healthy(gateKey, surface string, stages ...string) 
 	defer r.mu.Unlock()
 	for key, latch := range r.classes {
 		if key.gate == gateKey && key.surface == surface && latch.degraded && slices.Contains(stages, key.stage) {
-			latch.degraded = false
+			latch.degraded, latch.owed = false, false
 			r.classes[key] = latch
 		}
 	}
