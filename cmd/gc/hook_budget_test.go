@@ -92,6 +92,9 @@ func newHookBudgetFixture(t *testing.T) hookBudgetFixture {
 	prevAPI := mailCheckAPIClient
 	mailCheckAPIClient = func(string) (*api.Client, string) { return nil, "" }
 	t.Cleanup(func() { mailCheckAPIClient = prevAPI })
+	prevStepAPI := activeWorkStepAPIClient
+	activeWorkStepAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
+	t.Cleanup(func() { activeWorkStepAPIClient = prevStepAPI })
 	prevPoller := startNudgePoller
 	startNudgePoller = func(string, string, string) error { return nil }
 	t.Cleanup(func() { startNudgePoller = prevPoller })

@@ -206,6 +206,11 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	// otherwise widen the answer to everything.
 	cityGet(sm, "/work/ready", (*Server).humaHandleWorkReady, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), describes(workReadyDescription),
 		func(o *huma.Operation) { o.RejectUnknownQueryParameters = true })
+	// A session's step reminder as its hooks read it: live, over the stores the
+	// controller holds (see ActiveWorkStepReader). Unknown query parameters are
+	// refused for the same reason as /work/ready.
+	cityGet(sm, "/work/active-step", (*Server).humaHandleWorkActiveStep, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), describes(workActiveStepDescription),
+		func(o *huma.Operation) { o.RejectUnknownQueryParameters = true })
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,

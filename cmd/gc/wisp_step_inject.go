@@ -22,17 +22,33 @@ import (
 // Store priority: if GC_RIG_ROOT is set the rig store is queried (where
 // rig-scoped polecat work beads live), otherwise the city store at cityPath.
 // When cityPath is empty the function falls back to GC_CITY from the env.
+//
+// The controller holding those stores open is asked first, and any failure
+// reads them in process, exactly as before (wispStepLookup). A hook that can
+// start the lookup earlier, so it overlaps the hook's other work, holds a
+// wispStepLookup instead of calling this.
 func wispStepInjectionContent(cityPath string) string {
-	effective := cityPath
-	if effective == "" {
-		effective = strings.TrimSpace(os.Getenv("GC_CITY"))
+	return startWispStepLookup(cityPath, os.Stderr).content()
+}
+
+// wispStepCityPath is the city the step reminder reads: cityPath, else GC_CITY.
+func wispStepCityPath(cityPath string) string {
+	if cityPath != "" {
+		return cityPath
+	}
+	return strings.TrimSpace(os.Getenv("GC_CITY"))
+}
+
+// wispStepInjectionContentInProcess is wispStepInjectionContent read from
+// stores this process opens itself. effective is the city wispStepCityPath
+// resolved.
+func wispStepInjectionContentInProcess(effective string) string {
+	assignees := wispStepAssignees()
+	if len(assignees) == 0 {
+		return ""
 	}
 	store := openWispStepStore(effective)
 	if store == nil {
-		return ""
-	}
-	assignees := wispStepAssignees()
-	if len(assignees) == 0 {
 		return ""
 	}
 	routeCfg, _ := loadCityConfigWithoutBuiltinPackRefresh(effective, io.Discard)

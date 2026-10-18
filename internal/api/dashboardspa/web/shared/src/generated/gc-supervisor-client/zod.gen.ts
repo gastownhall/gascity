@@ -2,6 +2,12 @@
 
 import * as z from 'zod';
 
+export const zActiveWorkStep = z.object({
+    description: z.string(),
+    id: z.string(),
+    title: z.string()
+});
+
 export const zAdapterCapabilities = z.object({
     MaxMessageLength: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     SupportsAttachments: z.boolean(),
@@ -3465,6 +3471,10 @@ export const zWebhookRejectedPayload = z.object({
     scheme: z.string().optional(),
     status: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     webhook: z.string()
+});
+
+export const zWorkActiveStepBody = z.object({
+    step: zActiveWorkStep.optional()
 });
 
 export const zWorkLadderPayload = z.object({
@@ -10552,6 +10562,20 @@ export const zGetV0CityByCityNameWaitsQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameWaitsResponse = zWaitListBody;
+
+export const zGetV0CityByCityNameWorkActiveStepPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+export const zGetV0CityByCityNameWorkActiveStepQuery = z.object({
+    assignee: z.array(z.string()).min(1).max(8).nullable(),
+    scope_root: z.string().optional()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameWorkActiveStepResponse = zWorkActiveStepBody;
 
 export const zGetV0CityByCityNameWorkReadyPath = z.object({
     cityName: z.string().min(1).regex(/\S/)

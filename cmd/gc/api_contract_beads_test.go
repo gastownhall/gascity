@@ -76,6 +76,16 @@ func contractBeadsFamily(t *testing.T, h *contractHarness) {
 	badStatus, err := c.GetV0CityByCityNameWorkReadyWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkReadyParams{MetadataField: &[]string{"=no-key"}})
 	expectStatus(t, "ready work with a malformed filter", badStatus, err, http.StatusBadRequest)
 
+	// A session's step reminder as its hooks read it, live: an identity that
+	// holds no work has no step, and the answer says so by its absence.
+	step, err := c.GetV0CityByCityNameWorkActiveStepWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkActiveStepParams{Assignee: []string{"contract-idle-seat"}})
+	expectStatus(t, "active work step", step, err, http.StatusOK)
+	if s := mustJSON(t, "active work step", step.JSON200, step); s.Step != nil {
+		t.Fatalf("active work step for an idle identity = %s, want no step", contractBody(step))
+	}
+	blank, err := c.GetV0CityByCityNameWorkActiveStepWithResponse(ctx, city, &genclient.GetV0CityByCityNameWorkActiveStepParams{Assignee: []string{" "}})
+	expectStatus(t, "active work step for a blank identity", blank, err, http.StatusBadRequest)
+
 	patched, err := c.PatchV0CityByCityNameBeadByIdWithResponse(ctx, city, root.Id,
 		&genclient.PatchV0CityByCityNameBeadByIdParams{XGCRequest: contractCSRF},
 		genclient.PatchV0CityByCityNameBeadByIdJSONRequestBody{Title: ptr("contract root renamed"), Priority: ptr(int64(1))})

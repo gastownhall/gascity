@@ -81,7 +81,7 @@ func TestSessionStartWithoutAProvenSessionServesNothingForAClosedSession(t *test
 	resetHookBudgetProcessState(t)
 
 	var stderr bytes.Buffer
-	injection := primeHookContextSuffix(f.cityDir, nil, true, primeHookContext{HookEventName: "SessionStart"}, &stderr, false)
+	injection := primeHookContextSuffix(f.cityDir, nil, nil, true, primeHookContext{HookEventName: "SessionStart"}, &stderr, false)
 	if strings.Contains(injection.text, "status please") {
 		t.Fatalf("SessionStart for a closed session surfaced its alias's mail:\n%s\nstderr=%s", injection.text, stderr.String())
 	}

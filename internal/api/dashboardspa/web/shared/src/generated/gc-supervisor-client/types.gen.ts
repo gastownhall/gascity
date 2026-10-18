@@ -4,6 +4,21 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+export type ActiveWorkStep = {
+    /**
+     * The step bead's description; empty when it has none.
+     */
+    description: string;
+    /**
+     * The step bead's id.
+     */
+    id: string;
+    /**
+     * The step bead's title.
+     */
+    title: string;
+};
+
 export type AdapterCapabilities = {
     MaxMessageLength: number;
     SupportsAttachments: boolean;
@@ -10659,6 +10674,13 @@ export type WebhookRejectedPayload = {
     webhook: string;
 };
 
+export type WorkActiveStepBody = {
+    /**
+     * The session's current formula step, exactly the bead its step reminder names; absent when there is none.
+     */
+    step?: ActiveWorkStep;
+};
+
 export type WorkLadderPayload = {
     attempt?: number;
     bead_id: string;
@@ -20105,6 +20127,61 @@ export type GetV0CityByCityNameWaitsResponses = {
 };
 
 export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
+
+export type GetV0CityByCityNameWorkActiveStepData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query: {
+        /**
+         * The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.
+         */
+        assignee: Array<string> | null;
+        /**
+         * Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.
+         */
+        scope_root?: string;
+    };
+    url: '/v0/city/{cityName}/work/active-step';
+};
+
+export type GetV0CityByCityNameWorkActiveStepErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWorkActiveStepError = GetV0CityByCityNameWorkActiveStepErrors[keyof GetV0CityByCityNameWorkActiveStepErrors];
+
+export type GetV0CityByCityNameWorkActiveStepResponses = {
+    /**
+     * OK
+     */
+    200: WorkActiveStepBody;
+};
+
+export type GetV0CityByCityNameWorkActiveStepResponse = GetV0CityByCityNameWorkActiveStepResponses[keyof GetV0CityByCityNameWorkActiveStepResponses];
 
 export type GetV0CityByCityNameWorkReadyData = {
     body?: never;

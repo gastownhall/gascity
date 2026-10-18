@@ -730,6 +730,20 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		return 1
 	}
 
+	// The step reminder is the slowest read a drain makes: in process it opens
+	// the rig store at GC_RIG_ROOT and scans that rig by gc.routed_to once per
+	// identity. Ask the controller for it now, so the request runs while the
+	// target resolves; both paths below take it for the city the explicit
+	// environment names, which is the city they resolve.
+	var stepLookup *wispStepLookup
+	explicitCity, explicit := "", false
+	if inject {
+		if explicitCity, explicit = nudgeDrainExplicitCityPath(); explicit {
+			stepLookup = startWispStepLookup(explicitCity, stderr)
+			defer stepLookup.stop()
+		}
+	}
+
 	// Empty-queue fast path. Resolving the target loads the city config and
 	// opens the session store, and on an empty queue the only things it would
 	// feed are the context advisory (which renders nothing for a payload with
@@ -739,13 +753,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// resolution; a queued item or a usage sample takes the full path.
 	wispPrefetched := false
 	if inject && !contextUsage.ok {
-		if cityPath, ok := nudgeDrainExplicitCityPath(); ok && nudgeQueueIsEmpty(cityPath) {
-			wispExtra = wispStepInjectionContent(cityPath)
+		if explicit && nudgeQueueIsEmpty(explicitCity) {
+			wispExtra = stepLookup.content()
 			wispPrefetched = true
 			// The full path writes the step reminder only once the target
 			// resolves, so a non-empty reminder still needs that proof. Recheck
 			// the queue too: a nudge enqueued during the lookup must be claimed.
-			if wispExtra == "" && nudgeQueueIsEmpty(cityPath) {
+			if wispExtra == "" && nudgeQueueIsEmpty(explicitCity) {
 				return 0
 			}
 		}
@@ -772,7 +786,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if inject {
 		injectPrefix += contextInjectLineForSample(contextUsage, target.cfg.AgentDefaults.ContextAdvisory, target.agent.ContextAdvisory)
 		if !wispPrefetched {
-			wispExtra = wispStepInjectionContent(target.cityPath)
+			wispExtra = stepLookup.contentFor(target.cityPath)
 		}
 	}
 

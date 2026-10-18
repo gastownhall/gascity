@@ -1011,6 +1011,18 @@ func (e GetV0CityByCityNameWorkReadyParamsStatus) Valid() bool {
 	}
 }
 
+// ActiveWorkStep defines model for ActiveWorkStep.
+type ActiveWorkStep struct {
+	// Description The step bead's description; empty when it has none.
+	Description string `json:"description"`
+
+	// Id The step bead's id.
+	Id string `json:"id"`
+
+	// Title The step bead's title.
+	Title string `json:"title"`
+}
+
 // AdapterCapabilities defines model for AdapterCapabilities.
 type AdapterCapabilities struct {
 	MaxMessageLength           int64 `json:"MaxMessageLength"`
@@ -9807,6 +9819,11 @@ type WebhookRejectedPayload struct {
 	Webhook string `json:"webhook"`
 }
 
+// WorkActiveStepBody defines model for WorkActiveStepBody.
+type WorkActiveStepBody struct {
+	Step *ActiveWorkStep `json:"step,omitempty"`
+}
+
 // WorkLadderPayload defines model for WorkLadderPayload.
 type WorkLadderPayload struct {
 	Attempt     *int64  `json:"attempt,omitempty"`
@@ -11017,6 +11034,15 @@ type GetV0CityByCityNameWaitsParams struct {
 
 	// Session Filter by session ID.
 	Session *string `form:"session,omitempty" json:"session,omitempty"`
+}
+
+// GetV0CityByCityNameWorkActiveStepParams defines parameters for GetV0CityByCityNameWorkActiveStep.
+type GetV0CityByCityNameWorkActiveStepParams struct {
+	// Assignee The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.
+	Assignee []string `form:"assignee" json:"assignee"`
+
+	// ScopeRoot Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.
+	ScopeRoot *string `form:"scope_root,omitempty" json:"scope_root,omitempty"`
 }
 
 // GetV0CityByCityNameWorkReadyParams defines parameters for GetV0CityByCityNameWorkReady.
@@ -22191,6 +22217,9 @@ type ClientInterface interface {
 	// GetV0CityByCityNameWaits request
 	GetV0CityByCityNameWaits(ctx context.Context, cityName string, params *GetV0CityByCityNameWaitsParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
+	// GetV0CityByCityNameWorkActiveStep request
+	GetV0CityByCityNameWorkActiveStep(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkActiveStepParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+
 	// GetV0CityByCityNameWorkReady request
 	GetV0CityByCityNameWorkReady(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkReadyParams, reqEditors ...RequestEditorFn) (*http.Response, error)
 
@@ -24663,6 +24692,18 @@ func (c *Client) GetV0CityByCityNameWaitById(ctx context.Context, cityName strin
 
 func (c *Client) GetV0CityByCityNameWaits(ctx context.Context, cityName string, params *GetV0CityByCityNameWaitsParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewGetV0CityByCityNameWaitsRequest(c.Server, cityName, params)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetV0CityByCityNameWorkActiveStep(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkActiveStepParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetV0CityByCityNameWorkActiveStepRequest(c.Server, cityName, params)
 	if err != nil {
 		return nil, err
 	}
@@ -34953,6 +34994,78 @@ func NewGetV0CityByCityNameWaitsRequest(server string, cityName string, params *
 	return req, nil
 }
 
+// NewGetV0CityByCityNameWorkActiveStepRequest generates requests for GetV0CityByCityNameWorkActiveStep
+func NewGetV0CityByCityNameWorkActiveStepRequest(server string, cityName string, params *GetV0CityByCityNameWorkActiveStepParams) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/work/active-step", pathParam0)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	if params != nil {
+		queryValues := queryURL.Query()
+
+		if params.Assignee != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", true, "assignee", params.Assignee, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "array", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		if params.ScopeRoot != nil {
+
+			if queryFrag, err := runtime.StyleParamWithOptions("form", false, "scope_root", *params.ScopeRoot, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationQuery, Type: "string", Format: ""}); err != nil {
+				return nil, err
+			} else if parsed, err := url.ParseQuery(queryFrag); err != nil {
+				return nil, err
+			} else {
+				for k, v := range parsed {
+					for _, v2 := range v {
+						queryValues.Add(k, v2)
+					}
+				}
+			}
+
+		}
+
+		queryURL.RawQuery = queryValues.Encode()
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameWorkReadyRequest generates requests for GetV0CityByCityNameWorkReady
 func NewGetV0CityByCityNameWorkReadyRequest(server string, cityName string, params *GetV0CityByCityNameWorkReadyParams) (*http.Request, error) {
 	var err error
@@ -36212,6 +36325,9 @@ type ClientWithResponsesInterface interface {
 
 	// GetV0CityByCityNameWaitsWithResponse request
 	GetV0CityByCityNameWaitsWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWaitsParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWaitsResponse, error)
+
+	// GetV0CityByCityNameWorkActiveStepWithResponse request
+	GetV0CityByCityNameWorkActiveStepWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkActiveStepParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWorkActiveStepResponse, error)
 
 	// GetV0CityByCityNameWorkReadyWithResponse request
 	GetV0CityByCityNameWorkReadyWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkReadyParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWorkReadyResponse, error)
@@ -40622,6 +40738,33 @@ func (r GetV0CityByCityNameWaitsResponse) StatusCode() int {
 	return 0
 }
 
+type GetV0CityByCityNameWorkActiveStepResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *WorkActiveStepBody
+	ApplicationproblemJSON400 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetV0CityByCityNameWorkActiveStepResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetV0CityByCityNameWorkActiveStepResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameWorkReadyResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -42593,6 +42736,15 @@ func (c *ClientWithResponses) GetV0CityByCityNameWaitsWithResponse(ctx context.C
 		return nil, err
 	}
 	return ParseGetV0CityByCityNameWaitsResponse(rsp)
+}
+
+// GetV0CityByCityNameWorkActiveStepWithResponse request returning *GetV0CityByCityNameWorkActiveStepResponse
+func (c *ClientWithResponses) GetV0CityByCityNameWorkActiveStepWithResponse(ctx context.Context, cityName string, params *GetV0CityByCityNameWorkActiveStepParams, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameWorkActiveStepResponse, error) {
+	rsp, err := c.GetV0CityByCityNameWorkActiveStep(ctx, cityName, params, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetV0CityByCityNameWorkActiveStepResponse(rsp)
 }
 
 // GetV0CityByCityNameWorkReadyWithResponse request returning *GetV0CityByCityNameWorkReadyResponse
@@ -52725,6 +52877,67 @@ func ParseGetV0CityByCityNameWaitsResponse(rsp *http.Response) (*GetV0CityByCity
 			return nil, err
 		}
 		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetV0CityByCityNameWorkActiveStepResponse parses an HTTP response from a GetV0CityByCityNameWorkActiveStepWithResponse call
+func ParseGetV0CityByCityNameWorkActiveStepResponse(rsp *http.Response) (*GetV0CityByCityNameWorkActiveStepResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetV0CityByCityNameWorkActiveStepResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest WorkActiveStepBody
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 400:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON400 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
 		var dest ErrorModel

@@ -10,6 +10,29 @@
       }
     },
     "schemas": {
+      "ActiveWorkStep": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "description": "The step bead's description; empty when it has none.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The step bead's id.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The step bead's title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "description"
+        ],
+        "type": "object"
+      },
       "AdapterCapabilities": {
         "additionalProperties": false,
         "properties": {
@@ -28278,6 +28301,16 @@
         ],
         "type": "object"
       },
+      "WorkActiveStepBody": {
+        "additionalProperties": false,
+        "properties": {
+          "step": {
+            "$ref": "#/components/schemas/ActiveWorkStep",
+            "description": "The session's current formula step, exactly the bead its step reminder names; absent when there is none."
+          }
+        },
+        "type": "object"
+      },
       "WorkLadderPayload": {
         "additionalProperties": false,
         "properties": {
@@ -52476,6 +52509,148 @@
           }
         },
         "summary": "Get v0 city by city name waits"
+      }
+    },
+    "/v0/city/{cityName}/work/active-step": {
+      "get": {
+        "description": "A session's current formula step, exactly the bead its step reminder names, read by the controller from the stores it already holds open. The work store is the one at `scope_root` (the city when omitted, else the rig at that path) and the graph store is the one the city's class routing gives it; both are read live at request time, never from a read cache. The identities are tried in the order given. `step` is absent when there is no current step. While a config change is pending or being applied, after a failed reload, or for a scope the controller holds no store for, the request is refused with 503 `service-unavailable`; a failed read is 503 `store-unavailable`. Either 503 means the caller should read the stores in-process instead.",
+        "operationId": "get-v0-city-by-city-name-work-active-step",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.",
+            "explode": true,
+            "in": "query",
+            "name": "assignee",
+            "required": true,
+            "schema": {
+              "description": "The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_root",
+            "schema": {
+              "description": "Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkActiveStepBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name work active step"
       }
     },
     "/v0/city/{cityName}/work/ready": {
