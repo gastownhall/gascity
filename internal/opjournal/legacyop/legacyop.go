@@ -152,12 +152,14 @@ type Admission struct {
 // calls Open again for each attempt, so it closes through whatever store Open
 // answers by then. Inflight is the API's in-flight registry; nil (the CLI)
 // means never adopt. Degraded, when set, is told of every store failure the
-// recorder degrades past. Logger receives the recorder's rate-limited
-// degrade lines and late-result lines; nil is slog.Default(). Done, when
-// closed (its owner shutting down), ends any background close retry, leaving
-// the op to the sweeper; the entry stays held until the op's finish_by, so a
-// same-key retry in this process does not adopt an op whose effect may
-// already have landed. nil never closes.
+// recorder degrades past. Healthy, when set, is told of every close the store
+// answers, before the op's entry is released: a background retry's close
+// lands after Finish has returned, out of the caller's sight. Logger receives
+// the recorder's rate-limited degrade lines and late-result lines; nil is
+// slog.Default(). Done, when closed (its owner shutting down), ends any
+// background close retry, leaving the op to the sweeper; the entry stays held
+// until the op's finish_by, so a same-key retry in this process does not adopt
+// an op whose effect may already have landed. nil never closes.
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -165,6 +167,7 @@ type Recorder struct {
 	Inflight *Inflight
 	Clock    clock.Clock
 	Degraded func(Degrade)
+	Healthy  func(stage string)
 	Logger   *slog.Logger
 	Done     <-chan struct{}
 
@@ -324,6 +327,7 @@ func (r *Recorder) closeExpired(st *opjournal.Store, key string, minted bool, op
 		r.count(op.Kind, StageAdmit, ResultBusy, "")
 		return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
 	}
+	r.closeHealthy()
 	if cur.Status != opjournal.StatusClosed {
 		r.count(op.Kind, StageAdmit, ResultBusy, "")
 		return nil, &BusyError{ID: op.ID, Since: op.CreatedAt}
@@ -462,10 +466,12 @@ func (a *Admission) Finish(res Result) Finished {
 	op, err := r.closeWithRetries(a.store, a.Op, res.Outcome)
 	switch {
 	case err == nil:
+		r.closeHealthy()
 		a.release()
 		r.count(a.Op.Kind, StageClose, ResultClosed, "")
 		return Finished{Closed: true, Op: op}
 	case errors.Is(err, opjournal.ErrAlreadyTerminal):
+		r.closeHealthy()
 		a.release()
 		r.late(a.Op, res.Outcome, err)
 		return Finished{Late: true}
@@ -530,10 +536,12 @@ func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- str
 		err := r.closeOpened(a.Op, outcome)
 		switch {
 		case err == nil:
+			r.closeHealthy()
 			a.release()
 			r.count(a.Op.Kind, StageClose, ResultClosed, "")
 			return
 		case errors.Is(err, opjournal.ErrAlreadyTerminal):
+			r.closeHealthy()
 			a.release()
 			r.late(a.Op, outcome, err)
 			return

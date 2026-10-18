@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -233,4 +235,138 @@ func TestBackgroundCloseEndsOnDonePastFinishBy(t *testing.T) {
 	if r.Inflight.Len() != 0 {
 		t.Fatalf("registry %d past finish_by", r.Inflight.Len())
 	}
+}
+
+// Healthy is told of each close the store answers, the op closed or found
+// already closed, before the entry is released: in Finish, in the background
+// retry after Finish has returned, and in the CLI's expiry rule (DES-O0API
+// §5.5). A close the store fails, a background retry that finish_by or Done
+// ends and an invalid outcome are not health.
+func TestHealthyIsToldOfEachAnsweredClose(t *testing.T) {
+	out := succeeded(ViaLegacyDelivered)
+	// watch records the stages r tells Healthy, failing a call made once the
+	// request's entry is released.
+	watch := func(t *testing.T, r *Recorder) *[]string {
+		var stages []string
+		r.Healthy = func(stage string) {
+			if r.Inflight != nil && r.Inflight.Len() == 0 {
+				t.Errorf("Healthy(%s) after the entry was released", stage)
+			}
+			stages = append(stages, stage)
+		}
+		return &stages
+	}
+	check := func(t *testing.T, got *[]string, want ...string) {
+		t.Helper()
+		if !slices.Equal(*got, want) {
+			t.Fatalf("Healthy told %q, want %q", *got, want)
+		}
+	}
+	sweep := func(t *testing.T, e *env) {
+		e.clk.Advance(ExecutionBound + time.Second)
+		if stats, err := Sweep(e.st, e.clk.Now(), 10, "controller:op-sweep"); err != nil || stats.Closed != 1 {
+			t.Errorf("Sweep = %+v, %v", stats, err)
+		}
+	}
+	t.Run("a foreground close", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		adm, _ := r.Admit(msg("k1", "hello"))
+		if f := adm.Finish(Result{Outcome: out}); !f.Closed {
+			t.Fatalf("Finish = %+v", f)
+		}
+		check(t, healthy, StageClose)
+	})
+	t.Run("a foreground close that finds the op closed", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		adm, _ := r.Admit(msg("k1", "hello"))
+		sweep(t, e)
+		if f := adm.Finish(Result{Outcome: out}); !f.Late {
+			t.Fatalf("Finish = %+v, want late", f)
+		}
+		check(t, healthy, StageClose)
+	})
+	t.Run("a background close", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		adm, _ := r.Admit(msg("k1", "hello"))
+		e.fault.updateFails.Store(closeRetries)
+		f := adm.Finish(Result{Outcome: out})
+		if f.Background == nil {
+			t.Fatalf("Finish = %+v, want a background close", f)
+		}
+		<-f.Background
+		if got, _ := e.st.Get(adm.Op.ID); got.Status != opjournal.StatusClosed {
+			t.Fatalf("op %s after the background close", got.Status)
+		}
+		check(t, healthy, StageClose)
+	})
+	t.Run("a background close that finds the op closed", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		var waits atomic.Int32
+		r.sleep = func(time.Duration) {
+			if waits.Add(1) == closeRetries { // the first background wait
+				sweep(t, e)
+			}
+		}
+		adm, _ := r.Admit(msg("k1", "hello"))
+		e.fault.updateFails.Store(closeRetries)
+		f := adm.Finish(Result{Outcome: out})
+		if f.Background == nil {
+			t.Fatalf("Finish = %+v, want a background close", f)
+		}
+		<-f.Background
+		if got, _ := e.st.Get(adm.Op.ID); got.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
+			t.Fatalf("stored %+v, want the sweeper's outcome", got.Outcome)
+		}
+		check(t, healthy, StageClose)
+	})
+	t.Run("the CLI's expiry rule", func(t *testing.T) {
+		e := newEnv(t)
+		r := cliRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		e.seed(t, msg("k1", "hello"), ExecutorCLI)
+		e.clk.Advance(ExecutionBound + time.Second)
+		if adm, err := r.Admit(msg("k1", "hello")); err != nil || adm.Decision != Replay {
+			t.Fatalf("Admit = %+v, %v; want a replay of the expired op", adm, err)
+		}
+		check(t, healthy, StageClose)
+	})
+	t.Run("a background retry finish_by ends", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		r.sleep = func(time.Duration) { e.clk.Advance(time.Minute) }
+		adm, _ := r.Admit(msg("k1", "hello"))
+		e.fault.updateForever = true
+		<-adm.Finish(Result{Outcome: out}).Background
+		check(t, healthy)
+	})
+	t.Run("a background retry Done ends", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		r.after = func(time.Duration, func()) {}
+		done := make(chan struct{})
+		r.Done = done
+		adm, _ := r.Admit(msg("k1", "hello"))
+		e.fault.updateForever = true
+		close(done)
+		<-adm.Finish(Result{Outcome: out}).Background
+		check(t, healthy)
+	})
+	t.Run("an invalid outcome", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		adm, _ := r.Admit(msg("k1", "hello"))
+		adm.Finish(Result{Outcome: opjournal.Outcome{Arm: "bogus"}})
+		check(t, healthy)
+	})
 }

@@ -1455,7 +1455,7 @@ type AsyncAcceptedBody struct {
 	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
 	Op             *ConversationOp `json:"op,omitempty"`
 
-	// Replayed True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor.
+	// Replayed True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key.
 	Replayed *bool `json:"replayed,omitempty"`
 
 	// RequestId Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.

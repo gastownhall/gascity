@@ -279,7 +279,7 @@ export type AsyncAcceptedBody = {
      */
     op?: ConversationOp;
     /**
-     * True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor.
+     * True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key.
      */
     replayed?: boolean;
     /**

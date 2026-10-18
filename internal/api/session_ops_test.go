@@ -549,6 +549,59 @@ func TestSessionContentOpsAutoOneKeyIsOneOpAcrossPathsAndSpellings(t *testing.T)
 	}
 }
 
+// DES-O0API §3.1, request_id rule 6: resume is outside the op and its digest,
+// so a same-key retry that adds it to a message queued for a suspended session
+// replays that outcome and starts nothing, and the replay's event says so. The
+// cache refuses the flip on the first request's endpoint and spelling (it
+// compares whole bodies); every retry it misses gets the replay.
+func TestSessionContentOpsAutoReplayDoesNotApplyResume(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Resume")
+	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sp, session.WithCityPath(e.fs.cityPath))
+	if err := mgr.Suspend(context.Background(), testOperatorIn(t, e.fs.cityPath), info.ID, false); err != nil {
+		t.Fatalf("Suspend: %v", err)
+	}
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.SessionName+"/submit", "key-r", `{"message":"hi"}`).Body)
+	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	if op := e.waitClosed(t, first.RequestID); op.Outcome.Result.Via != legacyop.ViaLegacyQueued {
+		t.Fatalf("first outcome = %+v, want queued", op.Outcome)
+	}
+	starts := e.fs.sp.CountCalls("Start", info.SessionName)
+
+	resumed := `{"message":"hi","resume":true}`
+	if rec := e.post(t, "/session/"+info.SessionName+"/submit", "key-r", resumed); rec.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("same-spelling resume flip: %d %s, want 422", rec.Code, rec.Body.String())
+	}
+	for i, path := range []string{info.ID + "/submit", info.ID + "/messages"} {
+		rec := e.post(t, "/session/"+path, "key-r", resumed)
+		replay := decodeAsyncAccepted(t, rec.Body)
+		if rec.Code != http.StatusAccepted || replay.RequestID != first.RequestID || !replay.Replayed ||
+			replay.Op == nil || replay.Op.Outcome == nil || replay.Op.Outcome.Via != legacyop.ViaLegacyQueued {
+			t.Fatalf("%s: %d %+v op %+v", path, rec.Code, replay, replay.Op)
+		}
+		evs := waitTerminalEvents(t, e.fs.eventProv, first.RequestID, i+2)
+		if ev := evs[i+1]; ev.Seq <= mustSeq(t, replay.EventCursor) || !strings.Contains(ev.Message, replayOptionsNote) {
+			t.Fatalf("%s: re-emitted event %+v, want one after the cursor whose message says resume took no effect", path, ev)
+		}
+	}
+	if e.fs.sp.IsRunning(info.SessionName) || e.fs.sp.CountCalls("Start", info.SessionName) != starts {
+		t.Fatal("a replay started the session")
+	}
+	b, err := e.fs.cityBeadStore.Get(info.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Metadata["state"] != "suspended" {
+		t.Fatalf("state = %q, want suspended", b.Metadata["state"])
+	}
+	if rows := e.opRows(t); len(rows) != 1 {
+		t.Fatalf("op rows = %d, want 1", len(rows))
+	}
+	if got := queuedSubmitCount(t, e.fs.cityPath, info.ID); got != 1 {
+		t.Fatalf("queued submits = %d, want 1", got)
+	}
+}
+
 // request_id rule 8 (engdocs/design/async-request-result.md): the
 // Idempotency-Key cache sits in front of the front door in every mode, so a
 // retry it answers (the same endpoint and spelling) gets the first 202 though
@@ -1624,6 +1677,9 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 				if len(evs) != 1 {
 					t.Fatalf("%s: events = %d", ep.operation, len(evs))
 				}
+				if !strings.Contains(evs[0].Message, replayOptionsNote) {
+					t.Fatalf("%s: event message %q lacks the replay options note", ep.operation, evs[0].Message)
+				}
 				if tc.arm == opjournal.ArmSucceeded {
 					var p struct {
 						RequestID string          `json:"request_id"`
@@ -1641,7 +1697,8 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 				}
 				var p RequestFailedPayload
 				if evs[0].Type != events.RequestFailed || json.Unmarshal(evs[0].Payload, &p) != nil ||
-					p.Operation != ep.operation || p.ErrorCode != ep.code || p.Op == nil || !strings.Contains(p.ErrorMessage, "replayed") {
+					p.Operation != ep.operation || p.ErrorCode != ep.code || p.Op == nil || p.ErrorMessage != evs[0].Message ||
+					!strings.HasPrefix(p.ErrorMessage, "replayed: operation gc-op-1 already closed "+string(tc.arm)) {
 					t.Fatalf("%s: %s %s", ep.operation, evs[0].Type, evs[0].Payload)
 				}
 			}
@@ -1973,37 +2030,68 @@ func TestSessionContentOpsDegradeRearmsAfterARecordedRequest(t *testing.T) {
 	}
 }
 
-// §5.5: a close-stage degrade re-arms after a close that succeeds, so the
-// next close outage, an interval later, raises a fresh event.
+// §5.5: a close-stage degrade stays latched until a close succeeds, and
+// re-arms after one, so the next close outage, an interval later, raises a
+// fresh event.
 func TestSessionContentOpsDegradeRearmsAfterAClose(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Close rearm")
+	e.server(t) // publishes the city's live Server, whose provider takes its degrade events
 	clk := &clock.Fake{Time: time.Now()}
-	e.sm.cityOpsFor(e.fs.CityName(), e.fs).degraded.clk = clk
-	submit := func() {
-		t.Helper()
-		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`).Body)
-		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
-		e.waitClosed(t, acc.RequestID)
+	city := e.sm.cityOpsFor(e.fs.CityName(), e.fs)
+	city.degraded.clk = clk
+	closeFailure := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StageClose, Reason: legacyop.DegradeStoreError}
+	outage := func() {
+		clk.Time = clk.Time.Add(opsDegradeInterval)
+		city.degraded.Report(rollout.KeyOpsContent, closeFailure)
 	}
 	count := func() int {
 		evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
 		return len(evs)
 	}
-	e.store.set(func(s *opsTestStore) { s.updateFails = 4 }) // outlasts the foreground retries
-	submit()
-	clk.Time = clk.Time.Add(opsDegradeInterval)
-	e.store.set(func(s *opsTestStore) { s.updateFails = 4 })
-	submit()
+	outage()
+	outage()
 	if n := count(); n != 1 {
 		t.Fatalf("a close outage with no close in between raised %d events, want 1", n)
 	}
-	submit() // closes in the foreground
-	clk.Time = clk.Time.Add(opsDegradeInterval)
-	e.store.set(func(s *opsTestStore) { s.updateFails = 4 })
-	submit()
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`).Body)
+	waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1) // the close lands before the event (I10)
+	outage()
 	if n := count(); n != 2 {
 		t.Fatalf("a close outage after a healthy close raised %d events in total, want 2", n)
+	}
+}
+
+// §5.5: a close the background retry lands, after the request's event went
+// out with its op open, re-arms the close stage too, so the next close
+// outage, an interval later, raises a fresh event.
+func TestSessionContentOpsDegradeRearmsAfterABackgroundClose(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Background close rearm")
+	clk := &clock.Fake{Time: time.Now()}
+	city := e.sm.cityOpsFor(e.fs.CityName(), e.fs)
+	city.degraded.clk = clk
+	outage := func() {
+		t.Helper()
+		e.store.set(func(s *opsTestStore) { s.updateFails = 4 }) // outlasts the foreground retries
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`).Body)
+		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+		e.waitClosed(t, acc.RequestID)
+		// The retry reports the close before it releases the entry.
+		waitFor(t, testEventTimeout, "the background close releases its entry", func() bool { return city.inflight.Len() == 0 })
+	}
+	count := func() int {
+		evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+		return len(evs)
+	}
+	outage()
+	if n := count(); n != 1 {
+		t.Fatalf("a close outage raised %d events, want 1", n)
+	}
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	outage()
+	if n := count(); n != 2 {
+		t.Fatalf("a close outage after a background close raised %d events in total, want 2", n)
 	}
 }
 
@@ -2290,13 +2378,14 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 		stream  bool
 		wantErr string
 		queued  bool
+		replay  string
 	}{
 		{name: "no key", answer: map[string]any{"status": "accepted", "request_id": "req-1", "event_cursor": "3"}, stream: true},
 		{name: "keyed, live", key: "key-1", answer: map[string]any{
 			"status": "accepted", "request_id": "gc-op-a", "event_cursor": "3",
 			"idempotency_key": "key-1", "op": map[string]any{"id": "gc-op-a", "conversation": "sess-1", "kind": "message", "status": "submitted"},
 		}, stream: true},
-		{name: "keyed, replayed success", key: "key-2", queued: true, answer: map[string]any{
+		{name: "keyed, replayed success", key: "key-2", queued: true, replay: "replayed: operation gc-op-b already closed succeeded; " + replayOptionsNote, answer: map[string]any{
 			"status": "accepted", "request_id": "gc-op-b", "event_cursor": "3",
 			"replayed": true, "op": map[string]any{
 				"id": "gc-op-b", "conversation": "sess-1", "kind": "message", "status": "closed",
@@ -2304,7 +2393,8 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 			},
 		}},
 		{
-			name: "keyed, replayed failure", key: "key-3", wantErr: "submit failed: resolve_failed: replayed: operation gc-op-c already closed failed{session_gone}",
+			name: "keyed, replayed failure", key: "key-3",
+			wantErr: "submit failed: resolve_failed: replayed: operation gc-op-c already closed failed{session_gone}; " + replayOptionsNote,
 			answer: map[string]any{
 				"status": "accepted", "request_id": "gc-op-c", "event_cursor": "3", "replayed": true,
 				"op": map[string]any{
@@ -2360,6 +2450,9 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 			if err != nil || resp.ID != "sess-1" || resp.Queued != tc.queued || resp.Intent != session.SubmitIntentDefault {
 				t.Fatalf("resp = %+v, %v", resp, err)
 			}
+			if resp.Replayed != (tc.replay != "") || resp.Message != tc.replay {
+				t.Fatalf("resp replayed %v with message %q, want %q", resp.Replayed, resp.Message, tc.replay)
+			}
 		})
 	}
 }
@@ -2375,7 +2468,7 @@ func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	defer srv.Close()
 	c := NewCityScopedClient(srv.URL, e.fs.CityName())
 	first, err := c.SubmitSessionWithKey(info.ID, "via client", session.SubmitIntentFollowUp, "client-key")
-	if err != nil || !first.Queued || first.ID != info.ID {
+	if err != nil || !first.Queued || first.ID != info.ID || first.Replayed {
 		t.Fatalf("first = %+v, %v", first, err)
 	}
 
@@ -2384,7 +2477,8 @@ func TestClientSubmitSessionWithKeyReplaysAcrossARestart(t *testing.T) {
 	defer srv2.Close()
 	c2 := NewCityScopedClient(srv2.URL, e.fs.CityName())
 	replayed, err := c2.SubmitSessionWithKey(info.ID, "via client", session.SubmitIntentFollowUp, "client-key")
-	if err != nil || !replayed.Queued || replayed.ID != info.ID || replayed.Intent != session.SubmitIntentFollowUp {
+	if err != nil || !replayed.Queued || replayed.ID != info.ID || replayed.Intent != session.SubmitIntentFollowUp ||
+		!replayed.Replayed || !strings.HasSuffix(replayed.Message, replayOptionsNote) {
 		t.Fatalf("replay = %+v, %v", replayed, err)
 	}
 	if got := queuedSubmitCount(t, e.fs.cityPath, info.ID); got != 1 {
@@ -2539,8 +2633,8 @@ func driftEnv(t *testing.T, mode string) (e *opsEnv, a, b session.Info, logs fun
 // §6.1 target drift: in auto the delivery re-resolves the target, as it
 // always has, so it reaches the session the alias names now; the op, which
 // names the session the 202 resolved, closes from that result and the drift
-// is logged and counted. In require the delivery goes to the op's
-// conversation: the op is the request.
+// is logged and counted; a replay's event names the op's session. In require
+// the delivery goes to the op's conversation: the op is the request.
 func TestSessionContentOpsTargetDrift(t *testing.T) {
 	for _, path := range []string{"/submit", "/messages"} {
 		t.Run("auto "+path, func(t *testing.T) {
@@ -2562,6 +2656,21 @@ func TestSessionContentOpsTargetDrift(t *testing.T) {
 			}
 			if n := moved(); n != 1 {
 				t.Fatalf("%s counted %d times, want 1", opTargetMovedResult, n)
+			}
+			// request_id rule 4: the executor's event names the session that
+			// got the message, a replay's the op's.
+			replay := decodeAsyncAccepted(t, e.post(t, "/session/"+a.ID+path, "key-d", `{"message":"moved"}`).Body)
+			if replay.RequestID != acc.RequestID || !replay.Replayed {
+				t.Fatalf("replay = %+v", replay)
+			}
+			evs := waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 2)
+			for i, want := range []string{b.ID, a.ID} {
+				var p struct {
+					SessionID string `json:"session_id"`
+				}
+				if err := json.Unmarshal(evs[i].Payload, &p); err != nil || p.SessionID != want || evs[i].Subject != want {
+					t.Fatalf("event %d names %q (subject %q), want %s (%v)", i, p.SessionID, evs[i].Subject, want, err)
+				}
 			}
 		})
 		t.Run("require "+path, func(t *testing.T) {

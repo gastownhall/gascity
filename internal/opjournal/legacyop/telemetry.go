@@ -119,6 +119,14 @@ func (r *Recorder) degrade(kind opjournal.Kind, stage, reason string, err error)
 	}
 }
 
+// closeHealthy tells the Healthy hook that a close just worked, so its owner's
+// next close failure is news again.
+func (r *Recorder) closeHealthy() {
+	if r.Healthy != nil {
+		r.Healthy(StageClose)
+	}
+}
+
 // shouldLogDegrade reports whether key's degrade line is due, and if so
 // latches it for DegradeLogInterval.
 func (r *Recorder) shouldLogDegrade(key degradeLogKey) bool {

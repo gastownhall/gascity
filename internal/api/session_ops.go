@@ -350,6 +350,7 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 		Inflight: city.inflight,
 		Clock:    o.clk,
 		Degraded: func(d legacyop.Degrade) { city.degraded.Report(rollout.KeyOpsContent, d) },
+		Healthy:  func(stage string) { o.healthy(stage) },
 		Done:     city.done,
 	}
 	return o
@@ -675,7 +676,6 @@ func (s *Server) finishMessageOp(adm *legacyop.Admission, res legacyop.Result) *
 		return nil
 	}
 	if f.Closed {
-		s.ops.healthy(legacyop.StageClose)
 		return conversationOpWire(f.Op)
 	}
 	return s.currentOpWire(adm.Op)
@@ -715,14 +715,16 @@ func (o *serverOps) runAfterAdmit() {
 // the replaying request's endpoint, projected from the op (DES-O0API §6.3):
 // a request whose original waiter missed the event still gets one. The
 // projection carries no will_start, will_not_start_reason, interrupt or
-// original error message.
+// original error message; its message, the error_message of a failure, says
+// what it replays and that the retry's own options took no effect (§3.1).
 func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
 	wire := conversationOpWire(op)
 	arm, reason := op.Outcome.Effective()
+	message := replayMessage(op.ID, arm, reason)
 	if arm == opjournal.ArmSucceeded {
 		queued := op.Outcome.Result.Via == legacyop.ViaLegacyQueued
 		if operation == RequestOperationSessionSubmit {
-			s.emitMessageResult(events.RequestResultSessionSubmit, op.Conversation, SessionSubmitSucceededPayload{
+			s.emitReplayEvent(events.RequestResultSessionSubmit, op.Conversation, message, SessionSubmitSucceededPayload{
 				RequestID: op.ID,
 				SessionID: op.Conversation,
 				Queued:    queued,
@@ -731,7 +733,7 @@ func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
 			})
 			return
 		}
-		s.emitMessageResult(events.RequestResultSessionMessage, op.Conversation, SessionMessageSucceededPayload{
+		s.emitReplayEvent(events.RequestResultSessionMessage, op.Conversation, message, SessionMessageSucceededPayload{
 			RequestID: op.ID,
 			SessionID: op.Conversation,
 			Queued:    queued,
@@ -739,17 +741,41 @@ func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
 		})
 		return
 	}
-	s.emitRequestFailedOp(op.ID, operation, messageReplayErrorCode(operation, reason), replayedFailureMessage(op.ID, arm, reason), wire)
+	s.emitReplayEvent(events.RequestFailed, "", message, RequestFailedPayload{
+		RequestID:    op.ID,
+		Operation:    operation,
+		ErrorCode:    messageReplayErrorCode(operation, reason),
+		ErrorMessage: message,
+		Op:           wire,
+	})
 }
 
-// replayedFailureMessage is the error message of a replayed failure: the op
-// and its stored outcome; the original error text is not kept.
-func replayedFailureMessage(id string, arm opjournal.Arm, reason string) string {
+// emitReplayEvent records a replay's terminal event through its city's op
+// state, as emitMessageResult does, with the replay's message on the event.
+func (s *Server) emitReplayEvent(eventType, subject, message string, payload events.Payload) {
+	e, err := typedEvent(eventType, subject, payload)
+	if err != nil {
+		s.ops.logf("api: %v", err)
+		return
+	}
+	e.Message = message
+	s.ops.city.emit(s, requestIDFromPayload(payload), e)
+}
+
+// replayOptionsNote ends a replay's message (DES-O0API §3.1): resume and the
+// request's other execution options are outside the op and its digest, so a
+// same-key retry that changes one gets the first request's outcome without it.
+const replayOptionsNote = "a replay runs nothing, so this request's own options, such as resume, took no effect: wake the session to start it, or use a new Idempotency-Key to send again"
+
+// replayMessage is a replay's message: the op and its stored outcome (the
+// original error text is not kept), and that the retry's options took no
+// effect.
+func replayMessage(id string, arm opjournal.Arm, reason string) string {
 	message := fmt.Sprintf("replayed: operation %s already closed %s", id, arm)
 	if reason != "" {
 		message += "{" + reason + "}"
 	}
-	return message
+	return message + "; " + replayOptionsNote
 }
 
 // messageReplayErrorCode is the request.failed error code a replay projects

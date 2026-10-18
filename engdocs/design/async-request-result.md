@@ -50,7 +50,11 @@ progression.
    outcome, for example `request.failed` with `timeout` for a message that
    was delivered, so a replayed failure does not prove the message did not
    land. A request whose executor crashed after the 202 has none until it
-   is retried.
+   is retried. In `auto` the executor re-resolves its target (DES-O0API
+   §6.1), so when an alias moved to another session after the 202, the
+   executor's event names the session that got the message, while the op
+   and a replay's event name the one the alias named at acceptance;
+   `require` delivers to the op's session.
 5. Results are projections of the op: the executor closes the op, then
    emits the terminal event. When the close keeps failing, the event goes
    out at once, in every `ops.content` mode, and carries the op still
@@ -64,19 +68,36 @@ progression.
    `in_flight`: the running request emits its terminal event for its own
    operation only, so the other endpoint's waiter would never match it.
    Once the request has finished, a retry the `Idempotency-Key` cache
-   answers (rule 3) gets the first request's 202 again, whose terminal
-   event is after its cursor; any other retry gets the stored outcome and
-   a terminal event for its own operation. When either request is
-   unrecorded, a retry the cache answers gets the first request's 202
-   (or rule 9's 409 `in_flight`), whether that request is still running
-   or has finished, and any other retry is a new request (rule 3).
+   answers (rule 3) gets the 202 the cache holds for that endpoint and
+   spelling again, whose terminal event is after its cursor: the first
+   request's, or a replay's (`replayed: true`, with the replay's own
+   `event_cursor`) when the first retry on that endpoint and spelling
+   came after the request finished; any other retry gets the stored
+   outcome and a terminal event for its own operation. When either
+   request is unrecorded, a retry the cache answers gets the first
+   request's 202 (or rule 9's 409 `in_flight`), whether that request is
+   still running or has finished, and any other retry is a new request
+   (rule 3).
+   A same-key retry answered from the first request, by the cache, the
+   in-flight registry or the stored op, applies none of its own options.
+   The stored op's digest covers the session, the message and the
+   intent, not `resume` (DES-O0API §3.1), so a retry that adds
+   `resume: true` to a message that queued for a session that was not
+   running gets that outcome, and the session is not started. A replay's
+   re-emitted terminal event says so in its envelope `message` (and, for
+   a failure, its `error_message`). To start the session, wake it
+   (`POST /v0/city/{cityName}/session/{id}/wake`); to deliver the message
+   again, use a new key. The cache refuses a retry whose body differs
+   from the one it holds for that endpoint and spelling with 422
+   `idempotency_mismatch`, as it compares whole request bodies.
 7. A replay's `error_code` is derived from the stored outcome, which
    keeps the failure's class but not the step that failed, so it can
    differ from the original's: a session closed or gone during the
    delivery (originally `submit_failed` or `message_failed`) replays as
    `resolve_failed`, and a deadline or cancellation inside `/submit`
    (originally `submit_failed`) replays as `timeout`. The original `error_message` is
-   not kept either; a replay says which op it replays and its outcome.
+   not kept either: a replay's says which op it replays and its outcome,
+   and that the retry's own options took no effect (rule 6).
 8. A retry the `Idempotency-Key` cache misses still passes the front-door
    checks first: an unknown target is 404 and a session waiting on a
    pending interaction (for example an approval the first message raised)
@@ -220,7 +241,9 @@ operation also carries `idempotency_key` (the client's key, or one the
 server minted), `op` (the operation), and, on a retry of a request that
 already finished, `replayed: true` with the stored outcome in
 `op.outcome`. A client that sees `replayed: true` and `op.status:
-"closed"` has its answer and need not wait on the stream.
+"closed"` has its answer and need not wait on the stream. Nothing ran
+for the retry, so neither did its own options: a `resume: true` on it
+did not start the session (request_id rule 6).
 
 No resource IDs. No session data. No domain fields. The resource
 does not exist yet. Returning an ID for it invites the client to

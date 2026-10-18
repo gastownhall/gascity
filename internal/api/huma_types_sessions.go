@@ -72,7 +72,7 @@ type asyncAcceptedBody struct {
 	// IdempotencyKey, Replayed and Op are set only when the server recorded
 	// the request as an operation (an ops gate is auto or require).
 	IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery."`
-	Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor."`
+	Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key."`
 	Op             *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as."`
 }
 

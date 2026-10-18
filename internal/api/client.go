@@ -340,11 +340,16 @@ const sessionMessageTimeout = 4 * time.Minute
 const defaultClientTimeout = 60 * time.Second
 
 // SessionSubmitResponse is the domain-facing shape of a session submit result.
+// Replayed marks a SubmitSessionWithKey retry answered from a finished
+// request's stored outcome: nothing ran again, and Message says that the
+// retry's own options, resume included, took no effect (request_id rule 6).
 type SessionSubmitResponse struct {
-	Status string               `json:"status"`
-	ID     string               `json:"id"`
-	Queued bool                 `json:"queued"`
-	Intent session.SubmitIntent `json:"intent"`
+	Status   string               `json:"status"`
+	ID       string               `json:"id"`
+	Queued   bool                 `json:"queued"`
+	Intent   session.SubmitIntent `json:"intent"`
+	Replayed bool                 `json:"replayed,omitempty"`
+	Message  string               `json:"message,omitempty"`
 }
 
 // sseEvent is a parsed SSE frame from the event stream.
@@ -1485,7 +1490,10 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 // stored outcome without waiting on the event stream. That outcome is the
 // op's, which can differ from the first request's when its close kept
 // failing (request_id rule 4): a replayed failure does not prove the message
-// was not delivered. An empty key sends none, as SubmitSession does.
+// was not delivered. A replay runs nothing, so this call's resume does not
+// start a session the first request only queued for (request_id rule 6); a
+// replayed success says so in the response's Replayed and Message, a replayed
+// failure in its error. An empty key sends none, as SubmitSession does.
 func (c *Client) SubmitSessionWithKey(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
 	return c.submitSession(id, message, intent, key)
 }
@@ -1575,13 +1583,16 @@ func replayedSubmitOutcome(body *genclient.AsyncAcceptedBody, intent session.Sub
 	arm, reason := outcome.Effective()
 	if arm != opjournal.ArmSucceeded {
 		return SessionSubmitResponse{}, true, fmt.Errorf("submit failed: %s: %s",
-			messageReplayErrorCode(RequestOperationSessionSubmit, reason), replayedFailureMessage(op.Id, arm, reason))
+			messageReplayErrorCode(RequestOperationSessionSubmit, reason), replayMessage(op.Id, arm, reason))
 	}
 	queued := op.Outcome.Via != nil && *op.Outcome.Via == legacyop.ViaLegacyQueued
 	if intent == "" {
 		intent = session.SubmitIntentDefault
 	}
-	return SessionSubmitResponse{Status: "accepted", ID: op.Conversation, Queued: queued, Intent: intent}, true, nil
+	return SessionSubmitResponse{
+		Status: "accepted", ID: op.Conversation, Queued: queued, Intent: intent,
+		Replayed: true, Message: replayMessage(op.Id, arm, reason),
+	}, true, nil
 }
 
 // SlingRequest carries the parameters of a sling mutation for Client.Sling.
