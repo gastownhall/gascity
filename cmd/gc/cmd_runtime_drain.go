@@ -886,7 +886,10 @@ func (c drainAckCaller) names(b beads.Bead) bool {
 
 // drainAckCallerSessionID is the caller's GC_SESSION_ID, a seam for tests,
 // which MUST NOT call t.Parallel() when they swap it.
-var drainAckCallerSessionID = func() string { return os.Getenv("GC_SESSION_ID") }
+var drainAckCallerSessionID = callerSessionIDFromEnv
+
+// callerSessionIDFromEnv is the calling process's GC_SESSION_ID.
+func callerSessionIDFromEnv() string { return os.Getenv("GC_SESSION_ID") }
 
 // drainAckOwnOperator is the refusal of an --operator ack the caller makes
 // on its own session.
