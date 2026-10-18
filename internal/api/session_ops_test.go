@@ -303,7 +303,10 @@ var mintedKeyRE = regexp.MustCompile(`^k-[a-z2-7]{26}$`)
 // event, envelope and payload, are the legacy ones in full, keyed or not and
 // failed or not. The one field off shares with the other modes is an
 // interrupt_now's "interrupt" report (DES-T3I §14 item 2), which ops.content
-// does not gate.
+// does not gate. Nor does it gate the keeping of a terminal event the event
+// log refuses: while it is kept, off answers a same-key retry from the LRU
+// 409 in_flight, not the legacy 202
+// (TestSessionContentOpsOffReplayIsBusyWhileTheLiveLogRefusesTheEvent).
 func TestSessionContentOpsOffKeepsTheLegacyWire(t *testing.T) {
 	for _, tc := range []struct {
 		name, path, key, body string

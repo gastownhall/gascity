@@ -67,9 +67,9 @@ progression.
    answers (rule 3) gets the first request's 202 again, whose terminal
    event is after its cursor; any other retry gets the stored outcome and
    a terminal event for its own operation. When either request is
-   unrecorded, a retry the cache answers gets the first request's 202,
-   whether that request is still running or has finished, and any other
-   retry is a new request (rule 3).
+   unrecorded, a retry the cache answers gets the first request's 202
+   (or rule 9's 409 `in_flight`), whether that request is still running
+   or has finished, and any other retry is a new request (rule 3).
 7. A replay's `error_code` is derived from the stored outcome, which
    keeps the failure's class but not the step that failed, so it can
    differ from the original's: a session closed or gone during the
@@ -84,8 +84,11 @@ progression.
    Once the target is deliverable again, such a retry is answered as rule
    6 says. A retry the cache answers skips those checks: it gets the first
    request's 202 (or rule 9's 409 `in_flight`) whatever the target's state
-   now, because the cache sits in front of the handler, unchanged, in
-   every `ops.content` mode (DES-O0API D7).
+   now, because the cache sits in front of the handler in every
+   `ops.content` mode (DES-O0API D7). It answers as it did before the
+   server recorded operations but for that 409, which it gives in every
+   mode, `off` included, while the first request's terminal event is
+   kept (rule 9).
 9. The in-flight registry that answers rule 6 is one per city per API
    process, not one per per-city `Server`: the supervisor builds a new
    `Server` when a city's state changes while the old one may still be
@@ -103,8 +106,11 @@ progression.
    the op. The supervisor builds a restarted city's new `Server` only
    when a request for the city arrives, so a delivery can finish after
    the restart closed the old event log and before any new `Server` is
-   live. A `/submit` or `/messages` terminal event the event log refuses
-   is kept, in order, and recorded the next time a log takes it: when the
+   live. In every `ops.content` mode, `off` included, a `/submit` or
+   `/messages` terminal event goes to the city's live `Server`'s event
+   log (its own `Server`'s when the supervisor dropped the city), whether
+   or not its request was recorded, and one the log refuses is kept, in
+   order, and recorded the next time a log takes it: when the
    supervisor builds the city's next `Server`, before the city's next
    `/submit` or `/messages` terminal event, and before a same-key retry
    of its request is answered, whether the `Idempotency-Key` cache, the

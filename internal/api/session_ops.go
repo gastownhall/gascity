@@ -7,18 +7,21 @@ package api
 // Under the ops.content rollout gate each request is recorded as a message
 // op before the legacy delivery runs and closed from the legacy result after
 // it, through the legacyop front door. Off records nothing and answers as
-// before, with one addition every mode shares: an interrupt_now submit's
-// result carries the turn fence's "interrupt" report (DES-T3I §14 item 2),
-// which ops.content does not gate. Auto records where the op store can and
+// before, with two additions every mode shares, which ops.content does not
+// gate: an interrupt_now submit's result carries the turn fence's
+// "interrupt" report (DES-T3I §14 item 2), and a terminal event goes through
+// the city's shared op state (below), which keeps one the event log refuses
+// and answers a same-key retry of its request 409 in_flight, from the LRU
+// too, until it is recorded. Auto records where the op store can and
 // lets the request run unrecorded where it cannot. Require refuses a request
 // it cannot record; the one effect that can precede the refusal is the
 // materialization of a configured named session, which require needs to name
 // the op's conversation (§6.4). The existing Idempotency-Key LRU stays in
-// front, unchanged; behind it the in-flight registry and the op row are the
-// dedupe authority, so a retry finds its request again across a restart,
-// across /submit and /messages, and across alias and bead id. The delivered
-// text is the legacy path's, unchanged: no op id, key or marker reaches a
-// runtime (D15, I11).
+// front, unchanged but for that 409; behind it the in-flight registry and
+// the op row are the dedupe authority, so a retry finds its request again
+// across a restart, across /submit and /messages, and across alias and bead
+// id. The delivered text is the legacy path's, unchanged: no op id, key or
+// marker reaches a runtime (D15, I11).
 //
 // The in-flight registry is per city per process (cityOps), not per Server:
 // the supervisor builds a new Server for a city whenever the city's State

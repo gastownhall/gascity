@@ -105,3 +105,29 @@ warning, so the create must do the same instead of failing. Keep explicit
 per-session options, validated at create time, in `template_overrides`;
 otherwise startup can mistake its own baseline for config drift or compare one
 session's overrides against the template.
+
+## City op state and kept terminal events
+
+The supervisor builds a new `Server` for a city whenever the city's `State`
+changes, while the old one's `/submit` and `/messages` deliveries may still
+run. What those deliveries share lives per city per process in `cityOps`
+(`session_ops.go`; DES-O0API D9, I3), not on a `Server`: the in-flight
+registry, the degrade reporter, the kept terminal events and the city's live
+`Server`. `SupervisorMux` never removes a city's `cityOps`, and
+`getCityServer` publishes a new `Server` before it retires the one it
+replaces, so a same-key retry still finds a replaced `Server`'s running
+delivery, and that delivery a live `Server` to report through.
+
+In every `ops.content` mode, `off` included, a delivery records its terminal
+event to the city's live `Server`'s event log (`emitMessageResult`), and a
+recorded one closes its op through that `Server`'s store (`openOpStore`); its
+own `Server` serves only when the city has no live `Server` (the supervisor
+dropped it). An event the log refuses is kept, in order, and recorded when the
+supervisor publishes the city's next `Server`, before the city's next terminal
+event, and before a same-key retry of its request is answered. Three points
+answer such a retry: the `Idempotency-Key` LRU (`withMessageIdempotency`), the
+in-flight registry and the stored op (`replayAnswer`). Each records the kept
+events first and answers 409 `in_flight` while the retry's event stays kept,
+so no 202 goes out without its terminal event after its cursor. A new answer
+point must do the same. `engdocs/design/async-request-result.md` rules 8 and 9
+are the client contract.
