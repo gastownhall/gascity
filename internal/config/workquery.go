@@ -516,10 +516,16 @@ func (a *Agent) poolDemandTarget() string {
 // and the alias are the same string, and the tiers would ask bd the identical
 // question twice for the identical answer. Only test builtins compare, so the
 // skip costs no process, and the comparison is exact for any identity string.
+//
+// An identity that is only whitespace is skipped too: the claim pipeline trims
+// identities, so it is no identity there, and `gc ready` reads a blank
+// --assignee as no assignee filter at all, so its tier would answer with
+// anyone's work (ga-ylpbsy.3.8).
 func identityLoopHead() string {
 	return `gc_id_seen1=""; gc_id_seen2=""; ` +
 		`for id in "$GC_SESSION_ID" "$GC_SESSION_NAME" "$GC_ALIAS"; do ` +
 		`[ -z "$id" ] && continue; ` +
+		`case "$id" in *[![:space:]]*) ;; *) continue ;; esac; ` +
 		`[ "$id" = "$gc_id_seen1" ] && continue; ` +
 		`[ "$id" = "$gc_id_seen2" ] && continue; ` +
 		`if [ -z "$gc_id_seen1" ]; then gc_id_seen1="$id"; else gc_id_seen2="$id"; fi; `
