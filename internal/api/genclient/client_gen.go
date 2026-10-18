@@ -7474,12 +7474,44 @@ type TypedEventStreamEnvelopeWorkRecycleRequested struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeWorkReleaseUnfinished defines model for TypedEventStreamEnvelopeWorkReleaseUnfinished.
+type TypedEventStreamEnvelopeWorkReleaseUnfinished struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeWorkReleased defines model for TypedEventStreamEnvelopeWorkReleased.
 type TypedEventStreamEnvelopeWorkReleased struct {
 	Actor            string                   `json:"actor"`
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeWorkStartedUnrecorded defines model for TypedEventStreamEnvelopeWorkStartedUnrecorded.
+type TypedEventStreamEnvelopeWorkStartedUnrecorded struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -9398,6 +9430,23 @@ type TypedTaggedEventStreamEnvelopeWorkRecycleRequested struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished defines model for TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished.
+type TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeWorkReleased defines model for TypedTaggedEventStreamEnvelopeWorkReleased.
 type TypedTaggedEventStreamEnvelopeWorkReleased struct {
 	Actor            string                   `json:"actor"`
@@ -9405,6 +9454,23 @@ type TypedTaggedEventStreamEnvelopeWorkReleased struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          WorkLadderPayload        `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded defines model for TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded.
+type TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          SessionLifecyclePayload  `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -17483,6 +17549,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkRecycleReque
 	return err
 }
 
+// AsTypedEventStreamEnvelopeWorkReleaseUnfinished returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkReleaseUnfinished
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkReleaseUnfinished() (TypedEventStreamEnvelopeWorkReleaseUnfinished, error) {
+	var body TypedEventStreamEnvelopeWorkReleaseUnfinished
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkReleaseUnfinished overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkReleaseUnfinished
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkReleaseUnfinished(v TypedEventStreamEnvelopeWorkReleaseUnfinished) error {
+	v.Type = "work.release_unfinished"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkReleaseUnfinished performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkReleaseUnfinished
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkReleaseUnfinished(v TypedEventStreamEnvelopeWorkReleaseUnfinished) error {
+	v.Type = "work.release_unfinished"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeWorkReleased returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkReleased
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkReleased() (TypedEventStreamEnvelopeWorkReleased, error) {
 	var body TypedEventStreamEnvelopeWorkReleased
@@ -17501,6 +17595,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkReleased(v Ty
 // MergeTypedEventStreamEnvelopeWorkReleased performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkReleased
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkReleased(v TypedEventStreamEnvelopeWorkReleased) error {
 	v.Type = "work.released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeWorkStartedUnrecorded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeWorkStartedUnrecorded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeWorkStartedUnrecorded() (TypedEventStreamEnvelopeWorkStartedUnrecorded, error) {
+	var body TypedEventStreamEnvelopeWorkStartedUnrecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeWorkStartedUnrecorded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeWorkStartedUnrecorded(v TypedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeWorkStartedUnrecorded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeWorkStartedUnrecorded(v TypedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -17803,8 +17925,12 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeWorkNudged()
 	case "work.recycle_requested":
 		return t.AsTypedEventStreamEnvelopeWorkRecycleRequested()
+	case "work.release_unfinished":
+		return t.AsTypedEventStreamEnvelopeWorkReleaseUnfinished()
 	case "work.released":
 		return t.AsTypedEventStreamEnvelopeWorkReleased()
+	case "work.started_unrecorded":
+		return t.AsTypedEventStreamEnvelopeWorkStartedUnrecorded()
 	case "worker.operation":
 		return t.AsTypedEventStreamEnvelopeWorkerOperation()
 	default:
@@ -20902,6 +21028,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWork
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished() (TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished(v TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished) error {
+	v.Type = "work.release_unfinished"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished(v TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished) error {
+	v.Type = "work.release_unfinished"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeWorkReleased returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkReleased
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkReleased() (TypedTaggedEventStreamEnvelopeWorkReleased, error) {
 	var body TypedTaggedEventStreamEnvelopeWorkReleased
@@ -20920,6 +21074,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkR
 // MergeTypedTaggedEventStreamEnvelopeWorkReleased performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkReleased
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkReleased(v TypedTaggedEventStreamEnvelopeWorkReleased) error {
 	v.Type = "work.released"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded() (TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded, error) {
+	var body TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded(v TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded(v TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) error {
+	v.Type = "work.started_unrecorded"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -21222,8 +21404,12 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeWorkNudged()
 	case "work.recycle_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkRecycleRequested()
+	case "work.release_unfinished":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished()
 	case "work.released":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkReleased()
+	case "work.started_unrecorded":
+		return t.AsTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded()
 	case "worker.operation":
 		return t.AsTypedTaggedEventStreamEnvelopeWorkerOperation()
 	default:

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -137,7 +138,7 @@ func (c *ladderCity) row() beads.Bead {
 
 func (c *ladderCity) cell() workladder.Record {
 	c.t.Helper()
-	r, err := workladder.DecodeLadder(c.row().Metadata[workLadderKey])
+	r, err := workladder.DecodeLadder(c.row().Metadata[session.WorkLadderKey])
 	if err != nil {
 		c.t.Fatal(err)
 	}
@@ -151,20 +152,44 @@ func (c *ladderCity) entry(bead string) workladder.Entry {
 			return e
 		}
 	}
-	c.t.Fatalf("no ladder entry for %s in %s", bead, c.row().Metadata[workLadderKey])
+	c.t.Fatalf("no ladder entry for %s in %s", bead, c.row().Metadata[session.WorkLadderKey])
 	return workladder.Entry{}
 }
 
+// setRow writes kvs to the seat's row by a CAS: the work cells are CASOnly.
 func (c *ladderCity) setRow(kvs map[string]string) {
 	c.t.Helper()
-	if err := c.sessions.SetMetadataBatch(c.seat, kvs); err != nil {
-		c.t.Fatal(err)
+	casSetRow(c.t, c.sessions, c.seat, kvs)
+}
+
+// casSetRow writes kvs to row id of store by a CAS at a fresh revision.
+func casSetRow(t *testing.T, store *beads.MemStore, id string, kvs map[string]string) {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: kvs}); err != nil {
+		t.Fatal(err)
 	}
 }
 
 func (c *ladderCity) events(typ string) []events.Event {
 	evts, _ := c.rec.List(events.Filter{Type: typ})
 	return evts
+}
+
+// escalations are c's work.escalated reasons, in order.
+func escalations(c *ladderCity) []string {
+	var out []string
+	for _, e := range c.events(events.WorkEscalated) {
+		var p events.WorkLadderPayload
+		if err := json.Unmarshal(e.Payload, &p); err != nil {
+			c.t.Fatal(err)
+		}
+		out = append(out, p.Reason)
+	}
+	return out
 }
 
 // halfPast is m minutes and 30 seconds: the ladder's due times on a pass
@@ -201,8 +226,8 @@ func TestWorkLadderReplaysTheWedge(t *testing.T) {
 	if got := len(c.events(events.WorkRecycleRequested)); got != 1 {
 		t.Fatalf("work.recycle_requested = %d, want 1", got)
 	}
-	if esc := c.events(events.WorkEscalated); len(esc) != 1 || !strings.Contains(string(esc[0].Payload), workladder.AlertStartedUnanswered) {
-		t.Fatalf("work.escalated = %+v, want one started_unanswered", esc)
+	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertStartedRecycled, workladder.AlertStartedUnanswered}) {
+		t.Fatalf("work.escalated reasons = %v, want the recycle's alert, then started_unanswered", got)
 	}
 	if e := c.entry(id); e.Rung != workladder.RungEscalated || e.Recycles != 1 {
 		t.Fatalf("entry %+v, want escalated after one recycle", e)
@@ -249,7 +274,7 @@ func TestWorkLadderReleasesAnUnstartedClaim(t *testing.T) {
 		t.Fatalf("work.released = %+v, want one for %s", rel, id)
 	}
 	if cell := c.cell(); cell.Release != nil || len(cell.Entries) != 0 {
-		t.Fatalf("cell %s, want the release cleared and the entry gone", c.row().Metadata[workLadderKey])
+		t.Fatalf("cell %s, want the release cleared and the entry gone", c.row().Metadata[session.WorkLadderKey])
 	}
 	if len(c.posted) != 0 || c.row().Status == "closed" {
 		t.Fatalf("posted %+v, row %s: a release must not stop the seat", c.posted, c.row().Status)
@@ -285,12 +310,10 @@ func TestWorkLadderReleaseLosesToTheAgentsStart(t *testing.T) {
 	prev := workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
 		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
 	}}}
-	c.setRow(map[string]string{workLadderKey: workladder.EncodeLadder(prev)})
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(prev)})
 	race := &agentRaceStore{MemStore: c.sessions, row: c.seat, agent: func() {
 		started := workladder.EncodeStarted(workladder.Started{V: 1, Claims: []workladder.StartedClaim{{Key: key, Gen: 7, At: c.now, Via: workladder.ViaClaim}}})
-		if err := c.sessions.SetMetadataBatch(c.seat, map[string]string{workStartedKey: started}); err != nil {
-			t.Error(err)
-		}
+		casSetRow(t, c.sessions, c.seat, map[string]string{session.WorkStartedKey: started})
 	}}
 	c.env.CityStore = blindWriteRefusingStore{inner: race}
 	c.pass()
@@ -301,7 +324,7 @@ func TestWorkLadderReleaseLosesToTheAgentsStart(t *testing.T) {
 		t.Fatalf("claim %q: a release raced the start and won", b.Status)
 	}
 	if cell := c.cell(); cell.Release != nil || c.entry(id).Rung != workladder.RungStarted {
-		t.Fatalf("cell %s, want the claim started and no release", c.row().Metadata[workLadderKey])
+		t.Fatalf("cell %s, want the claim started and no release", c.row().Metadata[session.WorkLadderKey])
 	}
 	if got := len(c.events(events.WorkReleased)); got != 0 {
 		t.Fatalf("work.released = %d", got)
@@ -326,7 +349,7 @@ func TestWorkLadderClearsAReleaseThatKeptTheClaim(t *testing.T) {
 	prev := workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
 		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
 	}}}
-	c.setRow(map[string]string{workLadderKey: workladder.EncodeLadder(prev)})
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(prev)})
 	c.pass()
 	if got, _ := c.work.Get(b.ID); got.Status != "in_progress" {
 		t.Fatalf("claim %q, want kept: no lane serves it", got.Status)
@@ -349,13 +372,13 @@ func TestWorkLadderReleaseRefusesASeededClaim(t *testing.T) {
 	prev := workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
 		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
 	}}}
-	c.setRow(map[string]string{workLadderKey: workladder.EncodeLadder(prev), beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(prev), beadmeta.CurrentClaimBeadIDMetadataKey: id})
 	c.pass()
 	if b, _ := c.work.Get(id); b.Status != "in_progress" {
 		t.Fatalf("claim %q, want kept", b.Status)
 	}
 	if e := c.entry(id); e.Rung != workladder.RungStarted || e.Seed != workladder.SrcCurrentClaim || c.cell().Release != nil {
-		t.Fatalf("cell %s, want the claim started by its seed", c.row().Metadata[workLadderKey])
+		t.Fatalf("cell %s, want the claim started by its seed", c.row().Metadata[session.WorkLadderKey])
 	}
 }
 
@@ -371,7 +394,7 @@ func TestWorkLadderRecyclesOnceThenEscalates(t *testing.T) {
 	prev := workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
 		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungStarted, Since: c.now.Add(-3 * time.Hour), Attempts: 6, Last: c.now.Add(-61 * time.Minute), Seed: workladder.SrcAgent,
 	}}}
-	c.setRow(map[string]string{workLadderKey: workladder.EncodeLadder(prev), workStartedKey: agent})
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(prev), session.WorkStartedKey: agent})
 	c.pass()
 	if len(c.posted) != 1 || c.posted[0].Generation != "7" {
 		t.Fatalf("posted %+v, want one recycle at generation 7", c.posted)
@@ -392,8 +415,8 @@ func TestWorkLadderRecyclesOnceThenEscalates(t *testing.T) {
 	if e := c.entry(id); e.Rung != workladder.RungEscalated {
 		t.Fatalf("entry %+v, want escalated", e)
 	}
-	if got := len(c.events(events.WorkEscalated)); got != 1 {
-		t.Fatalf("work.escalated = %d, want 1", got)
+	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertStartedRecycled, workladder.AlertStartedUnanswered}) {
+		t.Fatalf("work.escalated reasons = %v, want one recycle alert and one escalation", got)
 	}
 }
 
@@ -516,7 +539,11 @@ func TestWorkLadderHoldsUnderAGate(t *testing.T) {
 		"heartbeat hold": func(now time.Time) map[string]string {
 			return map[string]string{"held_until": now.Add(6 * time.Hour).Format(time.RFC3339)}
 		},
-		"wait hold": func(time.Time) map[string]string { return map[string]string{"wait_hold": "true"} },
+		"wait hold":         func(time.Time) map[string]string { return map[string]string{"wait_hold": "true"} },
+		"restart requested": func(time.Time) map[string]string { return map[string]string{"restart_requested": "true"} },
+		"quarantined": func(now time.Time) map[string]string {
+			return map[string]string{"quarantined_until": now.Add(6 * time.Hour).Format(time.RFC3339)}
+		},
 		"starting":  func(time.Time) map[string]string { return map[string]string{"state": "creating"} },
 		"suspended": func(time.Time) map[string]string { return map[string]string{"sleep_intent": "user-hold"} },
 	} {
@@ -612,7 +639,7 @@ func TestWorkLadderSwitch(t *testing.T) {
 			}, nil)
 			lane.workLadder(context.Background(), env)
 			row := mustGetTestBead(t, store, "session-bead-a")
-			marker, cell := row.Metadata[idleClaimNudgeTriggerKey], row.Metadata[workLadderKey]
+			marker, cell := row.Metadata[idleClaimNudgeTriggerKey], row.Metadata[session.WorkLadderKey]
 			if (mode == "off") != (marker == "work-a") || (mode == "on") != (cell != "") {
 				t.Fatalf("mode %s: marker %q, cell %q", mode, marker, cell)
 			}
@@ -640,7 +667,7 @@ func TestWorkLadderUsesLastAllocation(t *testing.T) {
 			stampedMemStore(t, store)
 			lane, _ := newPoolStepsTestLane(env, func() *allocSummary { return tc.sum }, nil)
 			lane.workLadder(context.Background(), env)
-			r, err := workladder.DecodeLadder(mustGetTestBead(t, store, "session-bead-a").Metadata[workLadderKey])
+			r, err := workladder.DecodeLadder(mustGetTestBead(t, store, "session-bead-a").Metadata[session.WorkLadderKey])
 			got := err == nil && len(r.Entries) == 1 && r.Entries[0].Key.Bead == "work-a" && r.Entries[0].Kind == workladder.KindTrigger
 			if got != tc.want {
 				t.Fatalf("cell %+v (%v), want a trigger entry: %v", r, err, tc.want)
@@ -730,5 +757,491 @@ func TestWorkLadderCarriesWorkUnderAPartialSnapshot(t *testing.T) {
 	c.pass()
 	if after := c.entry(id); after.Attempts != before.Attempts || !after.Since.Equal(before.Since) {
 		t.Fatalf("entry %+v, want %+v carried", after, before)
+	}
+}
+
+// staleListStore lists the session rows from snapshot (a read taken before
+// the row moved, as a cached list can be) and reads and writes them live.
+type staleListStore struct {
+	*beads.MemStore
+	snapshot *beads.MemStore
+}
+
+func (s staleListStore) List(q beads.ListQuery) ([]beads.Bead, error) { return s.snapshot.List(q) }
+
+// snapshotOf is a store holding a copy of row id as it stands.
+func snapshotOf(t *testing.T, store *beads.MemStore, id string) *beads.MemStore {
+	t.Helper()
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	b.Metadata = maps.Clone(b.Metadata)
+	return beads.NewMemStoreFrom(0, []beads.Bead{b}, nil)
+}
+
+// ladderListFailingStore fails every listing: a seat's claims cannot be read.
+type ladderListFailingStore struct{ *beads.MemStore }
+
+func (ladderListFailingStore) List(beads.ListQuery) ([]beads.Bead, error) {
+	return nil, fmt.Errorf("store down")
+}
+
+func (ladderListFailingStore) ListByAssignee(string, string, int) ([]beads.Bead, error) {
+	return nil, fmt.Errorf("store down")
+}
+
+// unservedClaim is an in_progress claim the seat holds whose route no lane
+// serves: its release keeps it.
+func (c *ladderCity) unservedClaim() string {
+	c.t.Helper()
+	b, err := c.work.Create(beads.Bead{Title: "unserved", Type: "task", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "nowhere/lane"}})
+	if err != nil {
+		c.t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := c.work.Update(b.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &c.seat}); err != nil {
+		c.t.Fatal(err)
+	}
+	c.claims = append(c.claims, b.ID)
+	return b.ID
+}
+
+// A release that keeps its claim (no lane serves the route) never leaves it
+// silent: the claim is nudged hourly from then on, with one
+// release_unfinished alert, and the release is retried at the same pace,
+// each attempt recorded as work.release_unfinished.
+func TestWorkLadderKeptReleaseKeepsNudging(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.unservedClaim()
+	c.run(5*time.Hour, 30*time.Second, nil)
+	want := []time.Duration{halfPast(1), halfPast(4), halfPast(10), halfPast(82), halfPast(142), halfPast(202), halfPast(262)}
+	if fmt.Sprint(c.nudgedAt) != fmt.Sprint(want) {
+		t.Fatalf("nudges at %v, want %v: hourly after the kept release at 22m30s", c.nudgedAt, want)
+	}
+	if got := escalations(c); fmt.Sprint(got) != fmt.Sprint([]string{workladder.AlertReleaseUnfinished}) {
+		t.Fatalf("work.escalated = %v, want one release_unfinished", got)
+	}
+	if n := len(c.events(events.WorkReleaseUnfinished)); n != 5 {
+		t.Fatalf("work.release_unfinished = %d, want one per attempt (5)", n)
+	}
+	if b, _ := c.work.Get(id); b.Status != "in_progress" {
+		t.Fatalf("claim %q, want kept", b.Status)
+	}
+}
+
+// A release that fails (its read of the seat's claims errs) is settled as
+// unfinished, not left pending: the mark is cleared (the hook may hand the
+// claim out), the entry waits a Cap, and the failure is recorded.
+func TestWorkLadderFailedReleaseBacksOff(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("on a store that cannot be listed")
+	c.env.WorkLegs = testWorkLegs(c.env.CityPath, c.env.Cfg, ladderListFailingStore{MemStore: c.work}, nil)
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
+		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
+	}}})})
+	c.pass()
+	if b, _ := c.work.Get(id); b.Status != "in_progress" {
+		t.Fatalf("claim %q", b.Status)
+	}
+	if e := c.entry(id); c.cell().Release != nil || !e.Unreleased || !e.Last.Equal(c.now) {
+		t.Fatalf("cell %s: want the release cleared and the entry backed off", c.row().Metadata[session.WorkLadderKey])
+	}
+	unf := c.events(events.WorkReleaseUnfinished)
+	if len(unf) != 1 || !strings.Contains(unf[0].Message, "failed") {
+		t.Fatalf("work.release_unfinished = %+v, want one failure", unf)
+	}
+}
+
+// At deploy, a seat holding two claims the hook handed it (each bead's
+// gc.session_id is the seat) seeds both as started, though the row's
+// current_claim stamp names only one: neither is released.
+func TestWorkLadderSeedsEveryHandedOutClaim(t *testing.T) {
+	c := newLadderCity(t)
+	older, newer := c.claim("handed out first"), c.claim("handed out second")
+	for _, id := range []string{older, newer} {
+		if err := c.work.SetMetadataBatch(id, map[string]string{beadmeta.SessionIDMetadataKey: c.seat}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: newer})
+	c.run(time.Hour, 30*time.Second, nil)
+	for id, src := range map[string]workladder.StartSource{older: workladder.SrcClaimSession, newer: workladder.SrcCurrentClaim} {
+		if b, _ := c.work.Get(id); b.Status != "in_progress" {
+			t.Fatalf("claim %s %q: a handed-out claim was released", id, b.Status)
+		}
+		if e := c.entry(id); e.Rung != workladder.RungStarted || e.Seed != src || !e.Since.Equal(c.start) {
+			t.Fatalf("entry %+v, want started by %v from the first observation", e, src)
+		}
+	}
+}
+
+// A claim stamped with the seat's gc.session_id after the allocation was
+// read (its snapshot lacks the stamp) is found started by the release's live
+// read: not released, and started from then on.
+func TestWorkLadderReleaseFindsTheHandOver(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("stamped after the allocation was read")
+	c.lane.summary = func() *allocSummary {
+		s := c.summary()
+		for i := range s.AssignedWork {
+			s.AssignedWork[i].Metadata = maps.Clone(s.AssignedWork[i].Metadata)
+			delete(s.AssignedWork[i].Metadata, beadmeta.SessionIDMetadataKey)
+		}
+		return s
+	}
+	c.run(5*time.Minute, 30*time.Second, nil)
+	if err := c.work.SetMetadataBatch(id, map[string]string{beadmeta.SessionIDMetadataKey: c.seat}); err != nil {
+		t.Fatal(err)
+	}
+	c.run(30*time.Minute, 30*time.Second, nil)
+	if b, _ := c.work.Get(id); b.Status != "in_progress" {
+		t.Fatalf("claim %q: released though handed to the seat", b.Status)
+	}
+	if e := c.entry(id); e.Rung != workladder.RungStarted || e.Seed != workladder.SrcClaimSession {
+		t.Fatalf("entry %+v, want started by the hand-over stamp", e)
+	}
+	if n := len(c.events(events.WorkReleased)); n != 0 {
+		t.Fatalf("work.released = %d", n)
+	}
+}
+
+// Of two unstarted claims, a release gives back only the one its CAS
+// proved, whichever the seat's live read lists first; the other stays.
+func TestWorkLadderReleasesOnlyTheProvenClaim(t *testing.T) {
+	c := newLadderCity(t)
+	first, second := c.claim("first"), c.claim("second")
+	due := workladder.Entry{
+		Key: workladder.ClaimKey{Store: "city", Bead: second}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
+		Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
+	}
+	fresh := workladder.Entry{Key: workladder.ClaimKey{Store: "city", Bead: first}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now}
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{fresh, due}})})
+	c.pass()
+	if b, _ := c.work.Get(second); b.Status != "open" {
+		t.Fatalf("the proven claim %s %q, want released", second, b.Status)
+	}
+	if b, _ := c.work.Get(first); b.Status != "in_progress" {
+		t.Fatalf("the other claim %s %q, want kept", first, b.Status)
+	}
+}
+
+// A release whose retry gives the claim back sends no nudge about it in the
+// same pass: there is nothing left to claim.
+func TestWorkLadderNoNudgeAboutAReleasedClaim(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("route fixed since")
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
+		Key: workladder.ClaimKey{Store: "city", Bead: id}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed,
+		Since: c.now.Add(-2 * time.Hour), Attempts: 3, Last: c.now.Add(-61 * time.Minute), Unreleased: true,
+	}}})})
+	c.pass()
+	if b, _ := c.work.Get(id); b.Status != "open" {
+		t.Fatalf("claim %q, want the retry to release it", b.Status)
+	}
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudged %v about a claim the same pass gave back", c.nudgedAt)
+	}
+}
+
+// The hook's current-claim stamp landing between the ladder's read and its
+// release CAS is seen by the CAS: the claim is started, not released.
+func TestWorkLadderReleaseSeesASeedInItsCASWindow(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("stamped just now")
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Entries: []workladder.Entry{{
+		Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now.Add(-time.Hour), Attempts: 3, Last: c.now.Add(-time.Hour),
+	}}})})
+	race := &agentRaceStore{MemStore: c.sessions, row: c.seat, agent: func() {
+		casSetRow(t, c.sessions, c.seat, map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	}}
+	c.env.CityStore = blindWriteRefusingStore{inner: race}
+	c.pass()
+	if b, _ := c.work.Get(id); b.Status != "in_progress" {
+		t.Fatalf("claim %q: released over a seed that landed in the CAS window", b.Status)
+	}
+	if e := c.entry(id); e.Rung != workladder.RungStarted || e.Seed != workladder.SrcCurrentClaim || c.cell().Release != nil {
+		t.Fatalf("cell %s", c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// Each seed names a claim started at deploy, so it is nudged as started and
+// never released.
+func TestWorkLadderSeeds(t *testing.T) {
+	for name, tc := range map[string]struct {
+		meta func(id string) map[string]string
+		src  workladder.StartSource
+	}{
+		"execution_claim_started": {func(id string) map[string]string { return map[string]string{executionClaimStartedKey: "tok-7|" + id} }, workladder.SrcExecutionClaimStarted},
+		"current_claim": {func(id string) map[string]string {
+			return map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id}
+		}, workladder.SrcCurrentClaim},
+		"currently_processing": {func(id string) map[string]string { return map[string]string{session.CurrentBeadIDKey: id} }, workladder.SrcCurrentlyProcessing},
+		"agent cell, any store": {func(id string) map[string]string {
+			return map[string]string{session.WorkStartedKey: session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Bead: id, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim}))}
+		}, workladder.SrcAgent},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := newLadderCity(t)
+			id := c.claim("seeded")
+			c.setRow(tc.meta(id))
+			c.run(time.Hour, 30*time.Second, nil)
+			if b, _ := c.work.Get(id); b.Status != "in_progress" {
+				t.Fatalf("claim %q: a seeded claim was released", b.Status)
+			}
+			if e := c.entry(id); e.Rung != workladder.RungStarted || e.Seed != tc.src {
+				t.Fatalf("entry %+v, want started by %v", e, tc.src)
+			}
+		})
+	}
+	// A stamp of another incarnation is no evidence.
+	c := newLadderCity(t)
+	id := c.claim("stamped by a predecessor")
+	c.setRow(map[string]string{executionClaimStartedKey: "tok-6|" + id})
+	c.run(30*time.Minute, 30*time.Second, nil)
+	if b, _ := c.work.Get(id); b.Status != "open" {
+		t.Fatalf("claim %q: another incarnation's stamp kept it", b.Status)
+	}
+}
+
+// The started text is built in: a configured nudge never replaces it.
+func TestWorkLadderStartedTextIsBuiltIn(t *testing.T) {
+	c := newLadderCity(t)
+	c.env.Cfg.Agents[0].Nudge = "configured: gc hook --claim --drain-ack --json"
+	id := c.claim("started")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.run(5*time.Minute, 30*time.Second, nil)
+	for _, call := range c.sp.Calls {
+		if call.Method == "Nudge" && call.Message != fmt.Sprintf(ladderStartedNudge, id) {
+			t.Fatalf("started nudge %q, want the built-in text", call.Message)
+		}
+	}
+	if len(c.nudgedAt) == 0 {
+		t.Fatal("no nudge")
+	}
+}
+
+// A seat is quiet only on a readable activity clock: no activity reading
+// sends no nudge.
+func TestWorkLadderNeedsAQuietClock(t *testing.T) {
+	c := newLadderCity(t)
+	c.claim("any")
+	c.sp.SetActivity(ladderSeatName, time.Time{})
+	c.run(30*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v with no activity reading", c.nudgedAt)
+	}
+}
+
+// busySnapshot is a runtime whose pane still shows its provider's busy
+// indicator.
+type busySnapshot struct{ *runtime.Fake }
+
+func (busySnapshot) SnapshotIdle(string) (bool, error) { return false, nil }
+
+// A busy-readable provider's busy indicator vetoes a stale activity clock.
+func TestWorkLadderHonorsTheBusySnapshot(t *testing.T) {
+	c := newLadderCity(t)
+	c.claim("a long turn")
+	c.env.SP = busySnapshot{Fake: c.sp}
+	c.run(30*time.Minute, 30*time.Second, nil)
+	if len(c.nudgedAt) != 0 {
+		t.Fatalf("nudges %v while the pane shows busy", c.nudgedAt)
+	}
+}
+
+// A recycle is posted at the generation the commit landed at, read fresh,
+// not the one the pass listed.
+func TestWorkLadderRecyclesAtTheCommittedGeneration(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("long silent")
+	snap := snapshotOf(t, c.sessions, c.seat) // listed at generation 7
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	c.setRow(map[string]string{
+		"generation": "8", "instance_token": "tok-8", beadmeta.CurrentClaimBeadIDMetadataKey: id,
+		session.WorkLadderKey: workladder.EncodeLadder(workladder.Record{V: 1, Gen: 8, Entries: []workladder.Entry{{
+			Key: key, Kind: workladder.KindClaim, Rung: workladder.RungStarted, Since: c.now.Add(-3 * time.Hour), Attempts: 6, Last: c.now.Add(-61 * time.Minute),
+		}}}),
+	})
+	c.env.CityStore = blindWriteRefusingStore{inner: staleListStore{MemStore: c.sessions, snapshot: snap}}
+	c.pass()
+	if len(c.posted) != 1 || c.posted[0].Generation != "8" {
+		t.Fatalf("posted %+v, want one recycle at generation 8", c.posted)
+	}
+}
+
+// A row closed between the list and the commit gets no write and no act.
+func TestWorkLadderCommitSkipsAClosedRow(t *testing.T) {
+	c := newLadderCity(t)
+	c.claim("any")
+	c.now = c.now.Add(-5 * time.Minute)
+	c.pass() // observed
+	c.now = c.now.Add(5 * time.Minute)
+	snap := snapshotOf(t, c.sessions, c.seat)
+	before := c.row().Metadata[session.WorkLadderKey]
+	if err := c.sessions.Close(c.seat); err != nil {
+		t.Fatal(err)
+	}
+	c.env.CityStore = blindWriteRefusingStore{inner: staleListStore{MemStore: c.sessions, snapshot: snap}}
+	c.pass()
+	if len(c.nudgedAt) != 0 || c.row().Metadata[session.WorkLadderKey] != before {
+		t.Fatalf("nudges %v, cell %s: acted on a closed row", c.nudgedAt, c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// getFailingStore fails every live read while fail is set.
+type getFailingStore struct {
+	beads.Store
+	fail *bool
+}
+
+func (s getFailingStore) Get(id string) (beads.Bead, error) {
+	if *s.fail {
+		return beads.Bead{}, fmt.Errorf("store down")
+	}
+	return s.Store.Get(id)
+}
+
+// A claim whose live re-read cannot tell waits alone: it keeps its entry
+// and its count, and the seat's other work is still nudged.
+func TestWorkLadderHoldsOnlyTheUnreadableWork(t *testing.T) {
+	c := newLadderCity(t)
+	healthy := c.claim("on a healthy store")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: healthy})
+	other := beads.NewMemStore()
+	ob, err := other.Create(beads.Bead{Title: "on a store whose reads fail", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	inProgress := "in_progress"
+	if err := other.Update(ob.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &c.seat, Metadata: map[string]string{beadmeta.SessionIDMetadataKey: c.seat}}); err != nil {
+		t.Fatal(err)
+	}
+	fail := false
+	broken := getFailingStore{Store: other, fail: &fail}
+	c.lane, _ = newPoolStepsTestLane(c.env, func() *allocSummary {
+		s := c.summary()
+		b, _ := other.Get(ob.ID)
+		s.AssignedWork, s.AssignedStores, s.AssignedStoreRefs = append(s.AssignedWork, b), append(s.AssignedStores, broken), append(s.AssignedStoreRefs, "otherrig")
+		return s
+	}, func(r executionStalledRequest) { c.posted = append(c.posted, r) })
+	c.lane.now = func() time.Time { return c.now }
+	c.lane.events = c.rec
+	c.run(10*time.Minute, 30*time.Second, nil)
+	fail = true
+	before := len(c.nudgedAt)
+	held := workladder.ClaimKey{Store: "rig:otherrig", Bead: ob.ID}
+	attempts := -1
+	for _, e := range c.cell().Entries {
+		if e.Key == held {
+			attempts = e.Attempts
+		}
+	}
+	c.run(3*time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) == before {
+		t.Fatal("one unreadable claim silenced the whole seat")
+	}
+	found := false
+	for _, e := range c.cell().Entries {
+		if e.Key == held {
+			found = true
+			if e.Attempts != attempts {
+				t.Fatalf("held entry %+v, want its count %d kept", e, attempts)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("the unreadable claim's entry was dropped")
+	}
+}
+
+// Under an incomplete snapshot, carried work is re-read live before it is
+// acted on: a claim the seat finished meanwhile is dropped, never nudged or
+// recycled.
+func TestWorkLadderRereadsCarriedWork(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("finished while a rig was down")
+	c.setRow(map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: id})
+	c.run(2*time.Minute, 30*time.Second, nil)
+	closed := "closed"
+	if err := c.work.Update(id, beads.UpdateOpts{Status: &closed}); err != nil {
+		t.Fatal(err)
+	}
+	c.partial = true
+	before := len(c.nudgedAt)
+	c.run(4*time.Hour, 30*time.Second, nil)
+	if len(c.nudgedAt) != before || len(c.posted) != 0 {
+		t.Fatalf("a finished, carried claim: nudges %v, posted %+v", c.nudgedAt[before:], c.posted)
+	}
+	if len(c.cell().Entries) != 0 {
+		t.Fatalf("cell %s, want the finished claim dropped", c.row().Metadata[session.WorkLadderKey])
+	}
+}
+
+// A permission prompt (runtime.ErrPendingInteraction) is not the agent
+// ignoring its work: the attempt is re-counted as paused.
+func TestWorkLadderRepausesAPendingInteraction(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("any")
+	c.sp.NudgeErrors = map[string]error{ladderSeatName: fmt.Errorf("prompt up: %w", runtime.ErrPendingInteraction)}
+	c.now = c.now.Add(-2 * time.Minute)
+	c.pass()
+	c.now = c.now.Add(2 * time.Minute)
+	c.pass()
+	if e := c.entry(id); e.Attempts != 0 || e.Paused != 1 {
+		t.Fatalf("entry %+v, want the attempt re-counted as paused", e)
+	}
+}
+
+// Turning the ladder off drops a release it left pending, so the hook hands
+// the claim out again; the cell's pacing is left as it was.
+func TestWorkLadderOffClearsPendingReleases(t *testing.T) {
+	c := newLadderCity(t)
+	id := c.claim("being released")
+	key := workladder.ClaimKey{Store: "city", Bead: id}
+	cell := workladder.Record{
+		V: 1, Gen: 7, Entries: []workladder.Entry{{Key: key, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now, Attempts: 3, Last: c.now}},
+		Release: &workladder.ReleaseMark{Key: key, Gen: 7, At: c.now},
+	}
+	c.setRow(map[string]string{session.WorkLadderKey: workladder.EncodeLadder(cell)})
+	if !session.WorkLadderReleases(c.row().Metadata[session.WorkLadderKey], "city", id) {
+		t.Fatal("the hook does not see the pending release")
+	}
+	c.env.Cfg.Daemon.WorkLadder = "off"
+	c.pass()
+	if session.WorkLadderReleases(c.row().Metadata[session.WorkLadderKey], "city", id) {
+		t.Fatal("the pending release outlived the ladder")
+	}
+	if e := c.entry(id); e.Attempts != 3 {
+		t.Fatalf("entry %+v, want the pacing kept", e)
+	}
+}
+
+// W1 and W3 read each other's cells: the hook (W1) refuses to hand out a
+// claim the ladder's release names, and the ladder reads the hook's record
+// of a hand-over. W3 is built on W1, so a binary with the ladder always has
+// the hook that writes its evidence.
+func TestWorkLadderAndTheHookShareTheCells(t *testing.T) {
+	key := workladder.ClaimKey{Store: "rig:repo", Bead: "work-1"}
+	ladder := workladder.EncodeLadder(workladder.Record{V: 1, Gen: 7, Release: &workladder.ReleaseMark{Key: key, Gen: 7, At: stepsTestNow}})
+	res, _, err := decideWorkStarted(session.Info{InstanceToken: "tok", Generation: "7", WorkLadderRaw: ladder},
+		hookStartedFence{Token: "tok", Gen: 7, HasGen: true}, hookStartedKey{Store: key.Store, Bead: key.Bead}, session.WorkStartedViaClaim, stepsTestNow)
+	if err != nil || res != hookStartedReleasing {
+		t.Fatalf("hook decide = %v, %v; want it refusing the ladder's release", res, err)
+	}
+	for _, store := range []string{key.Store, ""} {
+		raw := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: store, Bead: key.Bead, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaAdopt}))
+		cell, err := workladder.DecodeStarted(raw)
+		if err != nil || !cell.Names(key) {
+			t.Fatalf("store %q: the ladder reads %q as %+v, %v; want it naming %v", store, raw, cell, err, key)
+		}
+	}
+	if _, err := workladder.DecodeStarted(`{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"at":"","via":"claim"}]}`); err == nil {
+		t.Fatal("the ladder reads a cell the hook cannot")
+	}
+	if _, err := session.DecodeWorkStarted(`{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"at":"","via":"claim"}]}`); err == nil {
+		t.Fatal("the hook reads a cell the ladder cannot")
 	}
 }

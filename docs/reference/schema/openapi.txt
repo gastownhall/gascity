@@ -13063,7 +13063,9 @@
             "work.nudge_failed": "#/components/schemas/TypedEventStreamEnvelopeWorkNudgeFailed",
             "work.nudged": "#/components/schemas/TypedEventStreamEnvelopeWorkNudged",
             "work.recycle_requested": "#/components/schemas/TypedEventStreamEnvelopeWorkRecycleRequested",
+            "work.release_unfinished": "#/components/schemas/TypedEventStreamEnvelopeWorkReleaseUnfinished",
             "work.released": "#/components/schemas/TypedEventStreamEnvelopeWorkReleased",
+            "work.started_unrecorded": "#/components/schemas/TypedEventStreamEnvelopeWorkStartedUnrecorded",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -13400,7 +13402,13 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkRecycleRequested"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkReleaseUnfinished"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkReleased"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkStartedUnrecorded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -14782,6 +14790,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.drain_fence_unavailable",
+                "work.started_unrecorded",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
@@ -14808,6 +14817,7 @@
                 "work.nudge_failed",
                 "work.recycle_requested",
                 "work.released",
+                "work.release_unfinished",
                 "work.escalated",
                 "mail.sent",
                 "mail.read",
@@ -19851,6 +19861,63 @@
         "title": "TypedEventStreamEnvelope work.recycle_requested",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWorkReleaseUnfinished": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.release_unfinished",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.release_unfinished",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkReleased": {
         "additionalProperties": false,
         "properties": {
@@ -19906,6 +19973,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope work.released",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkStartedUnrecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.started_unrecorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.started_unrecorded",
         "type": "object"
       },
       "TypedEventStreamEnvelopeWorkerOperation": {
@@ -20079,7 +20203,9 @@
             "work.nudge_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudgeFailed",
             "work.nudged": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudged",
             "work.recycle_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRecycleRequested",
+            "work.release_unfinished": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished",
             "work.released": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleased",
+            "work.started_unrecorded": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -20416,7 +20542,13 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRecycleRequested"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleased"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -21893,6 +22025,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.drain_fence_unavailable",
+                "work.started_unrecorded",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
@@ -21919,6 +22052,7 @@
                 "work.nudge_failed",
                 "work.recycle_requested",
                 "work.released",
+                "work.release_unfinished",
                 "work.escalated",
                 "mail.sent",
                 "mail.read",
@@ -27311,6 +27445,67 @@
         "title": "TypedTaggedEventStreamEnvelope work.recycle_requested",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.release_unfinished",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.release_unfinished",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeWorkReleased": {
         "additionalProperties": false,
         "properties": {
@@ -27370,6 +27565,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope work.released",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.started_unrecorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.started_unrecorded",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {

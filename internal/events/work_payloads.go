@@ -2,11 +2,11 @@ package events
 
 // WorkLadderPayload is the typed payload of the work ladder's facts
 // (work.nudged, work.nudge_failed, work.recycle_requested, work.released,
-// work.escalated): the seat, the work, the generation it was paced at, and
+// work.release_unfinished, work.escalated): the seat, the work, the generation it was paced at, and
 // the step's detail. Attempt is the entry's counted nudges after this one;
 // Paused marks a nudge sent while the provider was degraded, which counts
-// toward nothing. Reason is a failed delivery's error, an alert's reason, or
-// why a recycle was requested.
+// toward nothing. Reason is a failed delivery's error, an alert's reason,
+// why a recycle was requested, or how a release did not finish.
 type WorkLadderPayload struct {
 	SessionID   string `json:"session_id"`
 	SessionName string `json:"session_name,omitempty"`
@@ -25,7 +25,7 @@ type WorkLadderPayload struct {
 func (WorkLadderPayload) IsEventPayload() {}
 
 func init() {
-	for _, t := range []string{WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkEscalated} {
+	for _, t := range []string{WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated} {
 		RegisterPayload(t, WorkLadderPayload{})
 	}
 }

@@ -5820,8 +5820,12 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWorkNudged) | ({
     type: 'work.recycle_requested';
 } & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.release_unfinished';
+} & TypedEventStreamEnvelopeWorkReleaseUnfinished) | ({
     type: 'work.released';
 } & TypedEventStreamEnvelopeWorkReleased) | ({
+    type: 'work.started_unrecorded';
+} & TypedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -7826,6 +7830,24 @@ export type TypedEventStreamEnvelopeWorkRecycleRequested = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.release_unfinished
+ */
+export type TypedEventStreamEnvelopeWorkReleaseUnfinished = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.release_unfinished';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope work.released
  */
 export type TypedEventStreamEnvelopeWorkReleased = {
@@ -7840,6 +7862,24 @@ export type TypedEventStreamEnvelopeWorkReleased = {
     subject?: string;
     ts: string;
     type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8087,8 +8127,12 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
     type: 'work.recycle_requested';
 } & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.release_unfinished';
+} & TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished) | ({
     type: 'work.released';
 } & TypedTaggedEventStreamEnvelopeWorkReleased) | ({
+    type: 'work.started_unrecorded';
+} & TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -10204,6 +10248,25 @@ export type TypedTaggedEventStreamEnvelopeWorkRecycleRequested = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope work.release_unfinished
+ */
+export type TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.release_unfinished';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope work.released
  */
 export type TypedTaggedEventStreamEnvelopeWorkReleased = {
@@ -10219,6 +10282,25 @@ export type TypedTaggedEventStreamEnvelopeWorkReleased = {
     subject?: string;
     ts: string;
     type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
     workflow?: WorkflowEventProjection;
 };
 

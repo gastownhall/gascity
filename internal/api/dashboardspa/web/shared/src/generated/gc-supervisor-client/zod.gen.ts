@@ -5631,6 +5631,24 @@ export const zTypedEventStreamEnvelopeWorkRecycleRequested = z.object({
 });
 
 /**
+ * TypedEventStreamEnvelope work.release_unfinished
+ */
+export const zTypedEventStreamEnvelopeWorkReleaseUnfinished = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zWorkLadderPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('work.release_unfinished'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedEventStreamEnvelope work.released
  */
 export const zTypedEventStreamEnvelopeWorkReleased = z.object({
@@ -5645,6 +5663,24 @@ export const zTypedEventStreamEnvelopeWorkReleased = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('work.released'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedEventStreamEnvelope work.started_unrecorded
+ */
+export const zTypedEventStreamEnvelopeWorkStartedUnrecorded = z.object({
+    actor: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('work.started_unrecorded'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -5782,7 +5818,9 @@ export const zTypedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedEventStreamEnvelopeWorkNudgeFailed.extend({ type: z.literal('work.nudge_failed') }),
     zTypedEventStreamEnvelopeWorkNudged.extend({ type: z.literal('work.nudged') }),
     zTypedEventStreamEnvelopeWorkRecycleRequested.extend({ type: z.literal('work.recycle_requested') }),
+    zTypedEventStreamEnvelopeWorkReleaseUnfinished.extend({ type: z.literal('work.release_unfinished') }),
     zTypedEventStreamEnvelopeWorkReleased.extend({ type: z.literal('work.released') }),
+    zTypedEventStreamEnvelopeWorkStartedUnrecorded.extend({ type: z.literal('work.started_unrecorded') }),
     zTypedEventStreamEnvelopeWorkerOperation.extend({ type: z.literal('worker.operation') }),
     zTypedEventStreamEnvelopeCustom.extend({ type: z.literal('TypedEventStreamEnvelopeCustom') })
 ]);
@@ -7905,6 +7943,25 @@ export const zTypedTaggedEventStreamEnvelopeWorkRecycleRequested = z.object({
 });
 
 /**
+ * TypedTaggedEventStreamEnvelope work.release_unfinished
+ */
+export const zTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zWorkLadderPayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('work.release_unfinished'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
  * TypedTaggedEventStreamEnvelope work.released
  */
 export const zTypedTaggedEventStreamEnvelopeWorkReleased = z.object({
@@ -7920,6 +7977,25 @@ export const zTypedTaggedEventStreamEnvelopeWorkReleased = z.object({
     subject: z.string().optional(),
     ts: z.iso.datetime(),
     type: z.literal('work.released'),
+    workflow: zWorkflowEventProjection.optional()
+});
+
+/**
+ * TypedTaggedEventStreamEnvelope work.started_unrecorded
+ */
+export const zTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded = z.object({
+    actor: z.string(),
+    city: z.string(),
+    depends_on_step_ids: z.array(z.string()).optional(),
+    message: z.string().optional(),
+    payload: zSessionLifecyclePayload,
+    run_id: z.string().optional(),
+    seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
+    session_id: z.string().optional(),
+    step_id: z.string().optional(),
+    subject: z.string().optional(),
+    ts: z.iso.datetime(),
+    type: z.literal('work.started_unrecorded'),
     workflow: zWorkflowEventProjection.optional()
 });
 
@@ -8058,7 +8134,9 @@ export const zTypedTaggedEventStreamEnvelope = z.discriminatedUnion('type', [
     zTypedTaggedEventStreamEnvelopeWorkNudgeFailed.extend({ type: z.literal('work.nudge_failed') }),
     zTypedTaggedEventStreamEnvelopeWorkNudged.extend({ type: z.literal('work.nudged') }),
     zTypedTaggedEventStreamEnvelopeWorkRecycleRequested.extend({ type: z.literal('work.recycle_requested') }),
+    zTypedTaggedEventStreamEnvelopeWorkReleaseUnfinished.extend({ type: z.literal('work.release_unfinished') }),
     zTypedTaggedEventStreamEnvelopeWorkReleased.extend({ type: z.literal('work.released') }),
+    zTypedTaggedEventStreamEnvelopeWorkStartedUnrecorded.extend({ type: z.literal('work.started_unrecorded') }),
     zTypedTaggedEventStreamEnvelopeWorkerOperation.extend({ type: z.literal('worker.operation') }),
     zTypedTaggedEventStreamEnvelopeCustom.extend({ type: z.literal('TypedTaggedEventStreamEnvelopeCustom') })
 ]);

@@ -3021,9 +3021,24 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 }
 
 // WorkLadderEnabled reports whether the v2 reconciler runs the work-progress
-// ladder ([daemon] work_ladder): every value but "off" does.
+// ladder ([daemon] work_ladder): every value but "off" does. An unknown value
+// keeps the ladder on, with a load warning (workLadderWarnings).
 func (d DaemonConfig) WorkLadderEnabled() bool {
 	return !strings.EqualFold(strings.TrimSpace(d.WorkLadder), "off")
+}
+
+// workLadderWarnings returns the load warning for one config layer's
+// [daemon] work_ladder when its value is neither "on" nor "off": "false" or
+// "disabled" would otherwise read as on without a word.
+func workLadderWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Daemon.WorkLadder)) {
+	case "", "on", "off":
+		return nil
+	}
+	return []string{fmt.Sprintf(`%s: [daemon] work_ladder = %q is not a known value; the work ladder stays on (use "off" to run the backstops instead)`, source, cfg.Daemon.WorkLadder)}
 }
 
 // Session reconciler modes returned by SessionReconcilerMode.
