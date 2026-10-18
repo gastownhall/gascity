@@ -336,9 +336,12 @@ This rule ensures no spurious drain-restart cycles on remote-runtime
 agents that can't consume the skills anyway. A unit test asserts the
 policy.
 
-**Diagnostic reporting.** `CoreFingerprintBreakdown` exposes the
-Restart `FingerprintExtra` keys under the `FPExtra` key. `skills:*` keys
-are not among them, so a skill change never reports as `FPExtra` drift.
+**Diagnostic reporting.** `CoreFingerprintBreakdown` hashes every
+`FingerprintExtra` key under the `FPExtra` key, so stored breakdowns stay
+comparable across versions. It is read only once the core fingerprint has
+already found a drift, so a skill change alone never reaches it. When it
+does report `FPExtra`, the drift detail line lists only the Restart keys,
+the ones that can have caused the drift.
 
 ### Cleanup: ownership-by-target-prefix
 

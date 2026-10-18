@@ -259,9 +259,11 @@ type preparedStart struct {
 	liveHash      string
 	provisionHash string
 	launchHash    string
-	// prePolicyProvisionHash is provisionHash as the v6 binary computed it
-	// (runtime.PrePolicyProvisionFingerprint), which a box it started matches.
+	// prePolicyProvisionHash and prePolicyLaunchHash are provisionHash and
+	// launchHash as the v6 binary computed them (runtime.PrePolicy*), which a
+	// session it started matches.
 	prePolicyProvisionHash string
+	prePolicyLaunchHash    string
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -1224,6 +1226,7 @@ func buildPreparedStartWithTranscript(
 	provisionHash := runtime.ProvisionFingerprint(agentCfg)
 	prePolicyProvisionHash := runtime.PrePolicyProvisionFingerprint(agentCfg)
 	launchHash := runtime.LaunchFingerprint(agentCfg)
+	prePolicyLaunchHash := runtime.PrePolicyLaunchFingerprint(agentCfg)
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
@@ -1474,6 +1477,7 @@ func buildPreparedStartWithTranscript(
 		provisionHash:          provisionHash,
 		prePolicyProvisionHash: prePolicyProvisionHash,
 		launchHash:             launchHash,
+		prePolicyLaunchHash:    prePolicyLaunchHash,
 		promptDelivered:        promptDelivered,
 		promptHash:             promptHash,
 		transcriptRoots:        transcriptRoots,
@@ -1487,6 +1491,12 @@ func buildPreparedStartWithTranscript(
 // (runtime.ProvisionHashMatches): the box needs no rebuild.
 func (p *preparedStart) provisionMatches(stored string) bool {
 	return stored == p.provisionHash || stored == p.prePolicyProvisionHash
+}
+
+// launchMatches is provisionMatches for the launch half
+// (runtime.LaunchHashMatches): the agent needs no relaunch.
+func (p *preparedStart) launchMatches(stored string) bool {
+	return stored == p.launchHash || stored == p.prePolicyLaunchHash
 }
 
 func preparedStartSessionWorkDir(info sessionpkg.Info) string {

@@ -1819,7 +1819,8 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 // from its config. Returns nil if no extra fields are present. Each key's
 // runtime.FingerprintExtraChangePolicy decides whether a change drains:
 // pool.min / pool.max are Ignore (allocation inputs, not session identity);
-// depends_on and wake_mode stay Restart.
+// wake_mode is NextStart (it decides how the next wake resumes); depends_on
+// stays Restart.
 //
 // Note on pool.check omission: the default EffectiveScaleCheck string bakes
 // the agent's QualifiedName into the shell expression. Different code paths

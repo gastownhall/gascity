@@ -415,8 +415,8 @@ type Info struct {
 	// provision/launch/live sub-fingerprints captured at start. The launch-only-
 	// drift decision matches StartedProvisionHash against the recomputed provision
 	// fingerprint via runtime.ProvisionHashMatches (this binary's hash or the
-	// pre-policy v6 one) and compares StartedLaunchHash against the launch
-	// fingerprint exactly, both gated on != ""; the live-hash drift path compares
+	// pre-policy v6 one) and StartedLaunchHash against the launch fingerprint
+	// via runtime.LaunchHashMatches, both gated on != ""; the live-hash drift path compares
 	// StartedLiveHash. Mirrors keep the raw values.
 	StartedProvisionHash string // started_provision_hash (raw)
 	StartedLaunchHash    string // started_launch_hash (raw)

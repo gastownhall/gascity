@@ -3804,7 +3804,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// and leaves the live pair to the next tick's live
 						// check.
 						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
-							outcome := rebaselineLegacyHashOutcome(storedHash)
+							outcome := rebaselineLegacyHashOutcome(storedHash, runtime.PrePolicyCoreFingerprint(agentCfg))
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
@@ -3841,7 +3841,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						storedLaunch := infoByID[id].StartedLaunchHash
 						launchOnlyDrift := storedProvision != "" && storedLaunch != "" &&
 							runtime.ProvisionHashMatches(storedProvision, agentCfg) &&
-							storedLaunch != runtime.LaunchFingerprint(agentCfg)
+							!runtime.LaunchHashMatches(storedLaunch, agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -4058,7 +4058,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							// same session_live) — silently rebaseline
 							// the fingerprint fields rather than running
 							// SessionLive again. ga-s760 FRs 1-3.
-							outcome := rebaselineLegacyHashOutcome(storedLive)
+							outcome := rebaselineLegacyHashOutcome(storedLive, runtime.PrePolicyLiveFingerprint(agentCfg))
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
 							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, storedHash)
@@ -4131,7 +4131,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// the asleep named session as drifted. ga-s760 FRs 1-3.
 						// A v6 hash is one only for config unchanged since.
 						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
-							outcome := rebaselineLegacyHashOutcome(storedHash)
+							outcome := rebaselineLegacyHashOutcome(storedHash, runtime.PrePolicyCoreFingerprint(agentCfg))
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
@@ -7470,8 +7470,12 @@ func truncateCrashPaneOutput(output string, maxLines int) string {
 }
 
 // rebaselineLegacyHashOutcome picks the trace outcome that matches a
-// stored hash about to be silently rebaselined.
-func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
+// stored hash about to be silently rebaselined; prePolicy is the config's
+// hash as the v6 binary computed it.
+func rebaselineLegacyHashOutcome(stored, prePolicy string) TraceOutcomeCode {
+	if stored == prePolicy {
+		return TraceOutcomeRebaselinedPrePolicy
+	}
 	if runtime.IsVersionMismatchedHash(stored) {
 		return TraceOutcomeRebaselinedVersionMismatch
 	}
@@ -7653,9 +7657,9 @@ func relaunchAgentForLaunchDrift(
 	// means a concurrent bead mutation or a derivation divergence between the
 	// hash-form and prepared configs — take the full restart rather than
 	// relaunch-then-rebaseline against an unverified baseline.
-	if prepared.coreHash != currentHash || !prepared.provisionMatches(storedProvisionHash) || prepared.launchHash == storedLaunchHash {
+	if prepared.coreHash != currentHash || !prepared.provisionMatches(storedProvisionHash) || prepared.launchMatches(storedLaunchHash) {
 		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n", //nolint:errcheck
-			name, prepared.coreHash != currentHash, !prepared.provisionMatches(storedProvisionHash), prepared.launchHash == storedLaunchHash)
+			name, prepared.coreHash != currentHash, !prepared.provisionMatches(storedProvisionHash), prepared.launchMatches(storedLaunchHash))
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	// A warm-box relaunch resumes a TRACKED conversation. When the bead carried no

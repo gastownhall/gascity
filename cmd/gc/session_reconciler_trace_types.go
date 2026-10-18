@@ -256,6 +256,11 @@ const (
 	// current FingerprintVersion (older or future binary). No drain, no
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
+	// TraceOutcomeRebaselinedPrePolicy marks a silent rebaseline of the
+	// config's hash as the v6 binary computed it, before the FingerprintExtra
+	// change policy (runtime.PrePolicy*): the config did not change. No
+	// drain, no event.
+	TraceOutcomeRebaselinedPrePolicy TraceOutcomeCode = "rebaselined_pre_policy"
 
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
 	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"

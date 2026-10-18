@@ -77,7 +77,7 @@ func armConfigDrift(r *rowFacts) (intent, bool) {
 	key, now, obs := stored+":"+core, r.w.Now, r.w.Observed[r.k]
 	_, active := activeStop(r.row)
 	launchOnly := r.w.Env.relaunches() && info.StartedProvisionHash != "" && info.StartedLaunchHash != "" && // a conjoined runtime takes the full path
-		runtime.ProvisionHashMatches(info.StartedProvisionHash, cfg) && info.StartedLaunchHash != runtime.LaunchFingerprint(cfg)
+		runtime.ProvisionHashMatches(info.StartedProvisionHash, cfg) && !runtime.LaunchHashMatches(info.StartedLaunchHash, cfg)
 	switch {
 	case obs.Attached || obs.Uncertain:
 		if driftStampFresh(info.AttachedConfigDriftDeferredKey, info.AttachedConfigDriftDeferredAt, key, now, sessionAttachedConfigDriftRefreshInterval) {

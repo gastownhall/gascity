@@ -284,7 +284,7 @@ For PRs that touch `internal/runtime/fingerprint.go`:
 | `v1` | 2026-04-27 | Initial introduction of the `vN:` prefix. Pre-existing unversioned hashes are silently rebaselined to `v1` on the first reconciler tick after upgrade. |
 | `v5` | 2026-07-01 | Operational/host-tooling scripts (`city-*.sh`, `update-*.sh`) excluded from the `.gc/scripts` probed CopyFiles content hash, so editing one no longer flips every agent's fingerprint into a fleet-wide drift. Existing hashes rebaseline silently on upgrade. (#3840) |
 | `v6` | 2026-09-12 | Operator-authored config env gets its own Launch-tier identity field (`Config.OperatorEnv`), separate from `Env` and `FingerprintExtra`. Existing hashes rebaseline silently on upgrade. (#6321) |
-| `v7` | 2026-10-18 | `FingerprintExtra` hashes only its Restart-policy keys (`runtime.FingerprintExtraChangePolicy`), so a pool sizing or skill edit no longer drains the sessions it reaches. A `v6` hash rebaselines silently only for config unchanged since; a session whose config changed while `v6` ran drains once. (#8079) |
+| `v7` | 2026-10-18 | `FingerprintExtra` hashes only its Restart-policy keys (`runtime.FingerprintExtraChangePolicy`), so a pool sizing, skill or `wake_mode` edit no longer drains the sessions it reaches. A `v6` hash rebaselines silently only for config unchanged since; a session whose config changed while `v6` ran drains once. (#8079) |
 
 ## Known Limitations
 
