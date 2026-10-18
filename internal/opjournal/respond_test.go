@@ -172,66 +172,66 @@ func TestLatestRaisingFindsTheLastOfMany(t *testing.T) {
 	}
 }
 
-// respondReq is a lane respond on conversation gc-1 answering occurrence
-// occ, keyed by the occurrence's raised fact under prefix ("k" when prefix is
-// empty, or when occ is not an occurrence).
-func respondReq(principal string, gen int64, occ, prefix string, p RespondPayload) Request {
+// respondReq is the operator's lane respond on conversation gc-1's
+// generation 1 answering occurrence occ, keyed by the occurrence's raised
+// fact under prefix ("k" when prefix is empty, or occ is not an occurrence).
+func respondReq(occ, prefix string, p RespondPayload) Request {
 	payload, _ := EncodeRespondPayload(p)
 	key := "k"
 	if prefix != "" {
-		if id, err := FactID(prefix, Fact{Kind: FactInteractionRaised, Conversation: "gc-1", Generation: gen, Interaction: occ}); err == nil {
+		if id, err := FactID(prefix, Fact{Kind: FactInteractionRaised, Conversation: "gc-1", Generation: 1, Interaction: occ}); err == nil {
 			key = "respond:" + id
 		}
 	}
 	return Request{
 		Conversation: "gc-1", Kind: KindRespond, Executor: ExecutorLane, ClientKey: key,
-		Producer: Producer{Principal: principal, Actor: ActorOperator}, Payload: payload,
-		Scope: Scope{Kind: ScopeSession, Generation: gen, Interaction: occ},
+		Producer: Producer{Principal: "operator", Actor: ActorOperator}, Payload: payload,
+		Scope: Scope{Kind: ScopeSession, Generation: 1, Interaction: occ},
 	}
 }
 
 func TestProposeRespondIsKeyedByItsOccurrence(t *testing.T) {
 	h := newLaneHarness(t)
 	approve := RespondPayload{Action: "approve"}
-	op := h.propose(t, respondReq("operator", 1, "perm-1#1", "gc", approve))
+	op := h.propose(t, respondReq("perm-1#1", "gc", approve))
 	// The same answer again is the same op.
-	if again, created, err := h.store.Propose(respondReq("operator", 1, "perm-1#1", "gc", approve)); err != nil || created || again.ID != op.ID {
+	if again, created, err := h.store.Propose(respondReq("perm-1#1", "gc", approve)); err != nil || created || again.ID != op.ID {
 		t.Fatalf("same answer = %s, created %v, %v", again.ID, created, err)
 	}
 	// A different answer to the same occurrence is key reuse: the first
 	// answer wins.
-	if _, _, err := h.store.Propose(respondReq("operator", 1, "perm-1#1", "gc", RespondPayload{Action: "deny"})); !errors.Is(err, ErrKeyReuse) {
+	if _, _, err := h.store.Propose(respondReq("perm-1#1", "gc", RespondPayload{Action: "deny"})); !errors.Is(err, ErrKeyReuse) {
 		t.Fatalf("different answer = %v, want ErrKeyReuse", err)
 	}
 	// The next raising of the same request id is another occurrence, so its
 	// answer is another op.
-	next := h.propose(t, respondReq("operator", 1, "perm-1#2", "gc", approve))
+	next := h.propose(t, respondReq("perm-1#2", "gc", approve))
 	if next.ID == op.ID {
 		t.Fatal("the second raising's answer reused the first raising's op")
 	}
 	refused := map[string]Request{
 		"request-id key": func() Request {
-			r := respondReq("operator", 1, "perm-1#3", "gc", approve)
+			r := respondReq("perm-1#3", "gc", approve)
 			r.ClientKey = "respond:1:perm-1"
 			return r
 		}(),
 		"key of another occurrence": func() Request {
-			r := respondReq("operator", 1, "perm-1#3", "gc", approve)
+			r := respondReq("perm-1#3", "gc", approve)
 			r.Scope.Interaction = "perm-1#4"
 			return r
 		}(),
 		"request id, not an occurrence": func() Request {
-			r := respondReq("operator", 1, "perm-1#3", "gc", approve)
+			r := respondReq("perm-1#3", "gc", approve)
 			r.Scope.Interaction = "perm-1"
 			return r
 		}(),
 		"payload not json": func() Request {
-			r := respondReq("operator", 1, "perm-1#3", "gc", approve)
+			r := respondReq("perm-1#3", "gc", approve)
 			r.Payload = "allow"
 			return r
 		}(),
 		"payload not canonical": func() Request {
-			r := respondReq("operator", 1, "perm-1#3", "gc", approve)
+			r := respondReq("perm-1#3", "gc", approve)
 			r.Payload = `{ "action": "approve" }`
 			return r
 		}(),
@@ -247,7 +247,7 @@ func TestProposeRespondIsKeyedByItsOccurrence(t *testing.T) {
 // is still a RespondPayload.
 func TestProposeLegacyRespondKeepsItsClientKey(t *testing.T) {
 	h := newLaneHarness(t)
-	r := respondReq("operator", 1, "perm-1", "", RespondPayload{Action: "approve"})
+	r := respondReq("perm-1", "", RespondPayload{Action: "approve"})
 	r.Executor, r.ClientKey = ExecutorLegacyAPI, "k-client"
 	h.propose(t, r)
 	r.ClientKey, r.Payload = "k-other", "allow"

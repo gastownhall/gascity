@@ -263,8 +263,8 @@ type KillPolicy struct {
 }
 
 // Scope is an op's validity scope: the conversation, one context epoch, or
-// one session generation (with a turn for interrupt, an interaction for
-// respond).
+// one session generation (with a turn for interrupt, an interaction
+// occurrence for respond).
 type Scope struct {
 	Kind        ScopeKind
 	Epoch       int64

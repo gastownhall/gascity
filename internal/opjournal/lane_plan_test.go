@@ -408,7 +408,7 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 		r.Policy.Message.When = WhenSteer
 		r.Policy.Message.OnUnsupported = FallbackFail
 	}
-	respond := respondReq("operator", 1, "perm-1#1", "gc", RespondPayload{Action: "approve"})
+	respond := respondReq("perm-1#1", "gc", RespondPayload{Action: "approve"})
 	respond.StartBy, respond.FinishBy = t0.Add(2*time.Hour), t0.Add(3*time.Hour)
 	kinds := []struct {
 		name  string

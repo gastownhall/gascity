@@ -1387,7 +1387,7 @@ func TestNewLaneRefusals(t *testing.T) {
 // instead, busy or unsupported, with its bookkeeping kept: it is replayed
 // when the probe allows it, or start_by closes it failed{deadline_in_flight}.
 func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
-	respond := respondReq("operator", 1, "perm-1#1", "gc", RespondPayload{Action: "approve"})
+	respond := respondReq("perm-1#1", "gc", RespondPayload{Action: "approve"})
 	kinds := []struct {
 		name    string
 		req     Request

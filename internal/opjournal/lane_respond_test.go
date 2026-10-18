@@ -166,8 +166,8 @@ func TestLaneRespondStaleCases(t *testing.T) {
 // its request id shows: a later raising number, or a request never seen.
 func TestLaneRespondToAnUnraisedOccurrenceIsStale(t *testing.T) {
 	h := newLaneHarness(t)
-	ahead := h.propose(t, respondReq("operator", 1, "tmux-abc#3", "gc", RespondPayload{Action: "approve"}))
-	unseen := h.propose(t, respondReq("operator", 1, "tmux-def#1", "gc", RespondPayload{Action: "approve"}))
+	ahead := h.propose(t, respondReq("tmux-abc#3", "gc", RespondPayload{Action: "approve"}))
+	unseen := h.propose(t, respondReq("tmux-def#1", "gc", RespondPayload{Action: "approve"}))
 	h.raise(t, "tmux-abc")
 	exec := respondExec(h, "tmux-abc")
 	mustPass(t, h.lane(t, "ctl"), view(), exec)
@@ -243,7 +243,7 @@ func TestLaneRespondWaitsWhenItCannotLook(t *testing.T) {
 	})
 	t.Run("plan with an unreadable occurrence", func(t *testing.T) {
 		p := newPlanner(t)
-		op := p.op(respondReq("operator", 1, "tmux-abc#1", "gc", RespondPayload{Action: "approve"}))
+		op := p.op(respondReq("tmux-abc#1", "gc", RespondPayload{Action: "approve"}))
 		now := t0.Add(time.Minute)
 		rp := planRules(snapOf(op), view(), now, "lane:ctl")
 		rp.raisings = map[string]raisingState{op.ID: {request: "tmux-abc", err: errFlakyRead}}
