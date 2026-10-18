@@ -842,7 +842,7 @@ func TestHookDrainAckToleranceCallSites(t *testing.T) {
 	}
 	pending := func(strict bool) drainFn {
 		return func(ack hookDrainAckFunc, stdout, stderr io.Writer) int {
-			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: strict}, hookClaimOps{DrainAck: ack}, stdout, stderr)
+			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: strict}, hookClaimOps{DrainAck: ack}, "", stdout, stderr)
 		}
 	}
 	// claimsErrored reaches the same writeHookClaimDrain call as an idle store

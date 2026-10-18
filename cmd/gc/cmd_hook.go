@@ -550,10 +550,14 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
 	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:            queryEnv,
-		DrainAck:       opts.DrainAck,
-		JSON:           opts.JSON,
-		StrictDrainAck: drainAckStrictConfig(cfg),
+		Assignee: assignee,
+		// The drain-ack fence matches a started claim's assignee against
+		// these, on this door as on --claim.
+		IdentityCandidates: identityCandidates,
+		Env:                queryEnv,
+		DrainAck:           opts.DrainAck,
+		JSON:               opts.JSON,
+		StrictDrainAck:     drainAckStrictConfig(cfg),
 	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
@@ -1361,7 +1365,7 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, stdout, stderr)
+			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, dir, stdout, stderr)
 		}
 	}
 	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)

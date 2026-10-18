@@ -61,6 +61,12 @@ const (
 
 const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
+// defaultHeldClaimNudge is the default for a seat that already holds its claim
+// (the execution backstop's started seat): no --drain-ack, which on a hook
+// answer of no work, the started step gate- or hold-blocked, acked a drain
+// and gave the claim back (mc-ilr3b). PHASE1-2 §6.6's claim text.
+const defaultHeldClaimNudge = "Run gc hook --claim --json now; it returns the work assigned to you. Execute it."
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -636,6 +642,17 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 	}
 	if nudge == "" {
 		return defaultPoolClaimNudge
+	}
+	return nudge
+}
+
+// heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat that holds its
+// claim: its configured nudge, else defaultHeldClaimNudge, and "" when its
+// template names no configured agent.
+func heldClaimNudgeFor(cfg *config.City, session beads.Bead) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if known && nudge == "" {
+		return defaultHeldClaimNudge
 	}
 	return nudge
 }

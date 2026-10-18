@@ -116,6 +116,22 @@ type stalledClaim struct {
 	row    session.Info
 }
 
+// stalledClaimOf is the claim an execution-stalled stop of row gives back:
+// the backstop marker's, unless the seat names it as started, by its
+// work_started cell (or a cell it cannot read) or its execution_claim_started
+// stamp. Whoever requested the stop, it gives back only unstarted work
+// (mc-358yo, PHASE1-2 §6.5).
+func stalledClaimOf(row session.Info, meta map[string]string) stalledClaim {
+	beadID := strings.TrimSpace(meta[executionClaimNudgeWorkKey])
+	seat := releaseSeat{}
+	seat.nameStarted(startedClaimBead(meta[executionClaimStartedKey]))
+	seat.nameWorkStarted(row.WorkStartedRaw)
+	if beadID == "" || seat.namesStarted(beadID) {
+		return stalledClaim{}
+	}
+	return stalledClaim{beadID: beadID, row: row}
+}
+
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
 // session object the read saw.
 type corpseObject struct {
@@ -146,8 +162,8 @@ func stopDecide(v txView) txStep {
 	}
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
-	if stopReason(v.It) == executionStalledDrainReason && !workLadderOn(v.World) {
-		plan.stalled = stalledClaim{beadID: strings.TrimSpace(v.Meta[executionClaimNudgeWorkKey]), row: v.Row}
+	if stopReason(v.It) == executionStalledDrainReason && x7Releases(v.World, v.Meta) {
+		plan.stalled = stalledClaimOf(v.Row, v.Meta)
 	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
@@ -225,10 +241,20 @@ func stopCall(ctx context.Context, c txCaps, p stopPlan) (stopped, error) {
 // work_ladder). With it on, an execution-stalled stop is the ladder's
 // recycle, which keeps a started claim on the seat (PHASE1-2 §6.5): the
 // ladder releases an unstarted claim itself, by a CAS proving it unstarted,
-// and never asks a stop to. Rolled back, the stop gives back the execution
-// backstop's claim, as before.
+// and never asks a stop to.
 func workLadderOn(w *World) bool {
 	return w == nil || w.Env == nil || w.Env.Cfg == nil || w.Env.Cfg.Daemon.WorkLadderEnabled()
+}
+
+// x7Releases reports whether an execution-stalled stop of the row whose
+// metadata is meta gives back the execution backstop's claim (X7): only
+// with the ladder rolled back, and only a marker the backstops wrote for the
+// row's own incarnation. A recycle the ladder decided before it was turned
+// off finds no such marker (the ladder never writes one), so it keeps the
+// claim, as the ladder's recycles do.
+func x7Releases(w *World, meta map[string]string) bool {
+	token := strings.TrimSpace(meta["instance_token"])
+	return !workLadderOn(w) && token != "" && strings.TrimSpace(meta[executionClaimNudgeTokenKey]) == token
 }
 
 // releaseStalledClaim gives back, after a confirmed stop, the claim an

@@ -27,7 +27,7 @@ import (
 func TestReleasePoliciesTable(t *testing.T) {
 	want := map[releaseWhy]releasePolicy{
 		releaseKilledSeat:     {statuses: []string{"open", "in_progress"}, startedKeeps: true, lane: laneDirect, seatRoute: true},
-		releaseDrainAck:       {statuses: []string{"in_progress"}, lane: laneCarried, seatRoute: true},
+		releaseDrainAck:       {statuses: []string{"in_progress"}, startedNamedKeeps: true, lane: laneCarried, seatRoute: true},
 		releaseCloseCascade:   {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseStrandedRepair: {statuses: []string{"open", "in_progress"}, lane: laneCarried, seatRoute: true},
 		releaseOrphan:         {statuses: []string{"open", "in_progress"}, lane: laneDirect, pool: true},

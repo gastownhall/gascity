@@ -85,6 +85,10 @@ type Field struct {
 	// LifecycleInput, today's fence, already compares. PerTick keeps a key
 	// written every pass out of it, or every CAS on the row would lose.
 	Premise, PerTick bool
+	// CASOnly is a key every write must make through a conditional verb
+	// (UpdateIfMatch, CompareAndSetMetadataKey): GuardSessionKeys fails a
+	// blind one, a fixture's too.
+	CASOnly bool
 }
 
 // InPremise reports whether a fence compares f.
@@ -366,13 +370,11 @@ var registry = slices.Concat([]Field{
 
 	// The work cells (PHASE1-2 §6.1): each written whole, by its one owner,
 	// by a CAS on the row.
-	{
-		Key: "work_started", Class: ClassWork, NewKey: true,
-		NoWriter: "the agent's gc hook --claim writes it at hand-over (PHASE1-2 W1); the work ladder only reads it",
-	},
-	{Key: "work_ladder", Class: ClassWork, NewKey: true, Writers: sites(
+	{Key: WorkStartedKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
+		op("cmd/gc/hook_session_claim.go", "recordWorkStarted"), op("cmd/gc/hook_session_claim.go", "forgetWorkStarted"))},
+	{Key: WorkLadderKey, Class: ClassWork, NewKey: true, CASOnly: true, Writers: sites(
 		v2("cmd/gc/work_ladder_lane.go", "ladderPass.commit"), v2("cmd/gc/work_ladder_lane.go", "ladderPass.repause"),
-		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"))},
+		v2("cmd/gc/work_ladder_lane.go", "ladderPass.release"), v2("cmd/gc/work_ladder_lane.go", "clearLadderReleases"))},
 	{Key: ResetCommittedAtKey, Class: ClassMarker, Writers: sites(legacy(srcTransition, "RestartRequestPatch"))},
 	{Key: "drain_finalize", Class: ClassMarker, Writers: sites(legacy("cmd/gc/session_pool_drain_deadline.go", "retirePoolSlotAtDrainDeadline"))},
 	{Key: "startup_dialog_verified", Class: ClassMarker, Writers: sites(op("internal/session/chat.go", "Manager.markStartupDialogsVerifiedLocked"))},

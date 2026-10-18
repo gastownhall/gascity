@@ -406,6 +406,12 @@ type Info struct {
 	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
 	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
 	CurrentClaimBeadID string // current_claim_bead_id (raw)
+	// WorkStartedRaw and WorkLadderRaw are the RAW work cells (WorkStartedKey,
+	// WorkLadderKey; work_cells.go), so a fenced write's decide sees both:
+	// the hook's started write refuses a claim the ladder is releasing, and
+	// the ladder's release refuses one the hook recorded.
+	WorkStartedRaw string // work_started (raw JSON)
+	WorkLadderRaw  string // work_ladder (raw JSON)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the

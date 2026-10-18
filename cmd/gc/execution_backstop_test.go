@@ -1251,7 +1251,9 @@ func (f *executionBackstopFixture) nudgesDelivered() []string {
 // nudge: the configured one, or the pool default when its template configures
 // none, as no maintainer-city pool template does (the stamp vetoes the drain,
 // so the nudge is the seat's only way back). The hook hands the seat its own
-// claim, so the nudge is idempotent; a seat that answers is left alone.
+// claim, so the nudge is idempotent; a seat that answers is left alone. The
+// default carries no --drain-ack (mc-ilr3b): a started seat must never ack a
+// drain on the nudge's no-work answer.
 func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
@@ -1260,11 +1262,11 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 		snap  error // set: a claude pane whose idle snapshot returns this
 		want  string
 	}{
-		{name: "no nudge configured", want: defaultPoolClaimNudge},
+		{name: "no nudge configured", want: defaultHeldClaimNudge},
 		{name: "a configured nudge", nudge: "gc hook --claim --json", want: "gc hook --claim --json"},
 		// The production pane: broadcasts have scrolled the idle prompt
 		// away, so the snapshot can read neither a prompt nor a busy line.
-		{name: "claude pane with its prompt displaced", meta: map[string]string{"provider": "claude"}, snap: runtime.ErrIdleIndeterminate, want: defaultPoolClaimNudge},
+		{name: "claude pane with its prompt displaced", meta: map[string]string{"provider": "claude"}, snap: runtime.ErrIdleIndeterminate, want: defaultHeldClaimNudge},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
@@ -1284,8 +1286,8 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 			f.now = f.now.Add(idleClaimNudgeGrace + time.Second)
 			f.tick(t) // the window has run
 
-			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != tc.want {
-				t.Fatalf("nudges delivered = %q, want exactly [%q]; stdout=%s", got, tc.want, f.stdout.String())
+			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != tc.want || (tc.nudge == "" && strings.Contains(got[0], "--drain-ack")) {
+				t.Fatalf("nudges delivered = %q, want exactly [%q], with no --drain-ack by default; stdout=%s", got, tc.want, f.stdout.String())
 			}
 			if len(f.drained) != 0 || f.stalledEvents() != 0 {
 				t.Fatalf("drains %v, step_stalled %d; want neither for a seat with execution evidence", f.drained, f.stalledEvents())

@@ -846,13 +846,24 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		name    string
 		reason  string
 		release bool
-		other   bool // the seat holds a second in-progress bead
-		ladder  bool // the work ladder is on: the stop is its recycle
+		other   bool   // the seat holds a second in-progress bead
+		started string // the seat names the claim started: "cell", "stamp" or "unreadable"
+		ladder  bool   // the work ladder is on: the stop is its recycle
+		stale   bool   // the backstop's marker is another incarnation's
 	}{
-		{"execution-stalled", executionStalledDrainReason, true, false, false},
-		{"execution-stalled, a second claim held", executionStalledDrainReason, true, true, false},
-		{"another drain reason", drainOrphaned, false, false, false},
-		{"execution-stalled, the work ladder's recycle", executionStalledDrainReason, false, false, true},
+		{name: "execution-stalled", reason: executionStalledDrainReason, release: true},
+		{name: "execution-stalled, a second claim held", reason: executionStalledDrainReason, release: true, other: true},
+		{name: "another drain reason", reason: drainOrphaned},
+		// T9 (mc-358yo): a claim the seat names as started is not given back,
+		// whoever requested the stop.
+		{name: "execution-stalled, started by work_started", reason: executionStalledDrainReason, started: "cell"},
+		{name: "execution-stalled, started by execution_claim_started", reason: executionStalledDrainReason, started: "stamp"},
+		{name: "execution-stalled, work_started unreadable", reason: executionStalledDrainReason, started: "unreadable"},
+		// With the ladder on, the stop is its recycle, which keeps the claim;
+		// turned off after the recycle was decided, a marker the backstops did
+		// not write for this incarnation names nothing.
+		{name: "execution-stalled, the work ladder's recycle", reason: executionStalledDrainReason, ladder: true},
+		{name: "execution-stalled, the ladder turned off, a stale marker", reason: executionStalledDrainReason, stale: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string
@@ -881,8 +892,26 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 					}
 					otherID = other.ID
 				}
-				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
+				row, err := store.Get(id)
+				if err != nil {
 					t.Fatal(err)
+				}
+				token := row.Metadata["instance_token"]
+				if c.stale {
+					token = "tok-before-the-ladder"
+				}
+				if err := store.SetMetadataBatch(id, map[string]string{executionClaimNudgeWorkKey: claim.ID, executionClaimNudgeTokenKey: token}); err != nil {
+					t.Fatal(err)
+				}
+				switch c.started {
+				case "cell":
+					casSetMeta(t, store, id, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Bead: claim.ID, Via: session.WorkStartedViaClaim})))
+				case "stamp":
+					if err := store.SetMetadata(id, executionClaimStartedKey, "tok-old|"+claim.ID); err != nil {
+						t.Fatal(err)
+					}
+				case "unreadable":
+					casSetMeta(t, store, id, session.WorkStartedKey, "{")
 				}
 				rel := newCloseReleases(p.World, nil, io.Discard)
 				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil) // the pass's raw work legs, over the row's store
@@ -938,9 +967,7 @@ func TestExecutionStalledStopReleasesOnlyOnAConfirmedStop(t *testing.T) {
 					t.Fatal(err)
 				}
 				claimID = claim.ID
-				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
-					t.Fatal(err)
-				}
+				markStalledClaim(t, store, id, claim.ID)
 				rel := newCloseReleases(p.World, nil, io.Discard)
 				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil)
 				p.held.release = rel
@@ -981,9 +1008,7 @@ func TestExecutionStalledStopWithNothingLiveReleasesOnConfirmation(t *testing.T)
 					t.Fatal(err)
 				}
 				claimID = claim.ID
-				if err := store.SetMetadata(id, executionClaimNudgeWorkKey, claim.ID); err != nil {
-					t.Fatal(err)
-				}
+				markStalledClaim(t, store, id, claim.ID)
 				rel := newCloseReleases(p.World, nil, io.Discard)
 				rel.legs = testWorkLegs(p.World.CityPath, p.World.Env.Cfg, store, nil)
 				p.held.release = rel
@@ -1006,5 +1031,35 @@ func TestExecutionStalledStopWithNothingLiveReleasesOnConfirmation(t *testing.T)
 				t.Fatalf("settlement %+v, claim %q, row %s; want landed, the claim given back, the seat closed", s, claim.Status, got.Status)
 			}
 		})
+	}
+}
+
+// casSetMeta writes key on row id by a CAS at its current revision, as a
+// CASOnly key must be written.
+func casSetMeta(t *testing.T, store beads.Store, id, key, value string) {
+	t.Helper()
+	w, ok := beads.ConditionalWriterFor(store)
+	if !ok {
+		t.Fatalf("store %T has no conditional writer", store)
+	}
+	b, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := w.UpdateIfMatch(id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{key: value}}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// markStalledClaim stamps the execution backstop's marker on row id for
+// claim, as the backstops write it for the row's own incarnation.
+func markStalledClaim(t *testing.T, store beads.Store, id, claim string) {
+	t.Helper()
+	row, err := store.Get(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetMetadataBatch(id, map[string]string{executionClaimNudgeWorkKey: claim, executionClaimNudgeTokenKey: row.Metadata["instance_token"]}); err != nil {
+		t.Fatal(err)
 	}
 }
