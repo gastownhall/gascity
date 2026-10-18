@@ -18,11 +18,14 @@ func (f *laneFixture) prompt(req string) {
 	f.sp.SetPendingInteraction(f.name, &runtime.PendingInteraction{RequestID: req, Kind: "approval", Options: []string{"approve", "deny"}})
 }
 
-// respond records the raising of req the runtime shows, as a producer does,
-// and proposes principal's answer to it.
-func (f *laneFixture) respond(t *testing.T, st *opjournal.Store, req, principal string, p opjournal.RespondPayload) (opjournal.Op, opjournal.Fact) {
+// laneTestRequest is the request id of the prompts the respond tests show.
+const laneTestRequest = "tmux-abc"
+
+// respond records the raising of laneTestRequest the runtime shows, as a
+// producer does, and proposes the operator's answer to it.
+func (f *laneFixture) respond(t *testing.T, st *opjournal.Store, p opjournal.RespondPayload) (opjournal.Op, opjournal.Fact) {
 	t.Helper()
-	r, _, err := st.RecordRaising(f.id, 1, req, opjournal.FactBasisObserved, f.clk.Now())
+	r, _, err := st.RecordRaising(f.id, 1, laneTestRequest, opjournal.FactBasisObserved, f.clk.Now())
 	if err != nil {
 		t.Fatalf("RecordRaising: %v", err)
 	}
@@ -36,7 +39,7 @@ func (f *laneFixture) respond(t *testing.T, st *opjournal.Store, req, principal 
 	}
 	return f.propose(t, st, opjournal.Request{
 		Conversation: f.id, Kind: opjournal.KindRespond, Executor: opjournal.ExecutorLane, ClientKey: key,
-		Producer: opjournal.Producer{Principal: principal, Actor: opjournal.ActorOperator}, Payload: payload,
+		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator}, Payload: payload,
 		Scope: opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1, Interaction: r.Raised.Interaction},
 	}), r.Raised
 }
@@ -59,7 +62,7 @@ func TestLaneExecRespondAnswersTheRaising(t *testing.T) {
 	f := newLaneFixture(t)
 	st := f.laneStore(t)
 	f.prompt("tmux-abc")
-	op, raised := f.respond(t, st, "tmux-abc", "operator", opjournal.RespondPayload{Action: "approve", Text: "ok"})
+	op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve", Text: "ok"})
 	res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
 	if err != nil || res.Took != opjournal.TakeControl || res.Done != opjournal.DoneAccepted {
 		t.Fatalf("Pass = %+v, %v; want an accepted respond", res, err)
@@ -84,13 +87,13 @@ func TestLaneExecTwoIdenticalPromptsGetTwoAnswers(t *testing.T) {
 	st := f.laneStore(t)
 	l := f.lane(t, st)
 	f.prompt("tmux-abc")
-	first, _ := f.respond(t, st, "tmux-abc", "operator", opjournal.RespondPayload{Action: "approve"})
+	first, _ := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
 	if res, err := f.pass(context.Background(), t, l, st, nil); err != nil || res.Done != opjournal.DoneAccepted {
 		t.Fatalf("first Pass = %+v, %v", res, err)
 	}
 	f.clk.Advance(time.Second)
 	f.prompt("tmux-abc")
-	second, raised := f.respond(t, st, "tmux-abc", "operator", opjournal.RespondPayload{Action: "deny"})
+	second, raised := f.respond(t, st, opjournal.RespondPayload{Action: "deny"})
 	if second.ID == first.ID || raised.Interaction != "tmux-abc#2" {
 		t.Fatalf("second answer %s to %s; first %s", second.ID, raised.Interaction, first.ID)
 	}
@@ -131,7 +134,7 @@ func TestLaneExecRespondStaleWhenThePromptChanged(t *testing.T) {
 			f := newLaneFixture(t)
 			st := f.laneStore(t)
 			f.prompt("tmux-abc")
-			op, _ := f.respond(t, st, "tmux-abc", "operator", opjournal.RespondPayload{Action: "approve"})
+			op, _ := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
 			res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
 				return promptSwapExec{conversationLaneExec: e, swap: func() { tc.swap(f) }}
 			})
@@ -158,7 +161,7 @@ func TestLaneExecRespondWaitsBehindAContentGate(t *testing.T) {
 	f := newLaneFixture(t, func(meta map[string]string) { meta["restart_requested"] = "true" })
 	st := f.laneStore(t)
 	f.prompt("tmux-abc")
-	op, _ := f.respond(t, st, "tmux-abc", "operator", opjournal.RespondPayload{Action: "approve"})
+	op, _ := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
 	res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
 	if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitInteractionUnknown) {
 		t.Fatalf("Pass = %+v, %v; want an interaction_unknown wait", res, err)
