@@ -3,8 +3,12 @@ package opjournal
 import (
 	"errors"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 )
 
 func TestRespondPayloadRoundTripsCanonically(t *testing.T) {
@@ -104,6 +108,14 @@ func TestRespondKeyIsTheRaisedFactID(t *testing.T) {
 	bad := map[string]Fact{
 		"no id":         func() Fact { g := f; g.ID = ""; return g }(),
 		"resolved fact": func() Fact { g := f; g.Kind = FactInteractionResolved; return g }(),
+		// A resolved fact under its own, consistent id: only the kind
+		// tells it from the raising.
+		"resolved fact with its id": func() Fact {
+			g := f
+			g.Kind = FactInteractionResolved
+			g.ID, _ = FactID("gc", g)
+			return g
+		}(),
 		"id of another": func() Fact { g := f; g.Interaction = "perm-1#2"; return g }(),
 		"bad raising":   func() Fact { g := f; g.Interaction = "perm-1"; return g }(),
 	}
@@ -282,5 +294,112 @@ func laneRespond(t *testing.T, raised Fact, principal string, p RespondPayload) 
 		Conversation: raised.Conversation, Kind: KindRespond, Executor: ExecutorLane, ClientKey: key,
 		Producer: Producer{Principal: principal, Actor: ActorOperator}, Payload: payload,
 		Scope: Scope{Kind: ScopeSession, Generation: raised.Generation, Interaction: raised.Interaction},
+	}
+}
+
+// A lane respond is at most once by default, and nothing else: a second
+// attempt could answer a later, identical prompt (finding #1). A legacy
+// respond keeps the guarantee it names.
+func TestLaneRespondIsAtMostOnce(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, respondReq("perm-1#1", "gc", RespondPayload{Action: "approve"}))
+	if op.Policy.Guarantee != GuaranteeAtMostOnce {
+		t.Fatalf("default guarantee %s", op.Policy.Guarantee)
+	}
+	r := respondReq("perm-1#2", "gc", RespondPayload{Action: "approve"})
+	r.Policy.Guarantee = GuaranteeAtLeastOnce
+	if _, _, err := h.store.Propose(r); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("an at_least_once lane respond = %v, want ErrInvalidRequest", err)
+	}
+	legacy := respondReq("perm-1", "", RespondPayload{Action: "approve"})
+	legacy.Executor, legacy.ClientKey, legacy.Policy.Guarantee = ExecutorLegacyAPI, "k-legacy", GuaranteeAtLeastOnce
+	if got := h.propose(t, legacy); got.Policy.Guarantee != GuaranteeAtLeastOnce {
+		t.Fatalf("legacy guarantee %s", got.Policy.Guarantee)
+	}
+}
+
+// A stored lane respond this build cannot read (a payload field a newer
+// build added, an at_least_once guarantee, a scope naming no occurrence) is
+// quarantined, never closed (DES-O1 §4.1; finding #8).
+func TestLaneRespondUnreadableRowIsQuarantined(t *testing.T) {
+	for name, meta := range map[string]map[string]string{
+		"newer payload": {keyPayload: `{"action":"approve","later":1}`},
+		"at least once": {keyGuarantee: string(GuaranteeAtLeastOnce)},
+		"no occurrence": {keyScopeInteraction: "tmux-abc"},
+		"not an answer": {keyPayload: "approve"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			op := h.propose(t, laneRespond(t, h.raise(t, "tmux-abc"), "operator", RespondPayload{Action: "approve"}))
+			for k, v := range meta {
+				if err := h.mem.SetMetadata(op.ID, k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ops, quarantined, err := h.store.ListOpenTolerant("gc-1")
+			if err != nil || len(ops) != 0 || len(quarantined) != 1 || quarantined[0].ID != op.ID {
+				t.Fatalf("ListOpenTolerant = %d ops, quarantined %+v, %v", len(ops), quarantined, err)
+			}
+			exec := respondExec(h, "tmux-abc")
+			res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+			if len(res.Quarantined) != 1 || len(res.Closed) != 0 || len(exec.responds) != 0 {
+				t.Fatalf("pass %+v", res)
+			}
+			b, err := h.mem.Get(op.ID)
+			if err != nil || b.Metadata[keyStatus] == string(StatusClosed) {
+				t.Fatalf("the quarantined row was written: %+v, %v", b.Metadata, err)
+			}
+		})
+	}
+}
+
+// hidingStore answers a Get of one id ErrNotFound once, as a read that ran
+// just before another observer's write would.
+type hidingStore struct {
+	*beads.MemStore
+	mu   sync.Mutex
+	hide string
+}
+
+func (s *hidingStore) GuardedBatcherHandle() (beads.GuardedBatcher, bool) { return s.MemStore, true }
+
+func (s *hidingStore) Get(id string) (beads.Bead, error) {
+	s.mu.Lock()
+	hidden := id == s.hide
+	if hidden {
+		s.hide = ""
+	}
+	s.mu.Unlock()
+	if hidden {
+		return beads.Bead{}, beads.ErrNotFound
+	}
+	return s.MemStore.Get(id)
+}
+
+// RecordRaising that loses its create race to another observer answers from
+// the store: the raising as recorded, and whether it is resolved by now
+// (finding #12).
+func TestRecordRaisingAfterALostRaceReadsTheStore(t *testing.T) {
+	mem := &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	hs := &hidingStore{MemStore: mem}
+	st, err := NewLaneStore(beads.SessionStore{Store: hs}, &clock.Fake{Time: t0}, WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	first, _, err := st.RecordRaising("gc-1", 1, "tmux-x", FactBasisObserved, t0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordFact(Fact{Kind: FactInteractionResolved, Conversation: "gc-1", Generation: 1, Interaction: "tmux-x#1", Basis: FactBasisLane, At: t0}); err != nil {
+		t.Fatal(err)
+	}
+	// The latest-raising read misses #1, so this call numbers the raising
+	// #1 and finds it already recorded.
+	hs.mu.Lock()
+	hs.hide = first.Raised.ID
+	hs.mu.Unlock()
+	got, created, err := st.RecordRaising("gc-1", 1, "tmux-x", FactBasisObserved, t0.Add(time.Minute))
+	if err != nil || created || got.Raised.ID != first.Raised.ID || !got.Resolved || !got.Raised.At.Equal(t0) {
+		t.Fatalf("RecordRaising after a lost race = %+v, created %v, %v; want the stored, resolved raising", got, created, err)
 	}
 }

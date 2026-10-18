@@ -113,7 +113,8 @@ type Caps struct {
 	InBand bool
 	Steer  bool
 	// Respond answers pending interactions (the runtime is an
-	// InteractionProvider). Without it a respond closes failed{unsupported}.
+	// InteractionProvider). Without it a respond closes failed{unsupported}
+	// (a respond is at most once, so none waiting may have answered).
 	Respond bool
 	// Dedup deduplicates deliveries by delivery key: a send under a key the
 	// runtime already applied is answered Delivered and not applied again,
@@ -261,7 +262,9 @@ type InterruptCall struct {
 // it only when the probe showed RequestID pending and Interaction, the
 // occurrence the op answers, is its latest raising, still unresolved; the
 // executor answers only that request (RequestID is always set), and reports
-// Rejected skipped{stale} when the runtime shows another or none.
+// Rejected skipped{stale} when the runtime shows another or none. A respond
+// is at most once: after an Unknown result, or a lease that expired over its
+// attempt, it closes failed{ambiguous_delivery} and is never called again.
 type RespondCall struct {
 	Fence Fence
 	Op    Op
@@ -405,10 +408,6 @@ const (
 	// Caps.MaxText: it waits for a runtime with room and, as a blocking
 	// waiter, holds the content behind it.
 	WaitTextTooLong WaitReason = "text_too_long"
-	// WaitUnsupported is a respond the runtime cannot perform now, one
-	// attempt of which may already have reached it: closing it
-	// failed{unsupported} would record that it never ran.
-	WaitUnsupported WaitReason = "unsupported"
 	// WaitInteractionUnknown is a respond whose occurrence could not be read,
 	// or whose runtime could not be looked at: it retries on a timer.
 	WaitInteractionUnknown WaitReason = "interaction_unknown"
@@ -570,6 +569,9 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		now := l.now()
 		rp := planRules(snap, conv, now, l.by())
 		l.fillWaits(&res, rp.waits, rp.wake, rp.next)
+		if err := l.endOccurrences(rp.closes); err != nil {
+			return res, err
+		}
 		switch done, err := l.writeCloses(ctx, rp.closes, rp.closeRow, snap.rt, &res); {
 		case err != nil:
 			return res, err
@@ -591,14 +593,14 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		if err != nil {
 			return res, fmt.Errorf("probing conversation %s: %w", conv.ID, err)
 		}
-		if rp.raisings, err = l.noteRaisings(rp, probe, conv); err != nil {
+		if probe, rp.raisings, err = l.noteRaisings(rp, probe, conv); err != nil {
 			return res, err
 		}
 		tp, err := planTake(rp, probe, conv, now)
 		if err != nil {
 			return res, err
 		}
-		if err := l.writeResolves(tp.resolves); err != nil {
+		if err := l.endOccurrences(tp.closes); err != nil {
 			return res, err
 		}
 		l.fillWaits(&res, append(rp.waits, tp.waits...), rp.wake || tp.wake, minTime(rp.next, tp.next))

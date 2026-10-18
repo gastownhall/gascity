@@ -410,7 +410,13 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	for _, op := range tb.ops {
 		items = append(items, &doneItem{kind: doneOp, id: op.ID, cur: op, next: l.doneNext(tb, er, success, op, now)})
 	}
-	if f, ok := respondDoneFact(tb, er, success, now); ok {
+	for _, it := range items[1:] {
+		// The end of a respond's occurrence lands with its close (DES-O1
+		// §4.7, §10.2): its answer, or nothing sent.
+		f, ok := respondEnd(it.next, now)
+		if !ok {
+			continue
+		}
 		id, err := FactID(l.store.prefix, f)
 		if err != nil {
 			return err

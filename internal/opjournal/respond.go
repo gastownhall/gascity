@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"strconv"
 	"strings"
 	"time"
@@ -20,6 +19,13 @@ import (
 // one generation from 1. A lane respond op is keyed by the occurrence's
 // raised fact (RespondKey), never by the request id, so a second identical
 // prompt gets its own answer instead of a replay of the first.
+//
+// A lane respond is at most once: an attempt that may have answered is never
+// sent again, since the prompt showing by then may be a second, identical
+// raising. The first effective answer wins: an answer that closes with
+// nothing sent (refused, canceled, expired, unsupported) ends its occurrence
+// as well as one that answered, so a prompt still showing becomes the next
+// occurrence, with fresh keys for its answers.
 
 const (
 	// occurrenceSep separates the request id from the raising number. The
@@ -34,6 +40,16 @@ const (
 	// records when it sees a raising gone with no answer of its own: another
 	// prompt, or none, is pending.
 	ResolvedCleared = "cleared"
+	// ResolvedAmbiguous is the reason of an interaction.resolved the lane
+	// records when a respond that may have answered closes without proof
+	// (failed{ambiguous_delivery}): a prompt still showing may be a later,
+	// identical raising, so it is the next occurrence.
+	ResolvedAmbiguous = "ambiguous"
+	// ResolvedUnanswered is the reason of an interaction.resolved the lane
+	// records when a respond closes with nothing sent while its occurrence
+	// is open: the next answer to a prompt still showing is the next
+	// occurrence's, under a fresh key.
+	ResolvedUnanswered = "unanswered"
 	// respondKeyPrefix starts a lane respond's client key.
 	respondKeyPrefix = "respond:"
 	// maxOccurrenceSuffix is the longest "#<n>" a raising number makes.
@@ -79,16 +95,13 @@ func EncodeRespondPayload(p RespondPayload) (string, error) {
 }
 
 // DecodeRespondPayload reads a respond op's payload. Anything but
-// EncodeRespondPayload's canonical encoding of a valid answer is refused.
+// EncodeRespondPayload's canonical encoding of a valid answer is refused: a
+// field this build does not know, or trailing data, makes the re-encoding
+// differ.
 func DecodeRespondPayload(s string) (RespondPayload, error) {
-	dec := json.NewDecoder(strings.NewReader(s))
-	dec.DisallowUnknownFields()
 	var p RespondPayload
-	if err := dec.Decode(&p); err != nil {
+	if err := json.Unmarshal([]byte(s), &p); err != nil {
 		return RespondPayload{}, invalidf("respond payload is not a JSON answer: %v", err)
-	}
-	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
-		return RespondPayload{}, invalidf("respond payload has trailing data")
 	}
 	canonical, err := EncodeRespondPayload(p)
 	if err != nil {
@@ -139,6 +152,12 @@ func interactionFact(kind FactKind, conv string, gen int64, occ string) Fact {
 // interaction.raised fact it answers>. raised is the fact as recorded, its ID
 // set. One principal's answers to one raising are one op, and the next
 // raising of the same request id has another key.
+//
+// A producer keys an answer by the raising its requester saw, recorded when
+// the prompt was shown to them, and retries under that key. Calling
+// RecordRaising again at request time is not idempotent: once the first
+// attempt has resolved the raising, it records the next one, and a retry
+// would answer a later, identical prompt.
 func RespondKey(raised Fact) (string, error) {
 	if raised.Kind != FactInteractionRaised {
 		return "", invalidf("respond key: %s is not an interaction.raised fact", raised.Kind)
@@ -156,11 +175,11 @@ func RespondKey(raised Fact) (string, error) {
 	return composedKey("respond key", respondKeyPrefix+raised.ID)
 }
 
-// validateRespond checks what Propose requires of a respond op beyond its
-// shape: a RespondPayload and, for a lane op, the occurrence it answers and
-// the key that occurrence gives it. A legacy op keeps its client key
-// (DES-O0API §3.2).
-func validateRespond(prefix string, op Op) error {
+// validateRespondShape checks a respond op's own fields: a RespondPayload
+// and, for a lane op, the occurrence it answers and the at_most_once
+// guarantee. It is part of validateRequestShape, so a stored respond this
+// build cannot read is quarantined, never closed (DES-O1 §4.1).
+func validateRespondShape(op Op) error {
 	if _, err := DecodeRespondPayload(op.Payload); err != nil {
 		return err
 	}
@@ -169,6 +188,18 @@ func validateRespond(prefix string, op Op) error {
 	}
 	if _, _, err := ParseInteractionOccurrence(op.Scope.Interaction); err != nil {
 		return err
+	}
+	if op.Policy.Guarantee != GuaranteeAtMostOnce {
+		return invalidf("a lane respond is at_most_once, not %s: a second attempt could answer a later, identical prompt", op.Policy.Guarantee)
+	}
+	return nil
+}
+
+// validateRespondKey checks the key a lane respond's occurrence gives it. A
+// legacy op keeps its client key (DES-O0API §3.2).
+func validateRespondKey(prefix string, op Op) error {
+	if op.Executor != ExecutorLane {
+		return nil
 	}
 	id, err := FactID(prefix, interactionFact(FactInteractionRaised, op.Conversation, op.Scope.Generation, op.Scope.Interaction))
 	if err != nil {
@@ -265,10 +296,39 @@ func (s *Store) RecordRaising(conv string, gen int64, requestID string, basis Fa
 	if created, err = s.RecordFact(f); err != nil {
 		return InteractionRaising{}, false, fmt.Errorf("recording raising %s of conversation %s: %w", occ, conv, err)
 	}
-	if f.ID, err = FactID(s.prefix, f); err != nil {
+	if created {
+		if f.ID, err = FactID(s.prefix, f); err != nil {
+			return InteractionRaising{}, false, err
+		}
+		return InteractionRaising{Raised: f}, true, nil
+	}
+	// Another observer recorded this raising first, and it may be resolved
+	// by now: answer from the store.
+	stored, found, err := s.readFact(f)
+	if err == nil && !found {
+		err = fmt.Errorf("raising %s of conversation %s vanished after it was recorded", occ, conv)
+	}
+	if err != nil {
 		return InteractionRaising{}, false, err
 	}
-	return InteractionRaising{Raised: f}, created, nil
+	_, resolved, err := s.readFact(interactionFact(FactInteractionResolved, conv, gen, occ))
+	if err != nil {
+		return InteractionRaising{}, false, err
+	}
+	return InteractionRaising{Raised: stored, Resolved: resolved}, false, nil
+}
+
+// endRaising records f, an interaction.resolved, create-if-absent so an
+// earlier end stands, when its occurrence was raised. An occurrence never
+// raised gets no fact: it would resolve that raising before it happens.
+func (s *Store) endRaising(f Fact) error {
+	if _, raised, err := s.readFact(interactionFact(FactInteractionRaised, f.Conversation, f.Generation, f.Interaction)); err != nil || !raised {
+		return err
+	}
+	if _, err := s.RecordFact(f); err != nil {
+		return fmt.Errorf("recording the end of interaction %s of conversation %s: %w", f.Interaction, f.Conversation, err)
+	}
+	return nil
 }
 
 // raisingOf reads occurrence occ of generation gen of conv: whether it was

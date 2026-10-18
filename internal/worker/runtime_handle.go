@@ -533,18 +533,26 @@ func (h *RuntimeHandle) LiveObservation(_ context.Context) (LiveObservation, err
 	return obs, nil
 }
 
-// Respond resolves a blocking interaction through the runtime provider.
-func (h *RuntimeHandle) Respond(_ context.Context, req InteractionResponse) error {
+// Respond resolves a blocking interaction through the runtime provider, only
+// in the incarnation req.Fence names when it is set.
+func (h *RuntimeHandle) Respond(ctx context.Context, req InteractionResponse) error {
 	ip, ok := h.provider.(runtime.InteractionProvider)
 	if !ok {
 		return runtime.ErrInteractionUnsupported
 	}
-	return runtimeInteractionError(ip.Respond(h.sessionName, runtime.InteractionResponse{
+	response := runtime.InteractionResponse{
 		RequestID: req.RequestID,
 		Action:    req.Action,
 		Text:      req.Text,
 		Metadata:  cloneStringMap(req.Metadata),
-	}))
+	}
+	if !req.Fence.IsZero() {
+		if err := req.Fence.Validate(); err != nil {
+			return err
+		}
+		return runtimeInteractionError(runtime.RespondFencedVia(ctx, h.provider, h.sessionName, req.Fence, response))
+	}
+	return runtimeInteractionError(ip.Respond(h.sessionName, response))
 }
 
 // runtimeInteractionError reports the runtime's interaction refusals in the
@@ -558,7 +566,8 @@ func runtimeInteractionError(err error) error {
 	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction):
 		return fmt.Errorf("%w: %w", sessionpkg.ErrPendingInteraction, err)
 	case errors.Is(err, runtime.ErrInteractionResponseInvalid),
-		errors.Is(err, runtime.ErrInteractionActionUnavailable):
+		errors.Is(err, runtime.ErrInteractionActionUnavailable),
+		errors.Is(err, runtime.ErrInteractionGone):
 		return fmt.Errorf("%w: %w", sessionpkg.ErrInteractionMismatch, err)
 	}
 	return err

@@ -133,17 +133,20 @@
 // id> (RespondKey) for a lane respond, keyed by the interaction occurrence it
 // answers, never the runtime's request id, which can be a content hash: an
 // occurrence is <request id>#<n>, the nth raising of that request id in its
-// generation (RecordRaising). A legacy respond keeps its client key. The digest covers the defaulted kind, policy (a deliver-now's
-// now_gen and now_turn included), scope, after and payload (≤16 KiB): same id and
-// digest returns the existing op; another digest is ErrKeyReuse, refused at the
-// front door and never written. The principal is a stable logical id, never a
+// generation (RecordRaising). A lane respond is at most once, and any close
+// of one ends its occurrence (respondEnd), so the first effective answer
+// wins and a prompt still showing is the next occurrence. A legacy respond
+// keeps its client key. The digest covers the defaulted kind, policy (a
+// deliver-now's now_gen and now_turn included), scope, after and payload
+// (≤16 KiB): same id and digest returns the existing op; another digest is
+// ErrKeyReuse, refused at the front door and never written. The principal is a stable logical id, never a
 // bearer, credential or box epoch; the actor is an open class string.
 //
 // # Kinds (class · lane · default scope — Primitive Test: atomic, gains with models, transport)
 //
 //	message   content   conversation  conversation  create-if-absent delivery; producers decide what to say
 //	interrupt control   conversation  session+turn  turn-fenced, keyed by target; the requester decides to stop
-//	respond   control   conversation  session+occ   first answer wins; a human or granted principal answers
+//	respond   control   conversation  session+occ   at most once; first effective answer wins; a principal answers
 //	create    lifecycle lifecycle     conversation  materializes a captured launch spec; a generator decides
 //	wake      lifecycle lifecycle     conversation  one watermark; a generator (the planner too) decides
 //	suspend   lifecycle lifecycle     conversation  sets an operator hold; the requester decides

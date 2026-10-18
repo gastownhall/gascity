@@ -302,7 +302,6 @@ func TestPlanRulesTakePossible(t *testing.T) {
 	}
 }
 
-// takeFor runs both planners over ops with probe.
 // takeFor plans a Take of ops under probe. Every respond op's occurrence
 // reads raised and unresolved.
 func takeFor(t *testing.T, ops []Op, probe Probe) takePlan {
@@ -313,7 +312,7 @@ func takeFor(t *testing.T, ops []Op, probe Probe) takePlan {
 	for _, op := range ops {
 		if op.Kind == KindRespond {
 			req, _, err := ParseInteractionOccurrence(op.Scope.Interaction)
-			rp.raisings[op.ID] = raisingState{request: req, raised: err == nil, invalid: err != nil, err: err}
+			rp.raisings[op.ID] = raisingState{request: req, raised: err == nil, err: err}
 		}
 	}
 	tp, err := planTake(rp, probe, view(), now)
@@ -408,8 +407,6 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 		r.Policy.Message.When = WhenSteer
 		r.Policy.Message.OnUnsupported = FallbackFail
 	}
-	respond := respondReq("perm-1#1", "gc", RespondPayload{Action: "approve"})
-	respond.StartBy, respond.FinishBy = t0.Add(2*time.Hour), t0.Add(3*time.Hour)
 	kinds := []struct {
 		name  string
 		req   Request
@@ -419,7 +416,6 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 	}{
 		{"if_idle", laneMsg("a", RoleNotice, "x", withWhen(WhenIfIdle)), func(p *Probe) { p.Boundary = TriNo }, "skipped{busy}", WaitBusy},
 		{"steer fallback_fail", laneMsg("a", RoleNotice, "x", steerFail), func(p *Probe) { p.Boundary = TriNo }, "failed{unsupported}", WaitBusy},
-		{"respond", respond, func(p *Probe) { p.Caps.Respond = false }, "failed{unsupported}", WaitUnsupported},
 	}
 	states := []struct {
 		name  string
@@ -441,16 +437,8 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 		for _, s := range states {
 			t.Run(k.name+"/"+s.name, func(t *testing.T) {
 				p := newPlanner(t)
-				op := p.op(k.req, s.mod, func(op *Op) {
-					if op.Kind == KindRespond {
-						op.DeliveryKey = "" // a control op carries no key
-					}
-				})
+				op := p.op(k.req, s.mod)
 				allow := idleProbe()
-				allow.Caps.Respond, allow.Pending = true, "perm-1"
-				if op.Kind != KindRespond {
-					allow.Pending = ""
-				}
 				deny := allow
 				k.deny(&deny)
 				tp := takeFor(t, []Op{op}, deny)
@@ -473,11 +461,8 @@ func TestPlanTakeMaybeDeliveredWaitsInsteadOfClosing(t *testing.T) {
 					t.Fatalf("the probe that allows it took %v (waits %v, closes %v)", takenOf(tp), tp.waits, tp.closes)
 				}
 				// A maybe-delivered message goes as a replay, under its stored
-				// key or, when it has none, a new one; a control op has neither.
+				// key or, when it has none, a new one.
 				wantKey, wantRedelivery := op.ID+":1", !s.fresh
-				if op.Kind == KindRespond {
-					wantKey, wantRedelivery = "", false
-				}
 				if tp.take.key != wantKey || tp.take.redelivery != wantRedelivery {
 					t.Fatalf("took it under key %q, redelivery %v; want %q, %v", tp.take.key, tp.take.redelivery, wantKey, wantRedelivery)
 				}

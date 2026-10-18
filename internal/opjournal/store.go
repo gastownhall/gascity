@@ -128,7 +128,7 @@ func (s *Store) Preview(req Request) (Op, error) {
 		return Op{}, err
 	}
 	if op.Kind == KindRespond {
-		if err := validateRespond(s.prefix, op); err != nil {
+		if err := validateRespondKey(s.prefix, op); err != nil {
 			return Op{}, err
 		}
 	}
@@ -686,6 +686,13 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 	if result == CancelClosed || result == CancelAlreadyTerminal {
 		if err := s.closeBead(id); err != nil {
 			return "", Op{}, err
+		}
+		// A canceled lane respond ends its occurrence, as the lane's closes
+		// do (respondEnd); a retried Cancel repairs a crash before it.
+		if f, ok := respondEnd(op, utc(s.clk.Now())); ok {
+			if err := s.endRaising(f); err != nil {
+				return "", Op{}, err
+			}
 		}
 	}
 	return result, op, nil

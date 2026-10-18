@@ -84,6 +84,9 @@ type propWorld struct {
 	// lost are the ops already reported as lost.
 	lost       map[string]bool
 	violations []string
+	// answers counts the respond effects that may have answered, by
+	// occurrence (conversation/generation/occurrence): at most one each.
+	answers map[string]int
 
 	// Flaky reads: while flaky is set, a store Get fails transiently, most
 	// often on an after target; while afterDown is set, every read of an
@@ -108,6 +111,7 @@ func newPropWorld(t *testing.T, seed uint64) *propWorld {
 		lastSend: map[string][]string{}, convOf: map[string]string{}, decoded: map[string]Op{},
 		keyOfAttempt: map[string]map[int]string{}, rejectedKeys: map[string]bool{}, lost: map[string]bool{},
 		afterTargets: map[string]bool{}, fr: rand.New(rand.NewPCG(seed+77, seed)),
+		answers: map[string]int{},
 	}
 	fs.setFail(func(id string) bool {
 		if w.afterDown && w.afterTargets[id] {
@@ -215,7 +219,22 @@ func (e propExec) Deliver(_ context.Context, d Delivery) DeliveryResult {
 }
 
 func (e propExec) Interrupt(context.Context, InterruptCall) ControlResult { return e.w.controlRes() }
-func (e propExec) Respond(context.Context, RespondCall) ControlResult     { return e.w.controlRes() }
+
+// Respond answers as scripted. A respond is at most once and the first
+// effective answer wins, so an occurrence gets at most one effect that may
+// have answered it: a second would answer a prompt it was not meant for.
+func (e propExec) Respond(_ context.Context, c RespondCall) ControlResult {
+	r := e.w.controlRes()
+	switch r.(type) {
+	case Settled, Unknown:
+		e.w.cov.add("respond_answered")
+		occ := fmt.Sprintf("%s/%d/%s", c.Op.Conversation, c.Op.Scope.Generation, c.Interaction)
+		if e.w.answers[occ]++; e.w.answers[occ] > 1 {
+			e.w.fail("occurrence %s answered %d times (op %s attempt %d)", occ, e.w.answers[occ], c.Op.ID, c.Op.Attempt)
+		}
+	}
+	return r
+}
 
 func assertNoIdentifiersQuiet(w *propWorld, d Delivery) {
 	for _, op := range d.Ops {
@@ -265,7 +284,33 @@ func (w *propWorld) randomProbe() Probe {
 	if r.IntN(10) == 0 {
 		p.ContentBlock = "draining"
 	}
+	if r.IntN(6) == 0 {
+		p.Pending = []string{propRequests[0], propRequests[1], PendingUnknown}[r.IntN(3)]
+	}
 	return p
+}
+
+// propRequests are the runtime request ids the scripted runtime raises.
+var propRequests = []string{"tmux-a", "tmux-b"}
+
+// respondRequest is a lane respond to the latest raising of a request id in
+// conv's current generation, recorded now as a producer would.
+func (w *propWorld) respondRequest(conv, key string) Request {
+	gen := max(1, w.convs[conv].view.Generation)
+	raised, _, err := w.h.store.RecordRaising(conv, gen, propRequests[w.r.IntN(len(propRequests))], FactBasisObserved, w.h.clk.Now())
+	if err != nil {
+		w.t.Fatalf("RecordRaising: %v", err)
+	}
+	if k, err := RespondKey(raised.Raised); err == nil {
+		key = k
+	}
+	payload, _ := EncodeRespondPayload(RespondPayload{Action: []string{"approve", "deny"}[w.r.IntN(2)]})
+	return Request{
+		Conversation: conv, Kind: KindRespond, Executor: ExecutorLane, ClientKey: key,
+		Producer: Producer{Principal: []string{"operator", "conversation:gc-9"}[w.r.IntN(2)], Actor: ActorOperator},
+		Payload:  payload,
+		Scope:    Scope{Kind: ScopeSession, Generation: gen, Interaction: raised.Raised.Interaction},
+	}
 }
 
 func (w *propWorld) randomContent() func(Delivery) (DeliveryResult, bool) {
@@ -344,18 +389,24 @@ func (w *propWorld) propose() {
 		if r.IntN(6) == 0 {
 			req.ClientSeq = uint64(1 + r.IntN(5))
 		}
-		if r.IntN(8) == 0 {
+		switch r.IntN(8) {
+		case 0:
 			req = Request{
 				Conversation: conv, Kind: KindInterrupt, Executor: ExecutorLane, ClientKey: key,
 				Producer: Producer{Principal: "operator", Actor: ActorOperator},
 				Scope:    Scope{Kind: ScopeSession, Generation: max(1, w.convs[conv].view.Generation)},
 			}
+		case 1:
+			req = w.respondRequest(conv, key)
 		}
 	}
 	// Ops arrive at distinct instants: the interim order key (OJ-10a)
 	// breaks same-instant ties by id, not by arrival.
 	w.h.clk.Advance(time.Millisecond)
-	op, _, err := w.h.store.Propose(req)
+	op, created, err := w.h.store.Propose(req)
+	if req.Kind == KindRespond && (errors.Is(err, ErrKeyReuse) || err == nil && !created) {
+		return // the same principal answering one occurrence again: the first answer wins
+	}
 	if err != nil {
 		w.t.Fatalf("Propose: %v", err)
 	}
@@ -760,6 +811,7 @@ func TestLaneProperties(t *testing.T) {
 			"delivery", "redelivery", "note", "replay_dedup", "closed:poison", "closed:ambiguous_delivery",
 			"closed:stale", "closed:canceled", "closed:busy", "closed:dependency_failed", "closed:expired_before_start",
 			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group", "after_unreadable",
+			"respond_answered",
 		} {
 			if cov.counts[k] == 0 {
 				t.Errorf("the property runs never exercised %s (%v)", k, cov.counts)

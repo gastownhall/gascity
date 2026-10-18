@@ -1,19 +1,28 @@
 package opjournal
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
 
 // Respond outcome reasons the lane writes.
 const (
-	// ReasonRefusedPayload closes a respond whose payload is not a
-	// RespondPayload.
+	// ReasonRefusedPayload closes a taken respond whose payload is not a
+	// RespondPayload. DecodeOp quarantines such a row, so only an executor
+	// handed an op that skipped it sees one.
 	ReasonRefusedPayload = RefusedReasonPrefix + "payload"
-	// ReasonRefusedInteraction closes a respond whose scope names no
-	// interaction occurrence.
+	// ReasonRefusedInteraction closes a taken respond whose scope names no
+	// interaction occurrence; like ReasonRefusedPayload, DecodeOp
+	// quarantines such a row first.
 	ReasonRefusedInteraction = RefusedReasonPrefix + "interaction"
 )
+
+// interactionWaitDivisor sets how a respond that cannot see its occurrence
+// backs off: its next look comes after its age over this divisor, between
+// TransientBackoffBase and TransientBackoffMax, so a long blind wait costs a
+// logarithmic number of passes rather than one every TransientBackoffBase.
+const interactionWaitDivisor = 8
 
 // raisingState is the occurrence a respond candidate answers, as the pass
 // read it after its probe.
@@ -23,9 +32,7 @@ type raisingState struct {
 	// raised: its interaction.raised fact exists; resolved: so does its
 	// interaction.resolved.
 	raised, resolved bool
-	// invalid says the scope names no occurrence; err says why.
-	invalid bool
-	// err is why the occurrence could not be read, or why it is invalid.
+	// err is why the occurrence could not be read.
 	err error
 }
 
@@ -46,11 +53,18 @@ func pendingRequest(probe Probe, conv ConversationView) bool {
 // noteRaisings records the raising the probe shows, if any, then reads the
 // occurrence each respond candidate answers. A probe sees one prompt where a
 // runtime's request ids repeat; RecordRaising numbers it the next occurrence
-// once the last is resolved, so it is read after the record.
-func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv ConversationView) (map[string]raisingState, error) {
+// once the last is resolved, so it is read after the record. A request id the
+// journal cannot store (too long, control characters, padding) is no
+// occurrence anyone can answer: the probe returned reads it as
+// PendingUnknown, and only a store error fails the pass.
+func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv ConversationView) (Probe, map[string]raisingState, error) {
 	if pendingRequest(probe, conv) {
-		if _, _, err := l.store.RecordRaising(conv.ID, conv.Generation, probe.Pending, FactBasisObserved, l.now()); err != nil {
-			return nil, err
+		_, _, err := l.store.RecordRaising(conv.ID, conv.Generation, probe.Pending, FactBasisObserved, l.now())
+		switch {
+		case errors.Is(err, ErrInvalidRequest):
+			probe.Pending = PendingUnknown
+		case err != nil:
+			return probe, nil, err
 		}
 	}
 	var out map[string]raisingState
@@ -63,77 +77,104 @@ func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv Conversa
 		}
 		var st raisingState
 		occ := e.op.Scope.Interaction
-		if st.request, _, st.err = ParseInteractionOccurrence(occ); st.err != nil {
-			st.invalid = true
-		} else if st.raised, st.resolved, st.err = l.store.raisingOf(conv.ID, e.op.Scope.Generation, occ); st.err != nil {
+		if st.request, _, st.err = ParseInteractionOccurrence(occ); st.err == nil {
+			st.raised, st.resolved, st.err = l.store.raisingOf(conv.ID, e.op.Scope.Generation, occ)
+		}
+		if st.err != nil {
 			st.err = fmt.Errorf("reading interaction %s of op %s: %w", occ, e.op.ID, st.err)
 		}
 		out[e.op.ID] = st
 	}
-	return out, nil
+	return probe, out, nil
 }
 
 // respondReady decides a respond candidate against its occurrence and the
 // probe (DES-O1 §10.2): ready when the probe shows the occurrence's request
-// and the occurrence is raised and unresolved. Otherwise it waits (the look
-// or the read failed) or closes: skipped{stale} for an occurrence that is
-// over, failed{ambiguous_delivery} for one an earlier attempt of this op may
-// have answered. An occurrence the probe shows gone gets its
-// interaction.resolved recorded, so the next raising of its request id is a
-// new occurrence.
+// and the occurrence is raised and unresolved. It waits when the look or the
+// read failed, and otherwise closes skipped{stale}: the occurrence is over,
+// or its prompt is gone (Pass then records it cleared, respondEnd). A respond
+// is at most once, so a candidate is never one that may have answered.
 func (tp *takePlan) respondReady(rp rulesPlan, e entry, probe Probe, now time.Time) bool {
 	st, read := rp.raisings[e.op.ID]
-	retry := now.Add(TransientBackoffBase)
-	_, payloadErr := DecodeRespondPayload(e.op.Payload)
 	switch {
 	case !read:
-		tp.waitUntil(e.op, WaitInteractionUnknown, "occurrence not read", retry)
-	case st.invalid:
-		tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonRefusedInteraction}, now)
-	case payloadErr != nil:
-		tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonRefusedPayload}, now)
+		tp.waitUntil(e.op, WaitInteractionUnknown, "occurrence not read", interactionRetryAt(e.op, now))
 	case st.err != nil:
-		tp.waitUntil(e.op, WaitInteractionUnknown, st.err.Error(), retry)
+		tp.waitUntil(e.op, WaitInteractionUnknown, st.err.Error(), interactionRetryAt(e.op, now))
 	case probe.Pending == PendingUnknown:
-		tp.waitUntil(e.op, WaitInteractionUnknown, "the runtime's pending interaction is unknown", retry)
+		tp.waitUntil(e.op, WaitInteractionUnknown, "the runtime's pending interaction is unknown", interactionRetryAt(e.op, now))
 	case st.raised && !st.resolved && probe.Pending == st.request:
 		return true
 	default:
-		if st.raised && !st.resolved {
-			tp.resolves = append(tp.resolves, clearedFact(e.op, now))
-		}
-		o := Outcome{Arm: ArmSkipped, Reason: ReasonStale}
-		if e.maybeDelivered() {
-			o = Outcome{Arm: ArmFailed, Reason: ReasonAmbiguousDelivery}
-		}
-		tp.close(rp, e, o, now)
+		tp.close(rp, e, Outcome{Arm: ArmSkipped, Reason: ReasonStale}, now)
 	}
 	return false
 }
 
-// clearedFact is the interaction.resolved the lane records for the
-// occurrence op answers when it sees the raising gone.
-func clearedFact(op Op, now time.Time) Fact {
-	f := interactionFact(FactInteractionResolved, op.Conversation, op.Scope.Generation, op.Scope.Interaction)
-	f.Reason, f.Basis, f.At = ResolvedCleared, FactBasisObserved, now
-	return f
+// interactionRetryAt is when a respond that could not see its occurrence
+// looks again: after its age over interactionWaitDivisor, within
+// [TransientBackoffBase, TransientBackoffMax].
+func interactionRetryAt(op Op, now time.Time) time.Time {
+	since := op.CreatedAt
+	if op.NotBefore.After(since) {
+		since = op.NotBefore
+	}
+	d := now.Sub(since) / interactionWaitDivisor
+	return now.Add(min(max(d, TransientBackoffBase), TransientBackoffMax))
 }
 
-// writeResolves records the facts of raisings a plan saw gone, before the
-// closes of their ops: a crash in between leaves the ops open, and the next
-// pass closes them on the recorded facts.
-func (l *ConversationLane) writeResolves(facts []Fact) error {
-	for _, f := range facts {
-		if _, err := l.store.RecordFact(f); err != nil {
-			return fmt.Errorf("recording that interaction %s of conversation %s cleared: %w", f.Interaction, f.Conversation, err)
+// respondEnd is the interaction.resolved that ends the occurrence of next,
+// a lane respond as it closes (DES-O1 §10.2, first effective answer wins):
+// its answer's, basis lane, caused by it, when it succeeded; cleared,
+// observed, when it closed skipped{stale} (its prompt gone, its incarnation
+// over, or its occurrence already ended); ambiguous when an attempt may have
+// answered (maybe_delivered); unanswered when it closes with nothing sent. ok is false for any
+// other op, and for one still open.
+//
+// The lane is not the only writer of these facts: two closes of respond ops
+// to one occurrence (two principals' answers, or a host whose probe saw the
+// prompt gone after another host's answer cleared it) race, and the first
+// fact stands. A cleared fact may so stand for a prompt another op answered;
+// that op's own outcome still records the answer.
+func respondEnd(next Op, now time.Time) (Fact, bool) {
+	if next.Kind != KindRespond || next.Executor != ExecutorLane || next.Status != StatusClosed {
+		return Fact{}, false
+	}
+	f := interactionFact(FactInteractionResolved, next.Conversation, next.Scope.Generation, next.Scope.Interaction)
+	f.At, f.Basis, f.CauseOps = now, FactBasisLane, []string{next.ID}
+	o := next.Outcome
+	switch {
+	case o.Arm == ArmSucceeded:
+	case o.Arm == ArmSkipped && o.Reason == ReasonStale:
+		f.Reason, f.Basis, f.CauseOps = ResolvedCleared, FactBasisObserved, nil
+	case next.MaybeDelivered > 0:
+		f.Reason = ResolvedAmbiguous
+	default:
+		f.Reason = ResolvedUnanswered
+	}
+	return f, true
+}
+
+// endOccurrences records the end of the occurrence of every lane respond
+// closes closes (respondEnd), before the closes are written: a crash in
+// between leaves the ops open, and the next pass closes them again on the
+// recorded facts. Written after, a crash would leave an occurrence open
+// whose answers are spent, so the prompt still showing could not be
+// answered under a fresh key.
+func (l *ConversationLane) endOccurrences(closes []ruleClose) error {
+	for _, c := range closes {
+		if f, ok := respondEnd(c.next, l.now()); ok {
+			if err := l.store.endRaising(f); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
 }
 
 // respondCall is the effect call of a taken respond op, or the rejection of
-// one the planner should have closed: a payload or occurrence that does not
-// decode.
+// one whose payload or occurrence does not decode. DecodeOp refuses such a
+// row, so the rejection is reached only by an op that never went through it.
 func respondCall(fence Fence, op Op) (RespondCall, *Rejected) {
 	resp, err := DecodeRespondPayload(op.Payload)
 	if err != nil {
@@ -144,23 +185,4 @@ func respondCall(fence Fence, op Op) (RespondCall, *Rejected) {
 		return RespondCall{}, &Rejected{Arm: ArmFailed, Reason: ReasonRefusedInteraction}
 	}
 	return RespondCall{Fence: fence, Op: op, Interaction: op.Scope.Interaction, RequestID: req, Response: resp, Seq: op.LaneSeq}, nil
-}
-
-// respondDoneFact is the interaction.resolved a respond's Done writes in its
-// batch: the answer's, when the effect settled, and a cleared one when the
-// executor found the raising gone (Rejected skipped{stale}).
-func respondDoneFact(tb *takenBatch, er effectResult, success Outcome, now time.Time) (Fact, bool) {
-	if len(tb.ops) == 0 || tb.ops[0].Kind != KindRespond {
-		return Fact{}, false
-	}
-	op := tb.ops[0]
-	switch {
-	case er.kind == resultSettled:
-		f := interactionFact(FactInteractionResolved, op.Conversation, tb.spec.fence.Generation, op.Scope.Interaction)
-		f.CauseOps, f.Basis, f.At = []string{op.ID}, FactBasisLane, now
-		return f, true
-	case er.kind == resultRejected && success.Arm == ArmSkipped && success.Reason == ReasonStale:
-		return clearedFact(op, now), true
-	}
-	return Fact{}, false
 }

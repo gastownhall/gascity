@@ -129,7 +129,9 @@ var registry = []Spec{
 		DefaultScope: ScopeSession, Scopes: []ScopeKind{ScopeSession}, InteractionScoped: true,
 		PayloadRequired: true, PayloadAllowed: true,
 		StartWithin: time.Hour, FinishWithin: time.Hour + 5*time.Minute,
-		DefaultPolicy:       Policy{Guarantee: GuaranteeAtLeastOnce},
+		// A respond is at most once (validateRespondShape): a second attempt
+		// could answer a later, identical prompt.
+		DefaultPolicy:       Policy{Guarantee: GuaranteeAtMostOnce},
 		OnConversationClose: CloseRuleSkip,
 	},
 	{

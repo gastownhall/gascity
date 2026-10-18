@@ -102,7 +102,8 @@ func TestOpsUnknownKeySuggests(t *testing.T) {
 }
 
 // TestOpsAuthoritativeParses proves [ops] authoritative defaults to nil, and
-// accepts message, the one kind this build's conversation lane executes.
+// accepts message and respond, the kinds this build's conversation lane
+// executes.
 func TestOpsAuthoritativeParses(t *testing.T) {
 	empty, err := Parse([]byte("[ops]\ncontent = \"auto\"\n"))
 	if err != nil {
@@ -124,8 +125,15 @@ func TestOpsAuthoritativeParses(t *testing.T) {
 	if !cfg.Ops.LaneExecutes("message") {
 		t.Fatal("LaneExecutes(message) = false with message listed")
 	}
-	if cfg.Ops.LaneExecutes("interrupt") || cfg.Ops.LaneExecutes("") {
+	if cfg.Ops.LaneExecutes("interrupt") || cfg.Ops.LaneExecutes("respond") || cfg.Ops.LaneExecutes("") {
 		t.Fatal("LaneExecutes is true for a kind that is not listed")
+	}
+	both, err := Parse([]byte("[ops]\nauthoritative = [\"respond\", \"message\"]\n"))
+	if err != nil {
+		t.Fatalf("Parse respond: %v", err)
+	}
+	if !both.Ops.LaneExecutes("respond") || !both.Ops.LaneExecutes("message") {
+		t.Fatalf("LaneExecutes(respond, message) false with both listed: %#v", both.Ops.Authoritative)
 	}
 }
 
@@ -136,12 +144,11 @@ func TestOpsAuthoritativeRejects(t *testing.T) {
 	for _, tc := range []struct {
 		name, list, want string
 	}{
-		{"empty", `[""]`, "empty entry; accepted kinds: message"},
-		{"blank", `[" "]`, "empty entry; accepted kinds: message"},
+		{"empty", `[""]`, "empty entry; accepted kinds: message, respond"},
+		{"blank", `[" "]`, "empty entry; accepted kinds: message, respond"},
 		{"duplicate", `["message", "message"]`, `"message" is listed twice`},
-		{"unknown", `["mesage"]`, `"mesage" is not an op kind; accepted kinds: message`},
-		{"interrupt", `["interrupt"]`, `cannot execute "interrupt" in this build; accepted kinds: message`},
-		{"respond", `["respond"]`, `cannot execute "respond"`},
+		{"unknown", `["mesage"]`, `"mesage" is not an op kind; accepted kinds: message, respond`},
+		{"interrupt", `["interrupt"]`, `cannot execute "interrupt" in this build; accepted kinds: message, respond`},
 		{"lifecycle", `["kill"]`, `cannot execute "kill"`},
 		{"cased", `["Message"]`, `"Message" is not an op kind`},
 	} {

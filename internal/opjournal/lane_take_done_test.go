@@ -1384,22 +1384,20 @@ func TestNewLaneRefusals(t *testing.T) {
 // A fresh op the probe rules out closes (TestPlanTakeWhenTable), recording
 // that it never ran. Once an attempt may have reached the executor, because
 // its lease expired or it was released after an Unknown result, the op waits
-// instead, busy or unsupported, with its bookkeeping kept: it is replayed
-// when the probe allows it, or start_by closes it failed{deadline_in_flight}.
+// instead, busy, with its bookkeeping kept: it is replayed when the probe
+// allows it, or start_by closes it failed{deadline_in_flight}. A respond never
+// waits so: it is at most once (TestLaneRespondIsNeverReplayed).
 func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
-	respond := respondReq("perm-1#1", "gc", RespondPayload{Action: "approve"})
 	kinds := []struct {
-		name    string
-		req     Request
-		content bool
-		deny    func(*Probe)
-		wait    WaitReason
+		name string
+		req  Request
+		deny func(*Probe)
+		wait WaitReason
 	}{
-		{"if_idle", laneMsg("p", RolePrompt, "x", withWhen(WhenIfIdle)), true, func(p *Probe) { p.Boundary = TriNo }, WaitBusy},
+		{"if_idle", laneMsg("p", RolePrompt, "x", withWhen(WhenIfIdle)), func(p *Probe) { p.Boundary = TriNo }, WaitBusy},
 		{"steer fallback_fail", laneMsg("s", RolePrompt, "x", withWhen(WhenSteer), func(r *Request) {
 			r.Policy.Message.OnUnsupported = FallbackFail
-		}), true, func(p *Probe) { p.Boundary, p.Caps.Steer = TriNo, false }, WaitBusy},
-		{"respond", respond, false, func(p *Probe) { p.Caps.Respond = false }, WaitUnsupported},
+		}), func(p *Probe) { p.Boundary, p.Caps.Steer = TriNo, false }, WaitBusy},
 	}
 	ways := []struct {
 		name string
@@ -1418,19 +1416,13 @@ func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
 		}, func(s string) bool { return s == lastErrorLeaseExpired }},
 		{"released after unknown", func(t *testing.T, h *laneHarness, exec *fakeExec) {
 			exec.deliver = func(Delivery) DeliveryResult { return Unknown{Cause: errors.New("bridge timeout")} }
-			exec.respond = func(RespondCall) ControlResult { return Unknown{Cause: errors.New("bridge timeout")} }
 			mustPass(t, h.lane(t, "ctl"), view(), exec)
-			exec.deliver, exec.respond = nil, nil
+			exec.deliver = nil
 			h.clk.Advance(ExecutorErrorBackoff + time.Millisecond)
 		}, func(s string) bool { return strings.HasPrefix(s, lastErrorUnknown+": ") }},
 	}
 	for _, k := range kinds {
-		effects := func(exec *fakeExec) int {
-			if k.content {
-				return len(exec.delivered())
-			}
-			return len(exec.responds)
-		}
+		effects := func(exec *fakeExec) int { return len(exec.delivered()) }
 		for _, w := range ways {
 			for _, replayed := range []bool{true, false} {
 				ending := "start_by"
@@ -1441,11 +1433,6 @@ func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
 					h := newLaneHarness(t)
 					op := h.propose(t, k.req)
 					exec := newFakeExec(h.clk)
-					exec.probe.Caps.Respond = true
-					if !k.content {
-						h.raise(t, "perm-1")
-						exec.probe.Pending = "perm-1"
-					}
 					allow := exec.probe
 					w.attempt(t, h, exec)
 					if n := effects(exec); n != 1 {
@@ -1475,7 +1462,7 @@ func TestLaneMaybeDeliveredOpWaitsForTheProbe(t *testing.T) {
 						if got.Outcome.Arm != ArmSucceeded || got.Attempt != 2 {
 							t.Fatalf("op attempt %d %+v", got.Attempt, got.Outcome)
 						}
-						if ds := exec.delivered(); k.content && (!ds[1].Redelivery || ds[1].Key != ds[0].Key) {
+						if ds := exec.delivered(); !ds[1].Redelivery || ds[1].Key != ds[0].Key {
 							t.Fatalf("replay redelivery %v key %s, first key %s", ds[1].Redelivery, ds[1].Key, ds[0].Key)
 						}
 					} else {

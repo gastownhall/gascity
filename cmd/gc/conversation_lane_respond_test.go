@@ -56,27 +56,78 @@ func (f *laneFixture) responses() []runtime.Call {
 }
 
 // TestLaneExecRespondAnswersTheRaising proves a lane respond reaches the
-// runtime with its request id set, closes succeeded (unfenced: no runtime
-// fences a response yet) and resolves its occurrence.
+// runtime with its request id, text and metadata set, fenced to the view's
+// incarnation where the runtime fences answers, closes succeeded and
+// resolves its occurrence. A runtime that cannot fence answers, or a row
+// with no token, gets the answer unfenced, recorded as unfenced_delivery.
 func TestLaneExecRespondAnswersTheRaising(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		opts    []laneFixtureOpt
+		fencing runtime.InputFencing
+		fenced  bool
+	}{
+		{name: "fenced", fenced: true},
+		{name: "runtime cannot fence", fencing: runtime.InputFencingNone},
+		{name: "no token", opts: []laneFixtureOpt{noLaneToken}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t, tc.opts...)
+			f.sp.InputFencingValue = tc.fencing
+			st := f.laneStore(t)
+			f.prompt("tmux-abc")
+			op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve", Text: "ok", Metadata: map[string]string{"source": "lane"}})
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+			if err != nil || res.Took != opjournal.TakeControl || res.Done != opjournal.DoneAccepted {
+				t.Fatalf("Pass = %+v, %v; want an accepted respond", res, err)
+			}
+			calls := f.responses()
+			if len(calls) != 1 || calls[0].RequestID != "tmux-abc" || calls[0].Action != "approve" || calls[0].Message != "ok" || calls[0].Fence.IsZero() == tc.fenced {
+				t.Fatalf("runtime responses %+v; want one, fenced %v", calls, tc.fenced)
+			}
+			if tc.fenced && (calls[0].Fence.Token != f.token || calls[0].Fence.Generation != 1) {
+				t.Fatalf("answer fenced to %v, want the view's incarnation", calls[0].Fence)
+			}
+			if got := f.sp.Responses[f.name]; len(got) != 1 || got[0].Metadata["source"] != "lane" {
+				t.Fatalf("runtime answers %+v; want the payload's metadata", got)
+			}
+			want := opjournal.DegradationUnfencedDelivery
+			if tc.fenced {
+				want = ""
+			}
+			got := f.get(t, st, op.ID)
+			if got.Outcome.Arm != opjournal.ArmSucceeded || got.Outcome.Result.Via != laneViaLive || got.Outcome.Degradation != want {
+				t.Fatalf("op outcome %+v; want succeeded via live with degradation %q", got.Outcome, want)
+			}
+			if latest, found, err := st.LatestRaising(f.id, 1, "tmux-abc"); err != nil || !found || !latest.Resolved || latest.Raised.ID != raised.ID {
+				t.Fatalf("LatestRaising = %+v, found %v, %v; want the answered raising resolved", latest, found, err)
+			}
+		})
+	}
+}
+
+// TestLaneExecRespondFenceMissSendsNothing proves an answer whose fence the
+// runtime's incarnation does not hold (a respawn between the probe and the
+// key) reaches no prompt: the op is released, not closed, and retries.
+func TestLaneExecRespondFenceMissSendsNothing(t *testing.T) {
 	f := newLaneFixture(t)
 	st := f.laneStore(t)
 	f.prompt("tmux-abc")
-	op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve", Text: "ok"})
-	res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
-	if err != nil || res.Took != opjournal.TakeControl || res.Done != opjournal.DoneAccepted {
-		t.Fatalf("Pass = %+v, %v; want an accepted respond", res, err)
+	op, _ := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+		return promptSwapExec{conversationLaneExec: e, swap: func() {
+			// The session respawned as another incarnation under its name.
+			f.sp.Zombies[f.name] = true
+		}}
+	})
+	if err != nil || res.Done != opjournal.DoneReleased {
+		t.Fatalf("Pass = %+v, %v; want the respond released", res, err)
 	}
-	calls := f.responses()
-	if len(calls) != 1 || calls[0].RequestID != "tmux-abc" || calls[0].Action != "approve" || calls[0].Message != "ok" {
-		t.Fatalf("runtime responses %+v", calls)
+	if n := len(f.responses()); n != 0 {
+		t.Fatalf("%d answers reached the runtime", n)
 	}
-	got := f.get(t, st, op.ID)
-	if got.Outcome.Arm != opjournal.ArmSucceeded || got.Outcome.Result.Via != laneViaLive || got.Outcome.Degradation != opjournal.DegradationUnfencedDelivery {
-		t.Fatalf("op outcome %+v", got.Outcome)
-	}
-	if latest, found, err := st.LatestRaising(f.id, 1, "tmux-abc"); err != nil || !found || !latest.Resolved || latest.Raised.ID != raised.ID {
-		t.Fatalf("LatestRaising = %+v, found %v, %v; want the answered raising resolved", latest, found, err)
+	if got := f.get(t, st, op.ID); got.Status == opjournal.StatusClosed || got.MaybeDelivered != 0 {
+		t.Fatalf("op %s maybe %d %+v; want it open with nothing delivered", got.Status, got.MaybeDelivered, got.Outcome)
 	}
 }
 
@@ -154,11 +205,42 @@ func TestLaneExecRespondStaleWhenThePromptChanged(t *testing.T) {
 	}
 }
 
-// TestLaneExecRespondWaitsBehindAContentGate proves a gated running runtime
-// reads its pending interaction as unknown: the respond waits instead of
-// taking the prompt for gone.
-func TestLaneExecRespondWaitsBehindAContentGate(t *testing.T) {
-	f := newLaneFixture(t, func(meta map[string]string) { meta["restart_requested"] = "true" })
+// TestLaneExecRespondAnswersBehindAContentGate proves the content gate does
+// not hold control (DES-O1 I7, §10.5): a draining or restart-pending session
+// blocked on a prompt gets its answer, as the legacy respond path gives it,
+// while content still waits on the gate.
+func TestLaneExecRespondAnswersBehindAContentGate(t *testing.T) {
+	for _, gate := range []laneFixtureOpt{
+		func(meta map[string]string) { meta["restart_requested"] = "true" },
+		func(meta map[string]string) { meta["state"] = "draining" },
+	} {
+		f := newLaneFixture(t, gate)
+		st := f.laneStore(t)
+		f.prompt("tmux-abc")
+		msg := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		op, _ := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		if err != nil || res.Took != opjournal.TakeControl || res.Done != opjournal.DoneAccepted || len(f.responses()) != 1 {
+			t.Fatalf("Pass = %+v, %v; want the gated session's prompt answered", res, err)
+		}
+		if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+			t.Fatalf("respond %+v", got.Outcome)
+		}
+		if f.get(t, st, msg.ID).Status == opjournal.StatusClosed || len(f.nudges()) != 0 {
+			t.Fatal("content went past the gate")
+		}
+	}
+}
+
+// TestLaneExecRespondWaitsOnAnotherIncarnation proves a running runtime of
+// another incarnation than the row names reads its pending interaction as
+// unknown: the respond waits instead of taking the prompt for gone, and
+// nothing is answered.
+func TestLaneExecRespondWaitsOnAnotherIncarnation(t *testing.T) {
+	f := newLaneFixture(t)
+	if err := f.sp.SetMeta(f.name, "GC_SESSION_ID", "gc-someone-else"); err != nil {
+		t.Fatal(err)
+	}
 	st := f.laneStore(t)
 	f.prompt("tmux-abc")
 	op, _ := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
@@ -167,7 +249,36 @@ func TestLaneExecRespondWaitsBehindAContentGate(t *testing.T) {
 		t.Fatalf("Pass = %+v, %v; want an interaction_unknown wait", res, err)
 	}
 	if f.get(t, st, op.ID).Status == opjournal.StatusClosed || len(f.responses()) != 0 {
-		t.Fatal("a gated respond closed or answered")
+		t.Fatal("a respond to another incarnation closed or answered")
+	}
+}
+
+// TestLaneExecRespondRefusesWithoutAnAnswer proves the executor's own checks
+// before the answer: no handle from the probe, a pending look that fails, a
+// session that takes no responses, each sending nothing.
+func TestLaneExecRespondRefusesWithoutAnAnswer(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	v, info := f.view(t)
+	call := opjournal.RespondCall{Fence: laneFence(v), Interaction: "tmux-abc#1", RequestID: "tmux-abc", Response: opjournal.RespondPayload{Action: "approve"}}
+	e := newConversationLaneExec(f.deps(st), info)
+	if got, ok := e.Respond(context.Background(), call).(opjournal.NotDelivered); !ok || !got.Transient || !errors.Is(got.Cause, errLaneNoProbedHandle) {
+		t.Fatalf("Respond without a probe = %#v, want a transient NotDelivered", got)
+	}
+	f.prompt("tmux-abc")
+	if _, err := e.Probe(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	f.sp.PendingErrors[f.name] = errors.New("capture failed")
+	if got, ok := e.Respond(context.Background(), call).(opjournal.NotDelivered); !ok || !got.Transient {
+		t.Fatalf("Respond over a failed look = %#v, want a transient NotDelivered", got)
+	}
+	f.sp.PendingErrors[f.name] = runtime.ErrInteractionUnsupported
+	if got := e.Respond(context.Background(), call); got != (opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}) {
+		t.Fatalf("Respond to a session that takes no responses = %#v", got)
+	}
+	if n := len(f.responses()); n != 0 {
+		t.Fatalf("%d answers reached the runtime", n)
 	}
 }
 
@@ -194,37 +305,58 @@ func TestLaneExecRespondCaps(t *testing.T) {
 }
 
 // TestLaneRespondResultMapping pins how a response's error maps to the
-// lane's result.
+// lane's result, over the errors tmux and the session layer return: every
+// refusal that sent nothing is definitive or transient, and only an error
+// after the key may have landed is Unknown.
 func TestLaneRespondResultMapping(t *testing.T) {
 	stale := opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
+	refused := opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: laneRespondRefusedAction}
+	mismatch := func(err error) error { return fmt.Errorf("%w: %w", session.ErrInteractionMismatch, err) }
 	for _, tc := range []struct {
 		name string
 		err  error
 		want opjournal.ControlResult
 	}{
-		{"answered", nil, opjournal.Settled{Via: laneViaLive, Degradation: opjournal.DegradationUnfencedDelivery}},
 		{"session unsupported", session.ErrInteractionUnsupported, opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}},
 		{"runtime unsupported", runtime.ErrInteractionUnsupported, opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}},
-		{"action unavailable", fmt.Errorf("%w: %w", session.ErrInteractionMismatch, runtime.ErrInteractionActionUnavailable), opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: laneRespondRefusedAction}},
-		{"response invalid", fmt.Errorf("%w: %w", session.ErrInteractionMismatch, runtime.ErrInteractionResponseInvalid), opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: laneRespondRefusedAction}},
+		{"action unavailable", mismatch(fmt.Errorf("%w: 0 menu options match action %q", runtime.ErrInteractionActionUnavailable, "deny")), refused},
+		{"unknown action", mismatch(fmt.Errorf("%w: unknown action %q", runtime.ErrInteractionResponseInvalid, "answer")), refused},
 		{"request mismatch", fmt.Errorf("%w: pending interaction %q does not match request %q", session.ErrInteractionMismatch, "a", "b"), stale},
+		{"prompt changed", mismatch(fmt.Errorf("approval prompt changed: expected a, got b: %w", runtime.ErrInteractionGone)), stale},
+		{"prompt gone", mismatch(fmt.Errorf("approval a is gone: %w", runtime.ErrInteractionGone)), stale},
+		{"runtime prompt gone", fmt.Errorf("approval a is gone: %w", runtime.ErrInteractionGone), stale},
 		{"no pending", session.ErrNoPendingInteraction, stale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := laneRespondResult(context.Background(), tc.err); got != tc.want {
+			if got := laneRespondResult(context.Background(), tc.err, true); got != tc.want {
 				t.Fatalf("laneRespondResult(%v) = %#v, want %#v", tc.err, got, tc.want)
 			}
 		})
 	}
-	for _, err := range []error{runtime.ErrSessionNotFound, session.ErrSessionNotFound, runtime.ErrRuntimeUnavailable} {
-		if got, ok := laneRespondResult(context.Background(), err).(opjournal.NotDelivered); !ok || !got.Transient {
+	if got, want := laneRespondResult(context.Background(), nil, true), (opjournal.Settled{Via: laneViaLive, Degradation: opjournal.DegradationUnfencedDelivery}); got != want {
+		t.Fatalf("unfenced answer = %#v, want %#v", got, want)
+	}
+	if got, want := laneRespondResult(context.Background(), nil, false), (opjournal.Settled{Via: laneViaLive}); got != want {
+		t.Fatalf("fenced answer = %#v, want %#v", got, want)
+	}
+	for _, err := range []error{
+		runtime.ErrSessionNotFound, session.ErrSessionNotFound, runtime.ErrRuntimeUnavailable,
+		fmt.Errorf("responding to pending interaction: pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, errors.New("server busy")),
+		fmt.Errorf("responding to pending interaction: %w", &runtime.FenceMismatchError{Session: "s", Found: runtime.FenceFoundDead}),
+		fmt.Errorf("session %q: %w", "s", runtime.ErrInputFenceUnsupported),
+	} {
+		if got, ok := laneRespondResult(context.Background(), err, false).(opjournal.NotDelivered); !ok || !got.Transient {
 			t.Fatalf("laneRespondResult(%v) = %#v, want a transient NotDelivered", err, got)
 		}
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	for _, err := range []error{errors.New("approval prompt did not clear"), context.Canceled} {
-		if _, ok := laneRespondResult(ctx, err).(opjournal.Unknown); !ok {
+	for _, err := range []error{
+		fmt.Errorf("responding to pending interaction: approval prompt did not clear within %s of the answer", "10s"),
+		fmt.Errorf("responding to pending interaction: %w", &runtime.FenceMismatchError{Session: "s", Found: runtime.FenceFoundDead, Partial: true}),
+		context.Canceled,
+	} {
+		if _, ok := laneRespondResult(ctx, err, false).(opjournal.Unknown); !ok {
 			t.Fatalf("laneRespondResult(%v) is not Unknown", err)
 		}
 	}

@@ -425,15 +425,12 @@ func orderEntries(es []entry) {
 // takePlan is planTake's answer.
 type takePlan struct {
 	closes []ruleClose
-	// resolves are interaction.resolved facts to record before the closes:
-	// raisings the probe shows gone, whose respond ops close stale.
-	resolves []Fact
-	take     *takeSpec
-	waits    []OpWait
-	wake     bool
-	busy     bool
-	more     bool
-	next     time.Time
+	take   *takeSpec
+	waits  []OpWait
+	wake   bool
+	busy   bool
+	more   bool
+	next   time.Time
 }
 
 // takeSpec is the batch a Take writes.
@@ -550,8 +547,7 @@ func (tp *takePlan) close(rp rulesPlan, e entry, o Outcome, now time.Time) {
 }
 
 // planControl picks the first takeable control op (I10), closing a respond
-// the runtime cannot perform unless it may have been delivered (that one
-// waits). Control takes one op.
+// the runtime cannot perform. Control takes one op.
 func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry {
 	var picked *entry
 	blocked := false
@@ -569,8 +565,6 @@ func (tp *takePlan) planControl(rp rulesPlan, probe Probe, now time.Time) *entry
 			tp.wait(e.op, WaitNotLive, "")
 		case !probe.Running:
 			tp.wait(e.op, WaitNotRunning, "")
-		case e.op.Kind == KindRespond && !probe.Caps.Respond && e.maybeDelivered():
-			tp.wait(e.op, WaitUnsupported, "")
 		case e.op.Kind == KindRespond && !probe.Caps.Respond:
 			tp.close(rp, e, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, now)
 		case e.op.Kind == KindRespond && !tp.respondReady(rp, e, probe, now):

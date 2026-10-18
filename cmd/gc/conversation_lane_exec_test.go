@@ -1139,16 +1139,19 @@ func countSeams(e *conversationLaneExec, c *laneSeamCounts) {
 	}
 }
 
-// TestLaneExecBlockedProbeSkipsLooks proves a probe that a content gate or a
-// not-live runtime already decides resolves no handle and reads neither the
-// pending interaction nor the idle boundary.
+// TestLaneExecBlockedProbeSkipsLooks proves a probe of a not-live runtime
+// resolves no handle and reads neither the pending interaction nor the idle
+// boundary, and one a content gate decides reads no idle boundary: it
+// resolves the handle only to read the pending interaction, which control
+// may answer behind the gate (DES-O1 §10.5).
 func TestLaneExecBlockedProbeSkipsLooks(t *testing.T) {
 	for _, tc := range []struct {
-		name  string
-		opts  []laneFixtureOpt
-		setup func(f *laneFixture)
+		name    string
+		opts    []laneFixtureOpt
+		setup   func(f *laneFixture)
+		handles int32
 	}{
-		{name: "content block", opts: []laneFixtureOpt{func(meta map[string]string) { meta["restart_requested"] = "true" }}},
+		{name: "content block", opts: []laneFixtureOpt{func(meta map[string]string) { meta["restart_requested"] = "true" }}, handles: 1},
 		{name: "not live", setup: func(f *laneFixture) { f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol }},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1166,8 +1169,8 @@ func TestLaneExecBlockedProbeSkipsLooks(t *testing.T) {
 			if err != nil || res.Took != opjournal.TakeNone {
 				t.Fatalf("Pass = %+v, %v; want nothing taken", res, err)
 			}
-			if c.handles.Load() != 0 || c.idles.Load() != 0 {
-				t.Fatalf("handles %d idles %d, want none for a decided probe", c.handles.Load(), c.idles.Load())
+			if c.handles.Load() != tc.handles || c.idles.Load() != 0 {
+				t.Fatalf("handles %d idles %d, want %d handles and no idle read for a decided probe", c.handles.Load(), c.idles.Load(), tc.handles)
 			}
 		})
 	}

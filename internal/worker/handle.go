@@ -469,6 +469,13 @@ type InteractionResponse struct {
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`
 	Metadata  map[string]string `json:"metadata,omitempty"`
+	// Fence, when set, confines the answer to the incarnation it names
+	// (see runtime.InputFence): a runtime that cannot fence answers to the
+	// session (runtime.ResponseFencingFor reports none) refuses with
+	// runtime.ErrInputFenceUnsupported before sending anything, and a miss
+	// is a *runtime.FenceMismatchError. A caller that may answer unfenced
+	// checks the runtime's response fencing first and sends no fence.
+	Fence runtime.InputFence `json:"-"`
 }
 
 // SessionSpec describes the concrete session materialized by a session-backed

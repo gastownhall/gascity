@@ -1926,6 +1926,28 @@ func (m *Manager) PendingByName(sessName string) (*runtime.PendingInteraction, b
 
 // Respond resolves the current pending interaction for a session.
 func (m *Manager) Respond(id string, response runtime.InteractionResponse) error {
+	return m.respond(id, response, func(ip runtime.InteractionProvider, sessName string, response runtime.InteractionResponse) error {
+		return ip.Respond(sessName, response)
+	})
+}
+
+// RespondFenced answers as Respond does, only in the incarnation fence names
+// (SESSION-RUNTIME-024): the provider must fence answers to the session
+// (runtime.FencedInteractionProvider), else nothing is sent and the error is
+// runtime.ErrInputFenceUnsupported; a respawn between the check and the key
+// is a *runtime.FenceMismatchError. ctx bounds the provider's fenced answer,
+// not the session mutation lock.
+func (m *Manager) RespondFenced(ctx context.Context, id string, fence runtime.InputFence, response runtime.InteractionResponse) error {
+	if err := fence.Validate(); err != nil {
+		return err
+	}
+	return m.respond(id, response, func(_ runtime.InteractionProvider, sessName string, response runtime.InteractionResponse) error {
+		return runtime.RespondFencedVia(ctx, m.sp, sessName, fence, response)
+	})
+}
+
+// respond is Respond with the provider's answer sent by send.
+func (m *Manager) respond(id string, response runtime.InteractionResponse, send func(runtime.InteractionProvider, string, runtime.InteractionResponse) error) error {
 	return withSessionMutationLock(id, func() error {
 		_, sessName, err := m.sessionBead(id)
 		if err != nil {
@@ -1962,9 +1984,12 @@ func (m *Manager) Respond(id string, response runtime.InteractionResponse) error
 		// waits up to 10 s for Claude Code to redraw), and this session's
 		// mutation lock is held all that time, so sends, stops and other
 		// mutations of the session wait behind it.
-		if err := ip.Respond(sessName, response); err != nil {
+		if err := send(ip, sessName, response); err != nil {
 			if errors.Is(err, runtime.ErrInteractionUnsupported) {
 				return ErrInteractionUnsupported
+			}
+			if errors.Is(err, runtime.ErrInteractionGone) {
+				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)
 			}
 			if errors.Is(err, runtime.ErrInteractionActionUnavailable) {
 				return fmt.Errorf("%w: %w", ErrInteractionMismatch, err)

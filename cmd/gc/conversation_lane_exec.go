@@ -291,20 +291,22 @@ type laneLook struct {
 
 // look observes the runtime, gates content on the row (session.ContentGate,
 // for any content and for the drain reminder's notice) and on the live
-// incarnation, and, only for a running runtime some content may reach,
-// resolves its handle once and reads the pending interaction through it
-// and, with withTurns, the session's turns. The boundary is the quiescence
-// rule for a keystroke-mode runtime, and for a protocol-mode one its turns:
-// never the quiescence rule. A running live runtime no content may reach
-// reads lanePendingUnknown: nothing looked, so a respond waits rather than
-// take the prompt for gone.
+// incarnation, and, for a running runtime of the incarnation the row names,
+// resolves its handle once and reads the pending interaction through it,
+// and, when some content may reach it, the session's turns (with withTurns)
+// and the boundary. The boundary is the quiescence rule for a keystroke-mode
+// runtime, and for a protocol-mode one its turns: never the quiescence rule.
+// The content gate does not hold control (DES-O1 I7, §10.5): a draining or
+// held session blocked on a prompt still has it read, so a respond can
+// answer it. A running live runtime of another incarnation reads
+// lanePendingUnknown: nothing looked, so a respond waits rather than take
+// the prompt for gone.
 //
-// A draining row admits the drain notice, so its look resolves the handle
-// and reads the pending interaction and the boundary whatever its open ops
-// are: the probe does not see them, and a pass with only prompts open pays
-// one handle and the reads that its content_block wait does not use.
-// A pass runs only for a row with open ops, so an idle draining row pays
-// nothing.
+// A draining row admits the drain notice, so its look reads the boundary
+// whatever its open ops are: the probe does not see them, and a pass with
+// only prompts open pays the reads that its content_block wait does not
+// use. A pass runs only for a row with open ops, so an idle draining row
+// pays nothing.
 func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, withTurns bool) (laneLook, error) {
 	obs, err := e.observe(e.target)
 	if err != nil {
@@ -314,19 +316,24 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	now := e.deps.clk.Now()
 	l.block = session.ContentGate(e.info, l.running, now, session.GateContentAny)
 	l.drainNoticeBlock = session.ContentGate(e.info, l.running, now, session.GateContentDrainNotice)
-	if l.running && (l.block == "" || l.drainNoticeBlock == "") {
-		matches, err := e.matches(e.target, obs)
-		if err != nil {
+	matches := false
+	if l.running {
+		if matches, err = e.matches(e.target, obs); err != nil {
 			return laneLook{}, fmt.Errorf("matching session %s's live generation: %w", e.info.ID, err)
 		}
 		if !matches {
-			l.block, l.drainNoticeBlock = laneContentBlockIncarnation, laneContentBlockIncarnation
+			if l.block == "" {
+				l.block = laneContentBlockIncarnation
+			}
+			if l.drainNoticeBlock == "" {
+				l.drainNoticeBlock = laneContentBlockIncarnation
+			}
 		}
 	}
 	if !l.running || !caps.Live {
 		return l, nil
 	}
-	if l.block != "" && l.drainNoticeBlock != "" {
+	if !matches {
 		l.pending = lanePendingUnknown
 		return l, nil
 	}
@@ -337,6 +344,9 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 	l.handle = h
 	if l.pending, l.noResponses, err = lanePending(h.PendingStatus(ctx)); err != nil {
 		return laneLook{}, fmt.Errorf("reading session %s's pending interaction: %w", e.info.ID, err)
+	}
+	if l.block != "" && l.drainNoticeBlock != "" {
+		return l, nil
 	}
 	if withTurns && e.traits.readable {
 		l.turn = laneTurnLookOf(e.readTurns(ctx))

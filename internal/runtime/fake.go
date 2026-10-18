@@ -123,6 +123,7 @@ var (
 	_ FencedInputProvider = (*Fake)(nil)
 
 	_ BackgroundWorkStopper = (*Fake)(nil)
+	_ FencedInteractionProvider = (*Fake)(nil)
 
 	_ AttachmentObserverWithError = (*Fake)(nil)
 )
@@ -595,22 +596,49 @@ func (f *Fake) Pending(name string) (*PendingInteraction, error) {
 func (f *Fake) Respond(name string, response InteractionResponse) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	return f.respondLocked(name, response, InputFence{})
+}
+
+// ResponseFencing returns the configured input fencing, atomic when unset:
+// the fake fences answers as it fences input.
+func (f *Fake) ResponseFencing(string) InputFencing {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.inputFencingLocked()
+}
+
+// RespondFenced implements [FencedInteractionProvider]: when fence matches
+// it answers as [Fake.Respond] does, recording the fence on the call;
+// otherwise see checkFenceLocked.
+func (f *Fake) RespondFenced(_ context.Context, name string, fence InputFence, response InteractionResponse) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if err := f.checkFenceLocked(name, fence); err != nil {
+		return err
+	}
+	return f.respondLocked(name, response, fence)
+}
+
+// respondLocked records one answer, under fence when it is set, and clears
+// the matching pending interaction. The caller holds f.mu.
+func (f *Fake) respondLocked(name string, response InteractionResponse, fence InputFence) error {
 	f.Calls = append(f.Calls, Call{
 		Method:    "Respond",
 		Name:      name,
 		RequestID: response.RequestID,
 		Action:    response.Action,
 		Message:   response.Text,
+		Fence:     fence,
 	})
 	if f.broken {
 		return fmt.Errorf("session unavailable")
 	}
 	pending := f.PendingInteractions[name]
 	if pending == nil {
-		return fmt.Errorf("no pending interaction")
+		return fmt.Errorf("no pending interaction: %w", ErrInteractionGone)
 	}
 	if pending.RequestID != "" && response.RequestID != "" && pending.RequestID != response.RequestID {
-		return fmt.Errorf("pending interaction %q does not match request %q", pending.RequestID, response.RequestID)
+		return fmt.Errorf("pending interaction %q does not match request %q: %w", pending.RequestID, response.RequestID, ErrInteractionGone)
 	}
 	if response.RequestID == "" {
 		response.RequestID = pending.RequestID
