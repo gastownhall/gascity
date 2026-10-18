@@ -160,6 +160,7 @@ go_test(
         "guarded_batch_test.go",
         "hangbudget_linux_test.go",
         "hangbudget_test.go",
+        "has_metadata_key_test.go",
         "live_ready_test.go",
         "local_sidecar_test.go",
         "lookup_limit_error_test.go",

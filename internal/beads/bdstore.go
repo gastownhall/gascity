@@ -2884,8 +2884,14 @@ func (s *BdStore) listViaBDList(query ListQuery) ([]Bead, error) {
 			args = append(args, "--metadata-field", k+"="+serverQuery.Metadata[k])
 		}
 	}
+	if serverQuery.HasMetadataKey != "" {
+		args = append(args, "--has-metadata-key", serverQuery.HasMetadataKey)
+	}
 	if query.SkipLabels && serverQuery.Label == "" && s.listSkipLabelsEnabled {
 		args = append(args, "--skip-labels")
+	}
+	if query.SkipText {
+		args = append(args, "--brief")
 	}
 
 	out, err := s.runBDTransientRead(args...)
@@ -2930,6 +2936,11 @@ func bdListRequiresClientLimit(query, serverQuery ListQuery, clientFilteredAssig
 		return true
 	}
 	if len(serverQuery.Metadata) > 0 || !serverQuery.CreatedBefore.IsZero() || !serverQuery.UpdatedBefore.IsZero() {
+		return true
+	}
+	// bd's --has-metadata-key admits a key set to the empty string, which
+	// ListQuery.Matches then drops, so a bd-side limit could cut matching rows.
+	if serverQuery.HasMetadataKey != "" {
 		return true
 	}
 	// bd list exposes no compound (created_at, id) seek flag; the boundary is
@@ -3103,6 +3114,7 @@ func canApplyWispsServerLimit(query ListQuery) bool {
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		len(query.Metadata) == 0 &&
+		query.HasMetadataKey == "" &&
 		query.SeekAfter == nil
 }
 

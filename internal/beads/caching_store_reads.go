@@ -19,6 +19,11 @@ func (c *CachingStore) List(query ListQuery) ([]Bead, error) {
 	if !query.HasFilter() && !query.AllowScan {
 		return nil, fmt.Errorf("listing beads: %w", ErrQueryRequiresScan)
 	}
+	// A SkipText read returns rows without their text, so it bypasses the
+	// refresh below, which would install those rows in the cache.
+	if query.SkipText && (query.Live || query.ParentID != "") {
+		return c.backing.List(query)
+	}
 	if query.Live || query.ParentID != "" {
 		c.mu.RLock()
 		startSeq, startScan := c.mutationSeq, c.scanGen

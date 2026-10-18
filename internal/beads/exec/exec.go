@@ -384,10 +384,10 @@ func (s *Store) List(query beads.ListQuery) ([]beads.Bead, error) {
 		if query.Type != "" {
 			args = append(args, "--type="+query.Type)
 		}
-		// SeekAfter (like CreatedBefore) is applied Go-side after the script
+		// SeekAfter (like CreatedBefore and HasMetadataKey) is applied Go-side after the script
 		// returns, so a script-side limit would cut rows before the boundary
 		// filter runs and silently skip page rows.
-		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.SeekAfter == nil {
+		if query.Limit > 0 && query.CreatedBefore.IsZero() && query.SeekAfter == nil && query.HasMetadataKey == "" {
 			args = append(args, "--limit="+strconv.Itoa(query.Limit))
 		}
 		out, err = s.run(nil, args...)

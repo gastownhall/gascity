@@ -104,6 +104,8 @@ type completionsLane struct {
 	sweepEmitted   int
 	sweepRoots     int
 	sweepSkipped   int
+	sweepSettled   int
+	sweepStepFails int
 
 	interval time.Duration
 	poll     time.Duration
@@ -243,7 +245,7 @@ func (l *completionsLane) noteSweepFailure(now time.Time) {
 // completed a full traversal, closes the sweep out: it clears the force latch,
 // advances the cadence, and returns the whole sweep's totals for the summary
 // line. A sweep still in progress returns done=false and keeps the lane due.
-func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots, skipped int, complete bool) (total completionsSweepTotals, done bool) {
+func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, roots, skipped, settled, stepListFailures int, complete bool) (total completionsSweepTotals, done bool) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.sweepStartedAt.IsZero() {
@@ -253,15 +255,19 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 	l.sweepEmitted += emitted
 	l.sweepRoots += roots
 	l.sweepSkipped += skipped
+	l.sweepSettled += settled
+	l.sweepStepFails += stepListFailures
 	if !complete {
 		return completionsSweepTotals{}, false
 	}
 	total = completionsSweepTotals{
-		Emitted: l.sweepEmitted,
-		Roots:   l.sweepRoots,
-		Skipped: l.sweepSkipped,
-		Elapsed: now.Sub(l.sweepStartedAt),
-		Reason:  l.sweepReason,
+		Emitted:          l.sweepEmitted,
+		Roots:            l.sweepRoots,
+		Skipped:          l.sweepSkipped,
+		Settled:          l.sweepSettled,
+		StepListFailures: l.sweepStepFails,
+		Elapsed:          now.Sub(l.sweepStartedAt),
+		Reason:           l.sweepReason,
 	}
 	l.lastSweepAt = now
 	l.lastSweepReason = l.sweepReason
@@ -272,6 +278,8 @@ func (l *completionsLane) noteSweepChunk(now time.Time, reason string, emitted, 
 	l.sweepEmitted = 0
 	l.sweepRoots = 0
 	l.sweepSkipped = 0
+	l.sweepSettled = 0
+	l.sweepStepFails = 0
 	return total, true
 }
 
@@ -283,7 +291,13 @@ type completionsSweepTotals struct {
 	// walk; visible so a sweep that visits 10 of 900 roots reads as the
 	// optimization working, not as 890 roots vanishing.
 	Skipped int
-	Elapsed time.Duration
+	// Settled counts the visited roots that their store's one step listing
+	// settled; Roots-Settled were listed on their own.
+	Settled int
+	// StepListFailures counts the stores whose one step listing failed, so
+	// their roots were each listed on their own.
+	StepListFailures int
+	Elapsed          time.Duration
 	// Reason is why the sweep was due, latched from its first chunk.
 	Reason string
 }
@@ -396,10 +410,18 @@ func (cr *CityRuntime) runCompletionsSweepChunk(backstop *executionevent.Complet
 	for _, listErr := range result.ListErrors {
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v\n", cr.logPrefix, listErr) //nolint:errcheck // best-effort stderr
 	}
-	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.RootsSkippedConverged, result.SweepComplete)
+	// A failed one-read step listing skips nothing: the store's roots are
+	// listed one at a time instead, and the line says the sweep paid for that.
+	for _, stepErr := range result.StepListErrors {
+		fmt.Fprintf(cr.stderr, "%s: completions sweep: %v; listing each root's steps on its own\n", cr.logPrefix, stepErr) //nolint:errcheck // best-effort stderr
+	}
+	total, done := lane.noteSweepChunk(time.Now(), reason, result.Emitted, result.RootsVisited, result.RootsSkippedConverged, result.RootsSettled, len(result.StepListErrors), result.SweepComplete)
 	if done {
-		summary := fmt.Sprintf("reason=%s converged %d root(s) (+%d already-converged skipped), emitted %d completion fact(s), took %s (stores=%d)",
-			total.Reason, total.Roots, total.Skipped, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
+		summary := fmt.Sprintf("reason=%s converged %d root(s): %d settled by one listing, %d listed on their own (+%d already-converged skipped), emitted %d completion fact(s), took %s (stores=%d)",
+			total.Reason, total.Roots, total.Settled, total.Roots-total.Settled, total.Skipped, total.Emitted, total.Elapsed.Round(time.Millisecond), len(graphStores))
+		if total.StepListFailures > 0 {
+			summary += fmt.Sprintf(", step listing failed on %d store(s)", total.StepListFailures)
+		}
 		fmt.Fprintf(cr.stderr, "%s: completions sweep: %s\n", cr.logPrefix, summary) //nolint:errcheck // best-effort stderr
 	}
 	return result

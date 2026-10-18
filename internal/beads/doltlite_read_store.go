@@ -952,6 +952,11 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 		if query.SeekAfter != nil {
 			tableLimit = 0
 		}
+		// HasMetadataKey is applied Go-side below, so a SQL LIMIT cut before it
+		// could drop matching rows.
+		if query.HasMetadataKey != "" {
+			tableLimit = 0
+		}
 		// A before-filter admits NULL-julianday rows into the SQL result (see
 		// buildDoltliteTableQuery) precisely so filterDoltliteBeforeTimes can
 		// re-validate them Go-side. Those rows can sort anywhere in SQL's
@@ -976,6 +981,9 @@ func (s *DoltliteReadStore) queryIssuesOrderedInTables(query ListQuery, sets []d
 	}
 	if len(query.Metadata) > 0 {
 		merged = filterDoltliteMetadata(merged, query.Metadata)
+	}
+	if query.HasMetadataKey != "" {
+		merged = filterDoltliteHasMetadataKey(merged, query.HasMetadataKey)
 	}
 	merged = filterDoltliteBeforeTimes(merged, query)
 	if orderBy == "" {
@@ -1002,6 +1010,7 @@ func doltliteCanSelectBoundedTopN(query ListQuery, sets []doltliteTableSet, extr
 		extraWhere == "" &&
 		query.ParentID == "" &&
 		len(query.Metadata) == 0 &&
+		query.HasMetadataKey == "" &&
 		query.CreatedBefore.IsZero() &&
 		query.UpdatedBefore.IsZero() &&
 		query.SeekAfter == nil
@@ -1270,6 +1279,18 @@ func filterDoltliteMetadata(rows []Bead, filters map[string]string) []Bead {
 	out := rows[:0]
 	for _, row := range rows {
 		if matchesMetadata(row, filters) {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+// filterDoltliteHasMetadataKey keeps the rows whose metadata carries key with a
+// non-empty value, the ListQuery.HasMetadataKey contract.
+func filterDoltliteHasMetadataKey(rows []Bead, key string) []Bead {
+	out := rows[:0]
+	for _, row := range rows {
+		if row.Metadata[key] != "" {
 			out = append(out, row)
 		}
 	}

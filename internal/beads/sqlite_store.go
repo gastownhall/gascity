@@ -1569,6 +1569,10 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, "b.id IN (SELECT m.bead_id FROM metadata m WHERE m.meta_key=? AND m.meta_value=?)")
 		args = append(args, k, v)
 	}
+	if q.HasMetadataKey != "" {
+		where = append(where, "b.id IN (SELECT m.bead_id FROM metadata m WHERE m.meta_key=? AND m.meta_value<>'')")
+		args = append(args, q.HasMetadataKey)
+	}
 	sqlText := "SELECT " + projection + " FROM beads b"
 	if len(where) > 0 {
 		sqlText += " WHERE " + strings.Join(where, " AND ")
