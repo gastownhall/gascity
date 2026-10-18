@@ -31,7 +31,7 @@ type StateHandle interface {
 // LifecycleHandle exposes worker lifecycle control operations.
 type LifecycleHandle interface {
 	Start(context.Context, sessionpkg.Actor) error
-	StartResolved(context.Context, sessionpkg.Actor, string, runtime.Config) error
+	StartResolved(context.Context, sessionpkg.Actor, sessionpkg.Incarnation, string, runtime.Config) error
 	Attach(context.Context, sessionpkg.Actor) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error

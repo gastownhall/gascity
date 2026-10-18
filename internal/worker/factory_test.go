@@ -102,7 +102,7 @@ func TestFactoryThreadsStaleKeyDetectionWaiterToSessionHandles(t *testing.T) {
 	if err := handle.Stop(context.Background(), handleActor(t, handle, sessionpkg.ActorOperator)); err != nil {
 		t.Fatalf("Stop: %v", err)
 	}
-	if err := handle.StartResolved(context.Background(), startLeaseActor(t, handle), "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
+	if err := startResolved(t, handle, "claude --resume "+info.SessionKey, runtime.Config{WorkDir: t.TempDir()}); err != nil {
 		t.Fatalf("StartResolved: %v", err)
 	}
 	select {

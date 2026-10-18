@@ -469,7 +469,7 @@ func TestCreateSkipsUntrackedRuntimeFromOtherCityBeforeStart(t *testing.T) {
 			IsTracked: false,
 		}},
 	}
-	mgr := newTestManager(t, store, sp, WithCityPath("/tmp/this-city"))
+	mgr := newTestManager(t, store, sp) // a city of its own, not /tmp/other-city
 
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Title: "my chat", Command: "claude", WorkDir: "/tmp", Provider: "claude", Env: nil, Resume: ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -645,7 +645,7 @@ func TestStartRuntimeOnlyRefusesRespawnWhenOrphanNotConfirmedDead(t *testing.T) 
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armUnconfirmedOrphan(sp)
 
-	err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
+	err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir})
 	if err == nil {
 		t.Fatal("StartRuntimeOnly succeeded despite an orphan that could not be confirmed dead")
 	}
@@ -688,7 +688,7 @@ func TestStartRuntimeOnlyProceedsWhenOrphanConfirmedDead(t *testing.T) {
 	mgr, sp, info := seedSuspendedResumeTarget(t)
 	armConfirmedDeadOrphan(sp)
 
-	if err := mgr.StartRuntimeOnly(context.Background(), runtimeOnlyActor(t, mgr, info.ID), info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
+	if err := startRuntimeOnly(t, mgr, info.ID, BuildResumeCommand(info), runtime.Config{WorkDir: info.WorkDir}); err != nil {
 		t.Fatalf("StartRuntimeOnly: %v", err)
 	}
 	want := []string{"find:" + info.ID, "terminate:" + info.ID, "start:" + info.ID}
@@ -5944,7 +5944,7 @@ func TestObserveRuntimeForInfoCarriesAttachError(t *testing.T) {
 func TestTranscriptPathWaitsForKnownClaudeKey(t *testing.T) {
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := NewManagerWithOptions(store, sp)
+	mgr := newTestManager(t, store, sp)
 
 	workDir := t.TempDir()
 	resume := ProviderResume{
@@ -6014,7 +6014,7 @@ func TestTranscriptPathWithholdsWorkDirFallbackWhileStartHasNoKey(t *testing.T) 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			store := beads.NewMemStore()
-			mgr := NewManagerWithOptions(store, runtime.NewFake())
+			mgr := newTestManager(t, store, runtime.NewFake())
 			workDir := t.TempDir()
 			opts := CreateOptions{Template: "helper", Title: "", Command: "claude", WorkDir: workDir, Provider: "claude", Env: nil, Resume: tc.resume, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}}
 			info, err := mgr.CreateSession(context.Background(), opts)

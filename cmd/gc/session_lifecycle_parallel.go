@@ -190,6 +190,11 @@ type startCandidate struct {
 	// its commit (I-LEASE): the name's flock, and the row's record from just
 	// before PreWake; nil without a city runtime dir.
 	lease *sessionpkg.RuntimeLease
+
+	// inc is the incarnation the PreWake minted under lease
+	// (preWakeCommitUnder); the runtime-only start runs under it. Zero for a
+	// start with no session row, which has none.
+	inc sessionpkg.Incarnation
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -1076,10 +1081,11 @@ func prepareStartCandidateForCity(
 			// byte-coherent with the persisted state without a second Get. It shares
 			// preWakeCommit's error contract: a failed re-read already returned above,
 			// so the twin is never folded from a stale/rejected bead.
-			_, _, fold, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
+			inc, fold, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
 			if err != nil {
 				return err
 			}
+			candidate.inc = inc
 			undo = newPreWakeUndo(current, persisted.Metadata, fold)
 			candidate.info = current.ApplyPatch(fold)
 			return nil
@@ -2641,13 +2647,13 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, err
 		}
-		return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
+		return true, handle.StartResolved(ctx, by, sessionpkg.Incarnation{}, item.cfg.Command, item.cfg)
 	}
 	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
-	return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
+	return true, handle.StartResolved(ctx, by, item.candidate.inc, item.cfg.Command, item.cfg)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {

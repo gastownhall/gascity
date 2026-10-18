@@ -324,7 +324,12 @@ func (m *Manager) retainFailedResume(id, sessName string, env map[string]string,
 
 // retryFreshStartAfterStaleKey recovers a resume that died during startup by
 // relaunching the session fresh. startErr is the failed Start's error, nil
-// when the launch started and then exited.
+// when the launch started and then exited. The relaunch is a new process, so
+// it mints again under lease over inc, the failed start's incarnation, and
+// runs under the new one, which it leaves in inc. A nil inc relaunches under
+// the failed start's identity: the legacy runtime-only start, whose caller
+// commits against the incarnation its PreWake minted, so a mint under it
+// would make its own commit stale (deleted with legacy at P6).
 func (m *Manager) retryFreshStartAfterStaleKey(
 	ctx context.Context,
 	id string,
@@ -334,6 +339,8 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 	cfg runtime.Config,
 	startErr error,
 	unroute func(),
+	lease *RuntimeLease,
+	inc *Incarnation,
 ) (bool, error) {
 	if retainsCommittedConversation(infoFromPersistedBead(*b)) {
 		return false, m.retainFailedResume(id, sessName, cfg.Env, startErr, unroute)
@@ -417,6 +424,20 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		return false, err
 	}
 	cfg.Command = freshCmd
+	// The relaunch keeps the failed start's continuation epoch and leaves the
+	// reset the clear just recorded to the next start, as it always has: only
+	// its generation and token are new.
+	if inc != nil {
+		next, err := m.mintStart(ctx, lease, inc.By, b, false)
+		if err != nil {
+			if unroute != nil {
+				unroute()
+			}
+			return false, fmt.Errorf("fresh start after stale key: %w", err)
+		}
+		*inc = next
+		cfg.Env = mergeEnv(cfg.Env, next.Env())
+	}
 	// Refuse the fresh start if a prior escaped process for this session could
 	// not be confirmed dead: a survivor would race this replacement for the
 	// same work bead. This path reuses the existing bead ID, so there is no
@@ -434,6 +455,37 @@ func (m *Manager) retryFreshStartAfterStaleKey(
 		return false, fmt.Errorf("fresh start after stale key: %w", err)
 	}
 	return true, nil
+}
+
+// mintStart mints the incarnation a Manager start of row b runs under, under
+// lease, with nothing beyond the identity keys; freshContext also consumes
+// the continuation reset the row records in the same CAS (the epoch bumped,
+// the marker cleared), as commitPendingContinuationReset does. What it wrote
+// is folded onto b.
+func (m *Manager) mintStart(ctx context.Context, lease *RuntimeLease, by ActorKind, b *beads.Bead, freshContext bool) (Incarnation, error) {
+	expect := infoFromPersistedBead(*b)
+	inc, err := m.PersistedStore().MintIncarnation(ctx, lease, MintRequest{Expect: expect, By: by, Now: m.now(), FreshContext: freshContext})
+	if err != nil {
+		return Incarnation{}, err
+	}
+	if b.Metadata == nil {
+		b.Metadata = make(map[string]string)
+	}
+	maps.Copy(b.Metadata, inc.IdentityPatch(freshContext))
+	return inc, nil
+}
+
+// startEnv is the runtime environment of row b's start under inc: the
+// session's context, with every identity key inc's.
+func startEnv(b beads.Bead, inc Incarnation) map[string]string {
+	return mergeEnv(RuntimeEnvWithSessionContext(infoFromPersistedBead(b), int(inc.Generation), int(inc.ContinuationEpoch), inc.token), inc.Env())
+}
+
+// incarnationMoved reports whether row after records another incarnation than
+// before: another start minted between the two reads.
+func incarnationMoved(before, after beads.Bead) bool {
+	return strings.TrimSpace(before.Metadata["generation"]) != strings.TrimSpace(after.Metadata["generation"]) ||
+		strings.TrimSpace(before.Metadata["instance_token"]) != strings.TrimSpace(after.Metadata["instance_token"])
 }
 
 var (
@@ -715,7 +767,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			defer release()
 			return m.consumeUserHold(consume, m.now(), nil)
 		}
-		if err := m.confirmLiveSessionState(id, &b, false, nil); err != nil {
+		if err := m.confirmLiveSessionState(id, &b, false, nil, nil); err != nil {
 			return err
 		}
 		return nil
@@ -762,38 +814,31 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		}
 		return err
 	}
+	// A starter that held the lease since this one decided (the controller's
+	// PreWake, another operator) minted and left its runtime up: converge on
+	// it as live, under this lease, rather than mint over it, which would make
+	// it an older incarnation of its own row.
+	if State(fresh.Metadata["state"]) != StateSuspended && incarnationMoved(b, fresh) && m.sp.IsRunning(sessName) {
+		by.Lease = lease
+		return m.ensureRunningOn(ctx, by, id, fresh, sessName, resumeCommand, hints, replacing, true)
+	}
 	b = fresh
 
+	// The start's incarnation is minted under the lease before anything
+	// starts, and the runtime's identity env is built from it alone (I-MINT).
+	inc, err := m.mintStart(ctx, lease, by.Kind, &b, strings.TrimSpace(b.Metadata["continuation_reset_pending"]) != "")
+	if err != nil {
+		if unroute != nil {
+			unroute()
+		}
+		return err
+	}
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
-	generation, err := strconv.Atoi(b.Metadata["generation"])
-	if err != nil || generation <= 0 {
-		generation = DefaultGeneration
-	}
-	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
-	if err != nil {
-		return err
-	}
-	instanceToken := b.Metadata["instance_token"]
-	if instanceToken == "" {
-		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["instance_token"] = instanceToken
-	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		infoFromPersistedBead(b),
-		generation,
-		continuationEpoch,
-		instanceToken,
-	))
+	cfg.Env = mergeEnv(cfg.Env, startEnv(b, inc))
 	if gcProvider := providerKind(b); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	}
@@ -801,13 +846,6 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	cfg = runtime.SyncWorkDirEnv(cfg)
 	started := false
 	converged := false
-	// An operator's resume of a row the operator holds consumes the hold, but
-	// only once the runtime is up (resume_user_hold.go).
-	var consume Decided
-	consumes := false
-	if by.consumesHold() {
-		consume, consumes = userHoldDecision(b)
-	}
 	// Refuse to resume if a prior escaped process for this session could not be
 	// confirmed dead: a survivor would race this replacement for the same work
 	// bead (duplicate bd close). This is the stable/reused-bead-ID path — the
@@ -825,7 +863,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		// the launch: that says nothing about the resume key, so it falls
 		// through to the plain failure below instead of the stale-key recovery.
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, lease, &inc)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -875,7 +913,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute)
+			retried, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, lease, &inc)
 			if err != nil {
 				return err
 			}
@@ -892,6 +930,16 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 	if started || converged {
 		binding = m.startedRuntimeBindingPatch(sessName)
 	}
+	// An operator's resume of a row the operator holds consumes the hold, but
+	// only once the runtime is up (resume_user_hold.go). It decides on the row
+	// as this start read it under the lease, with the incarnation it minted
+	// last (a stale-key relaunch mints again), so only another's start since
+	// refuses the consume.
+	var consume Decided
+	consumes := false
+	if by.consumesHold() {
+		consume, consumes = userHoldDecision(b)
+	}
 	if consumes {
 		clears := MetadataPatch{}
 		if started {
@@ -900,7 +948,7 @@ func (m *Manager) ensureRunningOn(ctx context.Context, by Actor, id string, b be
 		maps.Copy(clears, binding)
 		return m.consumeUserHold(consume, m.now(), clears)
 	}
-	if err := m.confirmLiveSessionState(id, &b, started, binding); err != nil {
+	if err := m.confirmLiveSessionState(id, &b, started, binding, &inc); err != nil {
 		if started && !errors.Is(err, ErrStateSync) {
 			_ = m.sp.Stop(sessName)
 		}
@@ -953,7 +1001,7 @@ func (m *Manager) liveAgent(sessName string, processNames []string) bool {
 	return err == nil && live.Running && live.Alive
 }
 
-func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
+func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, b beads.Bead, sessName, resumeCommand string, hints runtime.Config) error {
 	// It runs under its caller's lease (by.Lease) and takes none: without
 	// one it refuses rather than start outside the lease.
 	if by.Lease == nil {
@@ -961,6 +1009,11 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 	}
 	if err := checkBorrowed(by.Lease, id, sessName); err != nil {
 		return err
+	}
+	// It starts under the incarnation its caller's PreWake minted, while the
+	// row still records it.
+	if !inc.Valid() || inc.ID != id {
+		return fmt.Errorf("%w: session %q (%s)", ErrIncarnationNotMinted, id, inc)
 	}
 	transport, _ := m.transportForBead(b, sessName)
 	unroute := m.routeACPIfNeeded(b.Metadata["provider"], transport, sessName)
@@ -971,36 +1024,23 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		return fmt.Errorf("%w: %s", ErrResumeRequired, id)
 	}
 
+	if !inc.recordedBy(b.Metadata) {
+		return fmt.Errorf("%w: session %s no longer records %s", ErrMintSuperseded, id, inc)
+	}
+
 	cfg := hints
 	cfg.Command = resumeCommand
 	if cfg.WorkDir == "" {
 		cfg.WorkDir = b.Metadata["work_dir"]
 	}
-	generation, err := strconv.Atoi(b.Metadata["generation"])
-	if err != nil || generation <= 0 {
-		generation = DefaultGeneration
-	}
+	// A continuation reset recorded since the PreWake (the prepared start's
+	// stale-resume clear) is consumed here, as legacy always has.
 	continuationEpoch, err := m.commitPendingContinuationReset(id, b)
 	if err != nil {
 		return err
 	}
-	instanceToken := b.Metadata["instance_token"]
-	if instanceToken == "" {
-		instanceToken = NewInstanceToken()
-		if err := m.store.SetMetadata(id, "instance_token", instanceToken); err != nil {
-			return fmt.Errorf("storing instance token: %w", err)
-		}
-		if b.Metadata == nil {
-			b.Metadata = make(map[string]string)
-		}
-		b.Metadata["instance_token"] = instanceToken
-	}
-	cfg.Env = mergeEnv(cfg.Env, RuntimeEnvWithSessionContext(
-		infoFromPersistedBead(b),
-		generation,
-		continuationEpoch,
-		instanceToken,
-	))
+	inc = inc.withContinuationEpoch(continuationEpoch)
+	cfg.Env = mergeEnv(cfg.Env, startEnv(b, inc))
 	if gcProvider := strings.TrimSpace(b.Metadata["provider_kind"]); gcProvider != "" {
 		cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 	} else if provider := strings.TrimSpace(b.Metadata["provider"]); provider != "" {
@@ -1024,7 +1064,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 		// A capacity refusal says nothing about the resume key; it takes the
 		// plain failure path, not the stale-key recovery (see ensureRunning).
 		case errors.Is(err, runtime.ErrSessionDiedDuringStartup) && !runtime.IsProviderCapacity(err):
-			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute)
+			retried, retryErr := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, err, unroute, nil, nil)
 			if retryErr != nil {
 				return retryErr
 			}
@@ -1056,7 +1096,7 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 			return err
 		}
 		if !m.sp.IsRunning(sessName) {
-			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute); err != nil {
+			if _, err := m.retryFreshStartAfterStaleKey(ctx, id, &b, sessName, resumeCommand, cfg, nil, unroute, nil, nil); err != nil {
 				return err
 			}
 		}
@@ -1066,8 +1106,12 @@ func (m *Manager) ensureRunningRuntimeOnly(ctx context.Context, by Actor, id str
 
 // confirmLiveSessionState marks the row of a session found or brought live as
 // active. extra rides the same write (the runtime binding of a start, or of a
-// resume that converged on a runtime already up).
-func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch) error {
+// resume that converged on a runtime already up). A start's confirm (inc, the
+// incarnation it minted) lands only while the row still records inc
+// (ConfirmIncarnation); a row that moved on is ErrStateSync wrapping
+// ErrMintSuperseded, and the runtime is left to its newer owner. A live row
+// found running, which minted nothing, is confirmed without a fence.
+func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool, extra MetadataPatch, inc *Incarnation) error {
 	if b == nil {
 		return nil
 	}
@@ -1088,8 +1132,14 @@ func (m *Manager) confirmLiveSessionState(id string, b *beads.Bead, started bool
 	if len(batch) == 0 {
 		return nil
 	}
-	if err := m.store.SetMetadataBatch(id, batch); err != nil {
+	if inc == nil {
+		if err := m.store.SetMetadataBatch(id, batch); err != nil {
+			return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+		}
+	} else if landed, err := m.PersistedStore().ConfirmIncarnation(*inc, batch); err != nil {
 		return fmt.Errorf("%w: updating session state: %w", ErrStateSync, err)
+	} else if !landed {
+		return fmt.Errorf("%w: session %s no longer records %s: %w", ErrStateSync, id, *inc, ErrMintSuperseded)
 	}
 	if b.Metadata == nil {
 		b.Metadata = make(map[string]string)
@@ -1371,8 +1421,10 @@ func (m *Manager) Start(ctx context.Context, by Actor, id, resumeCommand string,
 // StartRuntimeOnly brings the runtime live for a bead-backed session without
 // mutating persisted lifecycle metadata. Legacy reconciler callers use this
 // bridge while they still own commit/rollback bookkeeping above the worker
-// boundary. It runs under by.Lease, the caller's.
-func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeCommand string, hints runtime.Config) error {
+// boundary. It runs under by.Lease, the caller's, and under inc, the
+// incarnation the caller's PreWake minted under that lease
+// (MintIncarnation).
+func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id string, inc Incarnation, resumeCommand string, hints runtime.Config) error {
 	if err := m.checkStarter(by); err != nil {
 		return err
 	}
@@ -1381,7 +1433,7 @@ func (m *Manager) StartRuntimeOnly(ctx context.Context, by Actor, id, resumeComm
 		if err != nil {
 			return err
 		}
-		return m.ensureRunningRuntimeOnly(ctx, by, id, b, sessName, resumeCommand, hints)
+		return m.ensureRunningRuntimeOnly(ctx, by, id, inc, b, sessName, resumeCommand, hints)
 	})
 }
 

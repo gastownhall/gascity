@@ -391,6 +391,18 @@ func sameLifecycleFacts(a, b Info) bool {
 	return reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
 }
 
+// mintPremiseHolds is MintIncarnation's premise on one fresh read of the row
+// (meta its metadata): fresh still carries the lifecycle facts, the
+// generation and the token expect was read with, and still records lease (a
+// nil lease checks none). LifecycleInput holds no generation or token, so the
+// lifecycle facts alone would let a retry after a lost fence mint a stale g+1.
+func mintPremiseHolds(expect, fresh Info, lease *RuntimeLease, meta map[string]string) bool {
+	return sameLifecycleFacts(expect, fresh) &&
+		strings.TrimSpace(fresh.Generation) == strings.TrimSpace(expect.Generation) &&
+		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(expect.InstanceToken) &&
+		(lease == nil || lease.HoldsMeta(meta))
+}
+
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
 // refreshed Info as a LOCAL fold — info.ApplyPatch(patch) — never a re-Get. It
 // is the write-returns-Info chokepoint the reconciler routes its direct

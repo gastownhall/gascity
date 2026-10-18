@@ -1,8 +1,11 @@
 package worker
 
 import (
+	"context"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
 
@@ -69,4 +72,27 @@ func managerActor(t testing.TB, m *sessionpkg.Manager, kind sessionpkg.ActorKind
 		t.Fatal(err)
 	}
 	return sessionpkg.Actor{Kind: kind, City: city}
+}
+
+// startResolved is the legacy start's runtime-only bring-up through h: the
+// controller under the lease it holds across the start (startLeaseActor),
+// running the incarnation its PreWake minted under that lease. A
+// runtime-only handle has no row, so no incarnation.
+func startResolved(t testing.TB, h interface {
+	StartResolved(context.Context, sessionpkg.Actor, sessionpkg.Incarnation, string, runtime.Config) error
+}, startCommand string, cfg runtime.Config,
+) error {
+	t.Helper()
+	by := startLeaseActor(t, h)
+	var inc sessionpkg.Incarnation
+	if sh, ok := h.(*SessionHandle); ok {
+		info, err := sh.manager.Get(sh.currentSessionID())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if inc, err = sh.manager.PersistedStore().MintIncarnation(context.Background(), by.Lease, sessionpkg.MintRequest{Expect: info, By: sessionpkg.ActorController, Now: time.Now()}); err != nil {
+			t.Fatalf("minting %s: %v", info.ID, err)
+		}
+	}
+	return h.StartResolved(context.Background(), by, inc, startCommand, cfg)
 }

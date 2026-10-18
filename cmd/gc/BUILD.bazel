@@ -1824,6 +1824,7 @@ go_test(
         "session_idle_kill_wake_treadmill_test.go",
         "session_idle_latched_named_holder_test.go",
         "session_idle_respawn_test.go",
+        "session_incarnation_mint_test.go",
         "session_index_test.go",
         "session_key_guard_test.go",
         "session_keys_test.go",
