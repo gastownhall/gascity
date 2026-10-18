@@ -1526,6 +1526,23 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 		where = append(where, residual("b.assignee")+"=?")
 		args = append(args, q.Assignee)
 	}
+	if len(q.Assignees) > 0 {
+		// The assignee column holds exactly the bead's assignee, and SQLite
+		// compares TEXT byte for byte, so this keeps precisely the rows
+		// ListQuery.Matches keeps: it only stops the rest from being decoded.
+		// A mailbox read is this shape, and every open message used to be
+		// decoded to keep the session's own. The predicate is indexable: a
+		// listing with an issue-type filter keeps idx_beads_type, and one with
+		// none (a session's in-progress work) now reads only its identities'
+		// rows through idx_beads_assignee instead of scanning. Beside a
+		// metadata equality it is residual like the other columns.
+		placeholders := make([]string, len(q.Assignees))
+		for i, assignee := range q.Assignees {
+			placeholders[i] = "?"
+			args = append(args, assignee)
+		}
+		where = append(where, residual("b.assignee")+" IN ("+strings.Join(placeholders, ",")+")")
+	}
 	if q.ParentID != "" {
 		where = append(where, "b.parent_id=?")
 		args = append(args, q.ParentID)
@@ -1587,11 +1604,11 @@ func sqliteListSQL(q ListQuery, projection string) (string, []any) {
 
 // sqliteListCanPushLimit reports whether SQLite can apply q.Limit before the
 // Go-side ListQuery match. A source-side limit is only exact when every active
-// filter is represented by sqliteListSQL: the wisp tier, plural assignees, and
-// seek boundary remain residual filters over decoded Beads. Applying LIMIT
-// before any of those filters can discard a later matching row permanently.
+// filter is represented by sqliteListSQL: the wisp tier and the seek boundary
+// remain residual filters over decoded Beads. Applying LIMIT before either can
+// discard a later matching row permanently.
 func sqliteListCanPushLimit(q ListQuery) bool {
-	return q.TierMode != TierWisps && len(q.Assignees) == 0 && q.SeekAfter == nil
+	return q.TierMode != TierWisps && q.SeekAfter == nil
 }
 
 // ListOpen returns non-closed beads in creation order by default.
