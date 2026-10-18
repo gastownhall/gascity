@@ -323,6 +323,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// Other CLI entry points (cmd_sling, cmd_start, cmd_rig, cmd_supervisor)
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
+	city := newHookCity(cityPath, cfg)
 
 	// Fence a stale/superseded/unregistered runtime session BEFORE the
 	// city-suspension, agent-resolution, and agent-suspension early returns
@@ -354,7 +355,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
 			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
 		}
-		code, handled, info := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
+		code, handled, info := fenceHookClaimSession(city, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
 		if handled {
 			return code
 		}
@@ -553,7 +554,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			StrictDrainAck:     drainAckStrictConfig(cfg),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
@@ -562,7 +563,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		DrainAck:       opts.DrainAck,
 		JSON:           opts.JSON,
 		StrictDrainAck: drainAckStrictConfig(cfg),
-	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
+	}, city.claimOps(), runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -603,7 +604,7 @@ const (
 // transient session-store fault all return handled=false so the normal claim
 // path runs — the fence never turns an infrastructure hiccup or an
 // in-progress start into a false refusal.
-func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
+func fenceHookClaimSession(city *hookCity, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
 	if sessionID == "" {
 		// GC_TEMPLATE is the pool-membership signal (set only alongside
 		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
@@ -630,7 +631,7 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 	if instanceToken == "" {
 		return 0, false, nil
 	}
-	verdict, reason, info := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	verdict, reason, info := classifyHookClaimSessionVia(city.sessionFront, sessionID, instanceToken)
 	switch verdict {
 	case hookClaimSessionStale:
 		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
@@ -665,11 +666,18 @@ func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, inst
 func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
 	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
 	// rather than reloading the whole city config inside the open.
-	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	return classifyHookClaimSessionVia(newHookCity(cityPath, cfg).sessionFront, sessionID, instanceToken)
+}
+
+// classifyHookClaimSessionVia is classifyHookClaimSessionInfo reading the
+// session through front: in `gc hook`, the invocation's one session front door,
+// which the claim's later session reads and writes reuse.
+func classifyHookClaimSessionVia(front sessionFrontGetter, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
+	sessFront, err := front()
 	if err != nil {
 		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err), nil
 	}
-	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
+	info, err := sessFront.Get(sessionID)
 	if err != nil {
 		verdict, reason := classifyHookClaimSessionLookupError(err)
 		return verdict, reason, nil
@@ -782,19 +790,22 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
 	// routing exists to close — so every failure but one is fatal here. The
 	// exception, a binding with no claim CAS, degrades to unrouted claiming;
 	// see hookClaimRouteVerdict.
-	opened, err := hookClaimClassRouteForCity(cityPath)
+	opened, err := hookClaimClassRouteForCity(city.path)
 	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	if route != nil {
+		route.recorder = city.recorder
+	}
+	ops := classRoutedHookClaimOps(city.claimOps(), route)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 

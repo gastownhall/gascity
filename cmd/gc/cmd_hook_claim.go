@@ -2298,7 +2298,12 @@ func hookConfirmBeadBlockedWithBdStore(ctx context.Context, dir string, env []st
 }
 
 func hookEmitExecutionStepStarted(step beads.Bead, dir string, env []string, assignee string) {
-	rec := openCityRecorder(io.Discard)
+	emitExecutionStepStarted(openCityRecorder(io.Discard), step, dir, env, assignee)
+}
+
+// emitExecutionStepStarted is hookEmitExecutionStepStarted recording to rec,
+// which it closes.
+func emitExecutionStepStarted(rec events.Recorder, step beads.Bead, dir string, env []string, assignee string) {
 	if closer, ok := rec.(io.Closer); ok {
 		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
 	}
@@ -2923,6 +2928,15 @@ func hookClaimRestampWithBdStore(ctx context.Context, dir string, env []string, 
 // execution.claim_window_expired event so the fleet reports its own orphaned
 // claimers rather than leaving the class invisible.
 func hookEmitClaimWindowExpired(expiry hookClaimWindowExpiry) {
+	emitClaimWindowExpired(openCityRecorder(io.Discard), expiry)
+}
+
+// emitClaimWindowExpired is hookEmitClaimWindowExpired recording to rec, which
+// it closes.
+func emitClaimWindowExpired(rec events.Recorder, expiry hookClaimWindowExpiry) {
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+	}
 	payload, err := json.Marshal(events.ExecutionClaimWindowExpiredPayload{
 		BeadID:          expiry.BeadID,
 		InvocationAgeMS: expiry.InvocationAge.Milliseconds(),
@@ -2931,22 +2945,26 @@ func hookEmitClaimWindowExpired(expiry hookClaimWindowExpiry) {
 	if err != nil {
 		return
 	}
-	rec := openCityRecorder(io.Discard)
 	rec.Record(events.Event{
 		Type:    events.ExecutionClaimWindowExpired,
 		Actor:   eventActor(),
 		Subject: expiry.BeadID,
 		Payload: payload,
 	})
-	if closer, ok := rec.(io.Closer); ok {
-		_ = closer.Close()
-	}
 }
 
 // hookEmitClaimReleased publishes a best-effort bead.claim_released event so an
 // unwound claim is observable rather than looking like a claim that never
 // happened.
 func hookEmitClaimReleased(release hookClaimReleaseRecord) {
+	emitClaimReleased(openCityRecorder(io.Discard), release)
+}
+
+// emitClaimReleased is hookEmitClaimReleased recording to rec, which it closes.
+func emitClaimReleased(rec events.Recorder, release hookClaimReleaseRecord) {
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+	}
 	payload, err := json.Marshal(events.BeadClaimReleasedPayload{
 		BeadID:   release.BeadID,
 		Assignee: release.Assignee,
@@ -2955,21 +2973,25 @@ func hookEmitClaimReleased(release hookClaimReleaseRecord) {
 	if err != nil {
 		return
 	}
-	rec := openCityRecorder(io.Discard)
 	rec.Record(events.Event{
 		Type:    events.BeadClaimReleased,
 		Actor:   release.Assignee,
 		Subject: release.BeadID,
 		Payload: payload,
 	})
-	if closer, ok := rec.(io.Closer); ok {
-		_ = closer.Close()
-	}
 }
 
 // hookEmitClaimRejected publishes a best-effort bead.claim_rejected event to the
 // city event log so a lost-claim race is observable for eval/audit (ADR-0009).
 func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
+	emitClaimRejected(openCityRecorder(io.Discard), beadID, existingClaimant, attemptedClaimant)
+}
+
+// emitClaimRejected is hookEmitClaimRejected recording to rec, which it closes.
+func emitClaimRejected(rec events.Recorder, beadID, existingClaimant, attemptedClaimant string) {
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+	}
 	payload, err := json.Marshal(events.BeadClaimRejectedPayload{
 		BeadID:            beadID,
 		ExistingClaimant:  existingClaimant,
@@ -2978,22 +3000,27 @@ func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	if err != nil {
 		return
 	}
-	rec := openCityRecorder(io.Discard)
 	rec.Record(events.Event{
 		Type:    events.BeadClaimRejected,
 		Actor:   attemptedClaimant,
 		Subject: beadID,
 		Payload: payload,
 	})
-	if closer, ok := rec.(io.Closer); ok {
-		_ = closer.Close()
-	}
 }
 
 // hookEmitClaimReclaimedStale publishes a best-effort hook.claim.reclaimed_stale
 // event (ga-7rj87d FR5) so a scoped stale-lease recovery is observable to
 // mayor/watchers instead of surfacing only as an ordinary fresh claim.
 func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
+	emitClaimReclaimedStale(openCityRecorder(io.Discard), beadID, previousOwner, newAssignee)
+}
+
+// emitClaimReclaimedStale is hookEmitClaimReclaimedStale recording to rec,
+// which it closes.
+func emitClaimReclaimedStale(rec events.Recorder, beadID, previousOwner, newAssignee string) {
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
+	}
 	payload, err := json.Marshal(events.HookClaimReclaimedStalePayload{
 		BeadID:        beadID,
 		PreviousOwner: previousOwner,
@@ -3002,16 +3029,12 @@ func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
 	if err != nil {
 		return
 	}
-	rec := openCityRecorder(io.Discard)
 	rec.Record(events.Event{
 		Type:    events.HookClaimReclaimedStale,
 		Actor:   newAssignee,
 		Subject: beadID,
 		Payload: payload,
 	})
-	if closer, ok := rec.(io.Closer); ok {
-		_ = closer.Close()
-	}
 }
 
 // hookContinuationNudgeEnqueue is the production EnqueueContinuationNudge
@@ -3029,7 +3052,16 @@ func hookEmitClaimReclaimedStale(beadID, previousOwner, newAssignee string) {
 // See writeHookClaimWorkResultForBead for the call site.
 func hookContinuationNudgeEnqueue(assignee string) {
 	cityPath, err := resolveCity()
-	if err != nil || onWorkerSite(cityPath) {
+	if err != nil {
+		return
+	}
+	continuationNudgeEnqueueAt(cityPath, assignee)
+}
+
+// continuationNudgeEnqueueAt is hookContinuationNudgeEnqueue for an
+// already-resolved city.
+func continuationNudgeEnqueueAt(cityPath, assignee string) {
+	if onWorkerSite(cityPath) {
 		return
 	}
 	// Load cfg so maybeStartNudgePoller can skip the sidecar when the city
