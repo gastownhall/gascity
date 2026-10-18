@@ -56,11 +56,12 @@ func parseName[T comparable](names map[T]string, s string) (T, bool) {
 }
 
 type wireLadder struct {
-	V         int          `json:"v"`
-	Gen       int64        `json:"gen"`
-	LastNudge string       `json:"last_nudge,omitempty"`
-	Entries   []wireEntry  `json:"entries"`
-	Release   *wireRelease `json:"release,omitempty"`
+	V           int          `json:"v"`
+	Gen         int64        `json:"gen"`
+	LastNudge   string       `json:"last_nudge,omitempty"`
+	RecycledGen int64        `json:"recycled_gen,omitempty"`
+	Entries     []wireEntry  `json:"entries"`
+	Release     *wireRelease `json:"release,omitempty"`
 }
 
 type wireEntry struct {
@@ -78,6 +79,7 @@ type wireEntry struct {
 	Seed       string `json:"seed"`
 	RecycleAt  string `json:"recycle_at"`
 	Unreleased bool   `json:"unreleased,omitempty"`
+	Refused    int    `json:"refused,omitempty"`
 }
 
 type wireRelease struct {
@@ -107,7 +109,7 @@ func EncodeLadder(r Record) string {
 	if r.V == 0 {
 		return ""
 	}
-	w := wireLadder{V: Version, Gen: r.Gen, LastNudge: fmtTime(r.LastNudge), Entries: []wireEntry{}}
+	w := wireLadder{V: Version, Gen: r.Gen, LastNudge: fmtTime(r.LastNudge), RecycledGen: r.RecycledGen, Entries: []wireEntry{}}
 	for _, e := range sortedEntries(r.Entries) {
 		seed := ""
 		if e.Seed != 0 {
@@ -117,7 +119,7 @@ func EncodeLadder(r Record) string {
 			Store: e.Key.Store, Bead: e.Key.Bead, Kind: e.Kind.String(), Rung: e.Rung.String(),
 			Since: fmtTime(e.Since), Attempts: e.Attempts, Paused: e.Paused, Last: fmtTime(e.Last),
 			Next: fmtTime(e.Next), Recycles: e.Recycles, Escalated: e.Escalated, Seed: seed,
-			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased,
+			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased, Refused: e.Refused,
 		})
 	}
 	if r.Release != nil {
@@ -146,7 +148,7 @@ func DecodeLadder(raw string) (Record, error) {
 	if w.V != Version {
 		return bad("unknown version %d", w.V)
 	}
-	r := Record{V: Version, Gen: w.Gen}
+	r := Record{V: Version, Gen: w.Gen, RecycledGen: w.RecycledGen}
 	lastNudge, err := parseTime(w.LastNudge)
 	if err != nil {
 		return bad("last_nudge %q: %v", w.LastNudge, err)
@@ -154,7 +156,7 @@ func DecodeLadder(raw string) (Record, error) {
 	r.LastNudge = lastNudge
 	seen := map[ClaimKey]bool{}
 	for i, we := range w.Entries {
-		e := Entry{Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles, Escalated: we.Escalated, Unreleased: we.Unreleased}
+		e := Entry{Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles, Escalated: we.Escalated, Unreleased: we.Unreleased, Refused: we.Refused}
 		if e.Key.Bead == "" {
 			return bad("entry %d: empty bead", i)
 		}
@@ -162,7 +164,7 @@ func DecodeLadder(raw string) (Record, error) {
 			return bad("entry %d: duplicate %s/%s", i, e.Key.Store, e.Key.Bead)
 		}
 		seen[e.Key] = true
-		if e.Attempts < 0 || e.Paused < 0 || e.Recycles < 0 {
+		if e.Attempts < 0 || e.Paused < 0 || e.Recycles < 0 || e.Refused < 0 {
 			return bad("entry %d: negative count", i)
 		}
 		var ok bool

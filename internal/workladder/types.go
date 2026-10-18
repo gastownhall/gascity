@@ -182,6 +182,7 @@ const (
 	AlertStartedRecycled        = "started_recycled"
 	AlertReleaseUnfinished      = "release_unfinished"
 	AlertReleaseRacedStart      = "release_raced_start"
+	AlertNudgeRefused           = "nudge_refused"
 )
 
 // Decision is Decide's answer: the cell to CAS (no write when !Changed) and
@@ -201,6 +202,10 @@ type Record struct {
 	// LastNudge is the seat's last nudge, about any of its work: the seat
 	// is nudged at most once per Base (WL3), whatever work comes and goes.
 	LastNudge time.Time
+	// RecycledGen is the generation the ladder last asked to recycle the
+	// seat at: the stop that recycle brings is the ladder's, whatever the
+	// switch says by then.
+	RecycledGen int64
 }
 
 // Entry is one outstanding piece of work's pacing.
@@ -221,6 +226,10 @@ type Entry struct {
 	// did not release it (kept, or failed). It is then nudged at Cap, with
 	// one alert, and the release retried at Cap.
 	Unreleased bool
+	// Refused counts the nudges the seat could not take in a row (a
+	// permission prompt, a runtime unavailable): while it is above zero the
+	// entry is nudged no more often than PausedCap.
+	Refused int
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a
