@@ -2,7 +2,9 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -96,5 +98,64 @@ func TestOpSweepCleanPassRearmsTheDegradeEvent(t *testing.T) {
 	s.safePass()
 	if n := count(); n != 2 {
 		t.Fatalf("an outage after a clean pass raised %d events in total, want 2", n)
+	}
+}
+
+// opSweepToggleReadStore fails the sweep's read of open ops while failing is
+// set.
+type opSweepToggleReadStore struct {
+	opSweepStore
+	failing atomic.Bool
+}
+
+func (f *opSweepToggleReadStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Sort == beads.SortCreatedAsc && f.failing.Load() {
+		return nil, errors.New("dolt down")
+	}
+	return f.opSweepStore.List(q)
+}
+
+// TestOpSweepCleanSweepRearmsTheSweepDegrade proves a sweep-stage degrade
+// (the store opens, the sweep's read fails) re-arms after a pass whose sweep
+// is clean, so the next sweep failure, an interval later, raises another
+// event (DES-O0API §5.5).
+func TestOpSweepCleanSweepRearmsTheSweepDegrade(t *testing.T) {
+	store := &opSweepToggleReadStore{opSweepStore: newOpSweepStore()}
+	cs := newOpSweepCS(store, rollout.WithOpsContent(rollout.Auto))
+	rec := events.NewFake()
+	cs.eventProv = rec
+	s := cs.newOpSweeper()
+	s.logf = func(string, ...any) {}
+	clk := &opSweepClock{now: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)}
+	s.events = api.NewOpsDegradeReporter(func() events.Recorder { return rec }, clk)
+	sweepEvents := func() int {
+		evs, _ := rec.List(events.Filter{Type: events.OpsRecordingDegraded})
+		n := 0
+		for _, e := range evs {
+			var p events.OpsRecordingDegradedPayload
+			if err := json.Unmarshal(e.Payload, &p); err != nil {
+				t.Fatal(err)
+			}
+			if p.Stage == legacyop.StageSweep {
+				n++
+			}
+		}
+		return n
+	}
+
+	store.failing.Store(true)
+	s.safePass()
+	clk.Advance(legacyop.DegradeLogInterval)
+	s.safePass()
+	if n := sweepEvents(); n != 1 {
+		t.Fatalf("one sweep outage across an interval raised %d sweep events, want 1", n)
+	}
+	store.failing.Store(false)
+	s.safePass()
+	store.failing.Store(true)
+	clk.Advance(legacyop.DegradeLogInterval)
+	s.safePass()
+	if n := sweepEvents(); n != 2 {
+		t.Fatalf("a sweep outage after a clean sweep raised %d sweep events in total, want 2", n)
 	}
 }

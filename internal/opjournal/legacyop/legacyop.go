@@ -64,7 +64,9 @@ var (
 	// It is returned as *BusyError.
 	ErrBusy = errors.New("legacyop: op in progress")
 	// ErrUnavailable reports, in require mode, an op store that cannot
-	// record the request. Nothing ran.
+	// record the request. The request's own effect did not run; a caller
+	// may have prepared its target first (the API materializes a
+	// configured named session so the op can name it).
 	ErrUnavailable = errors.New("legacyop: op journal unavailable")
 )
 
@@ -149,8 +151,11 @@ type Admission struct {
 // registry; nil (the CLI) means never adopt. Degraded, when set, is told of
 // every store failure the recorder degrades past. Logger receives the
 // recorder's rate-limited degrade lines and late-result lines; nil is
-// slog.Default(). Done, when closed (its owner shutting down), ends any
-// background close retry, leaving the op to the sweeper; nil never closes.
+// slog.Default(). Done, when closed (its owner shutting down or replaced),
+// ends any background close retry, leaving the op to the sweeper; the entry
+// stays held until the op's finish_by, so a same-key retry in this process
+// does not adopt an op whose effect may already have landed. nil never
+// closes.
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -163,6 +168,8 @@ type Recorder struct {
 
 	// sleep waits between close retries; nil is time.Sleep.
 	sleep func(time.Duration)
+	// after runs f once d has passed; nil is time.AfterFunc.
+	after func(d time.Duration, f func())
 
 	logMu  sync.Mutex
 	logged map[degradeLogKey]time.Time
@@ -508,25 +515,46 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 
 // closeInBackground keeps closing the op, backing off, until it closes, its
 // finish_by passes (the sweeper owns it then) or the recorder's Done closes,
-// then releases the entry.
+// then releases the entry. When Done ends the retry before finish_by, the
+// entry is held until finish_by: the request ran in this process and its
+// effect may have landed, so a same-key retry must find it in flight rather
+// than adopt it (DES-O0API I3, §12).
 func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- struct{}) {
 	r := a.rec
 	defer close(done)
-	defer a.release()
 	gap := closeRetryGap
 	for !r.Clock.Now().After(a.Op.FinishBy) && r.wait(gap) {
 		_, err := a.store.CloseKnown(a.Op, outcome, string(r.Executor))
 		switch {
 		case err == nil:
+			a.release()
 			r.count(a.Op.Kind, StageClose, ResultClosed, "")
 			return
 		case errors.Is(err, opjournal.ErrAlreadyTerminal):
+			a.release()
 			r.late(a.Op, outcome, err)
 			return
 		}
 		gap = min(2*gap, backgroundGapMax)
 	}
 	r.count(a.Op.Kind, StageClose, ResultFailed, "")
+	a.releaseAtFinishBy()
+}
+
+// releaseAtFinishBy releases the entry at the op's finish_by, or now when it
+// has passed.
+func (a *Admission) releaseAtFinishBy() {
+	r := a.rec
+	hold := a.Op.FinishBy.Sub(r.Clock.Now())
+	if hold <= 0 {
+		a.release()
+		return
+	}
+	if r.after != nil {
+		r.after(hold, a.release)
+		return
+	}
+	time.AfterFunc(hold, a.release)
 }
 
 // release returns the request's in-flight entry.

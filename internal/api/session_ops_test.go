@@ -156,6 +156,36 @@ func (e *opsEnv) rebuild(t *testing.T) {
 	}
 }
 
+// rebuiltOverState is the city after a restart that opened a new sessions
+// store over the same data and, when ev is set, a new event provider.
+type rebuiltOverState struct {
+	*fakeState
+	store beads.Store
+	ev    events.Provider
+}
+
+func (r *rebuiltOverState) SessionsBeadStore() beads.SessionStore {
+	return beads.SessionStore{Store: r.store}
+}
+func (r *rebuiltOverState) CityBeadStore() beads.Store { return r.store }
+func (r *rebuiltOverState) EventProvider() events.Provider {
+	if r.ev != nil {
+		return r.ev
+	}
+	return r.fakeState.EventProvider()
+}
+
+// rebuildOver is rebuild for a restart that reopened the city's store as
+// store and, when ev is not nil, its event provider as ev.
+func (e *opsEnv) rebuildOver(t *testing.T, store beads.Store, ev events.Provider) {
+	t.Helper()
+	old := e.server(t)
+	e.resolver.state = &rebuiltOverState{fakeState: e.fs, store: store, ev: ev}
+	if e.server(t) == old {
+		t.Fatal("the supervisor kept the old Server")
+	}
+}
+
 // server is the Server the supervisor serves the city with now.
 func (e *opsEnv) server(t *testing.T) *Server {
 	t.Helper()
@@ -597,6 +627,35 @@ func TestSessionContentOpsAutoInFlightReplay(t *testing.T) {
 	}
 }
 
+// §6.2 on /messages: a same-key retry while the first request runs, by alias
+// past the per-path LRU, gets the cached 202, and a Go-client waiter on it
+// matches the one terminal event.
+func TestSessionContentOpsAutoMessagesInFlightReplay(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Messages in flight")
+	gp, release := e.gatedProvider(t)
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "key-m", `{"message":"hi"}`).Body)
+	gp.waitEntered(t)
+	e.recordUnrelatedEvent()
+	rec := e.post(t, "/session/"+info.SessionName+"/messages", "key-m", `{"message":"hi"}`)
+	second := decodeAsyncAccepted(t, rec.Body)
+	if rec.Code != http.StatusAccepted || second.RequestID != first.RequestID || second.EventCursor != first.EventCursor || second.Replayed {
+		t.Fatalf("in-flight replay = %d %+v, want the first answer %+v", rec.Code, second, first)
+	}
+	release()
+	srv := httptest.NewServer(e.h)
+	defer srv.Close()
+	c := NewCityScopedClient(srv.URL, e.fs.CityName())
+	ctx, cancel := context.WithTimeout(context.Background(), testEventTimeout)
+	defer cancel()
+	if _, err := c.waitForEvent(ctx, second.RequestID, events.RequestResultSessionMessage, RequestOperationSessionMessage, second.EventCursor); err != nil {
+		t.Fatalf("waiter on the replayed /messages 202: %v", err)
+	}
+	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+		t.Fatalf("deliveries = %d, want 1", got)
+	}
+}
+
 // §6.2: a same-key request on the other endpoint while the first is in
 // flight is busy (409 in_flight), not the cached 202: the running request
 // emits its terminal event for its own operation only, so a waiter on the
@@ -673,10 +732,11 @@ func TestSessionContentOpsServerRebuildKeepsTheInflightRequest(t *testing.T) {
 	}
 }
 
-// A dropped Server's close retry ends: in require the terminal event waits
+// A replaced Server's close retry ends: in require the terminal event waits
 // for a close that keeps failing, and the replaced Server's shutdown ends
-// that wait at once instead of at finish_by. The op stays open and leaves the
-// registry, so a same-key retry adopts it.
+// that wait at once instead of at finish_by. The op stays open and its
+// in-flight entry stays held until finish_by, so a same-key retry on the new
+// Server gets the cached 202 and nothing is delivered a second time.
 func TestSessionContentOpsShutdownEndsTheCloseRetry(t *testing.T) {
 	e := newOpsEnv(t, "require")
 	info := e.session(t, "Shutdown")
@@ -692,19 +752,90 @@ func TestSessionContentOpsShutdownEndsTheCloseRetry(t *testing.T) {
 		t.Fatalf("event = %s (%v), want the op still open", evs[0].Payload, err)
 	}
 	e.store.set(func(s *opsTestStore) { s.updateFails = 0 })
-	deadline := time.Now().Add(testEventTimeout)
-	for e.sm.cityOpsFor(e.fs.CityName(), e.fs).inflight.Len() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the in-flight entry was never released")
-		}
-		time.Sleep(5 * time.Millisecond)
+	if n := e.sm.cityOpsFor(e.fs.CityName(), e.fs).inflight.Len(); n != 1 {
+		t.Fatalf("in-flight entries after the retry ended = %d, want 1 held until finish_by", n)
 	}
 	rec := e.post(t, "/session/"+info.ID+"/submit", "key-s", `{"message":"x"}`)
 	acc := decodeAsyncAccepted(t, rec.Body)
-	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 1 {
-		t.Fatalf("retry = %d %+v op %+v, want an adoption", rec.Code, acc, acc.Op)
+	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 0 {
+		t.Fatalf("retry = %d %+v op %+v, want the cached 202", rec.Code, acc, acc.Op)
 	}
-	e.waitClosed(t, first.RequestID)
+	time.Sleep(20 * time.Millisecond)
+	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+		t.Fatalf("deliveries = %d, want 1", got)
+	}
+}
+
+// closingStore is a State's sessions store that the city's restart closes:
+// once closed, op-row conditional updates fail.
+type closingStore struct {
+	*opsTestStore
+	closed atomic.Bool
+}
+
+func (s *closingStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if s.closed.Load() {
+		return errors.New("store closed by the city restart")
+	}
+	return s.opsTestStore.UpdateIfMatch(id, rev, opts)
+}
+
+// I3 when the city restart closes the old State's store: the old Server's
+// delivery lands, its close fails and its Done is already closed, so the
+// close is not retried; the entry stays held, and a same-key retry on the
+// new Server gets the cached 202 instead of adopting and delivering again.
+func TestSessionContentOpsRebuildWithTheOldStoreClosedDeliversOnce(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	old := &closingStore{opsTestStore: e.store}
+	e.fs.cityBeadStore = old
+	info := e.session(t, "Old store")
+	gp, release := e.gatedProvider(t)
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-c", `{"message":"once"}`).Body)
+	gp.waitEntered(t)
+	e.rebuildOver(t, e.store, nil)
+	old.closed.Store(true)
+	release()
+	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	rec := e.post(t, "/session/"+info.ID+"/submit", "key-c", `{"message":"once"}`)
+	acc := decodeAsyncAccepted(t, rec.Body)
+	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 0 {
+		t.Fatalf("retry on the new Server = %d %+v op %+v, want the cached 202", rec.Code, acc, acc.Op)
+	}
+	time.Sleep(20 * time.Millisecond)
+	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+		t.Fatalf("deliveries for one key = %d, want 1", got)
+	}
+}
+
+// The supervisor ends a Server's background close retries when it drops the
+// city (its State is gone) and when it shuts down.
+func TestSessionContentOpsServerShutdownOnDropAndSupervisorShutdown(t *testing.T) {
+	isDone := func(srv *Server) bool {
+		select {
+		case <-srv.ops.done:
+			return true
+		default:
+			return false
+		}
+	}
+	t.Run("drop", func(t *testing.T) {
+		e := newOpsEnv(t, "auto")
+		srv := e.server(t)
+		e.sm.dropCityServer(e.fs.CityName())
+		if !isDone(srv) {
+			t.Fatal("the dropped Server was not shut down")
+		}
+	})
+	t.Run("supervisor shutdown", func(t *testing.T) {
+		e := newOpsEnv(t, "auto")
+		srv := e.server(t)
+		if err := e.sm.Shutdown(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+		if !isDone(srv) {
+			t.Fatal("the cached Server was not shut down with the supervisor")
+		}
+	})
 }
 
 // seedAPIOp proposes the op a submit of text under key would record, under
@@ -1196,6 +1327,97 @@ func TestSessionContentOpsDegradeRearmsAfterARecordedRequest(t *testing.T) {
 	}
 }
 
+// §5.5: a close-stage degrade re-arms after a close that succeeds, so the
+// next close outage, an interval later, raises a fresh event.
+func TestSessionContentOpsDegradeRearmsAfterAClose(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Close rearm")
+	clk := &clock.Fake{Time: time.Now()}
+	e.sm.cityOpsFor(e.fs.CityName(), e.fs).degraded.clk = clk
+	submit := func() {
+		t.Helper()
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`).Body)
+		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+		e.waitClosed(t, acc.RequestID)
+	}
+	count := func() int {
+		evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+		return len(evs)
+	}
+	e.store.set(func(s *opsTestStore) { s.updateFails = 4 }) // outlasts the foreground retries
+	submit()
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	e.store.set(func(s *opsTestStore) { s.updateFails = 4 })
+	submit()
+	if n := count(); n != 1 {
+		t.Fatalf("a close outage with no close in between raised %d events, want 1", n)
+	}
+	submit() // closes in the foreground
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	e.store.set(func(s *opsTestStore) { s.updateFails = 4 })
+	submit()
+	if n := count(); n != 2 {
+		t.Fatalf("a close outage after a healthy close raised %d events in total, want 2", n)
+	}
+}
+
+// §5.5: an adopt-stage degrade re-arms after an adoption that succeeds.
+func TestSessionContentOpsDegradeRearmsAfterAnAdoption(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "Adopt rearm")
+	e.server(t) // attaches the city's degrade events to the Server's provider
+	clk := &clock.Fake{Time: time.Now()}
+	city := e.sm.cityOpsFor(e.fs.CityName(), e.fs)
+	city.degraded.clk = clk
+	adoptFailure := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StageAdopt, Reason: legacyop.ReasonStoreUnavailable}
+	count := func() int {
+		evs, _ := e.fs.eventProv.List(events.Filter{Type: events.OpsRecordingDegraded})
+		return len(evs)
+	}
+	city.degraded.Report(rollout.KeyOpsContent, adoptFailure)
+	orphan := e.seedOp(t, info.ID, "key-ad", "adopt me", legacyop.ExecutorAPI)
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-ad", `{"message":"adopt me"}`).Body)
+	if acc.Op == nil || acc.Op.Attempt != 1 {
+		t.Fatalf("setup: %+v op %+v, want an adoption", acc, acc.Op)
+	}
+	waitTerminalEvents(t, e.fs.eventProv, orphan.ID, 1)
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	city.degraded.Report(rollout.KeyOpsContent, adoptFailure)
+	if n := count(); n != 2 {
+		t.Fatalf("an adopt failure after a healthy adoption raised %d events in total, want 2", n)
+	}
+}
+
+// After a city restart that brought a new event provider, the city's degrade
+// events go to the newest State's provider: the latch is the city's, the
+// destination the current Server's.
+func TestSessionContentOpsDegradeEventsFollowTheNewState(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	info := e.session(t, "New provider")
+	clk := &clock.Fake{Time: time.Now()}
+	e.sm.cityOpsFor(e.fs.CityName(), e.fs).degraded.clk = clk
+	submit := func(ev events.Provider) {
+		t.Helper()
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "", `{"message":"x"}`).Body)
+		waitTerminalEvents(t, ev, acc.RequestID, 1)
+	}
+	oldEv := e.fs.eventProv
+	e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
+	submit(oldEv)
+	newEv := events.NewFake()
+	e.rebuildOver(t, e.store, newEv)
+	e.store.set(func(s *opsTestStore) { s.createErr = nil })
+	submit(newEv)
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
+	submit(newEv)
+	o, _ := oldEv.List(events.Filter{Type: events.OpsRecordingDegraded})
+	n, _ := newEv.List(events.Filter{Type: events.OpsRecordingDegraded})
+	if len(o) != 1 || len(n) != 1 {
+		t.Fatalf("degrade events: old provider %d, new provider %d; want 1 and 1", len(o), len(n))
+	}
+}
+
 // closeCheckingEvents is an event provider that checks, as each terminal
 // event is recorded, that the op it names is already closed (I10).
 type closeCheckingEvents struct {
@@ -1595,7 +1817,7 @@ func TestSessionContentOpsRequireRefusesAnInvalidKey(t *testing.T) {
 // driftEnv is a city where the alias "drifty" names session a until the
 // request's op row commits, then names session b: the target moves between
 // the 202 and the delivery.
-func driftEnv(t *testing.T, mode string) (e *opsEnv, a, b session.Info, logs func() []string) {
+func driftEnv(t *testing.T, mode string) (e *opsEnv, a, b session.Info, logs func() []string, moved func() int) {
 	t.Helper()
 	e = newOpsEnv(t, mode)
 	a, b = e.session(t, "Drift A"), e.session(t, "Drift B")
@@ -1619,11 +1841,19 @@ func driftEnv(t *testing.T, mode string) (e *opsEnv, a, b session.Info, logs fun
 		defer mu.Unlock()
 		lines = append(lines, fmt.Sprintf(format, args...))
 	}
-	return e, a, b, func() []string {
-		mu.Lock()
-		defer mu.Unlock()
-		return slices.Clone(lines)
+	var counted atomic.Int32
+	e.server(t).ops.recordOp = func(_ context.Context, kind, surface, stage, result, _ string) {
+		if kind == string(opjournal.KindMessage) && surface == legacyop.SurfaceAPI && stage == legacyop.StageClose && result == opTargetMovedResult {
+			counted.Add(1)
+		}
 	}
+	return e, a, b, func() []string {
+			mu.Lock()
+			defer mu.Unlock()
+			return slices.Clone(lines)
+		}, func() int {
+			return int(counted.Load())
+		}
 }
 
 // §6.1 target drift: in auto the delivery re-resolves the target, as it
@@ -1634,7 +1864,7 @@ func driftEnv(t *testing.T, mode string) (e *opsEnv, a, b session.Info, logs fun
 func TestSessionContentOpsTargetDrift(t *testing.T) {
 	for _, path := range []string{"/submit", "/messages"} {
 		t.Run("auto "+path, func(t *testing.T) {
-			e, a, b, logs := driftEnv(t, "auto")
+			e, a, b, logs, moved := driftEnv(t, "auto")
 			acc := decodeAsyncAccepted(t, e.post(t, "/session/drifty"+path, "key-d", `{"message":"moved"}`).Body)
 			if acc.Op == nil || acc.Op.Conversation != a.ID {
 				t.Fatalf("202 = %+v op %+v, want an op for %s", acc, acc.Op, a.ID)
@@ -1650,9 +1880,12 @@ func TestSessionContentOpsTargetDrift(t *testing.T) {
 			if len(got) != 1 || !strings.Contains(got[0], acc.RequestID) || !strings.Contains(got[0], b.ID) {
 				t.Fatalf("drift log = %q", got)
 			}
+			if n := moved(); n != 1 {
+				t.Fatalf("%s counted %d times, want 1", opTargetMovedResult, n)
+			}
 		})
 		t.Run("require "+path, func(t *testing.T) {
-			e, a, b, logs := driftEnv(t, "require")
+			e, a, b, logs, moved := driftEnv(t, "require")
 			acc := decodeAsyncAccepted(t, e.post(t, "/session/drifty"+path, "key-d", `{"message":"moved"}`).Body)
 			if acc.Op == nil || acc.Op.Conversation != a.ID {
 				t.Fatalf("202 = %+v op %+v, want an op for %s", acc, acc.Op, a.ID)
@@ -1664,6 +1897,9 @@ func TestSessionContentOpsTargetDrift(t *testing.T) {
 			}
 			if got := logs(); len(got) != 0 {
 				t.Fatalf("require logged drift: %q", got)
+			}
+			if n := moved(); n != 0 {
+				t.Fatalf("require counted %s %d times", opTargetMovedResult, n)
 			}
 		})
 	}

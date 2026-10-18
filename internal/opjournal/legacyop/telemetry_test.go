@@ -165,13 +165,19 @@ func TestFinishReusesAdmitsStore(t *testing.T) {
 	}
 }
 
-// The background close retry ends when the recorder's Done closes (the
-// server shutting down), releasing the entry and leaving the op to the
-// sweeper, instead of retrying until finish_by.
+// The background close retry ends when the recorder's Done closes (its
+// owner shutting down or replaced), instead of retrying until finish_by. The
+// entry stays held until finish_by: the request's API did not die, so a
+// same-key retry in this process must not adopt the op and deliver it a
+// second time (DES-O0API I3, §12). At finish_by the entry is released and the
+// op is the sweeper's.
 func TestBackgroundCloseEndsOnDone(t *testing.T) {
 	e := newEnv(t)
 	r := apiRecorder(e, gate.Auto)
 	r.sleep = nil // real waits, interrupted by Done
+	var holdFor time.Duration
+	var releaseHold func()
+	r.after = func(d time.Duration, f func()) { holdFor, releaseHold = d, f }
 	done := make(chan struct{})
 	r.Done = done
 	adm, err := r.Admit(msg("k1", "hello"))
@@ -189,10 +195,42 @@ func TestBackgroundCloseEndsOnDone(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the background close outlived Done")
 	}
+	if r.Inflight.Len() != 1 {
+		t.Fatalf("registry %d after Done, want the entry held until finish_by", r.Inflight.Len())
+	}
+	if _, err := r.Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("same key after Done: %v, want ErrBusy (no adoption)", err)
+	}
+	if want := adm.Op.FinishBy.Sub(e.clk.Now()); releaseHold == nil || holdFor != want {
+		t.Fatalf("hold = %s (set %v), want %s, until finish_by", holdFor, releaseHold != nil, want)
+	}
+	releaseHold()
 	if r.Inflight.Len() != 0 {
-		t.Fatalf("registry %d after Done", r.Inflight.Len())
+		t.Fatalf("registry %d at finish_by", r.Inflight.Len())
 	}
 	if got, _ := e.st.Get(adm.Op.ID); got.Status != opjournal.StatusSubmitted {
 		t.Fatalf("op %s after Done", got.Status)
+	}
+}
+
+// A background close that Done ends after finish_by has passed releases the
+// entry at once: there is nothing left to hold for.
+func TestBackgroundCloseEndsOnDonePastFinishBy(t *testing.T) {
+	e := newEnv(t)
+	r := apiRecorder(e, gate.Auto)
+	r.after = func(time.Duration, func()) { t.Fatal("held an entry past finish_by") }
+	done := make(chan struct{})
+	r.Done = done
+	adm, err := r.Admit(msg("k1", "hello"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.fault.updateForever = true
+	close(done)
+	e.clk.Advance(ExecutionBound + time.Minute)
+	f := adm.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)})
+	<-f.Background
+	if r.Inflight.Len() != 0 {
+		t.Fatalf("registry %d past finish_by", r.Inflight.Len())
 	}
 }

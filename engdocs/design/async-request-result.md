@@ -51,8 +51,8 @@ progression.
    keeps the failure's class but not the step that failed, so it can
    differ from the original's: a session closed or gone during the
    delivery (originally `submit_failed` or `message_failed`) replays as
-   `resolve_failed`, and a deadline inside `/submit` (originally
-   `submit_failed`) replays as `timeout`. The original `error_message` is
+   `resolve_failed`, and a deadline or cancellation inside `/submit`
+   (originally `submit_failed`) replays as `timeout`. The original `error_message` is
    not kept either; a replay says which op it replays and its outcome.
 8. A retry still passes the front-door checks first: an unknown target is
    404 and a session waiting on a pending interaction (for example an
@@ -63,8 +63,12 @@ progression.
    process, not one per per-city `Server`: the supervisor builds a new
    `Server` when a city's state changes while the old one may still be
    delivering, and a retry must find that delivery instead of re-running
-   it. A replaced `Server` stops retrying a failing op close, leaving the
-   op open for the sweeper or for a same-key retry to adopt.
+   it. A replaced or dropped `Server` stops retrying a failing op close
+   and leaves the op open, but its in-flight entry stays held until the
+   op's `finish_by`: the message may already have landed, so a same-key
+   retry in that process gets the first request's 202 (or 409 `in_flight`
+   on the other endpoint) rather than adopting the op and delivering it
+   again. After `finish_by` the sweeper closes the op.
 
 ## The pattern
 

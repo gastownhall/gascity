@@ -23,7 +23,10 @@ package api
 // The in-flight registry is per city per process (cityOps), not per Server:
 // the supervisor builds a new Server for a city whenever the city's State
 // changes, while the old Server's deliveries may still run, and adoption
-// reads "not in the registry" as "its API died" (D9, I3).
+// reads "not in the registry" as "its API died" (D9, I3). For the same
+// reason a replaced or dropped Server whose op close is still failing stops
+// retrying but keeps the entry until the op's finish_by: its message may
+// have landed, so a same-key retry must not adopt and deliver it again.
 
 import (
 	"context"
@@ -127,6 +130,8 @@ type serverOps struct {
 	openStore func(beads.SessionStore, clock.Clock) (*opjournal.Store, error)
 	// logf writes the op path's log lines; tests capture them.
 	logf func(format string, args ...any)
+	// recordOp is telemetry.RecordOpRecord; tests capture it.
+	recordOp func(ctx context.Context, kind, surface, stage, result, unrecordedReason string)
 	// afterAdmit, when set, runs after a request is admitted and before its
 	// delivery goroutine owns the admission; tests inject a handler panic
 	// there.
@@ -154,8 +159,9 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 		openStore: func(st beads.SessionStore, clk clock.Clock) (*opjournal.Store, error) {
 			return opjournal.NewStore(st, clk)
 		},
-		logf: log.Printf,
-		done: make(chan struct{}),
+		logf:     log.Printf,
+		recordOp: telemetry.RecordOpRecord,
+		done:     make(chan struct{}),
 	}
 	o.content = &legacyop.Recorder{
 		Mode:     s.bootFlags.OpsContent(),
@@ -171,8 +177,8 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 
 // shutdown ends the Server's background close retries: the supervisor
 // dropped or replaced it. An op whose close was still being retried stays
-// open for the sweeper, or for a same-key retry to adopt. It is idempotent
-// and does nothing on nil.
+// open, its in-flight entry held until its finish_by, then the sweeper's.
+// It is idempotent and does nothing on nil.
 func (o *serverOps) shutdown() {
 	if o == nil {
 		return
@@ -433,7 +439,7 @@ func (s *Server) noteTargetMoved(adm *legacyop.Admission, delivered string) {
 		return
 	}
 	s.ops.logf("api: op %s for session %s was delivered to %s: the target moved after the 202", adm.Op.ID, adm.Op.Conversation, delivered)
-	telemetry.RecordOpRecord(context.Background(), string(opjournal.KindMessage), legacyop.SurfaceAPI, legacyop.StageClose, opTargetMovedResult, "")
+	s.ops.recordOp(context.Background(), string(opjournal.KindMessage), legacyop.SurfaceAPI, legacyop.StageClose, opTargetMovedResult, "")
 }
 
 // runAfterAdmit runs the test hook between admission and the delivery
@@ -489,8 +495,9 @@ func replayedFailureMessage(id string, arm opjournal.Arm, reason string) string 
 // from a failed or skipped message op's reason (DES-O0API §6.3). The reason
 // keeps the failure's class, not the step that failed, so a replay's code
 // can differ from the original's: a session closed or gone during the
-// delivery replays as resolve_failed, a deadline inside /submit as timeout
-// (engdocs/design/async-request-result.md, request_id rule 7).
+// delivery replays as resolve_failed, a deadline or cancellation inside
+// /submit as timeout (engdocs/design/async-request-result.md, request_id
+// rule 7).
 func messageReplayErrorCode(operation, reason string) string {
 	switch reason {
 	case opjournal.ReasonUnsupported:
