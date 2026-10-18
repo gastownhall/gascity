@@ -142,6 +142,9 @@ type CachingStore struct {
 	primeCycle             *fullPrimeCycle
 	lastFullPrimeStartedAt time.Time
 	primeRetryDelay        func(attempt int) time.Duration
+	// primedAt anchors periodic reconciliation until the first reconcile.
+	// Local writes and absorbed events move lastFreshAt, but are not full scans.
+	primedAt time.Time
 
 	lifecycleMu sync.Mutex
 	lifecycleWG sync.WaitGroup
@@ -1639,6 +1642,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.primePartialErr = partialErr
 	c.advanceObservationLocked()
 	c.markFreshLocked(now)
+	c.primedAt = now
 	c.updateStatsLocked()
 	return nil
 }
