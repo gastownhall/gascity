@@ -72,8 +72,12 @@ func (c *cliOpCity) useFreshReadingRuntime(t *testing.T) {
 
 // cliOpController is a fake managed controller on the city's socket that
 // counts the circuit-breaker resets it is asked for and answers every other
-// command ok.
-type cliOpController struct{ breakerResets atomic.Int32 }
+// command ok. With failBreakerReset set it answers a reset with a reply that
+// does not decode, so the reset fails.
+type cliOpController struct {
+	breakerResets    atomic.Int32
+	failBreakerReset atomic.Bool
+}
 
 func startCLIOpController(t *testing.T, cityDir string) *cliOpController {
 	t.Helper()
@@ -109,6 +113,10 @@ func startCLIOpController(t *testing.T, cityDir string) *cliOpController {
 					fmt.Fprintf(conn, "%d\n", os.Getpid()) //nolint:errcheck
 				case strings.HasPrefix(line, sessionCircuitResetCommandPrefix):
 					ctl.breakerResets.Add(1)
+					if ctl.failBreakerReset.Load() {
+						conn.Write([]byte("not json\n")) //nolint:errcheck
+						return
+					}
 					conn.Write([]byte(`{"outcome":"ok"}` + "\n")) //nolint:errcheck
 				default:
 					conn.Write([]byte("ok\n")) //nolint:errcheck

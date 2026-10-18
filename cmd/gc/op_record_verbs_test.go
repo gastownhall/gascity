@@ -18,6 +18,8 @@ import (
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
+	"go.opentelemetry.io/otel/attribute"
+	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
 )
 
 // cliOpCity is a file-backed city with one awake named session running on a
@@ -569,34 +571,61 @@ func (s *cliOpCloseHookStore) CloseIfMatch(id string, rev int64) error {
 }
 
 // A kill closes its op only once it has released the runtime lease, so the
-// op store write never runs under the lease. A kill that stopped the runtime
-// has its lease ended by the fenced kill already; one that found the runtime
+// op store write never runs under the lease: on success, on a failed kill,
+// and on a failed circuit-breaker reset. A kill that stopped the runtime has
+// its lease ended by the fenced kill already; one that found the runtime
 // gone still holds it when the kill returns.
 func TestSessionKillOpClosesAfterTheLeaseIsReleased(t *testing.T) {
-	h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
-	c := newCLIOpCity(t, h, map[string]string{"state": "asleep"})
-	if err := c.sp.Stop(c.name); err != nil {
-		t.Fatalf("stopping fake runtime: %v", err)
-	}
-	c.useFreshReadingRuntime(t)
-	hook := &cliOpCloseHookStore{MemStore: &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
-	h.opStore = hook
-	closes := 0
-	hook.onClose = func() {
-		closes++
-		lease, err := session.TryRuntimeLease(nil, session.RuntimeLeaseRequest{City: c.dir, Name: c.name})
-		if err != nil {
-			t.Errorf("the kill closed its op while holding the runtime lease: %v", err)
-			return
-		}
-		lease.Release()
-	}
-	var stdout, stderr bytes.Buffer
-	if code := cmdSessionKillWithForce([]string{c.bead.ID}, "", &stdout, &stderr, false, false); code != 0 {
-		t.Fatalf("kill = %d; stderr=%s", code, stderr.String())
-	}
-	if closes == 0 {
-		t.Fatal("the op was never closed")
+	for _, tc := range []struct {
+		name string
+		meta map[string]string
+		// failBreaker runs a managed controller that fails the reset.
+		failBreaker bool
+		wantCode    int
+	}{
+		{name: "named runtime gone", meta: map[string]string{"state": "asleep"}, wantCode: 0},
+		{
+			name:     "unnamed runtime gone fails",
+			meta:     map[string]string{"alias": "", namedSessionMetadataKey: "", namedSessionIdentityMetadata: "", "state": "asleep"},
+			wantCode: 1,
+		},
+		{name: "breaker reset fails", meta: map[string]string{"state": "asleep"}, failBreaker: true, wantCode: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+			c := newCLIOpCity(t, h, tc.meta)
+			if err := c.sp.Stop(c.name); err != nil {
+				t.Fatalf("stopping fake runtime: %v", err)
+			}
+			c.useFreshReadingRuntime(t)
+			var ctl *cliOpController
+			if tc.failBreaker {
+				ctl = startCLIOpController(t, c.dir)
+				ctl.failBreakerReset.Store(true)
+			}
+			hook := &cliOpCloseHookStore{MemStore: &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+			h.opStore = hook
+			closes := 0
+			hook.onClose = func() {
+				closes++
+				lease, err := session.TryRuntimeLease(nil, session.RuntimeLeaseRequest{City: c.dir, Name: c.name})
+				if err != nil {
+					t.Errorf("the kill closed its op while holding the runtime lease: %v", err)
+					return
+				}
+				lease.Release()
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdSessionKillWithForce([]string{c.bead.ID}, "", &stdout, &stderr, false, false); code != tc.wantCode {
+				t.Fatalf("kill = %d, want %d; stderr=%s", code, tc.wantCode, stderr.String())
+			}
+			if closes == 0 {
+				t.Fatal("the op was never closed")
+			}
+			if ctl != nil && ctl.breakerResets.Load() == 0 {
+				t.Fatal("the kill never asked the controller to reset the circuit breaker")
+			}
+		})
 	}
 }
 
@@ -836,16 +865,104 @@ func TestSessionWakeOpLateCloseIsReported(t *testing.T) {
 
 // require over a store that cannot record reports the store, even when the
 // key is also invalid: the store is opened before the key is checked.
-func TestSessionWakeOpRequireReportsTheStoreBeforeTheKey(t *testing.T) {
-	newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "require"})
-	f := newCLIOpWakeFixture(t)
-	f.deps.store = cliOpIncapableStore{f.rec}
-	code, stdout, _ := f.run(t, " padded", true)
-	if code != 1 {
-		t.Fatalf("wake = %d, want 1", code)
+func TestSessionVerbOpRequireReportsTheStoreBeforeTheKey(t *testing.T) {
+	for _, tc := range cliOpVerbCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newCLIOpVerbFixture(t, tc, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+			f.h.opStore = cliOpIncapableStore{f.h.opStore}
+			r := f.run(" padded", true)
+			if r.code != 1 {
+				t.Fatalf("%s = %d, want 1; stderr=%s", tc.name, r.code, r.stderr)
+			}
+			if got := cliOpFailureCode(t, []byte(r.stdout)); got != cliOpCodeUnavailable {
+				t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+			}
+		})
 	}
-	if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeUnavailable {
-		t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+}
+
+// cliOpRecordCounts is gc.ops.record.total by kind|surface|stage|result|reason.
+func cliOpRecordCounts(t *testing.T, reader *sdkmetric.ManualReader) map[string]int64 {
+	t.Helper()
+	got := map[string]int64{}
+	for _, dp := range collectCounterDataPoints(t, reader, "gc.ops.record.total") {
+		var key []string
+		for _, k := range []attribute.Key{"kind", "surface", "stage", "result", "unrecorded_reason"} {
+			v, _ := dp.Attributes.Value(k)
+			key = append(key, v.AsString())
+		}
+		got[strings.Join(key, "|")] += dp.Value
+	}
+	return got
+}
+
+// A require refusal over a store that cannot record is counted once as
+// admit/refused for every verb, wake's early store check included, and
+// prints no "running unrecorded" warning: nothing ran.
+func TestSessionVerbOpRequireRefusalIsCounted(t *testing.T) {
+	for _, tc := range cliOpVerbCases() {
+		t.Run(tc.name, func(t *testing.T) {
+			reader := installManualMetricReader(t)
+			f := newCLIOpVerbFixture(t, tc, map[string]string{"GC_OPS_LIFECYCLE": "require"})
+			f.h.opStore = cliOpIncapableStore{f.h.opStore}
+			r := f.run("", false)
+			if r.code != 1 {
+				t.Fatalf("%s = %d, want 1; stderr=%s", tc.name, r.code, r.stderr)
+			}
+			if strings.Contains(r.stderr, "running unrecorded") {
+				t.Fatalf("stderr = %q: a require refusal ran nothing, so it may not warn of running unrecorded", r.stderr)
+			}
+			got := cliOpRecordCounts(t, reader)
+			want := string(tc.kind) + "|cli|admit|refused|" + legacyop.ReasonStoreUnavailable
+			if got[want] != 1 {
+				t.Fatalf("counts = %v, want %s counted once", got, want)
+			}
+		})
+	}
+}
+
+// An outcome the journal refuses to store leaves the op open, and the run
+// says so: the op sweeper closes it at its deadline.
+func TestCLIOpRefusedOutcomeIsReported(t *testing.T) {
+	newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	f := newCLIOpWakeFixture(t)
+	var stdout, stderr bytes.Buffer
+	op, start := startCLIOp(f.deps.cfg, f.rec, cliOpRequest{
+		verb: "gc session wake", kind: opjournal.KindWake, conversation: f.id,
+		stdout: &stdout, stderr: &stderr,
+	})
+	if start != cliOpExecute || !op.adm.Recorded {
+		t.Fatalf("start = %v, recorded = %v; want a recorded execute", start, op.adm != nil && op.adm.Recorded)
+	}
+	op.finishOutcome(opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.RefusedReasonPrefix + strings.Repeat("x", 300)})
+	if !strings.Contains(stderr.String(), "op "+op.adm.Op.ID+" left open") {
+		t.Fatalf("stderr = %q, want a note that op %s was left open", stderr.String(), op.adm.Op.ID)
+	}
+	if got := cliOpOnly(t, f.rec); got.Status == opjournal.StatusClosed {
+		t.Fatalf("op = %+v, want it left open", got)
+	}
+}
+
+// An op the command leaves without a result closes failed{other} when the
+// command ends, and the run names the op and its key as failed.
+func TestCLIOpEndClosesAnUnfinishedOpFailed(t *testing.T) {
+	newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
+	f := newCLIOpWakeFixture(t)
+	var stdout, stderr bytes.Buffer
+	op, start := startCLIOp(f.deps.cfg, f.rec, cliOpRequest{
+		verb: "gc session wake", kind: opjournal.KindWake, conversation: f.id, key: "end-1",
+		asJSON: true, stdout: &stdout, stderr: &stderr,
+	})
+	if start != cliOpExecute {
+		t.Fatalf("start = %v, want execute", start)
+	}
+	op.end()
+	cliOpWantOutcome(t, cliOpOnly(t, f.rec), opjournal.ArmFailed, opjournal.ReasonOther, "")
+	if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeFailed {
+		t.Fatalf("failure code = %q, want %s", got, cliOpCodeFailed)
+	}
+	if !strings.Contains(stderr.String(), "key end-1") {
+		t.Fatalf("stderr = %q, want the op's key named", stderr.String())
 	}
 }
 

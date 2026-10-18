@@ -155,10 +155,13 @@ const (
 type cliOp struct {
 	req cliOpRequest
 	rec *legacyop.Recorder
-	// opened is the op store preflight opened, which the recorder reuses.
-	opened *opjournal.Store
-	adm    *legacyop.Admission
-	warned map[string]bool
+	// opened is the op store preflight opened, which the recorder reuses;
+	// openErr is the error preflight's open failed with, which the recorder
+	// reports instead of opening again.
+	opened  *opjournal.Store
+	openErr error
+	adm     *legacyop.Admission
+	warned  map[string]bool
 	// closedWith is the outcome finish closed the op with; nil until then.
 	closedWith *opjournal.Outcome
 }
@@ -171,8 +174,8 @@ func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp 
 		Mode:     op.mode(cfg),
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
-			if op.opened != nil {
-				return op.opened, nil
+			if op.opened != nil || op.openErr != nil {
+				return op.opened, op.openErr
 			}
 			return cliOpenOpStore(sessStore)
 		},
@@ -194,19 +197,26 @@ func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cli
 
 // preflight opens the op store ahead of a verb's resolution, which may
 // itself write (wake materializes a named session's row): under require a
-// store that cannot record refuses before anything is written. It reports
-// false after reporting the refusal. Other modes open nothing here.
+// store that cannot record refuses before anything is written. The refusal
+// goes through the recorder, which counts and degrades it as it does any
+// open failure; it reports false after reporting the refusal. Other modes
+// open nothing here.
 func (o *cliOp) preflight(sessStore beads.Store) bool {
 	if o.rec.Mode != rollout.Require {
 		return true
 	}
 	st, err := cliOpenOpStore(sessStore)
-	if err != nil {
-		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.req.key)
-		return false
+	if err == nil {
+		o.opened = st
+		return true
 	}
-	o.opened = st
-	return true
+	o.openErr = err
+	_, aerr := o.rec.Admit(legacyop.Request{Key: o.req.key, Kind: o.req.kind})
+	if aerr == nil {
+		aerr = err
+	}
+	o.refuseAdmit(aerr)
+	return false
 }
 
 // unavailableMessage is the require refusal of a request the journal cannot
