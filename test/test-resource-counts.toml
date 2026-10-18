@@ -918,6 +918,11 @@ resource = "listener_helper"
 calls = 4
 
 [[count]]
+path = "cmd/gc/op_record_verbs_matrix_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "cmd/gc/order_dispatch_close_race_test.go"
 resource = "fixed_sleep"
 calls = 1
