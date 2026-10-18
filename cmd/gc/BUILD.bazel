@@ -2043,6 +2043,7 @@ go_test(
         "wisp_gc_fenced_delete_test.go",
         "wisp_gc_test.go",
         "wisp_step_inject_prewake_test.go",
+        "wisp_step_inject_ready_test.go",
         "wisp_step_inject_test.go",
         "wisp_step_single_read_test.go",
         "work_assignment_release_race_test.go",
