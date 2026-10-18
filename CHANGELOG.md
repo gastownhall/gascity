@@ -378,8 +378,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   metadata.json is missing or unusable, or names a different store, the
   reload fails and keeps the old config. The error says whether to restore
   the file (do not restart first: boot treats a missing binding as a new
-  city) or to restart to adopt a deliberate rebinding. Rig scopes and boot
-  are unchanged.
+  city) or to restart to adopt a deliberate rebinding. Switching a city from
+  a non-bd beads provider (such as `file`) to bd now also takes a restart; a
+  reload refuses it. Rig scopes and boot are unchanged.
 
 - **Codex structured history keeps every turn's model and token usage.**
   Usage was read only from the rollout tail, so older turns (and older

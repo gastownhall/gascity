@@ -109,7 +109,10 @@ func bootCityStoreFor(cityPath string) cityStoreRecord {
 // parseCityStoreBinding reads a binding out of metadata.json content. Missing,
 // unreadable, torn, null, and non-object files are refused, as is metadata
 // that names no store at all (an empty object or pre-Dolt bd metadata): the
-// lifecycle would read any of them as "fresh city" and fall back to "hq".
+// lifecycle would read any of them as "fresh city" and fall back to "hq". A
+// binding field holding a non-string value is refused too, since the
+// lifecycle's own readers (canonicalScopeDoltDatabase,
+// scopeHasCompleteStorageBinding) would read it differently.
 func parseCityStoreBinding(data []byte, readErr error) (cityStoreBinding, error) {
 	if readErr != nil {
 		if errors.Is(readErr, fs.ErrNotExist) {
@@ -128,15 +131,23 @@ func parseCityStoreBinding(data []byte, readErr error) (cityStoreBinding, error)
 	if meta == nil {
 		return cityStoreBinding{}, errors.New("null")
 	}
-	str := func(key string) string {
-		s, _ := meta[key].(string)
-		return strings.TrimSpace(s)
-	}
-	binding := cityStoreBinding{
-		Backend:         str("backend"),
-		DoltDatabase:    str("dolt_database"),
-		StorageEndpoint: str("storage_endpoint"),
-		StorageDatabase: str("storage_database"),
+	var binding cityStoreBinding
+	for _, f := range []struct {
+		key string
+		dst *string
+	}{
+		{"backend", &binding.Backend},
+		{"dolt_database", &binding.DoltDatabase},
+		{"storage_endpoint", &binding.StorageEndpoint},
+		{"storage_database", &binding.StorageDatabase},
+	} {
+		switch v := meta[f.key].(type) {
+		case nil:
+		case string:
+			*f.dst = strings.TrimSpace(v)
+		default:
+			return cityStoreBinding{}, fmt.Errorf("%s is not a string", f.key)
+		}
 	}
 	if binding == (cityStoreBinding{}) {
 		return cityStoreBinding{}, errors.New("names no store (no backend, dolt_database, storage_endpoint, or storage_database)")
@@ -196,9 +207,10 @@ func reloadCityStoreDatabase(cityPath string, rec cityStoreRecord) (string, erro
 // the city is rebound to (mc-s8duk, where a git fast-forward in the city
 // checkout deleted a once-tracked metadata.json). A reload therefore checks
 // the metadata against the binding recorded at boot before any lifecycle step,
-// and again wherever the lifecycle would resolve the city's database — after
-// the provider start op, which can take seconds — handing it the booted
-// database instead of letting it resolve one.
+// again when city init begins — after the provider start op, which can take
+// seconds — whichever way init classifies the scope, and wherever the
+// lifecycle names the city's database, handing it the booted database instead
+// of letting it resolve one.
 func startBeadsLifecycleForReload(cityPath, _ string, cfg *config.City, rec cityStoreRecord, stderr io.Writer) error {
 	if !cityUsesBdStoreContract(cityPath) {
 		return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, nil)
@@ -206,7 +218,5 @@ func startBeadsLifecycleForReload(cityPath, _ string, cfg *config.City, rec city
 	if err := checkReloadCityStore(cityPath, rec); err != nil {
 		return err
 	}
-	return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, func() (string, error) {
-		return reloadCityStoreDatabase(cityPath, rec)
-	})
+	return startBeadsLifecycleResolvingCityDatabase(cityPath, cfg, stderr, &rec)
 }

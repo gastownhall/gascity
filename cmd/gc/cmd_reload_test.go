@@ -624,12 +624,18 @@ func TestReloadConfigTracedRescansOrdersWhenConfigRevisionUnchanged(t *testing.T
 	}
 	cfg := result.Cfg
 	applyFeatureFlags(cfg)
+	// Boot the bead lifecycle as the supervisor does before a runtime exists:
+	// reload refuses a city whose store was never initialized.
+	if err := startBeadsLifecycle(dir, "test", cfg, io.Discard); err != nil {
+		t.Fatalf("boot bead lifecycle: %v", err)
+	}
 	var stdout, stderr bytes.Buffer
 	initialOrders, err := scanOrderSetSnapshotFS(fsys.OSFS{}, dir, cfg, &stderr, "test")
 	if err != nil {
 		t.Fatalf("initial order scan: %v", err)
 	}
 	cr := &CityRuntime{
+		bootCityStore:      recordCityStore(dir),
 		cityPath:           dir,
 		cityName:           "test",
 		configName:         "test",

@@ -20,6 +20,7 @@ import (
 const (
 	gciMetadata    = `{"backend":"dolt","dolt_database":"gci","dolt_mode":"server"}`
 	hqStubMetadata = `{"database":"dolt","backend":"dolt","dolt_mode":"server","dolt_database":"hq"}`
+	hostedMetadata = `{"backend":"postgres","storage_endpoint":"opaque","storage_database":"work"}`
 )
 
 // staleMetadataShapes are metadata.json contents a city checkout can be left
@@ -57,7 +58,8 @@ func TestReloadCityStoreError(t *testing.T) {
 		{name: "booted binding", rec: gci, data: gciMetadata},
 		{name: "booted binding with extra keys", rec: gci, data: `{"backend":"dolt","dolt_database":"gci","project_id":"p","dolt_server_port":1}`},
 		{name: "legacy binding", rec: legacy, data: `{"backend":"dolt"}`},
-		{name: "hosted binding", rec: hosted, data: `{"backend":"postgres","storage_endpoint":"opaque","storage_database":"work"}`},
+		{name: "null field reads as absent", rec: legacy, data: `{"backend":"dolt","dolt_database":null}`},
+		{name: "hosted binding", rec: hosted, data: hostedMetadata},
 		{name: "missing", rec: gci, readErr: &fs.PathError{Op: "open", Path: path, Err: fs.ErrNotExist}, wantErr: []string{"(missing)", "[backend=dolt dolt_database=gci]", restoreBeforeRestart}, noRemedy: restartToAdopt},
 		{name: "permission denied", rec: gci, readErr: &fs.PathError{Op: "open", Path: path, Err: fs.ErrPermission}, wantErr: []string{"permission denied", restoreBeforeRestart}},
 		{name: "empty file", rec: gci, data: "", wantErr: []string{"unparseable", restoreBeforeRestart}},
@@ -66,6 +68,8 @@ func TestReloadCityStoreError(t *testing.T) {
 		{name: "null", rec: gci, data: "null", wantErr: []string{"(null)", restoreBeforeRestart}},
 		{name: "empty object", rec: gci, data: "{}", wantErr: []string{"names no store", restoreBeforeRestart}},
 		{name: "pre-dolt bd", rec: gci, data: `{"database":"beads.db","jsonl_export":"issues.jsonl"}`, wantErr: []string{"names no store", restoreBeforeRestart}},
+		{name: "non-string database", rec: gci, data: `{"backend":"dolt","dolt_database":123}`, wantErr: []string{"dolt_database is not a string", restoreBeforeRestart}, noRemedy: restartToAdopt},
+		{name: "non-string endpoint", rec: hosted, data: `{"backend":"postgres","storage_endpoint":{"url":"postgres://bd:s3cret@db.example.test:5432"},"storage_database":"work"}`, wantErr: []string{"storage_endpoint is not a string", restoreBeforeRestart}, noRemedy: "s3cret"},
 		{name: "backend only", rec: gci, data: `{"backend":"dolt"}`, wantErr: []string{"now names store [backend=dolt]", restartToAdopt}, noRemedy: restoreBeforeRestart},
 		{name: "gc hq stub", rec: gci, data: hqStubMetadata, wantErr: []string{"now names store [backend=dolt dolt_database=hq]", restartToAdopt}},
 		{name: "older binding restored by git", rec: gci, data: `{"backend":"dolt","dolt_database":"gas_city_inc"}`, wantErr: []string{"dolt_database=gas_city_inc", restartToAdopt}},
@@ -103,8 +107,7 @@ func TestReloadCityStoreError(t *testing.T) {
 
 func TestReloadCityStoreDatabaseRefusesNonDoltBinding(t *testing.T) {
 	cityPath, _ := establishedBdCity(t, "")
-	hosted := `{"backend":"postgres","storage_endpoint":"opaque","storage_database":"work"}`
-	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(hosted), 0o600); err != nil {
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(hostedMetadata), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	rec := recordCityStore(cityPath)
@@ -258,6 +261,64 @@ func TestReloadBeadsLifecycleRefusesInitWhenMetadataLostDuringStart(t *testing.T
 	}
 }
 
+// TestReloadBeadsLifecycleRefusesBindingRewrittenDuringStart covers the same
+// window for the city init branches that never reach the managed-Dolt
+// database resolution: a provider-owned scope, metadata now naming a complete
+// storage binding (which init would accept and reload would then publish),
+// and metadata now reading as embedded (which init would stamp with the
+// default database). Each must be refused before init acts on the rewrite.
+func TestReloadBeadsLifecycleRefusesBindingRewrittenDuringStart(t *testing.T) {
+	for _, tc := range []struct {
+		name, metadata, want string
+		providerOwned        bool
+	}{
+		{name: "provider-owned", want: "(missing)", providerOwned: true},
+		{name: "complete storage binding", metadata: hostedMetadata, want: "now names store"},
+		{name: "embedded", metadata: `{"backend":"dolt","dolt_mode":"embedded"}`, want: "now names store"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			startScript := `rm -f "$(dirname "$0")/.beads/metadata.json"; `
+			var wantMetadata []byte
+			if tc.metadata != "" {
+				startScript = "printf '%s' '" + tc.metadata + `' > "$(dirname "$0")/.beads/metadata.json"; `
+				wantMetadata = []byte(tc.metadata)
+			}
+			cityPath, callLog := establishedBdCity(t, startScript)
+			bdLog := filepath.Join(cityPath, "bd-calls.log")
+			fakeBd := filepath.Join(cityPath, "bd")
+			if err := os.WriteFile(fakeBd, []byte("#!/bin/sh\nprintf '%s\\n' \"$*\" >> \""+bdLog+"\"\nexit 1\n"), 0o755); err != nil { //nolint:gosec // the double must be executable
+				t.Fatal(err)
+			}
+			t.Setenv("BD_BIN", fakeBd)
+			if tc.providerOwned {
+				if err := persistProviderScopeOwnership(cityPath, cityPath, providerScopeIntent{Transport: "direct", Target: "local"}); err != nil {
+					t.Fatal(err)
+				}
+				if err := markProviderScopeOwnershipReady(cityPath, cityPath); err != nil {
+					t.Fatal(err)
+				}
+			}
+			cfg, err := loadCityConfig(cityPath, io.Discard)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			err = cityRuntimeStartBeadsLifecycle(cityPath, "test-city", cfg, recordCityStore(cityPath), io.Discard)
+
+			if calls := providerCalls(t, callLog); len(calls) != 1 || !strings.HasPrefix(calls[0], "start") {
+				t.Fatalf("provider calls = %q, want only the start that rewrote the metadata", calls)
+			}
+			if calls := providerCalls(t, bdLog); len(calls) != 0 {
+				t.Fatalf("bd calls = %q, want none against the rewritten store", calls)
+			}
+			assertNoCityStoreCreated(t, cityPath, callLog, wantMetadata)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("reload lifecycle error = %v, want a refusal containing %q", err, tc.want)
+			}
+		})
+	}
+}
+
 // TestReloadBeadsLifecycleInitsBootedDatabase is the positive control: with
 // the booted binding intact the reload lifecycle still reaches init, and
 // hands it the booted database rather than a resolved one.
@@ -297,6 +358,14 @@ func TestRecordCityStore(t *testing.T) {
 	if got := recordCityStore(cityPath); !got.Recorded || got.Database != "hq" {
 		t.Fatalf("recordCityStore(legacy) = %+v, want recorded with the historical hq default", got)
 	}
+	// Boot's init reads a numeric dolt_database as its digits; recording it
+	// as the legacy hq default would hold reloads to a store boot never used.
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(`{"backend":"dolt","dolt_database":123}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := recordCityStore(cityPath), (cityStoreRecord{BdBoot: true, Problem: "dolt_database is not a string"}); got != want {
+		t.Fatalf("recordCityStore(non-string database) = %+v, want %+v", got, want)
+	}
 	if err := os.Remove(scopeMetadataJSONPath(cityPath)); err != nil {
 		t.Fatal(err)
 	}
@@ -310,13 +379,25 @@ func TestRecordCityStore(t *testing.T) {
 // between boot and runtime construction must not leave the city unrecorded.
 func TestBootCityStoreIsRecordedByBootNotByRuntimeConstruction(t *testing.T) {
 	cityPath, _ := establishedBdCity(t, "")
-	recordBootCityStore(cityPath)
+	// A complete storage binding boots without a provider op, so the boot
+	// lifecycle runs to its end against the stub.
+	if err := os.WriteFile(scopeMetadataJSONPath(cityPath), []byte(hostedMetadata), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := loadCityConfig(cityPath, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
 	t.Cleanup(func() { bootCityStores.Delete(filepath.Clean(cityPath)) })
+	if err := startBeadsLifecycle(cityPath, "test-city", cfg, io.Discard); err != nil {
+		t.Fatalf("boot lifecycle: %v", err)
+	}
 	if err := os.Remove(scopeMetadataJSONPath(cityPath)); err != nil {
 		t.Fatal(err)
 	}
-	if got := bootCityStoreFor(cityPath); !got.Recorded || got.Database != "gci" {
-		t.Fatalf("bootCityStoreFor() = %+v, want the gci binding recorded at boot", got)
+	want := cityStoreRecord{Recorded: true, BdBoot: true, Binding: cityStoreBinding{Backend: "postgres", StorageEndpoint: "opaque", StorageDatabase: "work"}}
+	if got := bootCityStoreFor(cityPath); got != want {
+		t.Fatalf("bootCityStoreFor() = %+v, want the binding recorded at boot %+v", got, want)
 	}
 }
 
@@ -334,16 +415,14 @@ func TestReloadNormalizationNeverStampsDefaultCityDatabase(t *testing.T) {
 	if err := os.Remove(scopeMetadataJSONPath(cityPath)); err != nil {
 		t.Fatal(err)
 	}
-	resolve := func() (string, error) { return reloadCityStoreDatabase(cityPath, rec) }
-
-	if err := normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, resolve, io.Discard); err == nil {
+	if err := normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, &rec, io.Discard); err == nil {
 		t.Fatal("reload normalization succeeded with the city's metadata.json missing")
 	}
 	if _, err := os.Stat(scopeMetadataJSONPath(cityPath)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("reload normalization wrote city metadata (stat err = %v), want none", err)
 	}
 
-	// Boot keeps its fallback: with no resolver the same call stamps hq.
+	// Boot keeps its fallback: with no boot record the same call stamps hq.
 	if err := normalizeCanonicalBdScopeFilesResolvingCityDatabase(cityPath, cfg, nil, io.Discard); err != nil {
 		t.Fatalf("boot normalization: %v", err)
 	}
