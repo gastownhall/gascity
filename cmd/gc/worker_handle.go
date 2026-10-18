@@ -20,6 +20,11 @@ import (
 )
 
 func workerSessionCatalogWithConfig(cityPath string, store beads.Store, sp runtime.Provider, cfg *config.City) (*worker.SessionCatalog, error) {
+	if onWorkerSite(cityPath) {
+		// The box's guard runs nothing, so its IsRunning is not the remote
+		// runtime's liveness: the catalog reports the persisted state.
+		sp = nil
+	}
 	factory, err := workerFactoryWithConfig(cityPath, store, sp, cfg)
 	if err != nil {
 		return nil, err

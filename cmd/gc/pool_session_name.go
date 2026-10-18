@@ -704,10 +704,9 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 //     offers it for this snapshot shape (in_progress with a non-empty assignee
 //     — the verb's contract) AND the bead carries no active continuation-group
 //     routing vector (see beadHasActiveContinuationGroup). On BdStore this
-//     currently rides raw `bd sql`; when bd grows a native conditional-release
-//     verb it slots in inside BdStore.ReleaseIfCurrent (feature-detect the
-//     verb, fall back to `bd sql` on unsupported) and this caller needs no
-//     change.
+//     runs bd's conditional-release verb (`bd update --if-assignee
+//     --if-status`); a bd without it answers ErrConditionalReleaseUnsupported
+//     and the release falls through to 2.
 //  2. Otherwise releasePoolAssignmentWithRecheck: status, assignee and the
 //     affinity metadata as one write fenced on the snapshot's (status,
 //     assignee), so a claim landing after the snapshot is never clobbered.

@@ -119,48 +119,71 @@ func TestBDVersionPins(t *testing.T) {
 			bdVersion, bdPrev)
 	}
 
-	// The ready-projection feature floor (#3135's regressing surface) must exist
-	// and be strictly newer than the init floor, otherwise the gated path is dead
-	// for every supported bd. Compare semantically -- the same way the runtime
-	// gate in bdstore_ready_projection.go does (deps.CompareVersions) -- so a
-	// floor that is merely different from the init floor, including an older one,
-	// cannot pass.
+	// The init floor is what makes ReleaseIfCurrent's typed refusal safe:
+	// ReleaseIfCurrent has no path without bd's conditional-release flags
+	// (beads#5008), so every supported bd must carry them. bd 1.2.2
+	// re-released the 1.1.2 code, so the first tested release with the flags
+	// is 1.3.0, and the floor may not drop below it. The typed refusal names
+	// the same const.
+	condReleaseFloor := extractGoStringConst(t, root, "internal/beads/bdstore_conditional_release.go", "BdConditionalReleaseMinVersion")
+	if condReleaseFloor == "" {
+		t.Fatal("internal/beads/bdstore_conditional_release.go missing BdConditionalReleaseMinVersion const")
+	}
+	if deps.CompareVersions(bdMin, condReleaseFloor) < 0 {
+		t.Fatalf("bdMinVersion (%q) is below BdConditionalReleaseMinVersion (%q); a supported bd would hit ReleaseIfCurrent's old-bd refusal and release no stale assignment",
+			bdMin, condReleaseFloor)
+	}
+
+	// The ready-projection feature floor (#3135's regressing surface) must
+	// exist, and every supported bd must satisfy it, so the runtime gate in
+	// bdstore_ready_projection.go only ever refuses an unsupported bd. A floor
+	// above bdMinVersion would refuse the ready projection on the
+	// minimum-supported matrix cell, the #3135 failure mode; a floor above the
+	// newest matrix cell would refuse every supported bd.
 	readyFloor := extractGoStringConst(t, root, "internal/beads/bdstore_ready_projection.go", "bdReadyProjectionMinVersion")
 	if readyFloor == "" {
 		t.Fatal("internal/beads/bdstore_ready_projection.go missing bdReadyProjectionMinVersion const")
 	}
-	if deps.CompareVersions(readyFloor, bdMin) <= 0 {
-		t.Fatalf("bdReadyProjectionMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", readyFloor, bdMin)
+	if deps.CompareVersions(readyFloor, bdMin) > 0 {
+		t.Fatalf("bdReadyProjectionMinVersion (%q) is newer than bdMinVersion (%q); the minimum-supported bd could not serve the ready projection", readyFloor, bdMin)
+	}
+	if deps.CompareVersions(readyFloor, bdCurrent) > 0 {
+		t.Fatalf("bdReadyProjectionMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could serve the ready projection", readyFloor, bdCurrent)
 	}
 
 	// The fresh provider-owned floor is the third anchor: a scope initialized
 	// through bd's persisted ownership/transport contract needs a bd that has
-	// it. Like the ready-projection floor it must be strictly newer than the
-	// init floor (otherwise it gates nothing), and unlike it, it must also be
-	// reachable -- no supported bd could satisfy a floor above the newest
-	// matrix cell, so a fresh `gc init` would refuse on every cell.
-	// The current cell is the v1.3.0 tag, which compares equal to the 1.3.0
-	// floor. deps.CompareVersions strips prerelease identifiers, so a
-	// v1.3.0-rc.N cell compares equal too rather than below it.
+	// it. It may equal the init floor (both are 1.3.0 today) but never sit
+	// below it, and it must be reachable -- no supported bd could satisfy a
+	// floor above the newest matrix cell, so a fresh `gc init` would refuse on
+	// every cell. deps.CompareVersions strips prerelease identifiers, so a
+	// v1.3.0-rc.N cell compares equal to the 1.3.0 floor rather than below it.
 	freshProviderFloor := extractGoStringConst(t, root, "cmd/gc/init_provider_readiness.go", "bdFreshProviderMinVersion")
 	if freshProviderFloor == "" {
 		t.Fatal("cmd/gc/init_provider_readiness.go missing bdFreshProviderMinVersion const")
 	}
-	if deps.CompareVersions(freshProviderFloor, bdMin) <= 0 {
-		t.Fatalf("bdFreshProviderMinVersion (%q) must be strictly newer than bdMinVersion (%q); a feature floor at or below the init floor gates nothing", freshProviderFloor, bdMin)
+	if deps.CompareVersions(freshProviderFloor, bdMin) < 0 {
+		t.Fatalf("bdFreshProviderMinVersion (%q) is below bdMinVersion (%q); the init floor already refuses every bd it would admit", freshProviderFloor, bdMin)
 	}
 	if deps.CompareVersions(freshProviderFloor, bdCurrent) > 0 {
 		t.Fatalf("bdFreshProviderMinVersion (%q) is newer than deps.env BD_CURRENT_VERSION (%q); no supported bd could initialize a fresh provider-owned scope",
 			freshProviderFloor, bdCurrent)
 	}
 
-	// The bd_compatibility config enum is the operator-facing mirror of the two
-	// floors; both floor values must appear as enum members so they cannot diverge.
+	// The bd_compatibility config enum selects which bd CLI semantics gc relies
+	// on (bd-1.0.4 history-backed ready vs bd-1.0.5 ready flags). It is a
+	// behavior selector, not a support floor, so neither its members nor its
+	// default track the init floor. The ready-projection floor must still be
+	// one of its members.
 	cfg := readFile(t, root, "internal/config/config.go")
-	for _, member := range []string{"enum=bd-" + bdMin, "enum=bd-" + readyFloor} {
-		if !strings.Contains(cfg, member) {
-			t.Fatalf("internal/config/config.go bd_compatibility enum missing %q (floors: init=%s ready=%s)", member, bdMin, readyFloor)
-		}
+	if member := "enum=bd-" + readyFloor; !strings.Contains(cfg, member) {
+		t.Fatalf("internal/config/config.go bd_compatibility enum missing %q (ready floor %s)", member, readyFloor)
+	}
+
+	// The bd pack's doctor check restates the init floor so `gc doctor` refuses
+	// the same bd that `gc init`/`gc start` refuse.
+	if doctor := readFile(t, root, "examples/bd/doctor/check-bd/run.sh"); !strings.Contains(doctor, `required="`+bdMin+`"`) {
+		t.Fatalf("examples/bd/doctor/check-bd/run.sh does not pin required=%q (bdMinVersion)", bdMin)
 	}
 
 	// Every released bd that the required CI paths install from a tarball must

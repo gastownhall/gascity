@@ -231,7 +231,7 @@ func waitForNSessionCreateEvents(t *testing.T, prov events.Provider, n int, time
 
 func createTestSession(t *testing.T, store beads.Store, sp *runtime.Fake, title string) session.Info {
 	t.Helper()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "default", Title: title, Command: "echo test", WorkDir: "/tmp", Provider: "test", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("create session: %v", err)
@@ -1093,7 +1093,7 @@ func TestHandleSessionListIncludesKeyedCodexTelemetryWithoutPerSessionGets(t *te
 	fs := newSessionFakeState(t)
 	searchBase := newHermeticCodexSessionSearchPath(t)
 	workDir := t.TempDir()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 
 	type wantTelemetry struct {
 		info       session.Info
@@ -1195,7 +1195,7 @@ func TestHandleSessionListSkipsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	workDir := t.TempDir()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Codex Chat", Command: "codex", WorkDir: workDir, Provider: "codex-max", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1235,7 +1235,7 @@ func TestHandleSessionGetAllowsWorkdirOnlyCodexTranscriptDiscovery(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 
 	workDir := t.TempDir()
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Codex Chat", Command: "codex", WorkDir: workDir, Provider: "codex-max", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -1368,7 +1368,7 @@ func TestHandleSessionSuspend(t *testing.T) {
 	}
 
 	// Verify the session is now suspended.
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	got, err := mgr.Get(info.ID)
 	if err != nil {
 		t.Fatalf("get: %v", err)
@@ -1392,7 +1392,7 @@ func TestHandleSessionSuspend_IllegalTransition(t *testing.T) {
 
 	// Drain the session the way the controller's drain-ack path does, the
 	// only writer of state=draining (this test isolates the transition check).
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	if err := mgr.PersistedStore().ApplyPatch(info.ID, session.DrainAckStopPendingPatch(time.Now())); err != nil {
 		t.Fatalf("seeding drain-ack stop-pending: %v", err)
 	}
@@ -1452,7 +1452,7 @@ func TestHandleSessionClose(t *testing.T) {
 	}
 
 	// Session should no longer appear in default listing (excludes closed).
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list: %v", err)
@@ -2085,7 +2085,7 @@ func TestHandleSessionPatchRejectsReservedQualifiedAliasOnFork(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	_ = h
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(
 		context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Fork", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
@@ -2747,6 +2747,9 @@ command = [broken
 	if rec.Code != http.StatusAccepted {
 		t.Fatalf("status = %d, want %d; body: %s", rec.Code, http.StatusAccepted, rec.Body.String())
 	}
+	// The async create runs after the response; let it finish inside the
+	// test, while the city its start leases in still exists.
+	waitForNSessionCreateEvents(t, fs.eventProv, 1, 5*time.Second)
 }
 
 func TestHandleSessionCreateProviderReturns202WithRequestID(t *testing.T) {
@@ -2935,6 +2938,9 @@ func TestHandleSessionCreateAsyncAcceptsInlineMessage(t *testing.T) {
 	if w.Code != http.StatusAccepted {
 		t.Fatalf("got status %d, want %d; body: %s", w.Code, http.StatusAccepted, w.Body.String())
 	}
+	// The async create runs after the response; let it finish inside the
+	// test, while the city its start leases in still exists.
+	waitForNSessionCreateEvents(t, fs.eventProv, 1, 5*time.Second)
 }
 
 func TestHandleSessionCreateAsync_PoolTemplateWithoutAliasUsesGeneratedWorkDirIdentity(t *testing.T) {
@@ -3703,7 +3709,7 @@ func TestHandleProviderSessionCreateWithMessageRollsBackOnDeliveryFailure(t *tes
 	if failure.SessionID != "" {
 		t.Fatalf("failure session_id = %q, want empty: the rollback removed the session", failure.SessionID)
 	}
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, provider, session.WithCityPath(fs.cityPath))
 	sessions, err := mgr.List("", "")
 	if err != nil {
 		t.Fatalf("list sessions after rollback: %v", err)
@@ -5763,7 +5769,7 @@ func TestHandleSessionTranscriptUsesSessionKey(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5855,7 +5861,7 @@ func TestHandleSessionTranscriptAfterCursor(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5905,7 +5911,7 @@ func TestHandleSessionTranscriptAfterCursorRaw(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -5949,7 +5955,7 @@ func TestHandleSessionTranscriptCursorPaginationMetadata(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6035,7 +6041,7 @@ func TestHandleSessionTranscriptBeforeAndAfterExclusive(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6067,7 +6073,7 @@ func TestHandleSessionTranscriptMissingCursorReturnsConflict(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -6158,7 +6164,7 @@ func TestSessionTranscriptAndStreamDuplicateEntryIDReturnsConflict(t *testing.T)
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -6275,7 +6281,7 @@ func TestHandleSessionTranscriptSyntheticCursorSurvivesTruncationAndInvalidatesO
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	workDir := t.TempDir()
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
@@ -6408,7 +6414,7 @@ func TestHandleSessionTranscriptNoHistoryStillValidatesCursors(t *testing.T) {
 	h := newTestCityHandlerWith(t, fs, srv)
 	srv.sessionLogSearchPaths = []string{t.TempDir()}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		Template: "myrig/worker",
 		Title:    "Chat",
@@ -6812,7 +6818,7 @@ func TestHandleSessionStreamSSEHeaders(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7088,7 +7094,7 @@ func TestStreamSessionTranscriptHistoryDoesNotSkipTurnsAcrossCompactionBoundarie
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7169,7 +7175,7 @@ func TestStreamSessionTranscriptHistoryReloadsChangesWrittenAfterInitialHistory(
 	searchBase := t.TempDir()
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7258,7 +7264,7 @@ func TestCityScopedSessionStreamReloadsRotatedGeminiTranscriptAcrossRestart(t *t
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -7338,7 +7344,7 @@ func TestCityScopedSessionStreamFollowsRotatedGeminiTranscriptAfterWake(t *testi
 		t.Fatalf("chtimes(first transcript): %v", err)
 	}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "myrig/worker", Title: "Chat", Command: "gemini", WorkDir: workDir, Provider: "gemini", Env: nil, Resume: session.ProviderResume{}, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
@@ -7406,7 +7412,7 @@ func TestHandleSessionStreamWorkerOperationEventWakesTranscriptReload(t *testing
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7476,7 +7482,7 @@ func TestHandleSessionStreamRawWorkerOperationEventWakesTranscriptReload(t *test
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7549,7 +7555,7 @@ func TestHandleSessionStreamRawStallEmitsPendingWithoutTranscriptGrowth(t *testi
 		sessionStreamPendingStallTimeout = prevStallTimeout
 	}()
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7609,7 +7615,7 @@ func TestHandleSessionStreamRawStallEmitsPendingEventOnCityRoute(t *testing.T) {
 		sessionStreamPendingStallTimeout = prevStallTimeout
 	}()
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7680,7 +7686,7 @@ func TestSessionStreamStructuredHistoryStallEmitsPending(t *testing.T) {
 				handler = newTestCityHandlerWith(t, fs, srv)
 			}
 
-			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+			mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 			resume := session.ProviderResume{
 				ResumeFlag:    "--resume",
 				ResumeStyle:   "flag",
@@ -7757,7 +7763,7 @@ func TestHandleSessionStreamRawRunningSessionWithoutTranscriptOpensImmediately(t
 	srv := New(fs)
 	h := newTestCityHandlerWith(t, fs, srv)
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7796,7 +7802,7 @@ func TestHandleSessionStreamTranscriptWriteWakesWithoutPolling(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7860,7 +7866,7 @@ func TestHandleSessionStreamConversationFiltersNonDisplayEntries(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7900,7 +7906,7 @@ func TestHandleSessionStreamConversationRedactsThinkingText(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7938,7 +7944,7 @@ func TestHandleSessionStreamRawUsesLatestCompactionTail(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -7981,7 +7987,7 @@ func TestHandleSessionTranscriptRawIncludesAllTypes(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8038,7 +8044,7 @@ func TestHandleSessionTranscriptRawIncludesCodexCustomToolCalls(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8103,7 +8109,7 @@ func TestHandleSessionTranscriptStructuredIncludesCodexCustomToolBlocks(t *testi
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8215,7 +8221,7 @@ func TestHandleSessionTranscriptConversationIncludesCodexSystemError(t *testing.
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8271,7 +8277,7 @@ func TestHandleSessionStreamConversationIncludesCodexSystemError(t *testing.T) {
 	srv := New(fs)
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",
@@ -8319,7 +8325,7 @@ func TestHandleSessionGetActivity(t *testing.T) {
 	_ = h
 	srv.sessionLogSearchPaths = []string{searchBase}
 
-	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp)
+	mgr := session.NewManagerWithOptions(fs.cityBeadStore, fs.sp, session.WithCityPath(fs.cityPath))
 	resume := session.ProviderResume{
 		ResumeFlag:    "--resume",
 		ResumeStyle:   "flag",

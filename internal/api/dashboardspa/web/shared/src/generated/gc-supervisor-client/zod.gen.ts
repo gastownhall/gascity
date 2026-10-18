@@ -1402,6 +1402,42 @@ export const zReadinessResponse = z.object({
     items: z.record(z.string(), zReadinessItem)
 });
 
+export const zReadyBeadBlocker = z.object({
+    id: z.string(),
+    status: z.string()
+});
+
+export const zReadyBeadDep = z.object({
+    depends_on_id: z.string(),
+    issue_id: z.string(),
+    type: z.string()
+});
+
+export const zReadyBead = z.object({
+    assignee: z.string().optional(),
+    blocked_by: z.array(zReadyBeadBlocker).nullish(),
+    close_reason: z.string().optional(),
+    created_at: z.iso.datetime(),
+    defer_until: z.iso.datetime().optional(),
+    dependencies: z.array(zReadyBeadDep).nullish(),
+    description: z.string().optional(),
+    ephemeral: z.boolean().optional(),
+    from: z.string().optional(),
+    id: z.string(),
+    is_blocked: z.boolean().optional(),
+    issue_type: z.string(),
+    labels: z.array(z.string()).nullish(),
+    metadata: z.record(z.string(), z.string()).optional(),
+    needs: z.array(z.string()).nullish(),
+    no_history: z.boolean().optional(),
+    parent: z.string().optional(),
+    priority: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    ref: z.string().optional(),
+    status: z.string(),
+    title: z.string(),
+    updated_at: z.iso.datetime().optional()
+});
+
 export const zRecord = z.object({
     actor: z.string(),
     created_at: z.iso.datetime(),
@@ -3429,6 +3465,10 @@ export const zWebhookRejectedPayload = z.object({
     scheme: z.string().optional(),
     status: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     webhook: z.string()
+});
+
+export const zWorkReadyBody = z.object({
+    items: z.array(zReadyBead).nullable()
 });
 
 export const zWorkerOperationEventPayload = z.object({
@@ -10224,6 +10264,31 @@ export const zGetV0CityByCityNameWaitsQuery = z.object({
  * OK
  */
 export const zGetV0CityByCityNameWaitsResponse = zWaitListBody;
+
+export const zGetV0CityByCityNameWorkReadyPath = z.object({
+    cityName: z.string().min(1).regex(/\S/)
+});
+
+export const zGetV0CityByCityNameWorkReadyQuery = z.object({
+    assignee: z.string().optional(),
+    unassigned: z.boolean().optional(),
+    metadata_field: z.array(z.string()).nullish(),
+    exclude_type: z.array(z.string()).nullish(),
+    exclude_label: z.array(z.string()).nullish(),
+    sort: z.enum(['oldest', 'newest']).optional(),
+    limit: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    status: z.enum([
+        'open',
+        'in_progress',
+        'blocked',
+        'closed'
+    ]).optional()
+});
+
+/**
+ * OK
+ */
+export const zGetV0CityByCityNameWorkReadyResponse = zWorkReadyBody;
 
 export const zDeleteV0CityByCityNameWorkflowByWorkflowIdHeaders = z.object({
     'X-GC-Request': z.string().min(1)

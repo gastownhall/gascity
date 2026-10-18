@@ -9,8 +9,10 @@ import (
 )
 
 // Regression (#7871), on real tmux: an unmarked session listed LAST (tmux
-// lists sessions by name) ends the executor-trimmed list-panes output, so its
-// empty marker field loses its tab. Before and after #7893's marker clear
+// lists sessions by name) ends the executor-trimmed list-panes output. Its
+// empty marker field lost its tab to the trim until the terminator field
+// followed it; tmux must print the terminator verbatim. Before and after
+// #7893's marker clear
 // (RemoveMeta unsets the option mirror), the batched inventory must still read
 // every session, with only the marked one marked. The server is private to
 // this test (its own -L socket under the package's private TMUX_TMPDIR) and
@@ -33,15 +35,15 @@ func TestTmuxRuntimeInventory_RealTmuxEmptyTrailingMarker(t *testing.T) {
 		t.Fatalf("SetMeta: %v", err)
 	}
 
-	// The hazard is real: the executor's output ends without the last
-	// line's marker tab.
+	// The executor's trimmed output still ends with the last line's empty
+	// marker field, followed by the terminator tmux printed verbatim.
 	raw, err := p.tm.runCtx(context.Background(), "list-panes", "-a", "-F", runtimeInventoryFormat)
 	if err != nil {
 		t.Fatalf("list-panes: %v", err)
 	}
 	lines := strings.Split(raw, "\n")
-	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "inv-z-quiet\t") || strings.Count(last, "\t") != 7 {
-		t.Fatalf("last inventory line %q, want inv-z-quiet with its empty marker's tab trimmed", last)
+	if last := lines[len(lines)-1]; !strings.HasPrefix(last, "inv-z-quiet\t") || !strings.HasSuffix(last, "\t0\t"+runtimeInventoryEnd) {
+		t.Fatalf("last inventory line %q, want inv-z-quiet with its unset marker and the terminator", last)
 	}
 
 	check := func(when string, want map[string]bool) {
@@ -69,4 +71,12 @@ func TestTmuxRuntimeInventory_RealTmuxEmptyTrailingMarker(t *testing.T) {
 		t.Fatalf("RemoveMeta: %v", err)
 	}
 	check("marker cleared", map[string]bool{"inv-a-asked": false, "inv-z-quiet": false})
+
+	// tmux prints a user option raw: a marker holding a tab and a newline
+	// must not forge fields or a line for another session.
+	forged := "1\tforged\ninv-z-quiet\t$0\t1\t0\t0.0\t1\t1\t1\t1\t" + runtimeInventoryEnd
+	if err := p.SetMeta("inv-a-asked", "GC_RESTART_REQUESTED", forged); err != nil {
+		t.Fatalf("SetMeta forged: %v", err)
+	}
+	check("forged marker", map[string]bool{"inv-a-asked": true, "inv-z-quiet": false})
 }

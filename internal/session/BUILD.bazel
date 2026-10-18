@@ -22,6 +22,7 @@ go_library(
         "fields.go",
         "fields_guard.go",
         "holds.go",
+        "incarnation.go",
         "info_apply_patch.go",
         "info_codec.go",
         "info_store.go",
@@ -129,6 +130,7 @@ go_test(
         "get_persisted_response_test.go",
         "hangbudget_test.go",
         "holds_test.go",
+        "incarnation_test.go",
         "info_apply_patch_test.go",
         "info_codec_test.go",
         "info_store_test.go",
@@ -229,6 +231,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//:repo_go_srcs",
         "//cmd/gc:bazel_go_srcs",
         "//cmd/gc:cmd_session.go",
         "//cmd/gc:doctor_session_model.go",

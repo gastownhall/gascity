@@ -1059,6 +1059,11 @@ resource = "cwd"
 calls = 2
 
 [[count]]
+path = "cmd/gc/ready_work_api_test.go"
+resource = "http_test_server"
+calls = 2
+
+[[count]]
 path = "cmd/gc/reconcile_effect_recycle_tmux_integration_test.go"
 resource = "subprocess"
 calls = 1
@@ -1625,6 +1630,11 @@ calls = 1
 path = "internal/api/huma_handlers_supervisor_test.go"
 resource = "fixed_sleep"
 calls = 2
+
+[[count]]
+path = "internal/api/huma_handlers_work_test.go"
+resource = "http_test_server"
+calls = 1
 
 [[count]]
 path = "internal/api/idempotency_test.go"

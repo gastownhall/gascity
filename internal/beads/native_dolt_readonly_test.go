@@ -59,6 +59,7 @@ var nativeStoreMethodKinds = map[string]nativeStoreMethodKind{
 	"List":           nativeStoreRead,
 	"ListOpen":       nativeStoreRead,
 	"Ready":          nativeStoreRead,
+	"ReadyOrdered":   nativeStoreRead,
 	"Children":       nativeStoreRead,
 	"ListByLabel":    nativeStoreRead,
 	"ListByAssignee": nativeStoreRead,

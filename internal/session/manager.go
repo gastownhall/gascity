@@ -942,7 +942,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			sessionKey = generatedKey
 		}
 
-		// Create the bead first to get the ID.
+		// Create the bead first to get the ID. The create is the mint of the
+		// row's first incarnation (generation 1, a fresh token).
+		token := NewInstanceToken()
 		meta := map[string]string{
 			"template":           template,
 			"state":              string(StateActive),
@@ -955,7 +957,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			"session_id_flag":    resume.SessionIDFlag,
 			"generation":         fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-			"instance_token":     NewInstanceToken(),
+			"instance_token":     token,
 		}
 		// provider_kind may be injected via extraMeta when the caller has
 		// resolved the canonical builtin kind for a custom provider alias.
@@ -991,6 +993,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("creating session bead: %w", createErr)
 		}
 		b := createdBead
+		inc := createdIncarnation(b.ID, token, ActorOperator, m.now())
 
 		sessName := explicitName
 		if sessName == "" {
@@ -1033,6 +1036,44 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return nil
 		}
 
+		// The first start runs under the runtime lease on the new row's name,
+		// taken before any provider call: the name's flock excludes another
+		// starter or stopper of the same runtime name on this host, and the
+		// row's record those on other hosts. A held lease is busy
+		// (ErrSessionStarting). Lock order: the process's identifier
+		// reservation locks (held here), then the lease; the session mutation
+		// lock is not taken, and the lease is tried, never waited for, so no
+		// holder of the lease can be waiting on a reservation lock held here.
+		lease, leaseErr := m.leaseCreatedRuntime(b.ID, sessName)
+		if leaseErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(leaseErr, rbErr)
+			}
+			return leaseErr
+		}
+		defer lease.Release()
+		ctx, cancel, watchErr := lease.Watch(ctx, runtimeLeaseWatchEvery)
+		if watchErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(watchErr, rbErr)
+			}
+			return watchErr
+		}
+		defer cancel()
+		// Under the lease the first start reads the runtime fresh, as a
+		// Manager start does before its mint (leasedLiveness), and a read
+		// that cannot answer refuses the create (fail closed). The create is
+		// already the row's mint, so a runtime up under the new row's name is
+		// left to the Start: it reports the name taken (ErrSessionNameExists
+		// below), reuses it under the created incarnation as t3bridge's
+		// reuses the name's thread, or replaces one whose agent died.
+		if _, readErr := m.leasedLiveness(b.ID, sessName, hints.ProcessNames); readErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(readErr, rbErr)
+			}
+			return readErr
+		}
+
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
 		if resume.SessionIDFlag != "" && sessionKey != "" {
@@ -1043,13 +1084,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		runtimeInfo := m.infoFromBead(b)
-		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
-			runtimeInfo,
-			DefaultGeneration,
-			DefaultContinuationEpoch,
-			meta["instance_token"],
-		))
+		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), startEnv(m.infoFromBead(b), inc))
 		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
@@ -1066,8 +1101,8 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
-				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
+			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, inc.token) {
+				if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 					return metaErr
 				}
 				info = m.infoFromBead(b)
@@ -1084,7 +1119,12 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
-		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
+		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
+			if errors.Is(metaErr, ErrMintSuperseded) {
+				// The row records a newer incarnation: the runtime is its
+				// owner's to keep or reap, never stopped by name here.
+				return metaErr
+			}
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
 				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
 			}
@@ -1103,11 +1143,18 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	return info, nil
 }
 
-func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Bead) error {
+// confirmStartedRuntimeMetadata confirms the first start of a created row,
+// only while the row still records inc, the incarnation it was created with
+// (ConfirmIncarnation).
+func (m *Manager) confirmStartedRuntimeMetadata(inc Incarnation, sessName string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
 	maps.Copy(metadata, m.startedRuntimeBindingPatch(sessName))
-	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
+	landed, err := m.PersistedStore().ConfirmIncarnation(inc, metadata)
+	switch {
+	case err != nil:
 		return fmt.Errorf("storing started runtime metadata: %w", err)
+	case !landed:
+		return fmt.Errorf("%w: storing started runtime metadata: session %s no longer records %s: %w", ErrStateSync, inc.ID, inc, ErrMintSuperseded)
 	}
 	if b != nil {
 		if b.Metadata == nil {
@@ -1131,6 +1178,22 @@ func (m *Manager) startedRuntimeBindingPatch(sessName string) MetadataPatch {
 		log.Printf("session: %q started; not recording its runtime binding: %v", sessName, err)
 	}
 	return patch
+}
+
+// leaseCreatedRuntime takes the runtime lease on created row id's runtime
+// sessName for its first start, without waiting: the flock and the row's
+// record (TryRuntimeLease). A Manager with no city refuses
+// (ErrRuntimeLeaseNoCity), and a busy lease is ErrSessionStarting.
+func (m *Manager) leaseCreatedRuntime(id, sessName string) (*RuntimeLease, error) {
+	city, err := m.CityDir()
+	if err != nil {
+		return nil, RefuseWithoutCity(m.cityPath, fmt.Sprintf("session %q", id))
+	}
+	ttl := m.leaseTTL
+	if ttl <= 0 {
+		ttl = RuntimeLeaseTTLFor(nil)
+	}
+	return operatorRuntimeLease(TryRuntimeLease(m.PersistedStore(), RuntimeLeaseRequest{City: city.Path(), Name: sessName, ID: id, TTL: ttl}))
 }
 
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {

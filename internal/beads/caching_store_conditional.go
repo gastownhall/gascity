@@ -237,12 +237,11 @@ func (c *CachingStore) UpdateIfMatch(id string, expectedRevision int64, opts Upd
 // CloseIfMatch forwards the fenced close and maintains the cache. A post-close
 // refresh that reports ErrNotFound is tolerated silently — backings that hide
 // closed beads from Get do this on every successful close — and resolves to an
-// evict, so the next read reports exactly what the backing itself would.
-// Unlike the unconditional Close, a fenced re-close of an already-closed bead
-// is not short-circuited: fenced paths carry no idempotence short-circuits, and
-// only the backing evaluates the fence. Its bead.closed is announced only when
-// the write owns the close (claimCloseLocked), so a close the cache already
-// announced is not announced twice.
+// evict, so the next read reports exactly what the backing itself would. A
+// fenced re-close of an already-closed bead reaches the backing like any
+// write, and only the backing evaluates the fence. Its bead.closed is
+// announced only when the write owns the close (claimCloseLocked), so a close
+// the cache already announced is not announced twice.
 func (c *CachingStore) CloseIfMatch(id string, expectedRevision int64) error {
 	writer, ok := ConditionalWriterFor(c.conditionalBacking())
 	if !ok {
@@ -466,9 +465,9 @@ func (c *CachingStore) evictForConditionalWriteLocked(id string) conditionalEvic
 // revisionMoved reports whether b can be the row a successful fenced write
 // against expectedRevision committed: a store with revisions mints a fresh one
 // on every whole-row write, so a row still at expectedRevision is a lagged
-// pre-write read. Zero is a real revision like any other (a legacy row's,
-// which the write moves off 0), not an absent one, so a read still at a fenced
-// 0 is lagged too.
+// pre-write read. Zero is a revision like any other, compared exactly: a fence
+// at 0 landed on a row never rewritten, and a refetch still at 0 is the
+// pre-write row.
 func revisionMoved(b Bead, expectedRevision int64) bool {
 	return b.Revision != expectedRevision
 }

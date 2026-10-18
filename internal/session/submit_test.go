@@ -2499,17 +2499,21 @@ func (f staleCacheFake) ObserveLivenessSince(name string, processNames []string,
 }
 
 // crashedBehindStaleCache is a claude row whose agent crashed in a pane
-// still up, behind a provider cache that still shows it alive.
+// still up, behind a provider cache that still shows it alive. Its fresh read
+// fails with freshErr only once the row is created, since a create refuses
+// on a fresh read that cannot answer.
 func crashedBehindStaleCache(t *testing.T, provider string, freshErr error) (*Manager, *runtime.Fake, Info, string, runtime.Config) {
 	t.Helper()
 	store := beads.NewMemStore()
 	fake := runtime.NewFake()
 	cityPath := t.TempDir()
-	mgr := NewManagerWithOptions(store, staleCacheFake{Fake: fake, freshErr: freshErr}, WithCityPath(cityPath))
+	sp := &staleCacheFake{Fake: fake}
+	mgr := NewManagerWithOptions(store, sp, WithCityPath(cityPath))
 	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: provider, WorkDir: t.TempDir(), Provider: provider, Hints: runtime.Config{}, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("Create: %v", err)
 	}
+	sp.freshErr = freshErr
 	origPoller := startSessionSubmitPoller
 	startSessionSubmitPoller = func(string, string, string) error { return nil }
 	t.Cleanup(func() { startSessionSubmitPoller = origPoller })

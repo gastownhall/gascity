@@ -3,14 +3,11 @@ package beads
 import (
 	"bytes"
 	"context"
-	"crypto/rand"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"maps"
-	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -454,8 +451,9 @@ type BdStore struct {
 	readyProjectionScope *readyProjectionScopeGuard
 
 	// condReleaseLatchedUnsupported records that this bd rejected the
-	// conditional-release flags, pinning ReleaseIfCurrent to the raw-SQL
-	// fallback for the rest of the process (bdstore_conditional_release.go).
+	// conditional-release flags, so ReleaseIfCurrent and UpdateIfAssignment
+	// refuse with a typed error for the rest of the process without paying a
+	// failed subprocess each time (bdstore_conditional_release.go).
 	condReleaseMu                 sync.Mutex
 	condReleaseLatchedUnsupported bool
 
@@ -1791,273 +1789,46 @@ func (s *BdStore) Update(id string, opts UpdateOpts) error {
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still
 // has the expected assignee.
 //
-// It prefers bd's native conditional-release verb, which evaluates both
+// It runs bd's native conditional-release verb, which evaluates both
 // preconditions server-side and reports a failed one as exit 13 having written
-// nothing (bdstore_conditional_release.go). The raw `bd sql` path below is the
-// fallback for any bd predating the flags (beads#5008) — which means the
-// contract-tested minimum, deps.env BD_PREV_VERSION (1.0.4), and not the
-// installable default: deps.env BD_VERSION is v1.3.1, cut past
-// beads#5008, so a stock install takes the verb. This path is the floor's, not
-// the live one, and it stays reachable only because deps.env holds
-// BD_PREV_VERSION below beads#5008. On that path the sqlite backend refuses
-// raw DB access, so that
-// rejection — and embedded dolt WITHOUT a configured dolt directory — surface
-// ErrConditionalReleaseUnsupported (the latter via the
-// releaseIfCurrentViaEmbeddedDoltSQL fallback), while embedded dolt WITH a
-// configured directory services the CAS through that fallback directly. Callers
-// treat ErrConditionalReleaseUnsupported as "take a conditional recheck
-// fallback" (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb
-// path never returns it for a precondition miss.
+// nothing (bdstore_conditional_release.go). A bd predating the flags
+// (beads#5008, first shipped in a tested release as bd 1.3.0, the supported
+// floor) gets an error wrapping ErrConditionalReleaseUnsupported. Callers treat
+// ErrConditionalReleaseUnsupported as "take a conditional recheck fallback"
+// (see cmd/gc releasePoolAssignmentIfCurrent), which is why the verb path never
+// returns it for a precondition miss.
 //
 // id must be a canonical full bead ID, the same requirement Update documents.
 // bd's resolver prefix/substring-matches an id with no exact hit, and the
 // preconditions are then evaluated against whatever it resolved, so the verb
 // path verifies the id names exactly one existing bead before it mutates
 // anything and returns an error wrapping ErrIDCollision when bd resolved a
-// different one (gcy-g4o). The raw-SQL fallback matches id literally and needs
-// no such check.
+// different one (gcy-g4o).
 //
 // On a city that relocated a coordination class off this ledger, an id in that
-// class is refused outright before either path runs (bdsql_relocation.go); a
-// city that relocated nothing cannot reach that branch.
+// class is refused outright before bd runs (bdsql_relocation.go); a city that
+// relocated nothing cannot reach that branch.
 func (s *BdStore) ReleaseIfCurrent(id, expectedAssignee string) (bool, error) {
-	// Precondition of BOTH paths below, so it runs before either. A bead this
-	// ledger does not hold reaches a false "not held" verdict twice over: the
-	// SQL CAS matches zero rows, and the verb path resolves nothing and reports
-	// the same. Every caller reads that as "someone else holds it" and backs
-	// off. Worse on the verb path, bd's resolver prefix-matches an id with no
-	// exact hit, so a blind ledger can answer with a DIFFERENT bead's row
-	// instead of nothing at all. Refuse before either path touches bd.
+	// A bead this ledger does not hold would reach a false "not held" verdict:
+	// the verb resolves nothing and reports exactly that, and every caller reads
+	// it as "someone else holds it" and backs off. Worse, bd's resolver
+	// prefix-matches an id with no exact hit, so a blind ledger can answer with a
+	// DIFFERENT bead's row instead of nothing at all. Refuse before bd runs.
 	if err := s.guardRelocatedClassIDs("release-if-current "+id, id); err != nil {
 		return false, err
 	}
-	if !s.conditionalReleaseUnsupported() {
-		released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)
-		if handled {
-			if err != nil {
-				return false, fmt.Errorf("bd release-if-current: %w", err)
-			}
-			return released, nil
-		}
+	if s.conditionalReleaseUnsupported() {
+		return false, errBdLacksConditionalRelease()
+	}
+	released, handled, err := s.releaseIfCurrentViaBdVerb(id, expectedAssignee)
+	if !handled {
 		s.latchConditionalReleaseUnsupported()
-	}
-	// The raw-SQL fallback writes the row itself, so it also has to mint the
-	// fresh revision bd's verb path mints for us: a release that left the
-	// pre-release token in place would keep a stale fence current.
-	revision, err := newRevisionToken()
-	if err != nil {
-		return false, fmt.Errorf("bd release-if-current: minting revision: %w", err)
-	}
-	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
-		" WHERE id = " + bdSQLStringLiteral(id) +
-		" AND status = 'in_progress'" +
-		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
-		strconv.FormatInt(revision, 10) +
-		" WHERE id = " + bdSQLStringLiteral(id) +
-		" AND status = 'in_progress'" +
-		" AND assignee = " + bdSQLStringLiteral(expectedAssignee)
-	// Retry ordinary serialization conflicts, but never replay an ambiguous
-	// write: a revision-aware release mints a fresh token and matches on
-	// status+assignee, so replaying one that may already have committed could
-	// stomp a same-assignee reclaim that landed in between — reinstating the
-	// release token over the reclaim's. runBDTransientReleaseOutput draws that
-	// line; a single-attempt raw runner would instead surface every transient
-	// blip as a spurious release failure.
-	out, err := s.runBDTransientReleaseOutput("sql", "--json", query)
-	if err != nil {
-		if isBdSQLUnsupportedInEmbeddedMode(err) {
-			return s.releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee, revision)
-		}
-		if isMissingRevisionColumn(err) {
-			out, err = s.runBDTransientReleaseOutput("sql", "--json", legacyQuery)
-		}
+		return false, errBdLacksConditionalRelease()
 	}
 	if err != nil {
 		return false, fmt.Errorf("bd release-if-current: %w", err)
 	}
-	var result struct {
-		RowsAffected int `json:"rows_affected"`
-	}
-	if err := json.Unmarshal(extractJSON(out), &result); err != nil {
-		return false, fmt.Errorf("bd release-if-current: parsing SQL result: %w", err)
-	}
-	return result.RowsAffected > 0, nil
-}
-
-func (s *BdStore) releaseIfCurrentViaEmbeddedDoltSQL(id, expectedAssignee string, revision int64) (bool, error) {
-	doltDir, ok, err := s.embeddedDoltDir()
-	if err != nil {
-		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", err)
-	}
-	if !ok {
-		return false, fmt.Errorf("bd release-if-current embedded fallback: %w", ErrConditionalReleaseUnsupported)
-	}
-	legacyQuery := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP" +
-		" WHERE id = " + bdSQLStringLiteral(id) +
-		" AND status = 'in_progress'" +
-		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
-		"; SELECT ROW_COUNT() AS rows_affected"
-	query := "UPDATE issues SET status = 'open', assignee = '', updated_at = CURRENT_TIMESTAMP, revision = " +
-		strconv.FormatInt(revision, 10) +
-		" WHERE id = " + bdSQLStringLiteral(id) +
-		" AND status = 'in_progress'" +
-		" AND assignee = " + bdSQLStringLiteral(expectedAssignee) +
-		"; SELECT ROW_COUNT() AS rows_affected"
-	out, err := s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", query)
-	if err != nil {
-		if isBdTransientWriteError(err) || !isMissingRevisionColumn(err) {
-			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
-		}
-		out, err = s.runner(doltDir, "dolt", "sql", "-r", "json", "-q", legacyQuery)
-		if err != nil {
-			return false, fmt.Errorf("bd release-if-current embedded fallback: dolt sql: %w", err)
-		}
-	}
-	rowsAffected, err := parseDoltRowsAffected(out)
-	if err != nil {
-		return false, fmt.Errorf("bd release-if-current embedded fallback: parsing SQL result: %w", err)
-	}
-	return rowsAffected > 0, nil
-}
-
-func newRevisionToken() (int64, error) {
-	for {
-		var data [8]byte
-		if _, err := rand.Read(data[:]); err != nil {
-			return 0, err
-		}
-		revision := int64(binary.BigEndian.Uint64(data[:]) & math.MaxInt64)
-		if revision != 0 {
-			return revision, nil
-		}
-	}
-}
-
-func isMissingRevisionColumn(err error) bool {
-	if err == nil {
-		return false
-	}
-	message := strings.ToLower(err.Error())
-	return strings.Contains(message, "unknown column 'revision'") ||
-		strings.Contains(message, "unknown column `revision`") ||
-		strings.Contains(message, `unknown column "revision"`) ||
-		strings.Contains(message, "no such column: revision") ||
-		strings.Contains(message, `column "revision" not found`) ||
-		strings.Contains(message, "column 'revision' not found") ||
-		strings.Contains(message, "column `revision` not found") ||
-		strings.Contains(message, "column not found: revision")
-}
-
-func (s *BdStore) embeddedDoltDir() (string, bool, error) {
-	metaPath := filepath.Join(s.dir, ".beads", "metadata.json")
-	data, err := os.ReadFile(metaPath)
-	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return "", false, nil
-		}
-		return "", false, err
-	}
-	var meta struct {
-		Backend      string `json:"backend"`
-		Database     string `json:"database"`
-		DoltMode     string `json:"dolt_mode"`
-		DoltDatabase string `json:"dolt_database"`
-	}
-	if err := json.Unmarshal(data, &meta); err != nil {
-		return "", false, fmt.Errorf("parsing metadata.json: %w", err)
-	}
-	if !strings.EqualFold(strings.TrimSpace(meta.Backend), "dolt") &&
-		!strings.EqualFold(strings.TrimSpace(meta.Database), "dolt") {
-		return "", false, nil
-	}
-	if !strings.EqualFold(strings.TrimSpace(meta.DoltMode), "embedded") {
-		return "", false, nil
-	}
-	database := strings.TrimSpace(meta.DoltDatabase)
-	if database == "" {
-		return "", false, errors.New("metadata.json missing dolt_database")
-	}
-	if database != filepath.Base(database) {
-		return "", false, fmt.Errorf("metadata.json dolt_database %q must be a database name, not a path", database)
-	}
-	return filepath.Join(s.dir, ".beads", "embeddeddolt", database), true, nil
-}
-
-func parseDoltRowsAffected(out []byte) (int, error) {
-	data := bytes.TrimSpace(extractJSON(out))
-	found := false
-	rowsAffected := 0
-	for len(data) > 0 {
-		start := bytes.IndexAny(data, "{[")
-		if start < 0 {
-			break
-		}
-		data = data[start:]
-		decoder := json.NewDecoder(bytes.NewReader(data))
-		var raw json.RawMessage
-		if err := decoder.Decode(&raw); err != nil {
-			return 0, err
-		}
-		if got, ok, err := doltRowsAffectedFromJSON(raw); err != nil {
-			return 0, err
-		} else if ok {
-			rowsAffected = got
-			found = true
-		}
-		consumed := decoder.InputOffset()
-		if consumed <= 0 || int(consumed) > len(data) {
-			return 0, errors.New("could not advance through dolt JSON output")
-		}
-		data = data[consumed:]
-	}
-	if !found {
-		return 0, errors.New("missing rows_affected row")
-	}
-	return rowsAffected, nil
-}
-
-func doltRowsAffectedFromJSON(raw json.RawMessage) (int, bool, error) {
-	trimmed := bytes.TrimSpace(raw)
-	if len(trimmed) == 0 {
-		return 0, false, nil
-	}
-	if trimmed[0] == '[' {
-		var results []doltRowsAffectedResult
-		if err := json.Unmarshal(trimmed, &results); err != nil {
-			return 0, false, err
-		}
-		found := false
-		rowsAffected := 0
-		for _, result := range results {
-			if got, ok := result.rowsAffected(); ok {
-				rowsAffected = got
-				found = true
-			}
-		}
-		return rowsAffected, found, nil
-	}
-	var result doltRowsAffectedResult
-	if err := json.Unmarshal(trimmed, &result); err != nil {
-		return 0, false, err
-	}
-	rowsAffected, ok := result.rowsAffected()
-	return rowsAffected, ok, nil
-}
-
-type doltRowsAffectedResult struct {
-	Rows []struct {
-		RowsAffected *int `json:"rows_affected"`
-	} `json:"rows"`
-}
-
-func (r doltRowsAffectedResult) rowsAffected() (int, bool) {
-	for _, row := range r.Rows {
-		if row.RowsAffected != nil {
-			return *row.RowsAffected, true
-		}
-	}
-	return 0, false
+	return released, nil
 }
 
 func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
@@ -2068,12 +1839,6 @@ func isBdSQLUnsupportedInEmbeddedMode(err error) bool {
 	return strings.Contains(msg, "bd sql") &&
 		strings.Contains(msg, "not yet supported") &&
 		strings.Contains(msg, "embedded mode")
-}
-
-func bdSQLStringLiteral(value string) string {
-	// bd sql runs against Dolt/MySQL string-literal semantics.
-	value = strings.ReplaceAll(value, "\\", "\\\\")
-	return "'" + strings.ReplaceAll(value, "'", "''") + "'"
 }
 
 // Claim atomically claims an open bead through bd update --claim.
@@ -2653,13 +2418,15 @@ func (s *BdStore) runBDTransientCreateOutput(hasStableID bool, args ...string) (
 	}, args...)
 }
 
-// runBDTransientReleaseOutput runs a revision-aware release UPDATE, retrying
+// runBDTransientReleaseOutput runs an assignment-guarded write (the
+// --if-status/--if-assignee update behind UpdateIfAssignment), retrying
 // ordinary serialization conflicts but never replaying an ambiguous write.
 // Unlike a create there is no stable id to make the write idempotent: the
-// release matches on status+assignee and installs a fresh token, so replaying
-// one that may already have committed could stomp a same-assignee reclaim that
-// landed in between. Same ambiguity guard as an id-less create, named for the
-// release path it protects.
+// guard matches on status+assignee, so replaying one that may already have
+// committed could stomp a same-assignee reclaim that landed in between. Same
+// ambiguity guard as an id-less create. ReleaseIfCurrent's bd verb has the
+// same hazard but does not use this runner yet: releaseIfCurrentViaBdVerb
+// still runs through runBDTransientWriteOutput (ga-7ryjc6).
 func (s *BdStore) runBDTransientReleaseOutput(args ...string) ([]byte, error) {
 	return s.runBDTransientWriteOutputWhen(func(err error) bool {
 		return isBdTransientWriteError(err) && !isBdAmbiguousWriteError(err)

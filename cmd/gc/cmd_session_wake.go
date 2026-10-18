@@ -184,7 +184,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
 		if deps.cityUsesManagedReconciler(deps.cityPath) {
-			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil {
+			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil && !noteWorkerSitePoke(stderr, "gc session wake", err) {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}

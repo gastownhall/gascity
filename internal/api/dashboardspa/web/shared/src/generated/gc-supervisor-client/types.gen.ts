@@ -2706,6 +2706,44 @@ export type ReadinessResponse = {
     };
 };
 
+export type ReadyBead = {
+    assignee?: string;
+    blocked_by?: Array<ReadyBeadBlocker> | null;
+    close_reason?: string;
+    created_at: string;
+    defer_until?: string;
+    dependencies?: Array<ReadyBeadDep> | null;
+    description?: string;
+    ephemeral?: boolean;
+    from?: string;
+    id: string;
+    is_blocked?: boolean;
+    issue_type: string;
+    labels?: Array<string> | null;
+    metadata?: {
+        [key: string]: string;
+    };
+    needs?: Array<string> | null;
+    no_history?: boolean;
+    parent?: string;
+    priority?: number;
+    ref?: string;
+    status: string;
+    title: string;
+    updated_at?: string;
+};
+
+export type ReadyBeadBlocker = {
+    id: string;
+    status: string;
+};
+
+export type ReadyBeadDep = {
+    depends_on_id: string;
+    issue_id: string;
+    type: string;
+};
+
 export type Record = {
     actor: string;
     created_at: string;
@@ -10332,6 +10370,13 @@ export type WebhookRejectedPayload = {
      * Configured webhook name (empty only for unresolved routes, which are not evented).
      */
     webhook: string;
+};
+
+export type WorkReadyBody = {
+    /**
+     * The ready work, in the query's order, cut to its limit: exactly the rows gc ready prints.
+     */
+    items: Array<ReadyBead> | null;
 };
 
 export type WorkerOperationEventPayload = {
@@ -19759,6 +19804,85 @@ export type GetV0CityByCityNameWaitsResponses = {
 };
 
 export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
+
+export type GetV0CityByCityNameWorkReadyData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Only work whose assignee is exactly this identity.
+         */
+        assignee?: string;
+        /**
+         * Only work with no assignee.
+         */
+        unassigned?: boolean;
+        /**
+         * Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.
+         */
+        metadata_field?: Array<string> | null;
+        /**
+         * Drop beads of this issue type. Repeatable.
+         */
+        exclude_type?: Array<string> | null;
+        /**
+         * Drop beads carrying this label. Repeatable.
+         */
+        exclude_label?: Array<string> | null;
+        /**
+         * Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).
+         */
+        sort?: 'oldest' | 'newest';
+        /**
+         * At most this many rows, cut after the merge and the order; 0 is unlimited.
+         */
+        limit?: number;
+        /**
+         * List beads in this status instead of ready work.
+         */
+        status?: 'open' | 'in_progress' | 'blocked' | 'closed';
+    };
+    url: '/v0/city/{cityName}/work/ready';
+};
+
+export type GetV0CityByCityNameWorkReadyErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWorkReadyError = GetV0CityByCityNameWorkReadyErrors[keyof GetV0CityByCityNameWorkReadyErrors];
+
+export type GetV0CityByCityNameWorkReadyResponses = {
+    /**
+     * OK
+     */
+    200: WorkReadyBody;
+};
+
+export type GetV0CityByCityNameWorkReadyResponse = GetV0CityByCityNameWorkReadyResponses[keyof GetV0CityByCityNameWorkReadyResponses];
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;

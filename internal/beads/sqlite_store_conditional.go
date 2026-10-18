@@ -173,7 +173,8 @@ func (s *SQLiteStore) DeleteIfMatch(id string, expectedRevision int64) error {
 
 // CompareAndSetMetadataKey swaps metadata[key] iff its current value equals
 // expected. A genuine mismatch is (false, nil) — the caller lost the race —
-// distinct from an error.
+// distinct from an error. A swap to the value the key already holds
+// (expected == next) still writes the row and mints a fresh revision.
 func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (bool, error) {
 	if err := s.ensureOpen(); err != nil {
 		return false, err
@@ -222,7 +223,10 @@ func (s *SQLiteStore) CompareAndSetMetadataKey(id, key, expected, next string) (
 }
 
 // conditionalWrite is the shared fenced read-check-write body: load the bead
-// inside the write transaction, compare its revision, apply, commit.
+// inside the write transaction, compare its revision, apply, commit. The fence
+// is the only check, so a fenced write that leaves the row as it is still
+// commits and mints a fresh revision, where the unfenced rewriteBead commits
+// nothing (see applySQLiteUpdateOpts).
 func (s *SQLiteStore) conditionalWrite(id string, expectedRevision int64, apply func(context.Context, *sql.Tx, Bead) error) error {
 	if !s.hasRevisionColumn {
 		return ErrConditionalWriteUnsupported
