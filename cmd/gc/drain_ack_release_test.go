@@ -17,6 +17,13 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// releaseUnexecutedClaimsOnDrainAck is the drain-ack release as the
+// controller runs it for another seat: releaseDrainAckClaims without the
+// started refusal.
+func releaseUnexecutedClaimsOnDrainAck(legs WorkLegs, sessionBead beads.Bead, budget time.Duration, stderr io.Writer) {
+	releaseDrainAckClaims(legs, sessionBead, false, budget, stderr)
+}
+
 // drainAckSessionBead is the retiring worker every case below acknowledges
 // drain for.
 func drainAckSessionBead() beads.Bead {
@@ -434,27 +441,60 @@ func TestDrainAckKeepsClaimsTheSeatStarted(t *testing.T) {
 	}
 }
 
+// TestRefusedDrainAckNamesAFailedLegRead (F2): a seat's own drain-ack is
+// refused because it holds started work, and a second leg could not be read.
+// The refusal releases nothing, but the failed read is still reported. Kills
+// a refused pass that drops the read error.
+func TestRefusedDrainAckNamesAFailedLegRead(t *testing.T) {
+	cfg := servingRigsCity(declaredRigsConfig("frontend"), "worker")
+	work := splittest.NewWorkStore(t, "gc")
+	started := mustCreateDrainAckBead(t, work, beads.Bead{Title: "started", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+	legs := testWorkLegs("", cfg, work, map[string]beads.Store{"frontend": failingListStore{Store: beads.NewMemStore()}})
+	seat := drainAckSessionBead()
+	seat.Metadata[session.WorkStartedKey] = session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: "city", Bead: started.ID, Via: session.WorkStartedViaClaim}))
+
+	var stderr bytes.Buffer
+	held := releaseDrainAckClaims(legs, seat, true, drainAckReleaseBudget, &stderr)
+	if len(held) != 1 || held[0] != started.ID {
+		t.Fatalf("held %v; want the started claim %s, so the ack is refused (stderr=%s)", held, started.ID, stderr.String())
+	}
+	if !strings.Contains(stderr.String(), errDarkLeg{}.Error()) {
+		t.Fatalf("stderr %q; want the failed leg read named on the refused path", stderr.String())
+	}
+	if status, assignee := drainAckBeadStatus(t, work, started.ID); status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("started claim is %s/%q; want it kept on the seat", status, assignee)
+	}
+}
+
 // TestKilledSeatReadsWorkStarted (B1, E18): the killed-seat release keeps all
 // of a seat's work when any of it is started, and a claim its work_started
-// cell names counts, read off the row's Info and off its bead alike. Kills
-// either reader dropping the cell.
+// cell or its execution_claim_started stamp names counts, read off the row's
+// Info and off its bead alike. Kills either reader dropping either record.
 func TestKilledSeatReadsWorkStarted(t *testing.T) {
 	work := splittest.NewWorkStore(t, "gc")
 	open := mustCreateDrainAckBead(t, work, beads.Bead{Title: "open, handed to a turn", Type: "task", Metadata: routedToWorker()}, "open", "worker-1")
 	cell := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Bead: open.ID, Via: session.WorkStartedViaAdopt}))
-	bead := drainAckSessionBead()
-	bead.Metadata[session.WorkStartedKey] = cell
-	for name, seat := range map[string]releaseSeat{
-		"Info": releaseSeatOfInfo(session.Info{ID: bead.ID, SessionNameMetadata: "worker-1", Template: "worker", WorkStartedRaw: cell}),
-		"bead": releaseSeatOfBead(bead),
+	stamp := "tok-old|" + open.ID
+	for record, meta := range map[string]map[string]string{
+		"cell":  {session.WorkStartedKey: cell},
+		"stamp": {executionClaimStartedKey: stamp},
 	} {
-		got, err := work.Get(open.ID)
-		if err != nil {
-			t.Fatal(err)
+		bead := drainAckSessionBead()
+		for k, v := range meta {
+			bead.Metadata[k] = v
 		}
-		out := releaseListed([]seatWorkHit{{store: work, bead: got}}, releaseKilledSeat, seat, servingCity("worker"), ReleaseOpts{})
-		if len(out.Kept) != 1 || out.Why[open.ID] != keptStarted || len(out.Released) != 0 {
-			t.Errorf("%s: B1 outcome %+v; want the work_started claim kept as started", name, out)
+		for name, seat := range map[string]releaseSeat{
+			"Info": releaseSeatOfInfo(sessionInfoFromBead(bead)), // the row codec's projection
+			"bead": releaseSeatOfBead(bead),
+		} {
+			got, err := work.Get(open.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out := releaseListed([]seatWorkHit{{store: work, bead: got}}, releaseKilledSeat, seat, servingCity("worker"), ReleaseOpts{})
+			if len(out.Kept) != 1 || out.Why[open.ID] != keptStarted || len(out.Released) != 0 {
+				t.Errorf("%s via %s: B1 outcome %+v; want the claim kept as started", record, name, out)
+			}
 		}
 	}
 }

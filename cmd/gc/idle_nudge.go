@@ -656,10 +656,14 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 
 // heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
 // has started: its configured nudge, else defaultHeldClaimNudge naming the
-// claim, and "" when its template names no configured agent.
+// claim, and "" when its template names no configured agent. A configured
+// nudge that carries --drain-ack is not sent to a started seat either: the
+// default stands in for it, since an ack on the nudge's no-work answer is how
+// started work was lost (mc-ilr3b), and the hook's fence holds only a claim
+// whose start was recorded.
 func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
 	nudge, known := configuredClaimNudgeFor(cfg, session)
-	if known && nudge == "" {
+	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
 		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 	}
 	return nudge

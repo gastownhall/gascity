@@ -412,6 +412,11 @@ type Info struct {
 	// the ladder's release refuses one the hook recorded.
 	WorkStartedRaw string // work_started (raw JSON)
 	WorkLadderRaw  string // work_ladder (raw JSON)
+	// ExecutionClaimStarted is the RAW execution_claim_started stamp
+	// ("<instance_token>|<bead>") the execution backstop writes once a claim's
+	// step started: with the work_started cell, the started records a release
+	// keeps a seat's claims by, read off the Info as off the bead.
+	ExecutionClaimStarted string // execution_claim_started (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the

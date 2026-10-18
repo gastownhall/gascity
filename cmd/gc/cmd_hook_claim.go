@@ -1334,7 +1334,15 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	case hookStartedStale:
-		fmt.Fprintf(stderr, "gc hook --claim: refusing to hand %s to a stale session: the session row names another incarnation\n", bead.ID) //nolint:errcheck
+		// As for a closed row: no turn of another incarnation runs the claim.
+		// A generation-only mismatch passes the pre-claim identity fence, so
+		// a claim can be minted here and must be given back, not parked.
+		cause := fmt.Sprintf("refusing to hand %s to a stale session: the session row names another incarnation", bead.ID)
+		if minted {
+			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause+"; giving it back", bead, opts, ops, dir, stderr)
+		} else {
+			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
+		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	}
 	if stamped && hookClaimLifecycleCandidate(durable, opts) {
@@ -1391,8 +1399,12 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 // run with no session row records nothing. Every failure, and a seat with no
 // instance token to fence the write by, fails OPEN: the claim is delivered,
 // one stderr line names the fault, and work.started_unrecorded records it off
-// the pane. The work ladder's quiet gate is then what keeps the claim from
-// release (§6.5).
+// the pane. An unrecorded claim is outside the drain-ack fence: the next
+// hand-over of the claim re-attempts the record (the adopt door), and with
+// the work ladder rolled back ([daemon] work_ladder = "off") the drain-ack
+// release (D5) also keeps a claim the execution backstop's
+// execution_claim_started stamp names once the backstop writes it. A claim
+// neither re-served nor stamped can be released by a drain-ack.
 func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stderr io.Writer) hookStartedResult {
 	sessionID := hookClaimSessionID(opts.Env)
 	beadID := strings.TrimSpace(bead.ID)
@@ -1657,6 +1669,11 @@ func fenceHookDrainAck(label, reason string, opts hookClaimOptions, ops hookClai
 			BeadID:        held.ID,
 			Assignee:      held.Assignee,
 			Route:         hookClaimRoute(held),
+			// The same workflow position every other action=work answer
+			// carries (writeHookClaimWorkResultForBead): a worker's
+			// continuation-group protocol keys off these two fields.
+			RootBeadID:        strings.TrimSpace(held.Metadata[beadmeta.RootBeadIDMetadataKey]),
+			ContinuationGroup: strings.TrimSpace(held.Metadata[beadmeta.ContinuationGroupMetadataKey]),
 		}
 		if err := writeHookClaimResultLine(result, opts.JSON, stdout); err != nil {
 			fmt.Fprintf(stderr, "%s: writing result for %s: %v\n", label, held.ID, err) //nolint:errcheck

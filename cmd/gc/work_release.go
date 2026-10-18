@@ -154,6 +154,7 @@ func releaseSeatOfBead(b beads.Bead) releaseSeat {
 func releaseSeatOfInfo(info sessionpkg.Info) releaseSeat {
 	s := releaseSeat{id: info.ID, name: info.SessionNameMetadata, template: info.Template, fallback: retiredSessionFallbackRouteInfo(info)}
 	s.nameStarted(info.CurrentlyProcessingBeadID, info.CurrentClaimBeadID)
+	s.nameRecorded(startedClaimBead(info.ExecutionClaimStarted))
 	s.nameWorkStarted(info.WorkStartedRaw)
 	return s
 }

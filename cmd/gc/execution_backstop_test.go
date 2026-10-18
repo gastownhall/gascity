@@ -1264,6 +1264,9 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 	}{
 		{name: "no nudge configured", want: defaultHeldClaimNudge},
 		{name: "a configured nudge", nudge: "gc hook --claim --json", want: "gc hook --claim --json"},
+		// A configured nudge that would ack the drain is replaced by the
+		// default: the started rung never carries --drain-ack.
+		{name: "a configured --drain-ack nudge", nudge: "gc hook --claim --drain-ack --json", want: defaultHeldClaimNudge},
 		// The production pane: broadcasts have scrolled the idle prompt
 		// away, so the snapshot can read neither a prompt nor a busy line.
 		{name: "claude pane with its prompt displaced", meta: map[string]string{"provider": "claude"}, snap: runtime.ErrIdleIndeterminate, want: defaultHeldClaimNudge},
@@ -1290,8 +1293,8 @@ func TestExecutionBackstopNudgesAStartedSeatWhoseTurnDied(t *testing.T) {
 			if want == defaultHeldClaimNudge {
 				want = fmt.Sprintf(defaultHeldClaimNudge, f.work.ID) // the started-rung text names the claim
 			}
-			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != want || (tc.nudge == "" && strings.Contains(got[0], "--drain-ack")) {
-				t.Fatalf("nudges delivered = %q, want exactly [%q], with no --drain-ack by default; stdout=%s", got, want, f.stdout.String())
+			if got := f.nudgesDelivered(); len(got) != 1 || got[0] != want || strings.Contains(got[0], "--drain-ack") {
+				t.Fatalf("nudges delivered = %q, want exactly [%q], with no --drain-ack; stdout=%s", got, want, f.stdout.String())
 			}
 			if len(f.drained) != 0 || f.stalledEvents() != 0 {
 				t.Fatalf("drains %v, step_stalled %d; want neither for a seat with execution evidence", f.drained, f.stalledEvents())

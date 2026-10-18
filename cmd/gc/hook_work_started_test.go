@@ -313,7 +313,10 @@ func TestHookClaimRefusesAClaimTheLadderIsReleasing(t *testing.T) {
 
 // TestHookClaimStaleIncarnationRecordsNothing (T4): a runtime whose token or
 // generation is not the row's gets the stale-session drain and writes
-// nothing. Kills skipping the identity fence.
+// nothing. A claim minted before the started write found the row stale (a
+// generation-only mismatch passes the pre-claim fence) is given back, not
+// parked on the seat. Kills skipping the identity fence, and a stale arm that
+// does not unwind.
 func TestHookClaimStaleIncarnationRecordsNothing(t *testing.T) {
 	for name, env := range map[string][]string{
 		"token":      startedEnv("tok-0", "7"),
@@ -332,6 +335,15 @@ func TestHookClaimStaleIncarnationRecordsNothing(t *testing.T) {
 			}
 			if row.store.rowWrites != 0 || row.meta(t, session.WorkStartedKey) != "" {
 				t.Fatalf("row writes %d, work_started %q; want none", row.store.rowWrites, row.meta(t, session.WorkStartedKey))
+			}
+			if minted := l.index("claim:work-1") >= 0; minted != (len(l.releases) == 1) || len(l.releases) > 1 {
+				t.Fatalf("effects %v, releases %v; want every claim minted for a stale seat given back", l.log, l.releases)
+			}
+			if name == "generation" && len(l.releases) != 1 {
+				t.Fatalf("effects %v; want the generation-only mismatch to mint the claim and give it back", l.log)
+			}
+			if len(l.stepStarted) != 0 {
+				t.Fatalf("step_started emitted for %v, a claim not handed out", l.stepStarted)
 			}
 		})
 	}
@@ -398,7 +410,10 @@ func TestHookDrainAckFenceHoldsAStartedClaim(t *testing.T) {
 			ops.DrainPending = func(string) (bool, error) { return c.draining, nil }
 			ops.ReadWorkStarted = func(string) (string, error) { return cell, nil }
 			ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
-				return beads.Bead{ID: beadID, Status: c.status, Assignee: c.holder}, nil
+				return beads.Bead{ID: beadID, Status: c.status, Assignee: c.holder, Metadata: map[string]string{
+					beadmeta.RootBeadIDMetadataKey:        "root-1",
+					beadmeta.ContinuationGroupMetadataKey: "main",
+				}}, nil
 			}
 			stdout := &orderedWriter{l: l}
 			var stderr bytes.Buffer
@@ -408,6 +423,11 @@ func TestHookDrainAckFenceHoldsAStartedClaim(t *testing.T) {
 			if c.wantH {
 				if code != 0 || got.Action != "work" || got.Reason != hookClaimWorkReasonStartedClaimHeld || got.BeadID != "g-1" || got.Assignee != "worker-1" || l.acked {
 					t.Fatalf("code %d, result %+v, acked %v; want work started_claim_held g-1 and no ack", code, got, l.acked)
+				}
+				// The held answer carries the workflow position every other
+				// action=work answer does.
+				if got.RootBeadID != "root-1" || got.ContinuationGroup != "main" {
+					t.Fatalf("result %+v; want root_bead_id root-1 and continuation_group main", got)
 				}
 				return
 			}
@@ -536,6 +556,53 @@ func TestHookClaimFailsOpenWhenTheStartedWriteFails(t *testing.T) {
 	if _, err := recordWorkStarted(front, startedSessionID, hookStartedFence{Token: startedToken}, hookStartedKey{Bead: "b"}, "claim", time.Now()); !errors.Is(err, errWorkStartedContended) {
 		t.Fatalf("contended record err = %v, want errWorkStartedContended", err)
 	}
+}
+
+// TestUnrecordedClaimOutsideTheDrainAckFence pins what keeps a claim the
+// started write failed open on (recordHookWorkStarted): re-served, the next
+// hand-over re-attempts the record through the adopt door; not re-served (its
+// step gate-blocked) and unrecorded, the fence does not hold the ack, so only
+// D5's execution_claim_started keep (with the ladder rolled back) stands
+// between it and the release. Kills a re-served claim not re-recorded, and a
+// fence that silently holds an ack for a claim it has no record of.
+func TestUnrecordedClaimOutsideTheDrainAckFence(t *testing.T) {
+	row := newStartedRow(t, nil)
+	l := &startedLog{}
+	failing := l.ops(startedRoutedWork, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) {
+		return hookStartedUnrecorded, errors.New("sessions store unavailable")
+	})
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), failing, stdout, &stderr); code != 0 {
+		t.Fatalf("code %d; stderr=%s", code, stderr.String())
+	}
+	if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action != "work" || got.BeadID != "work-1" || row.meta(t, session.WorkStartedKey) != "" {
+		t.Fatalf("result %+v, work_started %q; want work-1 delivered and unrecorded", got, row.meta(t, session.WorkStartedKey))
+	}
+
+	t.Run("re-served", func(t *testing.T) {
+		l := &startedLog{}
+		stdout := &orderedWriter{l: l}
+		var stderr bytes.Buffer
+		if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), l.ops(startedAssignedWork, row, nil), stdout, &stderr); code != 0 {
+			t.Fatalf("code %d; stderr=%s", code, stderr.String())
+		}
+		if l.index("record:work-1:adopt") < 0 || !row.cell(t).Names(startedStoreRef, "work-1") || l.acked {
+			t.Fatalf("effects %v, cell %+v; want the adoption to record the claim, without an ack", l.log, row.cell(t))
+		}
+	})
+
+	t.Run("gate-blocked", func(t *testing.T) {
+		l := &startedLog{}
+		ops := l.ops(`[]`, nil, nil)
+		ops.ReadWorkStarted = func(string) (string, error) { return "", nil } // the failed write left the cell empty
+		stdout := &orderedWriter{l: l}
+		var stderr bytes.Buffer
+		doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr)
+		if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action != "drain" || !l.acked {
+			t.Fatalf("result %+v, acked %v; an unrecorded claim does not hold the ack: D5's stamp keep is its only cover", got, l.acked)
+		}
+	})
 }
 
 // alwaysMovedStore loses every CAS, as a row the controller rewrites between
