@@ -56,13 +56,13 @@ const (
 	SrcExecutionClaimStarted                        // execution_claim_started == "<token>|<bead>"
 	SrcCurrentClaim                                 // current_claim_bead_id
 	SrcCurrentlyProcessing                          // currently_processing_bead_id
+	SrcClaimSession                                 // the work bead's gc.session_id is the seat: the hook stamped it at hand-over
 )
 
 // Work is one outstanding piece of work for the seat.
 type Work struct {
-	Key      ClaimKey
-	Kind     Kind
-	Assignee string
+	Key  ClaimKey
+	Kind Kind
 }
 
 // Tri is a three-valued reading.
@@ -97,7 +97,6 @@ type Quiet struct {
 type Gate struct {
 	Held   bool
 	Reason string
-	Until  time.Time // the hold's end when known (a heartbeat's held_until)
 }
 
 // ProviderState is the seat's provider health.
@@ -116,7 +115,10 @@ type Observation struct {
 	Started map[ClaimKey]StartSource
 	// StartedRead is false when the agent cell is unreadable: then every
 	// outstanding claim is treated as started (fail safe).
-	StartedRead  bool
+	StartedRead bool
+	// Hold is work whose live re-read could not tell this pass: it is kept,
+	// with its count, and nothing is done about it until a read answers.
+	Hold         map[ClaimKey]bool
 	Runtime      Tri // the seat's runtime is alive
 	Quiet        Quiet
 	LastActivity time.Time
@@ -161,50 +163,33 @@ type Recycle struct {
 // CAS that it is unstarted (§6.5).
 type Release struct{ Key ClaimKey }
 
-// Alert is a condition a human should see. Decide emits each at most once
-// per entry.
+// Alert is a condition a human should see. Decide emits the escalations
+// at most once per entry, and one recycle alert per recycle.
 type Alert struct {
 	Key    ClaimKey
 	Reason string
-}
-
-// Note is an informational transition: an entry appeared, was seeded,
-// changed rung, was dropped, or had its count reset by progress.
-type Note struct {
-	Key   ClaimKey
-	Event string
 }
 
 func (Nudge) isAction()   {}
 func (Recycle) isAction() {}
 func (Release) isAction() {}
 func (Alert) isAction()   {}
-func (Note) isAction()    {}
 
 // Alert reasons.
 const (
 	AlertContinuationUnanswered = "continuation_unanswered"
 	AlertStartedUnanswered      = "started_unanswered"
+	AlertStartedRecycled        = "started_recycled"
+	AlertReleaseUnfinished      = "release_unfinished"
 	AlertReleaseRacedStart      = "release_raced_start"
 )
 
-// Note events.
-const (
-	NoteNew           = "new"
-	NoteSeeded        = "seeded"
-	NoteRung          = "rung"
-	NoteDropped       = "dropped"
-	NoteProgressReset = "progress_reset"
-)
-
-// Decision is Decide's answer: the cell to CAS (no write when !Changed), the
-// actions to take once it lands, and when to look again (zero: nothing
-// outstanding).
+// Decision is Decide's answer: the cell to CAS (no write when !Changed) and
+// the actions to take once it lands.
 type Decision struct {
 	Next    Record
 	Changed bool
 	Actions []Action
-	Due     time.Time
 }
 
 // Record is the work_ladder cell. V == 0 is an absent cell.
@@ -213,6 +198,9 @@ type Record struct {
 	Gen     int64
 	Entries []Entry
 	Release *ReleaseMark
+	// LastNudge is the seat's last nudge, about any of its work: the seat
+	// is nudged at most once per Base (WL3), whatever work comes and goes.
+	LastNudge time.Time
 }
 
 // Entry is one outstanding piece of work's pacing.
@@ -229,6 +217,10 @@ type Entry struct {
 	Escalated bool      // the entry's alert was raised (cleared on a rung change)
 	Seed      StartSource
 	RecycleAt time.Time
+	// Unreleased: a release of this unstarted claim ran to an outcome that
+	// did not release it (kept, or failed). It is then nudged at Cap, with
+	// one alert, and the release retried at Cap.
+	Unreleased bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

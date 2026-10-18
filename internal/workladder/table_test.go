@@ -37,6 +37,7 @@ func TestDecisionTable(t *testing.T) {
 		{"continuation/assigned, >= 6, alerted", ent(KindContinuation, RungAssigned, 7, func(e *Entry) { e.Escalated = true })},
 		{"claim/claimed, attempts < 3", ent(KindClaim, RungClaimed, 2, nil)},
 		{"claim/claimed, attempts >= 3", ent(KindClaim, RungClaimed, 3, nil)},
+		{"claim/claimed, release did not finish", ent(KindClaim, RungClaimed, 3, func(e *Entry) { e.Unreleased = true })},
 		{"claim/started, attempts < 6", ent(KindClaim, RungStarted, 5, nil)},
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil)},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 })},
@@ -54,7 +55,7 @@ func TestDecisionTable(t *testing.T) {
 		{"runtime dead", func(o *Observation) { o.Runtime = TriFalse }},
 	}
 	var b strings.Builder
-	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = the wait to the next look)\n\n")
+	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)\n\n")
 	fmt.Fprintf(&b, "| state |")
 	for _, c := range cols {
 		fmt.Fprintf(&b, " %s |", c.name)
@@ -76,7 +77,7 @@ func TestDecisionTable(t *testing.T) {
 			if len(acts) == 0 {
 				acts = []string{"-"}
 			}
-			fmt.Fprintf(&b, " %s; next %v |", strings.Join(acts, " + "), d.Due.Sub(now))
+			fmt.Fprintf(&b, " %s; next %v |", strings.Join(acts, " + "), nextLook(d, now, o.Provider.Degraded))
 		}
 		b.WriteString("\n")
 	}
@@ -117,4 +118,17 @@ func render(a Action) string {
 		return "alert " + a.Reason
 	}
 	return fmt.Sprintf("%T", a)
+}
+
+// nextLook is when the table's entry is next due after this pass, from now:
+// "-" when the pass leaves it due (it waits on a hold).
+func nextLook(d Decision, now time.Time, degraded bool) string {
+	if len(d.Next.Entries) == 0 || (d.Next.Release != nil && d.Next.Release.Key == d.Next.Entries[0].Key) {
+		return "-"
+	}
+	at := p.dueAt(d.Next.Entries[0], degraded)
+	if !at.After(now) {
+		return "now"
+	}
+	return at.Sub(now).String()
 }

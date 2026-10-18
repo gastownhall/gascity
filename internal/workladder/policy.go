@@ -82,10 +82,10 @@ func (p Policy) threshold(k Kind, r Rung) int {
 
 // backoff is the wait after the attempts-th counted nudge: Base doubling,
 // never above Cap. Once the rung's threshold step has acted (attempts past
-// the threshold), and on the escalated rung, it is Cap: "keep nudging at
-// Cap".
+// the threshold, or a release that did not finish), and on the escalated
+// rung, it is Cap: "keep nudging at Cap".
 func (p Policy) backoff(e Entry) time.Duration {
-	if e.Rung == RungEscalated || e.Attempts > p.threshold(e.Kind, e.Rung) {
+	if e.Rung == RungEscalated || e.Unreleased || e.Attempts > p.threshold(e.Kind, e.Rung) {
 		return p.Cap
 	}
 	d := p.Base

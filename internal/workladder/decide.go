@@ -9,27 +9,25 @@ import (
 // obs and p give the same Decision (WL7).
 //
 // The steps, in order: reconcile the entries with obs.Outstanding (rungs only
-// rise; a rise resets the count); reset counts on a new generation; settle a
-// pending release; then, only with the gate open, the runtime alive and the
-// seat quiet, act on the due entries: at most one Nudge per pass, for the
-// earliest-due entry. Due is never zero while anything is outstanding, and
-// never later than now+Cap with the gate open (WL1).
+// rise; a rise resets the count); reset counts on a new generation, and on
+// progress the seat made since its last nudge, whether or not the ladder saw
+// it; settle a pending release; then, only with the gate open, the runtime
+// alive and the seat quiet, act on the due entries, earliest first: at most
+// one Nudge per pass, and none within Base of the seat's last (WL3). An entry
+// whose live read could not tell (obs.Hold) waits, kept as it is.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
 	now := obs.Now
 	var acts []Action
-	note := func(k ClaimKey, ev string) { acts = append(acts, Note{Key: k, Event: ev}) }
 
 	// 1-2. Reconcile entries; a new generation restarts every count.
 	newGen := prev.V != 0 && prev.Gen != obs.Gen
 	old := make(map[ClaimKey]Entry, len(prev.Entries))
 	for _, e := range prev.Entries {
-		old[e.Key] = e
+		old[e.Key] = clampEntry(e, now)
 	}
 	var entries []Entry
-	cur := make(map[ClaimKey]bool, len(obs.Outstanding))
 	for _, w := range outstanding(obs.Outstanding) {
-		cur[w.Key] = true
 		src, started := startedBy(obs, w)
 		init := initialRung(w.Kind, started)
 		e, ok := old[w.Key]
@@ -41,9 +39,6 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 			if init == RungStarted {
 				ne.Seed = src
-				note(w.Key, NoteSeeded)
-			} else {
-				note(w.Key, NoteNew)
 			}
 			e = ne
 		default:
@@ -51,21 +46,16 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 				e.Attempts, e.Paused, e.Since = 0, 0, now
 			}
 			if init > e.Rung {
-				e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated = init, 0, 0, now, false
+				e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased = init, 0, 0, now, false, false
 				if init == RungStarted {
 					e.Seed = src
 				}
-				note(w.Key, NoteRung)
 			}
 		}
+		e = p.progressReset(e, obs)
 		entries = append(entries, e)
 	}
-	for _, e := range prev.Entries {
-		if !cur[e.Key] {
-			note(e.Key, NoteDropped)
-		}
-	}
-	next := Record{V: Version, Gen: obs.Gen, Entries: entries}
+	next := Record{V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now)}
 	idx := func(k ClaimKey) int { return slices.IndexFunc(next.Entries, func(e Entry) bool { return e.Key == k }) }
 
 	// 3. A pending release: re-emit while the claim is still outstanding and
@@ -86,30 +76,8 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	}
 
 	d := Decision{Next: next, Actions: acts}
-	if len(next.Entries) == 0 && next.Release == nil {
-		return p.settle(d, prev)
-	}
-
-	// 4-6. Held, not running, or not quiet: no nudge.
-	switch {
-	case obs.Gate.Held:
-		d.Due = now.Add(p.Grace)
-		if obs.Gate.Until.After(now) {
-			d.Due = obs.Gate.Until
-		}
-		return p.settle(d, prev)
-	case obs.Runtime != TriTrue:
-		d.Due = now.Add(p.Grace)
-		return p.settle(d, prev)
-	case obs.Quiet.State != Quiescent:
-		for i := range d.Next.Entries {
-			e := &d.Next.Entries[i]
-			if e.Attempts > 0 && !e.Last.IsZero() && !obs.LastActivity.Before(e.Last.Add(p.ProgressReset)) {
-				e.Attempts, e.Paused = 0, 0
-				d.Actions = append(d.Actions, Note{Key: e.Key, Event: NoteProgressReset})
-			}
-		}
-		d.Due = now.Add(p.Grace)
+	// 4-6. Held, not running, or not quiet: nothing more.
+	if len(next.Entries) == 0 || obs.Gate.Held || obs.Runtime != TriTrue || obs.Quiet.State != Quiescent {
 		return p.settle(d, prev)
 	}
 
@@ -117,8 +85,8 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	degraded := obs.Provider.Degraded
 	order := make([]int, 0, len(d.Next.Entries))
 	for i, e := range d.Next.Entries {
-		if d.Next.Release != nil && d.Next.Release.Key == e.Key {
-			continue // being released
+		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
+			continue // a read that could not tell, or being released
 		}
 		if !p.dueAt(e, degraded).After(now) {
 			order = append(order, i)
@@ -127,7 +95,8 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 	slices.SortStableFunc(order, func(a, b int) int {
 		return p.dueAt(d.Next.Entries[a], degraded).Compare(p.dueAt(d.Next.Entries[b], degraded))
 	})
-	nudged := false
+	// The seat's nudge slot: one per pass, and none within Base of its last.
+	nudged := !d.Next.LastNudge.IsZero() && now.Sub(d.Next.LastNudge) < p.Base
 	for _, i := range order {
 		e := &d.Next.Entries[i]
 		nudge := func(paused bool) {
@@ -136,7 +105,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			} else {
 				e.Attempts++
 			}
-			e.Last = now
+			e.Last, d.Next.LastNudge = now, now
 			nudged = true
 			d.Actions = append(d.Actions, Nudge{Key: e.Key, Kind: e.Kind, Rung: e.Rung, Attempt: e.Attempts, Paused: paused})
 		}
@@ -171,19 +140,37 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		case e.Rung == RungClaimed:
 			// WL2: the rung is claimed only while nothing names the key
 			// started; the caller re-proves it by CAS before releasing.
-			if d.Next.Release != nil || !obs.StartedRead {
-				continue
-			}
+			canRelease := d.Next.Release == nil && obs.StartedRead
 			if _, named := obs.Started[e.Key]; named {
+				canRelease = false
+			}
+			if !e.Unreleased {
+				if !canRelease {
+					continue
+				}
+				e.Last = now // a release that cannot finish is retried a backoff later
+				d.Next.Release = &ReleaseMark{Key: e.Key, Gen: obs.Gen, At: now}
+				d.Actions = append(d.Actions, Release{Key: e.Key})
 				continue
 			}
-			e.Last = now // a release the lane could not finish is retried a backoff later
-			d.Next.Release = &ReleaseMark{Key: e.Key, Gen: obs.Gen, At: now}
-			d.Actions = append(d.Actions, Release{Key: e.Key})
+			// A release ran and did not finish: keep nudging at Cap, alert
+			// once, and retry the release at the same pace.
+			if nudged {
+				continue
+			}
+			if canRelease {
+				d.Next.Release = &ReleaseMark{Key: e.Key, Gen: obs.Gen, At: now}
+				d.Actions = append(d.Actions, Release{Key: e.Key})
+			}
+			if !e.Escalated {
+				e.Escalated = true
+				d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: AlertReleaseUnfinished})
+			}
+			nudge(false)
 		case e.Recycles < p.MaxRecycles:
 			e.Recycles++
 			e.RecycleAt, e.Last = now, now
-			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true})
+			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true}, Alert{Key: e.Key, Reason: AlertStartedRecycled})
 		default:
 			if nudged {
 				continue
@@ -193,36 +180,48 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			nudge(false)
 		}
 	}
-
-	// 9. Due: the earliest entry, never later than now+Cap.
-	d.Due = now.Add(p.Cap)
-	for _, e := range d.Next.Entries {
-		if d.Next.Release != nil && d.Next.Release.Key == e.Key {
-			continue
-		}
-		if at := p.dueAt(e, degraded); at.Before(d.Due) {
-			d.Due = at
-		}
-	}
-	if d.Next.Release != nil && now.Add(p.Grace).Before(d.Due) {
-		d.Due = now.Add(p.Grace) // retry a release that did not finish
-	}
-	if d.Due.Before(now) {
-		d.Due = now // an entry this pass deferred is due on the next
-	}
 	return p.settle(d, prev)
 }
 
+// progressReset restarts e's count when the seat made progress at least
+// ProgressReset after e's last nudge, observed now or not (an outage, a
+// hold, the ladder off): its activity clock is the evidence, read on any
+// pass where the runtime is alive. The entry's grace restarts from that
+// activity.
+func (p Policy) progressReset(e Entry, obs Observation) Entry {
+	if obs.Runtime != TriTrue || e.Last.IsZero() || (e.Attempts == 0 && e.Paused == 0 && !e.Unreleased) ||
+		obs.LastActivity.Before(e.Last.Add(p.ProgressReset)) {
+		return e
+	}
+	e.Attempts, e.Paused, e.Unreleased, e.Since = 0, 0, false, minTime(obs.LastActivity, obs.Now)
+	return e
+}
+
+// clampEntry pulls e's times from a clock that ran ahead back to now, so a
+// skewed stamp cannot hold the entry back by its skew.
+func clampEntry(e Entry, now time.Time) Entry {
+	e.Since, e.Last, e.RecycleAt = minTime(e.Since, now), minTime(e.Last, now), minTime(e.RecycleAt, now)
+	return e
+}
+
+func minTime(t, now time.Time) time.Time {
+	if t.After(now) {
+		return now
+	}
+	return t
+}
+
 // dueAt is when a quiet seat's entry is next due: a grace after the entry
-// (or its generation) started, else the backoff after its last nudge, capped
-// at PausedCap while the provider is degraded.
+// (or its generation, or its last progress) started, else the backoff after
+// its last nudge. While the provider is degraded the backoff is PausedCap,
+// both floor and cap: delivery goes on, at a steady pace.
 func (p Policy) dueAt(e Entry, degraded bool) time.Time {
-	if e.Attempts == 0 && e.Paused == 0 {
+	if e.Attempts == 0 && e.Paused == 0 && !e.Unreleased {
 		return e.Since.Add(p.Grace)
 	}
 	iv := p.backoff(e)
 	if degraded {
-		iv = min(iv, p.PausedCap)
+		iv = p.PausedCap
 	}
 	return e.Last.Add(iv)
 }
@@ -246,7 +245,7 @@ func (p Policy) settle(d Decision, prev Record) Decision {
 
 // sameRecord reports whether a and b store the same cell text.
 func sameRecord(a, b Record) bool {
-	if a.V != b.V || a.Gen != b.Gen || len(a.Entries) != len(b.Entries) || (a.Release == nil) != (b.Release == nil) {
+	if a.V != b.V || a.Gen != b.Gen || !a.LastNudge.Equal(b.LastNudge) || len(a.Entries) != len(b.Entries) || (a.Release == nil) != (b.Release == nil) {
 		return false
 	}
 	if a.Release != nil && (a.Release.Key != b.Release.Key || a.Release.Gen != b.Release.Gen || !a.Release.At.Equal(b.Release.At)) {
@@ -255,7 +254,7 @@ func sameRecord(a, b Record) bool {
 	for i, x := range a.Entries {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
-			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed ||
+			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
 			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}
@@ -304,12 +303,44 @@ func initialRung(k Kind, started bool) Rung {
 }
 
 // ClearRelease is r without its pending release, when that release names key
-// at generation gen: the lane's last release step (§6.5 step 3), once the
-// release has run to an outcome. ok is false when r holds no such release.
+// at generation gen: the lane's last step of a release that released the
+// claim (§6.5 step 3). ok is false when r holds no such release.
 func ClearRelease(r Record, key ClaimKey, gen int64) (Record, bool) {
 	if r.Release == nil || r.Release.Key != key || r.Release.Gen != gen {
 		return r, false
 	}
 	r.Release = nil
+	return r, true
+}
+
+// ReleaseUnfinished is r after a release of key at gen ran to an outcome
+// that did not release the claim (kept: no lane serves its route, or no
+// single live hit; or failed): the release cleared, and the entry marked so
+// it is nudged at Cap, with one alert, and the release retried at Cap.
+func ReleaseUnfinished(r Record, key ClaimKey, gen int64, now time.Time) (Record, bool) {
+	r, ok := ClearRelease(r, key, gen)
+	if !ok {
+		return r, false
+	}
+	r.Entries = slices.Clone(r.Entries)
+	if i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key }); i >= 0 {
+		r.Entries[i].Unreleased, r.Entries[i].Last = true, now
+	}
+	return r, true
+}
+
+// ReleaseFoundStarted is r after the release of key at gen found, on its
+// live read, that the claim was handed to a turn of the seat (by src): the
+// release cleared, and the entry started, with a fresh count.
+func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now time.Time) (Record, bool) {
+	r, ok := ClearRelease(r, key, gen)
+	if !ok {
+		return r, false
+	}
+	r.Entries = slices.Clone(r.Entries)
+	if i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key }); i >= 0 && r.Entries[i].Rung < RungStarted {
+		e := &r.Entries[i]
+		e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Seed = RungStarted, 0, 0, now, false, false, src
+	}
 	return r, true
 }

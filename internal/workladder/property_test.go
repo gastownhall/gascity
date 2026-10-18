@@ -26,7 +26,7 @@ func sequences() int {
 func forEachSequence(t *testing.T, check func(seed uint64) error) {
 	t.Helper()
 	n := sequences()
-	workers := min(runtime.NumCPU(), 16)
+	workers := min(runtime.GOMAXPROCS(0), 8)
 	errs := make([]error, n)
 	var wg sync.WaitGroup
 	for w := range workers {
@@ -58,6 +58,7 @@ type sim struct {
 	seeds    map[ClaimKey]StartSource
 	started  map[ClaimKey]bool // ever started while continuously outstanding as a claim
 	obs      Observation
+	activity time.Time // the seat's last activity: it works now and then
 	lastStep time.Duration
 	churn    int // 0: a calm seat that only gains work; 1: everything flips
 }
@@ -124,9 +125,6 @@ func (s *sim) step() Observation {
 	flip := s.event
 	if flip(10) {
 		s.obs.Gate = Gate{Held: !s.obs.Gate.Held, Reason: "draining"}
-		if s.obs.Gate.Held && s.chance(50) {
-			s.obs.Gate.Until = s.now.Add(time.Duration(s.rng.IntN(13*60)) * time.Minute)
-		}
 	}
 	if flip(5) {
 		s.obs.Runtime = Tri(s.rng.IntN(3))
@@ -138,7 +136,19 @@ func (s *sim) step() Observation {
 		s.obs.Provider = ProviderState{Degraded: !s.obs.Provider.Degraded}
 	}
 	s.obs.StartedRead = !s.event(3)
-	s.obs.LastActivity = s.now.Add(-time.Duration(s.rng.IntN(60)) * time.Minute)
+	if s.event(4) { // the seat did some work
+		s.activity = s.now.Add(-time.Duration(s.rng.IntN(120)) * time.Second)
+	}
+	s.obs.LastActivity = s.activity
+	s.obs.Hold = nil
+	for _, k := range simKeys {
+		if s.event(5) {
+			if s.obs.Hold == nil {
+				s.obs.Hold = map[ClaimKey]bool{}
+			}
+			s.obs.Hold[k] = true
+		}
+	}
 
 	o := s.obs
 	o.Now, o.Gen, o.Outstanding, o.Started = s.now, s.gen, nil, map[ClaimKey]StartSource{}
@@ -186,13 +196,18 @@ func TestLadderInvariants(t *testing.T) {
 
 func runSequence(seed uint64) error {
 	s := newSim(seed)
-	type keyHist struct {
-		lastNudge, lastTriggerRecycle time.Time
-		gen                           int64
+	var lastSeatNudge time.Time
+	lastNudge := map[ClaimKey]time.Time{}   // per entry life
+	lastTrigger := map[ClaimKey]time.Time{} // trigger recycles, per entry life
+	recycles := map[ClaimKey]int{}          // started recycles while the entry lives
+	lastHeard := map[ClaimKey]time.Time{}   // a nudge or an alert, while the entry is actionable
+	type counted struct {
+		at      time.Time
+		attempt int
+		gen     int64
 	}
-	hist := map[ClaimKey]*keyHist{}
-	recycles := map[ClaimKey]int{}      // started recycles while the entry lives
-	lastAct := map[ClaimKey]time.Time{} // per live entry, while the seat is nudgeable
+	lastCounted := map[ClaimKey]counted{}  // the entry's last counted nudge
+	unfinished := map[ClaimKey]time.Time{} // when the lane last reported a release kept
 	for i := range 90 {
 		prev := s.rec
 		prevCopy := prev
@@ -216,74 +231,54 @@ func runSequence(seed uint64) error {
 			return fail("Changed=%v disagrees with the cell text", d.Changed)
 		}
 
-		live := 0
-		for _, e := range d.Next.Entries {
-			if d.Next.Release == nil || d.Next.Release.Key != e.Key {
-				live++
-			}
-		}
-		// WL1: never zero.
-		if (live > 0 || d.Next.Release != nil) && d.Due.IsZero() {
-			return fail("WL1: zero Due with work outstanding")
-		}
-		if live > 0 && !o.Gate.Held && d.Due.After(o.Now.Add(DefaultCap)) {
-			return fail("WL1: Due %v past now+Cap", d.Due.Sub(o.Now))
-		}
-		// WL1: every entry of a nudgeable seat is acted on within Cap, give
-		// or take the passes it waits for the one nudge slot.
-		eligible := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent
-		for _, a := range d.Actions {
-			lastAct[keyOf(a)] = o.Now
-		}
-		for _, e := range d.Next.Entries {
-			since, ok := lastAct[e.Key]
-			switch {
-			case !eligible || !ok || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key):
-				// not nudgeable, new, restarted by a new generation, or
-				// being released: its clock starts now
-				lastAct[e.Key] = o.Now
-			case o.Now.Sub(since) > DefaultCap+3*maxStep:
-				return fail("WL1: %v of a quiet seat has had no action for %v", e.Key, o.Now.Sub(since))
-			}
-		}
-		for k := range lastAct {
+		// An entry that is new, of a new kind, or gone starts a new life.
+		for k := range lastNudge {
 			if _, ok := entryOf(d.Next, k); !ok {
-				delete(lastAct, k)
+				delete(lastNudge, k)
+				delete(lastCounted, k)
 			}
 		}
-
-		// WL3: one nudge per pass.
-		if countNudges(d) > 1 {
-			return fail("WL3: %d nudges in one pass", countNudges(d))
-		}
-		for _, a := range d.Actions {
-			if n, ok := a.(Note); ok {
-				delete(hist, n.Key) // the entry restarted: a new pacing history
-				if n.Event == NoteDropped {
-					delete(recycles, n.Key)
+		for _, e := range d.Next.Entries {
+			if pe, ok := entryOf(prev, e.Key); !ok || pe.Kind != e.Kind {
+				delete(lastNudge, e.Key)
+				delete(lastCounted, e.Key)
+				delete(lastTrigger, e.Key)
+				if !ok {
+					delete(recycles, e.Key)
 				}
 			}
 		}
+
+		nudges := 0
 		for _, a := range d.Actions {
-			h := hist[keyOf(a)]
-			if h == nil || h.gen != o.Gen {
-				h = &keyHist{gen: o.Gen}
-				hist[keyOf(a)] = h
-			}
 			switch a := a.(type) {
 			case Nudge:
+				nudges++
 				// WL5: no nudge under a hold.
-				if o.Gate.Held {
-					return fail("WL5: nudge under a held gate")
+				if o.Gate.Held || o.Hold[a.Key] {
+					return fail("WL5: nudge under a hold")
 				}
 				// WL4: no counted nudge while degraded.
 				if o.Provider.Degraded && !a.Paused {
 					return fail("WL4: counted nudge while degraded")
 				}
-				if !h.lastNudge.IsZero() && o.Now.Sub(h.lastNudge) < DefaultBase {
-					return fail("WL3: nudges of %v %v apart", a.Key, o.Now.Sub(h.lastNudge))
+				// WL3: one nudge per seat per Base, whatever the work.
+				if !lastSeatNudge.IsZero() && o.Now.Sub(lastSeatNudge) < DefaultBase {
+					return fail("WL3: seat nudged %v after its last nudge", o.Now.Sub(lastSeatNudge))
 				}
-				h.lastNudge = o.Now
+				lastSeatNudge = o.Now
+				lastNudge[a.Key] = o.Now
+				// WL3: a counted nudge waits out its backoff: Base doubling
+				// from the last counted nudge, never less.
+				if !a.Paused {
+					if c, ok := lastCounted[a.Key]; ok && c.gen == o.Gen && a.Attempt == c.attempt+1 {
+						if want := min(DefaultBase<<max(c.attempt-1, 0), DefaultCap); o.Now.Sub(c.at) < want {
+							return fail("WL3: attempt %d of %v %v after attempt %d, want >= %v", a.Attempt, a.Key, o.Now.Sub(c.at), c.attempt, want)
+						}
+					}
+					lastCounted[a.Key] = counted{at: o.Now, attempt: a.Attempt, gen: o.Gen}
+				}
+				lastHeard[a.Key] = o.Now
 			case Recycle:
 				if o.Provider.Degraded {
 					return fail("WL4: recycle while degraded")
@@ -293,21 +288,31 @@ func runSequence(seed uint64) error {
 						return fail("WL3: %d recycles of started %v", recycles[a.Key], a.Key)
 					}
 				} else {
-					if !h.lastTriggerRecycle.IsZero() && o.Now.Sub(h.lastTriggerRecycle) < DefaultRecycleRepost {
-						return fail("WL3: trigger recycles %v apart", o.Now.Sub(h.lastTriggerRecycle))
+					if t := lastTrigger[a.Key]; !t.IsZero() && o.Now.Sub(t) < DefaultRecycleRepost {
+						return fail("WL3: trigger recycles %v apart", o.Now.Sub(t))
 					}
-					h.lastTriggerRecycle = o.Now
+					lastTrigger[a.Key] = o.Now
 				}
 			case Release:
 				// WL2: never release started work.
 				if !o.StartedRead || o.Started[a.Key] != 0 || s.started[a.Key] {
 					return fail("WL2: release of started %v", a.Key)
 				}
+				// WL3: a release that did not finish is retried at Cap.
+				if pe, ok := entryOf(prev, a.Key); ok && pe.Unreleased && prev.Release == nil {
+					if at := unfinished[a.Key]; o.Now.Sub(at) < DefaultCap {
+						return fail("WL3: release of %v retried %v after it was kept", a.Key, o.Now.Sub(at))
+					}
+				}
 			case Alert:
 				if o.Provider.Degraded && a.Reason != AlertReleaseRacedStart {
 					return fail("WL4: escalation while degraded")
 				}
+				lastHeard[a.Key] = o.Now
 			}
+		}
+		if nudges > 1 {
+			return fail("WL3: %d nudges in one pass", nudges)
 		}
 		if o.Provider.Degraded {
 			if d.Next.Release != nil && (prev.Release == nil || *d.Next.Release != *prev.Release) {
@@ -320,15 +325,41 @@ func runSequence(seed uint64) error {
 			}
 		}
 
-		// The lane: commit, then mostly finish releases.
+		// WL1: every entry of a nudgeable seat hears from the ladder (a
+		// nudge or an alert) within Cap, give or take the passes it waits
+		// for the seat's nudge slot; a release, kept, never silences it.
+		eligible := !o.Gate.Held && o.Runtime == TriTrue && o.Quiet.State == Quiescent
+		for _, e := range d.Next.Entries {
+			since, ok := lastHeard[e.Key]
+			switch {
+			case !eligible || !ok || o.Hold[e.Key] || prev.Gen != o.Gen || (d.Next.Release != nil && d.Next.Release.Key == e.Key):
+				lastHeard[e.Key] = o.Now
+			case o.Now.Sub(since) > DefaultCap+3*maxStep+2*DefaultBase:
+				return fail("WL1: %v of a quiet seat has not heard from the ladder for %v", e.Key, o.Now.Sub(since))
+			}
+		}
+		for k := range lastHeard {
+			if _, ok := entryOf(d.Next, k); !ok {
+				delete(lastHeard, k)
+			}
+		}
+
+		// The lane: commit, then finish releases: mostly released, else
+		// kept (ReleaseUnfinished), else (a crash) left pending.
 		if d.Changed {
 			s.rec = d.Next
 		}
 		for _, a := range d.Actions {
 			switch a := a.(type) {
 			case Release:
-				if s.chance(70) {
+				switch n := s.rng.IntN(10); {
+				case n < 6:
 					s.drop(a.Key)
+				case n < 9:
+					if r, ok := ReleaseUnfinished(s.rec, a.Key, s.gen, o.Now); ok {
+						s.rec = r
+						unfinished[a.Key] = o.Now
+					}
 				}
 			case Recycle: // A16 drains the seat; it wakes at a new generation
 				if s.chance(70) {
@@ -338,22 +369,6 @@ func runSequence(seed uint64) error {
 		}
 	}
 	return nil
-}
-
-func keyOf(a Action) ClaimKey {
-	switch a := a.(type) {
-	case Nudge:
-		return a.Key
-	case Recycle:
-		return a.Key
-	case Release:
-		return a.Key
-	case Alert:
-		return a.Key
-	case Note:
-		return a.Key
-	}
-	panic("unknown action")
 }
 
 // WL8: whatever a row carried before the ladder first sees it (no cell, or

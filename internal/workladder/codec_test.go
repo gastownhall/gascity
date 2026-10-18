@@ -78,7 +78,7 @@ func TestLadderRoundTrip(t *testing.T) {
 // Names reads a claim the hook recorded without a store as naming its bead
 // in every store, as the writer does; an entry with no bead names nothing.
 func TestStartedNames(t *testing.T) {
-	s, err := DecodeStarted(`{"v":1,"claims":[{"store":"","bead":"ga-1","gen":1,"at":"2026-10-17T20:00:00Z","via":"claim"},{"store":"rig:a","bead":"ga-2","gen":1,"at":"","via":"adopt"},{"store":"rig:a","bead":"","gen":1,"at":"","via":"claim"}]}`)
+	s, err := DecodeStarted(`{"v":1,"claims":[{"store":"","bead":"ga-1","gen":1,"at":"2026-10-17T20:00:00Z","via":"claim"},{"store":"rig:a","bead":"ga-2","gen":1,"at":"2026-10-17T20:00:00Z","via":"adopt"},{"store":"rig:a","bead":"","gen":1,"at":"2026-10-17T20:00:00Z","via":"claim"}]}`)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,6 +159,8 @@ func TestDecodeIssues(t *testing.T) {
 		"version 0": `{"claims":[]}`,
 		"version 2": `{"v":2,"claims":[]}`,
 		"bad time":  `{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"at":"x","via":"claim"}]}`,
+		"no time":   `{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"at":"","via":"claim"}]}`,
+		"no at":     `{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"via":"claim"}]}`,
 	}
 	for name, raw := range started {
 		_, err := DecodeStarted(raw)

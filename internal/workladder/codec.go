@@ -30,7 +30,7 @@ var (
 	rungNames = map[Rung]string{RungAssigned: "assigned", RungClaimed: "claimed", RungStarted: "started", RungEscalated: "escalated"}
 	srcNames  = map[StartSource]string{
 		SrcAgent: "agent", SrcExecutionClaimStarted: "execution_claim_started",
-		SrcCurrentClaim: "current_claim", SrcCurrentlyProcessing: "currently_processing",
+		SrcCurrentClaim: "current_claim", SrcCurrentlyProcessing: "currently_processing", SrcClaimSession: "claim_session",
 	}
 )
 
@@ -56,26 +56,28 @@ func parseName[T comparable](names map[T]string, s string) (T, bool) {
 }
 
 type wireLadder struct {
-	V       int          `json:"v"`
-	Gen     int64        `json:"gen"`
-	Entries []wireEntry  `json:"entries"`
-	Release *wireRelease `json:"release,omitempty"`
+	V         int          `json:"v"`
+	Gen       int64        `json:"gen"`
+	LastNudge string       `json:"last_nudge,omitempty"`
+	Entries   []wireEntry  `json:"entries"`
+	Release   *wireRelease `json:"release,omitempty"`
 }
 
 type wireEntry struct {
-	Store     string `json:"store"`
-	Bead      string `json:"bead"`
-	Kind      string `json:"kind"`
-	Rung      string `json:"rung"`
-	Since     string `json:"since"`
-	Attempts  int    `json:"attempts"`
-	Paused    int    `json:"paused"`
-	Last      string `json:"last"`
-	Next      string `json:"next"`
-	Recycles  int    `json:"recycles"`
-	Escalated bool   `json:"escalated"`
-	Seed      string `json:"seed"`
-	RecycleAt string `json:"recycle_at"`
+	Store      string `json:"store"`
+	Bead       string `json:"bead"`
+	Kind       string `json:"kind"`
+	Rung       string `json:"rung"`
+	Since      string `json:"since"`
+	Attempts   int    `json:"attempts"`
+	Paused     int    `json:"paused"`
+	Last       string `json:"last"`
+	Next       string `json:"next"`
+	Recycles   int    `json:"recycles"`
+	Escalated  bool   `json:"escalated"`
+	Seed       string `json:"seed"`
+	RecycleAt  string `json:"recycle_at"`
+	Unreleased bool   `json:"unreleased,omitempty"`
 }
 
 type wireRelease struct {
@@ -105,7 +107,7 @@ func EncodeLadder(r Record) string {
 	if r.V == 0 {
 		return ""
 	}
-	w := wireLadder{V: Version, Gen: r.Gen, Entries: []wireEntry{}}
+	w := wireLadder{V: Version, Gen: r.Gen, LastNudge: fmtTime(r.LastNudge), Entries: []wireEntry{}}
 	for _, e := range sortedEntries(r.Entries) {
 		seed := ""
 		if e.Seed != 0 {
@@ -115,7 +117,7 @@ func EncodeLadder(r Record) string {
 			Store: e.Key.Store, Bead: e.Key.Bead, Kind: e.Kind.String(), Rung: e.Rung.String(),
 			Since: fmtTime(e.Since), Attempts: e.Attempts, Paused: e.Paused, Last: fmtTime(e.Last),
 			Next: fmtTime(e.Next), Recycles: e.Recycles, Escalated: e.Escalated, Seed: seed,
-			RecycleAt: fmtTime(e.RecycleAt),
+			RecycleAt: fmtTime(e.RecycleAt), Unreleased: e.Unreleased,
 		})
 	}
 	if r.Release != nil {
@@ -145,9 +147,14 @@ func DecodeLadder(raw string) (Record, error) {
 		return bad("unknown version %d", w.V)
 	}
 	r := Record{V: Version, Gen: w.Gen}
+	lastNudge, err := parseTime(w.LastNudge)
+	if err != nil {
+		return bad("last_nudge %q: %v", w.LastNudge, err)
+	}
+	r.LastNudge = lastNudge
 	seen := map[ClaimKey]bool{}
 	for i, we := range w.Entries {
-		e := Entry{Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles, Escalated: we.Escalated}
+		e := Entry{Key: ClaimKey{Store: we.Store, Bead: we.Bead}, Attempts: we.Attempts, Paused: we.Paused, Recycles: we.Recycles, Escalated: we.Escalated, Unreleased: we.Unreleased}
 		if e.Key.Bead == "" {
 			return bad("entry %d: empty bead", i)
 		}
@@ -262,7 +269,8 @@ func EncodeStarted(s Started) string {
 // no error). Anything unreadable is a *DecodeIssue: the caller must then
 // treat every outstanding claim as started. It reads exactly what the
 // agent's writer reads (internal/session.DecodeWorkStarted: the JSON and the
-// version), so the two never disagree on whether the cell is readable.
+// version, and every claim's time, which the writer's time.Time requires),
+// so the two never disagree on whether the cell is readable.
 func DecodeStarted(raw string) (Started, error) {
 	if strings.TrimSpace(raw) == "" {
 		return Started{V: Version}, nil
@@ -279,6 +287,9 @@ func DecodeStarted(raw string) (Started, error) {
 	}
 	s := Started{V: Version}
 	for i, c := range w.Claims {
+		if c.At == "" {
+			return bad("claim %d: no time", i)
+		}
 		at, err := parseTime(c.At)
 		if err != nil {
 			return bad("claim %d: time %q: %v", i, c.At, err)
