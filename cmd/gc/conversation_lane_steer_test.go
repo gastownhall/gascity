@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -39,10 +40,24 @@ func (e recordingDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery)
 	return e.conversationLaneExec.Deliver(ctx, d)
 }
 
+// probeSteer probes f's conversation and returns its Caps.Steer.
+func probeSteer(t *testing.T, f *laneFixture) bool {
+	t.Helper()
+	st := f.laneStore(t)
+	v, info := f.view(t)
+	p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	return p.Caps.Steer
+}
+
 // TestLaneExecSteerCapIsRuntimeTimesFamily kills a probe whose Caps.Steer
-// reads only the runtime or only the family: a keystroke runtime steers
-// Codex and Claude, never Gemini; a runtime that cannot steer steers nobody;
-// and a conversation another host serves is steered by none here.
+// reads only the runtime or only the family: a protocol runtime steers every
+// family, a runtime that cannot steer steers nobody, no family takes a
+// keystroke steer (Codex reads tmux's trailing Escape as cancel, Claude
+// queues typed input for its next turn), and a conversation another host
+// serves is steered by none here.
 func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
@@ -50,27 +65,23 @@ func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 		mode     runtime.SteerMode
 		want     bool
 	}{
-		{"codex keystroke", "codex", runtime.SteerKeystroke, true},
-		{"claude keystroke", "claude", runtime.SteerKeystroke, true},
-		{"gemini keystroke", "gemini", runtime.SteerKeystroke, false},
+		{"codex protocol", "codex", runtime.SteerProtocol, true},
+		{"gemini protocol", "gemini", runtime.SteerProtocol, true},
+		{"codex keystroke", "codex", runtime.SteerKeystroke, false},
+		{"claude keystroke", "claude", runtime.SteerKeystroke, false},
 		{"codex none", "codex", runtime.SteerNone, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newLaneFixture(t, laneProvider(tc.provider))
 			f.sp.SteerModeValue = tc.mode
-			st := f.laneStore(t)
-			v, info := f.view(t)
-			p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
-			if err != nil {
-				t.Fatalf("Probe: %v", err)
-			}
-			if p.Caps.Steer != tc.want {
-				t.Fatalf("Caps.Steer = %v, want %v", p.Caps.Steer, tc.want)
+			if got := probeSteer(t, f); got != tc.want {
+				t.Fatalf("Caps.Steer = %v, want %v", got, tc.want)
 			}
 		})
 	}
 	t.Run("hosted elsewhere", func(t *testing.T) {
 		f := newLaneFixture(t, laneProvider("codex"))
+		f.sp.SteerModeValue = runtime.SteerProtocol
 		st := f.laneStore(t)
 		stampHost(t, f, st, 1, opjournal.KindMessage)
 		v, info := f.view(t)
@@ -81,11 +92,48 @@ func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 	})
 }
 
-// TestLaneExecBusyCodexDefaultWaits is D-STEER: a default (boundary) message
-// to a busy Codex session waits for the boundary, typing nothing, although
-// its runtime could steer it.
-func TestLaneExecBusyCodexDefaultWaits(t *testing.T) {
+// TestLaneExecSteerCapAgreesWithSessionReads kills a lane whose Caps.Steer
+// is derived apart from the supports_steer session responses report
+// (session.SubmissionCapabilitiesForRuntime over the row): for rows with no
+// provider, a wrapped provider, a provider kind, ACP by transport or by
+// provider, under every steer mode, the two agree.
+func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
+	rows := map[string]laneFixtureOpt{
+		"no provider":      func(map[string]string) {},
+		"codex":            laneProvider("codex"),
+		"builtin ancestor": func(m map[string]string) { m["provider"], m["builtin_ancestor"] = "my-wrap", "codex" },
+		"provider kind":    func(m map[string]string) { m["provider"], m["provider_kind"] = "fast", "claude" },
+		"acp transport":    func(m map[string]string) { m["provider"], m["transport"] = "codex", "acp" },
+		"acp provider":     laneProvider("acp"),
+	}
+	for name, opt := range rows {
+		for _, mode := range []runtime.SteerMode{runtime.SteerKeystroke, runtime.SteerProtocol, runtime.SteerNone} {
+			t.Run(name+"/"+string(mode), func(t *testing.T) {
+				f := newLaneFixture(t, opt)
+				f.sp.SteerModeValue = mode
+				row, err := f.store.Get(f.id)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+				want := session.SubmissionCapabilitiesForRuntime(row.Metadata, true,
+					runtime.TurnInterruptModeFor(f.sp, f.name), runtime.SteerModeFor(f.sp, f.name)).SupportsSteer
+				if got := probeSteer(t, f); got != want {
+					t.Fatalf("lane Caps.Steer = %v, session reads supports_steer = %v", got, want)
+				}
+			})
+		}
+	}
+}
+
+// TestLaneExecBusyDefaultWaits is D-STEER: a default (boundary) message to a
+// busy session waits for the boundary, typing nothing, although its runtime
+// could steer it.
+func TestLaneExecBusyDefaultWaits(t *testing.T) {
 	f := newLaneFixture(t, laneProvider("codex"))
+	f.sp.SteerModeValue = runtime.SteerProtocol
+	if !probeSteer(t, f) {
+		t.Fatal("Caps.Steer = false; the wait must be tested against a session the lane could steer")
+	}
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "after this turn"))
 	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
@@ -103,12 +151,14 @@ func TestLaneExecBusyCodexDefaultWaits(t *testing.T) {
 	}
 }
 
-// TestLaneExecSteersBusyCodex proves an explicit steer to a busy Codex
-// session types into the running turn: the lane hands the executor a steer in
-// joins mode, the executor sends it with immediate delivery under the Take's
-// fence (the runtime's NudgeNow), and the op closes succeeded via steer.
-func TestLaneExecSteersBusyCodex(t *testing.T) {
+// TestLaneExecSteersBusySession proves an explicit steer to a busy session
+// its runtime can steer goes into the running turn: the lane hands the
+// executor a steer in joins mode, the executor sends it with immediate
+// delivery under the Take's fence (the runtime's NudgeNow), and the op closes
+// succeeded via steer.
+func TestLaneExecSteersBusySession(t *testing.T) {
 	f := newLaneFixture(t, laneProvider("codex"))
+	f.sp.SteerModeValue = runtime.SteerProtocol
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "also check the logs", steerMsg(opjournal.FallbackBoundary)))
 	var mu sync.Mutex
@@ -134,8 +184,38 @@ func TestLaneExecSteersBusyCodex(t *testing.T) {
 		t.Fatalf("runtime nudges = %+v, want one fenced NudgeNow of the text", calls)
 	}
 	o := f.get(t, st, op.ID).Outcome
-	if o.Arm != opjournal.ArmSucceeded || o.Result.Via != laneViaSteer || o.Result.TurnLink != opjournal.LinkNone || o.Result.TurnBasis != opjournal.BasisNoSource {
-		t.Fatalf("outcome = %+v, want succeeded via steer, link none/no_source", o)
+	if o.Arm != opjournal.ArmSucceeded || o.Result.Via != laneViaSteer || o.Degradation != "" || o.Result.TurnLink != opjournal.LinkNone || o.Result.TurnBasis != opjournal.BasisNoSource {
+		t.Fatalf("outcome = %+v, want succeeded via steer, no degradation, link none/no_source", o)
+	}
+}
+
+// TestLaneExecSteersUnfenced proves a steer to a row with no instance token
+// goes out unfenced through the runtime's NudgeNow and closes succeeded via
+// steer with unfenced_delivery.
+func TestLaneExecSteersUnfenced(t *testing.T) {
+	f := newLaneFixture(t, laneProvider("codex"), noLaneToken)
+	f.sp.SteerModeValue = runtime.SteerProtocol
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "and the logs", steerMsg(opjournal.FallbackBoundary)))
+	var mu sync.Mutex
+	var reqs []worker.NudgeRequest
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+		busyLane(e)
+		recordRequests(e, &mu, &reqs)
+		return e
+	})
+	if err != nil || res.Done != opjournal.DoneAccepted {
+		t.Fatalf("Pass = %+v, %v; want accepted", res, err)
+	}
+	if len(reqs) != 1 || !reqs[0].Fence.IsZero() || reqs[0].Delivery != worker.NudgeDeliveryImmediate || !reqs[0].AllowUnfenced {
+		t.Fatalf("requests = %+v, want one unfenced immediate nudge", reqs)
+	}
+	if calls := f.nudges(); len(calls) != 1 || calls[0].Method != "NudgeNow" || calls[0].Fence != (runtime.InputFence{}) {
+		t.Fatalf("runtime nudges = %+v, want one unfenced NudgeNow", calls)
+	}
+	o := f.get(t, st, op.ID).Outcome
+	if o.Arm != opjournal.ArmSucceeded || o.Result.Via != laneViaSteer || o.Degradation != opjournal.DegradationUnfencedDelivery {
+		t.Fatalf("outcome = %+v, want succeeded via steer with unfenced_delivery", o)
 	}
 }
 
@@ -143,6 +223,7 @@ func TestLaneExecSteersBusyCodex(t *testing.T) {
 // is delivered as a normal turn: starts mode, default delivery, via live.
 func TestLaneExecSteerAtBoundaryIsANormalTurn(t *testing.T) {
 	f := newLaneFixture(t, laneProvider("codex"))
+	f.sp.SteerModeValue = runtime.SteerProtocol
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "go", steerMsg(opjournal.FallbackBoundary)))
 	var mu sync.Mutex
@@ -167,40 +248,43 @@ func TestLaneExecSteerAtBoundaryIsANormalTurn(t *testing.T) {
 }
 
 // TestLaneExecSteerUnsupportedFamily proves a steer to a busy session whose
-// family takes no mid-turn input follows its fallback: boundary waits busy
-// with nothing typed, fail closes failed{unsupported}.
+// family takes no keystroke steer follows its fallback: boundary waits busy
+// with nothing typed, fail closes failed{unsupported}. Codex is here: tmux's
+// trailing Escape would cancel its running turn.
 func TestLaneExecSteerUnsupportedFamily(t *testing.T) {
-	t.Run("boundary", func(t *testing.T) {
-		f := newLaneFixture(t, laneProvider("gemini"))
-		st := f.laneStore(t)
-		op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", steerMsg(opjournal.FallbackBoundary)))
-		res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
-			busyLane(e)
-			return e
+	for _, provider := range []string{"gemini", "codex", "claude"} {
+		t.Run(provider+"/boundary", func(t *testing.T) {
+			f := newLaneFixture(t, laneProvider(provider))
+			st := f.laneStore(t)
+			op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", steerMsg(opjournal.FallbackBoundary)))
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+				busyLane(e)
+				return e
+			})
+			if err != nil || res.Took != opjournal.TakeNone || !res.Busy {
+				t.Fatalf("Pass = %+v, %v; want a busy wait", res, err)
+			}
+			if len(f.nudges()) != 0 || f.get(t, st, op.ID).Status != opjournal.StatusSubmitted {
+				t.Fatal("a steer the session cannot take was typed or closed")
+			}
 		})
-		if err != nil || res.Took != opjournal.TakeNone || !res.Busy {
-			t.Fatalf("Pass = %+v, %v; want a busy wait", res, err)
-		}
-		if len(f.nudges()) != 0 || f.get(t, st, op.ID).Status != opjournal.StatusSubmitted {
-			t.Fatal("a steer the session cannot take was typed or closed")
-		}
-	})
-	t.Run("fail", func(t *testing.T) {
-		f := newLaneFixture(t, laneProvider("gemini"))
-		st := f.laneStore(t)
-		op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", steerMsg(opjournal.FallbackFail)))
-		res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
-			busyLane(e)
-			return e
+		t.Run(provider+"/fail", func(t *testing.T) {
+			f := newLaneFixture(t, laneProvider(provider))
+			st := f.laneStore(t)
+			op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", steerMsg(opjournal.FallbackFail)))
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+				busyLane(e)
+				return e
+			})
+			if err != nil || res.Took != opjournal.TakeNone {
+				t.Fatalf("Pass = %+v, %v; want nothing taken", res, err)
+			}
+			if o := f.get(t, st, op.ID).Outcome; o.Arm != opjournal.ArmFailed || o.Reason != opjournal.ReasonUnsupported {
+				t.Fatalf("outcome = %+v, want failed{unsupported}", o)
+			}
+			if len(f.nudges()) != 0 {
+				t.Fatal("an unsupported steer was typed")
+			}
 		})
-		if err != nil || res.Took != opjournal.TakeNone {
-			t.Fatalf("Pass = %+v, %v; want nothing taken", res, err)
-		}
-		if o := f.get(t, st, op.ID).Outcome; o.Arm != opjournal.ArmFailed || o.Reason != opjournal.ReasonUnsupported {
-			t.Fatalf("outcome = %+v, want failed{unsupported}", o)
-		}
-		if len(f.nudges()) != 0 {
-			t.Fatal("an unsupported steer was typed")
-		}
-	})
+	}
 }

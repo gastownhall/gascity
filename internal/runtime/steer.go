@@ -17,7 +17,11 @@ const (
 	// takes the text.
 	SteerKeystroke SteerMode = "keystroke"
 	// SteerProtocol means the runtime steers the running turn through a
-	// protocol, for every agent provider it hosts.
+	// protocol, for every agent provider it hosts. Its immediate nudge
+	// ([ImmediateNudgeProvider], or a fenced nudge with Immediate set) is
+	// that steer: a caller steers every mode through the immediate nudge, so
+	// a runtime that reports this mode must route its immediate nudge into
+	// the running turn.
 	SteerProtocol SteerMode = "protocol"
 )
 

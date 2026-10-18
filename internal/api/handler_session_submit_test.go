@@ -686,18 +686,20 @@ func TestBackgroundMessageNeverStartsInProcess(t *testing.T) {
 
 // TestSessionReadsReportSteer kills a read model whose supports_steer
 // disagrees with Manager.SubmissionCapabilities: steer is the runtime's steer
-// mode combined with the session's provider family, so Codex over a
-// keystroke runtime steers, Codex over a runtime that cannot steer does not,
-// and Gemini, whose CLI takes no typed input mid-turn, does not.
+// mode combined with the session's provider family, so a protocol runtime
+// steers every family, a runtime that cannot steer steers none, and no family
+// takes a keystroke steer (Codex reads tmux's trailing Escape as cancel).
 func TestSessionReadsReportSteer(t *testing.T) {
 	for _, tc := range []struct {
 		provider string
 		mode     runtime.SteerMode
 		want     bool
 	}{
-		{provider: "codex", mode: runtime.SteerKeystroke, want: true},
+		{provider: "codex", mode: runtime.SteerProtocol, want: true},
+		{provider: "gemini", mode: runtime.SteerProtocol, want: true},
+		{provider: "codex", mode: runtime.SteerKeystroke, want: false},
+		{provider: "claude", mode: runtime.SteerKeystroke, want: false},
 		{provider: "codex", mode: runtime.SteerNone, want: false},
-		{provider: "gemini", mode: runtime.SteerKeystroke, want: false},
 	} {
 		t.Run(tc.provider+"/"+string(tc.mode), func(t *testing.T) {
 			fs := newSessionFakeState(t)

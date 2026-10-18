@@ -52,7 +52,11 @@ type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
 	SupportsInterruptNow bool `json:"supports_interrupt_now"`
 	// SupportsSteer reports that a steer reaches the session's running turn
-	// ([SupportsSteer]); without it a steer waits for the turn's boundary.
+	// ([SupportsSteerForInfo]). Without it a steer follows its
+	// on_unsupported policy: boundary waits for the turn's boundary, fail
+	// closes the op failed{unsupported}. No submit intent steers yet: the
+	// capability is read by conversation-lane producers, whose steers only
+	// the conversation lane delivers.
 	SupportsSteer bool `json:"supports_steer"`
 }
 
@@ -86,7 +90,7 @@ func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQu
 // [runtime.TurnInterruptModeFor], and steers in steer, its
 // [runtime.SteerModeFor]: a runtime that cannot interrupt the session's turn
 // withdraws interrupt_now, and steer is the runtime's mode combined with the
-// session's provider family ([SupportsSteer]).
+// session's provider family ([SupportsSteerForInfo]).
 func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode, steer runtime.SteerMode) SubmissionCapabilities {
 	caps := SubmissionCapabilitiesForMetadata(metadata, hasDeferredQueue)
 	if refusesTurnInterrupt(beads.Bead{Metadata: metadata}, mode) {

@@ -219,12 +219,11 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (l
 // caps are the runtime's capabilities for conv. Content is live only for a
 // keystroke-mode runtime the conversation's row does not stamp as hosted
 // elsewhere for its current generation (DES-BX D7). A live runtime steers
-// where its steer mode and the session's provider family allow it
-// (session.SupportsSteer, D-STEER). Nothing deduplicates, responds or
-// injects in band here.
+// where its steer mode and the session row allow it
+// (session.SupportsSteerForInfo, the source session responses read too;
+// D-STEER). Nothing deduplicates, responds or injects in band here.
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
-	transport := e.target.sessionTransport()
 	caps := opjournal.Caps{
 		Live:     runtime.TurnInterruptModeFor(e.deps.sp, name) != runtime.TurnInterruptProtocol,
 		Input:    laneFenceMode(runtime.InputFencingFor(e.deps.sp, name)),
@@ -232,7 +231,7 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 		LinkWait: opjournal.DefaultLinkWait,
 		LeaseTTL: opjournal.DefaultLeaseTTL,
 	}
-	if transport == "acp" {
+	if e.target.sessionTransport() == "acp" {
 		caps.Text = opjournal.TextPlain
 	}
 	if caps.Live && e.deps.lane != nil {
@@ -244,7 +243,7 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 			caps.Live = false
 		}
 	}
-	caps.Steer = caps.Live && session.SupportsSteer(session.ProviderFamilyFromInfo(e.info, e.target.providerFamily()), transport, runtime.SteerModeFor(e.deps.sp, name))
+	caps.Steer = caps.Live && session.SupportsSteerForInfo(e.info, runtime.SteerModeFor(e.deps.sp, name))
 	return caps, nil
 }
 
@@ -277,8 +276,10 @@ var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a ha
 
 // Deliver implements opjournal.Executor: one fenced live-only nudge of the
 // delivery's text, verbatim, under its delivery key, through the handle its
-// probe resolved. A steer goes out with immediate delivery, typed into the
-// running turn without waiting for idle, and is recorded via steer.
+// probe resolved. A steer goes out with immediate delivery, into the running
+// turn without waiting for idle (a keystroke runtime types it; a protocol
+// runtime's immediate nudge is its steer, runtime.SteerProtocol), and is
+// recorded via steer.
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
 	if h == nil {
@@ -288,9 +289,9 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 	if d.Fence.Token != "" {
 		fence = runtime.InputFence{Generation: d.Fence.Generation, Epoch: d.Fence.Epoch, Token: d.Fence.Token}
 	}
-	delivery, via := worker.NudgeDeliveryDefault, laneViaLive
+	delivery := worker.NudgeDeliveryDefault
 	if d.Steer {
-		delivery, via = worker.NudgeDeliveryImmediate, laneViaSteer
+		delivery = worker.NudgeDeliveryImmediate
 	}
 	at := e.deps.clk.Now()
 	res, err := h.Nudge(ctx, sessionActor(session.ActorController, e.deps.cityPath), worker.NudgeRequest{
@@ -301,10 +302,8 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		Fence:         fence,
 		AllowUnfenced: true,
 	})
-	out := laneDeliveryResult(res, err, at, fence.IsZero())
-	if dv, ok := out.(opjournal.Delivered); ok {
-		dv.Via = via
-		out = dv
+	out := laneDeliveryResult(res, err, at, fence.IsZero(), d.Steer)
+	if _, ok := out.(opjournal.Delivered); ok {
 		stampLastNudgeDeliveredAt(sessionFrontDoor(e.deps.sessions), e.info.ID, e.deps.clk.Now())
 	}
 	return out
@@ -312,12 +311,18 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 
 // laneDeliveryResult maps one nudge's answer to the lane's result (DES-O1
 // §7.2). unfencedReq says the request carried no fence, because the row
-// names no token. A submit the runtime could not confirm may have delivered,
+// names no token; steer says it was a steer, recorded via steer. A steer
+// starts no turn, so its unobserved delivery carries no turn-start
+// degradation. A submit the runtime could not confirm may have delivered,
 // so it is Unknown; a nudge refused on a pending interaction, whichever
 // runtime refused it, or one the runtime reports never sent, is a transient
 // miss. Any other error may have come after input reached the session, so it
 // is Unknown too: a retake under a fresh key would deliver it twice.
-func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq bool) opjournal.DeliveryResult {
+func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq, steer bool) opjournal.DeliveryResult {
+	via, unobserved := laneViaLive, laneDegradationTurnStartUnobserved
+	if steer {
+		via, unobserved = laneViaSteer, ""
+	}
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.Delivered {
 		if res.Unfenced || unfencedReq {
 			degradation = opjournal.DegradationUnfencedDelivery
@@ -325,7 +330,7 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 		return opjournal.Delivered{
 			Record:      opjournal.DeliveryRecord{At: at, Ack: ack},
 			Evidence:    opjournal.TurnEvidence{HasSource: false},
-			Via:         laneViaLive,
+			Via:         via,
 			Degradation: degradation,
 		}
 	}
@@ -336,7 +341,7 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 	case err == nil:
 		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("runtime did not take the delivery (%s)", res.Undelivered)}
 	case errors.Is(err, runtime.ErrNudgeDeliveredUnobserved):
-		return delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)
+		return delivered(opjournal.AckDeliveredUnobserved, unobserved)
 	case errors.Is(err, runtime.ErrNudgeRejected):
 		return opjournal.Rejected{KeyRejected: true, Reason: err.Error()}
 	case errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed), errors.As(err, &miss) && miss.Partial:
