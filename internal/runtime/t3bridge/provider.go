@@ -76,6 +76,9 @@ type Provider struct {
 	// the thread and its dispatch.
 	fenceChecked func(name string)
 
+	// fresh coalesces fresh snapshot reads (DES-T3I D7).
+	fresh freshReads
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
@@ -1517,8 +1520,14 @@ func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 
 // rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
 // never from the cache, and caches what it read for the bridge's other
-// readers.
+// readers. Concurrent callers share reads by generation (freshReads): each
+// is answered by a read that started after it arrived.
 func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}, error) {
+	return p.fresh.do(ctx, p.rpcSnapshotRead)
+}
+
+// rpcSnapshotRead is one snapshot read for rpcSnapshotFresh.
+func (p *Provider) rpcSnapshotRead(ctx context.Context) (map[string]interface{}, error) {
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
