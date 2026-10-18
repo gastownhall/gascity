@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"fmt"
+	"github.com/gastownhall/gascity/internal/workladder"
 	"maps"
 	"strings"
 	"time"
@@ -121,31 +122,24 @@ type stalledClaim struct {
 
 // stalledClaimOf is the claim an execution-stalled stop of row gives back,
 // and whether the seat records that a turn began it (mc-358yo, PHASE1-2
-// §6.5).
+// §6.5). It runs with the work ladder off only: with it on, the stop is the
+// ladder's recycle, which gives back nothing (§8 W3), and the ladder releases
+// an unstarted claim itself.
 //
-// With the work ladder off, the execution backstop requests the stop, and its
-// own record is execution_claim_started at the row's current instance token
-// (startedValue), the stamp that already vetoes its drain. Only that names the
-// claim started: work_started names every claim the hook handed out, and a
-// stamp from an earlier incarnation names one the seat was woken on and never
-// ran, so keeping either would leave the seat asleep holding the claim, the
+// The execution backstop requests the stop, and its own record is
+// execution_claim_started at the row's current instance token (startedValue),
+// the stamp that already vetoes its drain. Only that keeps the claim:
+// work_started names every claim the hook handed out, and a stamp from an
+// earlier incarnation names one the seat was woken on and never ran, so
+// keeping either would leave the seat asleep holding the claim, the
 // assigned-work wake would restart it on it, and the backstop would drain it
-// again: the v5.10x loop. With the ladder on, the stop is the ladder's
-// recycle, and either record keeps the claim (work_started unreadable keeps
-// it too).
-func stalledClaimOf(row session.Info, meta map[string]string, ladderOn bool) stalledClaim {
+// again: the v5.10x loop.
+func stalledClaimOf(row session.Info, meta map[string]string) stalledClaim {
 	beadID := strings.TrimSpace(meta[executionClaimNudgeWorkKey])
 	if beadID == "" {
 		return stalledClaim{}
 	}
-	stamp := strings.TrimSpace(meta[executionClaimStartedKey])
-	started := stamp == strings.TrimSpace(meta["instance_token"])+"|"+beadID
-	if ladderOn {
-		seat := releaseSeat{}
-		seat.nameRecorded(startedClaimBead(stamp))
-		seat.nameWorkStarted(row.WorkStartedRaw)
-		started = seat.recordedUnread || seat.recorded[beadID]
-	}
+	started := strings.TrimSpace(meta[executionClaimStartedKey]) == strings.TrimSpace(meta["instance_token"])+"|"+beadID
 	return stalledClaim{beadID: beadID, row: row, started: started}
 }
 
@@ -180,7 +174,7 @@ func stopDecide(v txView) txStep {
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
 	if stopReason(v.It) == executionStalledDrainReason && x7Releases(v.World, v.Meta) {
-		plan.stalled = stalledClaimOf(v.Row, v.Meta, workLadderOn(v.World))
+		plan.stalled = stalledClaimOf(v.Row, v.Meta)
 	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
@@ -266,12 +260,18 @@ func workLadderOn(w *World) bool {
 // x7Releases reports whether an execution-stalled stop of the row whose
 // metadata is meta gives back the execution backstop's claim (X7): only
 // with the ladder rolled back, and only a marker the backstops wrote for the
-// row's own incarnation. A recycle the ladder decided before it was turned
-// off finds no such marker (the ladder never writes one), so it keeps the
-// claim, as the ladder's recycles do.
+// row's own incarnation, and not when the row's work_ladder cell records a
+// recycle at the row's generation (the switch flipped mid-recycle): either
+// way the stop is the ladder's, which keeps the claim.
 func x7Releases(w *World, meta map[string]string) bool {
 	token := strings.TrimSpace(meta["instance_token"])
-	return !workLadderOn(w) && token != "" && strings.TrimSpace(meta[executionClaimNudgeTokenKey]) == token
+	if workLadderOn(w) || token == "" || strings.TrimSpace(meta[executionClaimNudgeTokenKey]) != token {
+		return false
+	}
+	// A recycle the ladder asked for at this generation, with the switch
+	// flipped to off before the stop landed, is still the ladder's.
+	cell, err := workladder.DecodeLadder(meta[session.WorkLadderKey])
+	return err != nil || cell.V == 0 || cell.RecycledGen != rowGeneration(meta)
 }
 
 // releaseStalledClaim gives back, after a confirmed stop, the claim an

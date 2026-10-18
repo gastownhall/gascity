@@ -869,6 +869,32 @@ func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr
 	return runtimeDrainAck(newDrainOps(sp), target, operator, os.Getenv("GC_INSTANCE_TOKEN"), jsonOutput, stdout, stderr)
 }
 
+// drainAckCaller is who runs a drain-ack: an operator (--operator), or the
+// session itself, and the session identity its environment carries.
+type drainAckCaller struct {
+	operator         bool
+	sessionID, token string // the caller's GC_SESSION_ID and GC_INSTANCE_TOKEN
+}
+
+// names reports whether the caller's own environment names the session
+// bead b: an --operator ack from inside the session it targets is that
+// session's own ack.
+func (c drainAckCaller) names(b beads.Bead) bool {
+	id, token := strings.TrimSpace(c.sessionID), strings.TrimSpace(c.token)
+	return (id != "" && id == b.ID) || (token != "" && token == strings.TrimSpace(b.Metadata["instance_token"]))
+}
+
+// drainAckCallerSessionID is the caller's GC_SESSION_ID, a seam for tests,
+// which MUST NOT call t.Parallel() when they swap it.
+var drainAckCallerSessionID = callerSessionIDFromEnv
+
+// callerSessionIDFromEnv is the calling process's GC_SESSION_ID.
+func callerSessionIDFromEnv() string { return os.Getenv("GC_SESSION_ID") }
+
+// drainAckOwnOperator is the refusal of an --operator ack the caller makes
+// on its own session.
+const drainAckOwnOperator = "--operator acks another session from outside it, and the caller's GC_SESSION_ID or GC_INSTANCE_TOKEN names this one; nothing acknowledged"
+
 // runtimeDrainAck decides the city's mode once. A legacy city runs
 // doRuntimeDrainAck exactly as before E3. A v2 city keeps legacy's order and
 // binds the ack to the session row (CONTRACT v5.7 D5): the incarnation check,
@@ -878,24 +904,23 @@ func cmdRuntimeDrainAck(args []string, jsonOutput, operator bool, stdout, stderr
 // stay released, which is safe because they were unexecuted. envToken is the
 // caller's GC_INSTANCE_TOKEN.
 func runtimeDrainAck(dops drainOps, target sessionRuntimeTarget, operator bool, envToken string, jsonOutput bool, stdout, stderr io.Writer) int {
-	// A seat's own ack, in either mode, is refused while it holds started
-	// work it has not finished (PHASE1-2 §6.5, OD9; the hook's drain-ack fence
-	// for the direct command). An operator's ack is deliberate.
-	if !operator {
-		if held := drainAckStartedClaimsHeld(target.cityPath, target.sessionName, stderr); len(held) > 0 {
-			fmt.Fprintf(stderr, "gc runtime drain-ack: this session holds %s, which it started and has not finished: continue it (an operator acks with --operator); nothing acknowledged\n", strings.Join(held, ", ")) //nolint:errcheck // best-effort stderr
-			return drainAckRefused
-		}
+	caller := drainAckCaller{operator: operator, sessionID: drainAckCallerSessionID(), token: envToken}
+	if operator && caller.sessionID != "" && caller.sessionID == strings.TrimSpace(target.sessionID) {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", drainAckOwnOperator) //nolint:errcheck // best-effort stderr
+		return drainAckRefused
 	}
 	cfg, strict := drainAckCityMode(target.cityPath)
 	if !strict {
-		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, jsonOutput, stdout, stderr)
+		return doRuntimeDrainAck(dops, target.cityPath, target.display, target.sessionName, target.sessionID, caller, jsonOutput, stdout, stderr)
 	}
 	commit, code := checkDrainAckRowAt(target.cityPath, cfg, target.sessionName, target.sessionID, operator, envToken, stderr)
 	if code != 0 {
 		return code
 	}
-	drainAckReleaseHeldClaims(target.cityPath, target.sessionName, stderr)
+	if refusal := drainAckReleaseHeldClaims(target.cityPath, target.sessionName, caller, stderr); refusal != "" {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
+		return drainAckRefused
+	}
 	if commit != nil {
 		if err := commit(); err != nil {
 			fmt.Fprintf(stderr, "gc runtime drain-ack: held claims released; row ack not written, nothing acknowledged (safe to re-run): %v\n", err) //nolint:errcheck // best-effort stderr
@@ -1113,16 +1138,27 @@ var drainAckReleaseHeldClaims = releaseUnexecutedClaimsForSession
 // releaseUnexecutedClaimsForSession resolves this city's residency-correct work
 // legs and gives back every in_progress claim the draining session still holds.
 //
+// A seat's own ack, and an --operator ack whose caller's environment names
+// the seat, is the seat saying it holds nothing. It is refused, with nothing
+// released, while the seat holds started work the release would keep
+// (PHASE1-2 §6.5, OD9: the hook's drain-ack fence, for the direct command):
+// acking would stop the seat with that claim kept on it, the assigned-work
+// wake would restart it, and the cycle would repeat. An operator acks from
+// outside the session, and the --operator self-ack is refused outright. The
+// refusal is returned; "" is a pass that ran, or could not begin.
+//
 // The leg set mirrors `gc session close`, which leads with the WORK store and
 // hands in the relocated graph binding as a class leg: a claim that claim-time
 // routing left in the binding is invisible to a work-led scan, and would be
 // released by nothing. Best-effort throughout — a city that cannot be resolved
 // or a store that cannot be opened must never block the ack itself, which is the
 // signal the controller is waiting on.
-func releaseUnexecutedClaimsForSession(cityPath, sessionName string, stderr io.Writer) {
+func releaseUnexecutedClaimsForSession(cityPath, sessionName string, caller drainAckCaller, stderr io.Writer) string {
+	var refusal string
 	openDrainAckCity(cityPath, sessionName, stderr, func(cfg *config.City, store beads.Store, rigStores func() map[string]beads.Store) {
-		releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, stderr)
+		refusal = releaseUnexecutedClaimsForSessionStore(cityPath, cfg, store, rigStores, sessionName, caller, stderr)
 	})
+	return refusal
 }
 
 // openDrainAckCity opens the city at cityPath for a drain-ack's pass over
@@ -1181,18 +1217,28 @@ func openDrainAckCity(cityPath, sessionName string, stderr io.Writer, visit func
 // rigStores is a thunk, not a map, because opening the rig stores is real store
 // I/O on the pre-ack path. It is called only once resolution and the session
 // Get have both succeeded — a drain-ack that cannot find its session pays
-// nothing for stores it would immediately discard.
+// nothing for stores it would immediately discard. The refusal, and caller,
+// are releaseUnexecutedClaimsForSession's.
 func releaseUnexecutedClaimsForSessionStore(
 	cityPath string,
 	cfg *config.City,
 	store beads.Store,
 	rigStores func() map[string]beads.Store,
 	sessionName string,
+	caller drainAckCaller,
 	stderr io.Writer,
-) {
-	if legs, sessionBead, ok := drainAckSeat(cityPath, cfg, store, rigStores, sessionName); ok {
-		releaseUnexecutedClaimsOnDrainAck(legs, sessionBead, drainAckReleaseBudget, stderr)
+) string {
+	legs, sessionBead, ok := drainAckSeat(cityPath, cfg, store, rigStores, sessionName)
+	if !ok {
+		return ""
 	}
+	if caller.operator && caller.names(sessionBead) {
+		return drainAckOwnOperator
+	}
+	if held := releaseDrainAckClaims(legs, sessionBead, !caller.operator, drainAckReleaseBudget, stderr); len(held) > 0 {
+		return fmt.Sprintf("this session holds %s, which it started and has not finished: continue it (an operator acks from outside this session with --operator); nothing acknowledged", strings.Join(held, ", "))
+	}
+	return ""
 }
 
 // drainAckSeat resolves sessionName to its session bead and the work legs
@@ -1219,40 +1265,6 @@ func drainAckSeat(cityPath string, cfg *config.City, store beads.Store, rigStore
 	return workLegsFromCensus(cityPath, cfg, cityWorkLegOf(beads.WorkStore{Store: store}), rigs), sessionBead, true
 }
 
-// drainAckStartedClaimsHeld is the seam a seat's own drain-ack checks for
-// started work it has not finished; startedClaimsHeldForSession in
-// production. Tests that swap it MUST NOT call t.Parallel().
-var drainAckStartedClaimsHeld = startedClaimsHeldForSession
-
-// startedClaimsHeldForSession is the in_progress claims sessionName holds
-// that the drain-ack release would keep as started (startedClaimsKept): its
-// work_started cell or execution_claim_started stamp names them and no
-// dispatch hold parks them. The hook's drain-ack fence answers such a seat
-// with started_claim_held; this is the same check for a seat that runs `gc
-// runtime drain-ack` itself. Acking with them held would stop the seat while
-// the keep rule leaves them assigned to it: the assigned-work wake restarts
-// it, and the cycle repeats. A city or store it cannot open, or a read that
-// fails, finds nothing (best effort, as the release is): the release then
-// keeps the claims as before.
-func startedClaimsHeldForSession(cityPath, sessionName string, stderr io.Writer) []string {
-	var held []string
-	openDrainAckCity(cityPath, sessionName, stderr, func(cfg *config.City, store beads.Store, rigStores func() map[string]beads.Store) {
-		legs, sessionBead, ok := drainAckSeat(cityPath, cfg, store, rigStores, sessionName)
-		if !ok {
-			return
-		}
-		scope := releaseScopeOwn(sessionBead)
-		kept, err := startedClaimsKept(seatWorkFor(legs, scope), scope, releaseSeatOfBead(sessionBead))
-		if err != nil {
-			fmt.Fprintf(stderr, "gc runtime drain-ack: warning: reading this session's started claims: %v\n", err) //nolint:errcheck // best-effort stderr
-		}
-		for _, c := range kept {
-			held = append(held, c.bead.ID)
-		}
-	})
-	return held
-}
-
 // drainAckReleaseBudget bounds the whole held-claim release pass.
 //
 // The pass runs BEFORE the ack, which is the signal the controller waits on to
@@ -1272,8 +1284,11 @@ const drainAckReleaseBudget = 15 * time.Second
 // tells the controller it may stop this session, so acknowledging first opens a
 // window in which the session dies still holding exactly the claim this release
 // exists to clear.
-func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	drainAckReleaseHeldClaims(cityPath, sn, stderr)
+func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, caller drainAckCaller, jsonOutput bool, stdout, stderr io.Writer) int {
+	if refusal := drainAckReleaseHeldClaims(cityPath, sn, caller, stderr); refusal != "" {
+		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
+		return drainAckRefused
+	}
 	return finishRuntimeDrainAck(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
 }
 

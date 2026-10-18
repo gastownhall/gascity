@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"github.com/gastownhall/gascity/internal/workladder"
 	"io"
+	"strconv"
 	"sync/atomic"
 	"testing"
 	"testing/synctest"
@@ -850,17 +852,20 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 // on, the stop is the ladder's recycle, which keeps the claim whatever the
 // records say: the ladder gives back an unstarted claim itself, by a CAS
 // proving it unstarted, and never asks a stop to. A marker the backstops did
-// not write for the row's own incarnation names nothing.
+// not write for the row's own incarnation names nothing, and a recycle the
+// ladder decided at the row's generation stays the ladder's after the
+// switch flips to off.
 func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 	for _, c := range []struct {
-		name    string
-		reason  string
-		release bool
-		other   bool   // the seat holds a second in-progress bead
-		started string // the seat's record: "cell", "stamp" (current token), "old-stamp" or "unreadable"
-		ladder  bool   // the work ladder is on: the stop is its recycle
-		hold    string // a dispatch hold label on the claim
-		stale   bool   // the backstop's marker is another incarnation's
+		name     string
+		reason   string
+		release  bool
+		other    bool   // the seat holds a second in-progress bead
+		started  string // the seat's record: "cell", "stamp" (current token), "old-stamp" or "unreadable"
+		ladder   bool   // the work ladder is on: the stop is its recycle
+		hold     string // a dispatch hold label on the claim
+		stale    bool   // the backstop's marker is another incarnation's
+		recycled bool   // the ladder recycled the seat at its generation, then the switch flipped off
 	}{
 		{name: "execution-stalled", reason: executionStalledDrainReason, release: true},
 		{name: "execution-stalled, a second claim held", reason: executionStalledDrainReason, release: true, other: true},
@@ -870,11 +875,8 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 		{name: "ladder off: this incarnation's stamp, kept", reason: executionStalledDrainReason, started: "stamp"},
 		{name: "ladder off: stamped but hold:mayor, released", reason: executionStalledDrainReason, release: true, started: "stamp", hold: beadmeta.HoldMayorLabel},
 		{name: "ladder off: a stale marker, kept", reason: executionStalledDrainReason, stale: true},
-		{name: "ladder on: work_started names it, kept", reason: executionStalledDrainReason, started: "cell", ladder: true},
-		{name: "ladder on: an earlier incarnation's stamp, kept", reason: executionStalledDrainReason, started: "old-stamp", ladder: true},
-		{name: "ladder on: work_started unreadable, kept", reason: executionStalledDrainReason, started: "unreadable", ladder: true},
-		{name: "ladder on: started but hold:external, kept", reason: executionStalledDrainReason, started: "cell", ladder: true, hold: beadmeta.HoldExternalLabel},
-		{name: "ladder on: no record, kept (the ladder releases it itself)", reason: executionStalledDrainReason, ladder: true},
+		{name: "ladder off mid-recycle: the ladder's recycle at this generation, kept", reason: executionStalledDrainReason, recycled: true},
+		{name: "ladder on: kept whatever the records say (the recycle gives back nothing)", reason: executionStalledDrainReason, ladder: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string
@@ -913,6 +915,10 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				}
 				if err := store.SetMetadataBatch(id, map[string]string{executionClaimNudgeWorkKey: claim.ID, executionClaimNudgeTokenKey: token}); err != nil {
 					t.Fatal(err)
+				}
+				if c.recycled {
+					gen, _ := strconv.ParseInt(row.Metadata["generation"], 10, 64)
+					casSetMeta(t, store, id, session.WorkLadderKey, workladder.EncodeLadder(workladder.Record{V: 1, Gen: gen, RecycledGen: gen}))
 				}
 				if c.hold != "" {
 					if err := store.Update(claim.ID, beads.UpdateOpts{Labels: []string{c.hold}}); err != nil {
@@ -982,6 +988,7 @@ func TestExecutionStalledStopReleasesOnlyOnAConfirmedStop(t *testing.T) {
 			var work beads.Store
 			s, got, _ := stopRun(t, signaled(executionStalledDrainReason), undesired(executionStalledDrainReason), func(p *effectPass, l *fenceLeaf, store beads.Store, id string) {
 				work = store
+				p.World.Env.Cfg.Daemon.WorkLadder = "off" // the backstops' stop, which would give the claim back
 				claim, err := store.Create(beads.Bead{Title: "stalled step", Type: "task"})
 				if err != nil {
 					t.Fatal(err)

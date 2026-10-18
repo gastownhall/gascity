@@ -119,6 +119,7 @@ type startedLog struct {
 	releases    []string
 	acked       bool
 	unrecorded  []string
+	causes      []string // the work.started_unrecorded causes, in order
 	stepStarted []string
 }
 
@@ -190,9 +191,10 @@ func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkSt
 			return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee}, nil
 		},
 		StoreRef: func(string) string { return startedStoreRef },
-		EmitWorkStartedUnrecorded: func(_, _, beadID string, _ error) {
+		EmitWorkStartedUnrecorded: func(_, _, beadID string, cause error) {
 			l.add("unrecorded:" + beadID)
 			l.unrecorded = append(l.unrecorded, beadID)
+			l.causes = append(l.causes, cause.Error())
 		},
 		EmitExecutionStepStarted: func(step beads.Bead, _ string, _ []string, _ string) {
 			l.add("step_started:" + step.ID)
@@ -522,8 +524,9 @@ func TestHookClaimFailsOpenWhenTheStartedWriteFails(t *testing.T) {
 			if code != 0 || got.Action != "work" || got.BeadID != "work-1" {
 				t.Fatalf("code %d, result %+v; want work-1 delivered", code, got)
 			}
-			if len(l.unrecorded) != 1 || l.unrecorded[0] != "work-1" || strings.Count(stderr.String(), "delivering it anyway") != 1 {
-				t.Fatalf("unrecorded %v, stderr %q; want one event and one line", l.unrecorded, stderr.String())
+			if len(l.unrecorded) != 1 || l.unrecorded[0] != "work-1" || !strings.HasPrefix(l.causes[0], "delivered without a work_started record") ||
+				strings.Count(stderr.String(), "delivering it anyway") != 1 {
+				t.Fatalf("unrecorded %v, causes %q, stderr %q; want one event and one line", l.unrecorded, l.causes, stderr.String())
 			}
 		})
 	}
@@ -698,8 +701,11 @@ func TestHookClaimResetsAnUnreadableCell(t *testing.T) {
 	if cell := row.cell(t); len(cell.Claims) != 1 || !cell.Names(startedStoreRef, "work-1") {
 		t.Fatalf("work_started = %+v, want a readable cell holding work-1", cell)
 	}
-	if len(l.unrecorded) != 1 || !strings.Contains(stderr.String(), "unreadable") {
-		t.Fatalf("unrecorded %v, stderr %q; want the reset reported", l.unrecorded, stderr.String())
+	// Reported as a reset, never as a claim delivered without a record: it
+	// is recorded.
+	if len(l.causes) != 1 || !strings.Contains(l.causes[0], "was reset to this claim") || strings.Contains(l.causes[0], "delivered without") ||
+		!strings.Contains(stderr.String(), "recorded work-1 as started") || strings.Contains(stderr.String(), "delivering it anyway") {
+		t.Fatalf("causes %q, stderr %q; want the reset reported as a reset", l.causes, stderr.String())
 	}
 }
 
@@ -759,32 +765,85 @@ func TestHookDiscoveryOptionsCarryIdentities(t *testing.T) {
 }
 
 // TestRuntimeDrainAckRefusesASeatHoldingStartedWork (should-fix 4): a seat's
-// own `gc runtime drain-ack` is refused while it holds started work the
-// drain-ack release would keep, with nothing acknowledged; an operator's ack
-// is not checked. Acking would stop the seat with the claim kept on it, and
-// the assigned-work wake would restart it, in a loop.
+// own `gc runtime drain-ack` is refused, with nothing acknowledged, when the
+// release pass refuses (it holds started work the release would keep). An
+// --operator ack reaches the pass as an operator's, but one whose caller's
+// GC_SESSION_ID names the target is refused before it: an agent retrying as
+// --operator on itself would bring the stop/wake loop back.
 func TestRuntimeDrainAckRefusesASeatHoldingStartedWork(t *testing.T) {
-	prevHeld, prevRelease := drainAckStartedClaimsHeld, drainAckReleaseHeldClaims
-	t.Cleanup(func() { drainAckStartedClaimsHeld, drainAckReleaseHeldClaims = prevHeld, prevRelease })
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) {}
+	prevRelease, prevCaller := drainAckReleaseHeldClaims, drainAckCallerSessionID
+	t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckCallerSessionID = prevRelease, prevCaller })
 	for _, c := range []struct {
 		name     string
 		operator bool
-		held     []string
+		callerID string
+		refusal  string
 		want     int
+		passed   bool // the release pass ran
 	}{
-		{"own ack, started work held", false, []string{"g-1"}, drainAckRefused},
-		{"own ack, nothing held", false, nil, 0},
-		{"operator ack", true, []string{"g-1"}, 0},
+		{"own ack, started work held", false, "gc-7", "this session holds g-1", drainAckRefused, true},
+		{"own ack, nothing held", false, "gc-7", "", 0, true},
+		{"operator ack from outside", true, "gc-9", "", 0, true},
+		{"operator ack on its own session", true, "gc-7", "", drainAckRefused, false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			checked := false
-			drainAckStartedClaimsHeld = func(string, string, io.Writer) []string { checked = true; return c.held }
+			var got *drainAckCaller
+			drainAckCallerSessionID = func() string { return c.callerID }
+			drainAckReleaseHeldClaims = func(_, _ string, caller drainAckCaller, _ io.Writer) string { got = &caller; return c.refusal }
 			dops := newFakeDrainOps()
 			var stdout, stderr bytes.Buffer
-			code := runtimeDrainAck(dops, sessionRuntimeTarget{sessionName: "worker-1", display: "worker-1"}, c.operator, "", false, &stdout, &stderr)
-			if code != c.want || dops.acked["worker-1"] != (c.want == 0) || checked == c.operator {
-				t.Fatalf("code %d (want %d), acked %v, checked %v; stderr=%s", code, c.want, dops.acked["worker-1"], checked, stderr.String())
+			code := runtimeDrainAck(dops, sessionRuntimeTarget{sessionName: "worker-1", sessionID: "gc-7", display: "worker-1"}, c.operator, "tok-7", false, &stdout, &stderr)
+			if code != c.want || dops.acked["worker-1"] != (c.want == 0) || (got != nil) != c.passed {
+				t.Fatalf("code %d (want %d), acked %v, pass ran %v; stderr=%s", code, c.want, dops.acked["worker-1"], got != nil, stderr.String())
+			}
+			if got != nil && *got != (drainAckCaller{operator: c.operator, sessionID: c.callerID, token: "tok-7"}) {
+				t.Fatalf("the pass got caller %+v", *got)
+			}
+			if !c.passed && !strings.Contains(stderr.String(), "--operator acks another session from outside it") {
+				t.Fatalf("stderr %q: want the --operator self-ack named", stderr.String())
+			}
+		})
+	}
+}
+
+// TestDrainAckPassRefusesBeforeReleasingAnything (should-fix 4, review item
+// 2): the started-claim check is the release pass's own read, under its
+// budget. A seat's own ack that holds a started claim releases nothing, not
+// even its unstarted claims; an --operator ack whose caller's token names
+// the seat is refused outright; an operator from outside releases the
+// unstarted claim and keeps the started one.
+func TestDrainAckPassRefusesBeforeReleasingAnything(t *testing.T) {
+	for _, c := range []struct {
+		name          string
+		caller        drainAckCaller
+		refusal       string
+		unstartedOpen bool
+	}{
+		{"own ack", drainAckCaller{}, "an operator acks from outside this session with --operator", false},
+		{"operator, the seat's own token", drainAckCaller{operator: true, token: "tok-1"}, "--operator acks another session from outside it", false},
+		{"operator from outside", drainAckCaller{operator: true, token: "tok-9"}, "", true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			store := beads.NewMemStore()
+			seat := mustCreateDrainAckBead(t, store, beads.Bead{
+				ID: "worker-1", Title: "city/worker-1", Type: session.BeadType,
+				Metadata: map[string]string{"session_name": "worker-1", "template": "worker", "instance_token": "tok-1"},
+			}, "", "")
+			started := mustCreateDrainAckBead(t, store, beads.Bead{Title: "started", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+			unstarted := mustCreateDrainAckBead(t, store, beads.Bead{Title: "unstarted", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
+			casSetMeta(t, store, seat.ID, session.WorkStartedKey, startedCell(session.WorkStartedEntry{Bead: started.ID}))
+
+			var stderr bytes.Buffer
+			refusal := releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, "worker-1", c.caller, &stderr)
+
+			if (c.refusal == "") != (refusal == "") || !strings.Contains(refusal, c.refusal) {
+				t.Fatalf("refusal %q, want one containing %q", refusal, c.refusal)
+			}
+			if status, _ := drainAckBeadStatus(t, store, started.ID); status != "in_progress" {
+				t.Fatalf("started claim is %s, want kept", status)
+			}
+			if status, _ := drainAckBeadStatus(t, store, unstarted.ID); (status == "open") != c.unstartedOpen {
+				t.Fatalf("unstarted claim is %s; want released=%v", status, c.unstartedOpen)
 			}
 		})
 	}
@@ -795,7 +854,7 @@ func TestRuntimeDrainAckRefusesASeatHoldingStartedWork(t *testing.T) {
 // started; the step then blocks on a gate, so the work query serves it no
 // more; the seat is nudged with a --drain-ack nudge and runs the hook. The
 // hook answers started_claim_held and acks nothing, a direct
-// `gc runtime drain-ack` of its own would be refused (startedClaimsKept), and
+// `gc runtime drain-ack` of its own would be refused (releaseDrainAckClaims), and
 // had an ack happened anyway the drain-ack release keeps the claim. It stays
 // in_progress on the seat throughout.
 func TestStartedGateBlockedClaimSurvivesTheNudge(t *testing.T) {
@@ -851,12 +910,43 @@ func TestStartedGateBlockedClaimSurvivesTheNudge(t *testing.T) {
 
 	seat := drainAckSessionBead()
 	seat.Metadata[session.WorkStartedKey] = row.meta(t, session.WorkStartedKey)
-	scope := releaseScopeOwn(seat)
-	if kept, err := startedClaimsKept(seatWorkFor(legs, scope), scope, releaseSeatOfBead(seat)); err != nil || len(kept) != 1 || kept[0].bead.ID != claim.ID {
-		t.Fatalf("a direct drain-ack's check found %v, %v; want the claim, so the ack is refused", kept, err)
+	if held := releaseDrainAckClaims(legs, seat, true, drainAckReleaseBudget, &stderr); len(held) != 1 || held[0] != claim.ID {
+		t.Fatalf("a direct drain-ack's pass found %v; want the claim, so the ack is refused", held)
 	}
 	releaseUnexecutedClaimsOnDrainAck(legs, seat, drainAckReleaseBudget, &stderr)
 	if status, assignee := drainAckBeadStatus(t, work, claim.ID); status != "in_progress" || assignee != "worker-1" {
 		t.Fatalf("claim is %s/%q; want it in_progress on the seat", status, assignee)
+	}
+}
+
+// TestPlainHookPassesIdentitiesToTheDiscoveryDoor (E1, at the call site):
+// `gc hook` hands doHookDiscovery the seat's assignee and identities, which
+// the drain-ack fence on that door matches a started claim's assignee
+// against. (Plain `gc hook` refuses --drain-ack today, "requires --claim", so
+// the fence there is defense in depth: it holds the moment that changes.)
+func TestPlainHookPassesIdentitiesToTheDiscoveryDoor(t *testing.T) {
+	clearGCEnv(t)
+	disableManagedDoltRecoveryForTest(t)
+	t.Setenv("GC_BEADS", "file")
+	cityDir := writeFenceTestCity(t)
+	sessionID := newFenceSessionBead(t, cityDir, session.StateActive, "current-token")
+	installFenceWorkQueryProbe(t)
+	setFenceClaimEnv(t, cityDir, sessionID, "current-token")
+	prev := hookDiscover
+	t.Cleanup(func() { hookDiscover = prev })
+	var got *hookClaimOptions
+	hookDiscover = func(_, _ string, _ bool, opts hookClaimOptions, _ hookClaimOps, _ WorkQueryRunner, _, _ io.Writer, _ hookVisibility) int {
+		got = &opts
+		return 0
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmdHookWithOptions(nil, hookCommandOptions{JSON: true}, &stdout, &stderr)
+
+	if got == nil {
+		t.Fatalf("plain gc hook never reached the discovery door; stderr=%s", stderr.String())
+	}
+	if got.Assignee == "" || !slices.Contains(got.IdentityCandidates, sessionID) || !slices.Contains(got.IdentityCandidates, "worker-1") {
+		t.Fatalf("discovery door options %+v; want the assignee and the seat's identities (%s, worker-1)", *got, sessionID)
 	}
 }

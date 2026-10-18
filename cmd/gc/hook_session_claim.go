@@ -219,6 +219,10 @@ const hookStartedWriteAttempts = 5
 
 var errWorkStartedContended = errors.New("work_started: the row moved on every attempt")
 
+// errWorkStartedReset marks a started write that replaced an unreadable cell:
+// the claim is recorded, but the claims the old cell held are not.
+var errWorkStartedReset = errors.New("work_started was unreadable and was reset to this claim; the claims it held are no longer recorded")
+
 // decideWorkStarted is the started write's decision on a fresh read of the
 // row: refuse a closed row and another incarnation's (stale), refuse a claim
 // the controller is releasing, skip one already recorded, else record it
@@ -282,7 +286,7 @@ func recordWorkStarted(front *session.Store, sessionID string, fence hookStarted
 	case res == hookStartedRecorded && !wrote:
 		return hookStartedUnrecorded, errWorkStartedContended
 	case reset != nil:
-		return res, fmt.Errorf("work_started was unreadable and was reset to this claim; the claims it held are unrecorded: %w", reset)
+		return res, fmt.Errorf("%w: %w", errWorkStartedReset, reset)
 	}
 	return res, nil
 }
@@ -365,7 +369,7 @@ func emitWorkStartedUnrecorded(sessionID, template, beadID string, cause error) 
 	if subject == "" {
 		subject = sessionID
 	}
-	reason := fmt.Sprintf("claim %s delivered without a work_started record: %v", beadID, cause)
+	reason := fmt.Sprintf("claim %s: %v", beadID, cause)
 	rec.Record(events.Event{
 		Type:    events.WorkStartedUnrecorded,
 		Actor:   eventActor(),

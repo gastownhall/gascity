@@ -95,7 +95,7 @@ func TestDrainAckResolvesRuntimeNameToSessionBeadID(t *testing.T) {
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, runtimeName, &stderr)
+	releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, runtimeName, drainAckCaller{}, &stderr)
 
 	if sessionBead.ID == runtimeName {
 		t.Fatalf("fixture session ID %q unexpectedly equals runtime name", sessionBead.ID)
@@ -130,7 +130,7 @@ func TestDrainAckReleasesWhenSessionBeadIDIsTheRuntimeName(t *testing.T) {
 	}, "in_progress", runtimeName)
 
 	var stderr bytes.Buffer
-	releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, runtimeName, &stderr)
+	releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, runtimeName, drainAckCaller{}, &stderr)
 
 	status, assignee := drainAckBeadStatus(t, store, held.ID)
 	if status != "open" || assignee != "" {
@@ -324,17 +324,18 @@ func TestDrainAckReleasesBeforeAcknowledging(t *testing.T) {
 	dops := newFakeDrainOps()
 	releaseRan := false
 	ackedWhenReleaseRan := true
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) {
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) string {
 		releaseRan = true
 		acked, err := dops.isDrainAcked("worker-1")
 		if err != nil {
 			t.Errorf("isDrainAcked during release: %v", err)
 		}
 		ackedWhenReleaseRan = acked
+		return ""
 	}
 
 	var stdout, stderr bytes.Buffer
-	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", "", false, &stdout, &stderr); code != 0 {
+	if code := doRuntimeDrainAck(dops, t.TempDir(), "worker-1", "worker-1", "", drainAckCaller{}, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("doRuntimeDrainAck = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !releaseRan {
@@ -357,7 +358,7 @@ func TestRequestRestartReleasesNothing(t *testing.T) {
 	originalRelease := drainAckReleaseHeldClaims
 	t.Cleanup(func() { drainAckReleaseHeldClaims = originalRelease })
 	released := false
-	drainAckReleaseHeldClaims = func(string, string, io.Writer) { released = true }
+	drainAckReleaseHeldClaims = func(string, string, drainAckCaller, io.Writer) string { released = true; return "" }
 
 	var stdout, stderr bytes.Buffer
 	doRuntimeRequestRestart(newFakeDrainOps(), nil, false,

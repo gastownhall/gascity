@@ -549,7 +549,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
-	return doHookDiscovery(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, drainAckStrictConfig(cfg)), hookClaimOps{}, runner, stdout, stderr, hookVisibility{
+	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, drainAckStrictConfig(cfg)), hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -1337,6 +1337,10 @@ func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCo
 		StrictDrainAck:     strict,
 	}
 }
+
+// hookDiscover is doHookDiscovery, a seam for tests of what plain `gc hook`
+// hands it. Tests that swap it MUST NOT call t.Parallel().
+var hookDiscover = doHookDiscovery
 
 // doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
 // DISCOVERY door. doHook itself stays a pure query-and-print function; this
