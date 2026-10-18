@@ -2055,6 +2055,7 @@ go_test(
         "wisp_gc_test.go",
         "wisp_step_inject_prewake_test.go",
         "wisp_step_inject_test.go",
+        "wisp_step_routed_bridge_test.go",
         "wisp_step_single_read_test.go",
         "work_assignment_release_race_test.go",
         "work_assignment_test.go",
