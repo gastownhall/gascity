@@ -259,6 +259,9 @@ type preparedStart struct {
 	liveHash      string
 	provisionHash string
 	launchHash    string
+	// prePolicyProvisionHash is provisionHash as the v6 binary computed it
+	// (runtime.PrePolicyProvisionFingerprint), which a box it started matches.
+	prePolicyProvisionHash string
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -1219,6 +1222,7 @@ func buildPreparedStartWithTranscript(
 	// agentCfg as coreHash — BEFORE the one-shot dispatch overrides below — so
 	// they stay consistent with the started_config_hash the reconciler compares.
 	provisionHash := runtime.ProvisionFingerprint(agentCfg)
+	prePolicyProvisionHash := runtime.PrePolicyProvisionFingerprint(agentCfg)
 	launchHash := runtime.LaunchFingerprint(agentCfg)
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
@@ -1462,19 +1466,27 @@ func buildPreparedStartWithTranscript(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:         candidate,
-		cfg:               agentCfg,
-		coreHash:          coreHash,
-		coreBreakdown:     coreBreakdown,
-		liveHash:          liveHash,
-		provisionHash:     provisionHash,
-		launchHash:        launchHash,
-		promptDelivered:   promptDelivered,
-		promptHash:        promptHash,
-		transcriptRoots:   transcriptRoots,
-		conversationReset: conversationReset,
-		resumed:           resumed,
+		candidate:              candidate,
+		cfg:                    agentCfg,
+		coreHash:               coreHash,
+		coreBreakdown:          coreBreakdown,
+		liveHash:               liveHash,
+		provisionHash:          provisionHash,
+		prePolicyProvisionHash: prePolicyProvisionHash,
+		launchHash:             launchHash,
+		promptDelivered:        promptDelivered,
+		promptHash:             promptHash,
+		transcriptRoots:        transcriptRoots,
+		conversationReset:      conversationReset,
+		resumed:                resumed,
 	}, candidate.info, nil
+}
+
+// provisionMatches reports whether a stored provision hash is the prepared
+// config's, as this binary or the v6 one computed it
+// (runtime.ProvisionHashMatches): the box needs no rebuild.
+func (p *preparedStart) provisionMatches(stored string) bool {
+	return stored == p.provisionHash || stored == p.prePolicyProvisionHash
 }
 
 func preparedStartSessionWorkDir(info sessionpkg.Info) string {

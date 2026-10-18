@@ -4598,8 +4598,8 @@ func resolveTemplateForSessionBeadInfo(
 // realizePoolDesiredSessions uses a deep-copied instance agent +
 // qualifiedInstance, and this helper is what makes the other pool-backed
 // paths (rediscovery, store-backed dependency-floor) agree. GC_ALIAS and
-// FingerprintExtra are part of CoreFingerprint, so divergent shapes across
-// ticks trip the reconciler's config-drift drain.
+// the Restart-policy FingerprintExtra keys are part of CoreFingerprint, so
+// divergent shapes across ticks trip the reconciler's config-drift drain.
 //
 // Named beads resolve to their own stored alias (configured_named_identity),
 // NOT the shared backing template's qualified name. The main named-session

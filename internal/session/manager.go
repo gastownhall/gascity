@@ -413,9 +413,10 @@ type Info struct {
 	CoreHashBreakdown string // core_hash_breakdown (raw)
 	// StartedProvisionHash / StartedLaunchHash / StartedLiveHash are the RAW
 	// provision/launch/live sub-fingerprints captured at start. The launch-only-
-	// drift decision compares StartedProvisionHash against the recomputed provision
-	// fingerprint and StartedLaunchHash against the launch fingerprint (both exact
-	// string compares, both gated on != ""); the live-hash drift path compares
+	// drift decision matches StartedProvisionHash against the recomputed provision
+	// fingerprint via runtime.ProvisionHashMatches (this binary's hash or the
+	// pre-policy v6 one) and compares StartedLaunchHash against the launch
+	// fingerprint exactly, both gated on != ""; the live-hash drift path compares
 	// StartedLiveHash. Mirrors keep the raw values.
 	StartedProvisionHash string // started_provision_hash (raw)
 	StartedLaunchHash    string // started_launch_hash (raw)

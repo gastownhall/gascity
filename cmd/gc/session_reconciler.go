@@ -3797,17 +3797,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storedHash != currentHash {
 						// Stored hash has no version prefix or carries a
 						// different version than the current binary — silently
-						// rebaseline all four fingerprint fields rather than
+						// rebaseline the fingerprint fields rather than
 						// draining the session. The mismatch is a versioning
 						// artifact, not real config drift. See ga-s760 FRs 1-3.
-						// So is a hash computed before the FingerprintExtra
-						// change policy for config unchanged since.
+						// A v6 hash is one only for config unchanged since,
+						// and leaves the live pair to the next tick's live
+						// check.
 						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
 							outcome := rebaselineLegacyHashOutcome(storedHash)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, storedHash)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -3839,7 +3840,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						storedProvision := infoByID[id].StartedProvisionHash
 						storedLaunch := infoByID[id].StartedLaunchHash
 						launchOnlyDrift := storedProvision != "" && storedLaunch != "" &&
-							storedProvision == runtime.ProvisionFingerprint(agentCfg) &&
+							runtime.ProvisionHashMatches(storedProvision, agentCfg) &&
 							storedLaunch != runtime.LaunchFingerprint(agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
@@ -4032,10 +4033,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 					// Core config matches — check live-only drift.
 					// Use started_live_hash exclusively, matching
-					// the started_config_hash pattern above.
+					// the started_config_hash pattern above. A named
+					// session restarted in place falls through with its
+					// core drifted: its start stamps the live pair, or a
+					// refused stop leaves the drift to the next tick, so
+					// nothing here may run or rebaseline over it.
 					storedLive := infoByID[id].StartedLiveHash
 					currentLive := runtime.LiveFingerprint(agentCfg)
-					if storedLive != currentLive {
+					if !driftRestartedInPlace && storedLive != currentLive {
 						switch {
 						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
@@ -4047,15 +4052,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
-						case runtime.IsLegacyOrMismatchedVersion(storedLive):
+						case runtime.IsLiveHashArtifact(storedLive, agentCfg):
 							// Stored live hash from a pre-versioning or
-							// version-mismatched binary — silently rebaseline
-							// all four fingerprint fields rather than running
+							// version-mismatched binary (a v6 one only of the
+							// same session_live) — silently rebaseline
+							// the fingerprint fields rather than running
 							// SessionLive again. ga-s760 FRs 1-3.
 							outcome := rebaselineLegacyHashOutcome(storedLive)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, storedHash)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy live hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -4123,13 +4129,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Stored hash carries no version prefix or a different
 						// version — silently rebaseline rather than treating
 						// the asleep named session as drifted. ga-s760 FRs 1-3.
-						// Likewise a pre-change-policy hash of unchanged config.
+						// A v6 hash is one only for config unchanged since.
 						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
 							outcome := rebaselineLegacyHashOutcome(storedHash)
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, storedHash)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -7466,7 +7472,7 @@ func truncateCrashPaneOutput(output string, maxLines int) string {
 // rebaselineLegacyHashOutcome picks the trace outcome that matches a
 // stored hash about to be silently rebaselined.
 func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
-	if runtime.IsVersionMismatchedHash(stored) || !runtime.IsLegacyOrMismatchedVersion(stored) { // another version's, or a pre-change-policy hash
+	if runtime.IsVersionMismatchedHash(stored) {
 		return TraceOutcomeRebaselinedVersionMismatch
 	}
 	return TraceOutcomeRebaselinedUnversioned
@@ -7495,24 +7501,32 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 	}, nil
 }
 
-// silentRebaselineSessionHashes overwrites the four fingerprint metadata
-// fields (started_config_hash, started_live_hash, live_hash,
-// core_hash_breakdown) with values produced by the current binary. Used
-// when a stored hash carries no version prefix or a version prefix that
-// does not match runtime.FingerprintVersion. The reconciler invokes this
-// instead of draining the session — the hash mismatch is purely a
-// versioning artifact, not real config drift.
+// silentRebaselineSessionHashes overwrites the six fingerprint metadata
+// fields (started_config_hash, started_provision_hash, started_launch_hash,
+// started_live_hash, live_hash, core_hash_breakdown) with values produced by
+// the current binary. Used when a stored hash carries no version prefix or a
+// version prefix that does not match runtime.FingerprintVersion. The
+// reconciler invokes this instead of draining the session — the hash
+// mismatch is purely a versioning artifact, not real config drift. A v6
+// storedCore, which is one only for config unchanged since
+// (runtime.IsCoreHashArtifact), moves the core baseline alone: the live check
+// compares the live pair on its own, so a changed session_live is still
+// applied.
 //
 // Returns (patch, nil) on success, (nil, err) on persist error, (nil, nil)
 // when nothing was written (nil session or nil front-door). The caller folds
 // the returned patch onto the typed snapshot via ApplyPatch (nil is a no-op).
-func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config) (map[string]string, error) {
+func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config, storedCore string) (map[string]string, error) {
 	if id == "" || sessFront == nil {
 		return nil, nil
 	}
 	patch, err := sessionHashRebaselineMetadata(agentCfg)
 	if err != nil {
 		return nil, err
+	}
+	if runtime.IsPrePolicyHash(storedCore) {
+		delete(patch, "started_live_hash")
+		delete(patch, "live_hash")
 	}
 	if err := sessFront.ApplyPatch(id, patch); err != nil {
 		return nil, fmt.Errorf("rebaselining hashes: %w", err)
@@ -7639,9 +7653,9 @@ func relaunchAgentForLaunchDrift(
 	// means a concurrent bead mutation or a derivation divergence between the
 	// hash-form and prepared configs — take the full restart rather than
 	// relaunch-then-rebaseline against an unverified baseline.
-	if prepared.coreHash != currentHash || prepared.provisionHash != storedProvisionHash || prepared.launchHash == storedLaunchHash {
+	if prepared.coreHash != currentHash || !prepared.provisionMatches(storedProvisionHash) || prepared.launchHash == storedLaunchHash {
 		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n", //nolint:errcheck
-			name, prepared.coreHash != currentHash, prepared.provisionHash != storedProvisionHash, prepared.launchHash == storedLaunchHash)
+			name, prepared.coreHash != currentHash, !prepared.provisionMatches(storedProvisionHash), prepared.launchHash == storedLaunchHash)
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	// A warm-box relaunch resumes a TRACKED conversation. When the bead carried no

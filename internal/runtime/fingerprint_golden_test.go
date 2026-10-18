@@ -124,8 +124,8 @@ func TestFingerprintVersionPin(t *testing.T) {
 	// The version namespaces stored hashes; an UNINTENTIONAL bump during the
 	// de-conflation forces a city-wide metadata rebaseline. An intentional bump
 	// is a deliberate edit to this assertion + a golden regen.
-	if FingerprintVersion != "v6" {
-		t.Errorf("FingerprintVersion = %q, want v6", FingerprintVersion)
+	if FingerprintVersion != "v7" {
+		t.Errorf("FingerprintVersion = %q, want v7", FingerprintVersion)
 	}
 }
 

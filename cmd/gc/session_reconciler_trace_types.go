@@ -253,9 +253,8 @@ const (
 	TraceOutcomeRebaselinedUnversioned TraceOutcomeCode = "rebaselined_unversioned"
 	// TraceOutcomeRebaselinedVersionMismatch marks a silent rebaseline of
 	// a stored fingerprint hash whose v<digits>: prefix did not match the
-	// current FingerprintVersion (older or future binary), or that an older
-	// binary computed before the FingerprintExtra change policy
-	// (runtime.PrePolicyCoreFingerprint). No drain, no event.
+	// current FingerprintVersion (older or future binary). No drain, no
+	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
 
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"

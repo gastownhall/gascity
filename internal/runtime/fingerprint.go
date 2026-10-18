@@ -53,13 +53,16 @@ type BreakdownCopyEntry struct {
 // from Env and FingerprintExtra (Option A', ga-3a42sp). The bump rebaselines
 // existing v5 hashes silently rather than draining the fleet. (ga-i91hrn)
 //
-// The FingerprintExtra change policy did not bump the version: a config with
-// no Ignore or NextStart key hashes byte-identically, and a stored hash that
-// still carries such keys is recognized by PrePolicyCoreFingerprint.
-const FingerprintVersion = "v6"
+// v7: FingerprintExtra hashes only its Restart-policy keys
+// (FingerprintExtraChangePolicy), so a pool sizing or skill edit no longer
+// drains the sessions it reaches. A v6 hash is an artifact only for config
+// unchanged since (IsCoreHashArtifact), so a session whose config changed
+// under v6 still drains once; every other version is rebaselined silently.
+const FingerprintVersion = "v7"
 
 // ChangePolicy is what a change to one launch input does to a running
-// session (ARCH-SIMPLIFICATION-REVIEW §3.5).
+// session. Only a Restart input is hashed into the fingerprints that decide
+// a drain or restart; the other policies keep a change out of them.
 type ChangePolicy int
 
 const (
@@ -136,25 +139,71 @@ func CoreFingerprint(cfg Config) string {
 	return fmt.Sprintf("%s:%x", FingerprintVersion, h.Sum(nil))
 }
 
-// PrePolicyCoreFingerprint is CoreFingerprint as computed before the
-// FingerprintExtra change policy: every key hashed. It is the migration of
-// ARCH-SIMPLIFICATION-REVIEW §3.5: a stored hash equal to it is a session
-// started before the policy whose config has not changed since, which is
-// rebaselined rather than drained. It equals CoreFingerprint for a config
-// with no Ignore or NextStart key. Delete once no stored hash predates the
-// policy.
+// prePolicyFingerprintVersion is the version before the FingerprintExtra
+// change policy. Its hashes are the one version whose config the reconciler
+// still checks, so that a session whose Restart inputs changed under v6 drains
+// as it would have there. Delete it and the PrePolicy helpers once no stored
+// hash is v6; deleting early only turns such a drain into the silent
+// rebaseline every other version gets.
+const prePolicyFingerprintVersion = "v6"
+
+// PrePolicyCoreFingerprint is CoreFingerprint as the v6 binary computed it,
+// every FingerprintExtra key hashed: a stored hash equal to it is a session
+// started before the change policy whose config has not changed since.
 func PrePolicyCoreFingerprint(cfg Config) string {
 	h := sha256.New()
 	hashCoreFieldsExtra(h, cfg, cfg.FingerprintExtra)
-	return fmt.Sprintf("%s:%x", FingerprintVersion, h.Sum(nil))
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// PrePolicyProvisionFingerprint is ProvisionFingerprint as the v6 binary
+// computed it, every FingerprintExtra key hashed.
+func PrePolicyProvisionFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashProvisionFieldsExtra(h, cfg, cfg.FingerprintExtra)
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// prePolicyLiveFingerprint is LiveFingerprint as the v6 binary computed it:
+// the same digest, which never hashed FingerprintExtra.
+func prePolicyLiveFingerprint(cfg Config) string {
+	h := sha256.New()
+	hashLiveFields(h, cfg)
+	return fmt.Sprintf("%s:%x", prePolicyFingerprintVersion, h.Sum(nil))
+}
+
+// IsPrePolicyHash reports whether a stored hash was computed by the v6
+// binary, before the FingerprintExtra change policy.
+func IsPrePolicyHash(stored string) bool {
+	return strings.HasPrefix(stored, prePolicyFingerprintVersion+":")
 }
 
 // IsCoreHashArtifact reports whether a stored core hash that differs from
 // cfg's CoreFingerprint differs only in how it was computed, not in the
-// config: a legacy or version-mismatched hash, or cfg's pre-policy hash.
-// The reconciler silently rebaselines such a hash instead of draining.
+// config: cfg's v6 hash, or any other legacy or version-mismatched hash. A v6
+// hash of other config is a drift, as it was under v6. The reconciler
+// silently rebaselines an artifact instead of draining.
 func IsCoreHashArtifact(stored string, cfg Config) bool {
-	return IsLegacyOrMismatchedVersion(stored) || stored != "" && stored == PrePolicyCoreFingerprint(cfg)
+	if IsPrePolicyHash(stored) {
+		return stored == PrePolicyCoreFingerprint(cfg)
+	}
+	return IsLegacyOrMismatchedVersion(stored)
+}
+
+// IsLiveHashArtifact is IsCoreHashArtifact for a stored live hash: cfg's v6
+// live hash, or any other legacy or version-mismatched hash. A v6 hash of
+// another session_live is a live drift, applied without a restart.
+func IsLiveHashArtifact(stored string, cfg Config) bool {
+	if IsPrePolicyHash(stored) {
+		return stored == prePolicyLiveFingerprint(cfg)
+	}
+	return IsLegacyOrMismatchedVersion(stored)
+}
+
+// ProvisionHashMatches reports whether a stored provision hash is cfg's, as
+// this binary or the v6 one computed it: the box needs no rebuild.
+func ProvisionHashMatches(stored string, cfg Config) bool {
+	return stored == ProvisionFingerprint(cfg) || stored == PrePolicyProvisionFingerprint(cfg)
 }
 
 // LiveFingerprint returns a hash of only the SessionLive fields.
@@ -286,8 +335,8 @@ func hashCoreFields(h hash.Hash, cfg Config) {
 	hashCoreFieldsExtra(h, cfg, restartFingerprintExtra(cfg.FingerprintExtra))
 }
 
-// hashCoreFieldsExtra is hashCoreFields hashing extra as cfg's
-// FingerprintExtra.
+// hashCoreFieldsExtra is hashCoreFields with FingerprintExtra replaced by
+// extra.
 func hashCoreFieldsExtra(h hash.Hash, cfg Config, extra map[string]string) {
 	h.Write([]byte(cfg.Command)) //nolint:errcheck // hash.Write never errors
 	h.Write([]byte{0})           //nolint:errcheck // hash.Write never errors
@@ -511,6 +560,28 @@ func HashOverlayProviderNames(h io.Writer, providers []string) {
 // reconciler can detect a legacy `map[string]string` payload (no Version)
 // and fall back to the prior diff renderer.
 func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
+	return coreFingerprintBreakdown(cfg, restartFingerprintExtra(cfg.FingerprintExtra))
+}
+
+// breakdownFieldsAsOf returns cfg's breakdown fields as a binary of version
+// computed them.
+func breakdownFieldsAsOf(version string, cfg Config) map[string]string {
+	return coreFingerprintBreakdown(cfg, fingerprintExtraAsOf(version, cfg)).Fields
+}
+
+// fingerprintExtraAsOf returns the FingerprintExtra keys a binary of version
+// hashed into the breakdown: this binary's Restart keys, or, for a breakdown
+// of another version or of none, every key.
+func fingerprintExtraAsOf(version string, cfg Config) map[string]string {
+	if version == FingerprintVersion {
+		return restartFingerprintExtra(cfg.FingerprintExtra)
+	}
+	return cfg.FingerprintExtra
+}
+
+// coreFingerprintBreakdown is CoreFingerprintBreakdown with FingerprintExtra
+// replaced by extra.
+func coreFingerprintBreakdown(cfg Config, extra map[string]string) BreakdownV1 {
 	fieldHash := func(fn func(h hash.Hash)) string {
 		h := sha256.New()
 		fn(h)
@@ -529,10 +600,8 @@ func CoreFingerprintBreakdown(cfg Config) BreakdownV1 {
 		"MCPServers": fieldHash(func(h hash.Hash) {
 			hashMCPServers(h, cfg.MCPServers)
 		}),
-		// Every key, whatever its policy: the breakdown only diagnoses a
-		// drift the core hash found, and stored breakdowns stay comparable.
 		"FPExtra": fieldHash(func(h hash.Hash) {
-			hashFingerprintExtra(h, cfg.FingerprintExtra)
+			hashFingerprintExtra(h, extra)
 		}),
 		"PreStart": fieldHash(func(h hash.Hash) {
 			for _, ps := range cfg.PreStart {
@@ -606,18 +675,18 @@ func CoreFingerprintDriftFields(storedBreakdown BreakdownV1, current Config) []s
 	if len(storedBreakdown.Fields) == 0 {
 		return nil
 	}
-	return diffBreakdownFields(storedBreakdown.Fields, CoreFingerprintBreakdown(current).Fields)
+	return diffBreakdownFields(storedBreakdown.Fields, breakdownFieldsAsOf(storedBreakdown.Version, current))
 }
 
 // CoreFingerprintDriftFieldsFromJSON returns sorted drifted field names from a
 // JSON-encoded stored breakdown. It accepts both current BreakdownV1 payloads
 // and legacy map[string]string payloads.
 func CoreFingerprintDriftFieldsFromJSON(storedJSON string, current Config) []string {
-	storedFields, _, _ := parseStoredBreakdown(storedJSON)
+	storedFields, _, storedVersion, _ := parseStoredBreakdown(storedJSON)
 	if len(storedFields) == 0 {
 		return nil
 	}
-	return diffBreakdownFields(storedFields, CoreFingerprintBreakdown(current).Fields)
+	return diffBreakdownFields(storedFields, breakdownFieldsAsOf(storedVersion, current))
 }
 
 // LogCoreFingerprintDrift writes diagnostic output when config-drift is
@@ -632,9 +701,10 @@ func CoreFingerprintDriftFieldsFromJSON(storedJSON string, current Config) []str
 func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, current Config) {
 	currentBd := CoreFingerprintBreakdown(current)
 
-	storedFields, storedCopy, isV1 := parseStoredBreakdown(storedJSON)
+	storedFields, storedCopy, storedVersion, isV1 := parseStoredBreakdown(storedJSON)
+	currentFields := breakdownFieldsAsOf(storedVersion, current)
 
-	diffs := diffBreakdownFields(storedFields, currentBd.Fields)
+	diffs := diffBreakdownFields(storedFields, currentFields)
 
 	if len(diffs) == 0 {
 		if len(storedFields) == 0 {
@@ -647,7 +717,7 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 
 	fmt.Fprintf(w, "  config-drift-diag %s: drifted fields: %s\n", name, strings.Join(diffs, ", ")) //nolint:errcheck // best-effort diag
 	for _, field := range diffs {
-		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedFields[field], currentBd.Fields[field]) //nolint:errcheck // best-effort diag
+		fmt.Fprintf(w, "    %s: stored-hash=%s current-hash=%s\n", field, storedFields[field], currentFields[field]) //nolint:errcheck // best-effort diag
 		switch field {
 		case "Command":
 			fmt.Fprintf(w, "    Command: %q\n", current.Command) //nolint:errcheck // best-effort diag
@@ -656,7 +726,8 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 		case "MCPServers":
 			fmt.Fprintf(w, "    MCPServers: %+v\n", NormalizeMCPServerConfigs(current.MCPServers)) //nolint:errcheck // best-effort diag
 		case "FPExtra":
-			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", current.FingerprintExtra, len(current.FingerprintExtra)) //nolint:errcheck // best-effort diag
+			extra := fingerprintExtraAsOf(storedVersion, current)
+			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", extra, len(extra)) //nolint:errcheck // best-effort diag
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":
@@ -680,29 +751,30 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 }
 
 // parseStoredBreakdown decodes the JSON-encoded stored breakdown and
-// returns the per-field map, the typed CopyFiles entries, and a flag
-// indicating which format was used. If the JSON parses as a BreakdownV1
-// with a non-empty Version, the per-entry CopyFiles slice is returned
-// and isV1=true. If Version is empty (or the JSON is a bare
-// map[string]string), the map is returned and isV1=false. Empty input
-// yields an empty map and isV1=true (no CopyFiles to diff).
-func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries []BreakdownCopyEntry, isV1 bool) {
+// returns the per-field map, the typed CopyFiles entries, the version that
+// stored it, and a flag indicating which format was used. If the JSON
+// parses as a BreakdownV1 with a non-empty Version, the per-entry CopyFiles
+// slice is returned and isV1=true. If Version is empty (or the JSON is a
+// bare map[string]string), the map is returned with no version and
+// isV1=false. Empty input yields an empty map and isV1=true (no CopyFiles
+// to diff).
+func parseStoredBreakdown(stored string) (fields map[string]string, copyEntries []BreakdownCopyEntry, version string, isV1 bool) {
 	stored = strings.TrimSpace(stored)
 	if stored == "" {
-		return nil, nil, true
+		return nil, nil, "", true
 	}
 	var v1 BreakdownV1
 	if err := json.Unmarshal([]byte(stored), &v1); err == nil && v1.Version != "" {
 		if v1.Fields == nil {
 			v1.Fields = map[string]string{}
 		}
-		return v1.Fields, v1.CopyFiles, true
+		return v1.Fields, v1.CopyFiles, v1.Version, true
 	}
 	var legacy map[string]string
 	if err := json.Unmarshal([]byte(stored), &legacy); err == nil {
-		return legacy, nil, false
+		return legacy, nil, "", false
 	}
-	return nil, nil, false
+	return nil, nil, "", false
 }
 
 // diffBreakdownFields returns the sorted list of field names where the
