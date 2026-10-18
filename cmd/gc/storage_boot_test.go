@@ -1104,7 +1104,8 @@ func TestStorageMigrateAcceptsRigSharingTheCityStore(t *testing.T) {
 // holds a city id in a state the city work store does not. The copy carries
 // the city's version, so the rig's would be dropped: each is refused by name,
 // on whichever field differs, because a listing has no version stamp to notice
-// the change by (the native store clears Revision and never fills UpdatedAt).
+// the change by (bd lists no revision, and the native store never fills
+// UpdatedAt).
 // A token or a timestamp only one side publishes is no evidence either way,
 // whichever side that is, and neither is bd's readiness projection or the order
 // labels and edges come back in, so those rows are judged on the rest of the

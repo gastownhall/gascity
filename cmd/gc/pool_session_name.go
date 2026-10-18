@@ -697,8 +697,8 @@ func isCanonicalWorkflowRoot(wb beads.Bead) bool {
 // release assignment and metadata in one UpdateIfMatch guarded by that
 // revision. Conflicts are left for a later tick's fresh snapshot.
 // Required-but-unavailable capability refuses the release. Otherwise,
-// including for snapshots listed from the native store (or a CachingStore over
-// it), which carry no revision, the legacy paths below apply:
+// including for snapshots at revision 0 whose live row is not (a store whose
+// lists carry no revision, such as BdStore), the legacy paths below apply:
 //
 //  1. beads.ConditionalAssignmentReleaser.ReleaseIfCurrent when the store
 //     offers it for this snapshot shape (in_progress with a non-empty assignee

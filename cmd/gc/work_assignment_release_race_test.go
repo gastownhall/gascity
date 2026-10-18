@@ -292,9 +292,10 @@ func TestWorkReleaseConditionalWritesRequireRefusesWithoutCapability(t *testing.
 	})
 }
 
-// listWithoutRevisionStore answers List the way the native store does, and so
-// a CachingStore over it: list rows publish no revision, and only Get carries
-// one. Every release snapshot comes from such a List.
+// listWithoutRevisionStore answers List the way BdStore does (`bd list
+// --json` publishes no revision, mc-3c8h5), and so a CachingStore over it: list
+// rows carry revision 0, and only Get carries the real one. Every release
+// snapshot comes from such a List.
 type listWithoutRevisionStore struct {
 	*beads.MemStore
 }
@@ -310,9 +311,9 @@ func (s *listWithoutRevisionStore) List(q beads.ListQuery) ([]beads.Bead, error)
 }
 
 // TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots sweeps the
-// snapshot shape production releases hold. The revision guard has nothing to
-// check on a list row, so the release takes the legacy tiers, which fence on
-// the live status and assignee. Dead claims are released, with or without a
+// snapshot shape a store whose lists carry no revision hands releases. The
+// live row is not at 0, so the revision guard has nothing to check and the
+// release takes the legacy tiers, which fence on the live status and assignee. Dead claims are released, with or without a
 // continuation group, instead of being refused on every tick, and a claim
 // another worker took after the List is left alone.
 func TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots(t *testing.T) {
@@ -1081,4 +1082,51 @@ func TestReleaseWorkBead_ContinuationGroupNeverRidesASecondWrite(t *testing.T) {
 				got.Status, got.Assignee)
 		}
 	})
+}
+
+// legacyClaimStore is a stamped MemStore holding one claimed row at revision
+// 0, the default a legacy native row keeps until its first write.
+func legacyClaimStore(t *testing.T) (*beads.MemStore, beads.Bead) {
+	t.Helper()
+	row := beads.Bead{ID: "gc-1", Title: "work", Status: "in_progress", Type: "task", Assignee: "dead-worker"}
+	m := beads.NewMemStoreFrom(1, []beads.Bead{row}, nil)
+	stampConditionalWrites(t, m, gate.Auto)
+	snapshot, err := m.Get(row.ID)
+	if err != nil || snapshot.Revision != 0 {
+		t.Fatalf("legacy snapshot = (%+v, %v), want the row at revision 0", snapshot, err)
+	}
+	return m, snapshot
+}
+
+// Kills the revision-0 fallback to the tiers' weaker fence: a snapshot of a
+// legacy row still at 0 is released by one write fenced at 0, so a write
+// landing after the re-read refuses it, and a snapshot whose live row moved off
+// 0 is left to the tiers.
+func TestWorkReleaseFencesALegacyRowAtRevisionZero(t *testing.T) {
+	update := beads.UpdateOpts{Assignee: stringPtr(""), Status: stringPtr("open")}
+
+	store, snapshot := legacyClaimStore(t)
+	released, handled, err := releaseWorkAssignmentIfRevisionMatches(store, snapshot, update)
+	got, _ := store.Get(snapshot.ID)
+	if err != nil || !handled || !released || got.Assignee != "" || got.Revision == 0 {
+		t.Fatalf("legacy release = (released %v, handled %v, err %v), row %+v; want one fenced write that moves the row off 0", released, handled, err, got)
+	}
+
+	store, snapshot = legacyClaimStore(t)
+	between := &interleavedStore{Store: store, id: snapshot.ID, between: func() {
+		_ = store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr("dead-worker")})
+	}}
+	released, handled, err = releaseWorkAssignmentIfRevisionMatches(between, snapshot, update)
+	got, _ = store.Get(snapshot.ID)
+	if !handled || released || !beads.IsPreconditionFailed(err) || got.Assignee != "dead-worker" {
+		t.Fatalf("release over a write after the re-read = (released %v, handled %v, err %v), assignee %q; want the fence at 0 refused and the claim kept", released, handled, err, got.Assignee)
+	}
+
+	store, snapshot = legacyClaimStore(t)
+	if err := store.SetMetadata(snapshot.ID, "touched", "yes"); err != nil {
+		t.Fatal(err)
+	}
+	if _, handled, err := releaseWorkAssignmentIfRevisionMatches(store, snapshot, update); handled || err != nil {
+		t.Fatalf("snapshot at 0 over a live row off 0 = (handled %v, err %v), want it left to the tiers", handled, err)
+	}
 }

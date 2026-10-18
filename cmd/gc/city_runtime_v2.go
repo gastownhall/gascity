@@ -134,19 +134,24 @@ func (cr *CityRuntime) v2GraphStore() beads.Store {
 }
 
 // v2StoreCapability is C0.7's reading of one class store: its stamped
-// conditional-writes mode and kind, whether it has a conditional writer and
-// an atomic conditional closer, and why it has no writer.
+// conditional-writes mode and kind, whether it has a conditional writer (and
+// why not) and an atomic conditional closer, and whether its list reads carry
+// the revision its live reads do (and why not).
 type v2StoreCapability struct {
 	Class, Kind    string
 	Mode           gate.Mode
 	Writer, Closer bool
 	Reason         string
+	ListRevisions  bool
+	ListReason     string
 }
 
-// v2ClassStoreCapabilities reads C0.7's two capabilities of the sessions
-// and graph class stores (CONTRACT v5 R2), writing nothing. Boot resolves
-// the writer as the write path does; doctor (inspect) only inspects the
-// stamp and the capability memo, so it fires no degraded event.
+// v2ClassStoreCapabilities reads C0.7's capabilities of the sessions and
+// graph class stores (CONTRACT v5 R2), writing nothing. Boot resolves the
+// writer as the write path does; doctor (inspect) only inspects the stamp
+// and the capability memo, so it fires no degraded event. Both read revision
+// fidelity the same way (beads.CheckListRevisionFidelity): a writer fenced on
+// revisions its listings report as 0 fences nothing (mc-3c8h5).
 func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2StoreCapability {
 	out := make([]v2StoreCapability, 0, 2)
 	for _, c := range []struct {
@@ -175,6 +180,11 @@ func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2Sto
 				got.Reason = "the store does not implement conditional writes"
 			}
 		}
+		if err := beads.CheckListRevisionFidelity(c.store); err != nil {
+			got.ListReason = err.Error()
+		} else {
+			got.ListRevisions = true
+		}
 		out = append(out, got)
 	}
 	return out
@@ -193,18 +203,22 @@ func (c v2StoreCapability) String() string {
 	if !c.Writer {
 		writer += " (" + c.Reason + ")"
 	}
-	return fmt.Sprintf("%s store (%s, conditional_writes=%s): %s, atomic conditional closer %v", c.Class, c.Kind, mode, writer, c.Closer)
+	lists := fmt.Sprintf("list revisions %v", c.ListRevisions)
+	if !c.ListRevisions {
+		lists += " (" + c.ListReason + ")"
+	}
+	return fmt.Sprintf("%s store (%s, conditional_writes=%s): %s, atomic conditional closer %v, %s", c.Class, c.Kind, mode, writer, c.Closer, lists)
 }
 
 // v2CapabilityRefusal is C0.7's boot refusal: no capability, no effect. It
-// names each store lacking one, with both its capabilities, and the fix:
+// names each store lacking one, with all its capabilities, and the fix:
 // conditional_writes = "auto" when a store has them off, else a store that
 // fences.
 func v2CapabilityRefusal(caps []v2StoreCapability) error {
 	var parts []string
 	off := false
 	for _, c := range caps {
-		if !c.Writer || !c.Closer {
+		if !c.Writer || !c.Closer || !c.ListRevisions {
 			parts = append(parts, c.String())
 			off = off || (!c.Writer && c.off())
 		}

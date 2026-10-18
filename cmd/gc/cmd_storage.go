@@ -722,9 +722,9 @@ func cityWorkStoreRows(cityPath string) (map[string]beads.Bead, error) {
 // and metadata as a map — under a reflection guard that makes a field added to
 // beads.Bead either compared there, and so here, or exempted with its reason.
 // The payload is compared rather than trusted to a version stamp because a
-// listing carries none to rely on: the native store clears Revision on every
-// list row and never fills UpdatedAt, and bd keeps updated_at when it adds a
-// label or an edge.
+// listing carries none to rely on: bd lists every row without its revision
+// and keeps updated_at when it adds a label or an edge, and the native store
+// never fills UpdatedAt.
 //
 // Two list rows are not a source row and its copy, so four things differ from
 // that stage:

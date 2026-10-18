@@ -410,17 +410,22 @@ func TestBootRefusesWithoutAtomicCloser(t *testing.T) {
 	}
 }
 
-// Kills over-refusal: maintainer-city's shape, a SQLite store with the
-// revision layout, bare or under the controller's CachingStore, and the
-// native-Dolt wrapper chain (the bead policy store over the CachingStore
-// over an atomic-close store, stamped auto) resolve both capabilities, read
-// by boot and by doctor alike.
+// Kills over-refusal: maintainer-city's shape (its sessions and graph
+// classes on a SQLite store with the revision layout), bare or under the
+// controller's CachingStore, and the native-Dolt wrapper chain (the bead
+// policy store over the CachingStore over an atomic-close store, stamped
+// auto) resolve every capability, list revisions included, read by boot and
+// by doctor alike. Each store holds a written row, so revision fidelity is
+// read off a real revision rather than passed on an empty sample.
 func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 	sqlite := stampedSQLite(t, gate.Auto)
 	atomic := fencingAtomicCloseStore(t)
-	chain := &beadPolicyStore{Store: beads.NewCachingStoreForTest(atomic, nil), cfg: workerCity(1)}
+	for _, s := range []beads.Store{sqlite, atomic} {
+		seedWrittenRow(t, s)
+	}
+	chain := &beadPolicyStore{Store: primedCacheOver(t, atomic), cfg: workerCity(1)}
 	for name, store := range map[string]beads.Store{
-		"sqlite": sqlite, "cached sqlite": beads.NewCachingStoreForTest(sqlite, nil), "policy over cache over atomic close": chain,
+		"sqlite": sqlite, "cached sqlite": primedCacheOver(t, sqlite), "policy over cache over atomic close": chain,
 	} {
 		for _, inspect := range []bool{false, true} {
 			if err := v2CapabilityRefusal(v2ClassStoreCapabilities(store, store, inspect)); err != nil {
@@ -428,6 +433,64 @@ func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Kills a C0.7 that checks the conditional-writer interface alone: a store
+// that fences but lists every row at revision 0 while it reads live at a real
+// one (BdStore's `bd list --json`, mc-3c8h5) is refused, bare and under the
+// controller's CachingStore, naming its list revisions.
+func TestBootRefusesARevisionZeroLister(t *testing.T) {
+	atomic := fencingAtomicCloseStore(t)
+	seedWrittenRow(t, atomic)
+	blind := listRevisionZeroStore{atomic}
+	for name, store := range map[string]beads.Store{"bare": blind, "cached": primedCacheOver(t, blind)} {
+		for _, inspect := range []bool{false, true} {
+			caps := v2ClassStoreCapabilities(store, store, inspect)
+			if !caps[0].Writer || !caps[0].Closer {
+				t.Fatalf("%s (inspect=%v): capabilities %+v, want a writer and a closer, so only list revisions refuse", name, inspect, caps)
+			}
+			refusal := v2CapabilityRefusal(caps)
+			if refusal == nil || !strings.Contains(refusal.Error(), "list revisions false (list reads carry no revision") {
+				t.Errorf("%s (inspect=%v): C0.7 = %v, want a refusal naming the list revisions", name, inspect, refusal)
+			}
+		}
+	}
+}
+
+// listRevisionZeroStore lists every row at revision 0 and keeps the real
+// revision on Get; conditional writes resolve to the store it wraps.
+type listRevisionZeroStore struct{ beads.Store }
+
+func (s listRevisionZeroStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	rows, err := s.Store.List(q)
+	for i := range rows {
+		rows[i].Revision = 0
+	}
+	return rows, err
+}
+
+func (s listRevisionZeroStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// seedWrittenRow creates a row on s and writes it once.
+func seedWrittenRow(t *testing.T, s beads.Store) {
+	t.Helper()
+	b, err := s.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Update(b.ID, beads.UpdateOpts{Assignee: stringPtr("worker")}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// primedCacheOver is the controller's CachingStore over backing, primed.
+func primedCacheOver(t *testing.T, backing beads.Store) *beads.CachingStore {
+	t.Helper()
+	cache := beads.NewCachingStoreForTest(backing, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	return cache
 }
 
 // fencingAtomicCloseStore is a store C0.7 admits: an atomic-close MemStore
