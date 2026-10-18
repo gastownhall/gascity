@@ -38,12 +38,14 @@ func (e *ListRevisionsBlindError) Error() string {
 // listing of that row through store (past a cache, to its backing): a legacy
 // row written between the reads, or a cache that has not yet seen that write,
 // lists off 0 there. A listing that still says 0 is evidence, and it is the
-// refusal only when no row in the sample was listed at a revision: a read
-// path that drops revisions drops them on every row, while one row that
+// refusal only when a Live listing of the whole sample carries no revision: a
+// read path that drops revisions drops them on every row, while one row that
 // disagrees beside rows that carry theirs is that row's own anomaly. The one
 // known is an id held in both the issues and the wisps table, where the
 // native List reads the wisps row (which its CAS also fences on) and Get the
-// issues row. A listed revision that is non-zero but behind the live one is a
+// issues row. The sample's own revisions are no such evidence: a cache's rows
+// may carry revisions installed from point reads (its own creates and
+// updates, verified events), not from the list path. A listed revision that is non-zero but behind the live one is a
 // stale read, which the conditional write itself refuses, and not this
 // check's concern. An empty sample proves nothing either way and passes.
 //
@@ -59,13 +61,8 @@ func CheckListRevisionFidelity(store Store) error {
 	}
 	live := HandlesFor(followConditionalWritesResolveTarget(store)).Live
 	var blind *ListRevisionsBlindError
-	carried := false
 	for _, row := range rows {
-		if row.Revision != 0 {
-			carried = true
-			continue
-		}
-		if blind != nil {
+		if row.Revision != 0 || blind != nil {
 			continue
 		}
 		current, err := live.Get(row.ID)
@@ -86,8 +83,35 @@ func CheckListRevisionFidelity(store Store) error {
 		}
 		blind = &ListRevisionsBlindError{ID: row.ID, Live: current.Revision}
 	}
-	if blind != nil && !carried {
-		return blind
+	if blind == nil {
+		return nil
 	}
-	return nil
+	ids := make([]string, 0, len(rows))
+	for _, row := range rows {
+		ids = append(ids, row.ID)
+	}
+	listed, err := store.List(ListQuery{IDs: ids, IncludeClosed: true, Live: true})
+	if err != nil {
+		return fmt.Errorf("listing the sample live: %w", err)
+	}
+	for _, row := range listed {
+		if row.Revision != 0 {
+			return nil
+		}
+	}
+	return blind
+}
+
+// ListsFromCache reports whether store's list reads are answered by a
+// CachingStore, followed through declared resolve targets: whether
+// CheckListRevisionFidelity's sample costs no backing read.
+func ListsFromCache(store Store) bool {
+	if store == nil {
+		return false
+	}
+	if _, ok := store.(*CachingStore); ok {
+		return true
+	}
+	_, ok := followConditionalWritesResolveTarget(store).(*CachingStore)
+	return ok
 }

@@ -147,6 +147,7 @@ type v2StoreCapability struct {
 	ListRevisions  bool
 	ListReason     string
 	ListErr        error
+	ListSkipped    string
 }
 
 // v2ClassStoreCapabilities reads C0.7's capabilities of the sessions and
@@ -158,7 +159,9 @@ type v2StoreCapability struct {
 // (beads.CheckListRevisionFidelity): a writer fenced on revisions its listings
 // report as 0 fences nothing (mc-3c8h5). The read is skipped for a store that
 // already lacks a writer or a closer, which refuses regardless, and is made
-// once when both classes resolve to the same store.
+// once when both classes resolve to the same store. Doctor skips it over a
+// store no cache answers: there the sample is a backing scan (seconds at 80k
+// rows), and boot, over the controller's cache, makes the read that decides.
 func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2StoreCapability {
 	out := make([]v2StoreCapability, 0, 2)
 	for _, c := range []struct {
@@ -190,7 +193,9 @@ func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2Sto
 		switch {
 		case !got.Writer || !got.Closer:
 		case len(out) == 1 && sameClassStore(sessions, graph) && out[0].Writer && out[0].Closer:
-			got.ListRevisions, got.ListReason, got.ListErr = out[0].ListRevisions, out[0].ListReason, out[0].ListErr
+			got.ListRevisions, got.ListReason, got.ListErr, got.ListSkipped = out[0].ListRevisions, out[0].ListReason, out[0].ListErr, out[0].ListSkipped
+		case inspect && !beads.ListsFromCache(c.store):
+			got.ListSkipped = "not read without the controller's cache; boot reads it"
 		default:
 			var blind *beads.ListRevisionsBlindError
 			switch err := beads.CheckListRevisionFidelity(c.store); {
@@ -207,14 +212,20 @@ func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2Sto
 	return out
 }
 
-// sameClassStore reports whether two class stores are one store, without
-// comparing values whose dynamic type is not comparable (== on them panics).
-func sameClassStore(a, b beads.Store) bool {
-	if a == nil || b == nil {
+// sameClassStore reports whether two class stores are one store. == on two
+// interface values panics when their dynamic type is not comparable, or holds
+// (in a field) an interface whose dynamic type is not, which no type check
+// rules out up front; such stores are not the same store here.
+func sameClassStore(a, b beads.Store) (same bool) {
+	if a == nil || b == nil || reflect.TypeOf(a) != reflect.TypeOf(b) || !reflect.TypeOf(a).Comparable() {
 		return false
 	}
-	ta := reflect.TypeOf(a)
-	return ta == reflect.TypeOf(b) && ta.Comparable() && a == b
+	defer func() {
+		if recover() != nil {
+			same = false
+		}
+	}()
+	return a == b
 }
 
 // off reports whether c's conditional writes are off or never stamped.
@@ -238,6 +249,8 @@ func (c v2StoreCapability) String() string {
 		out += ", list revisions false (" + c.ListReason + ")"
 	case c.ListErr != nil:
 		out += ", list revisions not read (" + c.ListErr.Error() + ")"
+	case c.ListSkipped != "":
+		out += ", list revisions " + c.ListSkipped
 	}
 	return out
 }

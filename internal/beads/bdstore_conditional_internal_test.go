@@ -671,14 +671,19 @@ func TestUpdateIfMatchAssigneeEditForcesTheTransfer(t *testing.T) {
 			t.Fatalf("release at the stale revision %d: %v, want a precondition failure", rev, err)
 		}
 	}
-	w := &scriptedBd{id: "ga-1", revision: 1}
-	s := NewBdStore("/city", w.runner)
-	title := "renamed"
-	if err := s.UpdateIfMatch("ga-1", 1, UpdateOpts{Title: &title}); err != nil {
-		t.Fatal(err)
-	}
-	if argvContains(w.writeArgv, "--force") {
-		t.Fatalf("a fenced update without an assignee edit forced: %v", w.writeArgv)
+	title, empty, closed := "renamed", "", "closed"
+	for name, opts := range map[string]UpdateOpts{
+		"no assignee edit":             {Title: &title},
+		"an assignee edit that closes": {Assignee: &empty, Status: &closed},
+	} {
+		w := &scriptedBd{id: "ga-1", revision: 1}
+		s := NewBdStore("/city", w.runner)
+		if err := s.UpdateIfMatch("ga-1", 1, opts); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if argvContains(w.writeArgv, "--force") {
+			t.Fatalf("%s forced, which also waives bd's close policy: %v", name, w.writeArgv)
+		}
 	}
 }
 

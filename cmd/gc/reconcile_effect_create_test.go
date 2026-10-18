@@ -439,13 +439,17 @@ func TestBootAdmitsSQLiteRevisionLayout(t *testing.T) {
 // Kills a C0.7 that checks the conditional-writer interface alone: a store
 // that fences but lists every row at revision 0 while it reads live at a real
 // one (BdStore's `bd list --json`, mc-3c8h5) is refused, bare and under the
-// controller's CachingStore, naming its list revisions.
+// controller's CachingStore, naming its list revisions. Doctor reads it only
+// under the cache (TestDoctorC07SkipsTheUncachedRevisionRead).
 func TestBootRefusesARevisionZeroLister(t *testing.T) {
 	atomic := fencingAtomicCloseStore(t)
 	seedWrittenRow(t, atomic)
 	blind := listRevisionZeroStore{atomic}
 	for name, store := range map[string]beads.Store{"bare": blind, "cached": primedCacheOver(t, blind)} {
 		for _, inspect := range []bool{false, true} {
+			if inspect && name == "bare" {
+				continue
+			}
 			caps := v2ClassStoreCapabilities(store, store, inspect)
 			if !caps[0].Writer || !caps[0].Closer {
 				t.Fatalf("%s (inspect=%v): capabilities %+v, want a writer and a closer, so only list revisions refuse", name, inspect, caps)
@@ -455,6 +459,44 @@ func TestBootRefusesARevisionZeroLister(t *testing.T) {
 				t.Errorf("%s (inspect=%v): C0.7 = %v, want a refusal naming the list revisions", name, inspect, refusal)
 			}
 		}
+	}
+}
+
+// Kills a doctor that scans a store no cache answers: there the revision
+// read is a backing scan, so doctor names it unread and lists nothing, refuses
+// nothing, and still reads it under the controller's cache.
+func TestDoctorC07SkipsTheUncachedRevisionRead(t *testing.T) {
+	inner := fencingAtomicCloseStore(t)
+	seedWrittenRow(t, inner)
+	bare := &c07ListStore{Store: listRevisionZeroStore{inner}}
+	caps := v2ClassStoreCapabilities(bare, bare, true)
+	if n := bare.lists.Load(); n != 0 || caps[0].ListRevisions || v2CapabilityRefusal(caps) != nil ||
+		!strings.Contains(caps[0].String(), "list revisions not read without the controller's cache") {
+		t.Fatalf("doctor over an uncached store: %d lists, %s, refusal %v; want no list, no refusal, and the skip named", n, caps[0], v2CapabilityRefusal(caps))
+	}
+	cached := primedCacheOver(t, listRevisionZeroStore{inner})
+	if refusal := v2CapabilityRefusal(v2ClassStoreCapabilities(cached, cached, true)); refusal == nil {
+		t.Fatal("doctor under the cache did not read the revisions")
+	}
+}
+
+// uncomparableStore holds a slice, so == on it panics.
+type uncomparableStore struct {
+	beads.Store
+	_ []string
+}
+
+// Kills a store-identity check that panics: two class stores whose
+// comparable wrapper holds a store of an uncomparable type are not the same
+// store, and C0.7 reads each.
+func TestSameClassStoreNeverPanics(t *testing.T) {
+	mem := beads.NewMemStore()
+	wrapped := beads.SessionStore{Store: uncomparableStore{Store: mem}}
+	if sameClassStore(wrapped, wrapped) || sameClassStore(uncomparableStore{Store: mem}, uncomparableStore{Store: mem}) {
+		t.Fatal("uncomparable stores reported as one store")
+	}
+	if !sameClassStore(mem, mem) || sameClassStore(mem, beads.NewMemStore()) || sameClassStore(nil, mem) {
+		t.Fatal("store identity wrong for comparable stores")
 	}
 }
 

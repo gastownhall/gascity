@@ -3,6 +3,7 @@ package beads
 import (
 	"context"
 	"errors"
+	"sync/atomic"
 	"testing"
 )
 
@@ -159,6 +160,77 @@ func TestCheckListRevisionFidelityRefusesOnlyASystemicDrop(t *testing.T) {
 	var blind *ListRevisionsBlindError
 	if err := CheckListRevisionFidelity(oneRowStripper{Store: mem, id: "gc-1"}); !errors.As(err, &blind) {
 		t.Fatalf("the only sampled row at 0: %v, want a refusal", err)
+	}
+}
+
+// Kills deciding a systemic drop from the cached sample: a cache over a store
+// whose list path drops every revision still holds real revisions on the rows
+// it wrote itself (a create, an update), which came from point reads. They do
+// not vouch for the list path, so the store is still refused.
+func TestCheckListRevisionFidelityRefusesBehindPointReadRows(t *testing.T) {
+	for name, write := range map[string]func(t *testing.T, cache *CachingStore, newest string){
+		"local create": func(t *testing.T, cache *CachingStore, _ string) {
+			if _, err := cache.Create(Bead{Title: "created through the cache"}); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"local update": func(t *testing.T, cache *CachingStore, newest string) {
+			title := "touched"
+			if err := cache.Update(newest, UpdateOpts{Title: &title}); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			mem := NewMemStore()
+			var newest string
+			for i := 0; i < 3; i++ {
+				b, err := mem.Create(Bead{Title: "old"})
+				if err != nil {
+					t.Fatal(err)
+				}
+				newest = b.ID
+			}
+			cache := NewCachingStoreForTest(listRevisionStripper{mem}, nil)
+			if err := cache.PrimeActive(); err != nil {
+				t.Fatal(err)
+			}
+			write(t, cache, newest)
+			var blind *ListRevisionsBlindError
+			if err := CheckListRevisionFidelity(cache); !errors.As(err, &blind) {
+				t.Fatalf("C0.7 over a list path that drops every revision = %v, want a refusal", err)
+			}
+		})
+	}
+}
+
+// backingListCounter counts the List calls that reach it.
+type backingListCounter struct {
+	Store
+	lists atomic.Int32
+}
+
+func (s *backingListCounter) List(q ListQuery) ([]Bead, error) {
+	s.lists.Add(1)
+	return s.Store.List(q)
+}
+
+// Kills a boot sample the cache cannot serve: over a cache primed only with
+// its active rows, as at boot, the sample reaches the backing not at all.
+func TestCheckListRevisionFidelitySamplesFromTheCache(t *testing.T) {
+	mem := NewMemStore()
+	seedWrittenRows(t, mem)
+	backing := &backingListCounter{Store: mem}
+	cache := NewCachingStoreForTest(backing, nil)
+	if err := cache.PrimeActive(); err != nil {
+		t.Fatal(err)
+	}
+	backing.lists.Store(0)
+	if err := CheckListRevisionFidelity(cache); err != nil {
+		t.Fatalf("C0.7: %v", err)
+	}
+	if n := backing.lists.Load(); n != 0 {
+		t.Fatalf("the sample reached the backing %d times, want it served from the cache", n)
 	}
 }
 

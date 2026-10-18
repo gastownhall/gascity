@@ -393,7 +393,9 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // proves the caller decided on the row as it stands, so bd's anti-steal
 // refusal of another actor's live in_progress claim would only turn a fenced
 // release of a dead claim into a hard error. A stale revision still refuses
-// (bd exits 13 under --force).
+// (bd exits 13 under --force). An edit that also closes the bead does not
+// carry it: bd's --force also waives the close policy (open children, a live
+// blocker), which no assignee edit asked to override.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := validateConditionalUpdateOpts(opts, false); err != nil {
@@ -409,7 +411,7 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 	if len(args) == 3 {
 		return nil
 	}
-	if opts.Assignee != nil {
+	if opts.Assignee != nil && (opts.Status == nil || *opts.Status != "closed") {
 		args = append(args, "--force")
 	}
 	args = append(args, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
