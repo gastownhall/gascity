@@ -1004,31 +1004,381 @@ func TestRuntimeOnlyStartConsumesALateReset(t *testing.T) {
 }
 
 // TestRecordedIncarnationForTestStaysInTests: production code never builds
-// an incarnation it did not mint; the test-only constructor appears in no
-// non-test file of the packages that start sessions.
+// an incarnation it did not mint. The test-only constructor appears in no
+// non-test Go file of the repository (so in no package that imports this
+// one, directly or not) but its definition.
 func TestRecordedIncarnationForTestStaysInTests(t *testing.T) {
 	root := repoRoot(t)
-	for _, dir := range []string{"internal/session", "internal/worker", "internal/api", "cmd/gc"} {
-		entries, err := os.ReadDir(filepath.Join(root, dir))
+	scanned := 0
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
-			t.Fatal(err)
+			return err
 		}
-		for _, e := range entries {
-			name := e.Name()
-			if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-				continue
+		name := d.Name()
+		if d.IsDir() {
+			if path != root && (strings.HasPrefix(name, ".") || name == "testdata" || name == "node_modules" || strings.HasPrefix(name, "bazel-")) {
+				return filepath.SkipDir
 			}
-			src, err := os.ReadFile(filepath.Join(root, dir, name))
-			if err != nil {
+			return nil
+		}
+		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			return nil
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		scanned++
+		n := strings.Count(string(src), "RecordedIncarnationForTest(")
+		rel, _ := filepath.Rel(root, path)
+		if filepath.ToSlash(rel) == "internal/session/incarnation.go" {
+			n-- // its definition
+		}
+		if n > 0 {
+			t.Errorf("%s calls RecordedIncarnationForTest outside a test", rel)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scanned < 500 {
+		t.Fatalf("scanned %d Go files; the walk missed the repository", scanned)
+	}
+}
+
+// launchThenFailProvider scripts each Start: "die" fails during startup
+// with nothing launched; "launch-fail" launches the session under the
+// start's env, then fails (a readiness wait that timed out) with a cleanup
+// that could not kill it, as tmux's best-effort cleanupFailedStart can;
+// anything else starts. Unscripted Starts start. Its GetMeta reads a running
+// session's environment, as tmux's show-environment does.
+type launchThenFailProvider struct {
+	*runtime.Fake
+	script []string
+	n      int
+}
+
+func (p *launchThenFailProvider) GetMeta(name, key string) (string, error) {
+	if p.IsRunning(name) {
+		if v, ok := p.LastStartConfig(name).Env[key]; ok {
+			return v, nil
+		}
+	}
+	return p.Fake.GetMeta(name, key)
+}
+
+func (p *launchThenFailProvider) Start(ctx context.Context, name string, cfg runtime.Config) error {
+	step := ""
+	if p.n < len(p.script) {
+		step = p.script[p.n]
+	}
+	p.n++
+	switch step {
+	case "die":
+		p.Calls = append(p.Calls, runtime.Call{Method: "Start", Name: name, Config: cfg})
+		return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+	case "launch-fail":
+		if err := p.Fake.Start(ctx, name, cfg); err != nil {
+			return err
+		}
+		return errors.New("waiting for the agent: readiness timed out")
+	}
+	return p.Fake.Start(ctx, name, cfg)
+}
+
+// TestFailedStartKeepsAMintItsProcessCarries: a Start that failed after its
+// launch, whose process survived, keeps its mint: the row and the surviving
+// runtime name one incarnation, and the next start converges on it instead
+// of starting a second process. So does a read of the runtime's token that
+// cannot answer. A stale-key relaunch follows the same rule.
+func TestFailedStartKeepsAMintItsProcessCarries(t *testing.T) {
+	t.Run("launched then failed", func(t *testing.T) {
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store)
+		sp := &launchThenFailProvider{Fake: runtime.NewFake(), script: []string{"launch-fail"}}
+		mgr := newTestManager(t, store, sp)
+		by := testActor(mgr, ActorOperator)
+		if err := mgr.Start(context.Background(), by, b.ID, "claude", runtime.Config{}); err == nil {
+			t.Fatal("Start succeeded, want its failure")
+		}
+		env, row := sp.LastStartConfig("s-mint").Env, rowMeta(t, store, b.ID)
+		if row["generation"] != "4" || row["instance_token"] != env[runtime.InstanceTokenEnv] {
+			t.Fatalf("row gen=%s tok=%s, but the surviving runtime runs gen=%s tok=%s", row["generation"], row["instance_token"], env[runtime.RuntimeEpochEnv], env[runtime.InstanceTokenEnv])
+		}
+		if err := mgr.Start(context.Background(), by, b.ID, "claude", runtime.Config{}); err != nil {
+			t.Fatalf("second Start: %v", err)
+		}
+		if n, after := sp.CountCalls("Start", "s-mint"), rowMeta(t, store, b.ID); n != 1 || after["instance_token"] != env[runtime.InstanceTokenEnv] {
+			t.Fatalf("starts %d, row %v; want the second start converged on the survivor", n, after)
+		}
+	})
+	t.Run("token unreadable", func(t *testing.T) {
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store)
+		fake := runtime.NewFake()
+		fake.GetMetaErrors = map[string]map[string]error{"s-mint": {runtime.InstanceTokenEnv: errors.New("tmux: server busy")}}
+		sp := &startOverrideProvider{Fake: fake, startErr: errors.New("out of memory")}
+		mgr := newTestManager(t, store, sp)
+		if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{}); err == nil {
+			t.Fatal("Start succeeded, want its failure")
+		}
+		if row := rowMeta(t, store, b.ID); row["generation"] != "4" {
+			t.Fatalf("row %v, want the mint kept when the runtime's token cannot be read", row)
+		}
+	})
+	t.Run("stale-key relaunch launched then failed", func(t *testing.T) {
+		store := openLeaseStore(t, t.TempDir())
+		b := mintRow(t, store, "session_key", "k-stale", "resume_flag", "--resume")
+		sp := &launchThenFailProvider{Fake: runtime.NewFake(), script: []string{"die", "launch-fail"}}
+		mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(immediateStaleKeyDetectionWaiter))
+		if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume k-stale", runtime.Config{}); err == nil {
+			t.Fatal("Start succeeded, want the relaunch's failure")
+		}
+		env, row := sp.LastStartConfig("s-mint").Env, rowMeta(t, store, b.ID)
+		if row["generation"] != "5" || env[runtime.RuntimeEpochEnv] != "5" || row["instance_token"] != env[runtime.InstanceTokenEnv] {
+			t.Fatalf("row gen=%s tok=%s, but the surviving relaunch runs gen=%s tok=%s", row["generation"], row["instance_token"], env[runtime.RuntimeEpochEnv], env[runtime.InstanceTokenEnv])
+		}
+	})
+}
+
+// freshReadUnavailable is a provider whose fresh read cannot answer (a tmux
+// list-panes that timed out) while its Start works.
+type freshReadUnavailable struct{ *runtime.Fake }
+
+func (p *freshReadUnavailable) ObserveLivenessSince(string, []string, time.Time) (runtime.Liveness, error) {
+	return runtime.Liveness{}, fmt.Errorf("%w: observing tmux session: state cache cannot vouch for it", runtime.ErrRuntimeUnavailable)
+}
+
+// TestStartRefusesWhenTheFreshReadCannotAnswer: under its lease a start
+// whose fresh read of the runtime fails refuses (fail closed): no mint, no
+// Start, runtime.ErrRuntimeUnavailable reported once.
+func TestStartRefusesWhenTheFreshReadCannotAnswer(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store)
+	sp := &freshReadUnavailable{Fake: runtime.NewFake()}
+	mgr := newTestManager(t, store, sp)
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || strings.Count(err.Error(), "runtime unavailable") != 1 {
+		t.Fatalf("Start = %v, want ErrRuntimeUnavailable, said once", err)
+	}
+	if n, row := sp.CountCalls("Start", "s-mint"), rowMeta(t, store, b.ID); n != 0 || row["generation"] != "3" || row["instance_token"] != "tok-3" {
+		t.Fatalf("starts %d, row %v; want nothing started or minted", n, row)
+	}
+}
+
+// freshReadMisses reads the runtime not running though it is up: it came up
+// past the read, or the provider's read lags.
+type freshReadMisses struct{ *runtime.Fake }
+
+func (p *freshReadMisses) ObserveLivenessSince(string, []string, time.Time) (runtime.Liveness, error) {
+	return runtime.Liveness{}, nil
+}
+
+// failWriteBackStore fails the conditional write that would put the row
+// back on tok-3: a converged start's withdrawal.
+type failWriteBackStore struct {
+	*rowWriteRecorder
+	failed int
+}
+
+func (s *failWriteBackStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if opts.Metadata["instance_token"] == "tok-3" {
+		s.failed++
+		return errors.New("database is locked")
+	}
+	return s.rowWriteRecorder.UpdateIfMatch(id, rev, opts)
+}
+
+// TestConvergedStartWithdrawsItsMint: a start whose Start finds the name
+// taken past its fresh read converges on that runtime: its mint is
+// withdrawn and folded off the row it decides on, so the operator's hold is
+// consumed against the row as it was. A withdrawal that does not land is
+// ErrStateSync, never a success over a row that names no live process.
+func TestConvergedStartWithdrawsItsMint(t *testing.T) {
+	held := []string{
+		"state", string(StateSuspended), "held_until", time.Now().Add(testIndefiniteHold).UTC().Format(time.RFC3339),
+		"sleep_intent", string(SleepReasonUserHold), "suspended_at", "2026-10-09T11:00:00Z",
+	}
+	for _, failWithdraw := range []bool{false, true} {
+		t.Run(fmt.Sprintf("withdrawal fails=%v", failWithdraw), func(t *testing.T) {
+			backing := openLeaseStore(t, t.TempDir())
+			b := mintRow(t, backing, held...)
+			store := backing
+			fail := &failWriteBackStore{rowWriteRecorder: &rowWriteRecorder{Store: backing}}
+			if failWithdraw {
+				store = fail
+			}
+			sp := &freshReadMisses{Fake: runtime.NewFake()}
+			if err := sp.Start(context.Background(), "s-mint", runtime.Config{Env: map[string]string{runtime.RuntimeEpochEnv: "3", runtime.InstanceTokenEnv: "tok-3"}}); err != nil {
 				t.Fatal(err)
 			}
-			n := strings.Count(string(src), "RecordedIncarnationForTest(")
-			if dir == "internal/session" && name == "incarnation.go" {
-				n-- // its definition
+			mgr := newTestManager(t, store, sp)
+			err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{})
+			row := rowMeta(t, backing, b.ID)
+			if failWithdraw {
+				if !errors.Is(err, ErrStateSync) || fail.failed == 0 || row["state"] == string(StateActive) {
+					t.Fatalf("Attach = %v (withdrawal failures %d), row %v; want ErrStateSync and no confirm", err, fail.failed, row)
+				}
+				return
 			}
-			if n > 0 {
-				t.Errorf("%s/%s calls RecordedIncarnationForTest outside a test", dir, name)
+			if err != nil {
+				t.Fatalf("Attach: %v", err)
 			}
+			if row["generation"] != "3" || row["instance_token"] != "tok-3" || row["last_woke_at"] != "" || row["sleep_intent"] != "" || row["state"] != string(StateActive) {
+				t.Fatalf("row %v, want the mint withdrawn and the hold consumed on generation 3", row)
+			}
+		})
+	}
+}
+
+// TestStartFoundLiveUnderTheLeaseConvergesAsMainDid: a row not suspended
+// whose runtime another start brought up between the operator's read and
+// its lease converges as a Start that found the runtime up always did: the
+// runtime's binding is recorded and the operator's hold consumed.
+func TestStartFoundLiveUnderTheLeaseConvergesAsMainDid(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store, "held_until", time.Now().Add(testIndefiniteHold).UTC().Format(time.RFC3339),
+		"sleep_intent", string(SleepReasonUserHold), "suspended_at", "2026-10-09T11:00:00Z")
+	fake := runtime.NewFake()
+	gate := &isRunningHook{Provider: fake, at: 2}
+	gate.once = func() {
+		if err := fake.Start(context.Background(), "s-mint", runtime.Config{Env: map[string]string{runtime.RuntimeEpochEnv: "3", runtime.InstanceTokenEnv: "tok-3"}}); err != nil {
+			t.Error(err)
 		}
+	}
+	mgr := newTestManager(t, store, boundProvider{Provider: gate, binding: runtime.SessionBinding{ThreadID: "thread-9", ProjectID: "project-9"}})
+	if err := mgr.Attach(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{}); err != nil {
+		t.Fatalf("Attach: %v", err)
+	}
+	row := rowMeta(t, store, b.ID)
+	if gate.calls < gate.at || fake.CountCalls("Start", "s-mint") != 1 || row["generation"] != "3" {
+		t.Fatalf("IsRunning calls %d, starts %d, row %v; want the other start's runtime converged on, nothing minted", gate.calls, fake.CountCalls("Start", "s-mint"), row)
+	}
+	if row[MetadataRuntimeThreadID] != "thread-9" || row["sleep_intent"] != "" || row["state"] != string(StateActive) {
+		t.Fatalf("row %v, want its binding recorded and the hold consumed", row)
+	}
+}
+
+// TestStaleKeyWaitEndingAfterTheLaunchKeepsTheMint: a start whose context
+// ends during the stale-key wait after its Start succeeded keeps its mint:
+// the process it launched carries it.
+func TestStaleKeyWaitEndingAfterTheLaunchKeepsTheMint(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store, "session_key", "k-1", "resume_flag", "--resume")
+	sp := runtime.NewFake()
+	mgr := newTestManager(t, store, sp, WithStaleKeyDetectionWaiter(func(context.Context, string) error { return context.Canceled }))
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume k-1", runtime.Config{}); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Start = %v, want the wait's context.Canceled", err)
+	}
+	env, row := sp.LastStartConfig("s-mint").Env, rowMeta(t, store, b.ID)
+	if row["generation"] != "4" || row["instance_token"] != env[runtime.InstanceTokenEnv] {
+		t.Fatalf("row %v, launched env %v; want the launched process's mint kept", row, env)
+	}
+}
+
+// retryOrphanProvider's first Start dies during startup with nothing
+// launched; from its second scan on, the process table holds a root of the
+// session it cannot terminate, so the stale-key relaunch refuses.
+type retryOrphanProvider struct {
+	*runtime.Fake
+	city  string
+	scans int
+}
+
+func (p *retryOrphanProvider) Start(_ context.Context, name string, cfg runtime.Config) error {
+	p.Calls = append(p.Calls, runtime.Call{Method: "Start", Name: name, Config: cfg})
+	return fmt.Errorf("%w: session %q", runtime.ErrSessionDiedDuringStartup, name)
+}
+
+func (p *retryOrphanProvider) FindRuntimesBySessionID(id string) ([]runtime.LiveRuntime, error) {
+	p.scans++
+	if p.scans < 2 {
+		return nil, nil
+	}
+	return []runtime.LiveRuntime{{PID: 2147480000, SessionID: id, City: p.city}}, nil
+}
+
+func (p *retryOrphanProvider) TerminateRuntime(runtime.LiveRuntime) error {
+	return errors.New("operation not permitted")
+}
+
+// TestRelaunchRefusedByAnOrphanMintsNothing: the stale-key relaunch mints
+// only after its orphan kill, so a relaunch the kill refuses mints nothing,
+// and the failed start's own mint is withdrawn: the row is as it was.
+func TestRelaunchRefusedByAnOrphanMintsNothing(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store, "session_key", "k-stale", "resume_flag", "--resume")
+	city := t.TempDir()
+	sp := &retryOrphanProvider{Fake: runtime.NewFake(), city: city}
+	mgr := newTestManager(t, store, sp, WithCityPath(city))
+	err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude --resume k-stale", runtime.Config{})
+	if err == nil || !strings.Contains(err.Error(), "orphan cleanup") || sp.scans < 2 {
+		t.Fatalf("Start = %v (scans %d), want the relaunch's orphan refusal", err, sp.scans)
+	}
+	if row := rowMeta(t, store, b.ID); row["generation"] != "3" || row["instance_token"] != "tok-3" || row["last_woke_at"] != "" {
+		t.Fatalf("row %v, want nothing minted left behind", row)
+	}
+}
+
+// TestStartWithNothingToConfirmStillChecksItsMint: a start on a row whose
+// confirm has nothing to write (already active, no claim, no stop request,
+// no binding) still refuses when the row records a newer incarnation.
+func TestStartWithNothingToConfirmStillChecksItsMint(t *testing.T) {
+	store := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, store, "state", string(StateActive))
+	sp := &mintSeeingProvider{Fake: runtime.NewFake(), store: store, id: b.ID}
+	sp.hook = func() {
+		if err := store.SetMetadataBatch(b.ID, map[string]string{"generation": "9", "instance_token": "tok-newer"}); err != nil {
+			t.Error(err)
+		}
+	}
+	mgr := newTestManager(t, store, sp)
+	if err := mgr.Start(context.Background(), testActor(mgr, ActorOperator), b.ID, "claude", runtime.Config{}); !errors.Is(err, ErrMintSuperseded) {
+		t.Fatalf("Start = %v, want ErrMintSuperseded", err)
+	}
+}
+
+// TestIncarnationFencesReadTheWholeIdentity: an empty confirm on a closed
+// row is refused, a withdrawal over a row whose token moved at the same
+// generation writes nothing, and a mint's identity keys win over its
+// request's own patch.
+func TestIncarnationFencesReadTheWholeIdentity(t *testing.T) {
+	backing := openLeaseStore(t, t.TempDir())
+	b := mintRow(t, backing)
+	front := NewStore(beads.SessionStore{Store: backing})
+	req := mintReq(infoOf(t, backing, b.ID))
+	req.Patch = func(Info, Incarnation) MetadataPatch {
+		return MetadataPatch{"generation": "99", "instance_token": "tok-patch", "synced_at": "patched"}
+	}
+	inc, err := front.MintIncarnation(context.Background(), nil, req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if meta := rowMeta(t, backing, b.ID); meta["generation"] != "4" || !inc.recordedBy(meta) || meta["synced_at"] != "patched" {
+		t.Fatalf("row %v, want the mint's identity over its patch's, the patch's other keys kept", meta)
+	}
+	if err := backing.SetMetadataBatch(b.ID, map[string]string{"instance_token": "tok-other"}); err != nil {
+		t.Fatal(err)
+	}
+	if landed, err := front.unmintIncarnation(inc); err != nil || landed {
+		t.Fatalf("withdrawal over a moved token = %v, %v; want refused", landed, err)
+	}
+	if meta := rowMeta(t, backing, b.ID); meta["instance_token"] != "tok-other" || meta["generation"] != "4" {
+		t.Fatalf("row %v, want the moved token kept", meta)
+	}
+	closed, err := backing.Create(sessionBeadFixture("s-closed", "open", mintRowMeta("session_name", "s-closed")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	cinc, err := front.MintIncarnation(context.Background(), nil, mintReq(infoOf(t, backing, closed.ID)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backing.Close(closed.ID); err != nil {
+		t.Fatal(err)
+	}
+	if landed, err := front.ConfirmIncarnation(cinc, nil); err != nil || landed {
+		t.Fatalf("empty confirm on a closed row = %v, %v; want false", landed, err)
 	}
 }

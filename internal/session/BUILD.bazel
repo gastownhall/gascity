@@ -231,6 +231,7 @@ go_test(
         exclude = ["BUILD.bazel"],
     ) + [
         "//:go.mod",
+        "//:repo_go_srcs",
         "//cmd/gc:bazel_go_srcs",
         "//cmd/gc:cmd_session.go",
         "//cmd/gc:doctor_session_model.go",

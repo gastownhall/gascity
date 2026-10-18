@@ -158,7 +158,10 @@ var (
 	// opMint is every Manager start's incarnation mint (I-MINT, E1), and the
 	// legacy PreWake's CAS: generation g+1, a fresh token, last_woke_at and the
 	// continuation epoch, a fresh context consuming the reset.
-	opMint          = op("internal/session/incarnation.go", "Store.MintIncarnation")
+	opMint = op("internal/session/incarnation.go", "Store.MintIncarnation")
+	// opUnmint withdraws a start's mint no process ran under: it writes back
+	// what opMint replaced while the row still records the mint.
+	opUnmint        = op("internal/session/incarnation.go", "Store.unmintIncarnation")
 	v2AwakeHeal     = v2(srcHeals, "armAwakeHeal")     // A6's asleep-to-awake heal clears the wake request (D7 rule 2)
 	v2SatisfiedWake = v2(srcHeals, "armSatisfiedWake") // A6's satisfied-wake clear (D7 rule 2)
 	v2AdoptCommit   = Site{Mode: ModeV2, File: "cmd/gc/reconcile_effect_start.go"}.pending("mc-h28bx",
@@ -294,8 +297,8 @@ func withObserved(fields []Field) []Field {
 
 var registry = slices.Concat([]Field{
 	// Incarnation.
-	{Key: "generation", Class: ClassIncarnation, Writers: sites(legacyPreWake, opCreate, v2PreWake, opMint)},
-	{Key: "instance_token", Class: ClassIncarnation, Writers: sites(legacyPreWake, opMint,
+	{Key: "generation", Class: ClassIncarnation, Writers: sites(legacyPreWake, opCreate, v2PreWake, opMint, opUnmint)},
+	{Key: "instance_token", Class: ClassIncarnation, Writers: sites(legacyPreWake, opMint, opUnmint,
 		v2("cmd/gc/reconcile_arms_identity.go", "armIdentity"), v2("cmd/gc/allocator_create_named.go", "recordRowToken"))},
 
 	// Lifecycle.
@@ -304,7 +307,7 @@ var registry = slices.Concat([]Field{
 	{Key: "sleep_reason", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"), v2(srcHeals, "asleepHealPatch"), v2Accrual), Clears: sites(waitHold)},
 	{Key: "slept_at", Class: ClassLifecycle, Writers: sites(legacy(srcTransition, "SleepPatch"),
 		op("internal/session/kill_fence.go", "KillPendingPatch"))},
-	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake, opMint)},
+	{Key: "last_woke_at", Class: ClassLifecycle, Writers: sites(legacyPreWake, v2PreWake, opMint, opUnmint)},
 	{Key: "drain_at", Class: ClassLifecycle, Writers: sites(legacy(srcReconciler, "markDrainAckStopPending"), v2("cmd/gc/reconcile_effect_stop.go", "dormantChoice"))},
 	{Key: "pending_create_claim", Class: ClassLifecycle, Writers: sites(legacy(srcPoolNames, "createPoolSessionBeadWithIdentifiers")), Clears: sites(v2(srcHeals, "armClaimClear"))},
 	{Key: "pending_create_started_at", Class: ClassLifecycle, Writers: sites(legacyPreWake), Clears: sites(v2(srcHeals, "armClaimClear"))},
@@ -329,7 +332,7 @@ var registry = slices.Concat([]Field{
 	{Key: "wake_request", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy("internal/session/lifecycle_projection.go", "projectWakeCauses"), v2("internal/session/lifecycle_projection.go", "projectWakeCauses")), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
 	{Key: "wake_requested_at", Class: ClassRequest, Writers: sites(op(srcWaitStore, "Store.wakeSessionFromBead")), Readers: sites(legacy(srcReconciler, "explicitWakePendingInfo"), v2(srcReconciler, "explicitWakePendingInfo"), v2SatisfiedWake), Clears: sites(legacyPreWake, v2PreWake, v2AwakeHeal, v2SatisfiedWake, v2AdoptCommit)},
 	{Key: "restart_requested", Class: ClassRequest, Writers: sites(op(srcManager, "Manager.RequestFreshRestart")), Readers: sites(legacy(srcReconciler, "reconcileSessionBeadsTracedWithNamedDemand"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested")), Clears: sites(legacy(srcTransition, "RestartRequestPatch"), legacy(srcReconciler, "finalizeDrainAckStoppedSession"), v2("cmd/gc/reconcile_arms_lifecycle.go", "restartHandoff"), v2("cmd/gc/reconcile_arms_lifecycle.go", "armRestartRequested"), Site{Mode: ModeV2, File: "cmd/gc/reconcile_finalize.go"}.pending("mc-029ln", "D4's finalizePatch always clears it"))},
-	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart")), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake, opMint)},
+	{Key: "continuation_reset_pending", Class: ClassRequest, Writers: sites(v2(srcHeals, "asleepHealPatch"), op(srcManager, "Manager.RequestFreshRestart"), opUnmint), Readers: sites(legacy("cmd/gc/session_wake.go", "pendingContinuationResetNeedsFreshStart"), v2PreWake), Clears: sites(legacyCommit, v2PreWake, opMint)},
 
 	// The stop request: the controller half, then the CLI's ack (E3), which
 	// writes only in a v2 city.
@@ -384,7 +387,7 @@ var registry = slices.Concat([]Field{
 	{Key: "common_name", Class: ClassLaunchConfig, NoWriter: "retired: no production writer; name lookups still query it"},
 	{Key: "work_dir", Class: ClassLaunchConfig, Writers: sites(legacyCreate, v2("cmd/gc/allocator_create.go", "createEffects.verifiedMetadata"))},
 	{Key: beadmeta.WorkDirMetadataKey, Class: ClassLaunchConfig, Writers: sites(legacy("cmd/gc/build_desired_state.go", "computePoolTriggerBindingPatch"), v2("cmd/gc/allocator_create.go", "createEffects.verifiedMetadata"))},
-	{Key: "continuation_epoch", Class: ClassLaunchConfig, Writers: sites(legacyPreWake, opMint)},
+	{Key: "continuation_epoch", Class: ClassLaunchConfig, Writers: sites(legacyPreWake, opMint, opUnmint)},
 	{Key: "transport", Class: ClassLaunchConfig, Writers: sites(op(srcManager, "Manager.persistTransport"))},
 	{Key: "manual_session", Class: ClassAssignmentIdentity, NoWriter: "retired: no production writer; legacy rows keep it and isManualSessionBead still reads it"},
 	{Key: beadmeta.WorkerDirMetadataKey, Class: ClassLaunchConfig, NoWriter: "no production writer: contract.SetWorkerDir has no caller yet; WorkerDirFromMetadata reads it first"},
