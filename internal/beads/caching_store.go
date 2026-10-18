@@ -128,7 +128,10 @@ type CachingStore struct {
 	// registers no intent: its backing reports a count, not which ids it
 	// closed, so it announces only the closes of rows the cache held, and the
 	// close of a bead the cache never held is not announced by the write, even
-	// when a read caches the closed row while the write is in flight.
+	// when a read caches the closed row while the write is in flight. The
+	// closed row it installs for such a bead is marked silently installed
+	// (silentCloses), so a refresh with evidence of a recent close (the
+	// ledger feed's) announces it once.
 	closeIntents map[string]*closeIntent
 	// announcedCloses holds the closes this cache announced (announcedClose):
 	// every bead.closed emitChange sends, and the closes a reconcile announces

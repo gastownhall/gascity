@@ -456,6 +456,17 @@ func TestCachingStoreRefreshRowReportYieldsBeforeItsBackingRead(t *testing.T) {
 	}
 	end()
 
+	// A create in flight may be making the row the cache does not hold.
+	_, endCreate := cache.beginLocalCreate()
+	before = counted.readCalls.Load()
+	if _, err := cache.RefreshRowReport(outOfBand.ID, yield); !errors.Is(err, ErrRowRefreshYielded) {
+		t.Fatalf("a refresh of an unheld row during a create = %v, want ErrRowRefreshYielded", err)
+	}
+	if reads := counted.readCalls.Load() - before; reads != 0 {
+		t.Fatalf("the refresh yielding to a create made %d backing reads, want none", reads)
+	}
+	endCreate()
+
 	var endDuring func()
 	backing.onGet = func(id string) { _, endDuring = cache.beginLocalWrite(id) }
 	if _, err := cache.RefreshRowReport(outOfBand.ID, yield); !errors.Is(err, ErrRowRefreshYielded) {

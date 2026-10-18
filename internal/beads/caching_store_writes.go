@@ -625,8 +625,11 @@ func (c *CachingStore) CloseAll(ids []string, metadata map[string]string) (int, 
 			opts := absorbOpts{depsMode: depsKeepCached, seqMode: seqKeep, clearDirty: true}
 			if item.bead.Status == "closed" {
 				opts.depsMode = depsDrop
-				// Announced below whenever this close is claimed.
-				opts.closeAnnounced = true
+				// Announced below exactly when this close is claimed; an
+				// unclaimed closed row over no cached row stays marked
+				// silently installed (silentCloses), so the feed's refresh
+				// still announces it.
+				opts.closeAnnounced = announce
 			}
 			c.absorbFreshLocked(item.id, item.bead, c.clockNow(), opts)
 			if item.bead.Status == "closed" {
