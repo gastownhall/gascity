@@ -108,6 +108,7 @@ go_test(
         "turn_compose_test.go",
         "turn_current_test.go",
         "turn_fixture_test.go",
+        "turn_interrupt_test.go",
         "turn_watch_test.go",
     ],
     data = glob(

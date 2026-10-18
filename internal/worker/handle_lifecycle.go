@@ -374,11 +374,20 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 	return result, nil
 }
 
-// Interrupt soft-stops any in-flight worker turn.
+// Interrupt soft-stops the in-flight worker turn: the one req.Turn names, or
+// with no Turn whatever runs.
 func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if req.Turn != "" {
+		if !req.Fence.IsZero() {
+			err = fmt.Errorf("interrupting turn %q: %w", req.Turn, ErrTurnInterruptFenced)
+			return err
+		}
+		err = h.interruptTurn(ctx, req.Turn)
+		return err
+	}
 	id := h.currentSessionID()
 	if !req.Fence.IsZero() {
 		if err = req.Fence.Validate(); err != nil {

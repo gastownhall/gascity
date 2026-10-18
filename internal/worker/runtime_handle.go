@@ -285,10 +285,22 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 // session bead to pick provider-specific keys, keystroke and protocol
 // runtimes both get Interrupt; a runtime that cannot interrupt the turn is
 // sent nothing and reported with [sessionpkg.ErrTurnInterruptUnsupported].
+// A turn-scoped interrupt (req.Turn) needs a provider that observes and
+// fences turns itself, since a RuntimeHandle reads no transcript: it runs
+// the provider's InterruptTurn and WaitTurnEnded, and is refused, nothing
+// sent, on any other provider.
 func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if req.Turn != "" {
+		if !req.Fence.IsZero() {
+			err = fmt.Errorf("interrupting turn %q of %s: %w", req.Turn, h.sessionName, ErrTurnInterruptFenced)
+			return err
+		}
+		err = h.interruptTurn(ctx, req.Turn)
+		return err
+	}
 	if !req.Fence.IsZero() {
 		if err = req.Fence.Validate(); err != nil {
 			return err
@@ -307,6 +319,21 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) (er
 		return err
 	}
 	err = h.provider.Interrupt(h.sessionName)
+	return err
+}
+
+// interruptTurn is the turn-scoped interrupt from the provider alone: its
+// turn capabilities decide the refusal, and its turn fence the interrupt.
+func (h *RuntimeHandle) interruptTurn(ctx context.Context, turn string) error {
+	caps := h.turnCapabilities()
+	if err := turnInterruptRefusal(caps, h.sessionName, turn); err != nil {
+		return err
+	}
+	tf, ok := h.provider.(runtime.TurnFenceProvider)
+	if caps.Source != TurnSourceProtocol || !ok {
+		return fmt.Errorf("interrupting turn %q of %s: %w", turn, h.sessionName, runtime.ErrTurnIdentityUnsupported)
+	}
+	_, err := sessionpkg.InterruptTurnOn(ctx, tf, h.sessionName, turn)
 	return err
 }
 

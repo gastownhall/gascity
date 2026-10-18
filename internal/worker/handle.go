@@ -197,8 +197,24 @@ type InterruptRequest struct {
 	// takes no liveness read and leaves the verdict to the runtime's guard;
 	// tmux's checks the agent pane, not the agent process, so an interrupt
 	// into an exited agent whose pane lives on can return nil. It is a
-	// capability and never serialized.
+	// capability and never serialized. A turn-scoped interrupt takes none
+	// (ErrTurnInterruptFenced): a turn id is unique per session name across
+	// the incarnations that host it, so naming the turn already confines the
+	// interrupt to its incarnation.
 	Fence runtime.InputFence `json:"-"`
+	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
+	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
+	// Empty interrupts whatever runs (session scope). A turn-scoped
+	// interrupt is refused, with nothing sent, unless the session's turn
+	// capabilities record starts, fence at least checked and see ends at
+	// least inferred: runtime.ErrTurnIdentityUnsupported, or
+	// session.ErrTurnInterruptUnsupported when the runtime cannot interrupt
+	// at all. It returns nil only once a read of the session's turns shows
+	// the turn no longer current within 15 s; a *runtime.TurnNotCurrentError
+	// when the turn was not current, nothing sent; an error wrapping
+	// runtime.ErrTurnNotEnded when it was interrupted but not seen to end;
+	// and an error wrapping runtime.ErrRuntimeUnavailable when unknown.
+	Turn string `json:"turn,omitempty"`
 }
 
 // NudgeDelivery controls how a nudge should be delivered.
