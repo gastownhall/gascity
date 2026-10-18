@@ -52,8 +52,9 @@ func TestLadderRoundTrip(t *testing.T) {
 		{Key: key("b"), Kind: KindTrigger, Rung: RungAssigned, Since: t0, Attempts: 3, Paused: 2, Last: t0.Add(time.Minute), Next: t0.Add(time.Hour), RecycleAt: t0.Add(2 * time.Minute)},
 		{Key: key("a"), Kind: KindContinuation, Rung: RungAssigned, Since: t0, Escalated: true},
 		{Key: ClaimKey{Store: "", Bead: "c"}, Kind: KindClaim, Rung: RungEscalated, Since: t0, Recycles: 1, Seed: SrcCurrentlyProcessing},
-		{Key: key("d"), Kind: KindClaim, Rung: RungClaimed, Since: t0.Add(123456789 * time.Nanosecond)},
-	}, Release: &ReleaseMark{Key: key("d"), Gen: 9, At: t0}}
+		{Key: key("d"), Kind: KindClaim, Rung: RungClaimed, Since: t0.Add(123456789 * time.Nanosecond), Unreleased: true, Refused: 2},
+		{Key: key("e"), Kind: KindClaim, Rung: RungStarted, Since: t0, Seed: SrcClaimSession},
+	}, Release: &ReleaseMark{Key: key("d"), Gen: 9, At: t0}, LastNudge: t0.Add(time.Second), RecycledGen: 8}
 	got, err := DecodeLadder(EncodeLadder(r))
 	if err != nil {
 		t.Fatalf("round trip: %v", err)
@@ -66,7 +67,7 @@ func TestLadderRoundTrip(t *testing.T) {
 	if EncodeLadder(got) != EncodeLadder(r) {
 		t.Fatal("encoding is not canonical in entry order")
 	}
-	for _, src := range []StartSource{SrcAgent, SrcExecutionClaimStarted, SrcCurrentClaim, SrcCurrentlyProcessing} {
+	for _, src := range []StartSource{SrcAgent, SrcExecutionClaimStarted, SrcCurrentClaim, SrcCurrentlyProcessing, SrcClaimSession} {
 		r := Record{V: 1, Entries: []Entry{{Key: key("x"), Kind: KindClaim, Rung: RungStarted, Seed: src}}}
 		got, err := DecodeLadder(EncodeLadder(r))
 		if err != nil || got.Entries[0].Seed != src {

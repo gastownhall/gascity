@@ -768,3 +768,66 @@ func TestReleaseFoundStarted(t *testing.T) {
 		t.Fatal("mutated its input")
 	}
 }
+
+// A seat that refuses every nudge (a permission prompt) is retried no more
+// often than PausedCap, its count does not move, and one alert is raised.
+func TestDecideRefusedNudgesBackOff(t *testing.T) {
+	r := Record{}
+	var at []time.Duration
+	alerts := 0
+	for now := t0; now.Before(t0.Add(6 * time.Hour)); now = now.Add(30 * time.Second) {
+		d := Decide(r, startedBy1(quiet(now, 1, claim("s")), "s", SrcAgent), p)
+		r = d.Next
+		for _, a := range d.Actions {
+			if n, ok := a.(Nudge); ok {
+				at = append(at, now.Sub(t0))
+				var alert, ok bool
+				if r, alert, ok = NudgeRefused(r, n.Key, n.Attempt, now); !ok {
+					t.Fatalf("NudgeRefused refused the attempt it was given")
+				}
+				if alert {
+					alerts++
+				}
+			}
+		}
+	}
+	if alerts != 1 {
+		t.Fatalf("%d alerts, want one", alerts)
+	}
+	for i := 2; i < len(at); i++ {
+		if gap := at[i] - at[i-1]; gap < DefaultPausedCap {
+			t.Fatalf("refused nudges %v apart (%v)", gap, at)
+		}
+	}
+	if n := len(at); n > 6*6+2 {
+		t.Fatalf("%d attempts in 6h", n)
+	}
+	if e := r.Entries[0]; e.Attempts != 0 || e.Rung != RungStarted || e.Recycles != 0 {
+		t.Fatalf("entry %+v: refusals moved it toward escalation", e)
+	}
+	got, ok := NudgeTaken(r, key("s"))
+	if !ok || got.Entries[0].Refused != 0 {
+		t.Fatalf("NudgeTaken = %+v, %v", got.Entries[0], ok)
+	}
+	if _, ok := NudgeTaken(got, key("s")); ok {
+		t.Fatal("NudgeTaken wrote with no refusals")
+	}
+	if _, _, ok := NudgeRefused(r, key("s"), 99, t0); ok {
+		t.Fatal("NudgeRefused re-counted an attempt the cell no longer holds")
+	}
+}
+
+// A new generation clears an unfinished release and refusals; a recycle
+// records its generation.
+func TestDecideGenerationClearsUnfinished(t *testing.T) {
+	prev := rec(1, Entry{Key: key("u"), Kind: KindClaim, Rung: RungClaimed, Since: t0, Attempts: 3, Last: t0, Unreleased: true, Refused: 2})
+	d := Decide(prev, quiet(t0.Add(time.Minute), 2, claim("u")), p)
+	if e := entry(t, d, "u"); e.Unreleased || e.Refused != 0 {
+		t.Fatalf("entry %+v after a new generation", e)
+	}
+	r := rec(5, Entry{Key: key("s"), Kind: KindClaim, Rung: RungStarted, Since: t0, Attempts: 6, Last: t0})
+	d = Decide(r, startedBy1(quiet(t0.Add(2*time.Hour), 5, claim("s")), "s", SrcAgent), p)
+	if d.Next.RecycledGen != 5 {
+		t.Fatalf("RecycledGen = %d, want the recycle's generation 5", d.Next.RecycledGen)
+	}
+}

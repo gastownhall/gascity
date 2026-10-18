@@ -268,6 +268,10 @@ func runSequence(seed uint64) error {
 				}
 				lastSeatNudge = o.Now
 				lastNudge[a.Key] = o.Now
+				// A seat refusing nudges is retried no more often than PausedCap.
+				if pe, ok := entryOf(prev, a.Key); ok && pe.Refused > 0 && pe.Kind == entryKind(d.Next, a.Key) && prev.Gen == o.Gen && o.Now.Sub(pe.Last) < DefaultPausedCap {
+					return fail("WL3: %v nudged %v after a refused nudge", a.Key, o.Now.Sub(pe.Last))
+				}
 				// WL3: a counted nudge waits out its backoff: Base doubling
 				// from the last counted nudge, never less.
 				if !a.Paused {
@@ -344,10 +348,22 @@ func runSequence(seed uint64) error {
 			}
 		}
 
-		// The lane: commit, then finish releases: mostly released, else
-		// kept (ReleaseUnfinished), else (a crash) left pending.
+		// The lane: commit through the cell's text, then finish releases:
+		// mostly released, else kept (ReleaseUnfinished), else (a crash)
+		// left pending; and some nudges are refused (NudgeRefused).
 		if d.Changed {
-			s.rec = d.Next
+			r, err := DecodeLadder(EncodeLadder(d.Next))
+			if err != nil {
+				return fail("the cell does not decode: %v", err)
+			}
+			s.rec = r
+		}
+		for _, a := range d.Actions {
+			if n, ok := a.(Nudge); ok && s.event(10) {
+				if r, _, ok := NudgeRefused(s.rec, n.Key, n.Attempt, o.Now); ok {
+					s.rec = r
+				}
+			}
 		}
 		for _, a := range d.Actions {
 			switch a := a.(type) {
@@ -428,4 +444,9 @@ func TestNoDrainWave(t *testing.T) {
 		}
 		return nil
 	})
+}
+
+func entryKind(r Record, k ClaimKey) Kind {
+	e, _ := entryOf(r, k)
+	return e.Kind
 }

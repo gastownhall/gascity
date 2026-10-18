@@ -43,10 +43,10 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			e = ne
 		default:
 			if newGen {
-				e.Attempts, e.Paused, e.Since = 0, 0, now
+				e.Attempts, e.Paused, e.Since, e.Unreleased, e.Refused = 0, 0, now, false, 0
 			}
 			if init > e.Rung {
-				e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased = init, 0, 0, now, false, false
+				e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Refused = init, 0, 0, now, false, false, 0
 				if init == RungStarted {
 					e.Seed = src
 				}
@@ -55,7 +55,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		e = p.progressReset(e, obs)
 		entries = append(entries, e)
 	}
-	next := Record{V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now)}
+	next := Record{V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now), RecycledGen: prev.RecycledGen}
 	idx := func(k ClaimKey) int { return slices.IndexFunc(next.Entries, func(e Entry) bool { return e.Key == k }) }
 
 	// 3. A pending release: re-emit while the claim is still outstanding and
@@ -124,7 +124,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 				continue
 			}
 			if e.RecycleAt.IsZero() || now.Sub(e.RecycleAt) >= p.RecycleRepost {
-				e.RecycleAt = now
+				e.RecycleAt, d.Next.RecycledGen = now, obs.Gen
 				d.Actions = append(d.Actions, Recycle{Key: e.Key})
 			}
 			nudge(false)
@@ -169,7 +169,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			nudge(false)
 		case e.Recycles < p.MaxRecycles:
 			e.Recycles++
-			e.RecycleAt, e.Last = now, now
+			e.RecycleAt, e.Last, d.Next.RecycledGen = now, now, obs.Gen
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true}, Alert{Key: e.Key, Reason: AlertStartedRecycled})
 		default:
 			if nudged {
@@ -193,7 +193,7 @@ func (p Policy) progressReset(e Entry, obs Observation) Entry {
 		obs.LastActivity.Before(e.Last.Add(p.ProgressReset)) {
 		return e
 	}
-	e.Attempts, e.Paused, e.Unreleased, e.Since = 0, 0, false, minTime(obs.LastActivity, obs.Now)
+	e.Attempts, e.Paused, e.Unreleased, e.Refused, e.Since = 0, 0, false, 0, minTime(obs.LastActivity, obs.Now)
 	return e
 }
 
@@ -214,14 +214,18 @@ func minTime(t, now time.Time) time.Time {
 // dueAt is when a quiet seat's entry is next due: a grace after the entry
 // (or its generation, or its last progress) started, else the backoff after
 // its last nudge. While the provider is degraded the backoff is PausedCap,
-// both floor and cap: delivery goes on, at a steady pace.
+// both floor and cap: delivery goes on, at a steady pace. While the seat
+// refuses nudges (Refused) PausedCap is the floor.
 func (p Policy) dueAt(e Entry, degraded bool) time.Time {
 	if e.Attempts == 0 && e.Paused == 0 && !e.Unreleased {
 		return e.Since.Add(p.Grace)
 	}
 	iv := p.backoff(e)
-	if degraded {
+	switch {
+	case degraded:
 		iv = p.PausedCap
+	case e.Refused > 0:
+		iv = max(iv, p.PausedCap)
 	}
 	return e.Last.Add(iv)
 }
@@ -245,7 +249,7 @@ func (p Policy) settle(d Decision, prev Record) Decision {
 
 // sameRecord reports whether a and b store the same cell text.
 func sameRecord(a, b Record) bool {
-	if a.V != b.V || a.Gen != b.Gen || !a.LastNudge.Equal(b.LastNudge) || len(a.Entries) != len(b.Entries) || (a.Release == nil) != (b.Release == nil) {
+	if a.V != b.V || a.Gen != b.Gen || a.RecycledGen != b.RecycledGen || !a.LastNudge.Equal(b.LastNudge) || len(a.Entries) != len(b.Entries) || (a.Release == nil) != (b.Release == nil) {
 		return false
 	}
 	if a.Release != nil && (a.Release.Key != b.Release.Key || a.Release.Gen != b.Release.Gen || !a.Release.At.Equal(b.Release.At)) {
@@ -255,7 +259,7 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
+			x.Refused != y.Refused || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}
 	}
@@ -342,5 +346,43 @@ func ReleaseFoundStarted(r Record, key ClaimKey, gen int64, src StartSource, now
 		e := &r.Entries[i]
 		e.Rung, e.Attempts, e.Paused, e.Since, e.Escalated, e.Unreleased, e.Seed = RungStarted, 0, 0, now, false, false, src
 	}
+	return r, true
+}
+
+// refusedAlertAt is how many nudges in a row a seat refuses before the one
+// nudge_refused alert.
+const refusedAlertAt = 3
+
+// NudgeRefused is r after the seat could not take the nudge of attempt
+// about key that landed at now (a permission prompt, the runtime
+// unavailable): the attempt is re-counted as paused, so it moves nothing
+// toward escalation, and the entry backs off to PausedCap until a nudge is
+// taken. alert is true exactly when the refusals reach refusedAlertAt: the
+// caller raises one nudge_refused alert. ok is false when r no longer holds
+// that attempt.
+func NudgeRefused(r Record, key ClaimKey, attempt int, now time.Time) (out Record, alert, ok bool) {
+	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
+	if i < 0 || !r.Entries[i].Last.Equal(now) || r.Entries[i].Attempts != attempt {
+		return r, false, false
+	}
+	r.Entries = slices.Clone(r.Entries)
+	e := &r.Entries[i]
+	if e.Attempts > 0 {
+		e.Attempts--
+	}
+	e.Paused++
+	e.Refused++
+	return r, e.Refused == refusedAlertAt, true
+}
+
+// NudgeTaken is r after the seat took a nudge about key: its refusals end.
+// ok is false when there were none (no write needed).
+func NudgeTaken(r Record, key ClaimKey) (Record, bool) {
+	i := slices.IndexFunc(r.Entries, func(e Entry) bool { return e.Key == key })
+	if i < 0 || r.Entries[i].Refused == 0 {
+		return r, false
+	}
+	r.Entries = slices.Clone(r.Entries)
+	r.Entries[i].Refused = 0
 	return r, true
 }
