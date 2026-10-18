@@ -15,14 +15,19 @@ package main
 // It runs one pass at boot whatever the gates say, which catches ops left
 // open after a gate was turned off, and then a pass every interval while any
 // of the three ops gates the controller latched at boot is not off, or while
-// the last pass left work: an op still within its finish_by, a full batch
-// that closed an op (more may wait behind it), a retryable read, open or
-// close failure, or a truncated read. So with every gate off (the rollback
-// path, DES-O0API §12) the ops in flight at the restart are still closed
-// once their finish_by passes, and the loop then stops. A store that cannot
-// record ops at all (no conditional writes, no namespace) is not left work
-// with every gate off, or it would tick forever. A boot pass skipped because
-// the city is quiescent is retried on the ticker until it runs.
+// the last pass left work: an op still within its finish_by, a read that
+// stopped at the limit or its page cap in a pass where an op closed (more
+// may wait behind it), or a retryable read, open or close failure. So with
+// every gate off (the rollback path, DES-O0API §12) the ops in flight at the
+// restart are still closed once their finish_by passes, and the loop then
+// stops. Neither a store that cannot record ops at all (no conditional
+// writes, no namespace), nor a stopped read in a pass where nothing closed (a
+// head no pass gets past, closes refused for good), nor a panicking pass is
+// left work with every gate off, or any would tick forever. A pass that stops
+// the loop on a stopped read or a panic logs so, and gc doctor's
+// ops-recording check, which scans with every gate off too once an op row
+// exists, reports the expired ops left open. A boot pass skipped because the
+// city is quiescent is retried on the ticker until it runs.
 //
 // With every gate off a pass first asks the sessions store whether any op
 // row is submitted (opjournal.HasSubmittedOps, one keyed read of one row),
@@ -50,7 +55,8 @@ const (
 	// opSweepInterval is the pass cadence while a gate is on or the last pass
 	// left work.
 	opSweepInterval = time.Minute
-	// opSweepLimit caps the legacy ops one pass reads (and closes).
+	// opSweepLimit caps the expired legacy ops one pass closes. Ops still
+	// within their finish_by do not count toward it: the read pages past them.
 	opSweepLimit = 200
 	// opSweepActor stamps the closes the sweeper writes.
 	opSweepActor = "controller:op-sweep"
@@ -160,13 +166,19 @@ func (s *opSweeper) strongestMode() rollout.Mode {
 }
 
 // safePass runs one pass as store work and recovers a panic, so one bad row
-// cannot end the sweeper for the controller's life.
+// cannot crash the controller. With a gate on the next tick retries; with
+// every gate off the panicking pass leaves no work (see pass), so the loop
+// stops, and the log line says so.
 func (s *opSweeper) safePass() (panicked bool) {
 	defer s.cs.beginStoreWork()()
 	defer func() {
 		if r := recover(); r != nil {
 			panicked = true
-			log.Printf("op-sweep: pass panicked: %v (type=%T)\n%s", r, r, debug.Stack())
+			stops := ""
+			if !s.wantsTicker() {
+				stops = "; every ops gate is off, so the sweeper stops until the controller restarts"
+			}
+			s.logf("op-sweep: pass panicked%s: %v (type=%T)\n%s", stops, r, r, debug.Stack())
 		}
 	}()
 	s.pass()
@@ -212,11 +224,12 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 	}
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)
-	// A full batch may have ops behind it. It counts only when an op in it
-	// closed, so a batch whose every close fails for good cannot keep a
-	// gates-off ticker alive.
-	fullBatch := stats.Listed == opSweepLimit && stats.Closed+stats.Raced > 0
-	left := stats.Pending > 0 || stats.Truncated || fullBatch
+	// A read that stopped at the limit or its page cap may have ops behind
+	// it. It counts only when an op closed, so a head no pass gets past, or a
+	// batch whose every close fails for good, cannot keep a gates-off ticker
+	// alive; the pass that stops the loop that way says so.
+	progressed := stats.Closed+stats.Raced > 0
+	left := stats.Pending > 0 || ((stats.Full || stats.Truncated) && progressed)
 	if err != nil {
 		reason := legacyop.DegradeReason(err)
 		if stats.Failed == 0 {
@@ -226,7 +239,21 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 		s.report(mode, legacyop.StageSweep, reason, err)
 		left = left || opSweepRetryable(reason)
 	}
+	if mode == rollout.Off && !left && (stats.Full || stats.Truncated) {
+		s.logStoppedRead(stats)
+	}
 	return left
+}
+
+// logStoppedRead logs that a gates-off pass whose read stopped at the limit
+// or its page cap, with no op closed, stops the loop.
+func (s *opSweeper) logStoppedRead(stats legacyop.SweepStats) {
+	at := fmt.Sprintf("its limit of %d expired ops", opSweepLimit)
+	if stats.Truncated {
+		at = "its page cap behind a head of lane, undecodable or not yet expired legacy op rows"
+	}
+	s.logf("op-sweep: every ops gate is off and this pass closed no op after its read stopped at %s, "+
+		"so the sweeper stops and leaves the expired legacy ops it did not close open; gc doctor's ops-recording check reports them", at)
 }
 
 // opSweepRetryable reports whether a failure of reason may clear by itself,
@@ -267,8 +294,8 @@ func (s *opSweeper) logSweep(stats legacyop.SweepStats) {
 			return
 		}
 	}
-	s.logf("op-sweep: listed=%d closed=%d pending=%d raced=%d failed=%d truncated=%t undecodable=%d%s",
-		stats.Listed, stats.Closed, stats.Pending, stats.Raced, stats.Failed, stats.Truncated,
+	s.logf("op-sweep: listed=%d closed=%d pending=%d raced=%d failed=%d full=%t truncated=%t undecodable=%d%s",
+		stats.Listed, stats.Closed, stats.Pending, stats.Raced, stats.Failed, stats.Full, stats.Truncated,
 		len(stats.Undecodable), opSweepIDs(stats.Undecodable))
 }
 

@@ -18,7 +18,8 @@ const (
 	SurfaceController = "controller"
 )
 
-// Stages: the telemetry stages (admit, close, adopt, sweep) and, for a
+// Stages: the telemetry stages (admit, close, adopt, sweep, and open for a
+// controller sweeper pass that could not open the op store) and, for a
 // Degrade, the step that failed (open, propose, close, adopt, sweep).
 const (
 	StageAdmit   = "admit"

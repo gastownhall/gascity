@@ -303,23 +303,43 @@ func HasSubmittedOps(store beads.SessionStore) (bool, error) {
 	return len(rows) > 0, nil
 }
 
-// legacyScanPages bounds ListOpenLegacy's read: at most this many pages of
+// legacyScanPages bounds ListExpiredLegacy's read: at most this many pages of
 // limit rows.
 const legacyScanPages = 8
 
-// ListOpenLegacy returns up to limit open legacy ops (every executor but
-// lane), oldest first, for the sweeper. It reads keyed on gc.op.status =
-// submitted, because a legacy op never leaves submitted until it closes, in
-// pages of limit rows (SeekAfter), dropping lane ops and setting aside rows
-// that do not decode, until it has limit legacy ops, the matches run out or
-// it has read legacyScanPages pages; so a head of unsweepable rows (a lane
-// backlog, a newer build's rows) shorter than that does not starve the
-// sweeper. Undecodable rows are returned by id rather than failing the sweep.
-// The bool reports a truncated read: it stopped at that cap after a full
-// page, so legacy ops behind the head may remain unread, and the next read
-// starts again at the oldest row. A limit below 1 reads every match in one
-// read.
-func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, bool, error) {
+// LegacyScan is what one ListExpiredLegacy read found.
+type LegacyScan struct {
+	// Expired holds the open legacy ops past their finish_by at the cutoff,
+	// oldest first.
+	Expired []Op
+	// Pending counts the open legacy ops the read passed that are not past
+	// their finish_by at the cutoff; they do not count toward the limit.
+	Pending int
+	// Undecodable holds the ids of the rows the read could not decode.
+	Undecodable []string
+	// Full reports that the read stopped at limit expired ops with rows left
+	// unread, so more may wait behind them: not when the limit-th op ends a
+	// short page, which ends the matches.
+	Full bool
+	// Truncated reports that the read stopped at its page cap after a full
+	// page, so legacy ops behind the rows it read may remain unread.
+	Truncated bool
+}
+
+// ListExpiredLegacy returns up to limit open legacy ops (every executor but
+// lane) past their finish_by at at, oldest first, for the sweeper. It reads
+// keyed on gc.op.status = submitted, because a legacy op never leaves
+// submitted until it closes, in pages of limit rows (SeekAfter), dropping
+// lane ops, counting the legacy ops not past their finish_by (an adopted op
+// or one with an explicit deadline may be older than an expired one) and
+// setting aside rows that do not decode, until it has limit expired ops, the
+// matches run out or it has read legacyScanPages pages; so a head of rows the
+// sweeper never closes (a lane backlog, a newer build's rows) or cannot close
+// yet (ops in flight) shorter than that does not starve it. Undecodable rows
+// are returned by id rather than failing the sweep. A read that stops early
+// (Full, Truncated) is not resumed: the next read starts again at the oldest
+// row. A limit below 1 reads every match in one read.
+func (s *Store) ListExpiredLegacy(at time.Time, limit int) (LegacyScan, error) {
 	if limit < 0 {
 		limit = 0
 	}
@@ -330,32 +350,37 @@ func (s *Store) ListOpenLegacy(limit int) ([]Op, []string, bool, error) {
 		Limit:    limit,
 		TierMode: beads.TierBoth,
 	}
-	var out []Op
-	var undecodable []string
+	var scan LegacyScan
 	for page := 1; ; page++ {
 		rows, err := s.store.List(q)
 		if err != nil {
-			return nil, nil, false, fmt.Errorf("listing open legacy ops: %w", err)
+			return LegacyScan{}, fmt.Errorf("listing expired legacy ops: %w", err)
 		}
-		for _, b := range rows {
-			if limit > 0 && len(out) == limit {
-				break
-			}
+		for i, b := range rows {
 			op, err := DecodeOp(b)
 			if err != nil {
-				undecodable = append(undecodable, b.ID)
+				scan.Undecodable = append(scan.Undecodable, b.ID)
 				continue
 			}
 			if op.Status == StatusClosed || !op.Executor.Legacy() {
 				continue
 			}
-			out = append(out, op)
+			if !at.After(op.FinishBy) {
+				scan.Pending++
+				continue
+			}
+			scan.Expired = append(scan.Expired, op)
+			if len(scan.Expired) == limit {
+				scan.Full = i < len(rows)-1 || len(rows) == limit
+				return scan, nil
+			}
 		}
-		if limit == 0 || len(out) == limit || len(rows) < limit {
-			return out, undecodable, false, nil
+		if limit == 0 || len(rows) < limit {
+			return scan, nil
 		}
 		if page == legacyScanPages {
-			return out, undecodable, true, nil
+			scan.Truncated = true
+			return scan, nil
 		}
 		last := rows[len(rows)-1]
 		q.SeekAfter = &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}

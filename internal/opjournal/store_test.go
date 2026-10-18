@@ -1493,8 +1493,17 @@ func TestAdopt(t *testing.T) {
 	})
 }
 
-func TestListOpenLegacy(t *testing.T) {
+// inflightReq is a legacy:api legacyReq with a finish_by an hour past the
+// rest: the deadline an adoption or an explicit request gives an older op.
+func inflightReq(key string) Request {
+	r := legacyReq(ExecutorLegacyAPI, key)
+	r.FinishBy = t0.Add(time.Hour)
+	return r
+}
+
+func TestListExpiredLegacy(t *testing.T) {
 	h := newHarness(t)
+	h.propose(t, inflightReq("inflight"))
 	api := h.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
 	h.clk.Advance(time.Second)
 	cli := h.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
@@ -1512,35 +1521,47 @@ func TestListOpenLegacy(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	at := api.FinishBy.Add(time.Second)
 	h.rec.Reset()
-	got, undecodable, truncated, err := h.store.ListOpenLegacy(100)
+	scan, err := h.store.ListExpiredLegacy(at, 100)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{api.ID, cli.ID, bare.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
-		t.Fatalf("ListOpenLegacy = %v, want %v", ids(got), want)
+	if want := []string{api.ID, cli.ID, bare.ID}; fmt.Sprint(ids(scan.Expired)) != fmt.Sprint(want) {
+		t.Fatalf("ListExpiredLegacy = %v, want %v", ids(scan.Expired), want)
 	}
-	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
-		t.Fatalf("undecodable = %v", undecodable)
+	if scan.Pending != 1 {
+		t.Fatalf("pending = %d, want the in-flight op", scan.Pending)
 	}
-	if truncated {
-		t.Fatal("a read whose matches ran out reported truncated")
+	if fmt.Sprint(scan.Undecodable) != "[gc-op-bogus]" {
+		t.Fatalf("undecodable = %v", scan.Undecodable)
+	}
+	if scan.Full || scan.Truncated {
+		t.Fatalf("a read whose matches ran out reported full %t, truncated %t", scan.Full, scan.Truncated)
 	}
 	ops := h.rec.Ops()
 	if len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Label != LabelOp ||
 		ops[0].Query.Metadata[keyStatus] != string(StatusSubmitted) || ops[0].Query.Limit != 100 {
-		t.Fatalf("ListOpenLegacy issued %+v, want one List keyed by %s", ops, keyStatus)
+		t.Fatalf("ListExpiredLegacy issued %+v, want one List keyed by %s", ops, keyStatus)
 	}
-	if got, _, truncated, err := h.store.ListOpenLegacy(1); err != nil || truncated || len(got) != 1 || got[0].ID != api.ID {
-		t.Fatalf("ListOpenLegacy(1) = %v, truncated %t, %v", ids(got), truncated, err)
+	// The in-flight op ahead of api does not count toward limit.
+	if scan, err := h.store.ListExpiredLegacy(at, 1); err != nil || fmt.Sprint(ids(scan.Expired)) != fmt.Sprint([]string{api.ID}) ||
+		scan.Pending != 1 || !scan.Full || scan.Truncated {
+		t.Fatalf("ListExpiredLegacy(1) = %v %+v, %v; want %s, full", ids(scan.Expired), scan, err, api.ID)
+	}
+	// finish_by itself is not past it.
+	if scan, err := h.store.ListExpiredLegacy(api.FinishBy, 100); err != nil || len(scan.Expired) != 0 || scan.Pending != 4 {
+		t.Fatalf("ListExpiredLegacy at finish_by = %v %+v, %v; want 4 pending", ids(scan.Expired), scan, err)
 	}
 }
 
-// limit counts legacy ops returned, not rows read: a head of lane and
-// undecodable rows at least limit long does not starve the sweeper. Rows
-// read stay bounded by legacyScanPages pages of limit, and a read the cap
-// stops after a full page reports truncated: rows behind it may be unread.
-func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
+// limit counts expired legacy ops, not rows read: a head of lane, undecodable
+// and in-flight legacy rows at least limit long does not starve the sweeper,
+// and the in-flight ops it passes count pending. Rows read stay bounded by
+// legacyScanPages pages of limit, and a read the cap stops after a full page
+// reports truncated: rows behind it may be unread. A read whose limit-th
+// expired op ends a short page read every match, so it is not full.
+func TestListExpiredLegacyPagesPastUnsweepableRows(t *testing.T) {
 	h := newHarness(t)
 	for i := range 3 {
 		h.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
@@ -1551,32 +1572,37 @@ func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	for i := range 3 {
+		h.propose(t, inflightReq(fmt.Sprint("inflight", i)))
+	}
 	a := h.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
 	b := h.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
 	h.propose(t, legacyReq(ExecutorLegacyCLI, "c"))
-	got, undecodable, truncated, err := h.store.ListOpenLegacy(2)
+	at := a.FinishBy.Add(time.Second)
+	scan, err := h.store.ListExpiredLegacy(at, 2)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if want := []string{a.ID, b.ID}; fmt.Sprint(ids(got)) != fmt.Sprint(want) {
-		t.Fatalf("ListOpenLegacy(2) = %v, want %v", ids(got), want)
+	if want := []string{a.ID, b.ID}; fmt.Sprint(ids(scan.Expired)) != fmt.Sprint(want) {
+		t.Fatalf("ListExpiredLegacy(2) = %v, want %v", ids(scan.Expired), want)
 	}
-	if fmt.Sprint(undecodable) != "[gc-op-bogus]" {
-		t.Fatalf("undecodable = %v", undecodable)
+	if fmt.Sprint(scan.Undecodable) != "[gc-op-bogus]" {
+		t.Fatalf("undecodable = %v", scan.Undecodable)
 	}
-	if truncated {
-		t.Fatal("a read that found limit legacy ops reported truncated")
+	if scan.Pending != 3 || !scan.Full || scan.Truncated {
+		t.Fatalf("scan = %+v, want the 3 in-flight ops pending, full, not truncated", scan)
 	}
 
-	// A head longer than the cap hides the legacy op behind it, and says so.
+	// A head longer than the cap hides the expired op behind it, and says so.
 	capped := newHarness(t)
 	for i := range 2*legacyScanPages + 1 {
-		capped.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
+		capped.propose(t, inflightReq(fmt.Sprint("inflight", i)))
 	}
 	capped.propose(t, legacyReq(ExecutorLegacyCLI, "late"))
 	capped.rec.Reset()
-	if got, _, truncated, err := capped.store.ListOpenLegacy(2); err != nil || len(got) != 0 || !truncated {
-		t.Fatalf("ListOpenLegacy(2) past the scan cap = %v, truncated %t, %v", ids(got), truncated, err)
+	if scan, err := capped.store.ListExpiredLegacy(at, 2); err != nil || len(scan.Expired) != 0 ||
+		scan.Pending != 2*legacyScanPages || scan.Full || !scan.Truncated {
+		t.Fatalf("ListExpiredLegacy(2) past the scan cap = %v %+v, %v", ids(scan.Expired), scan, err)
 	}
 	if n := capped.countOps(beadstest.OpList); n != legacyScanPages {
 		t.Fatalf("read %d pages, want the cap %d", n, legacyScanPages)
@@ -1588,11 +1614,28 @@ func TestListOpenLegacyPagesPastUnsweepableRows(t *testing.T) {
 		short.propose(t, legacyReq(ExecutorLane, fmt.Sprint("lane", i)))
 	}
 	short.rec.Reset()
-	if got, _, truncated, err := short.store.ListOpenLegacy(2); err != nil || len(got) != 0 || truncated {
-		t.Fatalf("ListOpenLegacy(2) ending on the cap's short page = %v, truncated %t, %v", ids(got), truncated, err)
+	if scan, err := short.store.ListExpiredLegacy(at, 2); err != nil || len(scan.Expired) != 0 || scan.Full || scan.Truncated {
+		t.Fatalf("ListExpiredLegacy(2) ending on the cap's short page = %v %+v, %v", ids(scan.Expired), scan, err)
 	}
 	if n := short.countOps(beadstest.OpList); n != legacyScanPages {
 		t.Fatalf("read %d pages, want %d", n, legacyScanPages)
+	}
+
+	// The limit-th expired op ends the short second page, so no row is left
+	// unread.
+	exact := newHarness(t)
+	exact.propose(t, inflightReq("inflight"))
+	exact.clk.Advance(time.Second)
+	ea := exact.propose(t, legacyReq(ExecutorLegacyAPI, "a"))
+	exact.clk.Advance(time.Second)
+	eb := exact.propose(t, legacyReq(ExecutorLegacyCLI, "b"))
+	exact.rec.Reset()
+	scan, err = exact.store.ListExpiredLegacy(at, 2)
+	if err != nil || fmt.Sprint(ids(scan.Expired)) != fmt.Sprint([]string{ea.ID, eb.ID}) || scan.Pending != 1 || scan.Full || scan.Truncated {
+		t.Fatalf("ListExpiredLegacy(2) ending on its short last page = %v %+v, %v; want both expired ops, neither full nor truncated", ids(scan.Expired), scan, err)
+	}
+	if n := exact.countOps(beadstest.OpList); n != 2 {
+		t.Fatalf("read %d pages, want 2", n)
 	}
 }
 

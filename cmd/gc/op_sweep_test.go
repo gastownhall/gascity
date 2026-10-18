@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/rollout"
@@ -544,11 +545,41 @@ func TestOpSweepRecoversAPanickingPass(t *testing.T) {
 	if cs.storeWorkInFlight() {
 		t.Fatal("the panicking pass left its store work counted")
 	}
+	if l := h.logLines("op-sweep: pass panicked"); len(l) != 1 || !strings.Contains(l[0], "list exploded") || strings.Contains(l[0], "stops") {
+		t.Fatalf("panic lines = %q, want one naming the panic, not saying the sweeper stops", l)
+	}
 	if h.s.safePass() {
 		t.Fatal("the second pass panicked")
 	}
 	if got := getOp(t, store.opSweepStore, op.ID); got.Status != opjournal.StatusClosed {
 		t.Fatalf("the pass after the panic did not sweep: %s", got.Status)
+	}
+}
+
+// TestOpSweepGatesOffPanicStops proves a panicking gates-off pass leaves no
+// work, so a panic that recurs every pass cannot keep the loop ticking, and
+// that its log line says the sweeper stops.
+func TestOpSweepGatesOffPanicStops(t *testing.T) {
+	store := &panicOnceStore{opSweepStore: newOpSweepStore()}
+	op := seedOp(t, store.opSweepStore, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyAPI, "panic")
+	cs := newOpSweepCS(store)
+	h := newOpSweepHarness(cs)
+	h.clk.Set(op.FinishBy.Add(time.Second))
+	waitOpSweep(t, runOpSweep(context.Background(), h))
+	if !store.panicked.Load() {
+		t.Fatal("the boot pass did not panic")
+	}
+	if n := h.tickers.Load(); n != 0 {
+		t.Fatalf("started %d ticker(s) after a panicking pass with every gate off, want none", n)
+	}
+	if cs.storeWorkInFlight() {
+		t.Fatal("the panicking pass left its store work counted")
+	}
+	if l := h.logLines("op-sweep: pass panicked"); len(l) != 1 || !strings.Contains(l[0], "every ops gate is off, so the sweeper stops") {
+		t.Fatalf("panic lines = %q, want one saying the sweeper stops", l)
+	}
+	if got := getOp(t, store.opSweepStore, op.ID); got.Status != opjournal.StatusSubmitted {
+		t.Fatalf("the expired op = %s after the panicking pass, want it left open", got.Status)
 	}
 }
 
@@ -704,7 +735,7 @@ func TestOpSweepGatesOffNilStoreRetries(t *testing.T) {
 	}
 }
 
-// opSweepLegacyReadFailStore fails its first sorted List (ListOpenLegacy's
+// opSweepLegacyReadFailStore fails its first sorted List (ListExpiredLegacy's
 // read), not the unsorted HasSubmittedOps probe before it.
 type opSweepLegacyReadFailStore struct {
 	opSweepStore
@@ -763,21 +794,127 @@ func TestOpSweepGatesOffRetriesAFailedSweep(t *testing.T) {
 	}
 }
 
-// TestOpSweepGatesOffTruncatedReadKeepsTicking proves a gates-off pass whose
-// read stopped at its page cap leaves work: the legacy op behind a head of
-// unsweepable rows longer than the cap may still be open.
-func TestOpSweepGatesOffTruncatedReadKeepsTicking(t *testing.T) {
+// TestOpSweepGatesOffStuckTruncatedReadStops proves a gates-off pass whose
+// read stopped at its page cap and closed nothing leaves no work: a head of
+// unsweepable rows longer than the cap, which no later pass gets past, cannot
+// keep the loop ticking. The pass says the sweeper stops, and gc doctor's
+// ops-recording check, with every gate off too, reports the expired op the
+// head hides.
+func TestOpSweepGatesOffStuckTruncatedReadStops(t *testing.T) {
 	store := newOpSweepStore()
 	seedUndecodableOps(t, store, 8*opSweepLimit) // more rows than legacyScanPages pages of opSweepLimit
 	op := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "behind")
 	h := newOpSweepHarness(newOpSweepCS(store))
 	h.clk.Set(op.FinishBy.Add(time.Second))
+	waitOpSweep(t, runOpSweep(context.Background(), h))
+	if n := h.tickers.Load(); n != 0 {
+		t.Fatalf("started %d ticker(s) after a truncated pass that closed nothing with every gate off, want none", n)
+	}
+	if lines := h.logLines("op-sweep: listed="); len(lines) != 1 || !strings.Contains(lines[0], "closed=0 ") || !strings.Contains(lines[0], "truncated=true") {
+		t.Fatalf("summary = %q, want one truncated pass that closed nothing", lines)
+	}
+	if lines := h.logLines("the sweeper stops"); len(lines) != 1 || !strings.Contains(lines[0], "page cap") || !strings.Contains(lines[0], "gc doctor") {
+		t.Fatalf("stop lines = %q, want one saying the read stopped at its page cap and pointing at gc doctor", lines)
+	}
+	if got := getOp(t, store, op.ID); got.Status != opjournal.StatusSubmitted {
+		t.Fatalf("the op behind the head = %s, want it left open", got.Status)
+	}
+
+	c, _ := newTestOpsRecordingCheck(store, op.FinishBy.Add(opsRecordingStaleAfter+time.Second))
+	r := c.Run(&doctor.CheckContext{})
+	if r.Status != doctor.StatusWarning || !strings.HasPrefix(r.Message, "ops recording is off, but") || !strings.Contains(r.Message, "page cap") {
+		t.Fatalf("doctor = %v %q, want a gates-off Warning that its scan stopped at the page cap", r.Status, r.Message)
+	}
+	if !strings.Contains(r.FixHint, "restart the controller once the head has shrunk") {
+		t.Fatalf("doctor remedy %q, want the gates-off restart once the head shrinks", r.FixHint)
+	}
+}
+
+// TestOpSweepGatesOffTruncatedReadKeepsTickingAfterProgress proves a gates-off
+// pass whose read stopped at its page cap after closing ops leaves work, as
+// the closes shrink the head the next read starts from, and the loop returns
+// once a pass reads past the head.
+func TestOpSweepGatesOffTruncatedReadKeepsTickingAfterProgress(t *testing.T) {
+	store := newOpSweepStore()
+	clk := &clock.Fake{Time: opSweepT0}
+	ops := []opjournal.Op{
+		seedOp(t, store, clk, opjournal.ExecutorLegacyCLI, "head0"),
+		seedOp(t, store, clk, opjournal.ExecutorLegacyCLI, "head1"),
+	}
+	seedUndecodableOps(t, store, 8*opSweepLimit-len(ops)) // with the head ops, legacyScanPages full pages
+	ops = append(ops, seedOp(t, store, clk, opjournal.ExecutorLegacyCLI, "behind"))
+	h := newOpSweepHarness(newOpSweepCS(store))
+	h.clk.Set(ops[0].FinishBy.Add(time.Second))
+	done := runOpSweep(context.Background(), h)
+	select {
+	case h.ticks <- h.clk.Now():
+	case <-done:
+		t.Fatal("the loop returned after a truncated pass that closed ops with every gate off")
+	case <-time.After(10 * time.Second):
+		t.Fatal("the sweeper loop is not taking ticks")
+	}
+	waitOpSweep(t, done)
+	for _, op := range ops {
+		if got := getOp(t, store, op.ID); got.Status != opjournal.StatusClosed {
+			t.Fatalf("op %s = %s after two passes, want closed", op.ID, got.Status)
+		}
+	}
+	want := []string{
+		"listed=2 closed=2 pending=0 raced=0 failed=0 full=false truncated=true ",
+		"listed=1 closed=1 pending=0 raced=0 failed=0 full=false truncated=false ",
+	}
+	lines := h.logLines("op-sweep: listed=")
+	if len(lines) != len(want) {
+		t.Fatalf("summaries = %q, want %d", lines, len(want))
+	}
+	for i, w := range want {
+		if !strings.Contains(lines[i], w) {
+			t.Fatalf("summary %d = %q, want %q", i, lines[i], w)
+		}
+	}
+	if n := h.tickers.Load(); n != 1 {
+		t.Fatalf("started %d ticker(s), want 1", n)
+	}
+}
+
+// TestOpSweepPagesPastInFlightOps proves ops still within their finish_by do
+// not use up a pass's limit: one pass closes an expired op behind
+// opSweepLimit older ops an adopter gave a later finish_by, and leaves those
+// pending.
+func TestOpSweepPagesPastInFlightOps(t *testing.T) {
+	store := newOpSweepStore()
+	clk := &clock.Fake{Time: opSweepT0}
+	inflight := make([]opjournal.Op, 0, opSweepLimit)
+	for i := range opSweepLimit {
+		inflight = append(inflight, seedOp(t, store, clk, opjournal.ExecutorLegacyAPI, fmt.Sprintf("inflight%03d", i)))
+	}
+	expired := seedOp(t, store, clk, opjournal.ExecutorLegacyCLI, "expired")
+	adopter, err := opjournal.NewStore(beads.SessionStore{Store: store}, &clock.Fake{Time: expired.FinishBy}, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	for _, op := range inflight {
+		if _, err := adopter.Adopt(op.ID, op.Attempt, string(legacyop.ExecutorAPI), expired.FinishBy.Add(legacyop.ExecutionBound)); err != nil {
+			t.Fatalf("Adopt %s: %v", op.ID, err)
+		}
+	}
+	h := newOpSweepHarness(newOpSweepCS(store))
+	h.clk.Set(expired.FinishBy.Add(time.Second))
 	h.s.safePass()
-	if lines := h.logLines("op-sweep: listed="); len(lines) != 1 || !strings.Contains(lines[0], "truncated=true") {
-		t.Fatalf("summary = %q, want one truncated pass", lines)
+	if got := getOp(t, store, expired.ID); got.Status != opjournal.StatusClosed || got.Outcome.Reason != opjournal.ReasonDeadlineInFlight {
+		t.Fatalf("the expired op behind %d in-flight ops = %s %+v, want closed failed{deadline_in_flight}", opSweepLimit, got.Status, got.Outcome)
+	}
+	for _, op := range inflight {
+		if got := getOp(t, store, op.ID); got.Status != opjournal.StatusSubmitted {
+			t.Fatalf("in-flight op %s = %s, want submitted", op.ID, got.Status)
+		}
+	}
+	want := fmt.Sprintf("listed=%d closed=1 pending=%d ", opSweepLimit+1, opSweepLimit)
+	if l := h.logLines("op-sweep: listed="); len(l) != 1 || !strings.Contains(l[0], want) {
+		t.Fatalf("summaries = %q, want one containing %q", l, want)
 	}
 	if !h.s.wantsTicker() {
-		t.Fatal("a truncated gates-off pass left no work")
+		t.Fatal("a gates-off pass that left in-flight ops pending left no work")
 	}
 }
 
@@ -878,6 +1015,9 @@ func TestOpSweepGatesOffRefusedFullBatchStops(t *testing.T) {
 	}
 	if l := h.logLines("reason=conditional_writes_unsupported"); len(l) != 1 || !strings.Contains(l[0], "mode=off") {
 		t.Fatalf("degrade log lines = %q, want one mode=off conditional_writes_unsupported line", l)
+	}
+	if l := h.logLines("the sweeper stops"); len(l) != 1 || !strings.Contains(l[0], fmt.Sprintf("its limit of %d expired ops", opSweepLimit)) {
+		t.Fatalf("stop lines = %q, want one saying the read stopped at its limit", l)
 	}
 }
 

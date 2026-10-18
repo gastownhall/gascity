@@ -31,11 +31,11 @@ func TestSweep(t *testing.T) {
 	now := e.clk.Now().Add(time.Second)
 
 	stats, err := Sweep(e.st, now, 2, "controller:op-sweep")
-	if err != nil || stats.Closed != 2 || stats.Truncated {
-		t.Fatalf("bounded pass = %+v, %v; want 2 closed", stats, err)
+	if err != nil || stats.Closed != 2 || !stats.Full || stats.Truncated {
+		t.Fatalf("bounded pass = %+v, %v; want 2 closed, full", stats, err)
 	}
 	stats, err = Sweep(e.st, now, 100, "controller:op-sweep")
-	if err != nil || stats.Closed != 3 || stats.Pending != 1 || stats.Truncated || len(stats.Undecodable) != 1 || stats.Undecodable[0] != "gc-op-bogus" {
+	if err != nil || stats.Closed != 3 || stats.Pending != 1 || stats.Full || stats.Truncated || len(stats.Undecodable) != 1 || stats.Undecodable[0] != "gc-op-bogus" {
 		t.Fatalf("full pass = %+v, %v", stats, err)
 	}
 	for _, op := range expired {
@@ -87,6 +87,36 @@ func TestSweepReportsATruncatedRead(t *testing.T) {
 	stats, err = Sweep(e.st, now, 100, "controller:op-sweep")
 	if err != nil || stats.Listed != 1 || stats.Closed != 1 || stats.Truncated {
 		t.Fatalf("full pass = %+v, %v; want the hidden op closed", stats, err)
+	}
+}
+
+// limit counts expired ops, not ops read: older ops an adopter gave a later
+// finish_by do not starve the expired op behind them, and count Pending.
+func TestSweepPagesPastPendingOps(t *testing.T) {
+	e := newEnv(t)
+	var adopted []opjournal.Op
+	for i := range 3 {
+		adopted = append(adopted, e.seed(t, msg(fmt.Sprint("adopted-", i), "x"), ExecutorAPI))
+	}
+	expired := e.seed(t, msg("expired", "x"), ExecutorCLI)
+	e.clk.Advance(ExecutionBound)
+	for _, op := range adopted {
+		if _, err := e.st.Adopt(op.ID, op.Attempt, string(ExecutorAPI), e.clk.Now().Add(ExecutionBound)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	stats, err := Sweep(e.st, expired.FinishBy.Add(time.Second), 2, "controller:op-sweep")
+	if err != nil || stats.Listed != 4 || stats.Closed != 1 || stats.Pending != 3 || stats.Full || stats.Truncated {
+		t.Fatalf("pass = %+v, %v; want the expired op closed past 3 pending", stats, err)
+	}
+	if got, _ := e.st.Get(expired.ID); got.Status != opjournal.StatusClosed {
+		t.Fatalf("expired op %s behind the adopted ops", got.Status)
+	}
+	for _, op := range adopted {
+		if got, _ := e.st.Get(op.ID); got.Status != opjournal.StatusSubmitted {
+			t.Fatalf("adopted op %s swept: %s", op.ID, got.Status)
+		}
 	}
 }
 

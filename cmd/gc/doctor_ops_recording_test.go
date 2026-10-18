@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -48,13 +49,83 @@ func newTestOpsRecordingCheck(store beads.Store, now time.Time, opts ...rollout.
 
 func TestOpsRecordingDoctorCheck(t *testing.T) {
 	t.Run("off", func(t *testing.T) {
-		c, opens := newTestOpsRecordingCheck(newOpSweepStore(), opSweepT0)
+		var closes atomic.Int32
+		store := newOpSweepStore()
+		c, opens := newTestOpsRecordingCheck(opsRecordingClosingStore{store, &closes, nil}, opSweepT0)
 		r := c.Run(&doctor.CheckContext{})
 		if r.Status != doctor.StatusOK || r.Message != "ops recording is off" {
 			t.Fatalf("result = %v %q, want OK, ops recording is off", r.Status, r.Message)
 		}
-		if opens.Load() != 0 {
-			t.Fatal("the check opened the store with every gate off")
+		if opens.Load() != 1 || closes.Load() != 1 {
+			t.Fatalf("store opened %d, closed %d time(s), want 1 and 1", opens.Load(), closes.Load())
+		}
+		// With no op row the check reads one row at most and probes nothing.
+		if ops := store.Ops(); len(ops) != 1 || ops[0].Kind != beadstest.OpList || ops[0].Query.Limit != 1 {
+			t.Fatalf("store ops = %+v, want one List of one row", ops)
+		}
+	})
+
+	t.Run("off with only unexpired ops is OK", func(t *testing.T) {
+		store := newOpSweepStore()
+		fresh := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyAPI, "fresh")
+		c, _ := newTestOpsRecordingCheck(store, fresh.FinishBy.Add(opSweepInterval))
+		if r := c.Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK || r.Message != "ops recording is off" {
+			t.Fatalf("result = %v %q, want OK, ops recording is off", r.Status, r.Message)
+		}
+	})
+
+	// The sweeper stops with every gate off once a pass leaves no work, so a
+	// legacy op that expires after that stays open: the check still scans.
+	t.Run("off with a stale expired op warns", func(t *testing.T) {
+		store := newOpSweepStore()
+		stale := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "stale")
+		c, _ := newTestOpsRecordingCheck(store, stale.FinishBy.Add(opsRecordingStaleAfter+time.Second))
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.HasPrefix(r.Message, "ops recording is off; 1 open legacy op(s)") {
+			t.Fatalf("result = %v %q, want a gates-off Warning counting the stale op", r.Status, r.Message)
+		}
+		if len(r.Details) != 1 || !strings.Contains(r.Details[0], stale.ID) {
+			t.Fatalf("details = %v, want the stale op %s", r.Details, stale.ID)
+		}
+		if !strings.HasPrefix(r.FixHint, "restart the controller") || !strings.Contains(r.FixHint, "every ops gate off") {
+			t.Fatalf("remedy %q, want the gates-off restart remedy", r.FixHint)
+		}
+	})
+
+	t.Run("off with an unopenable store warns", func(t *testing.T) {
+		c, _ := newTestOpsRecordingCheck(nil, opSweepT0)
+		c.open = func() (beads.Store, error) { return nil, errors.New("dolt down") }
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.HasPrefix(r.Message, "ops recording is off, but") || !strings.Contains(r.Message, legacyop.DegradeStoreError) {
+			t.Fatalf("result = %v %q, want a gates-off Warning naming store_error", r.Status, r.Message)
+		}
+		if len(r.Details) != 1 || !strings.Contains(r.Details[0], "dolt down") || !strings.Contains(r.FixHint, "reachable") {
+			t.Fatalf("details = %q, remedy %q, want the open error and the reachability remedy", r.Details, r.FixHint)
+		}
+	})
+
+	t.Run("off with a failed probe warns", func(t *testing.T) {
+		store := &opSweepFlakyStore{opSweepStore: newOpSweepStore()}
+		store.fails.Store(1)
+		c, _ := newTestOpsRecordingCheck(store, opSweepT0)
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "could not be checked") ||
+			len(r.Details) != 1 || !strings.Contains(r.Details[0], "dolt down") {
+			t.Fatalf("result = %v %q %q, want a gates-off Warning naming the failed probe", r.Status, r.Message, r.Details)
+		}
+	})
+
+	// Setting the gates to off is no remedy when they are off already.
+	t.Run("off with an incapable store holding op rows warns", func(t *testing.T) {
+		store := newOpSweepStore()
+		seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "orphan")
+		c, _ := newTestOpsRecordingCheck(incapableStore{store}, opSweepT0)
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.HasPrefix(r.Message, "ops recording is off, but") {
+			t.Fatalf("result = %v %q, want a gates-off Warning", r.Status, r.Message)
+		}
+		if r.FixHint == "" || strings.Contains(r.FixHint, "set the ops gates to off") {
+			t.Fatalf("remedy %q, want one that does not offer turning the gates off", r.FixHint)
 		}
 	})
 
@@ -69,8 +140,8 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 				t.Errorf("message %q lacks %q", r.Message, want)
 			}
 		}
-		if !strings.Contains(r.FixHint, "conditional writes") || strings.Contains(r.FixHint, "id prefix") {
-			t.Errorf("remedy %q, want the conditional-writes remedy alone", r.FixHint)
+		if !strings.Contains(r.FixHint, "conditional writes") || strings.Contains(r.FixHint, "id prefix") || !strings.Contains(r.FixHint, "set the ops gates to off") {
+			t.Errorf("remedy %q, want the conditional-writes remedy alone, or the gates off", r.FixHint)
 		}
 	})
 
@@ -108,7 +179,7 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 		store.fails.Store(1)
 		c, _ := newTestOpsRecordingCheck(store, opSweepT0, rollout.WithOpsControl(rollout.Require))
 		r := c.Run(&doctor.CheckContext{})
-		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "listing open legacy ops failed") || !strings.Contains(r.Message, "dolt down") {
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "listing expired legacy ops failed") || !strings.Contains(r.Message, "dolt down") {
 			t.Fatalf("result = %v %q, want a Warning naming the failed listing", r.Status, r.Message)
 		}
 	})
@@ -179,6 +250,27 @@ func TestOpsRecordingDoctorCheck(t *testing.T) {
 		want := fmt.Sprintf("; at least %d open legacy op(s)", opSweepLimit)
 		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, want) {
 			t.Fatalf("result = %v %q, want a Warning counting %q", r.Status, r.Message, want)
+		}
+	})
+
+	t.Run("a page of ops not yet stale does not hide a stale op behind it", func(t *testing.T) {
+		store := newOpSweepStore()
+		// Older ops with a later finish_by fill the read's first page.
+		for i := range opSweepLimit {
+			seedOp(t, store, &clock.Fake{Time: opSweepT0.Add(time.Hour)}, opjournal.ExecutorLegacyCLI, fmt.Sprintf("inflight%03d", i))
+		}
+		c, _ := newTestOpsRecordingCheck(store, opSweepT0.Add(legacyop.ExecutionBound+opsRecordingStaleAfter+time.Second),
+			rollout.WithOpsLifecycle(rollout.Auto))
+		if r := c.Run(&doctor.CheckContext{}); r.Status != doctor.StatusOK {
+			t.Fatalf("status = %v, want OK: no op is stale and the read reached the end: %s", r.Status, r.Message)
+		}
+		stale := seedOp(t, store, &clock.Fake{Time: opSweepT0}, opjournal.ExecutorLegacyCLI, "stale")
+		r := c.Run(&doctor.CheckContext{})
+		if r.Status != doctor.StatusWarning || !strings.Contains(r.Message, "; 1 open legacy op(s)") {
+			t.Fatalf("result = %v %q, want a Warning counting the stale op behind the page", r.Status, r.Message)
+		}
+		if len(r.Details) != 1 || !strings.Contains(r.Details[0], stale.ID) {
+			t.Fatalf("details = %v, want the stale op %s", r.Details, stale.ID)
 		}
 	})
 

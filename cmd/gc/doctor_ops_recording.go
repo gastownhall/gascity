@@ -22,8 +22,9 @@ const opsRecordingStaleAfter = 2 * opSweepInterval
 
 // opsRecordingDoctorCheck reports whether the city can record ops for the
 // ops gates that are on ([ops] content, control, lifecycle): it probes
-// opjournal.NewStore over the city's sessions-class store, and warns about
-// expired legacy ops the controller's sweeper has left open.
+// opjournal.NewStore over the city's sessions-class store. With a gate on,
+// and with every gate off once that store holds an op row, it also warns
+// about expired legacy ops the controller's sweeper has left open.
 type opsRecordingDoctorCheck struct {
 	cfg        *config.City
 	flags      rollout.Flags
@@ -58,10 +59,13 @@ func (*opsRecordingDoctorCheck) WarmupEligible() bool { return false }
 // Fix implements doctor.Check.
 func (*opsRecordingDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run implements doctor.Check: OK with every gate off; with a gate on, an
-// Error (any gate require) or a Warning (auto only) when the store cannot
-// record ops, else OK, plus a Warning for expired legacy ops left open or a
-// scan for them that stopped at its page cap.
+// Run implements doctor.Check. With a gate on: an Error (any gate require)
+// or a Warning (auto only) when the store cannot record ops, else OK. With
+// every gate off: OK while the sessions store holds no submitted op row
+// (opjournal.HasSubmittedOps), and a Warning when that cannot be read. Then,
+// for either, a Warning for expired legacy ops left open or a scan for them
+// that stopped at its page cap: with every gate off the sweeper stops once a
+// pass leaves no work, so the ops it leaves are reported here.
 func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	if c.resolveErr != nil {
@@ -69,74 +73,105 @@ func (c *opsRecordingDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResul
 		return r
 	}
 	on, require := c.gatesOn()
-	if len(on) == 0 {
-		r.Message = "ops recording is off"
-		return r
-	}
 	gates := strings.Join(on, ", ")
 	store, err := c.open()
 	if err != nil {
-		return c.cannotRecord(r, gates, require, legacyop.DegradeStoreError, fmt.Errorf("opening the city store: %w", err))
+		err = fmt.Errorf("opening the city store: %w", err)
+		if gates == "" {
+			return offCannotRead(r, err)
+		}
+		return c.cannotRecord(r, gates, require, legacyop.DegradeStoreError, err)
 	}
 	defer func() { _ = closeBeadStoreHandle(store) }()
-	st, err := opjournal.NewStore(beads.SessionStore{Store: c.sessions(store)}, c.clk)
+	sessions := beads.SessionStore{Store: c.sessions(store)}
+	if gates == "" {
+		// Nothing to sweep until an op row exists, and no op store to open:
+		// with every gate off the store need not be able to record ops.
+		has, err := opjournal.HasSubmittedOps(sessions)
+		if err != nil {
+			return offCannotRead(r, err)
+		}
+		if !has {
+			r.Message = "ops recording is off"
+			return r
+		}
+	}
+	st, err := opjournal.NewStore(sessions, c.clk)
 	if err != nil {
+		if gates == "" {
+			return offCannotRead(r, err)
+		}
 		return c.cannotRecord(r, gates, require, legacyop.DegradeReason(err), err)
 	}
-	ops, undecodable, truncated, err := st.ListOpenLegacy(opSweepLimit)
+	return c.scanExpired(r, st, gates)
+}
+
+// scanExpired warns about the open legacy ops more than
+// opsRecordingStaleAfter past their finish_by, and about a scan for them that
+// stopped at its page cap. gates lists the gates that are on; it is empty
+// with every gate off.
+func (c *opsRecordingDoctorCheck) scanExpired(r *doctor.CheckResult, st *opjournal.Store, gates string) *doctor.CheckResult {
+	state, capable := "ops recording is off", "ops recording is off"
+	if gates != "" {
+		state = "ops recording on (" + gates + ")"
+		capable = state + ": the sessions store can record ops"
+	}
+	scan, err := st.ListExpiredLegacy(c.clk.Now().Add(-opsRecordingStaleAfter), opSweepLimit)
 	if err != nil {
 		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("ops recording on (%s); listing open legacy ops failed: %v", gates, err)
+		r.Message = fmt.Sprintf("%s; listing expired legacy ops failed: %v", state, err)
 		return r
 	}
-	stale, oldest := c.staleOps(r, ops)
-	if len(undecodable) > 0 {
+	oldest := staleOpDetails(r, scan.Expired)
+	if len(scan.Undecodable) > 0 {
 		r.Details = append(r.Details, fmt.Sprintf("%d op row(s) this gc cannot decode, which a newer gc may have written:%s",
-			len(undecodable), opSweepIDs(undecodable)))
+			len(scan.Undecodable), opSweepIDs(scan.Undecodable)))
 	}
 	switch {
-	case stale > 0:
-		count := strconv.Itoa(stale)
+	case len(scan.Expired) > 0:
+		count := strconv.Itoa(len(scan.Expired))
 		// The read stopped at the limit or the page cap, so more may wait behind it.
-		if truncated || len(ops) == opSweepLimit {
+		if scan.Full || scan.Truncated {
 			count = "at least " + count
 		}
 		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("ops recording on (%s); %s open legacy op(s) expired more than %s ago (oldest finish_by %s): the controller's op sweeper is not closing them",
-			gates, count, opsRecordingStaleAfter, oldest.UTC().Format(time.RFC3339))
+		r.Message = fmt.Sprintf("%s; %s open legacy op(s) expired more than %s ago (oldest finish_by %s): the controller's op sweeper is not closing them",
+			state, count, opsRecordingStaleAfter, oldest.UTC().Format(time.RFC3339))
 		r.FixHint = "check that the controller is running and look for op-sweep lines in its log; " +
 			"restart the controller if the [ops] gates changed since it started (it latches them at boot, " +
 			"while each CLI reads them per process)"
-	case truncated:
+		if gates == "" {
+			r.FixHint = "restart the controller: with every ops gate off its op sweeper runs from its start only until a pass leaves no work, " +
+				"so a legacy op that expires after that (one a gc run with a GC_OPS_* override recorded) stays open; " +
+				"look for op-sweep lines in its log if a restart does not close them"
+		}
+	case scan.Truncated:
 		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("ops recording on (%s): the sessions store can record ops, but the scan for expired legacy ops stopped at its page cap "+
-			"behind a head of lane or undecodable op rows, so the legacy ops behind that head were not checked", gates)
-		r.FixHint = "upgrade this gc if a newer gc wrote the rows it cannot decode (see the details), or find why the lane ops are still open; " +
-			"the controller's op sweeper misses the same legacy ops until that head shrinks"
+		r.Message = capable + ", but the scan for expired legacy ops stopped at its page cap " +
+			"behind a head of lane, undecodable or not yet stale legacy op rows, so the legacy ops behind that head were not checked"
+		r.FixHint = "upgrade this gc if a newer gc wrote the rows it cannot decode (see the details), or find why so many lane or legacy ops are still open; " +
+			"the controller's op sweeper misses the legacy ops behind a head of lane, undecodable or in-flight rows the same way, until that head shrinks"
+		if gates == "" {
+			r.FixHint += " (with every ops gate off it stops at that head, so restart the controller once the head has shrunk)"
+		}
 	default:
-		r.Message = fmt.Sprintf("ops recording on (%s): the sessions store can record ops", gates)
+		r.Message = capable
 	}
 	return r
 }
 
-// staleOps counts the ops more than opsRecordingStaleAfter past their
-// finish_by, adding the first ten to r's details, and returns the oldest such
-// finish_by. ListOpenLegacy returns only open legacy ops.
-func (c *opsRecordingDoctorCheck) staleOps(r *doctor.CheckResult, ops []opjournal.Op) (stale int, oldest time.Time) {
-	now := c.clk.Now()
-	for _, op := range ops {
-		if now.Sub(op.FinishBy) <= opsRecordingStaleAfter {
-			continue
-		}
-		if stale == 0 || op.FinishBy.Before(oldest) {
+// staleOpDetails adds the first ten of the stale ops to r's details and
+// returns the oldest finish_by among them.
+func staleOpDetails(r *doctor.CheckResult, stale []opjournal.Op) (oldest time.Time) {
+	for i, op := range stale {
+		if i == 0 || op.FinishBy.Before(oldest) {
 			oldest = op.FinishBy
 		}
-		stale++
 		if len(r.Details) < 10 {
 			r.Details = append(r.Details, fmt.Sprintf("%s (%s, %s): finish_by %s", op.ID, op.Kind, op.Executor, op.FinishBy.UTC().Format(time.RFC3339)))
 		}
 	}
-	return stale, oldest
+	return oldest
 }
 
 // gatesOn lists the gates that are not off, as key=mode, and whether any is
@@ -170,18 +205,34 @@ func (c *opsRecordingDoctorCheck) cannotRecord(r *doctor.CheckResult, gates stri
 	}
 	r.Message = fmt.Sprintf("ops recording on (%s) but the sessions store cannot record ops (%s): %s", gates, reason, effect)
 	r.Details = append(r.Details, err.Error())
-	r.FixHint = opsRecordingRemedy(reason)
+	r.FixHint = opsRecordingRemedy(reason, true)
+	return r
+}
+
+// offCannotRead reports, with every gate off, a sessions store that could
+// not be checked for expired legacy ops: a Warning, as nothing is refused,
+// but the ops the sweeper may have left open go unseen.
+func offCannotRead(r *doctor.CheckResult, err error) *doctor.CheckResult {
+	reason := legacyop.DegradeReason(err)
+	r.Status = doctor.StatusWarning
+	r.Message = fmt.Sprintf("ops recording is off, but the sessions store could not be checked for expired legacy ops (%s)", reason)
+	r.Details = append(r.Details, err.Error())
+	r.FixHint = opsRecordingRemedy(reason, false)
 	return r
 }
 
 // opsRecordingRemedy is the remedy for a sessions store that cannot record
-// ops for reason.
-func opsRecordingRemedy(reason string) string {
+// ops for reason; gatesOn offers setting the gates to off as one.
+func opsRecordingRemedy(reason string, gatesOn bool) string {
+	orOff := ""
+	if gatesOn {
+		orOff = ", or set the ops gates to off"
+	}
 	switch reason {
 	case legacyop.DegradeConditionalWritesUnsupported:
-		return "use a sessions store with conditional writes (for example a bd that supports --if-revision), or set the ops gates to off"
+		return "use a sessions store with conditional writes (for example a bd that supports --if-revision)" + orOff
 	case legacyop.DegradeNoNamespace:
-		return "configure an id prefix for the sessions store, or set the ops gates to off"
+		return "configure an id prefix for the sessions store" + orOff
 	default:
 		return "check that the sessions store is reachable"
 	}
