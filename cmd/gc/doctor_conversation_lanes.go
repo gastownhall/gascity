@@ -16,8 +16,9 @@ import (
 // conversationLanesDoctorCheck reports the conversation lanes ([ops]
 // authoritative): whether the sessions store can host them, and, from the
 // running controller's lane-status, whether its lane host runs, how long ago
-// it last passed, and the op rows it quarantined. It opens no store with the
-// list empty. It is never fixable.
+// it last passed, and the op rows it quarantined. With the list empty it
+// opens no store, and asks the controller only whether it still serves the
+// list it started with. It is never fixable.
 type conversationLanesDoctorCheck struct {
 	cfg *config.City
 	// open opens the city store; the check closes it after.
@@ -50,12 +51,14 @@ func (*conversationLanesDoctorCheck) WarmupEligible() bool { return false }
 // Fix implements doctor.Check.
 func (*conversationLanesDoctorCheck) Fix(_ *doctor.CheckContext) error { return nil }
 
-// Run implements doctor.Check: OK with the list empty; an Error when a kind
-// is listed and the sessions store cannot apply guarded batches, or the
-// controller refused to start the host; a Warning when the controller does
-// not answer, runs no lane host, waits for its sessions store, runs another
-// list than city.toml's, has quarantined op rows, or failed its last pass or
-// anything since its last good one; else OK with the last pass's age.
+// Run implements doctor.Check: with the list empty, OK unless the controller
+// still serves, or waits for its store to serve, the list it started with, a
+// Warning; an Error when a kind is listed and the sessions store cannot apply
+// guarded batches, or the controller refused to start the host; a Warning
+// when the controller does not answer, runs no lane host, waits for its
+// sessions store, runs another list than city.toml's, has quarantined op
+// rows, or failed its last pass or anything since its last good one; else OK
+// with the last pass's age.
 func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	var kinds []string
@@ -64,6 +67,16 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	}
 	if len(kinds) == 0 {
 		r.Message = "conversation lanes are off"
+		// The controller reads the list once, at start, so it serves the list
+		// it started with until it restarts. A controller that does not
+		// answer, or refused its list, serves none.
+		st, err := c.ask(ctx)
+		if err == nil && len(st.Kinds) > 0 && (st.State == laneHostStateRunning || st.State == laneHostStateUnavailable) {
+			r.Status = doctor.StatusWarning
+			r.Severity = doctor.SeverityAdvisory
+			r.Message = fmt.Sprintf("conversation lanes are off in city.toml, but the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", "))
+			r.FixHint = "restart the controller to apply the emptied list"
+		}
 		return r
 	}
 	listed := strings.Join(kinds, ", ")
@@ -86,12 +99,7 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.FixHint = "remove the kind from [ops] authoritative, or bind the sessions class to a native store"
 		return r
 	}
-	var st conversationLaneStatus
-	if ctx != nil && ctx.CityPath != "" && c.query != nil {
-		st, err = c.query(ctx.CityPath)
-	} else {
-		err = fmt.Errorf("no city to ask")
-	}
+	st, err := c.ask(ctx)
 	switch {
 	case err != nil:
 		r.Status = doctor.StatusWarning
@@ -150,6 +158,14 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	}
 	r.Message = fmt.Sprintf("conversation lanes on (%s): %s, %d conversation(s) in service", listed, pass, st.Workers)
 	return r
+}
+
+// ask is the lane-status reply of ctx's city's controller.
+func (c *conversationLanesDoctorCheck) ask(ctx *doctor.CheckContext) (conversationLaneStatus, error) {
+	if ctx == nil || ctx.CityPath == "" || c.query == nil {
+		return conversationLaneStatus{}, errors.New("no city to ask")
+	}
+	return c.query(ctx.CityPath)
 }
 
 // laneAge renders a status age in milliseconds to the second.

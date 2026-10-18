@@ -121,6 +121,15 @@ var ErrSessionNotFound = errors.New("session not found")
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
+// ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
+// session but the provider could not confirm it took: the message may have
+// been delivered, or may still sit unsubmitted in the session's input.
+// Callers that retry may count it as a failed attempt; callers that must not
+// deliver twice treat the nudge as possibly delivered. Providers wrap their
+// own unconfirmed submits with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".

@@ -54,6 +54,11 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 		opens    int
 	}{
 		{name: "off", status: doctor.StatusOK, want: "conversation lanes are off", opens: 0},
+		{name: "off, controller not answering", queryErr: errors.New("dial: no such file"), status: doctor.StatusOK, want: "conversation lanes are off", opens: 0},
+		{name: "off, host runs no list", st: conversationLaneStatus{State: laneHostStateRunning}, status: doctor.StatusOK, want: "conversation lanes are off", opens: 0},
+		{name: "off, host refused its list", st: conversationLaneStatus{State: laneHostStateRefused, Kinds: []string{"message"}}, status: doctor.StatusOK, want: "conversation lanes are off", opens: 0},
+		{name: "emptied while serving", st: running, status: doctor.StatusWarning, want: "conversation lanes are off in city.toml, but the controller runs [ops] authoritative = [message] until its next start", opens: 0},
+		{name: "emptied while waiting for its store", st: conversationLaneStatus{State: laneHostStateUnavailable, Kinds: []string{"message"}}, status: doctor.StatusWarning, want: "until its next start", opens: 0},
 		{
 			name: "incapable store", kinds: []string{"message"}, store: bd, status: doctor.StatusError,
 			want: "conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore)", opens: 1,
@@ -85,13 +90,17 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 }
 
 // TestConversationLanesDoctorHints pins the no-host remedy to unregistering
-// the city and starting its standalone controller, and the waits a running
-// host reports to its details.
+// the city and starting its standalone controller, the emptied-list remedy to
+// a restart, and the waits a running host reports to its details.
 func TestConversationLanesDoctorHints(t *testing.T) {
 	c, _ := newConversationLanesCheckForTest([]string{"message"}, newLaneTestStore(), conversationLaneStatus{State: laneHostStateNone}, nil)
 	const want = "a supervisor-hosted city (`gc start`) does not start the lane host yet; to serve the list, run `gc unregister /city`, then `gc start --foreground /city` (hidden from --help), or empty [ops] authoritative"
 	if r := c.Run(&doctor.CheckContext{CityPath: "/city"}); r.FixHint != want {
 		t.Fatalf("no-host hint = %q, want %q", r.FixHint, want)
+	}
+	c, _ = newConversationLanesCheckForTest(nil, nil, conversationLaneStatus{State: laneHostStateRunning, Kinds: []string{"message"}}, nil)
+	if r := c.Run(&doctor.CheckContext{CityPath: "/city"}); r.FixHint != "restart the controller to apply the emptied list" || r.Severity != doctor.SeverityAdvisory {
+		t.Fatalf("emptied-list hint = %q severity %v, want the restart remedy, advisory", r.FixHint, r.Severity)
 	}
 	st := conversationLaneStatus{State: laneHostStateRunning, Kinds: []string{"message"}, Waiting: []laneConversationWaits{{
 		Conversation: "gc-1", Wake: "held",

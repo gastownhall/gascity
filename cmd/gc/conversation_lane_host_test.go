@@ -1286,15 +1286,10 @@ func TestLaneHostBusyWorkersYieldToTheQueue(t *testing.T) {
 		}
 		break
 	}
-	// A yielding worker parks right after it hands its slot over, so the
-	// park may land after the delivery.
-	deadline := time.After(laneWaitBudget)
-	for hh.h.status(f.clk.Now()).Parked == 0 {
-		select {
-		case <-deadline:
-			t.Fatalf("status = %+v, want the busy conversations parked on their backoff", hh.h.status(f.clk.Now()))
-		case <-time.After(time.Millisecond):
-		}
+	// A yielding worker parks in the step that hands its slot over, so its
+	// park is in place before the queued conversation's first pass.
+	if s := hh.h.status(f.clk.Now()); s.Parked == 0 {
+		t.Fatalf("status = %+v, want a busy conversation parked on its backoff", s)
 	}
 }
 
@@ -1530,6 +1525,111 @@ func TestLaneHostScanStartedWorkerStopsThePark(t *testing.T) {
 	}
 	if s := hh.h.status(hh.f.clk.Now()); s.Parked != 0 {
 		t.Fatalf("status = %+v, want nothing parked", s)
+	}
+}
+
+// sameLaneWorkerState reports whether a and b hold the same backoff and wake.
+func sameLaneWorkerState(a, b laneWorkerState) bool {
+	return a.busySince.Equal(b.busySince) && a.errors == b.errors && a.wokeAt.Equal(b.wokeAt)
+}
+
+// TestLaneHostReleaseParksInOneStep proves a yielding worker's release parks
+// its conversation in the step that frees the slot, so no doorbell finds the
+// conversation neither served nor parked: a poke right after the release
+// starts the next worker from the parked state and stops the park's timer,
+// and no park stays beside that worker. A release a poke refuses parks
+// nothing.
+func TestLaneHostReleaseParksInOneStep(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f)
+	hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+		return laneBoundaryExec{clk: f.clk, boundary: opjournal.TriNo}
+	}
+	hh.start()
+	hh.h.wg.Wait() // the boot scan found nothing and the loop ended
+	f.propose(t, f.laneStore(t), f.msg("k1", opjournal.RolePrompt, "hello"))
+	w := &laneWorker{poke: make(chan struct{}, 1)}
+	hh.h.mu.Lock()
+	hh.h.workers[f.id] = w
+	hh.h.mu.Unlock()
+	now := f.clk.Now()
+	want := laneWorkerState{busySince: now.Add(-(laneBusyFirstFor + time.Second)), errors: 3, wokeAt: now.Add(-time.Second)}
+	park := &lanePark{after: laneBusyFirst, state: want}
+
+	w.poke <- struct{}{}
+	if hh.h.retire(f.id, w, false, park) {
+		t.Fatal("the release gave the slot up with a poke since the pass")
+	}
+	if s := hh.h.status(now); s.Workers != 1 || s.Parked != 0 || len(hh.timers) != 0 {
+		t.Fatalf("status = %+v, %d timers, want the slot kept and nothing parked", s, len(hh.timers))
+	}
+
+	if !hh.h.retire(f.id, w, false, park) {
+		t.Fatal("the release kept the slot")
+	}
+	timer := hh.nextTimer(t)
+	if timer.d != laneBusyFirst {
+		t.Fatalf("park timer = %s, want %s", timer.d, laneBusyFirst)
+	}
+	hh.h.mu.Lock()
+	parked, served := hh.h.parked[f.id], hh.h.workers[f.id] != nil
+	hh.h.mu.Unlock()
+	if parked == nil || !sameLaneWorkerState(parked.state, want) || served {
+		t.Fatalf("after the release: parked %+v, served %v; want parked from %+v, not served", parked, served, want)
+	}
+	if !hh.h.Poke(f.id) {
+		t.Fatal("Poke refused on a running host")
+	}
+	select {
+	case <-timer.stopped:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the worker the poke started did not stop the park's timer")
+	}
+	if p := hh.nextPass(t); p.conv != f.id || !p.out.res.Busy {
+		t.Fatalf("pass after the poke = %+v, want the busy conversation", p)
+	}
+	if tm := hh.nextTimer(t); tm.d != laneBusyNext {
+		t.Fatalf("backoff after the poke = %s, want %s: busy since before the park", tm.d, laneBusyNext)
+	}
+	if s := hh.h.status(f.clk.Now()); s.Workers != 1 || s.Parked != 0 {
+		t.Fatalf("status = %+v, want one worker and nothing parked", s)
+	}
+}
+
+// TestLaneHostFiredParkQueuesWithItsState proves a park that fires while
+// every slot is held queues its conversation and keeps the parked state for
+// it: the worker the freed slot starts resumes the backoff, and nothing stays
+// parked.
+func TestLaneHostFiredParkQueuesWithItsState(t *testing.T) {
+	hh, busy, park := laneParkedBusy(t)
+	holder := addSession(t, hh.f, "holder")
+	w := &laneWorker{poke: make(chan struct{}, 1)}
+	hh.h.mu.Lock()
+	hh.h.workers[holder] = w // the one slot
+	hh.h.mu.Unlock()
+	hh.f.clk.Advance(laneBusyFirstFor + time.Second)
+	park.c <- hh.f.clk.Now()
+	// A fired park stops its timer once its poke is done.
+	select {
+	case <-park.stopped:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the fired park did not finish")
+	}
+	if s := hh.h.status(hh.f.clk.Now()); s.Workers != 1 || s.Queued != 1 || s.Parked != 1 {
+		t.Fatalf("status = %+v, want the conversation queued behind the held slot, its state kept", s)
+	}
+	hh.noPass(t)
+	if !hh.h.retire(holder, w, true, nil) {
+		t.Fatal("the forced release kept the slot")
+	}
+	if p := hh.nextPass(t); p.conv != busy || !p.out.res.Busy {
+		t.Fatalf("pass in the freed slot = %+v, want the busy conversation", p)
+	}
+	if tm := hh.nextTimer(t); tm.d != laneBusyNext {
+		t.Fatalf("backoff after the queue = %s, want %s: busy since before it parked", tm.d, laneBusyNext)
+	}
+	if s := hh.h.status(hh.f.clk.Now()); s.Workers != 1 || s.Queued != 0 || s.Parked != 0 {
+		t.Fatalf("status = %+v, want the busy conversation served and nothing parked", s)
 	}
 }
 

@@ -40,6 +40,14 @@ type laneWorkerState struct {
 	wokeAt time.Time
 }
 
+// lanePark is how a worker that yields its slot parks its conversation: the
+// conversation is poked again after after, and its next worker starts from
+// state.
+type lanePark struct {
+	after time.Duration
+	state laneWorkerState
+}
+
 // laneWorkerHooks are what a host supplies to a conversation's worker.
 type laneWorkerHooks struct {
 	// pass runs one full pass over the conversation.
@@ -48,11 +56,10 @@ type laneWorkerHooks struct {
 	// it through a wait of d.
 	yield func(d time.Duration) bool
 	// release gives the slot up and reports true; with force false it keeps
-	// the slot and reports false when a poke arrived since the last pass.
-	release func(force bool) bool
-	// park pokes the conversation again after d without a slot; st is the
-	// state its next worker starts from.
-	park func(d time.Duration, st laneWorkerState)
+	// the slot and reports false when a poke arrived since the last pass. A
+	// non-nil park parks the conversation in the same step, so no doorbell
+	// finds it neither served nor parked.
+	release func(force bool, park *lanePark) bool
 	// onPass and onReprobe observe each full pass and each re-probe.
 	onPass    func(lanePassOutcome)
 	onReprobe func(stillBusy bool)
@@ -93,17 +100,18 @@ func (w *conversationLaneWorker) run() {
 		for {
 			delay, idle := w.nextDelay(out)
 			if idle || w.hooks.yield(delay) {
-				if !w.hooks.release(false) {
-					break // a poke arrived since the pass: pass again
-				}
+				var park *lanePark
 				if !idle {
-					w.hooks.park(delay, w.state)
+					park = &lanePark{after: delay, state: w.state}
+				}
+				if !w.hooks.release(false, park) {
+					break // a poke arrived since the pass: pass again
 				}
 				return
 			}
 			end := w.wait(delay)
 			if end == laneWaitEnded {
-				w.hooks.release(true)
+				w.hooks.release(true, nil)
 				return
 			}
 			if end == laneWaitPoked || delay <= 0 || !w.reprobeDue(out) {

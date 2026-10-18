@@ -15,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/tmux"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
@@ -381,7 +382,8 @@ func (laneFailingGetStore) Get(string) (beads.Bead, error) {
 	return beads.Bead{}, errors.New("store down")
 }
 
-// TestLaneExecDeliveryResultMapping pins the result mapping row by row.
+// TestLaneExecDeliveryResultMapping pins the result mapping row by row, the
+// tmux rows with the errors that runtime returns.
 func TestLaneExecDeliveryResultMapping(t *testing.T) {
 	at := laneT0
 	live := context.Background()
@@ -391,6 +393,8 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: at, Ack: ack}, Via: laneViaLive, Degradation: degradation}
 	}
 	someErr := errors.New("tmux exploded")
+	permissionPrompt := fmt.Errorf("%w: session %q is waiting on a permission prompt (Edit file, request tmux-1); answer it with respond (approve or deny) before sending text",
+		runtime.ErrPendingInteraction, "s")
 	for _, tc := range []struct {
 		name       string
 		ctx        context.Context
@@ -408,6 +412,9 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		{name: "unobserved and unfenced", ctx: live, res: worker.NudgeResult{Unfenced: true}, err: runtime.ErrNudgeDeliveredUnobserved, want: delivered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
 		{name: "not delivered", ctx: live, res: worker.NudgeResult{}, transient: true},
 		{name: "pending interaction", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrNudgeRefusedPendingInteraction), transient: true},
+		{name: "tmux permission prompt", ctx: live, err: permissionPrompt, transient: true},
+		{name: "tmux submit unconfirmed", ctx: live, err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), wantUnknwn: true},
+		{name: "tmux re-send refused after a submit", ctx: live, err: fmt.Errorf("%w: session %q: not re-sent: %s", tmux.ErrNudgeSubmitUnconfirmed, "s", permissionPrompt.Error()), wantUnknwn: true},
 		{name: "fence miss", ctx: live, err: &runtime.FenceMismatchError{Session: "s", Found: "absent"}, transient: true},
 		{name: "runtime unavailable", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), transient: true},
 		{name: "partial fence miss", ctx: live, err: &runtime.FenceMismatchError{Session: "s", Found: "dead", Partial: true}, wantUnknwn: true},
@@ -565,6 +572,43 @@ func TestLaneExecRespawnBetweenTakeAndDelivery(t *testing.T) {
 	got := f.get(t, st, op.ID)
 	if got.Status != opjournal.StatusAccepted || got.Failures != 0 || got.RetryAt.IsZero() {
 		t.Fatalf("op = %s failures %d retry_at %v; want a transient release", got.Status, got.Failures, got.RetryAt)
+	}
+}
+
+// TestLaneExecUnconfirmedSubmitMayHaveDelivered proves a tmux submit the
+// runtime could not confirm counts as possibly delivered: an at_most_once
+// message closes failed{ambiguous_delivery} instead of being sent again, and
+// an at_least_once one is retried marked maybe delivered.
+func TestLaneExecUnconfirmedSubmitMayHaveDelivered(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		guarantee opjournal.Guarantee
+		status    opjournal.Status
+		arm       opjournal.Arm
+		reason    string
+		failures  int
+	}{
+		{name: "at most once", guarantee: opjournal.GuaranteeAtMostOnce, status: opjournal.StatusClosed, arm: opjournal.ArmFailed, reason: opjournal.ReasonAmbiguousDelivery},
+		{name: "at least once", guarantee: opjournal.GuaranteeAtLeastOnce, status: opjournal.StatusAccepted, failures: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			f.sp.NudgeErrors = map[string]error{f.name: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, f.name)}
+			st := f.laneStore(t)
+			op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi", func(r *opjournal.Request) { r.Policy.Guarantee = tc.guarantee }))
+			if res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil || res.Done != opjournal.DoneReleased {
+				t.Fatalf("Pass = %+v, %v; want released", res, err)
+			}
+			if calls := f.nudges(); len(calls) != 1 {
+				t.Fatalf("runtime nudges = %+v, want the one unconfirmed submit", calls)
+			}
+			got := f.get(t, st, op.ID)
+			if got.Status != tc.status || got.Outcome.Arm != tc.arm || got.Outcome.Reason != tc.reason ||
+				got.Failures != tc.failures || got.MaybeDelivered != 1 {
+				t.Fatalf("op = %s %+v failures %d maybe_delivered %d; want %s %s{%s} failures %d maybe_delivered 1",
+					got.Status, got.Outcome, got.Failures, got.MaybeDelivered, tc.status, tc.arm, tc.reason, tc.failures)
+			}
+		})
 	}
 }
 

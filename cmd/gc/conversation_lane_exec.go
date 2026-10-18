@@ -295,7 +295,9 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 
 // laneDeliveryResult maps one nudge's answer to the lane's result (DES-O1
 // §7.2). unfencedReq says the request carried no fence, because the row
-// names no token.
+// names no token. A submit the runtime could not confirm may have delivered,
+// so it is Unknown; a nudge refused on a pending interaction, whichever
+// runtime refused it, is a transient miss.
 func laneDeliveryResult(ctx context.Context, res worker.NudgeResult, err error, at time.Time, unfencedReq bool) opjournal.DeliveryResult {
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.Delivered {
 		if res.Unfenced || unfencedReq {
@@ -318,11 +320,12 @@ func laneDeliveryResult(ctx context.Context, res worker.NudgeResult, err error, 
 		return delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)
 	case errors.Is(err, runtime.ErrNudgeRejected):
 		return opjournal.Rejected{KeyRejected: true, Reason: err.Error()}
-	case errors.As(err, &miss) && miss.Partial:
+	case errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed), errors.As(err, &miss) && miss.Partial:
 		return opjournal.Unknown{Cause: err}
 	case errors.As(err, &miss):
 		return opjournal.NotDelivered{Transient: true, Cause: err}
-	case errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction), errors.Is(err, runtime.ErrRuntimeUnavailable):
+	case errors.Is(err, runtime.ErrPendingInteraction), errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction),
+		errors.Is(err, runtime.ErrRuntimeUnavailable):
 		return opjournal.NotDelivered{Transient: true, Cause: err}
 	case ctx.Err() != nil, errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
 		return opjournal.Unknown{Cause: err}

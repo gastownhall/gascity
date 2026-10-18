@@ -276,8 +276,10 @@ type conversationLaneHost struct {
 	workers map[string]*laneWorker
 	queued  []string
 	inQueue map[string]bool
-	// parked holds each parked conversation's timer stop and the state its
-	// next worker starts from.
+	// parked holds each conversation whose worker yielded its slot: its park
+	// timer's stop, and the state its next worker starts from. A parked
+	// conversation has no worker, and stays parked until its next worker
+	// starts, through a wait in the queue after its timer fired.
 	parked map[string]*laneParked
 	// logged is when each kind of failure was last logged.
 	logged map[string]time.Time
@@ -479,6 +481,11 @@ func (h *conversationLaneHost) scan() (left bool) {
 func (h *conversationLaneHost) Poke(conv string) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	return h.pokeLocked(conv)
+}
+
+// pokeLocked is Poke with h.mu held.
+func (h *conversationLaneHost) pokeLocked(conv string) bool {
 	if h.state != laneHostStateRunning || h.ctx == nil || h.ctx.Err() != nil {
 		return false
 	}
@@ -516,9 +523,11 @@ func (h *conversationLaneHost) startWorkerLocked(conv string) {
 }
 
 // retire removes conv's worker unless force is false and a poke arrived
-// since its last pass, and starts the next queued conversation in its slot.
-// It reports whether the worker must exit.
-func (h *conversationLaneHost) retire(conv string, w *laneWorker, force bool) bool {
+// since its last pass, parks conv when park is set, and starts the next
+// queued conversation in its slot, in one hold of h.mu: a doorbell finds conv
+// served or parked, never between the two. It reports whether the worker
+// must exit.
+func (h *conversationLaneHost) retire(conv string, w *laneWorker, force bool, park *lanePark) bool {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	if !force {
@@ -530,6 +539,9 @@ func (h *conversationLaneHost) retire(conv string, w *laneWorker, force bool) bo
 	}
 	if h.workers[conv] == w {
 		delete(h.workers, conv)
+		if park != nil {
+			h.parkLocked(conv, *park)
+		}
 	}
 	for len(h.queued) > 0 && len(h.workers) < h.maxWorkers && h.ctx.Err() == nil {
 		next := h.queued[0]
@@ -554,31 +566,37 @@ func (h *conversationLaneHost) yield(d time.Duration) bool {
 	return d > 0 && len(h.queued) > 0
 }
 
-// park pokes conv again after d without holding a worker slot, keeping st
-// for its next worker. A newer park of conv replaces an older one, and a
-// worker started for conv first stops it.
-func (h *conversationLaneHost) park(conv string, d time.Duration, st laneWorkerState) {
-	p := &laneParked{stop: make(chan struct{}), state: st}
-	h.mu.Lock()
-	if old := h.parked[conv]; old != nil {
-		close(old.stop)
-	}
+// parkLocked pokes conv again after park.after without holding a worker
+// slot, keeping park.state for its next worker, whichever doorbell starts
+// it; a worker started for conv first stops the park. The caller holds h.mu
+// and has just removed conv's worker, so conv has no park yet.
+func (h *conversationLaneHost) parkLocked(conv string, park lanePark) {
+	p := &laneParked{stop: make(chan struct{}), state: park.state}
 	h.parked[conv] = p
+	fire, stopTimer := h.newTimer(park.after)
 	h.wg.Add(1)
-	h.mu.Unlock()
-	fire, stopTimer := h.newTimer(d)
-	go func() {
-		defer h.wg.Done()
-		defer stopTimer()
-		select {
-		case <-h.ctx.Done():
-			return
-		case <-p.stop:
-			return
-		case <-fire:
-		}
-		h.Poke(conv)
-	}()
+	go h.awaitPark(conv, p, fire, stopTimer)
+}
+
+// awaitPark pokes conv when its park p fires, unless a worker started for
+// conv first or the host ended. A poke that starts conv's worker hands it
+// p's state; one that queues conv keeps p until the queue starts it, so the
+// state waits in the queue with conv. A refused poke drops p.
+func (h *conversationLaneHost) awaitPark(conv string, p *laneParked, fire <-chan time.Time, stopTimer func()) {
+	defer h.wg.Done()
+	defer stopTimer()
+	select {
+	case <-h.ctx.Done():
+		return
+	case <-p.stop:
+		return
+	case <-fire:
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.parked[conv] == p && !h.pokeLocked(conv) {
+		delete(h.parked, conv)
+	}
 }
 
 // runWorker serves conv in its slot until the worker exits.
@@ -592,8 +610,7 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 		hooks: laneWorkerHooks{
 			pass:    func() lanePassOutcome { return h.pass(conv) },
 			yield:   h.yield,
-			release: func(force bool) bool { return h.retire(conv, w, force) },
-			park:    func(d time.Duration, st laneWorkerState) { h.park(conv, d, st) },
+			release: func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
 			onPass: func(out lanePassOutcome) {
 				if h.onPass != nil {
 					h.onPass(conv, out)
@@ -857,7 +874,8 @@ type conversationLaneStatus struct {
 	Reason string   `json:"reason,omitempty"`
 	Kinds  []string `json:"kinds,omitempty"`
 	// Workers are the conversations being served; Queued wait for a slot;
-	// Parked wait on a timer without one.
+	// Parked gave theirs up and wait, on a timer or in the queue, for their
+	// next worker, so a conversation can count in both Queued and Parked.
 	Workers  int   `json:"workers"`
 	Queued   int   `json:"queued"`
 	Parked   int   `json:"parked"`

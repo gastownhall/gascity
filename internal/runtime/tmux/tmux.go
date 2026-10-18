@@ -224,8 +224,11 @@ var (
 	// ack the item, so it requeues after the normal retry delay and consumes
 	// one of its bounded attempts, exactly like any other delivery failure.
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
-	// exactly what lets a stalled nudge go undetected for many minutes.
-	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// exactly what lets a stalled nudge go undetected for many minutes. It
+	// wraps runtime.ErrNudgeDeliveryUnconfirmed: the message may also have
+	// been delivered, so a caller that must not deliver twice treats it as
+	// possibly delivered.
+	ErrNudgeSubmitUnconfirmed = fmt.Errorf("%w: submit Enter delivered to tmux but not confirmed (busy state never observed)", runtime.ErrNudgeDeliveryUnconfirmed)
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
