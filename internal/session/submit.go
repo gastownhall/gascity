@@ -52,11 +52,17 @@ type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
 	SupportsInterruptNow bool `json:"supports_interrupt_now"`
 	// SupportsSteer reports that a steer reaches the session's running turn
-	// ([SupportsSteerForInfo]). Without it a steer follows its
-	// on_unsupported policy: boundary waits for the turn's boundary, fail
-	// closes the op failed{unsupported}. No submit intent steers yet: the
-	// capability is read by conversation-lane producers, whose steers only
-	// the conversation lane delivers.
+	// ([SupportsSteerForInfo]): the runtime's steer mode combined with the
+	// session's provider family, whichever host delivers the steer. No
+	// submit intent steers yet: the capability is read by conversation-lane
+	// producers, whose steers only the conversation lane delivers. The
+	// lane's Caps.Steer is this capability only while the lane runs the
+	// conversation live; it is false while another host serves the
+	// conversation or the runtime cancels turns by protocol, which the lane
+	// does not run live yet, and there a steer waits not_live whatever its
+	// on_unsupported policy. On a live lane, a steer the session cannot take
+	// follows that policy: boundary waits for the turn's boundary, fail
+	// closes the op failed{unsupported}.
 	SupportsSteer bool `json:"supports_steer"`
 }
 

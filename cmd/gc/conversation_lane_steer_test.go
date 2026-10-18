@@ -53,6 +53,18 @@ func probeSteer(t *testing.T, f *laneFixture) bool {
 	return p.Caps.Steer
 }
 
+// sessionReadsSteer is the supports_steer session responses report for f's
+// session: session.SubmissionCapabilitiesForRuntime over its row.
+func sessionReadsSteer(t *testing.T, f *laneFixture) bool {
+	t.Helper()
+	row, err := f.store.Get(f.id)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	return session.SubmissionCapabilitiesForRuntime(row.Metadata, true,
+		runtime.TurnInterruptModeFor(f.sp, f.name), runtime.SteerModeFor(f.sp, f.name)).SupportsSteer
+}
+
 // TestLaneExecSteerCapIsRuntimeTimesFamily kills a probe whose Caps.Steer
 // reads only the runtime or only the family: a protocol runtime steers every
 // family, a runtime that cannot steer steers nobody, no family takes a
@@ -181,9 +193,13 @@ func TestLaneSteerCapNeedsAKeyedSteer(t *testing.T) {
 // is derived apart from the supports_steer session responses report
 // (session.SubmissionCapabilitiesForRuntime over the row): for rows with no
 // provider, a wrapped provider, a provider kind, ACP by transport or by
-// provider, under every steer mode, the two agree. While the keystroke
-// table is empty it cannot, on its own, catch a Caps.Steer that ignores the
-// row; TestLaneExecSteerCapAsksAboutTheProbedRow covers that.
+// provider, under every steer mode, the two agree while the lane runs the
+// conversation live. While the keystroke table is empty it cannot, on its
+// own, catch a Caps.Steer that ignores the row;
+// TestLaneExecSteerCapAsksAboutTheProbedRow covers that. A runtime that
+// cancels turns by protocol is the documented split (SESSION-RUNTIME-025):
+// supports_steer still reads its steer mode, whichever host delivers, while
+// the lane does not run it live and steers nothing.
 func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 	rows := map[string]laneFixtureOpt{
 		"no provider":      func(map[string]string) {},
@@ -198,17 +214,58 @@ func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 			t.Run(name+"/"+string(mode), func(t *testing.T) {
 				f := newLaneFixture(t, opt)
 				f.sp.SteerModeValue = mode
-				row, err := f.store.Get(f.id)
-				if err != nil {
-					t.Fatalf("Get: %v", err)
-				}
-				want := session.SubmissionCapabilitiesForRuntime(row.Metadata, true,
-					runtime.TurnInterruptModeFor(f.sp, f.name), runtime.SteerModeFor(f.sp, f.name)).SupportsSteer
+				want := sessionReadsSteer(t, f)
 				if got := probeSteer(t, f); got != want {
 					t.Fatalf("lane Caps.Steer = %v, session reads supports_steer = %v", got, want)
 				}
 			})
 		}
+	}
+	for _, mode := range []runtime.SteerMode{runtime.SteerKeystroke, runtime.SteerProtocol, runtime.SteerNone} {
+		t.Run("protocol interrupt/"+string(mode), func(t *testing.T) {
+			f := newLaneFixture(t, laneProvider("codex"))
+			f.sp.SteerModeValue = mode
+			f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+			if got, want := sessionReadsSteer(t, f), mode == runtime.SteerProtocol; got != want {
+				t.Fatalf("session reads supports_steer = %v, want %v: the runtime's steer mode with the family, not gated on the lane", got, want)
+			}
+			st := f.laneStore(t)
+			v, info := f.view(t)
+			p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+			if err != nil || p.Caps.Live || p.Caps.Steer {
+				t.Fatalf("Probe = %+v, %v; want neither live nor steer", p.Caps, err)
+			}
+		})
+	}
+}
+
+// TestLaneExecProtocolModeSteerWaitsNotLive pins what the split between
+// supports_steer and Caps.Steer means for a steer (SESSION-RUNTIME-025): a
+// runtime that cancels turns and steers by protocol reads supports_steer
+// true, yet the lane does not run it live, so a steer to its busy session
+// whose on_unsupported is fail waits not_live with nothing typed, never
+// closing failed{unsupported}.
+func TestLaneExecProtocolModeSteerWaitsNotLive(t *testing.T) {
+	f := newLaneFixture(t, laneProvider("codex"))
+	f.sp.SteerModeValue = runtime.SteerProtocol
+	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	if !sessionReadsSteer(t, f) {
+		t.Fatal("session reads supports_steer = false; the wait must be tested against a session that reports a steer")
+	}
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "also check the logs", steerMsg(opjournal.FallbackFail)))
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+		busyLane(e)
+		return e
+	})
+	if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitNotLive) {
+		t.Fatalf("Pass = %+v, %v; want a not_live wait and nothing taken", res, err)
+	}
+	if calls := f.nudges(); len(calls) != 0 {
+		t.Fatalf("runtime nudges = %+v, want none", calls)
+	}
+	if got := f.get(t, st, op.ID); got.Status != opjournal.StatusSubmitted {
+		t.Fatalf("op = %s outcome %+v, want submitted: a steer the lane cannot run live waits, whatever its on_unsupported", got.Status, got.Outcome)
 	}
 }
 
