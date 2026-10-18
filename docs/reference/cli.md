@@ -3603,10 +3603,15 @@ relocated graph store are always read.
 
 When the city's controller is running, it answers the query from the stores it
 already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), reading every store
-live, never from a cache. The answer is the one this command would compute
-itself, without opening a store. If the controller is not running, refuses, or
-does not answer within 10s, this command reads the stores itself. GC_NO_API=1
-forces the local read.
+live, never from a cache, so the answer is the one this command would compute
+itself, without opening a store. That holds only while the controller's config
+is current, so it refuses while a config change is pending or being applied,
+and after a failed reload until one succeeds; a [storage] change fails every
+reload until it is reverted or the city restarts. The controller learns of an
+edit to the config files from its config watcher and answers under the config
+it holds until then. If the controller is not running, refuses, or does not
+answer within 10s, this command reads the stores itself. GC_NO_API=1 forces
+the local read.
 
 ```
 gc ready [flags]

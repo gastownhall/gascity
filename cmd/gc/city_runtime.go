@@ -1477,7 +1477,16 @@ func (cr *CityRuntime) tickReconcilePoolDeaths(p *tickPass) bool {
 }
 
 func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
-	p.configChanged = p.dirty.Swap(false)
+	if p.dirty.Load() {
+		// Mark the reload in progress before clearing the flag, so ReadyWork
+		// never finds it neither pending nor in progress (configFreshness). Only
+		// this goroutine clears the flag, so a change marked after the Load
+		// stays marked for the next tick.
+		fresh := cr.freshness()
+		fresh.beginChange()
+		defer func() { fresh.endReload(p.manualReply.Outcome) }()
+		p.configChanged = p.dirty.Swap(false)
+	}
 	if p.configChanged {
 		p.dirtyCleared = true
 		source := reloadSourceWatch
@@ -2474,10 +2483,15 @@ func (cr *CityRuntime) applyStartupConfigReload(
 	if cr.tomlPath == "" || cityRoot == "" || cr.configRev == "" || lastProviderName == nil || ctx.Err() != nil {
 		return
 	}
+	// Marked in progress before the flag is cleared, as the tick's reload is.
+	fresh := cr.freshness()
+	fresh.beginChange()
+	var reply reloadControlReply
+	defer func() { fresh.endReload(reply.Outcome) }()
 	if dirty != nil {
 		dirty.Swap(false)
 	}
-	reply := cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+	reply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
 	if reply.Outcome == reloadOutcomeFailed && dirty != nil {
 		dirty.Store(true)
 	}

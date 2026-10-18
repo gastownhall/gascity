@@ -1,6 +1,7 @@
 package readywork
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"regexp"
@@ -142,7 +143,7 @@ func boundedOrder(c compiled) (beads.ReadyOrder, bool) {
 
 // readyRead reads one leg's whole ready set for q, live.
 func readyRead(q beads.ReadyQuery) legRead {
-	return func(leg Leg) legResult {
+	return func(_ context.Context, leg Leg) legResult {
 		rows, err := beads.HandlesFor(leg.Store).Live.Ready(q)
 		return legResult{rows: rows, err: err}
 	}
@@ -150,17 +151,17 @@ func readyRead(q beads.ReadyQuery) legRead {
 
 // readReadyCandidates reads the ready arm: each leg asked with the pushed
 // predicates and, where it is exact, a pushed limit.
-func readReadyCandidates(legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+func readReadyCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
 	plain := readyRead(beads.ReadyQuery{TierMode: beads.FederatedReadTier})
 	q := readyReadQuery(c)
 	order, bounded := boundedOrder(c)
 	switch {
 	case bounded:
-		return readNarrowed(legs, c, boundedRead(c, q, order), plain)
+		return readNarrowed(ctx, legs, c, boundedRead(c, q, order), plain)
 	case predicatesPushed(q):
-		return readNarrowed(legs, c, readyRead(q), plain)
+		return readNarrowed(ctx, legs, c, readyRead(q), plain)
 	default:
-		return federate(legs, plain)
+		return federate(ctx, legs, plain)
 	}
 }
 
@@ -186,27 +187,28 @@ func predicatesPushed(q beads.ReadyQuery) bool {
 // binding read ended by relics the merge then drops, cannot occur while no work
 // prefix shadows a reserved one: boundedRead counts only the rows mergeKeeps
 // trusts (Co-resident ids above).
-func readNarrowed(legs []Leg, c compiled, narrowed, plain legRead) ([]beads.Bead, map[string]int, error) {
-	results := readLegs(legs, narrowed)
+func readNarrowed(ctx context.Context, legs []Leg, c compiled, narrowed, plain legRead) ([]beads.Bead, map[string]int, error) {
+	results := readLegs(ctx, legs, narrowed)
 	if err := firstLegError(legs, results); err != nil {
 		return nil, nil, err
 	}
 	items, owners := merge(results)
-	if narrowedAnswerIsExact(legs, c, items, owners) {
+	if narrowedAnswerIsExact(ctx, legs, c, items, owners) {
 		return items, owners, nil
 	}
-	return federate(legs, plain)
+	return federate(ctx, legs, plain)
 }
 
 // boundedRead asks one leg for its first Limit+boundedSlack ready rows in order,
-// and asks again for more while the rows the answer can use fall short of the
-// limit: rows the Go-only predicates keep and the merge keeps too (mergeKeeps).
-// A relic the merge drops for an earlier leg's copy is not a row in hand, and
-// counting it could end a binding's read before rows of its own the answer
-// needs. A store that cannot cut in order returns its whole set.
+// and asks again for more, unless ctx has ended, while the rows the answer can
+// use fall short of the limit: rows the Go-only predicates keep and the merge
+// keeps too (mergeKeeps). A relic the merge drops for an earlier leg's copy is
+// not a row in hand, and counting it could end a binding's read before rows of
+// its own the answer needs. A store that cannot cut in order returns its whole
+// set.
 func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead {
 	limit := c.query.Limit
-	return func(leg Leg) legResult {
+	return func(ctx context.Context, leg Leg) legResult {
 		want := limit + boundedSlack
 		for {
 			bq := q
@@ -227,6 +229,9 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead
 			if kept >= limit {
 				return legResult{rows: rows}
 			}
+			if err := ctx.Err(); err != nil {
+				return legResult{err: err}
+			}
 			want *= 4
 		}
 	}
@@ -235,8 +240,9 @@ func boundedRead(c compiled, q beads.ReadyQuery, order beads.ReadyOrder) legRead
 // narrowedAnswerIsExact reports whether a narrowed read's answer is the plain
 // read's: true unless a row the answer takes from a class binding, under an id
 // outside the binding's reserved namespaces, is also held by an earlier leg. A
-// leg that cannot say whether it holds the id counts as holding it.
-func narrowedAnswerIsExact(legs []Leg, c compiled, items []beads.Bead, owners map[string]int) bool {
+// leg that cannot say whether it holds the id counts as holding it, and so does
+// a leg whose probe comes after ctx has ended.
+func narrowedAnswerIsExact(ctx context.Context, legs []Leg, c compiled, items []beads.Bead, owners map[string]int) bool {
 	answer := c.filter(items)
 	c.order(answer)
 	if c.query.Limit > 0 && len(answer) > c.query.Limit {
@@ -258,6 +264,10 @@ func narrowedAnswerIsExact(legs []Leg, c compiled, items []beads.Bead, owners ma
 	}
 	held := make([]bool, len(probes))
 	fanout.Bounded(len(probes), LegFanOut, func(i int) {
+		if ctx.Err() != nil {
+			held[i] = true
+			return
+		}
 		_, err := beads.HandlesFor(legs[probes[i].leg].Store).Live.Get(probes[i].id)
 		held[i] = !errors.Is(err, beads.ErrNotFound)
 	})

@@ -2,6 +2,7 @@ package readywork
 
 import (
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,5 +52,23 @@ func TestReadAssigneeMatchesTheStoredAssigneeExactly(t *testing.T) {
 	}
 	if got := readIDs(t, legs, Query{Unassigned: true}); !slices.Equal(got, []string{"a-4"}) {
 		t.Fatalf("--unassigned = %v, want only the empty assignee a-4 (a whitespace assignee is an assignee, as bd matches it)", got)
+	}
+}
+
+// TestReadRefusesANegativeLimitBeforeReadingAnyStore pins the limit's floor at
+// the reader, where the CLI and the API meet: zero is unlimited and a negative
+// limit is refused, as the API refuses it, so the two doors cannot disagree on
+// it. The refusal costs no store read.
+func TestReadRefusesANegativeLimitBeforeReadingAnyStore(t *testing.T) {
+	store := newNarrowingStore(readyRow("a-1", 1, time.Now().UTC()))
+	_, err := Read([]Leg{testLeg("city", store)}, Query{Limit: -1})
+	if err == nil || !strings.Contains(err.Error(), "--limit -1") {
+		t.Fatalf("Read(--limit -1) error = %v, want a refusal naming the limit", err)
+	}
+	if got := len(store.readyQueries()) + len(store.orderedCalls()); got != 0 {
+		t.Fatalf("a refused query read the store %d times, want none", got)
+	}
+	if got := readIDs(t, []Leg{testLeg("city", store)}, Query{Limit: 0}); !slices.Equal(got, []string{"a-1"}) {
+		t.Fatalf("--limit 0 = %v, want every row (0 is unlimited)", got)
 	}
 }

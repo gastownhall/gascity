@@ -1,6 +1,7 @@
 package readywork
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -57,11 +58,26 @@ const LegFanOut = 8
 // may be ASKED for a bounded answer (pushdown.go), but only where that is
 // provably the same top N.
 func Read(legs []Leg, q Query) ([]ReadyBead, error) {
+	return ReadContext(context.Background(), legs, q)
+}
+
+// ReadContext is Read under ctx: once ctx ends, no further store read starts,
+// and the answer is ctx's error rather than rows.
+//
+// It is checked before every leg read, before every refill and probe, and
+// between the candidate read and the blocker reads. A store read already in
+// flight runs to its own end, because beads.Store reads take no context; a
+// caller that must stop those too hands in stores bound to ctx (the supervisor
+// binds every leg to its request, cmd/gc ready_work_api.go).
+func ReadContext(ctx context.Context, legs []Leg, q Query) ([]ReadyBead, error) {
 	c, err := compile(q)
 	if err != nil {
 		return nil, err
 	}
-	items, owners, err := readCandidates(legs, c)
+	items, owners, err := readCandidates(ctx, legs, c)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -75,7 +91,10 @@ func Read(legs []Leg, q Query) ([]ReadyBead, error) {
 	// this one dependency read on the one row that matters.
 	var blockers map[string][]ReadyBeadBlocker
 	if c.status == StatusInProgress {
-		blockers, err = blockedByForRows(items, legs, owners)
+		blockers, err = blockedByForRows(ctx, items, legs, owners)
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -102,25 +121,25 @@ func Read(legs []Leg, q Query) ([]ReadyBead, error) {
 // recorded at MERGE time rather than re-probed afterwards: the merge is
 // first-leg-wins, and a co-resident bead that is open in one leg and in_progress
 // in another would resolve to the wrong store under a fresh probe.
-func readCandidates(legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
+func readCandidates(ctx context.Context, legs []Leg, c compiled) ([]beads.Bead, map[string]int, error) {
 	switch c.status {
 	case "":
-		return readReadyCandidates(legs, c)
+		return readReadyCandidates(ctx, legs, c)
 	case StatusOpen:
-		return readOpenStatusCandidates(legs)
+		return readOpenStatusCandidates(ctx, legs)
 	case StatusInProgress:
 		// The crash-recovery tier, and the one whose rows carry blocked_by. The
 		// assignee is pushed into each leg's list; it is matched exactly on every
 		// backend, and re-applied to the merged set like every predicate.
 		plain := beads.ListQuery{Status: c.status, TierMode: beads.FederatedReadTier}
 		if c.assignee == "" {
-			return federate(legs, listRead(plain))
+			return federate(ctx, legs, listRead(plain))
 		}
 		narrowed := plain
 		narrowed.Assignee = c.assignee
-		return readNarrowed(legs, c, listRead(narrowed), listRead(plain))
+		return readNarrowed(ctx, legs, c, listRead(narrowed), listRead(plain))
 	default:
-		return federate(legs, listRead(beads.ListQuery{
+		return federate(ctx, legs, listRead(beads.ListQuery{
 			Status:   c.status,
 			TierMode: beads.FederatedReadTier,
 		}))
@@ -143,8 +162,8 @@ func readCandidates(legs []Leg, c compiled) ([]beads.Bead, map[string]int, error
 // non-closed row and keeping the mapped "open" ones gives the bd-backed store the
 // same answer without widening ListQuery{Status: "open"} for the controller
 // callers whose readiness gates rely on bd's narrower status (ga-3mv5d3).
-func readOpenStatusCandidates(legs []Leg) ([]beads.Bead, map[string]int, error) {
-	items, owners, err := federate(legs, listRead(beads.ListQuery{
+func readOpenStatusCandidates(ctx context.Context, legs []Leg) ([]beads.Bead, map[string]int, error) {
+	items, owners, err := federate(ctx, legs, listRead(beads.ListQuery{
 		AllowScan: true,
 		TierMode:  beads.FederatedReadTier,
 	}))
@@ -164,8 +183,9 @@ func readOpenStatusCandidates(legs []Leg) ([]beads.Bead, map[string]int, error) 
 
 // legRead reads one leg. Every read goes through the store's LIVE handle: a
 // caching-wrapped leg answers from its backing store, never from its read cache
-// (see the package documentation).
-type legRead func(leg Leg) legResult
+// (see the package documentation). A read that makes more than one store call
+// checks ctx before each call after the first.
+type legRead func(ctx context.Context, leg Leg) legResult
 
 // legResult is one leg's read, kept at that leg's index so every merge is
 // ordered by leg position whatever order the reads finished in.
@@ -175,7 +195,7 @@ type legResult struct {
 }
 
 func listRead(q beads.ListQuery) legRead {
-	return func(leg Leg) legResult {
+	return func(_ context.Context, leg Leg) legResult {
 		rows, err := beads.HandlesFor(leg.Store).Live.List(q)
 		return legResult{rows: rows, err: err}
 	}
@@ -190,8 +210,8 @@ func listRead(q beads.ListQuery) legRead {
 // PartialDegrade verdict on the rig legs: a CLI array has nowhere to say "this is
 // short", so a degraded leg would be served as a short array indistinguishable
 // from "no work".
-func federate(legs []Leg, read legRead) ([]beads.Bead, map[string]int, error) {
-	results := readLegs(legs, read)
+func federate(ctx context.Context, legs []Leg, read legRead) ([]beads.Bead, map[string]int, error) {
+	results := readLegs(ctx, legs, read)
 	if err := firstLegError(legs, results); err != nil {
 		return nil, nil, err
 	}
@@ -205,11 +225,16 @@ func federate(legs []Leg, read legRead) ([]beads.Bead, map[string]int, error) {
 // Every leg is a DISTINCT store (the plan dedupes legs by store identity), so no
 // two reads here share a store, and each writes only its own slot. Every leg is
 // read even when an earlier one fails: the reads have no side effects, and
-// firstLegError picks the error a sequential reader would have stopped at.
-func readLegs(legs []Leg, read legRead) []legResult {
+// firstLegError picks the error a sequential reader would have stopped at. A leg
+// whose turn comes after ctx has ended is not read; its slot holds ctx's error.
+func readLegs(ctx context.Context, legs []Leg, read legRead) []legResult {
 	results := make([]legResult, len(legs))
 	fanout.Bounded(len(legs), LegFanOut, func(i int) {
-		results[i] = read(legs[i])
+		if err := ctx.Err(); err != nil {
+			results[i] = legResult{err: err}
+			return
+		}
+		results[i] = read(ctx, legs[i])
 	})
 	return results
 }
@@ -261,8 +286,9 @@ func merge(results []legResult) ([]beads.Bead, map[string]int) {
 //
 // A dependency read that FAILS is returned, not swallowed. Reporting a gated
 // bead as unblocked is what re-serves work no worker can advance; the federation
-// is fail-loud for the same reason.
-func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, error) {
+// is fail-loud for the same reason. A read whose turn comes after ctx has ended
+// is not made, and fails its row with ctx's error.
+func blockedByForRows(ctx context.Context, items []beads.Bead, legs []Leg, owners map[string]int) (map[string][]ReadyBeadBlocker, error) {
 	if len(owners) == 0 || len(items) == 0 {
 		return nil, nil
 	}
@@ -281,7 +307,7 @@ func blockedByForRows(items []beads.Bead, legs []Leg, owners map[string]int) (ma
 	perLeg := make([]legBlockers, len(legOrder))
 	fanout.Bounded(len(legOrder), LegFanOut, func(i int) {
 		idx := legOrder[i]
-		perLeg[i] = readLegBlockers(legs[idx], byLeg[idx])
+		perLeg[i] = readLegBlockers(ctx, legs[idx], byLeg[idx])
 	})
 	// Report the failure of the first row, in answer order, whose enrichment
 	// failed: the row the sequential walk would have stopped at.
@@ -320,12 +346,15 @@ type legBlockers struct {
 // used, so every row's blockers come back in the order that read returns them;
 // the rows and then the distinct blocking targets are read concurrently, at most
 // LegFanOut at a time.
-func readLegBlockers(leg Leg, ids []string) legBlockers {
+func readLegBlockers(ctx context.Context, leg Leg, ids []string) legBlockers {
 	out := legBlockers{blockers: make(map[string][]ReadyBeadBlocker, len(ids)), errs: make(map[string]error)}
 	live := beads.HandlesFor(leg.Store).Live
 	deps := make([][]beads.Dep, len(ids))
 	depErrs := make([]error, len(ids))
 	fanout.Bounded(len(ids), LegFanOut, func(i int) {
+		if depErrs[i] = ctx.Err(); depErrs[i] != nil {
+			return
+		}
 		deps[i], depErrs[i] = live.DepList(ids[i], "down")
 	})
 	// Collect every distinct blocking target, in first-seen order.
@@ -350,6 +379,9 @@ func readLegBlockers(leg Leg, ids []string) legBlockers {
 	got := make([]beads.Bead, len(targets))
 	getErrs := make([]error, len(targets))
 	fanout.Bounded(len(targets), LegFanOut, func(i int) {
+		if getErrs[i] = ctx.Err(); getErrs[i] != nil {
+			return
+		}
 		got[i], getErrs[i] = live.Get(targets[i])
 	})
 	for i, id := range ids {

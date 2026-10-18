@@ -14,13 +14,17 @@ import (
 // in-process reader would produce them: the same rows, in the same order,
 // carrying the same fields.
 //
-// A limit of zero or less is unlimited, as it is in-process, and is not sent.
-// ctx bounds the call: the client's own ceiling is sized for slow federated
-// control-plane reads, and a caller with a cheaper fallback should stop waiting
-// sooner.
+// A query the in-process reader refuses, such as a negative limit, is refused
+// here too, before anything is sent. A limit of zero is unlimited and is not
+// sent. ctx bounds the call: the client's own ceiling is sized for slow
+// federated control-plane reads, and a caller with a cheaper fallback should
+// stop waiting sooner.
 func (c *Client) ReadyWork(ctx context.Context, q readywork.Query) ([]readywork.ReadyBead, error) {
 	if err := c.requireCityScope(); err != nil {
 		return nil, err
+	}
+	if err := q.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid ready-work query: %w", err)
 	}
 	params := &genclient.GetV0CityByCityNameWorkReadyParams{}
 	if q.Assignee != "" {

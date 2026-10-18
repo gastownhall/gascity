@@ -1,10 +1,12 @@
 package readywork
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 
@@ -106,6 +108,48 @@ func TestInProgressEnrichmentKeepsEachRowsBlockersInEdgeOrder(t *testing.T) {
 		if !reflect.DeepEqual(row.BlockedBy, want) {
 			t.Fatalf("row %s blocked_by = %+v, want %+v", row.ID, row.BlockedBy, want)
 		}
+	}
+}
+
+// cancellingListStore ends its read's context as its list returns, and counts
+// every dependency and blocker read made through it.
+type cancellingListStore struct {
+	*beads.MemStore
+	cancel context.CancelFunc
+	reads  *atomic.Int64
+}
+
+func (s cancellingListStore) List(query beads.ListQuery) ([]beads.Bead, error) {
+	defer s.cancel()
+	return s.MemStore.List(query)
+}
+
+func (s cancellingListStore) DepList(id, direction string) ([]beads.Dep, error) {
+	s.reads.Add(1)
+	return s.MemStore.DepList(id, direction)
+}
+
+func (s cancellingListStore) Get(id string) (beads.Bead, error) {
+	s.reads.Add(1)
+	return s.MemStore.Get(id)
+}
+
+// TestInProgressEnrichmentIsNotReadOnceTheContextEnds pins cancellation between
+// the phases: a context that ends while the candidates are being read stops the
+// read before any row's blockers are, and the answer is the context's error.
+func TestInProgressEnrichmentIsNotReadOnceTheContextEnds(t *testing.T) {
+	store := beads.NewMemStore()
+	inProgressWithBlockers(t, store, 3)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var reads atomic.Int64
+	leg := testLeg("city", cancellingListStore{MemStore: store, cancel: cancel, reads: &reads})
+	rows, err := ReadContext(ctx, []Leg{leg}, Query{Status: StatusInProgress})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("ReadContext = %v, %v; want the context's error once it ended", rows, err)
+	}
+	if got := reads.Load(); got != 0 {
+		t.Fatalf("%d dependency or blocker reads after the context ended, want none", got)
 	}
 }
 

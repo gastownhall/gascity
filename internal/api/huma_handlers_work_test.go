@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"reflect"
@@ -11,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/readywork"
 )
 
@@ -141,18 +143,26 @@ func TestWorkReadyAnswersAnEmptyArrayNotNull(t *testing.T) {
 	}
 }
 
-// TestWorkReadyStatuses pins the failure contract the CLI's fallback rests on.
+// TestWorkReadyStatuses pins the failure contract the CLI's fallback rests on:
+// the status, and for a 503 the problem code that tells a failed read
+// (store-unavailable) from a controller that does not serve ready work or
+// whose config is not current (service-unavailable). A store the controller
+// does not hold open counts as a failed read.
 func TestWorkReadyStatuses(t *testing.T) {
 	for _, tc := range []struct {
 		name  string
 		state State
 		query string
 		want  int
+		code  string
 	}{
 		{name: "malformed metadata filter is 400", state: &readyWorkFakeState{fakeState: newFakeState(t)}, query: "?metadata_field=%3Dvalue", want: http.StatusBadRequest},
 		{name: "unknown status is rejected", state: &readyWorkFakeState{fakeState: newFakeState(t)}, query: "?status=bogus", want: http.StatusUnprocessableEntity},
-		{name: "a state that cannot answer is 503", state: newFakeState(t), want: http.StatusServiceUnavailable},
-		{name: "a failed read is 503", state: &readyWorkFakeState{fakeState: newFakeState(t), err: errors.New(`rig "alpha" store: unreachable`)}, want: http.StatusServiceUnavailable},
+		// A misspelled filter must not widen the answer to everything.
+		{name: "unknown query parameter is rejected", state: &readyWorkFakeState{fakeState: newFakeState(t)}, query: "?bogus=1", want: http.StatusUnprocessableEntity},
+		{name: "a state that cannot answer is 503", state: newFakeState(t), want: http.StatusServiceUnavailable, code: apierr.ServiceUnavailable.Code},
+		{name: "a failed read is 503 store-unavailable", state: &readyWorkFakeState{fakeState: newFakeState(t), err: errors.New(`rig "alpha" store: unreachable`)}, want: http.StatusServiceUnavailable, code: apierr.StoreUnavailable.Code},
+		{name: "a config that is not current is 503 service-unavailable", state: &readyWorkFakeState{fakeState: newFakeState(t), err: fmt.Errorf("refusing: %w", ErrReadyWorkConfigNotCurrent)}, want: http.StatusServiceUnavailable, code: apierr.ServiceUnavailable.Code},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			sm := NewSupervisorMux(&singleStateResolver{state: tc.state}, nil, false, "test", "", time.Now())
@@ -160,6 +170,18 @@ func TestWorkReadyStatuses(t *testing.T) {
 			sm.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/v0/city/"+tc.state.CityName()+"/work/ready"+tc.query, nil))
 			if rec.Code != tc.want {
 				t.Fatalf("GET /work/ready%s = %d, want %d (body %s)", tc.query, rec.Code, tc.want, rec.Body.String())
+			}
+			if tc.code == "" {
+				return
+			}
+			var problem struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(rec.Body.Bytes(), &problem); err != nil {
+				t.Fatalf("decode problem %s: %v", rec.Body.String(), err)
+			}
+			if problem.Code != tc.code {
+				t.Fatalf("GET /work/ready%s problem code = %q, want %q (body %s)", tc.query, problem.Code, tc.code, rec.Body.String())
 			}
 		})
 	}
@@ -179,6 +201,21 @@ func TestReadyWorkClientReportsAFailedReadAsAFallbackableError(t *testing.T) {
 	}
 }
 
+// TestReadyWorkClientRefusesAQueryTheReaderRefuses pins the client's door to the
+// reader's: a negative limit is refused before it is sent, never dropped from
+// the request and answered unlimited.
+func TestReadyWorkClientRefusesAQueryTheReaderRefuses(t *testing.T) {
+	state := &readyWorkFakeState{fakeState: newFakeState(t)}
+	q := readywork.Query{Limit: -1}
+	rows, err := workReadyServer(t, state).ReadyWork(context.Background(), q)
+	if want := q.Validate(); err == nil || want == nil || !strings.Contains(err.Error(), want.Error()) {
+		t.Fatalf("ReadyWork(limit -1) = %v rows, error %v, want the reader's refusal %v", rows, err, want)
+	}
+	if len(state.asked) != 0 {
+		t.Fatalf("controller was asked %+v, want the query refused before it is sent", state.asked)
+	}
+}
+
 // TestWorkReadyEnumsAreTheReadersAcceptedValues pins the published status and
 // sort enums to the values the reader accepts, so a status or order the reader
 // gains cannot be rejected at the API's door while the CLI accepts it.
@@ -195,5 +232,16 @@ func TestWorkReadyEnumsAreTheReadersAcceptedValues(t *testing.T) {
 	}
 	if got, want := strings.Split(field("Sort").Tag.Get("enum"), ","), []string{readywork.SortOldest, readywork.SortNewest}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("sort enum = %v, want the reader's orders %v", got, want)
+	}
+	// The limit's floor: the API refuses below 0, and so must the reader, or a
+	// negative --limit would be refused at one door and read unlimited at the other.
+	if got := field("Limit").Tag.Get("minimum"); got != "0" {
+		t.Fatalf("limit minimum = %q, want 0", got)
+	}
+	if err := (readywork.Query{Limit: -1}).Validate(); err == nil {
+		t.Fatal("the reader accepts a negative limit the API refuses")
+	}
+	if err := (readywork.Query{Limit: 0}).Validate(); err != nil {
+		t.Fatalf("the reader refuses limit 0, which the API accepts as unlimited: %v", err)
 	}
 }
