@@ -3274,7 +3274,8 @@ export const zSessionStrandedClaimsPayload = z.object({
 
 export const zSubmissionCapabilities = z.object({
     supports_follow_up: z.boolean(),
-    supports_interrupt_now: z.boolean()
+    supports_interrupt_now: z.boolean(),
+    supports_steer: z.boolean()
 });
 
 export const zSessionResponse = z.object({

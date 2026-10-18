@@ -12951,11 +12951,15 @@
           },
           "supports_interrupt_now": {
             "type": "boolean"
+          },
+          "supports_steer": {
+            "type": "boolean"
           }
         },
         "required": [
           "supports_follow_up",
-          "supports_interrupt_now"
+          "supports_interrupt_now",
+          "supports_steer"
         ],
         "type": "object"
       },
