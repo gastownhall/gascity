@@ -351,8 +351,10 @@ func TestCheckUsesSingleAssigneeMessageScanForSlashRecipient(t *testing.T) {
 			messageListCalls++
 			return []byte(`[{"id":"msg-w","title":"hello","description":"body","status":"open","issue_type":"message","assignee":"gascity/workflows.codex-max","from":"human","created_at":"2026-01-02T03:04:05Z","ephemeral":true}]`), nil
 		case strings.Contains(cmd, "bd query --json"):
-			if strings.Contains(cmd, recipient) {
-				t.Fatalf("slash recipient leaked into supplemental wisp query: %s", cmd)
+			// The session-alias lookup may carry the recipient as a quoted
+			// metadata value; it must never appear as a bare clause value.
+			if strings.Contains(cmd, "="+recipient) {
+				t.Fatalf("slash recipient leaked bare into supplemental wisp query: %s", cmd)
 			}
 			return []byte(`[]`), nil
 		}
