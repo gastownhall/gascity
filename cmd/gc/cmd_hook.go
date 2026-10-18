@@ -481,15 +481,19 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
-	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
 	// On a split city the ready tiers of workQuery are already city-wide, so
 	// running the whole query once per store re-asks the same question R+1 times
-	// and re-opens every leg each time. Pin the city-wide read to the primary
-	// entry and leave the extras on the single-store command they ran before the
-	// swap, which still covers the per-store crash-recovery and ephemeral tiers
-	// `gc ready` does not answer. No-op on a single-store city and for a custom
-	// work_query, where both forms are the same string.
-	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	// and re-opens every leg each time: the read is pinned to the primary entry
+	// (scopeFederatedHookStores). Only that entry is built then, because every
+	// other leg's environment is a managed-Dolt projection (~0.25 s each on
+	// maintainer-city) the claim would discard. No-op on a single-store city and
+	// for a custom work_query, where both forms are the same string.
+	var stores []hookStore
+	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
+		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
+	} else {
+		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
