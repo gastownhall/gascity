@@ -55,9 +55,11 @@ type laneExecDeps struct {
 }
 
 // conversationLaneExec is the live opjournal.Executor for one conversation
-// over worker.Handle, for keystroke-mode runtimes. It is built per pass from
-// the session row the pass's view came from, so Probe and Deliver act on the
-// incarnation that view names.
+// over worker.Handle. A keystroke-mode runtime's boundary is the quiescence
+// rule; a protocol-mode one (t3bridge) is live when it reports its turns,
+// and its boundary is CurrentTurn showing no turn in progress (DES-T3I §14
+// item 6). It is built per pass from the session row the pass's view came
+// from, so Probe and Deliver act on the incarnation that view names.
 type conversationLaneExec struct {
 	deps   laneExecDeps
 	info   session.Info
@@ -81,6 +83,22 @@ type conversationLaneExec struct {
 	// reading the runtime row again.
 	lastCaps opjournal.Caps
 	capsRead bool
+	// turns resolves the handle the executor reads the session's turns
+	// through (conversation_lane_turn.go): the session's own handle by its
+	// row's bead id, which can read a transcript, else, with no row id or a
+	// row no session handle is built from, the runtime's.
+	// turnHandle and traits are what the first Probe resolved and read with
+	// the caps; protocol says the runtime is protocol-mode.
+	turns      func() (worker.TurnHandle, error)
+	turnHandle worker.TurnHandle
+	traits     laneTurnTraits
+	protocol   bool
+	// lastTurn is the last probe's look at the session's turns, which
+	// Deliver's link evidence starts from.
+	lastTurn laneTurnLook
+	// now and wait pace Deliver's link wait: the wall clock in production.
+	now  func() time.Time
+	wait func(ctx context.Context, d time.Duration) bool
 }
 
 var _ opjournal.Executor = (*conversationLaneExec)(nil)
@@ -118,39 +136,70 @@ func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversation
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
 	}
+	e.turns = func() (worker.TurnHandle, error) {
+		if e.info.ID != "" {
+			h, err := workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, e.info.ID)
+			if err == nil || errors.Is(err, session.ErrSessionNotFound) || errors.Is(err, runtime.ErrSessionNotFound) {
+				return h, err
+			}
+			// A row the session handle cannot be built from still has its
+			// runtime's own turns, if it reports them; its op records the
+			// link's basis either way.
+		}
+		return e.handle(e.target)
+	}
+	e.now, e.wait = time.Now, laneLinkWait
 	return e
 }
 
-// Probe implements opjournal.Executor: the runtime's caps, read once per
-// executor (one pass), then one bounded look at the runtime (laneLook).
+// Probe implements opjournal.Executor: the session's turn traits and the
+// runtime's caps, read once per executor (one pass), then one bounded look
+// at the runtime (laneLook), its turns included.
 func (e *conversationLaneExec) Probe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
-	if !e.capsRead {
-		caps, err := e.caps(conv)
-		if err != nil {
-			return opjournal.Probe{}, err
-		}
-		e.lastCaps, e.capsRead = caps, true
+	if err := e.readCaps(ctx, conv); err != nil {
+		return opjournal.Probe{}, err
 	}
-	return e.probe(ctx, conv, e.lastCaps)
+	return e.probe(ctx, conv, e.lastCaps, true)
 }
 
 // Reprobe is Probe for a host re-probing a busy runtime on its backoff
 // (DES-O1 §4.3): it reuses the caps the pass's Probe read and observes the
 // runtime by the row's bead id through the cached sessions store, so over
-// the controller's cache it reads nothing from the backing store.
+// the controller's cache it reads nothing from the backing store. It reads
+// the session's turns only where they decide the boundary (protocol mode).
 func (e *conversationLaneExec) Reprobe(ctx context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
-	return e.Probe(ctx, conv)
+	if err := e.readCaps(ctx, conv); err != nil {
+		return opjournal.Probe{}, err
+	}
+	return e.probe(ctx, conv, e.lastCaps, e.protocol)
+}
+
+// readCaps reads the session's turn traits and then the runtime's caps,
+// once per executor.
+func (e *conversationLaneExec) readCaps(ctx context.Context, conv opjournal.ConversationView) error {
+	if e.capsRead {
+		return nil
+	}
+	if err := e.readTurnTraits(ctx); err != nil {
+		return fmt.Errorf("reading session %s's turn capabilities: %w", e.info.ID, err)
+	}
+	caps, err := e.caps(conv)
+	if err != nil {
+		return err
+	}
+	e.lastCaps, e.capsRead = caps, true
+	return nil
 }
 
 // probe is one look at the runtime under caps, the whole look bounded by
-// e.budget.
-func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.ConversationView, caps opjournal.Caps) (opjournal.Probe, error) {
+// e.budget; withTurns reads the session's turns too.
+func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.ConversationView, caps opjournal.Caps, withTurns bool) (opjournal.Probe, error) {
 	p := opjournal.Probe{Available: true, Fence: laneFence(conv), TurnLive: opjournal.TriUnknown, Caps: caps}
-	e.live = nil
+	e.live, e.lastTurn = nil, laneTurnLook{live: opjournal.TriUnknown}
 	octx, cancel := context.WithTimeout(ctx, e.budget)
 	defer cancel()
 	look, err := worker.ObserveBounded(octx, laneObservationKey(e.deps.cityPath, e.info.ID), func(lctx context.Context) (laneLook, error) {
-		return e.look(lctx, caps)
+		return e.look(lctx, caps, withTurns)
 	})
 	switch {
 	case errors.Is(err, runtime.ErrRuntimeUnavailable):
@@ -162,7 +211,8 @@ func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.Convers
 		return opjournal.Probe{}, fmt.Errorf("probing session %s: %w", e.info.ID, err)
 	}
 	p.Running, p.ContentBlock, p.Pending, p.Boundary = look.running, look.block, look.pending, look.boundary
-	e.live = look.handle
+	p.TurnLive, p.Turn, p.KnownTurns = look.turn.live, look.turn.turn, look.turn.known
+	e.live, e.lastTurn = look.handle, look.turn
 	return p, nil
 }
 
@@ -173,18 +223,21 @@ type laneLook struct {
 	pending  string
 	boundary opjournal.Tri
 	handle   worker.Handle
+	turn     laneTurnLook
 }
 
 // look observes the runtime, gates content on the row (session.ContentGate)
 // and on the live incarnation, and, only for a running runtime content may
-// reach, resolves its handle once and reads the pending interaction and the
-// idle boundary through it.
-func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (laneLook, error) {
+// reach, resolves its handle once and reads the pending interaction through
+// it and, with withTurns, the session's turns. The boundary is the
+// quiescence rule for a keystroke-mode runtime, and for a protocol-mode one
+// its turns: never the quiescence rule.
+func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, withTurns bool) (laneLook, error) {
 	obs, err := e.observe(e.target)
 	if err != nil {
 		return laneLook{}, err
 	}
-	l := laneLook{running: obs.Running && obs.Alive}
+	l := laneLook{running: obs.Running && obs.Alive, turn: laneTurnLook{live: opjournal.TriUnknown}}
 	l.block = session.ContentGate(e.info, l.running, e.deps.clk.Now())
 	if l.running && l.block == "" {
 		matches, err := e.matches(e.target, obs)
@@ -206,6 +259,13 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (l
 	if l.pending, err = lanePending(h.PendingStatus(ctx)); err != nil {
 		return laneLook{}, fmt.Errorf("reading session %s's pending interaction: %w", e.info.ID, err)
 	}
+	if withTurns && e.traits.readable {
+		l.turn = laneTurnLookOf(e.readTurns(ctx))
+	}
+	if e.protocol {
+		l.boundary = l.turn.boundary()
+		return l, nil
+	}
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
 		l.boundary = opjournal.TriYes
@@ -213,14 +273,18 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (l
 	return l, nil
 }
 
-// caps are the runtime's capabilities for conv. Content is live only for a
-// keystroke-mode runtime the conversation's row does not stamp as hosted
-// elsewhere for its current generation (DES-BX D7). Nothing deduplicates,
-// steers, responds or injects in band here.
+// caps are the runtime's capabilities for conv. Content is live for a
+// keystroke-mode runtime, and for a protocol-mode one whose turns its own
+// protocol reports (its boundary), that the conversation's row does not
+// stamp as hosted elsewhere for its current generation (DES-BX D7). Dedup is
+// the worker boundary's read of whether the routed runtime deduplicates
+// keyed deliveries. Nothing steers, responds or injects in band here.
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
+	e.protocol = runtime.TurnInterruptModeFor(e.deps.sp, name) == runtime.TurnInterruptProtocol
 	caps := opjournal.Caps{
-		Live:     runtime.TurnInterruptModeFor(e.deps.sp, name) != runtime.TurnInterruptProtocol,
+		Live:     !e.protocol || e.traits.protocol,
+		Dedup:    worker.DeliveryKeysDeduplicated(e.deps.sp, name),
 		Input:    laneFenceMode(runtime.InputFencingFor(e.deps.sp, name)),
 		Text:     opjournal.TextReminder,
 		LinkWait: opjournal.DefaultLinkWait,
@@ -270,7 +334,8 @@ var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a ha
 
 // Deliver implements opjournal.Executor: one fenced live-only nudge of the
 // delivery's text, verbatim, under its delivery key, through the handle its
-// probe resolved.
+// probe resolved; a delivery the runtime took then gathers its turn
+// evidence within the link wait (linkEvidence).
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
 	if h == nil {
@@ -290,8 +355,12 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		AllowUnfenced: true,
 	})
 	out := laneDeliveryResult(res, err, at, fence.IsZero())
-	if _, ok := out.(opjournal.Delivered); ok {
+	if dv, ok := out.(opjournal.Delivered); ok {
 		stampLastNudgeDeliveredAt(sessionFrontDoor(e.deps.sessions), e.info.ID, e.deps.clk.Now())
+		rec := dv.Record
+		rec.Generation, rec.Epoch, rec.Mode = d.Fence.Generation, d.Fence.Epoch, d.Mode
+		dv.Evidence = e.linkEvidence(ctx, rec)
+		out = dv
 	}
 	return out
 }
