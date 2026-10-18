@@ -389,6 +389,14 @@ func TestLaneRespondWithNothingSentEndsTheOccurrence(t *testing.T) {
 			exec.probe.Caps.Respond = false
 			mustPass(t, h.lane(t, "ctl"), view(), exec)
 		}, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, true},
+		// The live executor's shape for a session that takes no responses:
+		// no respond capability, and so nothing pending it can name. That
+		// is a capability answer, not a look showing the prompt gone.
+		{"unsupported, nothing pending", func(t *testing.T, h *laneHarness, exec *fakeExec, _ Op) {
+			exec.probe.Caps.Respond, exec.probe.Pending = false, ""
+			mustPass(t, h.lane(t, "ctl"), view(), exec)
+			exec.probe.Pending = "tmux-abc"
+		}, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, true},
 		{"expired before start", func(t *testing.T, h *laneHarness, exec *fakeExec, op Op) {
 			h.clk.Advance(op.StartBy.Sub(h.clk.Now()) + time.Second)
 			mustPass(t, h.lane(t, "ctl"), view(), exec)
@@ -480,7 +488,9 @@ func TestLaneRespondEndIsWrittenBeforeTheClose(t *testing.T) {
 
 // A request id the journal cannot store is no occurrence anyone can answer:
 // the pass reads it as unknown instead of failing for every op of the
-// conversation (finding #10).
+// conversation (finding #10). The look still showed another request than
+// the respond's, so that respond closes skipped{stale}, while the message
+// waits on the prompt showing.
 func TestLaneUnrecordableRequestIDReadsUnknown(t *testing.T) {
 	for _, req := range []string{strings.Repeat("x", maxClientKeyLen), "tmux-\x01", " tmux-abc"} {
 		t.Run(fmt.Sprintf("%.12q", req), func(t *testing.T) {
@@ -490,8 +500,11 @@ func TestLaneUnrecordableRequestIDReadsUnknown(t *testing.T) {
 			exec := respondExec(h, req)
 			res := mustPass(t, h.lane(t, "ctl"), view(), exec)
 			waits := waitsOf(res.Waits)
-			if waits[op.ID] != WaitInteractionUnknown || waits[msg.ID] != WaitPendingInteraction || len(exec.responds) != 0 {
+			if waits[msg.ID] != WaitPendingInteraction || len(exec.responds) != 0 {
 				t.Fatalf("pass %+v", res)
+			}
+			if got := h.get(t, op.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
+				t.Fatalf("op %s %+v, want skipped{stale}", got.Status, got.Outcome)
 			}
 		})
 	}
@@ -761,6 +774,18 @@ func TestLaneRespondNothingSentLeavesTheOccurrenceToAnotherAnswer(t *testing.T) 
 			t.Fatalf("occurrence ended %v %+v", ok, f)
 		}
 	})
+	t.Run("an answer to another occurrence does not hold it", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		h.propose(t, laneRespond(t, h.raise(t, "tmux-xyz"), "conversation:gc-9", RespondPayload{Action: "deny"}))
+		if res, _, err := h.store.Cancel(a.ID, "operator", ""); err != nil || res != CancelClosed {
+			t.Fatalf("Cancel = %s, %v", res, err)
+		}
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered || !slices.Equal(f.CauseOps, []string{a.ID}) {
+			t.Fatalf("occurrence ended %v %+v", ok, f)
+		}
+	})
 	t.Run("both close in one pass", func(t *testing.T) {
 		// Two answers expire together: neither is left open, so the
 		// occurrence ends.
@@ -849,4 +874,100 @@ func TestLaneCorruptInteractionFactDoesNotStallTheConversation(t *testing.T) {
 			t.Fatalf("pass %+v", res)
 		}
 	})
+}
+
+// A look that shows another prompt ends the occurrence of a waiting respond
+// even when the journal cannot record that prompt: its request id cannot be
+// stored, or its raisings do not decode. The look was definitive, so the
+// identical prompt raised later is another occurrence the old answer must
+// not reach.
+func TestLaneRespondUnrecordedOtherPromptEndsTheOccurrence(t *testing.T) {
+	for name, setup := range map[string]func(t *testing.T, h *laneHarness) string{
+		"unstorable request id": func(*testing.T, *laneHarness) string { return "tmux-\x01other" },
+		"undecodable raising": func(t *testing.T, h *laneHarness) string {
+			other := h.raise(t, "tmux-other")
+			if err := h.mem.SetMetadata(other.ID, keyFactBasis, "bad basis!"); err != nil {
+				t.Fatal(err)
+			}
+			return "tmux-other"
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			first := h.raise(t, "tmux-abc")
+			shown := setup(t, h)
+			op := h.propose(t, laneRespond(t, first, "operator", RespondPayload{Action: "approve"}))
+			exec := respondExec(h, shown)
+			l := h.lane(t, "ctl")
+			mustPass(t, l, view(), exec)
+			f, ended := resolvedFact(t, h, first.Interaction)
+			if !ended || f.Reason != ResolvedCleared || f.Basis != FactBasisObserved {
+				t.Fatalf("occurrence %s ended %v %+v, want cleared", first.Interaction, ended, f)
+			}
+			// The agent raises the identical first prompt again.
+			h.clk.Advance(5 * time.Second)
+			exec.probe.Pending = "tmux-abc"
+			mustPass(t, l, view(), exec)
+			if len(exec.responds) != 0 {
+				t.Fatalf("the answer to %s reached the re-raised prompt", first.Interaction)
+			}
+			if got := h.get(t, op.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
+				t.Fatalf("op %s %+v, want skipped{stale}", got.Status, got.Outcome)
+			}
+		})
+	}
+}
+
+// A cancel recorded while a respond's effect runs turns Done's release (a
+// transient refusal, nothing sent) into a canceled close on reconcile. That
+// close ends the occurrence like any other, so the principal answers the
+// prompt still showing under a fresh key.
+func TestLaneRespondCanceledDuringTheEffectEndsTheOccurrence(t *testing.T) {
+	h := newLaneHarness(t)
+	raised := h.raise(t, "tmux-abc")
+	op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	exec := respondExec(h, "tmux-abc")
+	exec.onEffect = func() {
+		if res, _, err := h.store.Cancel(op.ID, "operator", ""); err != nil || res != CancelRequested {
+			t.Errorf("Cancel during the effect = %s, %v", res, err)
+		}
+	}
+	exec.respond = func(RespondCall) ControlResult {
+		return NotDelivered{Transient: true, Cause: errors.New("fence miss before any key")}
+	}
+	mustPass(t, h.lane(t, "ctl"), view(), exec)
+	if got := h.get(t, op.ID); got.Status != StatusClosed || got.Outcome.Arm != ArmCanceled {
+		t.Fatalf("op %s %+v, want closed canceled", got.Status, got.Outcome)
+	}
+	f, ended := resolvedFact(t, h, raised.Interaction)
+	if !ended || f.Reason != ResolvedUnanswered || f.Basis != FactBasisLane || !slices.Equal(f.CauseOps, []string{op.ID}) {
+		t.Fatalf("occurrence ended %v %+v", ended, f)
+	}
+	again := h.raise(t, "tmux-abc")
+	if _, created, err := h.store.Propose(laneRespond(t, again, "operator", RespondPayload{Action: "deny"})); err != nil || !created {
+		t.Fatalf("corrected answer to %s: created %v, %v", again.Interaction, created, err)
+	}
+}
+
+// A respond whose raising does not decode, seen gone, does not stall its
+// conversation: clearGone leaves that occurrence alone, the pass goes on,
+// and an unrelated message is delivered.
+func TestLaneCorruptRaisingSeenGoneDoesNotStall(t *testing.T) {
+	h := newLaneHarness(t)
+	raised := h.raise(t, "tmux-abc")
+	h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	msg := h.propose(t, laneMsg("m", RolePrompt, "hello"))
+	if err := h.mem.SetMetadata(raised.ID, keyFactBasis, "bad basis!"); err != nil {
+		t.Fatal(err)
+	}
+	exec := respondExec(h, "")
+	l := h.lane(t, "ctl")
+	for i := range 3 {
+		if _, err := l.Pass(context.Background(), view(), exec); err != nil {
+			t.Fatalf("pass %d: %v", i, err)
+		}
+	}
+	if got := h.get(t, msg.ID); got.Status != StatusClosed {
+		t.Fatalf("the unrelated message op stays %s", got.Status)
+	}
 }

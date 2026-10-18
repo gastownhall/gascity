@@ -304,6 +304,31 @@ func TestLaneExecRespondCaps(t *testing.T) {
 	}
 }
 
+// TestLaneExecRespondUnsupportedSessionFails proves a respond on a session
+// that takes no responses closes failed{unsupported}, a capability answer,
+// and ends its occurrence: the probe names no prompt there, and that is not
+// a look showing the prompt gone (which would close skipped{stale}).
+func TestLaneExecRespondUnsupportedSessionFails(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	l := f.lane(t, st)
+	f.prompt(laneTestRequest)
+	op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
+	f.sp.PendingErrors[f.name] = runtime.ErrInteractionUnsupported
+	if _, err := f.pass(context.Background(), t, l, st, nil); err != nil {
+		t.Fatalf("pass: %v", err)
+	}
+	if got := f.get(t, st, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmFailed || got.Outcome.Reason != opjournal.ReasonUnsupported {
+		t.Fatalf("op %s %+v, want failed{unsupported}", got.Status, got.Outcome)
+	}
+	if latest, found, err := st.LatestRaising(f.id, 1, laneTestRequest); err != nil || !found || !latest.Resolved || latest.Raised.ID != raised.ID {
+		t.Fatalf("latest raising %+v found %v, %v; want %s ended", latest, found, err, raised.Interaction)
+	}
+	if n := len(f.responses()); n != 0 {
+		t.Fatalf("%d answers reached the runtime", n)
+	}
+}
+
 // TestLaneRespondResultMapping pins how a response's error maps to the
 // lane's result, over the errors tmux and the session layer return: every
 // refusal that sent nothing is definitive or transient, and only an error

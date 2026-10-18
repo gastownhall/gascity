@@ -45,10 +45,12 @@ func fenceDisagrees(probe Probe, conv ConversationView) bool {
 
 // definitiveLook reports whether the probe looked at the runtime of the view,
 // and what it saw pending there: Pending, or nothing when the runtime is not
-// running, since a runtime that is not running shows no prompt.
+// running, since a runtime that is not running shows no prompt. A runtime
+// that takes no responses names no prompt either way: that is a capability
+// answer (failed{unsupported}), not a look showing the prompt gone.
 func definitiveLook(probe Probe, conv ConversationView) (pending string, looked bool) {
 	switch {
-	case !probe.Available || !probe.Caps.Live || fenceDisagrees(probe, conv):
+	case !probe.Available || !probe.Caps.Live || !probe.Caps.Respond || fenceDisagrees(probe, conv):
 		return "", false
 	case !probe.Running:
 		return "", true
@@ -74,14 +76,15 @@ func undecodableRow(err error) bool {
 // after the record. A request id the journal cannot store (too long, control
 // characters, padding), or whose raisings do not decode, is no occurrence
 // anyone can answer: the probe returned reads it as PendingUnknown, and only
-// a store error fails the pass.
+// a store error fails the pass. The look still showed that request, so the
+// occurrences it shows gone end all the same.
 func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv ConversationView) (Probe, map[string]raisingState, error) {
 	pending, looked := definitiveLook(probe, conv)
 	if looked && pending != "" {
 		_, _, err := l.store.RecordRaising(conv.ID, conv.Generation, pending, FactBasisObserved, l.now())
 		switch {
 		case errors.Is(err, ErrInvalidRequest), undecodableRow(err):
-			probe.Pending, looked = PendingUnknown, false
+			probe.Pending = PendingUnknown
 		case err != nil:
 			return probe, nil, err
 		}

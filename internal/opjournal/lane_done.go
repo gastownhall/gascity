@@ -410,33 +410,6 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	for _, op := range tb.ops {
 		items = append(items, &doneItem{kind: doneOp, id: op.ID, cur: op, next: l.doneNext(tb, er, success, op, now)})
 	}
-	closing := make(map[string]bool, len(tb.ops))
-	for _, op := range tb.ops {
-		closing[op.ID] = true
-	}
-	var endErr error
-	for _, it := range items[1:] {
-		// The end of a respond's occurrence lands with its close (DES-O1
-		// §4.7, §10.2): its answer, or nothing sent while no other answer
-		// to it is open (Store.occurrenceEnd). When the other answers
-		// cannot be read the end lands anyway: an open answer then closes
-		// skipped{stale} and its requester answers the next occurrence,
-		// where leaving the occurrence open could spend its answers.
-		f, ok, err := l.store.occurrenceEnd(it.next, closing, now)
-		if err != nil {
-			endErr = errors.Join(endErr, err)
-			f, ok = respondEnd(it.next, now)
-		}
-		if !ok {
-			continue
-		}
-		id, err := FactID(l.store.prefix, f)
-		if err != nil {
-			return err
-		}
-		f.ID = id
-		items = append(items, &doneItem{kind: doneFact, id: id, fact: f})
-	}
 	budget := min(max(tb.lease.Deadline.Sub(now)-doneBudgetSlack, doneMinBudget), doneMaxBudget)
 	var cause error
 	if settleBy := er.settleBy(); !settleBy.IsZero() && settleBy.Sub(now) < budget {
@@ -444,7 +417,7 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	}
 	dctx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), budget, cause)
 	defer cancel()
-	err := l.writeDone(dctx, tb, er, success, items)
+	endErr, err := l.writeDone(dctx, tb, er, success, items, now)
 	if err == nil {
 		res.Done = er.doneArm()
 	}
@@ -464,16 +437,21 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	return errors.Join(err, er.contractErr, endErr)
 }
 
-// writeDone applies Done's items until every one is written or dropped. A
-// refusal or an unknown error leaves the items stale; a transient error
-// re-reading them backs off and retries, like an unknown batch error. Once
-// ctx ends it writes nothing more.
-func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er effectResult, success Outcome, items []*doneItem) error {
+// writeDone applies Done's items, with the ends of the occurrences their
+// closes give (doneEnds), until every one is written or dropped. A refusal
+// or an unknown error leaves the items stale; a transient error re-reading
+// them backs off and retries, like an unknown batch error. The ends follow
+// the ops as reconciled: a cancel that turned a release into a close gets
+// its end. endErr is a failure reading the other answers to an occurrence,
+// whose end then landed anyway. Once ctx ends it writes nothing more.
+func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er effectResult, success Outcome, base []*doneItem, now time.Time) (endErr, err error) {
 	backoff := doneBackoffStart
 	var lastErr error
+	items := base
+	reconciled := true
 	for range casAttempts {
 		if err := context.Cause(ctx); err != nil {
-			return errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, err), lastErr)
+			return endErr, errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, err), lastErr)
 		}
 		var readErr error
 		for _, it := range items {
@@ -482,21 +460,27 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 			}
 			rerr, err := l.reconcile(tb, er, success, it)
 			if err != nil {
-				return err
+				return endErr, err
 			}
 			if rerr != nil {
 				readErr = rerr
 				continue
 			}
-			it.stale = false
+			it.stale, reconciled = false, true
 		}
 		if readErr != nil {
 			lastErr = readErr
 			if err := l.sleep(ctx, backoff); err != nil {
-				return errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, lastErr), err)
+				return endErr, errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, lastErr), err)
 			}
 			backoff = min(2*backoff, doneBackoffMax)
 			continue
+		}
+		if reconciled {
+			if items, endErr, err = l.doneEnds(tb, base, items, now); err != nil {
+				return endErr, err
+			}
+			reconciled = false
 		}
 		var batch []beads.GuardedItem
 		var pending []*doneItem
@@ -506,13 +490,13 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 			}
 			gi, err := l.doneGuardedItem(it)
 			if err != nil {
-				return err
+				return endErr, err
 			}
 			batch = append(batch, gi)
 			pending = append(pending, it)
 		}
 		if len(batch) == 0 {
-			return nil
+			return endErr, nil
 		}
 		_, kind, err := l.store.apply(ctx, "opjournal: lane done", batch)
 		switch kind {
@@ -520,21 +504,21 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 			for _, it := range pending {
 				it.done, it.written = true, true
 			}
-			return nil
+			return endErr, nil
 		case batchInvalid:
-			return fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, err)
+			return endErr, fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, err)
 		case batchRefused:
 			// A store refuses the whole batch at its first stale item, so
 			// every pending item is re-read: k moved rows cost one retry,
 			// not k.
 			if !refusedByPending(err, pending) {
-				return fmt.Errorf("settling ops of conversation %s: refused by a row it did not write: %w", tb.spec.view.ID, err)
+				return endErr, fmt.Errorf("settling ops of conversation %s: refused by a row it did not write: %w", tb.spec.view.ID, err)
 			}
 			lastErr = err
 		default:
 			lastErr = err
 			if err := l.sleep(ctx, backoff); err != nil {
-				return errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, lastErr), err)
+				return endErr, errors.Join(fmt.Errorf("settling ops of conversation %s: %w", tb.spec.view.ID, lastErr), err)
 			}
 			backoff = min(2*backoff, doneBackoffMax)
 		}
@@ -542,7 +526,58 @@ func (l *ConversationLane) writeDone(ctx context.Context, tb *takenBatch, er eff
 			it.stale = true
 		}
 	}
-	return fmt.Errorf("%w: settling ops of conversation %s lost %d tries: %w", ErrContention, tb.spec.view.ID, casAttempts, lastErr)
+	return endErr, fmt.Errorf("%w: settling ops of conversation %s lost %d tries: %w", ErrContention, tb.spec.view.ID, casAttempts, lastErr)
+}
+
+// doneEnds is Done's items: base, the row and op items, then the end of the
+// occurrence of every respond whose next closes it (DES-O1 §4.7, §10.2): its
+// answer, or nothing sent while no other answer to it is open
+// (Store.occurrenceEnd). An end already among items is kept, with what it
+// knows of having landed; one no op gives any more is dropped. When the
+// other answers cannot be read the end lands anyway, and endErr says so: an
+// open answer then closes skipped{stale} and its requester answers the next
+// occurrence, where leaving the occurrence open could spend its answers.
+func (l *ConversationLane) doneEnds(tb *takenBatch, base, items []*doneItem, now time.Time) (out []*doneItem, endErr, err error) {
+	have := make(map[string]*doneItem)
+	for _, it := range items {
+		if it.kind == doneFact {
+			have[it.id] = it
+		}
+	}
+	closing := make(map[string]bool, len(tb.ops))
+	for _, op := range tb.ops {
+		closing[op.ID] = true
+	}
+	out = slices.Clip(base)
+	seen := make(map[string]bool)
+	for _, it := range base {
+		if it.kind != doneOp || it.superseded {
+			continue
+		}
+		f, ok, rerr := l.store.occurrenceEnd(it.next, closing, now)
+		if rerr != nil {
+			endErr = errors.Join(endErr, rerr)
+			f, ok = respondEnd(it.next, now)
+		}
+		if !ok {
+			continue
+		}
+		id, err := FactID(l.store.prefix, f)
+		if err != nil {
+			return nil, endErr, err
+		}
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if prev, found := have[id]; found {
+			out = append(out, prev)
+			continue
+		}
+		f.ID = id
+		out = append(out, &doneItem{kind: doneFact, id: id, fact: f})
+	}
+	return out, endErr, nil
 }
 
 // refusedByPending reports whether err, a batch refusal, names a row of
