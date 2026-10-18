@@ -191,6 +191,11 @@ type hookClaimClassRoute struct {
 	workLegs []hookStore
 	readLeg  func(ctx context.Context, dir string, env []string, beadID, assignee string) (beads.Bead, error)
 	workHeld map[string]bool
+
+	// recorder opens the city event log the route's lifecycle events go to.
+	// Nil resolves the city and opens its log per event (openCityRecorder); a
+	// `gc hook` invocation sets it to its own city's (hookCity.recorder).
+	recorder func() events.Recorder
 }
 
 // newHookClaimClassRoute opens the claim-time class front door over an already
@@ -524,7 +529,12 @@ func (r *hookClaimClassRoute) listContinuation(rootID, group string) ([]beads.Be
 // makes that sentence true again; EmitLifecycle still performs the authoritative
 // graph.v2 root validation before recording anything.
 func (r *hookClaimClassRoute) emitExecutionStepStarted(step beads.Bead) {
-	rec := openCityRecorder(io.Discard)
+	var rec events.Recorder
+	if r.recorder != nil {
+		rec = r.recorder()
+	} else {
+		rec = openCityRecorder(io.Discard)
+	}
 	if closer, ok := rec.(io.Closer); ok {
 		defer closer.Close() //nolint:errcheck // lifecycle events are best-effort
 	}

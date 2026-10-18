@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"maps"
 	"net/url"
 	"os"
 	"path/filepath"
@@ -125,6 +126,7 @@ type controllerState struct {
 	pokeCh                 chan struct{}   // wakeOf's fallback when no wake is wired; triggers immediate reconciler tick
 	controlDispatcherCh    chan struct{}   // wakeOf's fallback when no wake is wired; triggers the control-dispatcher-only reconcile
 	configDirty            *atomic.Bool    // optional dirty flag shared with the reconciler reload path
+	freshness              configFreshness // reloads and API config writes in progress, for ReadyWork
 	services               workspacesvc.Registry
 	extmsgSvc              *extmsg.Services
 	adapterReg             *extmsg.AdapterRegistry
@@ -156,6 +158,14 @@ type controllerState struct {
 	// autocloseSweep backstops close-triggered autoclose; see autoclose_sweep.go.
 	autocloseSweep     *autocloseSweep
 	autocloseSweepOnce sync.Once
+
+	// webhookInapplicableReports is the set of orders the webhook dispatch seam
+	// has reported as inapplicable this controller boot. Every per-delivery
+	// dispatcher shares it (controllerWebhookDispatcher.dispatcher), so a refused
+	// order is announced once, not on every delivery and sender retry. The tick
+	// loop's dispatcher keeps its own set: it never dispatches a webhook-trigger
+	// order, the only kind this seam fires, so no order is in both.
+	webhookInapplicableReports inapplicableReportSet
 
 	// emergencyCh receives emergency.Record values from the gc emergency
 	// subsystem. startEmergencyEventRelay drains this channel and mirrors
@@ -3354,6 +3364,16 @@ func (s *configMutationSnapshot) restore() error {
 	return restoreErr
 }
 
+// changedOnDisk reports whether the files a captureConfigMutationSnapshot
+// snapshot holds no longer match it on disk, or can no longer be read to tell.
+func (s *configMutationSnapshot) changedOnDisk() bool {
+	now, err := captureConfigMutationSnapshot(s.cityPath)
+	return err != nil ||
+		!maps.Equal(s.existed, now.existed) ||
+		!maps.EqualFunc(s.files, now.files, bytes.Equal) ||
+		!s.agentTree.Equal(now.agentTree)
+}
+
 func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 	// Keep unvalidated writes and rollback inside the publication transaction.
 	// A reload must not cache a rejected raw patch while publishing an older
@@ -3367,16 +3387,34 @@ func (cs *controllerState) mutateAndPoke(mutate func() error) error {
 // mutateAndPokeLocked is mutateAndPoke for a config transaction, which
 // already holds publishMu (withConfigTransaction takes it before the
 // configedit.Editor lock).
-func (cs *controllerState) mutateAndPokeLocked(mutate func() error) error {
+func (cs *controllerState) mutateAndPokeLocked(mutate func() error) (err error) {
+	// The write changes the config files before it marks the reload pending,
+	// so ReadyWork must see it in progress throughout (configFreshness).
+	cs.freshness.beginChange()
+	defer cs.freshness.endChange()
 	var snapshot *configMutationSnapshot
 	if cs.cityPath != "" {
-		var err error
 		snapshot, err = captureConfigMutationSnapshot(cs.cityPath)
 		if err != nil {
 			return fmt.Errorf("snapshotting current city config: %w", err)
 		}
 	}
-	if err := mutate(); err != nil {
+	// Deferred after endChange, so it runs first: the reload is pending before
+	// the write stops being in progress. A failed write marks it too when it
+	// left disk off the snapshot, failing partway or failing to roll back: the
+	// controller still holds the config it published, and the config watcher
+	// may never see the change (it skips .gc/, where a rig rebind writes
+	// site.toml first). One that left disk as it found it marks nothing.
+	defer func() {
+		if err != nil && (snapshot == nil || !snapshot.changedOnDisk()) {
+			return
+		}
+		if cs.configDirty != nil {
+			cs.configDirty.Store(true)
+		}
+		cs.wakeOf().WakeMaintenance()
+	}()
+	if err = mutate(); err != nil {
 		return err
 	}
 	revision, err := cs.refreshConfigSnapshot()
@@ -3392,10 +3430,6 @@ func (cs *controllerState) mutateAndPokeLocked(mutate func() error) error {
 		}
 		return fmt.Errorf("refreshing updated city config: %w", err)
 	}
-	if cs.configDirty != nil {
-		cs.configDirty.Store(true)
-	}
-	cs.wakeOf().WakeMaintenance()
 	return nil
 }
 
@@ -3498,9 +3532,11 @@ func (cs *controllerState) ServiceRegistry() workspacesvc.Registry {
 // dispatcher (cr.od, which is owned by the orders lane — see orders_lane.go — and
 // may be nil for a webhook-only city). The seam's Dispatch path consults no per-tick
 // dispatcher state (cooldown cache, open-work gate) — it validates required params,
-// writes the tracking bead, and launches dispatchOne — so a per-delivery instance
-// is byte-equivalent to a long-lived one, and the order's own timeout bounds the
-// async work.
+// refuses an order its scope's backend rules out, writes the tracking bead, and
+// launches dispatchOne — and the order's own timeout bounds the async work. The one
+// piece of state that must outlive a delivery is the set of orders already reported
+// as inapplicable, so every per-delivery instance shares the controller's
+// webhookInapplicableReports and the report stays once per controller boot.
 func (cs *controllerState) WebhookDispatcher() orderdispatch.Dispatcher {
 	return controllerWebhookDispatcher{cs: cs}
 }
@@ -3531,7 +3567,9 @@ func (d controllerWebhookDispatcher) dispatcher() *memoryOrderDispatcher {
 		// discard recorder keeps it panic-free when the city has events disabled.
 		rec = events.Discard
 	}
-	return newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	md := newMemoryOrderDispatcher(routes, nil, cs.cityPath, cfg, rec, os.Stderr)
+	md.inapplicableReported = &cs.webhookInapplicableReports
+	return md
 }
 
 // ExtMsgServices returns the external messaging services.

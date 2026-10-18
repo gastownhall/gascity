@@ -1416,7 +1416,7 @@ on = "bead.closed"
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := cmdOrderRun("release-exec", "", false, nil, &stdout, &stderr)
+	code := cmdOrderRun("release-exec", "", false, false, nil, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("cmdOrderRun = %d, want 0; stderr: %s", code, stderr.String())
 	}

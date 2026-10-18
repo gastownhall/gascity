@@ -7,7 +7,6 @@ import (
 	"maps"
 	"math/rand/v2"
 	"slices"
-	"strings"
 	"testing"
 	"time"
 
@@ -48,8 +47,10 @@ import (
 //   - WorkSet and its scaled: wake stage (POOL-071): legacy's build never
 //     fills WorkSet and its demand snapshot forces it empty, so production
 //     legacy has no WorkSet either;
-//   - custom scale_check counts and partials (ruling 1): K1's run of
-//     legacy's own evaluation, read through gather, agrees on its fixture.
+//   - custom scale_check counts and partials (ruling 1, PAR-SC): K1's run of
+//     legacy's own evaluation, read through gather, agrees on every
+//     scaleCheckDiffCities fixture but those its two explained
+//     differences (scale-check-source, named-always-custom-count) name.
 
 // diffNow is the shared row helpers' clock (censusSession).
 var diffNow = censusNow
@@ -91,6 +92,14 @@ var allocDifferences = map[string]allocDifference{
 		"v5 AL1",
 		"the census reads beads.FederatedReadTier, so a wisp-tier session row is in v2's census; legacy's snapshot does not read that tier",
 	},
+	"scale-check-source": {
+		"v5 §12.2, PAR-SC (owner ruling 2026-10-17)",
+		"one scale_check source runs every custom check: before its first run ends inside its budget, or once its result is older than 3 × patrol, every custom template reads partial (rows kept, no create) until a fresh run publishes, where legacy's tick waits on each check and marks only the one that failed or timed out",
+	},
+	"named-always-custom-count": {
+		"v5 §12.2, PAR-SC, POOL-008 (owner ruling 2026-10-17)",
+		"an always named session whose template's custom check counts work: v2 plans the canonical named create, where legacy's build creates a pool-managed ephemeral row that its desired state maps to the named identity",
+	},
 }
 
 // allocFindings are divergences the differential found that CONTRACT v5
@@ -108,9 +117,16 @@ type diffCity struct {
 	alive []string
 	// scaleCheck publishes K1's scale_check run (ruling 1): legacy runs each
 	// custom check in its shell (shellScaleCheck, which its build hard-wires:
-	// one sh per check), and the lane's run answers each "echo X" check with
-	// X, as the shell does.
+	// one sh per check), and the lane's run uses the same runner, so both
+	// read the same output, exit status and parse.
 	scaleCheck bool
+	// scaleCheckErr, when set, is the source's read error in place of the
+	// run's result: the lane publishes errSourceTimeout for a first run that
+	// outlived its budget.
+	scaleCheckErr error
+	// scaleCheckAge is how long before diffNow the published run ended. The
+	// lane serves a result for FreshFor (3 × patrol) after it ended.
+	scaleCheckAge time.Duration
 	// explain maps each aspect this city differs on to its difference.
 	explain map[string]string
 }
@@ -315,30 +331,30 @@ func v2Allocation(t *testing.T, c diffCity) allocOutcome {
 }
 
 // diffRecording is K1's recording for c: the scale_check source holds the
-// lane's run of every custom scale_check (runCustomScaleChecks), its runner
-// answering each command with the output legacy's shell gives it. Nil
-// without custom checks, as before the lane's first publish.
+// lane's run of every custom scale_check (runCustomScaleChecks) with the
+// production runner, shellScaleCheck, which legacy's build runs too, or
+// c's read error, ended c.scaleCheckAge ago. Nil without custom checks, as
+// before the lane's first publish.
 func diffRecording(t *testing.T, c diffCity, cityPath string, store beads.Store) *externalReadsRecording {
 	t.Helper()
 	if !c.scaleCheck {
 		return nil
 	}
-	runner := func(command, _ string, _ map[string]string) (string, error) {
-		i := strings.LastIndex(command, "echo ")
-		if i < 0 {
-			return "", fmt.Errorf("unexpected scale_check %q", command)
-		}
-		return command[i+len("echo "):] + "\n", nil
+	res := sourceResult{StartedAt: diffNow.Add(-c.scaleCheckAge), EndedAt: diffNow.Add(-c.scaleCheckAge), Err: c.scaleCheckErr}
+	if c.scaleCheckErr == nil {
+		res.ScaleCheck = runCustomScaleChecks(externalReadsEnv{CityPath: cityPath, CityName: c.cfg.Workspace.Name, Cfg: c.cfg, CityStore: store},
+			shellScaleCheck, controllerQueryRuntimeEnv, io.Discard)
 	}
-	run := runCustomScaleChecks(externalReadsEnv{CityPath: cityPath, CityName: c.cfg.Workspace.Name, Cfg: c.cfg, CityStore: store},
-		runner, controllerQueryRuntimeEnv, io.Discard)
 	return &externalReadsRecording{
-		Seq: 1, FreshFor: time.Minute,
-		Sources: map[sourceKey]sourceResult{
-			{kind: sourceScaleCheck, cfg: c.cfg}: {StartedAt: diffNow, EndedAt: diffNow, sourcePayload: sourcePayload{ScaleCheck: run}},
-		},
+		Seq: 1, FreshFor: diffScaleCheckFreshFor,
+		Sources: map[sourceKey]sourceResult{{kind: sourceScaleCheck, cfg: c.cfg}: res},
 	}
 }
+
+// diffScaleCheckFreshFor is the recording's freshness: 3 × a nominal 20s
+// patrol. The lane's is 3 × its configured patrol; every fixture's age is
+// relative to this value, so the 20s itself is arbitrary.
+const diffScaleCheckFreshFor = externalReadsFreshPatrols * 20 * time.Second
 
 // allocInputsOf is the decide's inputs from a gathered World.
 func allocInputsOf(w World, cityPath, cityName string) allocInputs {
@@ -432,7 +448,7 @@ func diffCities(t *testing.T) []diffCity {
 	control := func(id, root string) beads.Bead {
 		return diffWork(id, dispatcher, beadmeta.KindMetadataKey, beadmeta.KindWorkflowFinalize, beadmeta.RootStoreRefMetadataKey, root)
 	}
-	return []diffCity{
+	return append([]diffCity{
 		{
 			name: "routed demand reuses an asleep row and plans the rest",
 			cfg:  diffConfig(diffAgent("worker", 3)),
@@ -583,6 +599,122 @@ func diffCities(t *testing.T) []diffCity {
 			beads: []beads.Bead{chatRow("dr-c", "1", "configured_named_mode", "on_demand")},
 		},
 		v5HashedCity(),
+	}, scaleCheckDiffCities()...)
+}
+
+// customPool is a pool agent whose demand is the custom scale_check check.
+func customPool(name, check string, maxActive int) config.Agent {
+	a := diffAgent(name, maxActive)
+	a.ScaleCheck = check
+	return a
+}
+
+// scaleCheckDiffCities are PAR-SC's custom scale_check cities (I5,
+// POOL-005/006/008): the check's failure modes (exit status, empty, negative
+// and non-integer output, the source's timeout and staleness), its clamp by
+// max_active_sessions and floors, the default probe beside it on a cold or
+// warm pool, assigned work, and the named sessions it backs. Each runs
+// legacy's check in its shell and K1's through the same runner.
+func scaleCheckDiffCities() []diffCity {
+	floored := func(name, check string, minActive, maxActive int) config.Agent {
+		a := customPool(name, check, maxActive)
+		a.MinActiveSessions = intPtr(minActive)
+		return a
+	}
+	floors := diffConfig(floored("zero", "echo 0", 2, 4), floored("over", "echo 3", 1, 5), floored("failing", "exit 1", 2, 3))
+	floors.Daemon.MaxWakesPerTick = intPtr(100)
+	named := diffConfig(diffAgent("worker", 2), customPool("chat", "echo 1", 1), customPool("mayor", "echo 2", 1))
+	named.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}, {Template: "mayor", Mode: "always"}}
+	return []diffCity{
+		{
+			name: "a failing check and empty, negative and non-integer output are partial: rows kept, nothing created",
+			cfg: diffConfig(customPool("exits", "exit 3", 3), customPool("empty", "printf ''", 3),
+				customPool("negative", "echo -1", 3), customPool("words", "echo two", 3), customPool("ok", "echo 1", 3)),
+			beads: []beads.Bead{
+				poolRow("dr-1", "exits", 1, "asleep"), poolRow("dr-2", "empty", 1, "active"),
+				poolRow("dr-3", "negative", 1, "asleep"), poolRow("dr-4", "ok", 1, "asleep"),
+			},
+			alive:      []string{"s-dr-2"},
+			scaleCheck: true,
+		},
+		{
+			name:       "a custom count over max_active_sessions stops at the cap",
+			cfg:        diffConfig(customPool("worker", "echo 7", 3)),
+			beads:      []beads.Bead{poolRow("dr-1", "worker", 1, "asleep")},
+			scaleCheck: true,
+		},
+		{
+			name:       "floors under a custom count: zero fills the floor, a count adds over it, a failing check keeps it",
+			cfg:        floors,
+			beads:      []beads.Bead{poolRow("dr-1", "zero", 1, "asleep"), poolRow("dr-2", "failing", 1, "asleep")},
+			scaleCheck: true,
+		},
+		{
+			name: "the default probe wakes one cold custom pool and is blind for a warm one (POOL-006)",
+			cfg:  diffConfig(customPool("cold", "echo 0", 3), customPool("warm", "echo 0", 3)),
+			beads: []beads.Bead{
+				poolRow("dr-1", "warm", 1, "active"),
+				diffWork("dw-1", "cold"), diffWork("dw-2", "cold"), diffWork("dw-3", "cold"),
+				diffWork("dw-4", "warm"), diffWork("dw-5", "warm"),
+			},
+			alive:      []string{"s-dr-1"},
+			scaleCheck: true,
+		},
+		{
+			name: "a custom count is new demand on top of assigned work",
+			cfg:  diffConfig(customPool("worker", "echo 1", 4)),
+			beads: []beads.Bead{
+				poolRow("dr-1", "worker", 1, "asleep"), poolRow("dr-2", "worker", 2, "asleep"),
+				{ID: "dw-1", Title: "dw-1", Type: "task", Status: "in_progress", Assignee: "dr-1", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			scaleCheck: true,
+		},
+		{
+			name:       "named sessions backed by custom checks: on_demand and always (POOL-008)",
+			explain:    map[string]string{"create:named:mayor": "named-always-custom-count", "create:pool:mayor/mayor#": "named-always-custom-count"},
+			cfg:        named,
+			beads:      []beads.Bead{diffWork("dw-1", "chat"), diffWork("dw-2", "worker")},
+			scaleCheck: true,
+		},
+		{
+			name:          "a result as old as its freshness is still served",
+			cfg:           diffConfig(customPool("worker", "echo 2", 3)),
+			beads:         []beads.Bead{poolRow("dr-1", "worker", 1, "asleep")},
+			scaleCheck:    true,
+			scaleCheckAge: diffScaleCheckFreshFor,
+		},
+		// Legacy's timed-out check is a failed one (shellCommand returns
+		// the deadline as an error; TestLegacyScaleCheckTimeoutIsAFailedCheck),
+		// so "exit 124" stands in for it on the legacy side.
+		{
+			name:          "a timed-out first run reads as the check failing",
+			cfg:           diffConfig(customPool("worker", "exit 124", 3)),
+			beads:         []beads.Bead{poolRow("dr-1", "worker", 1, "asleep")},
+			scaleCheck:    true,
+			scaleCheckErr: errSourceTimeout,
+		},
+		{
+			name: "a timed-out first run, beside a check that answers",
+			explain: map[string]string{
+				"accepted:ok": "scale-check-source", "retain:ok": "scale-check-source",
+				"create:pool:ok/ok-2#2": "scale-check-source", "create:pool:ok/ok-3#3": "scale-check-source",
+			},
+			cfg:           diffConfig(customPool("hung", "exit 124", 3), customPool("ok", "echo 2", 3)),
+			beads:         []beads.Bead{poolRow("dr-1", "hung", 1, "asleep"), poolRow("dr-2", "ok", 1, "asleep")},
+			scaleCheck:    true,
+			scaleCheckErr: errSourceTimeout,
+		},
+		{
+			name: "a result older than its freshness",
+			explain: map[string]string{
+				"accepted:worker": "scale-check-source", "retain:worker": "scale-check-source",
+				"create:pool:worker/worker-2#2": "scale-check-source", "create:pool:worker/worker-3#3": "scale-check-source",
+			},
+			cfg:           diffConfig(customPool("worker", "echo 2", 3)),
+			beads:         []beads.Bead{poolRow("dr-1", "worker", 1, "asleep")},
+			scaleCheck:    true,
+			scaleCheckAge: diffScaleCheckFreshFor + time.Nanosecond,
+		},
 	}
 }
 
@@ -716,5 +848,21 @@ func TestAllocationDifferentialEntriesHaveFixtures(t *testing.T) {
 		if !shown[id] {
 			t.Errorf("finding %s has no fixture", id)
 		}
+	}
+}
+
+// Kills a legacy timeout that reads as a trusted count: a scale_check that
+// outlives its deadline is a failed check, count zero and partial, which is
+// why the differential's timeout fixtures stand legacy's side in with a
+// failing command.
+func TestLegacyScaleCheckTimeoutIsAFailedCheck(t *testing.T) {
+	cfg := diffConfig(customPool("worker", "exec sleep 5", 3))
+	runner := func(command, dir string, env map[string]string) (string, error) {
+		return shellCommand(command, dir, 50*time.Millisecond, env)
+	}
+	work := []poolEvalWork{{agentIdx: 0, sp: scaleParamsFor(&cfg.Agents[0]), poolDir: t.TempDir(), newDemand: true}}
+	counts, partial := evaluatePendingPoolsMapWith(cfg, work, runner, io.Discard, nil)
+	if counts["worker"] != 0 || !partial["worker"] {
+		t.Fatalf("timed-out check: counts %v, partial %v; want worker 0 and partial", counts, partial)
 	}
 }

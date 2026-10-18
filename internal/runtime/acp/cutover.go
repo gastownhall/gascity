@@ -15,8 +15,8 @@ import (
 // SessionEventProvider (SubscribeSessionEvents), TurnEventProvider
 // (SubscribeTurnEvents), TurnFenceProvider and TurnObservationProvider (turn
 // reads and the turn-scoped interrupt), ProcessTableScanner (orphan reaping),
-// LivenessObserverWithError and ListingAttestation — through to the
-// underlying *Provider. The early cut-over for the acp provider.
+// LivenessObserverWithError, ListingAttestation and FencedInputProvider (the
+// checked input fence) — through to the underlying *Provider. The early cut-over for the acp provider.
 type seamBackedProvider struct {
 	runtime.Provider
 	raw *Provider
@@ -33,6 +33,7 @@ var (
 	_ runtime.ProcessTableScanner         = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError   = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation          = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider         = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider     = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider     = (*Provider)(nil)
 	_ runtime.TurnEventProvider           = (*seamBackedProvider)(nil)
@@ -151,4 +152,28 @@ func (s *seamBackedProvider) LivenessReadsFresh() bool { return s.raw.LivenessRe
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
+}
+
+// InputFencing implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) InputFencing(name string) runtime.InputFencing {
+	return s.raw.InputFencing(name)
+}
+
+// NudgeFenced implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	return s.raw.NudgeFenced(ctx, name, content, n)
+}
+
+// SendKeysFenced implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	return s.raw.SendKeysFenced(ctx, name, fence, keys...)
+}
+
+// InterruptFenced implements [runtime.FencedInputProvider] (non-seam
+// passthrough).
+func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	return s.raw.InterruptFenced(ctx, name, fence)
 }

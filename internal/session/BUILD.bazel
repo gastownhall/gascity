@@ -201,6 +201,7 @@ go_test(
         "submit_poller_env_test.go",
         "submit_test.go",
         "submit_turn_fence_test.go",
+        "suspend_wake_stamp_test.go",
         "suspend_wake_test.go",
         "sweep_interrupt_test.go",
         "target_classifier_test.go",

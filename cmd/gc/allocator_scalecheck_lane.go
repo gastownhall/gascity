@@ -17,10 +17,14 @@ import (
 // It runs the same work legacy's demand pass runs (evaluatePendingPools under
 // the probe_concurrency semaphore) over the same pools: non-suspended,
 // generic-ephemeral agents with a custom scale_check outside suspended rigs,
-// and none while the city is suspended (the lane skips the pass).
+// and none while the city is suspended (a suspended pass skips the source).
 // One difference is deliberate (BEHAVIORS #38): a pool whose probe env cannot
 // be built is marked partial rather than silently skipped, so its count reads
 // as untrusted (retain, block create) instead of zero.
+//
+// A run records no trace.scale_check_exec operation (legacy's demand pass
+// records one per check), and a failed check logs under legacy's
+// "buildDesiredState:" prefix (ga-f4vclk).
 
 // scaleCheckResult is one scale_check run: each custom scale_check pool's
 // count (additive new demand) and the pools whose count cannot be trusted.

@@ -408,7 +408,7 @@ func doSessionWait(sessionID string, depIDs []string, matchAny bool, note string
 			fmt.Fprintf(stderr, "gc session wait: setting wait hold: %v\n", err) //nolint:errcheck
 			return 1
 		}
-		if err := deps.pokeController(); err != nil {
+		if err := deps.pokeController(); err != nil && !noteWorkerSitePoke(stderr, "gc session wait", err) {
 			fmt.Fprintf(stderr, "gc session wait: poking controller: %v\n", err) //nolint:errcheck
 			return 1
 		}

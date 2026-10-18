@@ -92,7 +92,12 @@ var boundedLimitOnlyFeeds = map[string]bool{
 	"GET /v0/city/{cityName}/formulas/{name}/runs": true,
 	"GET /v0/city/{cityName}/orders/feed":          true,
 	"GET /v0/city/{cityName}/runs":                 true,
-	"GET /v0/events":                               true,
+	// `gc ready --limit`: the top N of the ordered ready answer (2026-10-17,
+	// ga-ylpbsy.3, approved with the supervisor-served read design). It is
+	// not a page: the query is answered whole, and a walk past it would mean
+	// a cursor over a set that changes between requests.
+	"GET /v0/city/{cityName}/work/ready": true,
+	"GET /v0/events":                     true,
 }
 
 type specParam struct {

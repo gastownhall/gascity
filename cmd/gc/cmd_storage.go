@@ -733,9 +733,10 @@ func cityWorkStoreRows(cityPath string) (map[string]beads.Bead, error) {
 //     no edges shows both sides empty, so there a divergence in edges alone is
 //     not seen. Needs is create-time shorthand for edges, which the copy
 //     strips rather than carries, and is not compared.
-//   - Revision is compared only when both rows publish one. Zero is "no token",
-//     not revision 0 (revisionMoved reads it the same way), so a listing that
-//     publishes none is neither a match nor a mismatch.
+//   - Revision is compared only when both rows carry a nonzero one. A listing
+//     may publish none (the native store clears it, above), and that zero reads
+//     the same as a legacy row's real revision 0, so a zero on either side is
+//     neither a match nor a mismatch.
 //   - A timestamp is compared only when both rows carry it, for the same reason.
 //   - IsBlocked is not compared: it is bd's readiness projection, not stored
 //     state, and the copy strips it.

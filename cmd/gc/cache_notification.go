@@ -65,7 +65,11 @@ const (
 )
 
 // beadUpdateDedup remembers the payload hash of the last created or updated
-// notification recorded per bead id, and when it was recorded.
+// notification recorded per bead id, and when it was recorded. It drops
+// repeated notifications, not writes: the cache hands every write to its
+// backing on purpose, a same-value one included (see CachingStore.Update),
+// and must not regain a cached-row skip to spare a pass-through backing (bd,
+// a proxied or HTTP store) the call.
 type beadUpdateDedup struct {
 	mu   sync.Mutex
 	last map[string]dedupEntry
