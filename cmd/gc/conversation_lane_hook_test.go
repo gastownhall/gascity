@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"os"
@@ -1171,5 +1172,112 @@ func TestNudgeDrainInjectLaneLeaseOutlivesTheHookDeadline(t *testing.T) {
 	want := deadline.Add(laneHookLeaseGrace)
 	if got := leases[0].Deadline; got.Before(want.Add(-2*time.Second)) || got.After(want.Add(time.Second)) {
 		t.Fatalf("lease deadline = %s, want about %s (hook deadline + %s)", got, want, laneHookLeaseGrace)
+	}
+}
+
+// TestNudgeDrainInjectNoDoorbellWithoutADone: a pass that records no Done (an
+// open prompt the hook cannot serve, as when the controller is down) rings no
+// doorbell.
+func TestNudgeDrainInjectNoDoorbellWithoutADone(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	f.propose(t, "fix the build", func(r *opjournal.Request) { r.Policy.Message.Role = opjournal.RolePrompt })
+	run := f.drain(t)
+	if run.code != 0 {
+		t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
+	}
+	if len(f.pokes) != 0 {
+		t.Fatalf("doorbells = %v; want none, the pass recorded no Done", f.pokes)
+	}
+}
+
+// TestNudgeDrainInjectDoorbellRingsTheDrainsCity: the doorbell goes to the
+// city the drain resolved.
+func TestNudgeDrainInjectDoorbellRingsTheDrainsCity(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	f.propose(t, "mail arrived")
+	var cities []string
+	hookLanePoke = func(city, _ string, _ time.Duration) { cities = append(cities, city) }
+	run := f.drain(t)
+	if len(cities) != 1 || !samePath(cities[0], f.cityDir) {
+		t.Fatalf("doorbell cities = %q, want [%s]; stderr=%s", cities, f.cityDir, run.stderr)
+	}
+}
+
+// TestNudgeDrainInjectTrimsTheSessionID: a GC_SESSION_ID padded with
+// whitespace still names the hook's conversation.
+func TestNudgeDrainInjectTrimsTheSessionID(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	t.Setenv("GC_SESSION_ID", " "+f.sessionID+"\n")
+	op := f.propose(t, "mail arrived")
+	run := f.drain(t)
+	cur, err := f.st.Get(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cur.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v; want succeeded; stdout=%s stderr=%s", cur.Outcome, run.stdout, run.stderr)
+	}
+}
+
+// TestNudgeDrainInjectTokenlessHook: a hook and a row that both name no token
+// deliver unfenced when the env epochs name the row's incarnation, and take
+// nothing when they name another (DES-O1 sec 8).
+func TestNudgeDrainInjectTokenlessHook(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		epoch     string
+		delivered bool
+	}{
+		{"same incarnation", "", true},
+		{"other epoch", "7", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookLaneDrainFixture(t)
+			if err := f.sessions.SetMetadata(f.sessionID, "instance_token", ""); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv(runtime.InstanceTokenEnv, "")
+			if tc.epoch != "" {
+				t.Setenv(runtime.ContinuationEpochEnv, tc.epoch)
+			}
+			op := f.propose(t, "mail arrived")
+			run := f.drain(t)
+			cur, err := f.st.Get(op.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got := cur.Outcome.Arm == opjournal.ArmSucceeded; got != tc.delivered {
+				t.Fatalf("delivered = %v, want %v; stdout=%s stderr=%s", got, tc.delivered, run.stdout, run.stderr)
+			}
+			if tc.delivered && cur.Outcome.Degradation != opjournal.DegradationUnfencedDelivery {
+				t.Fatalf("degradation = %q, want %q", cur.Outcome.Degradation, opjournal.DegradationUnfencedDelivery)
+			}
+		})
+	}
+}
+
+// TestNudgeDrainInjectJSONFormatsRunTheLanePass: the JSON hook formats run the
+// in-band pass whatever GC_PROVIDER names, and write one JSON document that
+// carries the notice.
+func TestNudgeDrainInjectJSONFormatsRunTheLanePass(t *testing.T) {
+	for _, format := range []string{hookOutputFormatCodex, hookOutputFormatGemini, hookOutputFormatAntigravity} {
+		t.Run(format, func(t *testing.T) {
+			f := newHookLaneDrainFixture(t)
+			t.Setenv("GC_PROVIDER", format)
+			op := f.propose(t, "mail arrived")
+			run := recordHookCommand(t, func(stdout, stderr io.Writer) int {
+				return cmdNudgeDrainWithFormat(nil, true, format, stdout, stderr)
+			})
+			if !strings.Contains(run.stdout, "mail arrived") {
+				t.Fatalf("lane notice not in the %s hook output:\n%s\nstderr=%s", format, run.stdout, run.stderr)
+			}
+			var doc map[string]any
+			if err := json.Unmarshal([]byte(strings.TrimSpace(run.stdout)), &doc); err != nil {
+				t.Fatalf("%s hook output is not one JSON document: %v\n%s", format, err, run.stdout)
+			}
+			if cur, err := f.st.Get(op.ID); err != nil || cur.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("op = %+v, %v; want succeeded", cur, err)
+			}
+		})
 	}
 }

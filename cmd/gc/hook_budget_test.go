@@ -518,6 +518,9 @@ func TestHookVerbsOpenOneStoreThroughRun(t *testing.T) {
 		t.Run(strings.Join(args, " "), func(t *testing.T) {
 			newHookBudgetFixture(t)
 			resetHookBudgetProcessState(t)
+			// A claude-family hook, so nudge drain --inject runs the lane
+			// probe and the memo must serve it.
+			t.Setenv("GC_PROVIDER", "claude")
 			var opens int
 			prev := observeOpenedStore
 			observeOpenedStore = func(_ string, store beads.Store) beads.Store {
