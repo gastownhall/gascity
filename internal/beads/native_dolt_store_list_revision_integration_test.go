@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	beadslib "github.com/steveyegge/beads"
@@ -233,6 +234,74 @@ func TestListRevisionFidelityAdmitsRealNativeDolt(t *testing.T) {
 			t.Errorf("%s: %v", name, err)
 		}
 	}
+}
+
+// An id held in both the issues and the wisps table is two rows: the native
+// List reads the wisps one and Get the issues one, so a legacy wisps twin at
+// 0 lists at 0 while it reads live at a real revision. That is the row's own
+// anomaly, not a read path that drops revisions, so beside a row that lists
+// its revision it is no refusal. Kills a check that refuses on one row.
+func TestListRevisionFidelityAdmitsAnIDInBothTables(t *testing.T) {
+	store, db := openServerNativeStoreForTest(t)
+	if _, err := store.Create(Bead{Title: "plain"}); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	written, err := store.Create(Bead{Title: "twin"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	cols := sharedColumnsForTest(t, db, "issues", "wisps")
+	if _, err := db.Exec("INSERT INTO wisps ("+cols+") SELECT "+cols+" FROM issues WHERE id = ?", written.ID); err != nil {
+		t.Fatalf("plant the wisps twin: %v", err)
+	}
+	if _, err := db.Exec("UPDATE wisps SET row_lock = 0 WHERE id = ?", written.ID); err != nil {
+		t.Fatalf("reset the twin's row_lock: %v", err)
+	}
+	got, err := store.Get(written.ID)
+	if err != nil || got.Revision == 0 {
+		t.Fatalf("Get = (%d, %v), want the issues row at a real revision", got.Revision, err)
+	}
+	both, err := store.List(ListQuery{IDs: []string{written.ID}, IncludeClosed: true, TierMode: TierBoth})
+	if err != nil {
+		t.Fatalf("List both tiers: %v", err)
+	}
+	if len(both) != 1 || both[0].Revision != 0 {
+		t.Fatalf("List = %+v, want the one wisps twin at 0; the fixture no longer shows the anomaly", revisionsByID(t, both))
+	}
+	cache := NewCachingStoreForTest(store, nil)
+	if err := cache.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	for name, s := range map[string]Store{"native": store, "cached native": cache} {
+		if err := CheckListRevisionFidelity(s); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// sharedColumnsForTest lists, quoted and comma-joined, the columns tables a
+// and b both have.
+func sharedColumnsForTest(t *testing.T, db *sql.DB, a, b string) string {
+	t.Helper()
+	rows, err := db.Query(`SELECT c1.column_name FROM information_schema.columns c1
+		JOIN information_schema.columns c2 ON c2.table_schema = c1.table_schema AND c2.column_name = c1.column_name AND c2.table_name = ?
+		WHERE c1.table_schema = DATABASE() AND c1.table_name = ? ORDER BY c1.ordinal_position`, b, a)
+	if err != nil {
+		t.Fatalf("read the shared columns: %v", err)
+	}
+	defer func() { _ = rows.Close() }()
+	var cols []string
+	for rows.Next() {
+		var c string
+		if err := rows.Scan(&c); err != nil {
+			t.Fatalf("scan a column: %v", err)
+		}
+		cols = append(cols, "`"+c+"`")
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the shared columns: %v", err)
+	}
+	return strings.Join(cols, ", ")
 }
 
 func stringPtrForListRevisionTest(s string) *string { return &s }

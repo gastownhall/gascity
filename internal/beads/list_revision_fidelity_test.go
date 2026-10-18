@@ -106,9 +106,67 @@ func TestCheckListRevisionFidelityRefusesARevisionZeroLister(t *testing.T) {
 	}
 }
 
-// A failed sample is not a pass.
+// Kills a refusal that does not re-confirm: a cache primed with a legacy row
+// at 0 that has not yet seen the row's first write lists it at 0 while it
+// reads live at a real revision, but its backing lists the real one, so the
+// store is admitted.
+func TestCheckListRevisionFidelityReconfirmsALaggingLegacyRow(t *testing.T) {
+	mem := NewMemStoreFrom(1, []Bead{{ID: "gc-1", Title: "legacy", Status: "open", Type: "task"}}, nil)
+	cache := primedCacheForFidelityTest(t, mem)
+	assignee := "worker"
+	if err := mem.Update("gc-1", UpdateOpts{Assignee: &assignee}); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := cache.List(ListQuery{Status: "open"})
+	if err != nil || len(rows) != 1 || rows[0].Revision != 0 {
+		t.Fatalf("cached List = (%+v, %v), want the lagging row at 0", rows, err)
+	}
+	for name, s := range map[string]Store{"cached": cache, "class over cache": SessionStore{Store: cache}} {
+		if err := CheckListRevisionFidelity(s); err != nil {
+			t.Errorf("%s: %v", name, err)
+		}
+	}
+}
+
+// oneRowStripper lists one row at revision 0 and every other at its own.
+type oneRowStripper struct {
+	Store
+	id string
+}
+
+func (s oneRowStripper) List(q ListQuery) ([]Bead, error) {
+	rows, err := s.Store.List(q)
+	for i := range rows {
+		if rows[i].ID == s.id {
+			rows[i].Revision = 0
+		}
+	}
+	return rows, err
+}
+
+// One row listed at 0 beside rows that carry their revisions is that row's
+// anomaly, not a read path that drops revisions, and is no refusal; the same
+// row alone is.
+func TestCheckListRevisionFidelityRefusesOnlyASystemicDrop(t *testing.T) {
+	mem := NewMemStore()
+	seedWrittenRows(t, mem)
+	if err := CheckListRevisionFidelity(oneRowStripper{Store: mem, id: "gc-1"}); err != nil {
+		t.Fatalf("one row at 0 among rows with revisions: %v", err)
+	}
+	if err := mem.Close("gc-2"); err != nil {
+		t.Fatal(err)
+	}
+	var blind *ListRevisionsBlindError
+	if err := CheckListRevisionFidelity(oneRowStripper{Store: mem, id: "gc-1"}); !errors.As(err, &blind) {
+		t.Fatalf("the only sampled row at 0: %v, want a refusal", err)
+	}
+}
+
+// A failed sample is not a pass, and not a verdict on the store either.
 func TestCheckListRevisionFidelityFailsClosedOnAReadError(t *testing.T) {
-	if err := CheckListRevisionFidelity(listErrStore{NewMemStore()}); err == nil {
-		t.Fatal("a failed list read passed the check")
+	err := CheckListRevisionFidelity(listErrStore{NewMemStore()})
+	var blind *ListRevisionsBlindError
+	if err == nil || errors.As(err, &blind) {
+		t.Fatalf("a failed list read = %v, want a read error that is no refusal", err)
 	}
 }

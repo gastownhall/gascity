@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os/exec"
+	"reflect"
 	"strings"
 	"time"
 
@@ -107,7 +108,7 @@ func (cr *CityRuntime) newPlannerHost() plannerHost {
 			return readV2SessionMigration(cr.cityPath, cr.cityName, cr.serviceConfigSnapshot(), cr.v2SessionsStore(), rigs)
 		},
 		capabilities: func() error {
-			return v2CapabilityRefusal(v2ClassStoreCapabilities(cr.v2SessionsStore(), cr.v2GraphStore(), false))
+			return v2CapabilityVerdict(v2ClassStoreCapabilities(cr.v2SessionsStore(), cr.v2GraphStore(), false))
 		},
 		beginTrace: cr.beginV2Trace,
 		inventoryFields: func() map[string]any {
@@ -136,7 +137,8 @@ func (cr *CityRuntime) v2GraphStore() beads.Store {
 // v2StoreCapability is C0.7's reading of one class store: its stamped
 // conditional-writes mode and kind, whether it has a conditional writer (and
 // why not) and an atomic conditional closer, and whether its list reads carry
-// the revision its live reads do (and why not).
+// the revision its live reads do (and why not, or the read that kept that
+// from being decided).
 type v2StoreCapability struct {
 	Class, Kind    string
 	Mode           gate.Mode
@@ -144,14 +146,19 @@ type v2StoreCapability struct {
 	Reason         string
 	ListRevisions  bool
 	ListReason     string
+	ListErr        error
 }
 
 // v2ClassStoreCapabilities reads C0.7's capabilities of the sessions and
 // graph class stores (CONTRACT v5 R2), writing nothing. Boot resolves the
 // writer as the write path does; doctor (inspect) only inspects the stamp
-// and the capability memo, so it fires no degraded event. Both read revision
-// fidelity the same way (beads.CheckListRevisionFidelity): a writer fenced on
-// revisions its listings report as 0 fences nothing (mc-3c8h5).
+// and the capability memo, so it fires no degraded event.
+//
+// Both then read revision fidelity the same way
+// (beads.CheckListRevisionFidelity): a writer fenced on revisions its listings
+// report as 0 fences nothing (mc-3c8h5). The read is skipped for a store that
+// already lacks a writer or a closer, which refuses regardless, and is made
+// once when both classes resolve to the same store.
 func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2StoreCapability {
 	out := make([]v2StoreCapability, 0, 2)
 	for _, c := range []struct {
@@ -180,14 +187,34 @@ func v2ClassStoreCapabilities(sessions, graph beads.Store, inspect bool) []v2Sto
 				got.Reason = "the store does not implement conditional writes"
 			}
 		}
-		if err := beads.CheckListRevisionFidelity(c.store); err != nil {
-			got.ListReason = err.Error()
-		} else {
-			got.ListRevisions = true
+		switch {
+		case !got.Writer || !got.Closer:
+		case len(out) == 1 && sameClassStore(sessions, graph) && out[0].Writer && out[0].Closer:
+			got.ListRevisions, got.ListReason, got.ListErr = out[0].ListRevisions, out[0].ListReason, out[0].ListErr
+		default:
+			var blind *beads.ListRevisionsBlindError
+			switch err := beads.CheckListRevisionFidelity(c.store); {
+			case err == nil:
+				got.ListRevisions = true
+			case errors.As(err, &blind):
+				got.ListReason = err.Error()
+			default:
+				got.ListErr = err
+			}
 		}
 		out = append(out, got)
 	}
 	return out
+}
+
+// sameClassStore reports whether two class stores are one store, without
+// comparing values whose dynamic type is not comparable (== on them panics).
+func sameClassStore(a, b beads.Store) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	ta := reflect.TypeOf(a)
+	return ta == reflect.TypeOf(b) && ta.Comparable() && a == b
 }
 
 // off reports whether c's conditional writes are off or never stamped.
@@ -203,11 +230,16 @@ func (c v2StoreCapability) String() string {
 	if !c.Writer {
 		writer += " (" + c.Reason + ")"
 	}
-	lists := fmt.Sprintf("list revisions %v", c.ListRevisions)
-	if !c.ListRevisions {
-		lists += " (" + c.ListReason + ")"
+	out := fmt.Sprintf("%s store (%s, conditional_writes=%s): %s, atomic conditional closer %v", c.Class, c.Kind, mode, writer, c.Closer)
+	switch {
+	case c.ListRevisions:
+		out += ", list revisions true"
+	case c.ListReason != "":
+		out += ", list revisions false (" + c.ListReason + ")"
+	case c.ListErr != nil:
+		out += ", list revisions not read (" + c.ListErr.Error() + ")"
 	}
-	return fmt.Sprintf("%s store (%s, conditional_writes=%s): %s, atomic conditional closer %v, %s", c.Class, c.Kind, mode, writer, c.Closer, lists)
+	return out
 }
 
 // v2CapabilityRefusal is C0.7's boot refusal: no capability, no effect. It
@@ -218,7 +250,7 @@ func v2CapabilityRefusal(caps []v2StoreCapability) error {
 	var parts []string
 	off := false
 	for _, c := range caps {
-		if !c.Writer || !c.Closer || !c.ListRevisions {
+		if !c.Writer || !c.Closer || c.ListReason != "" {
 			parts = append(parts, c.String())
 			off = off || (!c.Writer && c.off())
 		}
@@ -231,6 +263,34 @@ func v2CapabilityRefusal(caps []v2StoreCapability) error {
 		fix = `set [beads] conditional_writes = "auto"`
 	}
 	return fmt.Errorf("v2 refuses to boot without conditional writes (C0.7): %s; v2 never writes blind: %s, or remove session_reconciler to run legacy", strings.Join(parts, "; "), fix)
+}
+
+// v2CapabilityUnreadError is C0.7 failing to read a class store's list
+// revisions: no verdict on the store, so boot retries rather than refusing.
+type v2CapabilityUnreadError struct {
+	Class string
+	Err   error
+}
+
+func (e *v2CapabilityUnreadError) Error() string {
+	return fmt.Sprintf("C0.7 could not read the %s store to check its list revisions: %v", e.Class, e.Err)
+}
+
+func (e *v2CapabilityUnreadError) Unwrap() error { return e.Err }
+
+// v2CapabilityVerdict is boot's C0.7 answer: the refusal when a store lacks a
+// capability, else a *v2CapabilityUnreadError when a store could not be read,
+// else nil.
+func v2CapabilityVerdict(caps []v2StoreCapability) error {
+	if refusal := v2CapabilityRefusal(caps); refusal != nil {
+		return refusal
+	}
+	for _, c := range caps {
+		if c.ListErr != nil {
+			return &v2CapabilityUnreadError{Class: c.Class, Err: c.ListErr}
+		}
+	}
+	return nil
 }
 
 // recordV2Pass records the planner's reconcile_pass operation in a

@@ -315,77 +315,85 @@ func (s *listWithoutRevisionStore) List(q beads.ListQuery) ([]beads.Bead, error)
 // live row is not at 0, so the revision guard has nothing to check and the
 // release takes the legacy tiers, which fence on the live status and assignee. Dead claims are released, with or without a
 // continuation group, instead of being refused on every tick, and a claim
-// another worker took after the List is left alone.
+// another worker took after the List is left alone. Under the controller's
+// cache too, whose rows (primed from that List) are also at 0: the snapshot
+// is re-read past the cache, not from it.
 func TestWorkReleaseConditionalWritesReleasesRevisionlessSnapshots(t *testing.T) {
 	type shape struct{ group, reclaimed bool }
 	for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
 		for _, orphan := range []bool{false, true} {
-			t.Run(fmt.Sprintf("%s/orphan=%t", mode, orphan), func(t *testing.T) {
-				store := &listWithoutRevisionStore{MemStore: beads.NewMemStore()}
-				stampConditionalWrites(t, store, mode)
-				if writer, _, err := beads.ResolveConditionalWriter(store); writer == nil || err != nil {
-					t.Fatalf("conditional writer=%v err=%v, want the revision guard engaged", writer, err)
-				}
-				shapes := map[string]shape{}
-				for _, s := range []shape{{false, false}, {true, false}, {false, true}, {true, true}} {
-					claimed := seedClaimedBead(t, store, "dead-worker")
-					metadata := map[string]string{beadmeta.SessionAffinityMetadataKey: "dead-worker"}
-					if s.group {
-						metadata[beadmeta.ContinuationGroupMetadataKey] = "old-group"
+			for _, cached := range []bool{false, true} {
+				t.Run(fmt.Sprintf("%s/orphan=%t/cached=%t", mode, orphan, cached), func(t *testing.T) {
+					store := &listWithoutRevisionStore{MemStore: beads.NewMemStore()}
+					stampConditionalWrites(t, store, mode)
+					if writer, _, err := beads.ResolveConditionalWriter(store); writer == nil || err != nil {
+						t.Fatalf("conditional writer=%v err=%v, want the revision guard engaged", writer, err)
 					}
-					if err := store.Update(claimed.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
-						t.Fatal(err)
-					}
-					shapes[claimed.ID] = s
-				}
-				work := workAssignmentForStore(beads.WorkStore{Store: store})
-				snapshots, err := work.OpenAssignedTo("dead-worker", "in_progress", beads.TierBoth, true)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if len(snapshots) != len(shapes) {
-					t.Fatalf("listed %d snapshots, want %d", len(snapshots), len(shapes))
-				}
-				for _, snapshot := range snapshots {
-					if snapshot.Revision != 0 {
-						t.Fatalf("snapshot %s has revision %d, want a revision-less list row", snapshot.ID, snapshot.Revision)
-					}
-					if shapes[snapshot.ID].reclaimed {
-						if err := store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr("fresh-worker")}); err != nil {
+					shapes := map[string]shape{}
+					for _, s := range []shape{{false, false}, {true, false}, {false, true}, {true, true}} {
+						claimed := seedClaimedBead(t, store, "dead-worker")
+						metadata := map[string]string{beadmeta.SessionAffinityMetadataKey: "dead-worker"}
+						if s.group {
+							metadata[beadmeta.ContinuationGroupMetadataKey] = "old-group"
+						}
+						if err := store.Update(claimed.ID, beads.UpdateOpts{Metadata: metadata}); err != nil {
 							t.Fatal(err)
 						}
+						shapes[claimed.ID] = s
 					}
-				}
-				for _, snapshot := range snapshots {
-					s := shapes[snapshot.ID]
-					label := fmt.Sprintf("group=%t/reclaimed=%t", s.group, s.reclaimed)
-					if orphan {
-						if released := releaseOrphanedPoolAssignment(store, snapshot, true); released == s.reclaimed {
-							t.Errorf("%s: orphan release reported released=%t", label, released)
-						}
-					} else if err := work.ReleaseWorkBead(snapshot, ""); err != nil {
-						t.Errorf("%s: release: %v", label, err)
+					var target beads.Store = store
+					if cached {
+						target = primedCacheOver(t, store)
 					}
-					got, err := store.Get(snapshot.ID)
+					work := workAssignmentForStore(beads.WorkStore{Store: target})
+					snapshots, err := work.OpenAssignedTo("dead-worker", "in_progress", beads.TierBoth, true)
 					if err != nil {
 						t.Fatal(err)
 					}
-					if s.reclaimed {
-						if got.Status != "in_progress" || got.Assignee != "fresh-worker" {
-							t.Errorf("%s: status=%q assignee=%q, want the newer claim left alone", label, got.Status, got.Assignee)
+					if len(snapshots) != len(shapes) {
+						t.Fatalf("listed %d snapshots, want %d", len(snapshots), len(shapes))
+					}
+					for _, snapshot := range snapshots {
+						if snapshot.Revision != 0 {
+							t.Fatalf("snapshot %s has revision %d, want a revision-less list row", snapshot.ID, snapshot.Revision)
 						}
-						continue
-					}
-					if got.Status != "open" || got.Assignee != "" {
-						t.Errorf("%s: status=%q assignee=%q, want the dead claim released", label, got.Status, got.Assignee)
-					}
-					for key := range clearedSessionAffinityMetadata() {
-						if got.Metadata[key] != "" {
-							t.Errorf("%s: %s not cleared: %q", label, key, got.Metadata[key])
+						if shapes[snapshot.ID].reclaimed {
+							if err := store.Update(snapshot.ID, beads.UpdateOpts{Assignee: stringPtr("fresh-worker")}); err != nil {
+								t.Fatal(err)
+							}
 						}
 					}
-				}
-			})
+					for _, snapshot := range snapshots {
+						s := shapes[snapshot.ID]
+						label := fmt.Sprintf("group=%t/reclaimed=%t", s.group, s.reclaimed)
+						if orphan {
+							if released := releaseOrphanedPoolAssignment(target, snapshot, true); released == s.reclaimed {
+								t.Errorf("%s: orphan release reported released=%t", label, released)
+							}
+						} else if err := work.ReleaseWorkBead(snapshot, ""); err != nil {
+							t.Errorf("%s: release: %v", label, err)
+						}
+						got, err := store.Get(snapshot.ID)
+						if err != nil {
+							t.Fatal(err)
+						}
+						if s.reclaimed {
+							if got.Status != "in_progress" || got.Assignee != "fresh-worker" {
+								t.Errorf("%s: status=%q assignee=%q, want the newer claim left alone", label, got.Status, got.Assignee)
+							}
+							continue
+						}
+						if got.Status != "open" || got.Assignee != "" {
+							t.Errorf("%s: status=%q assignee=%q, want the dead claim released", label, got.Status, got.Assignee)
+						}
+						for key := range clearedSessionAffinityMetadata() {
+							if got.Metadata[key] != "" {
+								t.Errorf("%s: %s not cleared: %q", label, key, got.Metadata[key])
+							}
+						}
+					}
+				})
+			}
 		}
 	}
 }

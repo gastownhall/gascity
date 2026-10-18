@@ -380,8 +380,9 @@ func TestCachingStoreUpdateReflected(t *testing.T) {
 }
 
 // TestCachingStoreRevisionMoved pins the revision half of the install
-// predicate: a row still at expectedRevision is a pre-write read, and zero on
-// either side carries no usable token.
+// predicate: a row still at expectedRevision is a pre-write read, 0 included:
+// 0 is a legacy row's real revision, and a write fenced on it moves the row
+// off 0.
 func TestCachingStoreRevisionMoved(t *testing.T) {
 	t.Parallel()
 
@@ -393,8 +394,9 @@ func TestCachingStoreRevisionMoved(t *testing.T) {
 	}{
 		{"moved", 8, 7, true},
 		{"unmoved", 7, 7, false},
-		{"no_expected_token", 7, 0, true},
-		{"no_row_token", 0, 7, true},
+		{"moved_off_legacy_zero", 7, 0, true},
+		{"moved_to_a_legacy_read", 0, 7, true},
+		{"still_at_legacy_zero", 0, 0, false},
 	}
 	for _, tc := range cases {
 		if got := revisionMoved(Bead{Revision: tc.revision}, tc.expected); got != tc.want {

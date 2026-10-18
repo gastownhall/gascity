@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"testing/synctest"
 	"time"
@@ -454,6 +455,80 @@ func TestBootRefusesARevisionZeroLister(t *testing.T) {
 				t.Errorf("%s (inspect=%v): C0.7 = %v, want a refusal naming the list revisions", name, inspect, refusal)
 			}
 		}
+	}
+}
+
+// c07ListStore counts List calls, or fails them with err; conditional
+// writes resolve to the store it wraps.
+type c07ListStore struct {
+	beads.Store
+	lists atomic.Int32
+	err   error
+}
+
+func (s *c07ListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	s.lists.Add(1)
+	if s.err != nil {
+		return nil, s.err
+	}
+	return s.Store.List(q)
+}
+
+func (s *c07ListStore) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
+// Kills a C0.7 that refuses on a failed read, or reports it as a missing
+// capability: a store whose revision read fails is no refusal, names the
+// read in its own error, and boot retries it rather than stopping.
+func TestC07UnreadStoreIsRetriedNotRefused(t *testing.T) {
+	store := &c07ListStore{Store: fencingAtomicCloseStore(t), err: errors.New("dial tcp: connection refused")}
+	caps := v2ClassStoreCapabilities(store, store, false)
+	if refusal := v2CapabilityRefusal(caps); refusal != nil {
+		t.Fatalf("C0.7 refused a store it could not read: %v", refusal)
+	}
+	var unread *v2CapabilityUnreadError
+	verdict := v2CapabilityVerdict(caps)
+	if !errors.As(verdict, &unread) || strings.Contains(verdict.Error(), "refuses to boot") || !strings.Contains(verdict.Error(), "connection refused") {
+		t.Fatalf("verdict = %v, want a read failure of its own naming the cause", verdict)
+	}
+
+	stderr := &synchronizedBuffer{}
+	rt := newDefaultPlanner(stderr)
+	refusal := errors.New("refused on the retry")
+	calls := 0
+	rt.host.capabilities = func() error {
+		calls++
+		if calls == 1 {
+			return verdict
+		}
+		return refusal
+	}
+	if err := rt.boot(context.Background()); !errors.Is(err, refusal) || calls != 2 {
+		t.Fatalf("boot = %v after %d C0.7 reads, want the read retried once and then the refusal", err, calls)
+	}
+	if !strings.Contains(stderr.String(), "C0.7 store read failed (retry in") {
+		t.Fatalf("stderr %q, want the retry reported", stderr.String())
+	}
+}
+
+// Kills a revision read that costs boot more than it decides: none for a
+// store that already lacks a closer, and one for a store both classes share.
+func TestC07RevisionReadSkippedAndShared(t *testing.T) {
+	noCloser := &c07ListStore{Store: fencedMemStore(t)}
+	seedWrittenRow(t, noCloser.Store)
+	if caps := v2ClassStoreCapabilities(noCloser, noCloser, false); caps[0].Closer || v2CapabilityRefusal(caps) == nil {
+		t.Fatalf("capabilities %+v, want no closer and a refusal", caps)
+	}
+	if n := noCloser.lists.Load(); n != 0 {
+		t.Errorf("a store without a closer was listed %d times, want 0", n)
+	}
+	shared := &c07ListStore{Store: fencingAtomicCloseStore(t)}
+	seedWrittenRow(t, shared.Store)
+	caps := v2ClassStoreCapabilities(shared, shared, false)
+	if !caps[0].ListRevisions || !caps[1].ListRevisions {
+		t.Fatalf("capabilities %+v, want both classes' list revisions read", caps)
+	}
+	if n := shared.lists.Load(); n != 1 {
+		t.Errorf("a store both classes share was listed %d times, want 1", n)
 	}
 }
 

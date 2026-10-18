@@ -737,3 +737,40 @@ func TestCachingStoreOneSubprocessCheckInFlight(t *testing.T) {
 			n, dirty, seq, before, got.Title)
 	}
 }
+
+// An external write the cache learns of by event is verified against a
+// backing read; the installed row is that read, revision included, so a CAS
+// decided on the cached row lands on the first try rather than being refused
+// once at the pre-write revision. Kills the event merge keeping the cached
+// revision.
+func TestCachingStoreVerifiedEventInstallsTheBackingRevision(t *testing.T) {
+	t.Parallel()
+	for _, b := range staleEventBackings {
+		t.Run(b.name, func(t *testing.T) {
+			t.Parallel()
+			backing := b.open(t)
+			row, err := backing.Create(Bead{Title: "held"})
+			if err != nil {
+				t.Fatalf("Create: %v", err)
+			}
+			cache := newConditionalCacheForTest(t, backing)
+			written := writeHeldUntil(t, backing, row.ID, "external")
+			payload, err := EncodeBeadEventPayload(written)
+			if err != nil {
+				t.Fatalf("EncodeBeadEventPayload: %v", err)
+			}
+			cache.ApplyEvent("bead.updated", payload)
+			got, err := cache.Get(row.ID)
+			if err != nil {
+				t.Fatalf("cached Get: %v", err)
+			}
+			if got.Metadata["held_until"] != "external" || got.Revision != written.Revision {
+				t.Fatalf("cached row = held_until %q at revision %d, want %q at the backing's %d",
+					got.Metadata["held_until"], got.Revision, "external", written.Revision)
+			}
+			if err := cache.UpdateIfMatch(row.ID, got.Revision, UpdateOpts{Metadata: map[string]string{"held_until": "healed"}}); err != nil {
+				t.Fatalf("CAS at the cached revision: %v", err)
+			}
+		})
+	}
+}
