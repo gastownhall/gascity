@@ -158,10 +158,23 @@ current-context: c
 		runtime.ProfileSubprocess: subprocess.NewSeamBacked(),
 		runtime.ProfileHerdr:      herdr.New("city", t.TempDir(), t.TempDir(), 0, 0),
 		runtime.ProfileK8s:        kube,
-		runtime.ProfileExec:       exec.NewSeamBacked("/bin/true"),
+		runtime.ProfileExec:       exec.NewSeamBacked(execConnectionPack(t)),
 		runtime.ProfileSSH:        ssh.NewSeamBacked(ep),
 		runtime.ProfileT3Bridge:   t3bridge.NewSeamBacked(),
 	}
+}
+
+// execConnectionPack is an exec pack that declares the exec connection and
+// input fencing (proc.exec, input-fence) alone, the tmux-in-a-box shape the
+// exec profile models, and answers every other op as /bin/true does.
+func execConnectionPack(t *testing.T) string {
+	t.Helper()
+	script := filepath.Join(t.TempDir(), "pack")
+	body := "#!/bin/sh\n[ \"$1\" = protocol ] && echo '{\"version\":0,\"capabilities\":[\"proc.exec\",\"input-fence\"]}'\nexit 0\n"
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	return script
 }
 
 // Kills a profile that drifts from its backend: one optional interface more

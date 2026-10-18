@@ -1,6 +1,7 @@
 package beads
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -11,6 +12,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -763,7 +765,20 @@ func (s *SQLiteStore) normalizeCreate(b Bead) (Bead, error) {
 	if b.UpdatedAt.IsZero() {
 		b.UpdatedAt = b.CreatedAt
 	}
+	b.Revision = s.insertRevision()
 	return b, nil
+}
+
+// insertRevision is the revision upsertBeadTx inserts a new row at: 1, as on
+// MemStore, so an insert mints a nonzero token as every other write does (a
+// row at 0 is one an older binary inserted, whose 0 is a real token under the
+// REVISION CONTRACT on ConditionalWriter); 0 on a layout with no revision
+// column, whose reads carry none.
+func (s *SQLiteStore) insertRevision() int64 {
+	if !s.hasRevisionColumn {
+		return 0
+	}
+	return 1
 }
 
 // AdvanceSequenceFloor lifts the store's in-memory id sequence so the next
@@ -1051,15 +1066,20 @@ func (s *SQLiteStore) upsertBeadTx(ctx context.Context, tx *sql.Tx, b Bead) erro
 			 ref=excluded.ref,
 			 description=excluded.description,
 			 bead_json=excluded.bead_json`
+	columns, values := `id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json`, `?,?,?,?,?,?,?,?,?,?,?,?,?,?`
+	args := []any{
+		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
+		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload),
+	}
 	if s.hasRevisionColumn {
+		columns, values = columns+`,revision`, values+`,?`
+		args = append(args, s.insertRevision())
 		update += `, revision=beads.revision+1`
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO beads(id,tier,title,status,issue_type,priority,created_at,updated_at,assignee,from_agent,parent_id,ref,description,bead_json)
-		VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-		ON CONFLICT(id) DO UPDATE SET `+update,
-		b.ID, tier, b.Title, b.Status, b.Type, priority, b.CreatedAt.UnixNano(), sqliteUnixNanoOrZero(b.UpdatedAt),
-		b.Assignee, b.From, b.ParentID, b.Ref, b.Description, string(payload))
+		INSERT INTO beads(`+columns+`)
+		VALUES(`+values+`)
+		ON CONFLICT(id) DO UPDATE SET `+update, args...)
 	if err != nil {
 		return fmt.Errorf("sqlite upsert bead %q: %w", b.ID, err)
 	}
@@ -1176,7 +1196,11 @@ func scanSQLiteBead(row sqliteScanner) (Bead, error) {
 // applySQLiteUpdateOpts applies opts to b with SQLiteStore.Update's exact
 // field semantics (nil pointers skipped, Labels appended, RemoveLabels
 // filtered, Metadata merged). Update and UpdateIfMatch share it so the fenced
-// and unfenced paths cannot drift.
+// and unfenced paths cannot drift on what an edit sets. They differ on an edit
+// that leaves the row as it is: Update's rewriteBead commits nothing, while
+// the fenced verbs, the guarded batch and sqliteStoreTx.Update write the row
+// anyway and mint a fresh revision. The REVISION CONTRACT on ConditionalWriter
+// allows both.
 func applySQLiteUpdateOpts(b Bead, opts UpdateOpts) Bead {
 	noteSessionKeys(b, opts.Metadata) // every SQLite update applies its opts here
 	wasClosed := b.Status == "closed"
@@ -1240,10 +1264,17 @@ func (s *SQLiteStore) Update(id string, opts UpdateOpts) error {
 }
 
 // rewriteBead replaces id's row with apply's edit of it in one transaction,
-// bumping the claim fence when the edit moves ownership.
+// bumping the claim fence when the edit moves ownership. An edit that leaves
+// the stored row as it is commits nothing: the store decides the no-op against
+// the row its own transaction read, so the revision and updated_at stay put
+// and no CAS token another writer holds goes stale. A read-only store refuses
+// every edit up front, so a same-value one is refused as a changing one is.
 func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 	if err := s.ensureOpen(); err != nil {
 		return err
+	}
+	if s.readOnly {
+		return fmt.Errorf("sqlite update %q: store is read-only", id)
 	}
 	return retryOnBusy(func() error {
 		ctx := context.Background()
@@ -1256,8 +1287,11 @@ func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 		if err != nil {
 			return err
 		}
-		before := b
+		before := cloneBead(b) // apply may edit b's maps and slices in place
 		b = apply(b)
+		if sqliteRowUnchanged(before, b) {
+			return nil // commit nothing: the deferred rollback ends the transaction
+		}
 		b.UpdatedAt = time.Now()
 		if err := s.upsertBeadTx(ctx, tx, b); err != nil {
 			return err
@@ -1267,6 +1301,33 @@ func (s *SQLiteStore) rewriteBead(id string, apply func(Bead) Bead) error {
 		}
 		return tx.Commit()
 	})
+}
+
+// sqliteRowUnchanged reports whether next, an edit of the stored row before,
+// would store what before already holds. Labels compare as the set the labels
+// table keeps (INSERT OR IGNORE), so re-adding a present label is no change.
+// A row either side cannot marshal is treated as changed. The compare sees
+// only what the row marshals, so Revision, ClaimFence and
+// IndefinitelyDeferred (json:"-") are invisible to it. That holds because no
+// edit moves them: the fence moves only in
+// bumpClaimFenceIfOwnershipTransitionTx, on an ownership transition, which
+// always changes a marshaled field (the assignee or the status); the
+// revision is the store's own counter; and IndefinitelyDeferred is a bd read
+// projection no SQLite row carries. An edit that moves one directly must
+// compare it here.
+func sqliteRowUnchanged(before, next Bead) bool {
+	if !slices.Equal(sqliteLabelSet(before.Labels), sqliteLabelSet(next.Labels)) {
+		return false
+	}
+	before.Labels, next.Labels = nil, nil
+	next.UpdatedAt = before.UpdatedAt
+	a, errA := json.Marshal(before)
+	b, errB := json.Marshal(next)
+	return errA == nil && errB == nil && bytes.Equal(a, b)
+}
+
+func sqliteLabelSet(labels []string) []string {
+	return slices.Compact(slices.Sorted(slices.Values(labels)))
 }
 
 // ReleaseIfCurrent clears an in-progress assignment only when the bead still

@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "cutover.go",
         "envelope.go",
+        "fence.go",
         "provider.go",
         "reuse.go",
         "seams.go",
@@ -28,6 +29,7 @@ go_test(
     srcs = [
         "delivery_ids_test.go",
         "envelope_test.go",
+        "fence_test.go",
         "provider_test.go",
         "reuse_test.go",
         "seams_test.go",

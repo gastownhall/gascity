@@ -734,15 +734,15 @@ test-bd-cli-contract-home-isolation:
 		-run '^TestRunBDIsolatesHOMEFromSharedServerConfig$$' ./test/acceptance
 
 ## test-bd-conditional-release-contract: run the ReleaseIfCurrent CAS contract
-## against the bd on PATH. It was split from test-bd-cli-contract because it was
-## the one bd contract the installable default could not run -- deps.env
-## BD_VERSION predated `--if-assignee`/`--if-status`, so the row only had a home
-## on the source-built BD_CURRENT_REF cell. That is no longer true as of
-## BD_VERSION=v1.3.0, which carries the flags, so the row now runs on every
-## cell rather than skipping on most. Kept separate anyway: it is the only
-## contract that needs a real CAS-capable bd, and BD_PREV_VERSION (v1.0.4) still
-## cannot run it. GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability
-## skip into a failure, so a cell cannot pass while proving nothing.
+## against the bd on PATH. It is separate from test-bd-cli-contract because it
+## is the only contract that needs a real CAS-capable bd. Every pinned bd
+## (BD_PREV_VERSION, BD_VERSION and BD_CURRENT_REF) carries
+## `--if-assignee`/`--if-status`, so the row's capability skip fires on none
+## of them. CI runs the row only against the BD_CURRENT_REF bd (v1.3.1):
+## strictly in //internal/beads:bd_conditional_release_contract_test, and in
+## the integration-packages lane. A BD_PREV_VERSION cell is ga-7ryjc6.
+## GC_REQUIRE_BD_CONDITIONAL_RELEASE=1 turns the row's capability skip into a
+## failure, so a cell cannot pass while proving nothing.
 ##
 ## The existence preflight closes the other way this cell can pass having proven
 ## nothing: a `-run` selector that matches no test is not an error to `go test`

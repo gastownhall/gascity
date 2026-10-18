@@ -349,6 +349,11 @@ esac
 	if !strings.Contains(log, "bd update bead-1 --append-notes") {
 		t.Fatalf("dry-run failure did not append scan JSON to work bead\nlog:\n%s\noutput:\n%s", log, out)
 	}
+	// The script builds the note's fence without a literal ``` (gascity#7967);
+	// the note itself must still carry the scan as a fenced JSON block.
+	if !strings.Contains(log, "\n\n```json\n"+`{"schema":"gc.dolt.cleanup.v1",`) || !strings.Contains(log, `"errors_total":1}}`+"\n```") {
+		t.Fatalf("dry-run failure note lost its fenced JSON block\nlog:\n%s\noutput:\n%s", log, out)
+	}
 	if strings.Contains(log, "bd close bead-1") {
 		t.Fatalf("rendered script closed bead despite dry-run failure\nlog:\n%s\noutput:\n%s", log, out)
 	}
@@ -1256,7 +1261,22 @@ func extractFirstBashFence(t *testing.T, markdown string) string {
 	if end <= start {
 		t.Fatal("closing code fence appears before bash body")
 	}
-	return markdown[start:end]
+	body := markdown[start:end]
+	// Readers of the rendered step (the dog agent, or a regex that does not
+	// anchor fences to line starts) end the fence at its first ```, not its
+	// last. TOML basic-string escapes such as \n can put one inside the script,
+	// which then runs truncated (gascity#7967).
+	if i := strings.Index(body, "```"); i >= 0 {
+		lineStart := strings.LastIndex(body[:i], "\n") + 1
+		lineEnd := strings.IndexByte(body[i:], '\n')
+		if lineEnd < 0 {
+			lineEnd = len(body)
+		} else {
+			lineEnd += i
+		}
+		t.Fatalf("bash fence body contains ``` on line %q: readers end the fence there", body[lineStart:lineEnd])
+	}
+	return body
 }
 
 func TestStaleDBOrderUsesParsedFieldsOnly(t *testing.T) {

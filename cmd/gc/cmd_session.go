@@ -225,7 +225,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+	if err := validateSessionTransportAt(cityPath, resolved, sessionTransport, sp); err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -278,10 +278,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
-	// supervisor socket alone is not enough for unmanaged ad-hoc cities.
+	// supervisor socket alone is not enough for unmanaged ad-hoc cities. On a
+	// worker site no poke reaches a controller, but the remote one starts the
+	// session at its next reconcile.
 	if cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			// Controller is running — create bead only, let reconciler start it.
+		if pokeErr := pokeController(cityPath); controllerWillReconcile(cityPath, pokeErr) {
+			// A controller will reconcile — create bead only, let it start the session.
 			kindMeta := map[string]string{
 				"agent_name":     sessionQualifiedName,
 				"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
@@ -355,8 +357,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-			// Enqueue the new session to trigger an immediate reconcile.
-			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
+			// Enqueue the new session to trigger an immediate reconcile. A
+			// worker site has no controller to enqueue to; say so instead.
+			if !noteWorkerSitePoke(stderr, "gc session new", pokeErr) {
+				_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
+			}
 
 			if jsonOutput {
 				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
@@ -380,6 +385,14 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			if !shouldAttachNewSession(noAttach, sessionTransport) {
 				if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
 					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
+				}
+				return 0
+			}
+			// A worker site's sessions run where its remote controller runs,
+			// so this box has nothing to wait for or attach to.
+			if onWorkerSite(cityPath) {
+				if !jsonOutput {
+					fmt.Fprintln(stdout, "Worker site: the remote controller runs this session; not attaching.") //nolint:errcheck // best-effort stdout
 				}
 				return 0
 			}
@@ -551,41 +564,56 @@ type acpRouteRegistrar interface {
 	RouteACP(name string)
 }
 
+// validateSessionTransportAt validates a create's transport for the city at
+// cityPath. On a worker site the remote controller's runtime starts the
+// session and the box's guard routes no transport, so only the
+// configuration is checked there.
+func validateSessionTransportAt(cityPath string, resolved *config.ResolvedProvider, transport string, sp runtime.Provider) error {
+	if onWorkerSite(cityPath) {
+		return validateResolvedSessionTransportConfig(resolved, transport)
+	}
+	return validateResolvedSessionTransport(resolved, transport, sp)
+}
+
 func validateResolvedSessionTransport(resolved *config.ResolvedProvider, transport string, sp runtime.Provider) error {
-	transport = strings.TrimSpace(transport)
-	switch transport {
-	case "":
-		return nil
+	if err := validateResolvedSessionTransportConfig(resolved, transport); err != nil {
+		return err
+	}
+	switch transport = strings.TrimSpace(transport); transport {
 	case config.SessionTransportTmux:
-		if sessionProviderSupportsTmux(sp) {
-			return nil
+		if !sessionProviderSupportsTmux(sp) {
+			return fmt.Errorf("provider %q requires tmux transport but the session provider cannot route tmux sessions", sessionTransportProviderName(resolved, transport))
 		}
-		providerName := transport
-		if resolved != nil && resolved.Name != "" {
-			providerName = resolved.Name
-		}
-		return fmt.Errorf("provider %q requires tmux transport but the session provider cannot route tmux sessions", providerName)
 	case config.SessionTransportACP:
+		if !sessionProviderSupportsACP(sp) {
+			return fmt.Errorf("provider %q requires ACP transport but the session provider cannot route ACP sessions", sessionTransportProviderName(resolved, transport))
+		}
+	}
+	return nil
+}
+
+// validateResolvedSessionTransportConfig checks a transport against the
+// configuration alone: the transport is known, and an ACP transport's
+// provider supports ACP.
+func validateResolvedSessionTransportConfig(resolved *config.ResolvedProvider, transport string) error {
+	switch transport = strings.TrimSpace(transport); transport {
+	case "", config.SessionTransportTmux:
+		return nil
+	case config.SessionTransportACP:
+		if resolved != nil && !resolved.SupportsACP {
+			return fmt.Errorf("provider %q does not support ACP transport", sessionTransportProviderName(resolved, transport))
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown session transport %q", transport)
 	}
-	providerName := ""
-	if resolved != nil {
-		providerName = resolved.Name
-		if !resolved.SupportsACP {
-			if providerName == "" {
-				providerName = transport
-			}
-			return fmt.Errorf("provider %q does not support ACP transport", providerName)
-		}
+}
+
+func sessionTransportProviderName(resolved *config.ResolvedProvider, transport string) string {
+	if resolved != nil && resolved.Name != "" {
+		return resolved.Name
 	}
-	if sessionProviderSupportsACP(sp) {
-		return nil
-	}
-	if providerName == "" {
-		providerName = transport
-	}
-	return fmt.Errorf("provider %q requires ACP transport but the session provider cannot route ACP sessions", providerName)
+	return transport
 }
 
 func sessionProviderSupportsACP(sp runtime.Provider) bool {
@@ -1739,17 +1767,21 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 
 	// Try reconciler-first path: set held_until metadata, poke controller.
 	// Only use this path when the city is managed by a standalone controller
-	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
+	// or the machine-wide supervisor — not for unmanaged ad-hoc cities. A
+	// worker site takes it too: its remote controller drains the hold.
 	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
-		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
-			// Controller is running — metadata-only suspend: the operator
+		if pokeErr := sessionSuspendPokeController(cityPath); controllerWillReconcile(cityPath, pokeErr) {
+			// A controller will reconcile — metadata-only suspend: the operator
 			// hold (the disposition's Suspend cell), which the reconciler drains.
 			if _, err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			// Enqueue the held session to trigger an immediate reconcile.
-			_ = sessionSuspendEnqueueController(cityPath, reconcilekey.Session(sessionID))
+			// Enqueue the held session to trigger an immediate reconcile. A
+			// worker site has no controller to enqueue to; say so instead.
+			if !noteWorkerSitePoke(stderr, "gc session suspend", pokeErr) {
+				_ = sessionSuspendEnqueueController(cityPath, reconcilekey.Session(sessionID))
+			}
 			if asJSON {
 				if err := writeSessionActionJSON(stdout, sessionActionResult{
 					Action:    "suspend",
@@ -2690,6 +2722,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 
 	if c := apiClient(cityPath); c != nil {
 		resp, err := c.SubmitSession(target, message, intent)
@@ -2784,11 +2820,22 @@ type sessionNudgeJSON struct {
 	Outcome       string `json:"outcome"`
 }
 
-// cmdSessionNudge is the CLI entry point for "gc session nudge".
+// cmdSessionNudge is the CLI entry point for "gc session nudge". A worker site
+// refuses before it resolves the target or writes anything
+// (errWorkerSiteDeliveryNeedsController).
 func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	targetInfo, err := resolveNudgeTarget(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr

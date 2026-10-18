@@ -163,6 +163,48 @@ orders and pack scripts run, is the binary under test, and whenever an order
 they run fails. `test/acceptance/BUILD.bazel` sets both variables
 (`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
 
+### Git auto-maintenance in test repos
+
+Git 2.55 starts `git maintenance run --auto` detached, in the background, after
+`commit`, `merge`, `am`, `fetch` and `pull`. In a test repo that process is
+still writing under the repo when `t.TempDir`'s cleanup removes it, and the
+cleanup fails with `directory not empty` (ga-zoe1wr). So at test-binary init
+`internal/testenv` sets `GIT_TEMPLATE_DIR` to a template whose config holds
+`maintenance.auto = false`, and every repo the binary, or a child it spawns,
+creates with `git init` or `git clone` starts with auto-maintenance off. The
+variable replaces any ambient one that is not already the template and beats
+`init.templateDir`, so a developer's own template cannot bring the daemon back;
+only an explicit `--template` does.
+
+The template is `gc-test-gittemplate-<uid>-<digest>` under `$TEST_TMPDIR` when
+Bazel sets it, else the temp dir, and holds the config, an empty `hooks/` and an
+empty `info/exclude`. Git copies a template's `hooks/` into every repo it makes,
+so a planted template would run code in every test repo. Init therefore writes
+the template once, by atomic rename, and checks any existing one entry by entry,
+byte for byte, and on unix for owner and mode. A template that differs is never
+used: the test binary panics at init, naming the directory to remove.
+
+- A test binary that another one re-execs inherits `GIT_TEMPLATE_DIR`, and
+  keeps it when it is an absolute path that passes the same checks, so a child
+  started with a `TMPDIR` of its own creates nothing there. A test that expects
+  such a directory to stay empty relies on this.
+- A test that builds a child env from scratch, with an explicit `cmd.Env` list
+  or `helpers.NewEnv` for acceptance tests, must carry `GIT_TEMPLATE_DIR` into
+  it, or the repos that child creates lose the guard, and a child that is a
+  test binary installs a template of its own in its temp dir.
+  `internal/git`'s `SanitizedEnv` and `HermeticEnv` keep it.
+- A testscript subcommand (the test binary re-invoked as `gc` or `bd`) is not
+  seeded; the testscript owns that env.
+- To check that a test path spawns no auto-maintenance, make every check due
+  and trace git: set `GIT_CONFIG_COUNT=1`,
+  `GIT_CONFIG_KEY_0=maintenance.geometric-repack.auto` and
+  `GIT_CONFIG_VALUE_0=-1` in the environment of a direct `go test`, and point
+  `GIT_TRACE` at a file. Each `built-in: git maintenance run` line is one spawn.
+  Naming these variables in `EXTRA_TEST_ENV` does not reach the test binaries
+  of `make test-fast-parallel`: the per-job `env -i` blocks in
+  `scripts/test-local-parallel` and `scripts/test-go-test-shard` forward only
+  their own allowlists.
+
 ### Merge queue
 
 The required-check workflows are merge-queue ready but the queue is off: it
@@ -2304,6 +2346,7 @@ This table is rendered from `internal/testutil/providerledger` and checked by `g
 | `runtime.builtin.t3bridge` | production_provider | — | `runtime.Provider` | `internal/runtime/t3bridge.NewSeamBacked` | runtime.builtin/exact:t3bridge | `runtime.Provider` | waived by ga-80po0c.3 through 2026-11-05: the production T3 bridge composition has focused tests but no full shared runtime contract |
 | `runtime.builtin.tmux` | production_provider | — | `runtime.Provider` | `internal/runtime/tmux.NewSeamBackedWithConfig` | runtime.builtin/exact:tmux | `runtime.Provider` | proved by internal/runtime/tmux/adapter_test.go#TestTmuxConformance |
 | `runtime.composition.auto` | production_provider | — | `runtime.Provider` | `internal/runtime/auto.New` | source: cmd/gc/providers.go#resolveSessionTransportProvider — conditional transport composition is outside the runtime registry | `runtime.Provider` | proved by internal/runtime/auto/conformance_test.go#TestAutoConformance (default-route conformance; ACP route covered by focused auto routing tests) |
+| `runtime.worker-site.guard` | production_provider | — | `runtime.Provider` | `internal/runtime/guard.New` | source: cmd/gc/providers.go#resolveWorkerSpec — a worker site's control-plane descriptor selects the guard, outside the runtime registry | `runtime.Provider` | not applicable: worker-site guard: it refuses every runtime operation, so the successful-provider contract is not applicable |
 <!-- END CHECKED RUNTIME PROVIDER LEDGER -->
 
 Rows reading `waived by <bead> through <date>` are governed by "Waiver expiry

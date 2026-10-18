@@ -496,3 +496,13 @@ func (s *ProxiedStore) fireConditionalWritesDegradeOnce(d ConditionalWritesDegra
 		carrier.fireConditionalWritesDegradeOnce(d)
 	}
 }
+
+// ReadyOrdered forwards a bounded ordered ready read to the read leaf
+// (OrderedReadyReader). Explicit for the reason DepListBatch is: a wrapper
+// does not promote its leaf's optional capabilities, so a silent ProxiedStore
+// would make every bounded read take the whole-set path. The native leaf cuts
+// in order; a demoted store's bd leaf cannot and answers with its whole set.
+func (s *ProxiedStore) ReadyOrdered(query ReadyQuery, order ReadyOrder) ([]Bead, bool, error) {
+	rows, ordered, err := ReadyOrdered(s.readLeaf(), query, order)
+	return rows, ordered, s.classifyReadError(err)
+}

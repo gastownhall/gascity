@@ -192,6 +192,7 @@ go_test(
         "workquery_parity_test.go",
         "workquery_recovery_test.go",
         "workquery_single_session_routed_test.go",
+        "workquery_whitespace_identity_test.go",
     ],
     data = glob(
         ["**"],

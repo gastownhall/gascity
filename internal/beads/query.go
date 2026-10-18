@@ -203,6 +203,31 @@ type ReadyQuery struct {
 	// default Ready reads to TierBoth so no-history and ephemeral policy rows
 	// remain reachable under bd 1.0.4.
 	TierMode TierMode
+
+	// Unassigned and MetadataEquals are ADVISORY narrowing predicates, the
+	// same contract ListQuery.ParentIDs carries: a store MAY apply them to
+	// narrow its answer, and a store that does not recognize them ignores them
+	// and returns a superset. A store that applies one must apply it exactly —
+	// never drop a row that satisfies it — so a caller that needs the exact
+	// answer re-applies the predicates to what comes back, and pays for the
+	// pushdown only in rows it does not have to read.
+	//
+	// Unassigned keeps beads whose assignee is empty, as `bd ready
+	// --unassigned` matches.
+	Unassigned bool
+	// MetadataEquals keeps beads whose metadata carries every key with exactly
+	// that value, as `bd ready --metadata-field key=value` matches. Keys and
+	// values are passed as given; a caller that cannot vouch for a pair's
+	// equality semantics on every backend (a value that is a JSON literal, a
+	// key outside bd's key grammar) must not push it.
+	MetadataEquals map[string]string
+}
+
+// IsZero reports whether q selects nothing beyond Ready's historical default:
+// every open, unblocked, main-tier bead.
+func (q ReadyQuery) IsZero() bool {
+	return q.Assignee == "" && q.Limit == 0 && q.TierMode == TierIssues &&
+		!q.Unassigned && len(q.MetadataEquals) == 0
 }
 
 func readyQueryFromArgs(queries []ReadyQuery) ReadyQuery {

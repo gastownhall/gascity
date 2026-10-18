@@ -60,11 +60,11 @@ import (
 // (reconcile_steps_*.go). A closed wait dependency runs the waits step alone,
 // without reading the legs (GUAR-010).
 //
-// The lane always reads, suspended city or not (CONTRACT v5 R4), so a
-// suspended city's drains keep their work reads. Only its steps keep
-// legacy's suspension gate: while the city is suspended a pass starts none,
-// as legacy's demand pass returns before its repairs (POOL-001). The lane
-// serves only v2.
+// A pass reads every leg, suspended city or not (CONTRACT v5 R4), so a
+// suspended city's drains keep their work reads. Its custom scale_checks and
+// its steps keep legacy's suspension gate: while the city is suspended a pass
+// runs no check and starts no step, as legacy's demand pass returns before
+// both (POOL-001). The lane serves only v2.
 //
 // The lane is paced at the patrol interval and woken by key-less socket and
 // API pokes (a CLI writer such as gc sling pokes key-less), a supervisor
@@ -281,6 +281,10 @@ type externalReadsEnv struct {
 	// WorkLegs are the city work legs over WorkStore, which the stranded-work
 	// detector reads; the zero WorkLegs detects nothing.
 	WorkLegs WorkLegs
+	// CitySuspended is effectiveCitySuspended, judged once per pass by
+	// passEnv so the pass's sources and its steps agree. Like legacy, an
+	// unreadable suspension file reads as the zero state.
+	CitySuspended bool
 }
 
 // laneStep is work a pass starts after it publishes, at most once per every
@@ -427,8 +431,7 @@ func (l *externalReadsLane) join(ctx context.Context) error {
 
 // pass publishes the reads that ended after the last publish, reads the
 // sources, publishes, then starts the steps that are due unless the city is
-// suspended (POOL-001; like legacy, an unreadable suspension file reads as
-// the zero state). It reports whether it ran.
+// suspended (POOL-001). It reports whether it ran.
 func (l *externalReadsLane) pass(ctx context.Context) bool {
 	env, ok := l.passEnv(ctx)
 	if !ok {
@@ -443,7 +446,7 @@ func (l *externalReadsLane) pass(ctx context.Context) bool {
 		return false
 	}
 	rec := l.publish(published)
-	if !effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
+	if !env.CitySuspended {
 		l.startSteps(ctx, env, rec, nil)
 	}
 	return true
@@ -460,7 +463,7 @@ func (l *externalReadsLane) stepsOnly(ctx context.Context) bool {
 	if !ok {
 		return false
 	}
-	if !effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath)) {
+	if !env.CitySuspended {
 		l.startSteps(ctx, env, l.rec.Load(), l.waitsStep)
 	}
 	return true
@@ -495,8 +498,9 @@ func (l *externalReadsLane) lateEnded() bool {
 	return l.late
 }
 
-// passEnv returns the environment a pass runs against, and false when the
-// pass must not run: shutdown has begun, or the env cannot be built.
+// passEnv returns the environment a pass runs against, with the city's
+// suspension judged, and false when the pass must not run: shutdown has
+// begun, or the env cannot be built.
 func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool) {
 	if ctx.Err() != nil {
 		return externalReadsEnv{}, false
@@ -506,6 +510,7 @@ func (l *externalReadsLane) passEnv(ctx context.Context) (externalReadsEnv, bool
 		fmt.Fprintf(l.stderr, "external reads: %v\n", err) //nolint:errcheck
 		return externalReadsEnv{}, false
 	}
+	env.CitySuspended = effectiveCitySuspended(env.Cfg, loadSuspensionStateBestEffort(env.CityPath))
 	return env, true
 }
 
@@ -616,7 +621,8 @@ func (l *externalReadsLane) collect(sources []externalSource) map[sourceKey]sour
 
 // sources lists what a pass reads: each lane-fed demand leg (RawOpen and
 // ReadyAll), the city store's closed named-session index when an on_demand named session can consult it, and
-// the custom scale_checks.
+// the custom scale_checks unless the city is suspended: legacy's demand pass
+// returns before them, and the decide reads none while it is (POOL-001).
 func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 	var out []externalSource
 	add := func(key sourceKey, read func() (sourcePayload, error)) {
@@ -638,7 +644,7 @@ func (l *externalReadsLane) sources(env externalReadsEnv) []externalSource {
 			return sourcePayload{ClosedNamed: idx}, err
 		})
 	}
-	if env.Cfg != nil {
+	if env.Cfg != nil && !env.CitySuspended {
 		out = append(out, externalSource{key: sourceKey{kind: sourceScaleCheck, cfg: env.Cfg}, budget: l.scaleCheckBudget, read: func() (sourcePayload, error) {
 			return sourcePayload{ScaleCheck: runCustomScaleChecks(env, l.runner, l.queryEnv, l.stderr)}, nil
 		}})

@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"math/rand/v2"
 	"os"
 	"os/exec"
@@ -31,7 +30,12 @@ var bdShowWatchInterval = 2 * time.Second
 // bdShowWatchRemoteBase is the floor of a remote scope's watch poll. A remote
 // watch is one served read per poll, and a watcher can sit unattended for
 // hours, so gc polls a served store five times less often than bd polls a
-// local one: 0.1 req/s per watcher.
+// local one: 0.1 req/s per watcher. That load is why bd-enterprise refuses
+// --watch on an http workspace (design decision D10 in the bd-enterprise
+// repository, engdocs/design/http-client-backend.md: polling a shared server
+// every 2s amplifies load, a failing poll spams or vanishes, and nothing
+// backs off from the server's 503s). gc's watch polls at this slower rate,
+// reports a failing read once and backs off while failing (pollBdShowWatch).
 const bdShowWatchRemoteBase = 10 * time.Second
 
 // bdShowWatchRemoteInterval returns the poll interval for a watch on a remote
@@ -41,6 +45,10 @@ const bdShowWatchRemoteBase = 10 * time.Second
 var bdShowWatchRemoteInterval = func() time.Duration {
 	return bdShowWatchRemoteBase + rand.N(bdShowWatchRemoteBase/5+1) //nolint:gosec // jitter, not security
 }
+
+// bdShowWatchMaxBackoff caps the wait between polls while reads keep failing,
+// far above either poll interval.
+const bdShowWatchMaxBackoff = 5 * time.Minute
 
 // bdShowWatchContext is canceled by Ctrl+C or SIGTERM. A var so tests can
 // stop a watch without signaling the test process.
@@ -237,23 +245,47 @@ var bdScopeRefusesShowWatch = func(cityPath string, target execStoreTarget, env 
 	return scopeUsesProxiedDoltMode(cityPath, target.ScopeRoot)
 }
 
-// bdScopeUsesRemoteBackend reports whether the scope's store is served over
-// bd's http backend: its own metadata names backend "http", or, for a rig with
-// no metadata.json of its own, its city's does. Only a missing file inherits;
-// metadata that exists is the scope's own answer. gc serves `show --watch`
-// itself for such a scope, at the remote interval: enterprise bd refuses
-// --watch against an HTTP workspace, and OSS bd would poll the server every
-// 2s.
+// bdScopeUsesRemoteBackend reports whether the scope's store is served by a
+// remote backend (contract.BackendServesRemotely: bd's http store). The
+// backend is read from the scope that governs it, by the rule
+// resolveBdBinaryForScope applies: a rig that overrides the city backend
+// (scopeOverridesCityBackend) answers from its own metadata, and every other
+// rig from its city's, whatever its own metadata.json and config.yaml leave
+// unsaid. An unreadable metadata.json answers false; bd reports it itself. gc
+// serves `show --watch` itself on such a scope, at the remote interval:
+// enterprise bd refuses --watch against an HTTP workspace, and OSS bd would
+// poll the server every 2s.
+//
+// Sharing that rule keeps a rig's watch routed with its other bd commands. On
+// a build that does not register bd's http backend, a rig whose own
+// metadata.json names "http" does not by that alone override its city, so its
+// watch follows the city: gc serves it under a proxied city (the default) and
+// bd under an embedded or server-mode one. On such a build, a rig whose
+// config.yaml overrides the city is refused before any watch starts.
 func bdScopeUsesRemoteBackend(cityPath, scopeRoot string) bool {
-	if strings.TrimSpace(scopeRoot) == "" {
-		scopeRoot = cityPath
+	governing := cityPath
+	if scopeOverridesCityBackend(cityPath, scopeRoot) {
+		governing = scopeRoot
 	}
-	path := scopeMetadataJSONPath(scopeRoot)
-	if _, err := os.Stat(path); errors.Is(err, fs.ErrNotExist) && strings.TrimSpace(cityPath) != "" && !samePath(cityPath, scopeRoot) {
-		path = scopeMetadataJSONPath(cityPath)
+	backend, _, err := contract.ReadMetadataBackend(fsys.OSFS{}, scopeMetadataJSONPath(governing))
+	return err == nil && contract.BackendServesRemotely(backend)
+}
+
+// bdShowWatchServedByGC recognizes a `show --watch` that gc serves itself, and
+// the interval to poll at: the remote interval on a remote scope, checked
+// first because the server's load decides it, and bd's own interval where bd
+// refuses watch mode. ok is false for anything else, which stays bd's.
+func bdShowWatchServedByGC(bdArgs []string, cityPath string, target execStoreTarget, env []string) (req bdShowWatchRequest, interval time.Duration, ok bool) {
+	req, ok = parseBdShowWatchArgs(bdArgs)
+	switch {
+	case !ok:
+		return bdShowWatchRequest{}, 0, false
+	case bdScopeUsesRemoteBackend(cityPath, target.ScopeRoot):
+		return req, bdShowWatchRemoteInterval(), true
+	case bdScopeRefusesShowWatch(cityPath, target, env):
+		return req, bdShowWatchInterval, true
 	}
-	backend, named, err := contract.ReadMetadataBackend(fsys.OSFS{}, path)
-	return err == nil && named && strings.EqualFold(strings.TrimSpace(backend), "http")
+	return bdShowWatchRequest{}, 0, false
 }
 
 // bdWatchRunFunc runs one bd invocation and returns its exit code.
@@ -271,7 +303,9 @@ type bdWatchRunner struct {
 	env       []string
 	cityPath  string
 	scopeRoot string
-	// stderr receives gc's own diagnostics, whatever the call's sink is.
+	// stderr receives gc's own diagnostics: the gc-managed "bd dolt start"
+	// remedy and the silent-fallback report. A call's own failure, bd's
+	// stderr or a bd that cannot start, goes to that call's stderr.
 	stderr io.Writer
 	hinted bool
 }
@@ -303,7 +337,7 @@ func (r *bdWatchRunner) run(ctx context.Context, args []string, stdout, stderr i
 		return exit
 	case err != nil:
 		if ctx.Err() == nil {
-			fmt.Fprintf(r.stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(stderr, "gc bd: %v\n", err) //nolint:errcheck // best-effort stderr
 		}
 		return 1
 	case bdOutputIndicatesSilentFallback(scan.String()):
@@ -313,10 +347,11 @@ func (r *bdWatchRunner) run(ctx context.Context, args []string, stdout, stderr i
 	return 0
 }
 
-// runBdShowWatch serves `show <id> --watch` for a scope where bd refuses it,
-// the way bd serves it where it does not (beads v1.3.0 watchIssue): render
-// once, then poll every interval and re-render when the bead's
-// id:status:updated_at snapshot changes, until ctx is canceled (Ctrl+C).
+// runBdShowWatch serves `show <id> --watch` for a scope where gc serves the
+// watch itself, the way bd serves it where it does (beads v1.3.0 watchIssue):
+// render once, then poll and re-render when the bead's id:status:updated_at
+// snapshot changes, until ctx is canceled (Ctrl+C). pollBdShowWatch paces the
+// polls.
 func runBdShowWatch(ctx context.Context, req bdShowWatchRequest, run bdWatchRunFunc, interval time.Duration, stdout, stderr io.Writer) int {
 	id := req.ID
 	if req.Current {
@@ -334,8 +369,9 @@ func runBdShowWatch(ctx context.Context, req bdShowWatchRequest, run bdWatchRunF
 	}
 
 	// Snapshot before rendering: a change that lands in between is then seen
-	// by the next poll and redrawn, never lost.
-	last, code := bdShowWatchSnapshot(ctx, req, id, run)
+	// by the next poll and redrawn, never lost. A failed first read is not
+	// reported: the render reads the same bead and shows bd's own error.
+	last, code, _ := bdShowWatchSnapshot(ctx, req, id, run)
 	if code == bdSilentFallbackExitCode {
 		return code
 	}
@@ -347,32 +383,69 @@ func runBdShowWatch(ctx context.Context, req bdShowWatchRequest, run bdWatchRunF
 		return code
 	}
 	fmt.Fprint(stderr, bdShowWatchHint) //nolint:errcheck // best-effort stderr
+	return pollBdShowWatch(ctx, req, id, last, run, interval, stdout, stderr)
+}
 
-	ticker := time.NewTicker(interval)
-	defer ticker.Stop()
+// pollBdShowWatch polls id every interval and redraws it when its snapshot
+// differs from last, until ctx is canceled. bd's watchIssue skips a failed
+// poll silently and keeps its fixed rate; gc reports the first failure of a
+// run of them, with bd's first error line, keeps the last view up and doubles
+// the wait after each consecutive failure, up to bdShowWatchMaxBackoff. A
+// watch then neither hides a dead store behind a stale view nor keeps
+// hammering a server that answers 503s. The first poll that succeeds again is
+// reported and drops the wait back to interval.
+func pollBdShowWatch(ctx context.Context, req bdShowWatchRequest, id, last string, run bdWatchRunFunc, interval time.Duration, stdout, stderr io.Writer) int {
+	delay, failing := interval, false
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			fmt.Fprint(stderr, bdShowWatchStopped) //nolint:errcheck // best-effort stderr
 			return 0
-		case <-ticker.C:
-			snap, code := bdShowWatchSnapshot(ctx, req, id, run)
-			if code == bdSilentFallbackExitCode {
-				return code
-			}
-			if code != 0 || snap == last {
-				continue
-			}
-			last = snap
-			if code := run(ctx, req.displayArgs(id), stdout, stderr); code == bdSilentFallbackExitCode {
-				return code
-			}
-			if ctx.Err() != nil {
-				continue
-			}
-			fmt.Fprint(stderr, bdShowWatchHint) //nolint:errcheck // best-effort stderr
+		case <-timer.C:
 		}
+		snap, code, reason := bdShowWatchSnapshot(ctx, req, id, run)
+		switch {
+		case code == bdSilentFallbackExitCode:
+			return code
+		case ctx.Err() != nil:
+			// Canceled mid-read, which is no failure: the timer stays drained,
+			// so the next select reports the stop.
+			continue
+		case code != 0:
+			if !failing {
+				fmt.Fprintf(stderr, "gc bd: watch: reading %s failed: %s; keeping the last view and retrying with backoff\n", id, reason) //nolint:errcheck // best-effort stderr
+			}
+			failing, delay = true, min(2*delay, bdShowWatchMaxBackoff)
+		default:
+			if failing {
+				fmt.Fprintf(stderr, "gc bd: watch: reading %s recovered\n", id) //nolint:errcheck // best-effort stderr
+			}
+			failing, delay = false, interval
+			if snap != last {
+				last = snap
+				if code := bdShowWatchRedraw(ctx, req, id, run, stdout, stderr); code != 0 {
+					return code
+				}
+			}
+		}
+		timer.Reset(delay)
 	}
+}
+
+// bdShowWatchRedraw renders id again after its snapshot changed and repeats
+// bd's watch hint below it. A render that fails shows bd's own error and the
+// watch goes on; only bd's silent fallback to a store the watch must not read
+// returns non-zero, which stops the watch.
+func bdShowWatchRedraw(ctx context.Context, req bdShowWatchRequest, id string, run bdWatchRunFunc, stdout, stderr io.Writer) int {
+	if code := run(ctx, req.displayArgs(id), stdout, stderr); code == bdSilentFallbackExitCode {
+		return code
+	}
+	if ctx.Err() == nil {
+		fmt.Fprint(stderr, bdShowWatchHint) //nolint:errcheck // best-effort stderr
+	}
+	return 0
 }
 
 // bdShowWatchRow is the part of bd's show --json row the watch reads.
@@ -384,21 +457,34 @@ type bdShowWatchRow struct {
 
 // bdShowWatchSnapshot reads the bead as JSON and reduces it to bd's own watch
 // snapshot (id:status:updated_at). A failed read returns bd's non-zero code
-// and is skipped by the caller, as bd skips it.
-func bdShowWatchSnapshot(ctx context.Context, req bdShowWatchRequest, id string, run bdWatchRunFunc) (string, int) {
+// and the reason it failed (bdShowWatchFailureReason).
+func bdShowWatchSnapshot(ctx context.Context, req bdShowWatchRequest, id string, run bdWatchRunFunc) (snapshot string, code int, reason string) {
 	var out bytes.Buffer
-	if code := run(ctx, req.snapshotArgs(id), &out, io.Discard); code != 0 {
-		return "", code
+	errOut := &headLimitedWriter{limit: bdStderrScanLimit}
+	if exit := run(ctx, req.snapshotArgs(id), &out, errOut); exit != 0 {
+		return "", exit, bdShowWatchFailureReason(errOut.String(), exit)
 	}
 	var rows []bdShowWatchRow
 	if err := json.Unmarshal(out.Bytes(), &rows); err == nil && len(rows) > 0 {
-		return rows[0].ID + ":" + rows[0].Status + ":" + rows[0].UpdatedAt, 0
+		return rows[0].ID + ":" + rows[0].Status + ":" + rows[0].UpdatedAt, 0, ""
 	}
 	raw := bytes.TrimSpace(out.Bytes())
 	if len(raw) == 0 {
-		return "", 1
+		return "", 1, "bd show --json printed nothing"
 	}
-	return string(raw), 0
+	return string(raw), 0, ""
+}
+
+// bdShowWatchFailureReason sums up a failed read for the watch's one failure
+// line: bd's first non-blank stderr line, or its exit code when it printed
+// none.
+func bdShowWatchFailureReason(stderr string, code int) string {
+	for line := range strings.Lines(stderr) {
+		if line = strings.TrimSpace(line); line != "" {
+			return line
+		}
+	}
+	return fmt.Sprintf("bd exited %d", code)
 }
 
 // bdShowWatchCurrentID asks bd which bead --current names.

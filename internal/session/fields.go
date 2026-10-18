@@ -272,7 +272,7 @@ var observed = []struct {
 	{legacy(srcTransition, "RestartRequestPatch"), false, []string{"continuation_reset_pending", "last_woke_at", "pending_create_claim", "pending_create_started_at", "primed_at", "priming_attempted_at", "prompt_hash", "session_key", "started_config_hash"}},
 	{legacy(srcTransition, "RetireNamedSessionPatch"), false, []string{"pending_create_claim", "pending_create_started_at", "state", "state_reason"}},
 	{op(srcManager, "Manager.createBeadOnly"), false, []string{"continuation_epoch", "instance_token", "pending_create_claim", "pending_create_started_at", "provider", "resume_command", "resume_flag", "resume_style", "session_id_flag", "session_origin", "state", "work_dir"}},
-	{op(srcManager, "Manager.Suspend"), false, []string{"held_until", "sleep_intent", "sleep_reason", "slept_at", "state"}},
+	{op(srcManager, "Manager.Suspend"), false, []string{"held_until", "last_woke_at", "sleep_intent", "sleep_reason", "slept_at", "state"}},
 	{op(srcManager, "Manager.Suspend"), true, []string{"wake_request", "wake_requested_at"}},
 	{op("internal/session/store.go", "Store.SetState"), false, []string{"state", "state_reason"}},
 	{op(srcWaitStore, "Store.wakeSessionFromBead"), false, []string{"churn_count", "held_until", "quarantined_until", "sleep_intent", "wait_hold", "wake_attempts", "wake_refused_event_at"}},

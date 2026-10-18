@@ -497,6 +497,17 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 	}
 }
 
+// runTestenvChild re-execs a named test under exactly env, optionally in dir.
+// Dolt-port and git-template contracts share this subprocess boundary.
+func runTestenvChild(bin, testName, dir string, env []string) ([]byte, error) {
+	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")
+	if dir != "" {
+		cmd.Dir = dir
+	}
+	cmd.Env = env
+	return cmd.Output()
+}
+
 // assertRefusesDoltPort re-execs bin under testName's -test.run pattern (with
 // dir as its working directory, unless empty) and asserts either a panic —
 // whose stderr must contain both diagnostic substrings — or, when wantPanic
@@ -508,12 +519,7 @@ func TestInitRefusesProdDoltPort(t *testing.T) {
 // test/test-resource-counts.toml).
 func assertRefusesDoltPort(t *testing.T, bin, testName, dir string, env []string, wantPanic bool, wantOutput []string) {
 	t.Helper()
-	cmd := exec.Command(bin, "-test.run=^"+testName+"$", "-test.v")
-	if dir != "" {
-		cmd.Dir = dir
-	}
-	cmd.Env = env
-	out, err := cmd.Output()
+	out, err := runTestenvChild(bin, testName, dir, env)
 	if wantPanic {
 		if err == nil {
 			t.Fatalf("child succeeded but should have refused the Dolt port; output:\n%s", out)
