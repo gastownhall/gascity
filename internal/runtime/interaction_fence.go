@@ -16,7 +16,9 @@ var ErrInteractionGone = errors.New("the interaction the response names is no lo
 // FencedInputProvider's input is. A fenced answer never reaches another
 // incarnation: a miss is a *FenceMismatchError (Partial when a key of the
 // answer was sent before it), and a runtime that cannot fence session name
-// refuses with ErrInputFenceUnsupported before sending anything.
+// refuses with ErrInputFenceUnsupported before sending anything. An answer
+// that fails for another reason before its key was sent may wrap
+// ErrInputNotSent.
 type FencedInteractionProvider interface {
 	// ResponseFencing reports how the runtime fences answers to session
 	// name. It is a static trait: it reads no runtime state.

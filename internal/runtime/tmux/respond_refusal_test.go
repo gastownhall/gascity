@@ -14,8 +14,8 @@ import (
 // Every refusal of Respond that sends nothing names why with a runtime
 // sentinel, so a caller can tell a refusal from an answer that may have
 // landed: a prompt gone or changed is ErrInteractionGone, an action no prompt
-// offers is ErrInteractionResponseInvalid, and a pane that could not be read
-// is ErrRuntimeUnavailable.
+// offers is ErrInteractionResponseInvalid, and a pane that could not be read,
+// or a key that found no tmux server, is ErrRuntimeUnavailable.
 func TestRespondRefusalsNameWhy(t *testing.T) {
 	requestID := "tmux-" + approvalHash(&parsedApproval{ToolName: "Read", Input: "file_path: /tmp/test.txt"})
 	cases := []struct {
@@ -66,6 +66,13 @@ func TestRespondRefusalsNameWhy(t *testing.T) {
 	provider := &Provider{tm: &Tmux{exec: &fakeExecutor{agentPane: true, outs: []string{"assistant ready"}}}}
 	if err := provider.Respond("s", runtime.InteractionResponse{Action: "approve"}); err != nil {
 		t.Fatalf("Respond with no request and no prompt = %v", err)
+	}
+	// The pane shows the prompt, out of copy-mode, and the key finds the
+	// server gone: no key reached the prompt.
+	exec := &fakeExecutor{agentPane: true, outs: []string{approvalPromptPane(), "0"}, errs: []error{nil, nil, ErrNoServer}}
+	err := (&Provider{tm: &Tmux{exec: exec}}).Respond("s", runtime.InteractionResponse{RequestID: requestID, Action: "approve"})
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !slices.Equal(sentKeys(exec.calls), []string{"1"}) {
+		t.Fatalf("Respond = %v after keys %q, want ErrRuntimeUnavailable from the one key", err, sentKeys(exec.calls))
 	}
 }
 
@@ -121,4 +128,32 @@ func TestRespondFencedTypesTheAnswerUnderThePaneGuard(t *testing.T) {
 			t.Fatalf("bare %q, events %q; want nothing typed", bare, events)
 		}
 	})
+	// A failure before the guarded paste, reading the fence or staging the
+	// key, sends nothing and says so (ErrInputNotSent): it is no miss, and
+	// no error after a key that may have landed.
+	loadErr := errors.New("load-buffer: no space left on device")
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	for _, tc := range []struct {
+		name  string
+		ctx   context.Context
+		fault func(*fenceModel)
+		cause error
+	}{
+		{"staging the key failed", context.Background(), func(m *fenceModel) { m.failLoad = map[int]error{1: loadErr} }, loadErr},
+		{"reading the fence failed", canceled, func(*fenceModel) {}, context.Canceled},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			m := model()
+			tc.fault(m)
+			err := fenceModelProvider(m).RespondFenced(tc.ctx, fenceModelSession, testFence, answer)
+			var miss *runtime.FenceMismatchError
+			if !errors.Is(err, runtime.ErrInputNotSent) || !errors.Is(err, tc.cause) || errors.As(err, &miss) {
+				t.Fatalf("RespondFenced = %v, want ErrInputNotSent wrapping %v", err, tc.cause)
+			}
+			if bare, events, _ := m.snapshot(); len(bare) != 0 || len(events) != 0 || m.guards != 0 {
+				t.Fatalf("bare %q, events %q, guards %d; want nothing typed", bare, events, m.guards)
+			}
+		})
+	}
 }

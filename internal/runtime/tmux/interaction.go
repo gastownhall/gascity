@@ -956,9 +956,13 @@ func (t *Tmux) respond(ctx context.Context, name string, response runtime.Intera
 	// Send the keystroke once. key is one digit from 1 to 9
 	// (approvalOptionKey), which tmux types as given, so unlike caller text it
 	// needs no runtime.TmuxLiteralArgs encoding (RUNTIME-CONTRACT-011).
+	// A key that found no session or no server typed nothing.
 	if _, err := t.runCtx(inputCtx(ctx), "send-keys", "-t", target, "-l", key); err != nil {
-		if errors.Is(err, ErrSessionNotFound) {
+		switch {
+		case errors.Is(err, ErrSessionNotFound):
 			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrSessionNotFound, err)
+		case errors.Is(err, ErrNoServer):
+			return fmt.Errorf("send-keys failed: %w: %w", runtime.ErrRuntimeUnavailable, err)
 		}
 		return fmt.Errorf("send-keys failed: %w", err)
 	}

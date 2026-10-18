@@ -402,7 +402,8 @@ type doneItem struct {
 // this Take's lease is rewritten at its fresh revision; an op another lane
 // re-took, or that closed otherwise, is left alone (I9). It runs on past ctx,
 // for the time left in the lease bounded by doneMinBudget and doneMaxBudget,
-// but never past the result's SettleBy.
+// but never past the result's SettleBy. Every respond it closes then
+// re-checks the end of its occurrence (Store.endClosed).
 func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectResult, preCall time.Time, res *PassResult) error {
 	er, success := l.settle(tb, er, preCall)
 	now := l.now()
@@ -430,6 +431,7 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 			}
 		case it.written && it.next.Status == StatusClosed:
 			res.Closed = append(res.Closed, ClosedOp{ID: it.id, Arm: it.next.Outcome.Arm, Reason: it.next.Outcome.Reason})
+			endErr = errors.Join(endErr, l.store.endClosed(it.next, now))
 		case it.written:
 			res.Next = minTime(res.Next, it.next.RetryAt)
 		}
@@ -741,6 +743,9 @@ func (l *ConversationLane) writeCloses(ctx context.Context, closes []ruleClose, 
 		}
 		for _, c := range bc {
 			res.Closed = append(res.Closed, ClosedOp{ID: c.cur.ID, Arm: c.next.Outcome.Arm, Reason: c.next.Outcome.Reason})
+		}
+		if err := l.endClosedOccurrences(bc); err != nil {
+			return false, err
 		}
 	}
 	if rowItem != nil {

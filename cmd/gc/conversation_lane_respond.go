@@ -28,8 +28,8 @@ const laneRespondRefusedAction = opjournal.RefusedReasonPrefix + "action"
 // The re-check and the answer run under the session mutation lock, which
 // legacy Manager.Respond holds over its own: otherwise both could pass the
 // runtime's pre-verify of one prompt and type two keys, the second landing
-// in whatever shows next. A lock held past ctx sends nothing, and the op
-// retries.
+// in whatever shows next. A lock held past ctx, or a re-check that outlasts
+// it, sends nothing, and the op retries.
 func (e *conversationLaneExec) Respond(ctx context.Context, c opjournal.RespondCall) opjournal.ControlResult {
 	h := e.live
 	if h == nil {
@@ -56,6 +56,11 @@ func (e *conversationLaneExec) respondLocked(ctx context.Context, h worker.Handl
 		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 	case pending == nil || pending.RequestID != c.RequestID:
 		return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
+	}
+	// The re-check need not honor ctx, so it can spend the call's budget:
+	// an answer begun now would fail before its key, so none is sent.
+	if err := ctx.Err(); err != nil {
+		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("answering %s after the re-check: %w", c.Interaction, err)}
 	}
 	fence := e.respondFence(c.Fence)
 	err = h.Respond(ctx, worker.InteractionResponse{
@@ -98,14 +103,18 @@ func laneRespondResult(ctx context.Context, err error, unfenced bool) opjournal.
 		return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
 	case errors.As(err, &miss) && miss.Partial:
 		return opjournal.Unknown{Cause: err}
-	case errors.As(err, &miss), errors.Is(err, runtime.ErrInputFenceUnsupported),
-		errors.Is(err, runtime.ErrSessionNotFound), errors.Is(err, session.ErrSessionNotFound), errors.Is(err, runtime.ErrRuntimeUnavailable):
+	case errors.As(err, &miss), errors.Is(err, runtime.ErrInputFenceUnsupported), errors.Is(err, runtime.ErrInvalidInputFence),
+		errors.Is(err, runtime.ErrSessionNotFound), errors.Is(err, session.ErrSessionNotFound), errors.Is(err, runtime.ErrRuntimeUnavailable),
+		errors.Is(err, runtime.ErrInputNotSent):
 		// Nothing was sent: another incarnation, a runtime that would not
-		// fence, or one that could not be reached or read before the key.
+		// fence, a fence naming no incarnation, a runtime that could not be
+		// reached or read before the key, or an answer that failed before
+		// its key, even one cut short by ctx.
 		return opjournal.NotDelivered{Transient: true, Cause: err}
 	default:
-		// A canceled or timed-out answer, or a prompt that did not clear
-		// after its key, may have been answered.
+		// A canceled or timed-out answer the runtime does not place before
+		// its key, or a prompt that did not clear after it, may have been
+		// answered.
 		return opjournal.Unknown{Cause: errors.Join(err, ctx.Err())}
 	}
 }

@@ -218,12 +218,13 @@ func respondEnd(next Op, now time.Time) (Fact, bool) {
 	return f, true
 }
 
-// endOccurrences records the end of the occurrence of every lane respond
-// closes closes (Store.endOccurrence), before the closes are written: a
-// crash in between leaves the ops open, and the next pass closes them again
-// on the recorded facts. Written after, a crash would leave an occurrence
-// open whose answers are spent, so the prompt still showing could not be
-// answered under a fresh key.
+// endOccurrences records the end of the occurrence of every lane respond it
+// closes (Store.endOccurrence), before the closes are written: a crash in
+// between leaves the ops open, and the next pass closes them again on the
+// recorded facts. Written after, a crash would leave an occurrence open whose
+// answers are spent, so the prompt still showing could not be answered under
+// a fresh key. An end withheld for another open answer is re-checked once
+// the closes land (endClosedOccurrences).
 func (l *ConversationLane) endOccurrences(closes []ruleClose) error {
 	closing := make(map[string]bool, len(closes))
 	for _, c := range closes {
@@ -242,8 +243,10 @@ func (l *ConversationLane) endOccurrences(closes []ruleClose) error {
 // outside closing, still answers the occurrence: an answer that sent
 // nothing leaves the prompt showing for that one (DES-O1 §4.7, §10.2: the
 // first accepted answer wins). The last of them to close with nothing sent
-// ends it. A respond proposed after the read races the end: it then closes
-// skipped{stale}, and its requester answers the next occurrence.
+// ends it; two closing at once can each read the other open, so each
+// re-checks once its close lands (Store.endClosed). A respond proposed after
+// the read races the end: it then closes skipped{stale}, and its requester
+// answers the next occurrence.
 func (s *Store) occurrenceEnd(next Op, closing map[string]bool, now time.Time) (Fact, bool, error) {
 	f, ok := respondEnd(next, now)
 	if !ok || f.Reason != ResolvedUnanswered {
@@ -276,6 +279,53 @@ func (s *Store) endOccurrence(next Op, closing map[string]bool, now time.Time) e
 		return err
 	}
 	return nil
+}
+
+// endClosedOccurrences re-checks, once closes have landed, the end of the
+// occurrence each one answers (Store.endClosed).
+func (l *ConversationLane) endClosedOccurrences(closes []ruleClose) error {
+	var errs error
+	for _, c := range closes {
+		errs = errors.Join(errs, l.store.endClosed(c.next, l.now()))
+	}
+	return errs
+}
+
+// endClosed records, once next's close has landed, the unanswered end that
+// occurrenceEnd withheld before it for another open answer, when no other
+// answer is open now. Two answers closing with nothing sent at once can each
+// read the other open before either close lands, and each withholds the end
+// for the other; re-read after its own close, the later of them reads both
+// closed and ends the occurrence. An end already recorded stands
+// (endRaising), and every other end is written before the close. When the
+// other answers cannot be read the end lands anyway and the error says so,
+// as in Done (doneEnds): the close has landed, and an occurrence left open
+// with its answers spent could not be answered again.
+func (s *Store) endClosed(next Op, now time.Time) error {
+	f, ok := respondEnd(next, now)
+	if !ok || f.Reason != ResolvedUnanswered {
+		return nil
+	}
+	_, ok, readErr := s.occurrenceEnd(next, nil, now)
+	if !ok && readErr == nil {
+		return nil
+	}
+	if err := s.endRaising(f); err != nil && !undecodableRow(err) {
+		return errors.Join(readErr, err)
+	}
+	return readErr
+}
+
+// endTerminal records the end of the occurrence of next, a lane respond
+// Cancel found closed: by Store.Close or outside the journal, neither of
+// which ends its occurrence, or by a close whose re-check (endClosed) did
+// not land. An unanswered end lands as endClosed lands it, even when the
+// other answers cannot be read; any other as endOccurrence writes it.
+func (s *Store) endTerminal(next Op, now time.Time) error {
+	if f, ok := respondEnd(next, now); ok && f.Reason == ResolvedUnanswered {
+		return s.endClosed(next, now)
+	}
+	return s.endOccurrence(next, nil, now)
 }
 
 // respondCall is the effect call of a taken respond op, or the rejection of

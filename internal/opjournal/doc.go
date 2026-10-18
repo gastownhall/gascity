@@ -136,8 +136,9 @@
 // generation (RecordRaising). A lane respond is at most once. The first
 // accepted answer wins: a close that may have answered ends the occurrence,
 // a close with nothing sent ends it once no other open answer names it
-// (occurrenceEnd), and a look that shows its prompt gone ends it as well
-// (clearGone), so a prompt still showing is the next occurrence. A legacy respond
+// (occurrenceEnd, re-read once the close lands: endClosed), and a look that
+// shows its prompt gone ends it as well (clearGone), so a prompt still
+// showing is the next occurrence. A legacy respond
 // keeps its client key. The digest covers the defaulted kind, policy (a
 // deliver-now's now_gen and now_turn included), scope, after and payload
 // (≤16 KiB): same id and digest returns the existing op; another digest is

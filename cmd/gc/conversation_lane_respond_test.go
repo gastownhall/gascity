@@ -364,21 +364,34 @@ func TestLaneRespondResultMapping(t *testing.T) {
 	if got, want := laneRespondResult(context.Background(), nil, false), (opjournal.Settled{Via: laneViaLive}); got != want {
 		t.Fatalf("fenced answer = %#v, want %#v", got, want)
 	}
-	for _, err := range []error{
-		runtime.ErrSessionNotFound, session.ErrSessionNotFound, runtime.ErrRuntimeUnavailable,
-		fmt.Errorf("responding to pending interaction: pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, errors.New("server busy")),
-		fmt.Errorf("responding to pending interaction: %w", &runtime.FenceMismatchError{Session: "s", Found: runtime.FenceFoundDead}),
-		fmt.Errorf("session %q: %w", "s", runtime.ErrInputFenceUnsupported),
-	} {
-		if got, ok := laneRespondResult(context.Background(), err, false).(opjournal.NotDelivered); !ok || !got.Transient {
-			t.Fatalf("laneRespondResult(%v) = %#v, want a transient NotDelivered", err, got)
-		}
+	notSent := func(cause error) error {
+		return fmt.Errorf("fenced input to %q: %w: %w", "s", runtime.ErrInputNotSent, cause)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
+	// Nothing was sent, whether or not the call's context has ended.
+	for _, err := range []error{
+		runtime.ErrSessionNotFound, session.ErrSessionNotFound, runtime.ErrRuntimeUnavailable,
+		fmt.Errorf("responding to pending interaction: pre-verify capture failed: %w: %w", runtime.ErrRuntimeUnavailable, errors.New("server busy")),
+		fmt.Errorf("responding to pending interaction: send-keys failed: %w: %w", runtime.ErrRuntimeUnavailable, errors.New("no tmux server running")),
+		fmt.Errorf("responding to pending interaction: %w", &runtime.FenceMismatchError{Session: "s", Found: runtime.FenceFoundDead}),
+		fmt.Errorf("session %q: %w", "s", runtime.ErrInputFenceUnsupported),
+		fmt.Errorf("%w: generation 0", runtime.ErrInvalidInputFence),
+		notSent(fmt.Errorf("reading the agent pane: %w", context.DeadlineExceeded)),
+		fmt.Errorf("send-keys failed: %w", notSent(fmt.Errorf("loading tmux paste buffer: %w", context.Canceled))),
+	} {
+		for _, c := range []context.Context{context.Background(), ctx} {
+			res := laneRespondResult(c, err, false)
+			if got, ok := res.(opjournal.NotDelivered); !ok || !got.Transient {
+				t.Fatalf("laneRespondResult(%v) under ctx err %v = %#v, want a transient NotDelivered", err, c.Err(), res)
+			}
+		}
+	}
+	// The key may have landed: after it, or while its guarded paste ran.
 	for _, err := range []error{
 		fmt.Errorf("responding to pending interaction: approval prompt did not clear within %s of the answer", "10s"),
 		fmt.Errorf("responding to pending interaction: %w", &runtime.FenceMismatchError{Session: "s", Found: runtime.FenceFoundDead, Partial: true}),
+		fmt.Errorf("responding to pending interaction: send-keys failed: %w", context.DeadlineExceeded),
 		context.Canceled,
 	} {
 		if _, ok := laneRespondResult(ctx, err, false).(opjournal.Unknown); !ok {
@@ -456,6 +469,52 @@ func TestLaneExecRespondHoldsTheSessionMutationLock(t *testing.T) {
 	}
 	if res := e.Respond(context.Background(), call); res != (opjournal.Settled{Via: laneViaLive}) {
 		t.Fatalf("Respond once the lock is free = %#v", res)
+	}
+}
+
+// pendingHook runs onPending at each pending look, before the fake answers
+// it: a test ends the call's context during the re-check.
+type pendingHook struct {
+	*runtime.Fake
+	onPending func()
+}
+
+func (p *pendingHook) Pending(name string) (*runtime.PendingInteraction, error) {
+	if p.onPending != nil {
+		p.onPending()
+	}
+	return p.Fake.Pending(name)
+}
+
+// TestLaneExecRespondDeadlineAfterTheRecheckSendsNothing proves a call
+// whose context ends during the pending re-check (a slow capture spending
+// the lease's budget) sends no answer and retries: the respond stays open,
+// never closed ambiguous, so its occurrence is not spent unanswered.
+func TestLaneExecRespondDeadlineAfterTheRecheckSendsNothing(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	v, info := f.view(t)
+	call := opjournal.RespondCall{Fence: laneFence(v), Interaction: "tmux-abc#1", RequestID: "tmux-abc", Response: opjournal.RespondPayload{Action: "approve"}}
+	deps := f.deps(st)
+	hook := &pendingHook{Fake: f.sp}
+	deps.sp = hook
+	e := newConversationLaneExec(deps, info)
+	f.prompt("tmux-abc")
+	if _, err := e.Probe(context.Background(), v); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	hook.onPending = cancel
+	res := e.Respond(ctx, call)
+	if got, ok := res.(opjournal.NotDelivered); !ok || !got.Transient || !errors.Is(got.Cause, context.Canceled) {
+		t.Fatalf("Respond past its deadline = %#v, want a transient NotDelivered", res)
+	}
+	if n := len(f.responses()); n != 0 {
+		t.Fatalf("%d answers reached the runtime past the deadline", n)
+	}
+	hook.onPending = nil
+	if res := e.Respond(context.Background(), call); res != (opjournal.Settled{Via: laneViaLive}) {
+		t.Fatalf("Respond within its deadline = %#v", res)
 	}
 }
 

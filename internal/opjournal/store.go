@@ -690,17 +690,24 @@ func (s *Store) Cancel(id, by, reason string) (CancelResult, Op, error) {
 	if err != nil {
 		return "", Op{}, err
 	}
+	// The close has landed even when its bead's repair fails, so the
+	// occurrence's end is recorded regardless.
+	var closeErr, endErr error
 	if result == CancelClosed || result == CancelAlreadyTerminal {
-		if err := s.closeBead(id); err != nil {
-			return "", Op{}, err
-		}
+		closeErr = s.closeBead(id)
 	}
-	if result == CancelAlreadyTerminal {
-		// A lane respond closed outside the lane and Cancel (its bead
-		// closed externally) gets its end here.
-		if err := s.endOccurrence(op, nil, utc(s.clk.Now())); err != nil {
-			return "", Op{}, err
-		}
+	switch result {
+	case CancelClosed:
+		// Another answer to the occurrence, closing at once, may have read
+		// this one open and withheld the end for it (Store.endClosed).
+		endErr = s.endClosed(op, utc(s.clk.Now()))
+	case CancelAlreadyTerminal:
+		// A lane respond closed outside the lane and Cancel, or whose
+		// re-check did not land, gets its end here (Store.endTerminal).
+		endErr = s.endTerminal(op, utc(s.clk.Now()))
+	}
+	if err := errors.Join(closeErr, endErr); err != nil {
+		return "", Op{}, err
 	}
 	return result, op, nil
 }

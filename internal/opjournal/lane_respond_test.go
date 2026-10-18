@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // respondExec is a fake executor whose runtime shows pending, with respond
@@ -797,6 +799,205 @@ func TestLaneRespondNothingSentLeavesTheOccurrenceToAnotherAnswer(t *testing.T) 
 		mustPass(t, h.lane(t, "ctl"), view(), respondExec(h, "tmux-abc"))
 		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered {
 			t.Fatalf("occurrence ended %v %+v", ok, f)
+		}
+	})
+}
+
+// raceWriter runs race once, just before the op store's first fenced write
+// to op id: between the read that write decides on and the write.
+type raceWriter struct {
+	beads.ConditionalWriter
+	id   string
+	race func()
+}
+
+func (w *raceWriter) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts) error {
+	if race := w.race; race != nil && id == w.id {
+		w.race = nil
+		race()
+	}
+	return w.ConditionalWriter.UpdateIfMatch(id, rev, opts)
+}
+
+// closesOp reports whether batch closes op id.
+func closesOp(batch beads.GuardedBatch, id string) bool {
+	return slices.ContainsFunc(batch.Items, func(it beads.GuardedItem) bool {
+		u := it.Update
+		return u != nil && u.ID == id && u.Opts.Status != nil && *u.Opts.Status == beadStatusClosed
+	})
+}
+
+// Two answers that send nothing and close at once each read the other open
+// before their own close lands, so each withholds the occurrence's end for
+// the other. Each re-checks once its close has landed: the later reads the
+// other closed and ends the occurrence, and the prompt still showing is the
+// next occurrence, answerable under fresh keys.
+func TestNothingSentAnswersClosingAtOnceEndTheOccurrence(t *testing.T) {
+	cancel := func(t *testing.T, h *laneHarness, op Op, principal string) {
+		t.Helper()
+		if res, _, err := h.store.Cancel(op.ID, principal, ""); err != nil || res != CancelClosed {
+			t.Errorf("Cancel(%s) = %s, %v", op.ID, res, err)
+		}
+	}
+	// cancelFirst cancels b just before the lane's batch closing a lands.
+	cancelFirst := func(t *testing.T, h *laneHarness, a, b Op) {
+		fired := false
+		h.batcher.setFault(func(_ int, batch beads.GuardedBatch) (bool, error) {
+			if !fired && closesOp(batch, a.ID) {
+				fired = true
+				cancel(t, h, b, "conversation:gc-9")
+			}
+			return false, nil
+		})
+	}
+	ended := func(t *testing.T, h *laneHarness, raised Fact, ops ...Op) {
+		t.Helper()
+		for _, op := range ops {
+			if got := h.get(t, op.ID); got.Status != StatusClosed {
+				t.Fatalf("op %s %s", op.ID, got.Status)
+			}
+		}
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered {
+			t.Fatalf("occurrence ended %v %+v, want unanswered", ok, f)
+		}
+		if next := h.raise(t, "tmux-abc"); next.Interaction != "tmux-abc#2" {
+			t.Fatalf("the prompt still showing raised %s, want tmux-abc#2", next.Interaction)
+		}
+	}
+	t.Run("cancel and cancel", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		b := h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "deny"}))
+		h.store.writer = &raceWriter{ConditionalWriter: h.store.writer, id: a.ID, race: func() {
+			cancel(t, h, b, "conversation:gc-9")
+		}}
+		cancel(t, h, a, "operator")
+		ended(t, h, raised, a, b)
+	})
+	t.Run("lane rule close and cancel", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		h.clk.Advance(2 * time.Second)
+		b := h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "deny"}))
+		// a's start_by passes; b's has not.
+		h.clk.Advance(a.StartBy.Sub(h.clk.Now()) + time.Second)
+		cancelFirst(t, h, a, b)
+		exec := respondExec(h, "tmux-abc")
+		mustPass(t, h.lane(t, "ctl"), view(), exec)
+		if got := h.get(t, a.ID); got.Outcome.Reason != ReasonExpiredBeforeStart || len(exec.responds) != 0 {
+			t.Fatalf("op a %+v after %d responds", got.Outcome, len(exec.responds))
+		}
+		ended(t, h, raised, a, b)
+	})
+	t.Run("lane done and cancel", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "bogus"}))
+		h.clk.Advance(time.Millisecond)
+		b := h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "approve"}))
+		exec := respondExec(h, "tmux-abc")
+		exec.respond = func(RespondCall) ControlResult {
+			return Rejected{Arm: ArmFailed, Reason: RefusedReasonPrefix + "action"}
+		}
+		cancelFirst(t, h, a, b)
+		mustPass(t, h.lane(t, "ctl"), view(), exec)
+		if got := h.get(t, a.ID); got.Outcome.Reason != RefusedReasonPrefix+"action" || len(exec.responds) != 1 {
+			t.Fatalf("op a %+v after %d responds", got.Outcome, len(exec.responds))
+		}
+		ended(t, h, raised, a, b)
+	})
+}
+
+// When the other answers cannot be read once its close has landed, a
+// nothing-sent close ends the occurrence anyway and says so: left open, the
+// occurrence's answers would be spent and the prompt unanswerable.
+func TestNothingSentCloseEndsTheOccurrenceWhenTheOtherAnswersCannotBeRead(t *testing.T) {
+	h := newLaneHarness(t)
+	raised := h.raise(t, "tmux-abc")
+	a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "deny"}))
+	// The read before the close sees the other answer open; the one after
+	// fails.
+	h.store.writer = &raceWriter{ConditionalWriter: h.store.writer, id: a.ID, race: func() {
+		h.store.store.Store = failingListStore{h.store.store.Store}
+	}}
+	if _, _, err := h.store.Cancel(a.ID, "operator", ""); err == nil || !strings.Contains(err.Error(), "dolt down") {
+		t.Fatalf("Cancel = %v, want the failed read", err)
+	}
+	if got := h.get(t, a.ID); got.Status != StatusClosed || got.Outcome.Arm != ArmCanceled {
+		t.Fatalf("op %s %s %+v", a.ID, got.Status, got.Outcome)
+	}
+	if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered || !slices.Equal(f.CauseOps, []string{a.ID}) {
+		t.Fatalf("occurrence ended %v %+v, want unanswered by %s", ok, f, a.ID)
+	}
+}
+
+// A cancel whose bead repair (Store.closeBead) fails once its close has
+// landed still re-checks its occurrence's end, and says why it failed: two
+// cancels closing at once each withhold the end for the other, and the later
+// of them ends the occurrence.
+func TestCancelRechecksTheOccurrenceEndWhenItsBeadRepairFails(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	raised := h.raise(t, "tmux-abc")
+	a := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	b := h.propose(t, laneRespond(t, raised, "conversation:gc-9", RespondPayload{Action: "deny"}))
+	// b's cancel closes between a's read of b and a's close, and a's bead
+	// then cannot be read back.
+	h.store.writer = &raceWriter{ConditionalWriter: h.store.writer, id: a.ID, race: func() {
+		if res, _, err := h.store.Cancel(b.ID, "conversation:gc-9", ""); err != nil || res != CancelClosed {
+			t.Errorf("Cancel(%s) = %s, %v", b.ID, res, err)
+		}
+		fs.setFail(func(id string) bool { return id == a.ID })
+	}}
+	if _, _, err := h.store.Cancel(a.ID, "operator", ""); !errors.Is(err, errFlakyRead) {
+		t.Fatalf("Cancel = %v, want the failed repair read", err)
+	}
+	fs.setFail(nil)
+	if got := h.get(t, a.ID); got.Status != StatusClosed || got.Outcome.Arm != ArmCanceled {
+		t.Fatalf("op %s %s %+v", a.ID, got.Status, got.Outcome)
+	}
+	if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered || !slices.Equal(f.CauseOps, []string{a.ID}) {
+		t.Fatalf("occurrence ended %v %+v, want unanswered by %s", ok, f, a.ID)
+	}
+}
+
+// A respond closed outside the lane gets its occurrence's end from the next
+// Cancel (CancelAlreadyTerminal) as a close of its own gets one: an answer's
+// end as its outcome gives it, and a nothing-sent end even when the other
+// answers cannot be read, the error saying so (Store.endClosed).
+func TestCancelOfARespondClosedOutsideTheLaneEndsItsOccurrence(t *testing.T) {
+	t.Run("answered", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		if _, err := h.store.Close(op.ID, Outcome{Arm: ArmSucceeded, Result: Result{Via: "live"}}, "operator"); err != nil {
+			t.Fatal(err)
+		}
+		if res, _, err := h.store.Cancel(op.ID, "operator", ""); err != nil || res != CancelAlreadyTerminal {
+			t.Fatalf("Cancel = %s, %v", res, err)
+		}
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != "" || !slices.Equal(f.CauseOps, []string{op.ID}) {
+			t.Fatalf("occurrence ended %v %+v, want answered by %s", ok, f, op.ID)
+		}
+	})
+	t.Run("closed externally, the other answers unreadable", func(t *testing.T) {
+		h := newLaneHarness(t)
+		raised := h.raise(t, "tmux-abc")
+		op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+		if err := h.mem.Close(op.ID); err != nil {
+			t.Fatal(err)
+		}
+		h.store.store.Store = failingListStore{h.store.store.Store}
+		if _, _, err := h.store.Cancel(op.ID, "operator", ""); err == nil || !strings.Contains(err.Error(), "dolt down") {
+			t.Fatalf("Cancel = %v, want the failed read", err)
+		}
+		if got := h.get(t, op.ID); got.Status != StatusClosed || got.Outcome.Reason != ReasonClosedExternally {
+			t.Fatalf("op %s %s %+v", op.ID, got.Status, got.Outcome)
+		}
+		if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered || !slices.Equal(f.CauseOps, []string{op.ID}) {
+			t.Fatalf("occurrence ended %v %+v, want unanswered by %s", ok, f, op.ID)
 		}
 	})
 }
