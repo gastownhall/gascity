@@ -607,3 +607,164 @@ func TestReconcilerRefusedNamedRestartKeepsPrePolicyDrift(t *testing.T) {
 		t.Fatalf("tick 2: started_config_hash = %q, want the restarted session's", got)
 	}
 }
+
+// Kills A14 rebaselining, rather than repairing, an asleep named row the v6
+// binary started whose config changed since (SESS-566/568): as under v6,
+// its drift is repaired, its conversation reset, never resumed on the
+// drifted config.
+func TestDecideRowAsleepNamedV6DriftIsRepaired(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		edit func(*TemplateParams)
+	}{
+		{"pool.max changed since", func(tp *TemplateParams) { tp.FPExtra["pool.max"] = "5" }},
+		{"command changed since", func(tp *TemplateParams) { tp.Command = "run --other" }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			withoutA7(t)
+			named := []string{"configured_named_session", "true", "configured_named_identity", "worker", "configured_named_mode", "always"}
+			meta := slices.Concat([]string{"state", "asleep", "session_key", "k-1"}, v6Row(v6PolicyCore, v6PolicyProvision, v6PolicyLaunch, v6PolicyLive), named)
+			tp := policyTP()
+			tc.edit(&tp)
+			it, _ := decideDrain(t, meta, func(e *selectionEntry) {
+				e.InDesired, e.Desired, e.Liveness = true, desireWake, livenessGone
+			}, func(w *World) {
+				info := w.Census.Rows[rowKeyOf("gc-1")].Info
+				w.Env = &reconcileEnv{Cfg: &config.City{Agents: []config.Agent{{Name: "worker"}}}, SP: runtime.NewFake()}
+				w.Templates = &templateMemo{entries: map[templateMemoKey]templateResolution{templateMemoKeyOf(info): {TP: tp}}}
+			})
+			if it.Reason != decideDriftRepair && it.Patch["continuation_reset_pending"] != "true" { // a repair composed into the start resets the conversation
+				t.Fatalf("decideRow = (%q, %q) %v, want the drift repair of a v6 drift", it.Kind, it.Reason, it.Patch)
+			}
+		})
+	}
+}
+
+// Kills the legacy asleep named block rebaselining, rather than repairing
+// (SESS-568), a session the v6 binary started whose config changed since:
+// its baseline is cleared and its conversation key not kept.
+func TestReconcilerRepairsAsleepNamedV6Drift(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{
+		Workspace:     config.Workspace{Name: "test-city"},
+		Agents:        []config.Agent{{Name: "worker", StartCommand: "test-cmd"}},
+		NamedSessions: []config.NamedSession{{Template: "worker", Mode: "on_demand"}},
+	}
+	sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, "worker")
+	env.addDesired(sessionName, "worker", false)
+	tp := env.desiredState[sessionName]
+	tp.FPExtra = policyExtra()
+	tp.FPExtra["pool.max"] = "5" // the stored hashes are of pool.max=2
+	env.desiredState[sessionName] = tp
+	session := env.createSessionBead(sessionName, "worker")
+	meta := sliceMap(v6Row(
+		"v6:47160838d4b095c47ee45ad4515a6728282015a11a01affa0549a73b244ce41a",
+		"v6:c5da5d5d182c30f841fb059a443ec834928885fa2aae393587698334fa885ab8",
+		"v6:3169d460594ef6b246d2e6876dd3b2fd9678c16fe73673d3f8a79bb35143b608",
+		"v6:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"))
+	maps.Copy(meta, map[string]string{
+		namedSessionMetadataKey: "true", namedSessionIdentityMetadata: "worker", namedSessionModeMetadata: "on_demand", "session_key": "conversation-1",
+	})
+	env.setSessionMetadata(&session, meta)
+
+	env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+
+	got := env.sessionInfo(session.ID)
+	if got.StartedConfigHash != "" || got.SessionKey == "conversation-1" {
+		t.Fatalf("started_config_hash = %q, session_key = %q; want the drift repaired (hash cleared, conversation-1 not kept); stderr=%s",
+			got.StartedConfigHash, got.SessionKey, env.stderr.String())
+	}
+}
+
+// v6NoLive is the v6 binary's live hash of no session_live.
+const v6NoLive = "v6:4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+
+// Kills the legacy live check keeping a v6 live pair it rebaselines (the
+// rebaseline moved nothing, so it repeats every tick): a row whose core
+// baselines are this binary's but whose live pair is the v6 binary's of the
+// same session_live has the live pair rebaselined, without RunLive.
+func TestReconcilerRebaselinesV6LiveArtifact(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	tp := env.desiredState["worker"]
+	tp.FPExtra = policyExtra()
+	env.desiredState["worker"] = tp
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	cfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+	env.setSessionMetadata(&session, sliceMap(v6Row(runtime.CoreFingerprint(cfg), runtime.ProvisionFingerprint(cfg), runtime.LaunchFingerprint(cfg), v6NoLive)))
+
+	env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+
+	b := mustGetBead(t, env.store, session.ID)
+	if b.Metadata["started_live_hash"] != runtime.LiveFingerprint(cfg) || b.Metadata["live_hash"] != runtime.LiveFingerprint(cfg) {
+		t.Fatalf("live pair = (%q, %q), want rebaselined to %q; stderr=%s", b.Metadata["started_live_hash"], b.Metadata["live_hash"], runtime.LiveFingerprint(cfg), env.stderr.String())
+	}
+	if n := env.sp.CountCalls("RunLive", "worker"); n != 0 {
+		t.Fatalf("RunLive calls = %d, want 0", n)
+	}
+}
+
+// Kills a legacy migration of a v6 row of unchanged config that does not
+// converge: tick 1 moves the core four, tick 2 the live pair, tick 3
+// nothing; never a drain or RunLive.
+func TestReconcilerV6RowConvergesInTwoTicks(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	tp := env.desiredState["worker"]
+	tp.FPExtra = policyExtra()
+	env.desiredState["worker"] = tp
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, sliceMap(v6Row(
+		"v6:47160838d4b095c47ee45ad4515a6728282015a11a01affa0549a73b244ce41a",
+		"v6:c5da5d5d182c30f841fb059a443ec834928885fa2aae393587698334fa885ab8",
+		"v6:3169d460594ef6b246d2e6876dd3b2fd9678c16fe73673d3f8a79bb35143b608",
+		v6NoLive)))
+	cfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+	for tick := 1; tick <= 3; tick++ {
+		env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+		if ds := env.dt.get(session.ID); ds != nil {
+			t.Fatalf("tick %d drained: %+v", tick, ds)
+		}
+	}
+	b := mustGetBead(t, env.store, session.ID)
+	for k, want := range map[string]string{
+		"started_config_hash": runtime.CoreFingerprint(cfg), "started_provision_hash": runtime.ProvisionFingerprint(cfg),
+		"started_launch_hash": runtime.LaunchFingerprint(cfg), "started_live_hash": runtime.LiveFingerprint(cfg), "live_hash": runtime.LiveFingerprint(cfg),
+	} {
+		if b.Metadata[k] != want {
+			t.Errorf("after 3 ticks %s = %q, want %q", k, b.Metadata[k], want)
+		}
+	}
+	if n := env.sp.CountCalls("RunLive", "worker"); n != 0 {
+		t.Fatalf("RunLive calls = %d, want 0", n)
+	}
+}
+
+// Kills the v6 rule leaking to other versions: a future (v8) row is still
+// a silent rebaseline of all six keys.
+func TestReconcilerFutureVersionRebaselinesAllSix(t *testing.T) {
+	env := newReconcilerTestEnv(t)
+	env.cfg = &config.City{Agents: []config.Agent{{Name: "worker"}}}
+	env.addDesired("worker", "worker", true)
+	tp := env.desiredState["worker"]
+	tp.FPExtra = policyExtra()
+	env.desiredState["worker"] = tp
+	session := env.createSessionBead("worker", "worker")
+	env.markSessionActive(&session)
+	env.setSessionMetadata(&session, sliceMap(v6Row("v8:aaaa", "v8:bbbb", "v8:cccc", "v8:dddd")))
+	cfg := sessionCoreConfigForHashInfo(tp, env.sessionInfo(session.ID))
+
+	env.reconcile([]beads.Bead{mustGetBead(t, env.store, session.ID)})
+
+	b := mustGetBead(t, env.store, session.ID)
+	if b.Metadata["started_config_hash"] != runtime.CoreFingerprint(cfg) || b.Metadata["started_live_hash"] != runtime.LiveFingerprint(cfg) {
+		t.Fatalf("v8 row: core=%q live=%q, want both rebaselined; stderr=%s", b.Metadata["started_config_hash"], b.Metadata["started_live_hash"], env.stderr.String())
+	}
+	if ds := env.dt.get(session.ID); ds != nil {
+		t.Fatalf("v8 row drained: %+v", ds)
+	}
+}

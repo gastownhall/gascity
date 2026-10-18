@@ -148,7 +148,8 @@ func TestPrePolicyMigration(t *testing.T) {
 }
 
 // TestLogCoreFingerprintDriftShowsRestartExtraOnly: the stderr detail line
-// for a drifted FPExtra lists only the keys that can drift, while the
+// for a drifted FPExtra lists only the keys that can drift, and against a
+// v6 baseline also the pool and skill keys it drains once for, while the
 // breakdown still hashes every key.
 func TestLogCoreFingerprintDriftShowsRestartExtraOnly(t *testing.T) {
 	stored := Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "2", "depends_on": "db"}}
@@ -161,6 +162,20 @@ func TestLogCoreFingerprintDriftShowsRestartExtraOnly(t *testing.T) {
 	LogCoreFingerprintDrift(&out, "worker", string(raw), current)
 	if !strings.Contains(out.String(), "FPExtra: map[depends_on:cache] (len=1)") {
 		t.Fatalf("drift detail = %q, want FPExtra listing only depends_on", out.String())
+	}
+	if strings.Contains(out.String(), "v6 baseline") {
+		t.Fatalf("drift detail = %q, want no v6 line against this version's breakdown", out.String())
+	}
+	v6Breakdown := CoreFingerprintBreakdown(stored)
+	v6Breakdown.Version = "v6"
+	raw, err = json.Marshal(v6Breakdown)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out.Reset()
+	LogCoreFingerprintDrift(&out, "worker", string(raw), current)
+	if !strings.Contains(out.String(), "FPExtra (v6 baseline, drains once): map[pool.max:5] (len=1)") {
+		t.Fatalf("drift detail = %q, want the pool key a v6 baseline drains once for", out.String())
 	}
 	if CoreFingerprintBreakdown(stored).Fields["FPExtra"] == CoreFingerprintBreakdown(Config{Command: "claude", FingerprintExtra: map[string]string{"pool.max": "5", "depends_on": "db"}}).Fields["FPExtra"] {
 		t.Fatal("the breakdown no longer hashes Ignore keys")

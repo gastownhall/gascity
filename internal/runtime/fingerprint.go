@@ -726,6 +726,12 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 		case "FPExtra":
 			extra := restartFingerprintExtra(current.FingerprintExtra)      // the keys that can drift; the breakdown hashes them all
 			fmt.Fprintf(w, "    FPExtra: %v (len=%d)\n", extra, len(extra)) //nolint:errcheck // best-effort diag
+			if storedBreakdownVersion(storedJSON) == prePolicyFingerprintVersion {
+				// A v6 baseline hashed every key, so a pool or skill edit since
+				// its start is part of the drift it drains once for.
+				prior := nonRestartFingerprintExtra(current.FingerprintExtra)
+				fmt.Fprintf(w, "    FPExtra (v6 baseline, drains once): %v (len=%d)\n", prior, len(prior)) //nolint:errcheck // best-effort diag
+			}
 		case "PreStart":
 			fmt.Fprintf(w, "    PreStart: %v\n", current.PreStart) //nolint:errcheck // best-effort diag
 		case "OverlayDir":
@@ -746,6 +752,29 @@ func LogCoreFingerprintDrift(w io.Writer, name string, storedJSON string, curren
 			}
 		}
 	}
+}
+
+// storedBreakdownVersion is the version a JSON-encoded stored breakdown was
+// written under, "" for a legacy or unreadable one.
+func storedBreakdownVersion(stored string) string {
+	var v struct {
+		Version string `json:"version"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(stored)), &v); err != nil {
+		return ""
+	}
+	return v.Version
+}
+
+// nonRestartFingerprintExtra is the Ignore and NextStart subset of extra.
+func nonRestartFingerprintExtra(extra map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range extra {
+		if FingerprintExtraChangePolicy(k) != ChangeRestart {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 // parseStoredBreakdown decodes the JSON-encoded stored breakdown and

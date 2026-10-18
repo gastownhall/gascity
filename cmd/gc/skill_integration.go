@@ -259,10 +259,11 @@ func effectiveSkillsForAgent(city *materialize.CityCatalog, agent *config.Agent,
 // mergeSkillFingerprintEntries adds one "skills:<name>" → content-hash
 // entry to fpExtra for each desired skill, hashed with
 // runtime.HashPathContent. The entries are NextStart
-// (runtime.FingerprintExtraChangePolicy): this binary's fingerprints and
-// drift breakdown leave them out, so a skill edit reaches the next start
-// without draining a running session. Only the v6 recomputation that
-// migrates a session started before the policy hashes them
+// (runtime.FingerprintExtraChangePolicy): the core and provision
+// fingerprints leave them out, so a skill edit reaches the next start
+// without draining a running session. The diagnostic drift breakdown still
+// hashes every key, and the v6 recomputation that migrates a session
+// started before the policy hashes them too
 // (runtime.PrePolicyCoreFingerprint). Adding an agent's first skill or
 // removing its last can still drain it, through the stage-2
 // materialize-skills PreStart entry (resolveTemplate).
