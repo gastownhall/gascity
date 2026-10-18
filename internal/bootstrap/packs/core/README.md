@@ -114,6 +114,17 @@ resolution `nudge-on-route` applies at route time. A dependent with both an
 assignee and a route is nudged at its assignee only: a claimed bead belongs
 to its session.
 
+Either way, it skips a dependent that another `blocks` blocker still holds
+(`gc bd dep list <dep> --direction=down --type=blocks --json` lists a blocker
+other than the one that closed whose status is neither `closed` nor `pinned`,
+the two bd treats as satisfied). Its assignee or routed target has nothing to
+do yet, and a nudge to an asleep seat parked on the dependent would wake that
+seat for nothing; the seat wakes on its own once the dependent is ready. The
+skipped pair is recorded like a nudged one, so later runs in the lookback do
+not read its blockers again; the close of the dependent's last blocker is a
+pair of its own, and nudges. A blocker read that fails proves nothing, and
+the nudge goes out.
+
 **Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
 dependency lookup and the assignee nudge to the rig that owns each bead, so
 cross-rig blocker chains within a city resolve correctly. The routed nudge
