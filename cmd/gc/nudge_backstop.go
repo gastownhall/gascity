@@ -218,7 +218,7 @@ func runNudgeBackstop(
 			continue
 		case backstopActionExhausted:
 			clearBackstopHold(pred, store, s, stdout)
-			if backstopLastNoticeStands(store, s, target, label, stdout) {
+			if backstopLastNoticeStands(store, s, target, last, now, label, stdout) {
 				continue
 			}
 			pred.exhausted(store, s, stdout)
@@ -353,10 +353,16 @@ func proposeBackstopNotice(
 // backstopLastNoticeStands reports whether an exhausted backstop's terminal
 // action must wait: the controller's lane host executes message ops for
 // store and label's last notice for target is still open and due, so the
-// last reminder has not yet had its chance at the session's boundary. A
-// failed read does not hold the terminal action; it is logged at most once
-// per laneErrorLogInterval.
-func backstopLastNoticeStands(store beads.Store, s *beads.Bead, target backstopTarget, label string, stdout io.Writer) bool {
+// last reminder has not yet had its chance at the session's boundary. Once
+// a backoff has passed since the last reservation (last) the last notice is
+// past its start_by, so it is no longer read: an exhausted backstop whose
+// terminal action leaves it exhausted pays no listing per tick. A failed
+// read does not hold the terminal action; it is logged at most once per
+// laneErrorLogInterval.
+func backstopLastNoticeStands(store beads.Store, s *beads.Bead, target backstopTarget, last, now time.Time, label string, stdout io.Writer) bool {
+	if !now.Before(last.Add(idleClaimNudgeBackoff)) {
+		return false
+	}
 	lane := plannerNoticeLaneFor(store)
 	if lane == nil {
 		return false

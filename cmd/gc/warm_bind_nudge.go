@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"log"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -219,8 +220,16 @@ const (
 
 // warmBindNotice proposes the binding's claim nudge as a planner notice. The
 // lane waits for the slot's boundary itself, so there is no idle wait here.
-// The op is idempotent by key, so a marker write that fails re-proposes the
-// same op on a later tick. A failure is logged at most once per
+//
+// The marker names only the trigger a slot was last nudged for, so a slot
+// bound to A, then B, then A again in one incarnation is a new binding the
+// key must tell apart from the first. Each binding takes the first episode
+// (warmBindNoticeEpisode) whose op is not already written and past due: an
+// op still due is this binding's own (a marker write that failed after its
+// proposal), so the retry finds it pending and writes nothing new; an op no
+// longer due belongs to an earlier binding. A trigger rebound more than
+// warmBindNoticeMaxEpisodes times in one incarnation is given up on, and the
+// claim backstop owns re-delivery. A failure is logged at most once per
 // laneErrorLogInterval.
 func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID, claimText string) warmBindNoticeResult {
 	n := plannerNotice{
@@ -232,29 +241,51 @@ func warmBindNotice(lane plannerNoticeLane, session beads.Bead, name, triggerID,
 		StartWithin: warmBindNoticeStartWithin,
 	}
 	failKey := plannerNoticeFailureKey(session.ID, n)
-	outcome, _, err := proposePlannerNotice(lane, session, n)
-	switch {
-	case err != nil && plannerNoticeRefused(err):
-		lane.noticeRecovered(failKey)
-		log.Printf("warm-bind claim nudge: notice for %s refused for trigger %s: %v", name, triggerID, err)
-		return warmBindNoticeSpent
-	case err != nil:
-		failures, logNow := lane.noticeFailed(failKey)
-		if failures >= plannerNoticeMaxFailures {
+	for i := 1; i <= warmBindNoticeMaxEpisodes; i++ {
+		n.Episode = warmBindNoticeEpisode(i)
+		outcome, op, err := proposePlannerNotice(lane, session, n)
+		switch {
+		case err != nil && plannerNoticeRefused(err):
 			lane.noticeRecovered(failKey)
-			log.Printf("warm-bind claim nudge: notice for %s failed %d times in a row for trigger %s: %v", name, failures, triggerID, err)
+			log.Printf("warm-bind claim nudge: notice for %s refused for trigger %s: %v", name, triggerID, err)
 			return warmBindNoticeSpent
+		case err != nil:
+			failures, logNow := lane.noticeFailed(failKey)
+			if failures >= plannerNoticeMaxFailures {
+				lane.noticeRecovered(failKey)
+				log.Printf("warm-bind claim nudge: notice for %s failed %d times in a row for trigger %s: %v", name, failures, triggerID, err)
+				return warmBindNoticeSpent
+			}
+			if logNow {
+				log.Printf("warm-bind claim nudge: notice for %s failed for trigger %s (%d of %d): %v", name, triggerID, failures, plannerNoticeMaxFailures, err)
+			}
+			return warmBindNoticeRetry
+		case outcome == plannerNoticeAlreadyProposed && !plannerNoticeStillDue(op, lane.noticeNow()):
+			continue // an earlier binding's notice; try the next episode
 		}
-		if logNow {
-			log.Printf("warm-bind claim nudge: notice for %s failed for trigger %s (%d of %d): %v", name, triggerID, failures, plannerNoticeMaxFailures, err)
+		lane.noticeRecovered(failKey)
+		if outcome == plannerNoticeDirect {
+			return warmBindNoticeDirect
 		}
-		return warmBindNoticeRetry
+		return warmBindNoticeProposed
 	}
 	lane.noticeRecovered(failKey)
-	if outcome == plannerNoticeDirect {
-		return warmBindNoticeDirect
+	log.Printf("warm-bind claim nudge: %s was bound to %s more than %d times in one incarnation; no new notice", name, triggerID, warmBindNoticeMaxEpisodes)
+	return warmBindNoticeSpent
+}
+
+// warmBindNoticeMaxEpisodes bounds how many bindings of one trigger in one
+// incarnation get their own warm-bind notice (warmBindNotice).
+const warmBindNoticeMaxEpisodes = 32
+
+// warmBindNoticeEpisode is the Episode of a trigger's i-th warm-bind notice
+// in one incarnation: none for the first, so a trigger bound once keys as
+// <purpose>:<token>:<trigger>:1, then the binding's number.
+func warmBindNoticeEpisode(i int) string {
+	if i <= 1 {
+		return ""
 	}
-	return warmBindNoticeProposed
+	return strconv.Itoa(i)
 }
 
 // nudgeWarmBindSlot types the claim nudge into the slot directly, after

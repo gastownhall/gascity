@@ -140,6 +140,13 @@ var n = sp.Nudge`, []string{"zz.go:var n"}},
 // declaration types as a runtime.Provider or worker.Handle (laneInjectTyped):
 // the scan has no type checker, so an uncalled .Nudge on an operand of
 // another type reads as a field, as config.Agent.Nudge is.
+//
+// Without a type checker the scan cannot type every operand, so a method
+// value taken without a call is missed when its operand is a field chain
+// (e.deps.sp.Nudge) or a variable declared from a call's result
+// (sp := h.SessionProvider(); n := sp.Nudge). Calling such a value later
+// (n(...)) names no injecting method either. Review catches those; a
+// go/types or nogo analyzer would close the gap.
 func laneInjectSites(fset *token.FileSet, name string, file *ast.File) []laneInjectSite {
 	var out []laneInjectSite
 	for _, decl := range file.Decls {

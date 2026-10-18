@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"strconv"
 	"strings"
@@ -885,4 +886,195 @@ func TestPlannerNoticeDeliveredByTheLaneHost(t *testing.T) {
 func (f *laneFixture) meta(t *testing.T, key string) string {
 	t.Helper()
 	return f.row(t).Metadata[key]
+}
+
+// countingOpListStore is a sessions store that counts its op listings (the
+// read every planner notice starts with).
+type countingOpListStore struct {
+	laneTestStore
+	opLists atomic.Int64
+}
+
+func (s *countingOpListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Metadata["gc.op.open"] != "" {
+		s.opLists.Add(1)
+	}
+	return s.laneTestStore.List(q)
+}
+
+// TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue: one
+// backoff after the last reservation the last notice is past its start_by,
+// so an exhausted backstop no longer lists the conversation's ops each tick
+// (the continuation backstop stays exhausted indefinitely).
+func TestRunNudgeBackstopExhaustedSkipsTheReadOnceTheLastNoticeIsPastDue(t *testing.T) {
+	store := &countingOpListStore{laneTestStore: newLaneTestStore()}
+	f := newLaneFixtureOver(t, store)
+	newNoticeLaneHost(t, f, "message")
+	calls := 0
+	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
+	var out bytes.Buffer
+	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-idleClaimNudgeBackoff))
+	before := store.opLists.Load()
+	const ticks = 5
+	for i := 0; i < ticks; i++ {
+		runNoticeBackstop(f, rows, pred, &out)
+		f.clk.Advance(30 * time.Second)
+	}
+	if n := store.opLists.Load() - before; n != 0 {
+		t.Fatalf("op listings over %d exhausted ticks = %d, want 0", ticks, n)
+	}
+	if calls != ticks {
+		t.Fatalf("terminal action ran %d times, want %d", calls, ticks)
+	}
+}
+
+// TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction: a journal
+// that cannot be read while the last notice may still be due logs once and
+// lets the terminal action run, so an outage never parks the backstop.
+func TestRunNudgeBackstopFailedHoldReadDoesNotHoldTheTerminalAction(t *testing.T) {
+	store := &failingOpListStore{laneTestStore: newLaneTestStore()}
+	f := newLaneFixtureOver(t, store)
+	newNoticeLaneHost(t, f, "message")
+	store.fail.Store(true)
+	calls := 0
+	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &calls}
+	var out bytes.Buffer
+	rows := backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-30*time.Second))
+	runNoticeBackstop(f, rows, pred, &out)
+	runNoticeBackstop(f, rows, pred, &out)
+	if calls != 2 {
+		t.Fatalf("terminal action ran %d times with the hold read failing, want 2", calls)
+	}
+	if n := strings.Count(out.String(), "not holding the terminal action"); n != 1 {
+		t.Fatalf("failed-read lines = %d, want 1 (rate-limited); journal %q", n, out.String())
+	}
+}
+
+func TestPlannerNoticeRefusedCoversRequestErrors(t *testing.T) {
+	for _, err := range []error{opjournal.ErrInvalidRequest, opjournal.ErrPayloadTooLarge, opjournal.ErrKeyReuse} {
+		if !plannerNoticeRefused(fmt.Errorf("proposing: %w", err)) {
+			t.Errorf("plannerNoticeRefused(%v) = false, want true", err)
+		}
+	}
+	if plannerNoticeRefused(errors.New("store unavailable")) {
+		t.Error("plannerNoticeRefused(a transient) = true, want false")
+	}
+}
+
+// TestRunNudgeBackstopNoticeCausationIsTheWorkBead: a target with
+// provenance keys its notice by the full trigger but names the bare work
+// bead as the op's causation.
+func TestRunNudgeBackstopNoticeCausationIsTheWorkBead(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	target := backstopTarget{ID: "wb-1", StoreRef: "rig:a", RootID: "r-1"}
+	pred := noticeTestBackstop{target: target, text: "claim wb-1"}
+	var out bytes.Buffer
+	observed := f.clk.Now().Add(-time.Hour)
+	runNoticeBackstop(f, backstopRows(t, f, 0, observed), pred, &out)
+	op := f.get(t, f.laneStore(t), noticeOpID(t, f, "idle-claim-nudge", backstopNoticeTrigger(target), episode(observed), 1))
+	if op.Causation != "wb-1" {
+		t.Fatalf("causation = %q, want the work bead wb-1", op.Causation)
+	}
+}
+
+// TestDeliverWarmBindClaimNudgeNoticesARebindingAfresh: A, then B, then A
+// again in one incarnation. The second A binding is another binding, so it
+// gets its own notice, as the direct nudge gave it its own nudge.
+func TestDeliverWarmBindClaimNudgeNoticesARebindingAfresh(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message") // no pass: past start_by, ops stay open and not due
+	logs := captureStdLog(t)
+	bind := func(trigger string) {
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, trigger), warmClaimText, alwaysUnclaimed)
+		f.clk.Advance(2 * time.Minute)
+	}
+	bind("w-A")
+	bind("w-B")
+	logs.Reset()
+	bind("w-A")
+	st := f.laneStore(t)
+	f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-A", "", 1))
+	again := f.get(t, st, noticeOpID(t, f, warmBindNoticePurpose, "w-A", "2", 1))
+	if again.Payload != warmClaimText || again.Causation != "w-A" {
+		t.Fatalf("second A notice = %+v", again)
+	}
+	if !strings.Contains(logs.String(), "queued a claim notice for "+f.name+" to claim w-A") {
+		t.Errorf("log = %q, want the queued line", logs.String())
+	}
+	if n := len(f.openOps(t)); n != 3 {
+		t.Fatalf("open ops = %d, want one per binding", n)
+	}
+}
+
+// TestDeliverWarmBindClaimNudgeRebindingDeliversEveryBinding runs A, B, A
+// through a started lane host: three bindings, three deliveries, as with
+// the direct nudge.
+func TestDeliverWarmBindClaimNudgeRebindingDeliversEveryBinding(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start()
+	hh.waitTicker(t)
+	st := f.laneStore(t)
+	for i, b := range []struct{ trigger, episode string }{{"w-A", ""}, {"w-B", ""}, {"w-A", "2"}} {
+		deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, b.trigger), warmClaimText, alwaysUnclaimed)
+		id := noticeOpID(t, f, warmBindNoticePurpose, b.trigger, b.episode, 1)
+		deadline := time.After(laneWaitBudget)
+		for {
+			if got := f.get(t, st, id); got.Status == opjournal.StatusClosed {
+				if got.Outcome.Arm != opjournal.ArmSucceeded {
+					t.Fatalf("binding %d (%s): outcome = %+v, want succeeded", i+1, b.trigger, got.Outcome)
+				}
+				break
+			}
+			select {
+			case <-deadline:
+				t.Fatalf("binding %d (%s): the host never delivered its notice", i+1, b.trigger)
+			case <-hh.passes:
+			case <-time.After(5 * time.Millisecond):
+			}
+		}
+		f.clk.Advance(2 * time.Minute)
+	}
+	if n := len(f.nudges()); n != 3 {
+		t.Fatalf("deliveries = %d, want 3", n)
+	}
+}
+
+// TestDeliverWarmBindClaimNudgeRetryFindsItsDueNotice: the marker write was
+// lost after the notice was proposed. The retry, while that notice is due,
+// writes nothing new and stamps the marker.
+func TestDeliverWarmBindClaimNudgeRetryFindsItsDueNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), warmClaimText, alwaysUnclaimed)
+	if err := f.store.SetMetadataBatch(f.id, map[string]string{warmBindNudgedForTriggerKey: ""}); err != nil {
+		t.Fatalf("clearing the marker: %v", err)
+	}
+	f.clk.Advance(10 * time.Second)
+	row := f.row(t)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, &row, warmClaimText, alwaysUnclaimed)
+	if n := len(f.openOps(t)); n != 1 {
+		t.Fatalf("open ops = %d, want the one notice", n)
+	}
+	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
+		t.Fatalf("marker = %q, want w-1", got)
+	}
+}
+
+// TestWarmBindNoticeGivesUpPastItsEpisodeBound: a trigger rebound more than
+// warmBindNoticeMaxEpisodes times in one incarnation is given up on, and the
+// claim backstop owns re-delivery.
+func TestWarmBindNoticeGivesUpPastItsEpisodeBound(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	for i := 1; i <= warmBindNoticeMaxEpisodes; i++ {
+		if got := warmBindNotice(h, f.row(t), f.name, "w-A", warmClaimText); got != warmBindNoticeProposed {
+			t.Fatalf("binding %d = %v, want proposed", i, got)
+		}
+		f.clk.Advance(2 * time.Minute)
+	}
+	if got := warmBindNotice(h, f.row(t), f.name, "w-A", warmClaimText); got != warmBindNoticeSpent {
+		t.Fatalf("binding past the bound = %v, want spent", got)
+	}
 }
