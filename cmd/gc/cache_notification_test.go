@@ -63,6 +63,40 @@ func TestWrapWithCachingStoreStampsNotificationSource(t *testing.T) {
 	}
 }
 
+// TestSameValueWriteRecordsNoBeadUpdated pins the city-level effect of a
+// store that decides no-op writes itself: every write reaches the SQLite
+// store through the cache, a same-value one commits nothing there, and so
+// the city records no bead.updated for it. Before the store skipped them, a
+// no-op still moved updated_at and the revision, so each one recorded.
+func TestSameValueWriteRecordsNoBeadUpdated(t *testing.T) {
+	backing, err := beads.OpenSQLiteStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	ep := events.NewFake()
+	store := wrapWithCachingStore(context.Background(), backing, ep, true)
+	b, err := store.Create(beads.Bead{Title: "row"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(b.ID, "k", "v"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	title := "row"
+	for range 2 {
+		if err := store.SetMetadata(b.ID, "k", "v"); err != nil {
+			t.Fatalf("same-value SetMetadata: %v", err)
+		}
+		if err := store.Update(b.ID, beads.UpdateOpts{Title: &title}); err != nil {
+			t.Fatalf("same-value Update: %v", err)
+		}
+	}
+	want := []string{events.BeadCreated + "/" + cacheLocalActor, events.BeadUpdated + "/" + cacheLocalActor}
+	if got := beadEventsFor(ep, b.ID); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("events = %v, want %v: a same-value write recorded an event", got, want)
+	}
+}
+
 // TestCacheChangeRecorderSuppressesRepeatedUpdates is the mc-zndi7.12 fix: a
 // bead.updated whose payload equals the last one emitted for the bead carries
 // nothing, and on bd cities it was 99% of the bus.

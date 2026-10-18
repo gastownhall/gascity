@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -2034,7 +2035,7 @@ func conformanceCLIReadyDeadRigLeg(t *testing.T, e splitEnv) {
 	}
 
 	legs := mustReadyLegs(t, loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
-	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	rows, err := readywork.Read(legs, readywork.Query{})
 	if err == nil {
 		t.Fatalf("gc ready served %d beads over the same dead %q leg; the API said that read was PARTIAL, and a bare array has nowhere to say so — the CLI's equivalent of Partial 200 is a non-zero exit", len(rows), deadRig)
 	}
@@ -2067,7 +2068,7 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 		e.rigStores,
 		fixtureGraphLeg(e),
 	)
-	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	rows, err := readywork.Read(legs, readywork.Query{})
 	if err != nil {
 		t.Fatalf("gc ready over the fixture stores: %v", err)
 	}
@@ -2228,7 +2229,7 @@ func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string
 	}
 
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress})
+	rows, err := readywork.Read(legs, readywork.Query{Status: readywork.StatusInProgress})
 	if err != nil {
 		t.Fatalf("gc ready --status in_progress over the fixture stores: %v", err)
 	}
@@ -2450,7 +2451,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	readyIDs := func(status string) []string {
 		t.Helper()
-		rows, err := readyBeadsForOpts(legs, readyOpts{status: status, metadataFields: []string{selector}})
+		rows, err := readywork.Read(legs, readywork.Query{Status: status, MetadataFields: []string{selector}})
 		if err != nil {
 			t.Fatalf("the federated reader the refusal steers to failed on --status %q: %v", status, err)
 		}
@@ -2611,12 +2612,12 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
-		excludeTypes:   []string{"epic"},
-		sortOrder:      readySortOldest,
-		limit:          20,
+	rows, err := readywork.Read(legs, readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		ExcludeTypes:   []string{"epic"},
+		Sort:           readywork.SortOldest,
+		Limit:          20,
 	})
 	if err != nil {
 		t.Fatalf("the reader the split work_query names failed over healthy stores: %v", err)
@@ -2661,12 +2662,12 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	t.Helper()
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
-	assertFederatedReaderServes(t, e, routed.ID, "routed", readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
-		excludeTypes:   []string{"epic"},
-		sortOrder:      readySortOldest,
-		limit:          20,
+	assertFederatedReaderServes(t, e, routed.ID, "routed", readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		ExcludeTypes:   []string{"epic"},
+		Sort:           readywork.SortOldest,
+		Limit:          20,
 	})
 	assertClaimEscalatesOffTheWorkStore(t, e, routed.ID, "routed")
 
@@ -2675,10 +2676,10 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	// (graphroute.ApplyGraphRouteBinding sets step.Assignee for a non-pool,
 	// non-direct binding, and molecule materialization writes it through).
 	assigned := e.mintWispWith(t, wispOpts{title: "assigned graph step", assignee: e.qualified})
-	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readyOpts{
-		assignee:  e.qualified,
-		sortOrder: readySortOldest,
-		limit:     20,
+	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readywork.Query{
+		Assignee: e.qualified,
+		Sort:     readywork.SortOldest,
+		Limit:    20,
 	})
 	assertClaimEscalatesOffTheWorkStore(t, e, assigned.ID, "assigned")
 
@@ -2691,10 +2692,10 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 // a restatement of it. It is the "sees" half of every see-and-claim row: a claim
 // assertion on a bead the query never served would prove nothing about the
 // command.
-func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readyOpts) {
+func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readywork.Query) {
 	t.Helper()
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, opts)
+	rows, err := readywork.Read(legs, opts)
 	if err != nil {
 		t.Fatalf("the reader the split work_query's %s tier names failed over healthy stores: %v", tier, err)
 	}

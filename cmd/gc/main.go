@@ -215,6 +215,9 @@ func runWithRootCommandOptionsAndLifecycle(args []string, stdout, stderr io.Writ
 	var observedStdout *countingWriter
 	options.invocationArgs = append([]string(nil), args...)
 	root := newRootCmdWithOptions(execStdout, stderr, options)
+	prevPlaneGateExempt := controlPlaneGateExempt
+	controlPlaneGateExempt = controlPlaneGateExemptFor(root, args)
+	defer func() { controlPlaneGateExempt = prevPlaneGateExempt }()
 	root.SetArgs(args)
 	root.SetOut(execStdout)
 	root.SetErr(stderr)
@@ -566,6 +569,10 @@ type contextResolutionMode struct {
 	// around. Eager discovery captures the city it picks into the
 	// pack-command closures the user later runs, so a cheaper-but-different
 	// answer would end up executing pack code against the wrong city.
+	//
+	// It reads the city's plane but never marks the invocation a worker site
+	// (withAdvisoryControlPlane): eager discovery runs before cobra parses
+	// --city, so the city it finds need not be the one the command targets.
 	advisory bool
 	// cityOnly marks an authoritative resolution whose caller reads only
 	// CityPath. It skips the rig decoration (rigFromCwdDir) and nothing else:
@@ -602,6 +609,13 @@ type resolvedContext struct {
 	CityPath string        // absolute path to city root (empty when Remote is set)
 	RigName  string        // rig name (empty if not in a rig context)
 	Remote   *remoteTarget // non-nil => a REMOTE city over the control plane; CityPath is empty
+	// Plane is the city's plane: Local, or Worker when it holds
+	// .gc/control-plane.toml. It is authoritative only when the resolution
+	// succeeded without the gate exemption: for an exempt command on a
+	// descriptor gc cannot use it stays the zero value (Local) while every
+	// seam treats the city as a worker site. Readers that decide behavior
+	// use onWorkerSite(CityPath).
+	Plane controlPlane
 }
 
 // resolveCommandContext resolves city+rig context for commands that accept an
@@ -627,7 +641,7 @@ func resolveCommandContext(args []string) (resolvedContext, error) {
 	// name to resolveContextFromPath's upward city walk (which would silently
 	// target an ambient ancestor city).
 	if classifyCityRef(args[0]) == cityRefName {
-		return resolveCityNameContext(args[0], resolveContextFromPath)
+		return withControlPlane(resolveCityNameContext(args[0], resolveContextFromPath))
 	}
 	return resolveContextFromPath(args[0])
 }
@@ -699,6 +713,15 @@ func resolveContextAllowRemote() (resolvedContext, error) {
 }
 
 func resolveContextAllowRemoteMode(mode contextResolutionMode) (resolvedContext, error) {
+	if mode.advisory {
+		return withAdvisoryControlPlane(resolveContextChain(mode))
+	}
+	return withControlPlane(resolveContextChain(mode))
+}
+
+// resolveContextChain is resolveContextAllowRemoteMode's priority chain,
+// before the city's plane is filled in.
+func resolveContextChain(mode contextResolutionMode) (resolvedContext, error) {
 	// Step 0: explicit remote target. A conflict (remote+local or remote+remote)
 	// surfaces here regardless.
 	if target, handled, err := resolveRemoteTarget(); err != nil {
@@ -857,6 +880,12 @@ func resolveCity() (string, error) {
 }
 
 func resolveContextFromPath(path string) (resolvedContext, error) {
+	return withControlPlane(resolveCityContextFromPath(path))
+}
+
+// resolveCityContextFromPath is resolveContextFromPath before the city's
+// plane is filled in.
+func resolveCityContextFromPath(path string) (resolvedContext, error) {
 	abs := normalizePathForCompare(path)
 	// Validate the explicit target directly before scanning the registry for
 	// rig bindings. An unrelated registered city with a broken/stale config

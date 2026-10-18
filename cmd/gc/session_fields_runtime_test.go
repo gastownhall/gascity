@@ -384,6 +384,36 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
 			}),
 		},
+		"cmd/gc/reconcile_effect_launch.go:preWakeStep": { // the row as the launch's Start sees it: the PreWake landed, the commit not yet
+			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "continuation_reset_pending", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				k, leaf := launchKit(t, "asleep", meta...)
+				var atStart map[string]string
+				leaf.onStart = func(context.Context) {
+					b, err := k.backing.Get(k.it.Key.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					atStart = maps.Clone(b.Metadata)
+				}
+				if s := k.runKind(); s.Outcome != settledLanded || atStart == nil {
+					t.Fatalf("launch settled %+v, want landed with a Start", s)
+				}
+				return atStart
+			},
+		},
+		"internal/session/incarnation.go:Store.MintIncarnation": { // a fresh context consumes the reset
+			[]string{"continuation_reset_pending", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: func(session.Info) bool { return true }}
+				if _, err := sessionFrontDoor(m).MintIncarnation(context.Background(), nil, req); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {
 			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch {

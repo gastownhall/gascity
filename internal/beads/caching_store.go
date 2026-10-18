@@ -219,7 +219,11 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - an unconditional write that another local write or deletion of the row
 //     overlapped, or that a full Prime replace overlapped: its own change,
 //     laid over its refresh read or patched into the cached row, could roll
-//     the other write back, so it installs nothing;
+//     the other write back, so it installs nothing. Every write reaches the
+//     backing (none is skipped on a cached match), so a same-value write the
+//     backing commits nothing for still counts here: overlapping a real
+//     write, it fences that write's install and marks the row dirty, and a
+//     strict CachedList declines until a backing read settles it;
 //   - a conditional write's refetch that failed, did not reflect the write,
 //     or was superseded by a newer write racing it;
 //   - an idempotent conditional write whose evicted row was not clean at the
