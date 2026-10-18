@@ -29,7 +29,9 @@ var steerFamilies = map[string]bool{}
 // transport takes a steer from a runtime that steers in mode
 // ([runtime.SteerModeFor]): a protocol steer for every family, a keystroke
 // steer for a family in the steer table and never over ACP, whose prompts are
-// whole turns.
+// whole turns. family may be a raw provider name such as "Codex":
+// supportsSteer normalizes it with [sessionlog.ProviderFamily], which leaves
+// a family [ProviderFamilyFromInfo] already normalized unchanged.
 func supportsSteer(family, transport string, mode runtime.SteerMode) bool {
 	switch mode {
 	case runtime.SteerProtocol:
