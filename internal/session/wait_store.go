@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"strings"
@@ -427,14 +428,27 @@ func (s *Store) RetryClosedWait(id, nextAttempt string, now time.Time) (WaitInfo
 	return WaitInfoFromBead(created), nil
 }
 
+// waitCancelChunk is how many wait beads one CloseAll closes when CancelWaits
+// can be cut off by its context. A CachingStore refreshes each id with a
+// separate read, so the chunk is the most work that can finish after the
+// deadline has passed.
+const waitCancelChunk = 10
+
 // CancelWaits marks all non-terminal waits for the session canceled (closing the
 // terminal ones idempotently) and returns every queued wait-nudge ID discovered
 // across capped lookup pages, plus whether any lookup page was capped.
-func (s *Store) CancelWaits(sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
-	return s.cancelWaitsAndCollectNudgeIDs(sessionID, now)
+//
+// ctx bounds only the gaps between store calls: it is checked before each wait
+// lookup and, when ctx can end, before each chunk of at most waitCancelChunk
+// waits; a store call already in flight is never interrupted. A ctx that is
+// already done makes no store call. When ctx ends the call stops and returns
+// an error wrapping ctx.Err(); the nudge IDs it returns then include the waits
+// in chunks it did not close, because they are collected before closing.
+func (s *Store) CancelWaits(ctx context.Context, sessionID string, now time.Time) (nudgeIDs []string, capped bool, err error) {
+	return s.cancelWaitsAndCollectNudgeIDs(ctx, sessionID, now)
 }
 
-func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) ([]string, bool, error) {
+func (s *Store) cancelWaitsAndCollectNudgeIDs(ctx context.Context, sessionID string, now time.Time) ([]string, bool, error) {
 	ids := []string(nil)
 	seen := map[string]bool{}
 	capped := false
@@ -443,6 +457,9 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 		"canceled_at": now.UTC().Format(time.RFC3339),
 	}
 	for {
+		if err := ctx.Err(); err != nil {
+			return ids, capped, waitCancelError(ctx, sessionID, err)
+		}
 		waits, err := s.WaitsForSession(sessionID)
 		if err != nil && !beads.IsLookupLimitError(err) {
 			return ids, capped, err
@@ -462,15 +479,11 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 			}
 			cancelIDs = append(cancelIDs, wait.ID)
 		}
-		if len(cancelIDs) > 0 {
-			if _, err := s.store.CloseAll(cancelIDs, canceledMetadata); err != nil {
-				return ids, capped, err
-			}
+		if err := s.closeWaitIDs(ctx, cancelIDs, canceledMetadata); err != nil {
+			return ids, capped, waitCancelError(ctx, sessionID, err)
 		}
-		if len(terminalIDs) > 0 {
-			if _, err := s.store.CloseAll(terminalIDs, nil); err != nil {
-				return ids, capped, err
-			}
+		if err := s.closeWaitIDs(ctx, terminalIDs, nil); err != nil {
+			return ids, capped, waitCancelError(ctx, sessionID, err)
 		}
 		canceled := len(cancelIDs) + len(terminalIDs)
 		if !lookupCapped {
@@ -480,6 +493,39 @@ func (s *Store) cancelWaitsAndCollectNudgeIDs(sessionID string, now time.Time) (
 			return ids, capped, err
 		}
 	}
+}
+
+// waitCancelError names the session on a context end and passes any other
+// error through unchanged.
+func waitCancelError(ctx context.Context, sessionID string, err error) error {
+	if ctxErr := ctx.Err(); ctxErr != nil && errors.Is(err, ctxErr) {
+		return fmt.Errorf("canceling waits for session %s: %w", sessionID, err)
+	}
+	return err
+}
+
+// closeWaitIDs closes the waits with ids. A ctx that cannot end gets one
+// CloseAll for the whole list; otherwise the list is closed in chunks of
+// waitCancelChunk with a ctx check before each, and the error is ctx.Err() when
+// ctx ended before a chunk could start.
+func (s *Store) closeWaitIDs(ctx context.Context, ids []string, metadata map[string]string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	if ctx.Done() == nil {
+		_, err := s.store.CloseAll(ids, metadata)
+		return err
+	}
+	for start := 0; start < len(ids); start += waitCancelChunk {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		end := min(start+waitCancelChunk, len(ids))
+		if _, err := s.store.CloseAll(ids[start:end], metadata); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ReassignWaits moves open non-terminal waits from one session bead ID to another
@@ -591,7 +637,7 @@ func (s *Store) wakeSessionFromBead(sessionBead beads.Bead, now time.Time) ([]st
 	if state, conflict := lifecycleWakeConflictState(view); conflict {
 		return nil, &WakeConflictError{SessionID: sessionBead.ID, State: state}
 	}
-	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(sessionBead.ID, now)
+	nudgeIDs, capped, err := s.cancelWaitsAndCollectNudgeIDs(context.Background(), sessionBead.ID, now)
 	if err != nil {
 		return nil, err
 	}

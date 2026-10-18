@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -1470,7 +1471,7 @@ func cancelWaitsForSession(sessFront *sessionpkg.Store, sessionID string) error 
 	if !sessFront.Backed() || sessionID == "" {
 		return nil
 	}
-	nudgeIDs, _, err := sessFront.CancelWaits(sessionID, time.Now().UTC())
+	nudgeIDs, _, err := sessFront.CancelWaits(context.Background(), sessionID, time.Now().UTC())
 	if err != nil {
 		if !isWaitLookupLimitError(err) {
 			return err

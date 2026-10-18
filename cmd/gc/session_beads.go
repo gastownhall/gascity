@@ -1611,6 +1611,33 @@ func reassignStateAssignedToRetiredSessionBead(store beads.Store, oldSessionID, 
 	}
 }
 
+// retiredSessionCleanupLegBudget bounds each leg (waits, then external
+// messaging) of cancelStateAssignedToRetiredSessionBead. A leg issues no new
+// store call once the budget has passed; a call already in flight finishes.
+// Whatever a cut-off leg leaves converges through the backstops named on the
+// helper.
+const retiredSessionCleanupLegBudget = 10 * time.Second
+
+// cancelStateAssignedToRetiredSessionBead cancels the waits and closes the
+// external messaging bindings, participants and memberships of a retired
+// session. Errors are written to stderr and never returned.
+//
+// The two legs run in that order under independent retiredSessionCleanupLegBudget
+// deadlines, so a slow waits leg cannot starve the external messaging leg. The
+// deadline comes from context.Background() here, not from a caller: the
+// pending-create rollback chain carries no ctx, and its shutdown branch runs
+// with an already-canceled one, yet the teardown must still run. A leg that
+// returns an error after its own budget ended logs one "cut off" line naming
+// the session, the leg and the budget; any other error keeps its ordinary line.
+// A cut-off leg writes no persisted state.
+//
+// What a cut-off leg leaves converges through these backstops:
+//   - waits: the wake-state session-closed pass in prepareWaitWakeStateHooked
+//     (cmd_wait.go) cancels a wait whose session is closed;
+//   - bindings: extmsg.ReapStaleBindings, driven by tickReapStaleExtmsgBindings;
+//   - participants and memberships: none. A truncated external messaging leg
+//     leaves them, as any store error in it does, and the cut-off line is the
+//     only signal.
 func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string, now time.Time, stderr io.Writer) {
 	if store == nil || strings.TrimSpace(sessionID) == "" {
 		return
@@ -1619,7 +1646,10 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 		stderr = io.Discard
 	}
 	sessFront := sessionFrontDoor(store)
-	_, capped, err := sessFront.CancelWaits(sessionID, now)
+	waitsCtx, cancelWaits := context.WithTimeout(context.Background(), retiredSessionCleanupLegBudget)
+	_, capped, err := sessFront.CancelWaits(waitsCtx, sessionID, now)
+	waitsCutOff := err != nil && waitsCtx.Err() != nil
+	cancelWaits()
 	if capped {
 		stampWaitLookupCapDiagnostic(sessFront, sessionID, beads.LookupLimitError{
 			Kind:  "wait",
@@ -1627,12 +1657,26 @@ func cancelStateAssignedToRetiredSessionBead(store beads.Store, sessionID string
 			Limit: waitLookupLimit,
 		}, now, "retired-session-cleanup")
 	}
-	if err != nil {
+	if waitsCutOff {
+		logRetiredCleanupCutOff(stderr, sessionID, "waits", err)
+	} else if err != nil {
 		fmt.Fprintf(stderr, "session beads: canceling waits for retired session %s: %v\n", sessionID, err) //nolint:errcheck
 	}
-	if err := extmsg.CloseSessionBindings(context.Background(), store, sessionID, now); err != nil {
-		fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+	extCtx, cancelExt := context.WithTimeout(context.Background(), retiredSessionCleanupLegBudget)
+	defer cancelExt()
+	if err := extmsg.CloseSessionBindings(extCtx, store, sessionID, now); err != nil {
+		if extCtx.Err() != nil {
+			logRetiredCleanupCutOff(stderr, sessionID, "extmsg", err)
+		} else {
+			fmt.Fprintf(stderr, "session beads: closing external message bindings for retired session %s: %v\n", sessionID, err) //nolint:errcheck
+		}
 	}
+}
+
+// logRetiredCleanupCutOff writes the line for a cleanup leg that ended at its
+// retiredSessionCleanupLegBudget.
+func logRetiredCleanupCutOff(stderr io.Writer, sessionID, leg string, err error) {
+	fmt.Fprintf(stderr, "session beads: retired session %s: %s leg cut off at its %s budget: %v\n", sessionID, leg, retiredSessionCleanupLegBudget, err) //nolint:errcheck
 }
 
 // retiredCleanup is cancelStateAssignedToRetiredSessionBead for a v2

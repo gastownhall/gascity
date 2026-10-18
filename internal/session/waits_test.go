@@ -1,6 +1,7 @@
 package session
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"reflect"
@@ -360,7 +361,7 @@ func TestCancelWaitsAndCollectNudgeIDsReturnsAllNudgesAfterLookupLimit(t *testin
 		}
 	}
 
-	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(sessionID, now)
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(context.Background(), sessionID, now)
 	if err != nil {
 		t.Fatalf("CancelWaitsAndCollectNudgeIDs: %v", err)
 	}
@@ -410,7 +411,7 @@ func TestCancelWaitsAndCollectNudgeIDsReturnsObservedNudgesOnCancelError(t *test
 	}
 	store := cancelWaitMetadataFailStore{MemStore: mem, failID: wait.ID}
 
-	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits("gc-session", time.Now().UTC())
+	nudgeIDs, capped, err := waitStoreOver(store).CancelWaits(context.Background(), "gc-session", time.Now().UTC())
 	if err == nil || !strings.Contains(err.Error(), "cancel wait metadata failed") {
 		t.Fatalf("CancelWaitsAndCollectNudgeIDs error = %v, want cancel wait metadata failed", err)
 	}
@@ -545,7 +546,7 @@ func TestCancelWaits_CancelsLegacyWaitBeadsWithoutLegacyTypeQuery(t *testing.T) 
 		t.Fatalf("create legacy wait: %v", err)
 	}
 
-	if _, _, err := waitStoreOver(store).CancelWaits("gc-session", time.Now().UTC()); err != nil {
+	if _, _, err := waitStoreOver(store).CancelWaits(context.Background(), "gc-session", time.Now().UTC()); err != nil {
 		t.Fatalf("CancelWaits: %v", err)
 	}
 	updated, err := store.Get(wait.ID)
