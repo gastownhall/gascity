@@ -382,7 +382,7 @@ func TestBeadsNudgeQueueStaleLeaseReclaimHasExactlyOneWinner(t *testing.T) {
 }
 
 // TestBeadsNudgeQueueSweepDeletesOverAnUnstampedList pins the sweep over a
-// store whose List carries no revision, as the native store's does: the delete
+// store whose List carries no revision, as BdStore's does: the delete
 // presents the revision of a fresh read, so a retired record past retention is
 // removed rather than skipped as stale on every pass.
 func TestBeadsNudgeQueueSweepDeletesOverAnUnstampedList(t *testing.T) {

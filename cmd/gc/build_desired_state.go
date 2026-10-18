@@ -4598,8 +4598,8 @@ func resolveTemplateForSessionBeadInfo(
 // realizePoolDesiredSessions uses a deep-copied instance agent +
 // qualifiedInstance, and this helper is what makes the other pool-backed
 // paths (rediscovery, store-backed dependency-floor) agree. GC_ALIAS and
-// FingerprintExtra are part of CoreFingerprint, so divergent shapes across
-// ticks trip the reconciler's config-drift drain.
+// the Restart-policy FingerprintExtra keys are part of CoreFingerprint, so
+// divergent shapes across ticks trip the reconciler's config-drift drain.
 //
 // Named beads resolve to their own stored alias (configured_named_identity),
 // NOT the shared backing template's qualified name. The main named-session
@@ -5396,11 +5396,7 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	if bp != nil {
 		// The v2 realization memo counts its occupancy's slots once (A3).
 		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
-			for slot := 1; unlimited || slot <= upper; slot++ {
-				if usedSlots[slot] || held[slot] {
-					continue
-				}
-				usedSlots[slot] = true
+			if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
 				return slot, nil
 			}
 			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())

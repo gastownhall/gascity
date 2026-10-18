@@ -387,6 +387,15 @@ func conditionalWriteBackoff(attempt int) time.Duration {
 // from the stores that can. If this store cannot fence, it returns
 // ErrConditionalWriteUnsupported rather than falling through to an
 // unconditional write.
+//
+// An assignee edit carries --force, as the native store's waives its
+// assignee-transfer guard (ForceAssigneeTransfer): the revision fence already
+// proves the caller decided on the row as it stands, so bd's anti-steal
+// refusal of another actor's live in_progress claim would only turn a fenced
+// release of a dead claim into a hard error. A stale revision still refuses
+// (bd exits 13 under --force). An edit that also closes the bead does not
+// carry it: bd's --force also waives the close policy (open children, a live
+// blocker), which no assignee edit asked to override.
 func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOpts) error {
 	noteSessionKeysByID(s.Get, id, opts.Metadata)
 	if err := validateConditionalUpdateOpts(opts, false); err != nil {
@@ -401,6 +410,9 @@ func (s *BdStore) UpdateIfMatch(id string, expectedRevision int64, opts UpdateOp
 	args := bdUpdateArgs(id, opts)
 	if len(args) == 3 {
 		return nil
+	}
+	if opts.Assignee != nil && (opts.Status == nil || *opts.Status != "closed") {
+		args = append(args, "--force")
 	}
 	args = append(args, conditionalWriteFlag, strconv.FormatInt(expectedRevision, 10))
 	return s.runConditionalWrite(id, expectedRevision, args...)

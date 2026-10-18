@@ -53,6 +53,39 @@ chat auto-suspend, an unadmitted runtime), and a city whose class
 stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
 remove the key to run legacy.
 
+A custom `scale_check` is admitted (PAR-SC). The external-reads lane runs
+every custom check off the pass (`allocator_scalecheck_lane.go`), and the
+decide reads its latest result. Each time the lane reads its sources, it
+first judges whether the city is suspended. When it is, the lane runs no
+check, drops the result it holds and voids every run started before that
+pass, so after resume no result read before that suspension is served. A
+suspend and resume that both fall between two of these judgments are not
+seen: a result read before them is then served like any other, while it is
+under three patrols old. Across a config reload the lane serves the last
+result it published, less the templates whose check changed, until a run
+of the new config ends.
+
+A custom template is held (its rows are kept and nothing is created) when:
+- its own check failed, timed out or printed no non-negative integer
+  (trace cause `pool-scale-check-partial`);
+- the lane has no fresh result for it: no run yet, a failed or timed-out
+  run, a result three patrols old, or a carried result that lacks it
+  (`scale-check-source-unread`).
+
+A run may still count as unassigned a bead that a session claimed after
+the run started. So the decide subtracts, from each custom template's
+count, the template's work assignments first seen no earlier than that
+start (never below zero; trace cause `scale-check-stale-vs-claim`). An
+assignment belongs to the template its work routes to, or, for unrouted
+work, to the claimant's template. The assignment is stamped after the work
+read, so a run that starts during the read is not missed. This can only
+under-create, and a real backlog still scales up. A claim the check never
+counted, or every assignment on the first pass after a controller restart,
+is cut too, so while the cut lasts the template keeps its rows: creates
+follow the cut count, but no row is put to sleep or drained for it. A new
+claim wakes the lane, and a newer run's publish wakes the planner, so a cut
+lasts about one run.
+
 `gc doctor` has a `daemon-session-reconciler` check:
 
 | Value | Result |

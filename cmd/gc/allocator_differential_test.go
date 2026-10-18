@@ -50,7 +50,7 @@ import (
 //   - custom scale_check counts and partials (ruling 1, PAR-SC): K1's run of
 //     legacy's own evaluation, read through gather, agrees on every
 //     scaleCheckDiffCities fixture but those its two explained
-//     differences (scale-check-source, named-always-custom-count) name.
+//     differences (scale-check-source, named-singleton-custom-count) name.
 
 // diffNow is the shared row helpers' clock (censusSession).
 var diffNow = censusNow
@@ -93,12 +93,12 @@ var allocDifferences = map[string]allocDifference{
 		"the census reads beads.FederatedReadTier, so a wisp-tier session row is in v2's census; legacy's snapshot does not read that tier",
 	},
 	"scale-check-source": {
-		"v5 §12.2, PAR-SC (owner ruling 2026-10-17)",
-		"one scale_check source runs every custom check: before its first run ends inside its budget, or once its result is older than 3 × patrol, every custom template reads partial (rows kept, no create) until a fresh run publishes, where legacy's tick waits on each check and marks only the one that failed or timed out",
+		"v5 §12.2 #70, PAR-SC (owner ruling 2026-10-17)",
+		"one scale_check source runs every custom check off the pass, and serves the last result it published until a run of the current config ends: with no result yet, a failed or timed-out one, or once the served result is older than 3 × patrol, every custom template reads partial (rows kept, no create), where legacy's tick waits on each check and marks only the one that failed or timed out",
 	},
-	"named-always-custom-count": {
-		"v5 §12.2, PAR-SC, POOL-008 (owner ruling 2026-10-17)",
-		"an always named session whose template's custom check counts work: v2 plans the canonical named create, where legacy's build creates a pool-managed ephemeral row that its desired state maps to the named identity",
+	"named-singleton-custom-count": {
+		"v5 §12.2 #71, PAR-SC, POOL-008 (owner ruling 2026-10-17)",
+		"a named session desired with no row (always, or on_demand through work assigned to its identity) on a singleton template whose custom check counts work: v2 plans the canonical named create, where legacy's build creates a pool-managed ephemeral row that its desired state maps to the named identity",
 	},
 }
 
@@ -127,9 +127,15 @@ type diffCity struct {
 	// scaleCheckAge is how long before diffNow the published run ended. The
 	// lane serves a result for FreshFor (3 × patrol) after it ended.
 	scaleCheckAge time.Duration
-	// explain maps each aspect this city differs on to its difference.
-	explain map[string]string
+	// explain maps each aspect this city differs on to its difference and
+	// the two sides' values there.
+	explain map[string]explained
 }
+
+// explained is one aspect's accounted difference: its allocDifferences or
+// allocFindings ID and the values legacy and v2 must show, as mismatches
+// renders them.
+type explained struct{ id, values string }
 
 // allocOutcome is one side's allocation, normalized for comparison.
 type allocOutcome struct {
@@ -297,7 +303,14 @@ func v2Allocation(t *testing.T, c diffCity) allocOutcome {
 	if err != nil {
 		t.Fatalf("gather: %v", err)
 	}
-	d := mustDecide(t, allocInputsOf(w, cityPath, c.cfg.Workspace.Name))
+	in := allocInputsOf(w, cityPath, c.cfg.Workspace.Name)
+	// Steady state: every claim predates the scale_check run, as legacy's
+	// single tick reads both at once. The pairing guard's window is
+	// TestScaleCheckClaimSkewHoldsCreates'.
+	for claim := range in.ClaimsSeen {
+		in.ClaimsSeen[claim] = time.Time{}
+	}
+	d := mustDecide(t, in)
 
 	out := newAllocOutcome()
 	for t, n := range d.Snapshot.PoolDesired {
@@ -362,7 +375,8 @@ func allocInputsOf(w World, cityPath, cityName string) allocInputs {
 		Now: w.Now, Epoch: "e1", Cfg: w.Env.Cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen,
 		CityPath: cityPath, CityName: cityName,
 		CitySuspended: w.CitySuspended, SuspendedRigPaths: w.SuspendedRigPaths,
-		Census: w.Census, Demand: w.Demand, ScaleCheck: w.ScaleCheck, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge,
+		Census: w.Census, Demand: w.Demand, ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen,
+		Obs: w.Obs, ObsMaxAge: w.ObsMaxAge,
 		Endpoints: w.Gates, ProviderHealth: w.ProviderHealth, Episodes: w.Episodes,
 		SleepPolicies: w.SleepPolicies, TransportRefused: w.TransportRefused, ReadyWaits: w.ReadyWaits,
 		InFlight: w.InFlight, Backoff: w.Backoff,
@@ -376,23 +390,25 @@ func checkDifferential(t *testing.T, c diffCity) {
 	legacy, v2 := legacyAllocation(t, c), v2Allocation(t, c)
 	got := legacy.mismatches(v2)
 	for aspect, values := range got {
-		id, ok := c.explain[aspect]
+		want, ok := c.explain[aspect]
 		if !ok {
 			t.Errorf("%s: unexplained difference %s (%s)", c.name, aspect, values)
 			continue
 		}
-		_, explained := allocDifferences[id]
-		finding, found := allocFindings[id]
+		_, listed := allocDifferences[want.id]
+		finding, found := allocFindings[want.id]
 		switch {
+		case values != want.values:
+			t.Errorf("%s: %s, accounted to %s, shows %q, want %q", c.name, aspect, want.id, values, want.values)
 		case found:
-			t.Logf("%s: %s is open finding %s: %s", c.name, aspect, id, finding.reason)
-		case !explained:
-			t.Errorf("%s: %s accounted to %q, which neither allocDifferences nor allocFindings lists", c.name, aspect, id)
+			t.Logf("%s: %s is open finding %s: %s", c.name, aspect, want.id, finding.reason)
+		case !listed:
+			t.Errorf("%s: %s accounted to %q, which neither allocDifferences nor allocFindings lists", c.name, aspect, want.id)
 		}
 	}
-	for aspect, id := range c.explain {
+	for aspect, want := range c.explain {
 		if _, ok := got[aspect]; !ok {
-			t.Errorf("%s: %s, accounted to %s, no longer shows: legacy and v2 agree", c.name, aspect, id)
+			t.Errorf("%s: %s, accounted to %s, no longer shows: legacy and v2 agree", c.name, aspect, want.id)
 		}
 	}
 	if t.Failed() {
@@ -529,25 +545,25 @@ func diffCities(t *testing.T) []diffCity {
 		},
 		{
 			name:    "creates over the wake budget",
-			explain: map[string]string{"create:pool:worker/worker-3#3": "create-budget", "create:pool:worker/worker-4#4": "create-budget"},
+			explain: map[string]explained{"create:pool:worker/worker-3#3": {"create-budget", "legacy false, v2 true"}, "create:pool:worker/worker-4#4": {"create-budget", "legacy false, v2 true"}},
 			cfg:     budget,
 			beads:   []beads.Bead{diffWork("dw-1", "worker"), diffWork("dw-2", "worker"), diffWork("dw-3", "worker"), diffWork("dw-4", "worker")},
 		},
 		{
 			name:    "a template in a suspended rig",
-			explain: map[string]string{"accepted:away/helper": "suspended-rig"},
+			explain: map[string]explained{"accepted:away/helper": {"suspended-rig", "legacy 1, v2 0"}},
 			cfg:     rigged,
 			beads:   []beads.Bead{diffWork("dw-1", "worker")},
 		},
 		{
 			name:    "a depends_on dependency floor",
-			explain: map[string]string{"create:pool:db/db#": "dependency-floor"},
+			explain: map[string]explained{"create:pool:db/db#": {"dependency-floor", "legacy true, v2 false"}},
 			cfg:     deps,
 			beads:   []beads.Bead{diffWork("dw-1", "app")},
 		},
 		{
 			name:    "a suspended city keeps its named row",
-			explain: map[string]string{"selected:dr-c": "suspended-city-named"},
+			explain: map[string]explained{"selected:dr-c": {"suspended-city-named", "legacy false, v2 true"}},
 			cfg:     idle,
 			beads:   []beads.Bead{chatRow("dr-c", "1"), poolRow("dr-1", "worker", 1, "active")},
 			alive:   []string{"s-dr-1"},
@@ -567,7 +583,7 @@ func diffCities(t *testing.T) []diffCity {
 		},
 		{
 			name:    "an expired pending create with no runtime",
-			explain: map[string]string{"selected:dr-1": "stale-pending-create", "create:pool:worker/worker-2#2": "stale-pending-create"},
+			explain: map[string]explained{"selected:dr-1": {"stale-pending-create", "legacy true, v2 false"}, "create:pool:worker/worker-2#2": {"stale-pending-create", "legacy false, v2 true"}},
 			cfg:     diffConfig(diffAgent("worker", 3)),
 			beads: []beads.Bead{
 				poolRow("dr-1", "worker", 1, "creating", "pending_create_claim", "true", "pending_create_started_at", diffNow.Add(-time.Hour).Format(time.RFC3339)),
@@ -584,7 +600,7 @@ func diffCities(t *testing.T) []diffCity {
 		},
 		{
 			name:    "a failed create, an orphaned template and a phantom singleton slot",
-			explain: map[string]string{"create:pool:worker/worker-1#1": "create-fence"},
+			explain: map[string]explained{"create:pool:worker/worker-1#1": {"create-fence", "legacy false, v2 true"}},
 			cfg:     diffConfig(diffAgent("worker", 2), diffAgent("solo", 1)),
 			beads: []beads.Bead{
 				poolRow("dr-1", "worker", 1, string(session.StateFailedCreate)),
@@ -625,6 +641,8 @@ func scaleCheckDiffCities() []diffCity {
 	floors.Daemon.MaxWakesPerTick = intPtr(100)
 	named := diffConfig(diffAgent("worker", 2), customPool("chat", "echo 1", 1), customPool("mayor", "echo 2", 1))
 	named.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}, {Template: "mayor", Mode: "always"}}
+	onDemand := diffConfig(customPool("chat", "echo 1", 1))
+	onDemand.NamedSessions = []config.NamedSession{{Template: "chat", Mode: "on_demand"}}
 	return []diffCity{
 		{
 			name: "a failing check and empty, negative and non-integer output are partial: rows kept, nothing created",
@@ -671,9 +689,16 @@ func scaleCheckDiffCities() []diffCity {
 		},
 		{
 			name:       "named sessions backed by custom checks: on_demand and always (POOL-008)",
-			explain:    map[string]string{"create:named:mayor": "named-always-custom-count", "create:pool:mayor/mayor#": "named-always-custom-count"},
+			explain:    map[string]explained{"create:named:mayor": {"named-singleton-custom-count", "legacy false, v2 true"}, "create:pool:mayor/mayor#": {"named-singleton-custom-count", "legacy true, v2 false"}},
 			cfg:        named,
 			beads:      []beads.Bead{diffWork("dw-1", "chat"), diffWork("dw-2", "worker")},
+			scaleCheck: true,
+		},
+		{
+			name:       "an on_demand named session with work assigned to it, on a counting singleton template",
+			explain:    map[string]explained{"create:named:chat": {"named-singleton-custom-count", "legacy false, v2 true"}, "create:pool:chat/chat#": {"named-singleton-custom-count", "legacy true, v2 false"}},
+			cfg:        onDemand,
+			beads:      []beads.Bead{{ID: "dw-1", Title: "dw-1", Type: "task", Status: "open", Assignee: "chat", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{}}},
 			scaleCheck: true,
 		},
 		{
@@ -695,9 +720,9 @@ func scaleCheckDiffCities() []diffCity {
 		},
 		{
 			name: "a timed-out first run, beside a check that answers",
-			explain: map[string]string{
-				"accepted:ok": "scale-check-source", "retain:ok": "scale-check-source",
-				"create:pool:ok/ok-2#2": "scale-check-source", "create:pool:ok/ok-3#3": "scale-check-source",
+			explain: map[string]explained{
+				"accepted:ok": {"scale-check-source", "legacy 2, v2 0"}, "retain:ok": {"scale-check-source", "legacy false, v2 true"},
+				"create:pool:ok/ok-2#2": {"scale-check-source", "legacy true, v2 false"}, "create:pool:ok/ok-3#3": {"scale-check-source", "legacy true, v2 false"},
 			},
 			cfg:           diffConfig(customPool("hung", "exit 124", 3), customPool("ok", "echo 2", 3)),
 			beads:         []beads.Bead{poolRow("dr-1", "hung", 1, "asleep"), poolRow("dr-2", "ok", 1, "asleep")},
@@ -706,9 +731,9 @@ func scaleCheckDiffCities() []diffCity {
 		},
 		{
 			name: "a result older than its freshness",
-			explain: map[string]string{
-				"accepted:worker": "scale-check-source", "retain:worker": "scale-check-source",
-				"create:pool:worker/worker-2#2": "scale-check-source", "create:pool:worker/worker-3#3": "scale-check-source",
+			explain: map[string]explained{
+				"accepted:worker": {"scale-check-source", "legacy 2, v2 0"}, "retain:worker": {"scale-check-source", "legacy false, v2 true"},
+				"create:pool:worker/worker-2#2": {"scale-check-source", "legacy true, v2 false"}, "create:pool:worker/worker-3#3": {"scale-check-source", "legacy true, v2 false"},
 			},
 			cfg:           diffConfig(customPool("worker", "echo 2", 3)),
 			beads:         []beads.Bead{poolRow("dr-1", "worker", 1, "asleep")},
@@ -742,7 +767,7 @@ func v5HashedCity() diffCity {
 	wisp.Ephemeral = true
 	return diffCity{
 		name:    "production-shaped rows with v5 hashes",
-		explain: map[string]string{"selected:gcg-wisp-vownh35": "wisp-tier"},
+		explain: map[string]explained{"selected:gcg-wisp-vownh35": {"wisp-tier", "legacy false, v2 true"}},
 		cfg:     cfg,
 		beads: []beads.Bead{
 			poolRow("gcg-session-b2063", "reviewer", 1, "awake", hashes("tok-1")...),
@@ -768,11 +793,26 @@ func TestAllocationDifferentialFixtures(t *testing.T) {
 
 // generatedCity is seed's city: one to four pool templates (singletons
 // among them) with caps and floors, an optional named session, rows in the
-// states both sides manage alike, some alive, and routed and assigned work.
-// It stays clear of every explained difference: no suspension, depends_on,
-// custom scale_check, stale create, wisp-tier row or create budget.
+// states both sides manage alike, some alive, routed and assigned work, and
+// custom scale_checks (PAR-SC) that count, answer zero or fail. It stays
+// clear of every explained difference: no suspension, depends_on, stale
+// create, wisp-tier row, create budget, stale or timed-out scale_check run,
+// or counting check on a named session with no row (named-singleton-
+// custom-count). The checks draw from their own stream, so the cities the
+// seeds gave before PAR-SC keep their shape.
 func generatedCity(seed uint64) diffCity {
 	rng := rand.New(rand.NewPCG(seed, 7))
+	checks := rand.New(rand.NewPCG(seed, 11))
+	check := func(counting bool) string {
+		outputs := []string{"echo 0", "exit 1", "echo junk", "echo 1", "echo 2", "echo 5"}
+		if !counting {
+			outputs = outputs[:3]
+		}
+		if checks.IntN(3) > 0 {
+			return ""
+		}
+		return outputs[checks.IntN(len(outputs))]
+	}
 	cfg := diffConfig()
 	cfg.Daemon.MaxWakesPerTick = intPtr(100)
 	c := diffCity{name: fmt.Sprintf("seed %d", seed), cfg: cfg}
@@ -782,6 +822,7 @@ func generatedCity(seed uint64) diffCity {
 		template := fmt.Sprintf("pool%d", i)
 		maxActive := 1 + rng.IntN(4)
 		agent := diffAgent(template, maxActive)
+		agent.ScaleCheck = check(true)
 		if maxActive > 1 && rng.IntN(3) == 0 {
 			agent.MinActiveSessions = intPtr(1 + rng.IntN(2))
 		}
@@ -809,15 +850,19 @@ func generatedCity(seed uint64) diffCity {
 	}
 	if rng.IntN(2) == 0 {
 		mode := []string{"always", "on_demand"}[rng.IntN(2)]
-		cfg.Agents = append(cfg.Agents, diffAgent("chat", 1))
+		chat := diffAgent("chat", 1)
 		cfg.NamedSessions = []config.NamedSession{{Template: "chat", Mode: mode}}
-		if rng.IntN(2) == 0 {
+		hasRow := rng.IntN(2) == 0
+		if hasRow {
 			c.beads = append(c.beads, chatRow("dg-chat", "1", "configured_named_mode", mode))
 		}
+		chat.ScaleCheck = check(hasRow)
+		cfg.Agents = append(cfg.Agents, chat)
 		if rng.IntN(2) == 0 {
 			c.beads = append(c.beads, beads.Bead{ID: "dga-chat", Title: "dga-chat", Type: "task", Status: "open", Assignee: "chat", CreatedAt: diffNow.Add(-time.Hour), Metadata: map[string]string{}})
 		}
 	}
+	c.scaleCheck = slices.ContainsFunc(cfg.Agents, func(a config.Agent) bool { return a.ScaleCheck != "" })
 	return c
 }
 
@@ -835,8 +880,8 @@ func TestAllocationDifferentialGenerated(t *testing.T) {
 func TestAllocationDifferentialEntriesHaveFixtures(t *testing.T) {
 	shown := map[string]bool{}
 	for _, c := range diffCities(t) {
-		for _, id := range c.explain {
-			shown[id] = true
+		for _, want := range c.explain {
+			shown[want.id] = true
 		}
 	}
 	for _, id := range slices.Sorted(maps.Keys(allocDifferences)) {
@@ -852,11 +897,11 @@ func TestAllocationDifferentialEntriesHaveFixtures(t *testing.T) {
 }
 
 // Kills a legacy timeout that reads as a trusted count: a scale_check that
-// outlives its deadline is a failed check, count zero and partial, which is
-// why the differential's timeout fixtures stand legacy's side in with a
-// failing command.
+// outlives its deadline is a failed check, count zero and partial, even
+// when it printed a count first, which is why the differential's timeout
+// fixtures stand legacy's side in with a failing command.
 func TestLegacyScaleCheckTimeoutIsAFailedCheck(t *testing.T) {
-	cfg := diffConfig(customPool("worker", "exec sleep 5", 3))
+	cfg := diffConfig(customPool("worker", "echo 3; exec sleep 5", 3))
 	runner := func(command, dir string, env map[string]string) (string, error) {
 		return shellCommand(command, dir, 50*time.Millisecond, env)
 	}

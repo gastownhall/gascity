@@ -160,6 +160,7 @@ go_test(
         "guarded_batch_test.go",
         "hangbudget_linux_test.go",
         "hangbudget_test.go",
+        "list_revision_fidelity_test.go",
         "live_ready_test.go",
         "local_sidecar_test.go",
         "lookup_limit_error_test.go",
@@ -197,6 +198,7 @@ go_test(
         "native_dolt_store_integration_test.go",
         "native_dolt_store_label_cas_integration_test.go",
         "native_dolt_store_lifecycle_test.go",
+        "native_dolt_store_list_revision_integration_test.go",
         "native_dolt_store_list_sort_test.go",
         "native_dolt_store_metadata_cas_integration_test.go",
         "native_dolt_store_metadata_cas_internal_test.go",
@@ -293,10 +295,10 @@ go_test(
         "//conditions:default": {},
     }),
     # The integration build (//test:integration_packages) runs ~1700 tests for
-    # ~300 s on one worker; 13 shards bring each to under a minute. The guard
+    # ~300 s on one worker; 11 shards bring each to under a minute. The guard
     # scripts/integration_packages_shards_test.go keeps the tests in
     # heavy_tests.txt apart.
-    shard_count = 13,
+    shard_count = 11,
     deps = [
         "//internal/beadmeta",
         "//internal/beads/beadstest",

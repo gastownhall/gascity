@@ -730,7 +730,6 @@ func TestNativeDoltStoreListPushdownAnswersTheUnpushedQuery(t *testing.T) {
 			if err != nil {
 				t.Fatalf("beadFromNativeIssue: %v", err)
 			}
-			bead.Revision = 0
 			all = append(all, bead)
 		}
 		// The unpushed answer is one unfiltered request's rows, in the order

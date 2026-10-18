@@ -77,6 +77,7 @@ go_test(
         "fingerprint_config_env_test.go",
         "fingerprint_golden_test.go",
         "fingerprint_partition_test.go",
+        "fingerprint_policy_test.go",
         "fingerprint_test.go",
         "import_boundary_test.go",
         "import_trust_test.go",

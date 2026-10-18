@@ -1826,7 +1826,11 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 }
 
 // buildFingerprintExtra builds the fpExtra map for an agent's fingerprint
-// from its config. Returns nil if no extra fields are present.
+// from its config. Returns nil if no extra fields are present. Each key's
+// runtime.FingerprintExtraChangePolicy decides whether a change drains:
+// pool.min / pool.max are Ignore (allocation inputs, not session identity);
+// wake_mode is NextStart (it decides how the next wake resumes); depends_on
+// stays Restart.
 //
 // Note on pool.check omission: the default EffectiveScaleCheck string bakes
 // the agent's QualifiedName into the shell expression. Different code paths
@@ -1837,8 +1841,7 @@ func countRunningPoolInstances(agentName, agentDir string, sp0 scaleParams, a *c
 // oscillation drives config-drift drain on every live pool/named session
 // (minutes-into-work reaps — see gascity ga-00f). scale_check is a runtime
 // probe for demand, not a behavioral-identity field; changes to ScaleCheck
-// don't need to reap live sessions. pool.min / pool.max / depends_on /
-// wake_mode continue to contribute since those are genuinely identity.
+// don't need to reap live sessions.
 func buildFingerprintExtra(a *config.Agent) map[string]string {
 	m := make(map[string]string)
 	if a.MinActiveSessions != nil || a.MaxActiveSessions != nil || a.ScaleCheck != "" || a.DrainTimeout != "" {
