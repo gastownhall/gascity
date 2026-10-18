@@ -411,7 +411,7 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		{name: "unobserved", err: fmt.Errorf("submit: %w", runtime.ErrNudgeDeliveredUnobserved), want: delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
 		{name: "unobserved and unfenced", res: worker.NudgeResult{Unfenced: true}, err: runtime.ErrNudgeDeliveredUnobserved, want: delivered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
 		{name: "steer delivered", res: worker.NudgeResult{Delivered: true}, steer: true, want: steered(opjournal.AckDelivered, "")},
-		{name: "steer unobserved starts no turn", err: runtime.ErrNudgeDeliveredUnobserved, steer: true, want: steered(opjournal.AckDeliveredUnobserved, "")},
+		{name: "steer unobserved", err: runtime.ErrNudgeDeliveredUnobserved, steer: true, want: steered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
 		{name: "steer unobserved and unfenced", err: runtime.ErrNudgeDeliveredUnobserved, unfenced: true, steer: true, want: steered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
 		{name: "not delivered", res: worker.NudgeResult{}, transient: true},
 		{name: "pending interaction", err: fmt.Errorf("x: %w", runtime.ErrNudgeRefusedPendingInteraction), transient: true},

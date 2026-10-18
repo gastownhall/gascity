@@ -41,8 +41,8 @@ func supportsSteer(family, transport string, mode runtime.SteerMode) bool {
 	}
 }
 
-// SupportsSteerForInfo reports whether the session info projects from its
-// row takes a steer from a runtime that steers in mode. It reads only the
+// SupportsSteerForInfo reports whether the session that info describes, as
+// projected from its row, takes a steer from a runtime that steers in mode. It reads only the
 // row's provider family ([ProviderFamilyFromInfo]) and transport, so every
 // reader of the capability (session responses through
 // [SubmissionCapabilitiesForRuntime], the conversation lane) agrees.

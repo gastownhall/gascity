@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -92,6 +93,69 @@ func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 	})
 }
 
+// TestLaneExecSteerCapAsksAboutTheProbedRow kills a probe that decides
+// Caps.Steer apart from the session's row or the runtime's steer mode: the
+// lane asks the steer-capability source (session.SupportsSteerForInfo in
+// production) once, about the row the pass's view came from and the mode the
+// runtime reports, and Caps.Steer is that answer while the runtime is live.
+// It is the agreement test's complement: with no family in the keystroke
+// table, only a seam can tell a row-blind probe from a row-reading one.
+func TestLaneExecSteerCapAsksAboutTheProbedRow(t *testing.T) {
+	for _, answer := range []bool{true, false} {
+		t.Run(fmt.Sprint(answer), func(t *testing.T) {
+			f := newLaneFixture(t, func(m map[string]string) { m["provider"], m["builtin_ancestor"] = "my-wrap", "codex" })
+			f.sp.SteerModeValue = runtime.SteerKeystroke
+			st := f.laneStore(t)
+			v, info := f.view(t)
+			e := newConversationLaneExec(f.deps(st), info)
+			type ask struct {
+				info session.Info
+				mode runtime.SteerMode
+			}
+			var asks []ask
+			e.steerable = func(i session.Info, m runtime.SteerMode) bool {
+				asks = append(asks, ask{i, m})
+				return answer
+			}
+			p, err := e.Probe(context.Background(), v)
+			if err != nil {
+				t.Fatalf("Probe: %v", err)
+			}
+			if len(asks) != 1 || asks[0].mode != runtime.SteerKeystroke || asks[0].info.ID != f.id ||
+				asks[0].info.Provider != "my-wrap" || session.ProviderFamilyFromInfo(asks[0].info, "") != "codex" {
+				t.Fatalf("steer asks = %+v, want one about row %s (my-wrap, family codex) in keystroke mode", asks, f.id)
+			}
+			if p.Caps.Steer != answer {
+				t.Fatalf("Caps.Steer = %v, want the source's answer %v", p.Caps.Steer, answer)
+			}
+		})
+	}
+}
+
+// TestLaneSteerCapNeedsAKeyedSteer kills a lane that steers a runtime that
+// deduplicates by delivery key: a steer goes out through the immediate
+// nudge, which no runtime keys yet, so a re-taken steer would be applied
+// twice while the planner drops the D-NOTE repeat line for a dedup runtime.
+func TestLaneSteerCapNeedsAKeyedSteer(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		caps      opjournal.Caps
+		steerable bool
+		want      bool
+	}{
+		{"live steerable", opjournal.Caps{Live: true}, true, true},
+		{"not live", opjournal.Caps{}, true, false},
+		{"not steerable", opjournal.Caps{Live: true}, false, false},
+		{"dedup", opjournal.Caps{Live: true, Dedup: true}, true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := laneSteerCap(tc.caps, tc.steerable); got != tc.want {
+				t.Fatalf("laneSteerCap(%+v, %v) = %v, want %v", tc.caps, tc.steerable, got, tc.want)
+			}
+		})
+	}
+}
+
 // TestLaneExecSteerCapAgreesWithSessionReads kills a lane whose Caps.Steer
 // is derived apart from the supports_steer session responses report
 // (session.SubmissionCapabilitiesForRuntime over the row): for rows with no
@@ -176,16 +240,22 @@ func TestLaneExecSteersBusySession(t *testing.T) {
 		t.Fatalf("deliveries = %+v, want one steer in joins mode", deliveries)
 	}
 	wantFence := runtime.InputFence{Generation: 1, Epoch: 1, Token: f.token}
-	if len(reqs) != 1 || reqs[0].Delivery != worker.NudgeDeliveryImmediate || reqs[0].Wake != worker.NudgeWakeLiveOnly || reqs[0].Fence != wantFence {
-		t.Fatalf("requests = %+v, want one fenced live-only immediate nudge", reqs)
+	got := f.get(t, st, op.ID)
+	if len(reqs) != 1 || reqs[0].Delivery != worker.NudgeDeliveryImmediate || reqs[0].Wake != worker.NudgeWakeLiveOnly || reqs[0].Fence != wantFence ||
+		reqs[0].DeliveryKey != "gc:"+got.DeliveryKey {
+		t.Fatalf("requests = %+v, want one fenced live-only immediate nudge under key gc:%s", reqs, got.DeliveryKey)
 	}
 	calls := f.nudges()
 	if len(calls) != 1 || calls[0].Method != "NudgeNow" || calls[0].Message != "also check the logs" || calls[0].Fence != wantFence {
 		t.Fatalf("runtime nudges = %+v, want one fenced NudgeNow of the text", calls)
 	}
-	o := f.get(t, st, op.ID).Outcome
+	o := got.Outcome
 	if o.Arm != opjournal.ArmSucceeded || o.Result.Via != laneViaSteer || o.Degradation != "" || o.Result.TurnLink != opjournal.LinkNone || o.Result.TurnBasis != opjournal.BasisNoSource {
 		t.Fatalf("outcome = %+v, want succeeded via steer, no degradation, link none/no_source", o)
+	}
+	row, err := f.store.Get(f.id)
+	if err != nil || row.Metadata[session.MetadataLastNudgeDeliveredAt] == "" {
+		t.Fatalf("session row = %v, %v; want the last nudge stamped", row.Metadata, err)
 	}
 }
 
