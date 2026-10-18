@@ -224,8 +224,14 @@ func (e *opsEnv) opRows(t *testing.T) []beads.Bead {
 // waitClosed polls until op id is closed.
 func (e *opsEnv) waitClosed(t *testing.T, id string) opjournal.Op {
 	t.Helper()
+	return e.waitClosedWithin(t, id, testEventTimeout)
+}
+
+// waitClosedWithin is waitClosed with its own deadline.
+func (e *opsEnv) waitClosedWithin(t *testing.T, id string, timeout time.Duration) opjournal.Op {
+	t.Helper()
 	st := e.opStore(t)
-	deadline := time.Now().Add(testEventTimeout)
+	deadline := time.Now().Add(timeout)
 	for time.Now().Before(deadline) {
 		op, err := st.Get(id)
 		if err == nil && op.Status == opjournal.StatusClosed {
@@ -245,8 +251,13 @@ func terminalEvents(t *testing.T, prov events.Provider, requestID string) []even
 	if err != nil {
 		t.Fatal(err)
 	}
+	return terminalEventsOf(all, requestID)
+}
+
+// terminalEventsOf are the terminal events for requestID among evs.
+func terminalEventsOf(evs []events.Event, requestID string) []events.Event {
 	var out []events.Event
-	for _, e := range all {
+	for _, e := range evs {
 		switch e.Type {
 		case events.RequestResultSessionSubmit, events.RequestResultSessionMessage, events.RequestFailed:
 		default:
@@ -699,20 +710,14 @@ func TestSessionContentOpsAutoInFlightOtherEndpointIsBusy(t *testing.T) {
 // whose State changed while the old Server still delivers. A same-key retry
 // on the new Server finds the request in flight (the registry is the
 // city's, per process) and gets the cached 202: it does not adopt and
-// deliver a second time. The old Server is shut down.
+// deliver a second time.
 func TestSessionContentOpsServerRebuildKeepsTheInflightRequest(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Rebuild")
 	gp, release := e.gatedProvider(t)
 	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-r", `{"message":"once"}`).Body)
 	gp.waitEntered(t)
-	old := e.server(t)
 	e.rebuild(t)
-	select {
-	case <-old.ops.done:
-	default:
-		t.Fatal("the replaced Server was not shut down")
-	}
 	rec := e.post(t, "/session/"+info.ID+"/submit", "key-r", `{"message":"once"}`)
 	retry := decodeAsyncAccepted(t, rec.Body)
 	if rec.Code != http.StatusAccepted || retry.RequestID != first.RequestID || retry.Op == nil || retry.Op.Attempt != 0 {
@@ -732,35 +737,34 @@ func TestSessionContentOpsServerRebuildKeepsTheInflightRequest(t *testing.T) {
 	}
 }
 
-// A replaced Server's close retry ends: in require the terminal event waits
-// for a close that keeps failing, and the replaced Server's shutdown ends
-// that wait at once instead of at finish_by. The op stays open and its
-// in-flight entry stays held until finish_by, so a same-key retry on the new
-// Server gets the cached 202 and nothing is delivered a second time.
-func TestSessionContentOpsShutdownEndsTheCloseRetry(t *testing.T) {
+// §6.1 step 8 in require: a close that outlasts its foreground retries does
+// not hold the terminal event back. A client stops waiting after
+// sessionMessageTimeout, long before finish_by, and its unkeyed retry would
+// deliver again. The event goes out at once with the op still open; the close
+// retries in the background, holding the in-flight entry, so a same-key retry
+// gets the cached 202, and the op closes once the store recovers.
+func TestSessionContentOpsRequireEmitsWhileTheCloseRetries(t *testing.T) {
 	e := newOpsEnv(t, "require")
-	info := e.session(t, "Shutdown")
-	gp, release := e.gatedProvider(t)
-	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-s", `{"message":"x"}`).Body)
-	gp.waitEntered(t)
+	info := e.session(t, "Require close")
 	e.store.set(func(s *opsTestStore) { s.updateFails = 1 << 30 })
-	e.rebuild(t)
-	release()
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-s", `{"message":"x"}`).Body)
 	evs := waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
 	var p SessionSubmitSucceededPayload
 	if err := json.Unmarshal(evs[0].Payload, &p); err != nil || p.Op == nil || p.Op.Status == "closed" {
 		t.Fatalf("event = %s (%v), want the op still open", evs[0].Payload, err)
 	}
-	e.store.set(func(s *opsTestStore) { s.updateFails = 0 })
-	if n := e.sm.cityOpsFor(e.fs.CityName(), e.fs).inflight.Len(); n != 1 {
-		t.Fatalf("in-flight entries after the retry ended = %d, want 1 held until finish_by", n)
-	}
-	rec := e.post(t, "/session/"+info.ID+"/submit", "key-s", `{"message":"x"}`)
+	rec := e.post(t, "/session/"+info.SessionName+"/submit", "key-s", `{"message":"x"}`)
 	acc := decodeAsyncAccepted(t, rec.Body)
-	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 0 {
-		t.Fatalf("retry = %d %+v op %+v, want the cached 202", rec.Code, acc, acc.Op)
+	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 0 || acc.Replayed {
+		t.Fatalf("retry while the close retries = %d %+v op %+v, want the cached 202", rec.Code, acc, acc.Op)
 	}
-	time.Sleep(20 * time.Millisecond)
+	e.store.set(func(s *opsTestStore) { s.updateFails = 0 })
+	// The background retry backs off toward 5s between attempts.
+	if op := e.waitClosedWithin(t, first.RequestID, 3*testEventTimeout); op.Attempt != 0 || op.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v, want the first attempt closed succeeded", op)
+	}
+	city := e.server(t).ops.city
+	waitFor(t, testEventTimeout, "the closed op's in-flight entry is released", func() bool { return city.inflight.Len() == 0 })
 	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
 		t.Fatalf("deliveries = %d, want 1", got)
 	}
@@ -780,39 +784,415 @@ func (s *closingStore) UpdateIfMatch(id string, rev int64, opts beads.UpdateOpts
 	return s.opsTestStore.UpdateIfMatch(id, rev, opts)
 }
 
-// I3 when the city restart closes the old State's store: the old Server's
-// delivery lands, its close fails and its Done is already closed, so the
-// close is not retried; the entry stays held, and a same-key retry on the
-// new Server gets the cached 202 instead of adopting and delivering again.
+// closableEvents is a State's event provider that the city's restart closes:
+// once closed, it refuses what is recorded, as a closed FileRecorder does:
+// RecordAck reports the refusal and Record drops the event silently. It
+// keeps what it refused for the test to inspect.
+type closableEvents struct {
+	*events.Fake
+	closed atomic.Bool
+
+	mu      sync.Mutex
+	refused []events.Event
+}
+
+func (c *closableEvents) Record(e events.Event) {
+	_ = c.RecordAck(e)
+}
+
+func (c *closableEvents) RecordAck(e events.Event) error {
+	if c.closed.Load() {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.refused = append(c.refused, e)
+		return errors.New("event log closed by the city restart")
+	}
+	return c.Fake.RecordAck(e)
+}
+
+// refusedEvents are the events it refused while closed.
+func (c *closableEvents) refusedEvents() []events.Event {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.refused)
+}
+
+// I3 and §6.1 step 8 when the city restart closes the old State's store and
+// event log while the old Server still delivers: a same-key retry on the new
+// Server gets the cached 202 instead of adopting and delivering again, the
+// old Server's terminal event for it lands in the new Server's event log,
+// and the op's close, refused by the old store, is retried through the new
+// one: the op closes with the delivery's outcome instead of expiring at
+// finish_by.
 func TestSessionContentOpsRebuildWithTheOldStoreClosedDeliversOnce(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	old := &closingStore{opsTestStore: e.store}
 	e.fs.cityBeadStore = old
+	oldEv := &closableEvents{Fake: events.NewFake()}
+	e.fs.eventProv = oldEv
 	info := e.session(t, "Old store")
 	gp, release := e.gatedProvider(t)
 	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-c", `{"message":"once"}`).Body)
 	gp.waitEntered(t)
-	e.rebuildOver(t, e.store, nil)
+	newEv := events.NewFake()
+	e.rebuildOver(t, e.store, newEv)
 	old.closed.Store(true)
-	release()
-	waitTerminalEvents(t, e.fs.eventProv, first.RequestID, 1)
+	oldEv.closed.Store(true)
 	rec := e.post(t, "/session/"+info.ID+"/submit", "key-c", `{"message":"once"}`)
 	acc := decodeAsyncAccepted(t, rec.Body)
-	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 0 {
+	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.Op == nil || acc.Op.Attempt != 0 || acc.Replayed {
 		t.Fatalf("retry on the new Server = %d %+v op %+v, want the cached 202", rec.Code, acc, acc.Op)
 	}
-	time.Sleep(20 * time.Millisecond)
+	release()
+	if evs := waitTerminalEvents(t, newEv, acc.RequestID, 1); evs[0].Type != events.RequestResultSessionSubmit {
+		t.Fatalf("event on the new provider = %s: %s", evs[0].Type, evs[0].Payload)
+	}
+	if op := e.waitClosed(t, first.RequestID); op.Attempt != 0 || op.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v, want the first attempt closed succeeded", op)
+	}
+	city := e.server(t).ops.city
+	waitFor(t, testEventTimeout, "the closed op's in-flight entry is released", func() bool { return city.inflight.Len() == 0 })
 	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
 		t.Fatalf("deliveries for one key = %d, want 1", got)
 	}
 }
 
-// The supervisor ends a Server's background close retries when it drops the
-// city (its State is gone) and when it shuts down.
-func TestSessionContentOpsServerShutdownOnDropAndSupervisorShutdown(t *testing.T) {
-	isDone := func(srv *Server) bool {
+// restartGapEnv is a city whose restart closed the store and event log its
+// Server delivers through while a submit was delivering: the delivery has
+// finished, and the closed log refused its terminal event, but no request
+// has brought the new Server yet. The op's close fails until the test clears
+// updateFails.
+type restartGapEnv struct {
+	*opsEnv
+	info  session.Info
+	first asyncAcceptedBody
+	// cityLog is the city's events.jsonl, reopened by the restart.
+	cityLog *events.Fake
+	city    *cityOps
+}
+
+func newRestartGapEnv(t *testing.T, key string) *restartGapEnv {
+	t.Helper()
+	e := newOpsEnv(t, "auto")
+	old := &closingStore{opsTestStore: e.store}
+	e.fs.cityBeadStore = old
+	cityLog := events.NewFake()
+	oldEv := &closableEvents{Fake: cityLog}
+	e.fs.eventProv = oldEv
+	info := e.session(t, "Restart gap")
+	gp, release := e.gatedProvider(t)
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", key, `{"message":"once"}`).Body)
+	gp.waitEntered(t)
+	city := e.server(t).ops.city
+	// The restart closes the old store and event log, and the resolver
+	// serves the reopened ones. The op's close keeps failing, so its
+	// in-flight entry stays held.
+	e.store.set(func(s *opsTestStore) { s.updateFails = 1 << 30 })
+	old.closed.Store(true)
+	oldEv.closed.Store(true)
+	e.resolver.state = &rebuiltOverState{fakeState: e.fs, store: e.store, ev: cityLog}
+	release()
+	waitFor(t, testEventTimeout, "the closed event log refuses the terminal event", func() bool {
+		return len(terminalEventsOf(oldEv.refusedEvents(), first.RequestID)) == 1
+	})
+	if n := len(terminalEvents(t, cityLog, first.RequestID)); n != 0 {
+		t.Fatalf("terminal events before the city is served again = %d, want 0", n)
+	}
+	return &restartGapEnv{opsEnv: e, info: info, first: first, cityLog: cityLog, city: city}
+}
+
+// requireOneEventAfter fails unless the city's log holds exactly one
+// terminal event for the submit, a submit result after cursor.
+func (g *restartGapEnv) requireOneEventAfter(t *testing.T, what, cursor string) {
+	t.Helper()
+	evs := terminalEvents(t, g.cityLog, g.first.RequestID)
+	if len(evs) != 1 || evs[0].Type != events.RequestResultSessionSubmit || evs[0].Seq <= mustSeq(t, cursor) {
+		t.Fatalf("%s: terminal events = %+v, want one after cursor %s", what, evs, cursor)
+	}
+}
+
+// finish lets the op close and checks it closed from its one delivery.
+func (g *restartGapEnv) finish(t *testing.T) {
+	t.Helper()
+	g.store.set(func(s *opsTestStore) { s.updateFails = 0 })
+	// The background retry backs off toward 5s between attempts.
+	if op := g.waitClosedWithin(t, g.first.RequestID, 3*testEventTimeout); op.Attempt != 0 || op.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v, want the first attempt closed succeeded", op)
+	}
+	waitFor(t, testEventTimeout, "the closed op's in-flight entry is released", func() bool { return g.city.inflight.Len() == 0 })
+	if got := len(deliveredCalls(g.fs.sp, g.info.SessionName)); got != 1 {
+		t.Fatalf("deliveries for one key = %d, want 1", got)
+	}
+}
+
+// §6.1 step 8 across a restart gap: the supervisor serves a restarted city
+// with a new Server only when a request for it arrives, so a delivery can
+// finish after the restart closed the old State's event log while no new
+// Server is live. Its terminal event, which the closed log refuses, is kept
+// and recorded once the supervisor serves the city again, in the log the
+// 202's cursor counts in (the city's events.jsonl, reopened): a same-key
+// retry, the request that brings the new Server, gets the cached 202 and can
+// read the event after its cursor, and so can a later retry the LRU answers.
+func TestSessionContentOpsRestartGapKeepsTheTerminalEvent(t *testing.T) {
+	g := newRestartGapEnv(t, "key-g")
+	for _, retry := range []string{"the retry that brings the new Server", "the retry the LRU answers"} {
+		rec := g.post(t, "/session/"+g.info.ID+"/submit", "key-g", `{"message":"once"}`)
+		acc := decodeAsyncAccepted(t, rec.Body)
+		if rec.Code != http.StatusAccepted || acc.RequestID != g.first.RequestID || acc.EventCursor != g.first.EventCursor || acc.Replayed {
+			t.Fatalf("%s = %d %+v, want the cached 202 %+v", retry, rec.Code, acc, g.first)
+		}
+		g.requireOneEventAfter(t, retry, acc.EventCursor)
+	}
+	g.finish(t)
+	g.requireOneEventAfter(t, "after the close", g.first.EventCursor)
+}
+
+// §6.1 step 8 across a restart gap, with no retry: whatever request brings
+// the restarted city's new Server records the kept terminal event before it
+// is served, so a client that waits on the event stream reads the event once
+// anything serves the city.
+func TestSessionContentOpsRestartGapRecordsTheKeptEventWhenTheCityIsServed(t *testing.T) {
+	g := newRestartGapEnv(t, "key-s")
+	rec := httptest.NewRecorder()
+	g.h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, cityURL(g.fs, "/sessions"), nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /sessions = %d: %s", rec.Code, rec.Body.String())
+	}
+	g.requireOneEventAfter(t, "the request that brings the new Server", g.first.EventCursor)
+	g.finish(t)
+	g.requireOneEventAfter(t, "after the close", g.first.EventCursor)
+}
+
+// §6.2 in-flight rows across a restart gap whose reopened event log refuses
+// too: the kept terminal event cannot be recorded yet, so a same-key retry
+// is answered busy (409 in_flight), which the LRU does not keep, instead of a
+// 202 whose cursor no event follows; once the log takes the event, the next
+// retry records it and gets the cached 202.
+func TestSessionContentOpsInFlightReplayIsBusyWhileTheEventIsKept(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	cityLog := events.NewFake()
+	oldEv := &closableEvents{Fake: cityLog}
+	e.fs.eventProv = oldEv
+	info := e.session(t, "Kept")
+	gp, release := e.gatedProvider(t)
+	first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-k", `{"message":"once"}`).Body)
+	gp.waitEntered(t)
+	city := e.server(t).ops.city
+	e.store.set(func(s *opsTestStore) { s.updateFails = 1 << 30 })
+	oldEv.closed.Store(true)
+	newEv := &closableEvents{Fake: cityLog}
+	newEv.closed.Store(true)
+	e.resolver.state = &rebuiltOverState{fakeState: e.fs, store: e.store, ev: newEv}
+	release()
+	waitFor(t, testEventTimeout, "the closed event log refuses the terminal event", func() bool {
+		return len(terminalEventsOf(oldEv.refusedEvents(), first.RequestID)) == 1
+	})
+	if rec := e.post(t, "/session/"+info.ID+"/submit", "key-k", `{"message":"once"}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "in_flight") {
+		t.Fatalf("retry while the event log refuses the kept event = %d: %s, want 409 in_flight", rec.Code, rec.Body.String())
+	}
+	if n := len(terminalEventsOf(newEv.refusedEvents(), first.RequestID)); n == 0 {
+		t.Fatal("the reopened event log was never offered the kept event")
+	}
+	newEv.closed.Store(false)
+	rec := e.post(t, "/session/"+info.ID+"/submit", "key-k", `{"message":"once"}`)
+	acc := decodeAsyncAccepted(t, rec.Body)
+	if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.EventCursor != first.EventCursor || acc.Replayed {
+		t.Fatalf("retry once the log takes the event = %d %+v, want the cached 202 %+v", rec.Code, acc, first)
+	}
+	if evs := terminalEvents(t, cityLog, first.RequestID); len(evs) != 1 || evs[0].Seq <= mustSeq(t, acc.EventCursor) {
+		t.Fatalf("terminal events = %+v, want one after cursor %s", evs, acc.EventCursor)
+	}
+	e.store.set(func(s *opsTestStore) { s.updateFails = 0 })
+	if op := e.waitClosedWithin(t, first.RequestID, 3*testEventTimeout); op.Attempt != 0 || op.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v, want the first attempt closed succeeded", op)
+	}
+	waitFor(t, testEventTimeout, "the closed op's in-flight entry is released", func() bool { return city.inflight.Len() == 0 })
+	if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+		t.Fatalf("deliveries for one key = %d, want 1", got)
+	}
+}
+
+// §6.2 on the Server that accepted the request: its event log refuses the
+// request's terminal event (a lock timeout, a full disk) while the city's
+// State is unchanged, so no new Server records the kept event. Every same-key
+// retry is busy (409 in_flight) while the event is kept, whether the LRU
+// answers it (the same path) or the op row does (another spelling of the
+// target), so none gets a 202 with no event after its cursor; once the log
+// takes the event, the LRU's retry records it and gets the cached 202.
+func TestSessionContentOpsReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.T) {
+	for _, endpoint := range []string{"/submit", "/messages"} {
+		t.Run(strings.TrimPrefix(endpoint, "/"), func(t *testing.T) {
+			e := newOpsEnv(t, "auto")
+			cityLog := events.NewFake()
+			live := &closableEvents{Fake: cityLog}
+			e.fs.eventProv = live
+			info := e.session(t, "Live log refuses")
+			gp, release := e.gatedProvider(t)
+			path := "/session/" + info.ID + endpoint
+			first := decodeAsyncAccepted(t, e.post(t, path, "key-l", `{"message":"once"}`).Body)
+			gp.waitEntered(t)
+			srv := e.server(t)
+			live.closed.Store(true)
+			release()
+			waitFor(t, testEventTimeout, "the live event log refuses the terminal event", func() bool {
+				return len(terminalEventsOf(live.refusedEvents(), first.RequestID)) == 1
+			})
+			e.waitClosed(t, first.RequestID)
+			waitFor(t, testEventTimeout, "the closed op's in-flight entry is released", func() bool { return srv.ops.city.inflight.Len() == 0 })
+			for _, retry := range []struct{ what, path string }{
+				{"the retry the LRU answers", path},
+				{"the retry the op row answers", "/session/" + info.SessionName + endpoint},
+			} {
+				if rec := e.post(t, retry.path, "key-l", `{"message":"once"}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "in_flight") {
+					t.Fatalf("%s while the event is kept = %d: %s, want 409 in_flight", retry.what, rec.Code, rec.Body.String())
+				}
+			}
+			if e.server(t) != srv {
+				t.Fatal("the supervisor built a new Server for the unchanged State")
+			}
+			live.closed.Store(false)
+			rec := e.post(t, path, "key-l", `{"message":"once"}`)
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.EventCursor != first.EventCursor || acc.Replayed {
+				t.Fatalf("retry once the log takes the event = %d %+v, want the cached 202 %+v", rec.Code, acc, first)
+			}
+			if evs := terminalEvents(t, cityLog, first.RequestID); len(evs) != 1 || evs[0].Seq <= mustSeq(t, acc.EventCursor) {
+				t.Fatalf("terminal events = %+v, want the kept one after cursor %s", evs, acc.EventCursor)
+			}
+			if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+				t.Fatalf("deliveries for one key = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// The same in off mode, the default, which records no op: the
+// Idempotency-Key LRU is the only path that replays a same-key retry, and it
+// answers busy (409 in_flight) while the request's terminal event is kept;
+// once the log takes the event, the retry records it and gets the cached 202.
+func TestSessionContentOpsOffReplayIsBusyWhileTheLiveLogRefusesTheEvent(t *testing.T) {
+	for _, endpoint := range []string{"/submit", "/messages"} {
+		t.Run(strings.TrimPrefix(endpoint, "/"), func(t *testing.T) {
+			e := newOpsEnv(t, "")
+			cityLog := events.NewFake()
+			live := &closableEvents{Fake: cityLog}
+			e.fs.eventProv = live
+			info := e.session(t, "Off live log refuses")
+			gp, release := e.gatedProvider(t)
+			path := "/session/" + info.ID + endpoint
+			first := decodeAsyncAccepted(t, e.post(t, path, "key-o", `{"message":"once"}`).Body)
+			if !strings.HasPrefix(first.RequestID, "req-") {
+				t.Fatalf("request_id = %q, want an off-mode req- id", first.RequestID)
+			}
+			gp.waitEntered(t)
+			srv := e.server(t)
+			live.closed.Store(true)
+			release()
+			waitFor(t, testEventTimeout, "the live event log refuses the terminal event", func() bool {
+				return len(terminalEventsOf(live.refusedEvents(), first.RequestID)) == 1
+			})
+			if rec := e.post(t, path, "key-o", `{"message":"once"}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "in_flight") {
+				t.Fatalf("off-mode LRU retry while the event is kept = %d: %s, want 409 in_flight", rec.Code, rec.Body.String())
+			}
+			if e.server(t) != srv {
+				t.Fatal("the supervisor built a new Server for the unchanged State")
+			}
+			live.closed.Store(false)
+			rec := e.post(t, path, "key-o", `{"message":"once"}`)
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || acc.EventCursor != first.EventCursor {
+				t.Fatalf("retry once the log takes the event = %d %+v, want the cached 202 %+v", rec.Code, acc, first)
+			}
+			if evs := terminalEvents(t, cityLog, first.RequestID); len(evs) != 1 || evs[0].Seq <= mustSeq(t, acc.EventCursor) {
+				t.Fatalf("terminal events = %+v, want the kept one after cursor %s", evs, acc.EventCursor)
+			}
+			if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+				t.Fatalf("deliveries for one key = %d, want 1", got)
+			}
+			if rows := e.opRows(t); len(rows) != 0 {
+				t.Fatalf("off wrote %d op rows", len(rows))
+			}
+		})
+	}
+}
+
+// keptFor counts the terminal events city keeps for requestID.
+func keptFor(city *cityOps, requestID string) int {
+	city.emitMu.Lock()
+	defer city.emitMu.Unlock()
+	n := 0
+	for _, k := range city.kept {
+		if k.requestID == requestID {
+			n++
+		}
+	}
+	return n
+}
+
+// §6.3 for a replay of a finished request while the live event log refuses:
+// the terminal event the replay re-emits is kept like any other, so the
+// replay is busy (409 in_flight) rather than a 202 with no event after its
+// cursor, and a further retry keeps no second copy; once the log takes it,
+// the replay gets its 202 and an event for its endpoint after its cursor.
+func TestSessionContentOpsStoredReplayIsBusyWhileItsEventIsKept(t *testing.T) {
+	for _, tc := range []struct{ endpoint, event string }{
+		{"/submit", events.RequestResultSessionSubmit},
+		{"/messages", events.RequestResultSessionMessage},
+	} {
+		t.Run(strings.TrimPrefix(tc.endpoint, "/"), func(t *testing.T) {
+			e := newOpsEnv(t, "auto")
+			cityLog := events.NewFake()
+			live := &closableEvents{Fake: cityLog}
+			e.fs.eventProv = live
+			info := e.session(t, "Replay refused")
+			first := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+tc.endpoint, "key-p", `{"message":"once"}`).Body)
+			waitTerminalEvents(t, cityLog, first.RequestID, 1)
+			e.waitClosed(t, first.RequestID)
+			city := e.server(t).ops.city
+			waitFor(t, testEventTimeout, "the closed op's in-flight entry is released", func() bool { return city.inflight.Len() == 0 })
+			live.closed.Store(true)
+			// Another spelling of the target goes past the per-path LRU to the
+			// op row, which replays the stored outcome.
+			replay := "/session/" + info.SessionName + tc.endpoint
+			for range 2 {
+				if rec := e.post(t, replay, "key-p", `{"message":"once"}`); rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "in_flight") {
+					t.Fatalf("replay while the log refuses its event = %d: %s, want 409 in_flight", rec.Code, rec.Body.String())
+				}
+			}
+			if n := keptFor(city, first.RequestID); n != 1 {
+				t.Fatalf("kept events for the op = %d, want 1: a busy retry keeps no second copy", n)
+			}
+			live.closed.Store(false)
+			rec := e.post(t, replay, "key-p", `{"message":"once"}`)
+			acc := decodeAsyncAccepted(t, rec.Body)
+			if rec.Code != http.StatusAccepted || acc.RequestID != first.RequestID || !acc.Replayed {
+				t.Fatalf("replay once the log takes its event = %d %+v, want a replayed 202", rec.Code, acc)
+			}
+			var after []events.Event
+			for _, ev := range terminalEvents(t, cityLog, first.RequestID) {
+				if ev.Seq > mustSeq(t, acc.EventCursor) {
+					after = append(after, ev)
+				}
+			}
+			if len(after) == 0 || after[0].Type != tc.event {
+				t.Fatalf("terminal events after cursor %s = %+v, want a %s", acc.EventCursor, after, tc.event)
+			}
+			if got := len(deliveredCalls(e.fs.sp, info.SessionName)); got != 1 {
+				t.Fatalf("deliveries for one key = %d, want 1", got)
+			}
+		})
+	}
+}
+
+// The Server the supervisor serves a city with is the city's live Server,
+// the one its deliveries report and close through. Dropping the city leaves
+// it with none and keeps its background close retries running, so a city
+// that comes back closes what they could not; the supervisor's shutdown
+// ends them.
+func TestSessionContentOpsLiveServerOnDropAndSupervisorShutdown(t *testing.T) {
+	retriesEnded := func(srv *Server) bool {
 		select {
-		case <-srv.ops.done:
+		case <-srv.ops.content.Done:
 			return true
 		default:
 			return false
@@ -821,9 +1201,19 @@ func TestSessionContentOpsServerShutdownOnDropAndSupervisorShutdown(t *testing.T
 	t.Run("drop", func(t *testing.T) {
 		e := newOpsEnv(t, "auto")
 		srv := e.server(t)
+		if live := srv.liveServer(); live != srv {
+			t.Fatalf("live Server = %p, want the served %p", live, srv)
+		}
 		e.sm.dropCityServer(e.fs.CityName())
-		if !isDone(srv) {
-			t.Fatal("the dropped Server was not shut down")
+		if live := srv.ops.city.liveServer(); live != nil {
+			t.Fatalf("live Server after the drop = %p, want none", live)
+		}
+		if retriesEnded(srv) {
+			t.Fatal("the drop ended the city's background close retries")
+		}
+		next := e.server(t)
+		if next == srv || srv.liveServer() != next {
+			t.Fatalf("the city came back on %p, live %p; want a new live Server", next, srv.liveServer())
 		}
 	})
 	t.Run("supervisor shutdown", func(t *testing.T) {
@@ -832,8 +1222,8 @@ func TestSessionContentOpsServerShutdownOnDropAndSupervisorShutdown(t *testing.T
 		if err := e.sm.Shutdown(context.Background()); err != nil {
 			t.Fatal(err)
 		}
-		if !isDone(srv) {
-			t.Fatal("the cached Server was not shut down with the supervisor")
+		if !retriesEnded(srv) {
+			t.Fatal("the supervisor's shutdown did not end the city's background close retries")
 		}
 	})
 }
@@ -1291,6 +1681,163 @@ func TestOpsDegradeReporterLatchesPerClass(t *testing.T) {
 	}
 }
 
+// §5.5: a report with nowhere to record (the city has no live Server) does
+// not latch its class, so the first report that can record raises the event.
+func TestOpsDegradeReporterDoesNotLatchWithoutARecorder(t *testing.T) {
+	rec := &fakeRecorder{}
+	var live atomic.Bool
+	clk := &clock.Fake{Time: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)}
+	r := NewOpsDegradeReporter(func() events.Recorder {
+		if !live.Load() {
+			return nil
+		}
+		return rec
+	}, clk)
+	d := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StagePropose, Reason: legacyop.DegradeStoreError}
+	r.Report(rollout.KeyOpsContent, d)
+	live.Store(true)
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(rec.events()); n != 1 {
+		t.Fatalf("events = %d, want 1: the report with no recorder latched its class", n)
+	}
+}
+
+// §5.5: a degrade event the event log refuses (a log the city's restart
+// closed) does not latch its class either: the class's next failure raises
+// the event again, and only an event the log acknowledged latches it.
+func TestOpsDegradeReporterDoesNotLatchARefusedEvent(t *testing.T) {
+	ev := &closableEvents{Fake: events.NewFake()}
+	ev.closed.Store(true)
+	clk := &clock.Fake{Time: time.Date(2026, 10, 17, 0, 0, 0, 0, time.UTC)}
+	r := NewOpsDegradeReporter(func() events.Recorder { return ev }, clk)
+	d := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StageClose, Reason: legacyop.DegradeStoreError}
+	r.Report(rollout.KeyOpsContent, d)
+	if n := len(ev.refusedEvents()); n != 1 {
+		t.Fatalf("refused events = %d, want the first report's", n)
+	}
+	ev.closed.Store(false)
+	r.Report(rollout.KeyOpsContent, d)
+	r.Report(rollout.KeyOpsContent, d)
+	recorded, err := ev.List(events.Filter{Type: events.OpsRecordingDegraded})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recorded) != 1 {
+		t.Fatalf("recorded events = %d, want 1: the refused event latched its class, or the acknowledged one did not", len(recorded))
+	}
+}
+
+// newKeepingCityOps is a city whose live Server's event log refuses events
+// until reopened, with its log lines captured.
+func newKeepingCityOps(t *testing.T) (*cityOps, *Server, *closableEvents, func() []string) {
+	t.Helper()
+	c := newCityOps()
+	var mu sync.Mutex
+	var lines []string
+	c.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	ev := &closableEvents{Fake: events.NewFake()}
+	ev.closed.Store(true)
+	fs := newFakeState(t)
+	fs.eventProv = ev
+	srv := &Server{state: fs}
+	c.publish(srv)
+	return c, srv, ev, func() []string {
+		mu.Lock()
+		defer mu.Unlock()
+		return slices.Clone(lines)
+	}
+}
+
+// keptLines are the log lines that contain marker.
+func keptLines(lines []string, marker string) []string {
+	var out []string
+	for _, l := range lines {
+		if strings.Contains(l, marker) {
+			out = append(out, l)
+		}
+	}
+	return out
+}
+
+// A city keeps at most maxKeptEvents terminal events its event log refuses,
+// dropping the oldest and logging each drop; once the log takes events
+// again, the next terminal event follows the kept ones, recorded oldest
+// first.
+func TestCityOpsKeepsBoundedEventsInOrder(t *testing.T) {
+	c, srv, ev, lines := newKeepingCityOps(t)
+	for i := range maxKeptEvents + 2 {
+		id := fmt.Sprintf("req-%d", i)
+		c.emit(srv, id, events.Event{Type: events.RequestFailed, Subject: id})
+	}
+	dropped := keptLines(lines(), "dropping the kept")
+	if len(dropped) != 2 || !strings.Contains(dropped[0], "result req-0:") || !strings.Contains(dropped[1], "result req-1:") {
+		t.Fatalf("drop log lines = %q, want req-0's then req-1's", dropped)
+	}
+	if !c.flushKeeps(srv, "req-2") || c.flushKeeps(srv, "req-1") {
+		t.Fatal("kept events: want req-2 kept and req-1 dropped")
+	}
+	ev.closed.Store(false)
+	c.emit(srv, "req-next", events.Event{Type: events.RequestFailed, Subject: "req-next"})
+	recorded, err := ev.List(events.Filter{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []string
+	for _, e := range recorded {
+		got = append(got, e.Subject)
+	}
+	var want []string
+	for i := 2; i < maxKeptEvents+2; i++ {
+		want = append(want, fmt.Sprintf("req-%d", i))
+	}
+	want = append(want, "req-next")
+	if !slices.Equal(got, want) {
+		t.Fatalf("recorded %d events %q..., want %d in order", len(got), got[:min(len(got), 3)], len(want))
+	}
+	if c.flushKeeps(srv, "req-2") {
+		t.Fatal("req-2 is still kept after the log took it")
+	}
+}
+
+// At shutdown a city records the terminal events it kept when its event log
+// takes them, and logs each one it cannot record as lost.
+func TestCityOpsShutdownRecordsOrLogsTheKeptEvents(t *testing.T) {
+	t.Run("the log refuses", func(t *testing.T) {
+		c, srv, ev, lines := newKeepingCityOps(t)
+		c.emit(srv, "req-a", events.Event{Type: events.RequestFailed, Subject: "req-a"})
+		c.emit(srv, "req-b", events.Event{Type: events.RequestFailed, Subject: "req-b"})
+		c.shutdown()
+		lost := keptLines(lines(), "is lost")
+		if len(lost) != 2 || !strings.Contains(lost[0], "result req-a ") || !strings.Contains(lost[1], "result req-b ") {
+			t.Fatalf("lost log lines = %q, want req-a's then req-b's", lost)
+		}
+		if recorded, _ := ev.List(events.Filter{}); len(recorded) != 0 {
+			t.Fatalf("recorded events = %d, want 0", len(recorded))
+		}
+		select {
+		case <-c.done:
+		default:
+			t.Fatal("shutdown left the close retries running")
+		}
+	})
+	t.Run("the log takes them", func(t *testing.T) {
+		c, srv, ev, lines := newKeepingCityOps(t)
+		c.emit(srv, "req-a", events.Event{Type: events.RequestFailed, Subject: "req-a"})
+		ev.closed.Store(false)
+		c.shutdown()
+		if lost := keptLines(lines(), "is lost"); len(lost) != 0 {
+			t.Fatalf("lost log lines = %q, want none", lost)
+		}
+		if recorded, _ := ev.List(events.Filter{}); len(recorded) != 1 || recorded[0].Subject != "req-a" {
+			t.Fatalf("recorded events = %+v, want req-a's", recorded)
+		}
+	})
+}
+
 // §5.5 end to end: an outage of the content gate's store raises one event;
 // a request that records again re-arms it, so the next outage, an interval
 // later, raises another. The latch is per city per process: a rebuilt Server
@@ -1365,7 +1912,7 @@ func TestSessionContentOpsDegradeRearmsAfterAClose(t *testing.T) {
 func TestSessionContentOpsDegradeRearmsAfterAnAdoption(t *testing.T) {
 	e := newOpsEnv(t, "auto")
 	info := e.session(t, "Adopt rearm")
-	e.server(t) // attaches the city's degrade events to the Server's provider
+	e.server(t) // publishes the city's live Server, whose provider takes its degrade events
 	clk := &clock.Fake{Time: time.Now()}
 	city := e.sm.cityOpsFor(e.fs.CityName(), e.fs)
 	city.degraded.clk = clk
@@ -1415,6 +1962,39 @@ func TestSessionContentOpsDegradeEventsFollowTheNewState(t *testing.T) {
 	n, _ := newEv.List(events.Filter{Type: events.OpsRecordingDegraded})
 	if len(o) != 1 || len(n) != 1 {
 		t.Fatalf("degrade events: old provider %d, new provider %d; want 1 and 1", len(o), len(n))
+	}
+}
+
+// §5.5 with overlapping States: the supervisor builds a Server for a new
+// State before it serves it, and a concurrent miss can build one it never
+// serves. Building a Server takes none of the city's degrade events: they
+// go to the served Server's provider until the supervisor serves the new
+// State.
+func TestSessionContentOpsDegradeEventsGoToTheServedServer(t *testing.T) {
+	e := newOpsEnv(t, "auto")
+	e.server(t)
+	clk := &clock.Fake{Time: time.Now()}
+	city := e.sm.cityOpsFor(e.fs.CityName(), e.fs)
+	city.degraded.clk = clk
+	count := func(ev events.Provider) int {
+		evs, _ := ev.List(events.Filter{Type: events.OpsRecordingDegraded})
+		return len(evs)
+	}
+	newEv := events.NewFake()
+	next := &rebuiltOverState{fakeState: e.fs, store: e.store, ev: newEv}
+	newCityServer(next, e.sm.readOnly, e.sm.cityOpsFor(e.fs.CityName(), next))
+	d := legacyop.Degrade{Mode: gate.Auto, Surface: legacyop.SurfaceAPI, Stage: legacyop.StagePropose, Reason: legacyop.DegradeStoreError}
+	city.degraded.Report(rollout.KeyOpsContent, d)
+	if o, n := count(e.fs.eventProv), count(newEv); o != 1 || n != 0 {
+		t.Fatalf("with an unserved Server built: served provider %d, unserved %d; want 1 and 0", o, n)
+	}
+	e.resolver.state = next
+	e.server(t)
+	city.degraded.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, legacyop.StagePropose)
+	clk.Time = clk.Time.Add(opsDegradeInterval)
+	city.degraded.Report(rollout.KeyOpsContent, d)
+	if o, n := count(e.fs.eventProv), count(newEv); o != 1 || n != 1 {
+		t.Fatalf("once the new State is served: old provider %d, new %d; want 1 and 1", o, n)
 	}
 }
 
@@ -1473,8 +2053,9 @@ func (p *panickingProvider) NudgeFenced(ctx context.Context, name string, conten
 // answer keeps I1 (require: a 2xx is preceded by a committed op whose id is
 // the request_id), I2 (each op ends with exactly one outcome), I4
 // (request_id is op.id, and a same-key retry gets it again) and I10 (the op
-// closes before its terminal event; auto may emit first only when the close
-// outlasts its foreground retries).
+// closes before its terminal event, unless the close outlasts its foreground
+// retries: then the event goes out at once with the op still open, in every
+// mode).
 func TestSessionContentOpsDurable202Property(t *testing.T) {
 	faults := []string{"none", "propose_error", "ambiguous", "close_error", "close_error_background", "crash_after_commit", "delivery_panic"}
 	i := 0
@@ -1588,11 +2169,11 @@ func runDurable202Case(t *testing.T, i int, mode, fault string, keyed bool, endp
 		checker.mu.Lock()
 		open := slices.Clone(checker.open)
 		checker.mu.Unlock()
-		if len(open) > 0 && (mode == "require" || fault != "close_error_background") {
+		if len(open) > 0 && fault != "close_error_background" {
 			t.Fatalf("I10: terminal events emitted before their op closed: %v", open)
 		}
-		if mode == "auto" && fault == "close_error_background" && acc.Op != nil && len(open) == 0 {
-			t.Fatal("auto waited for a background close before emitting")
+		if fault == "close_error_background" && acc.Op != nil && len(open) == 0 {
+			t.Fatal("the terminal event waited for a background close")
 		}
 	})
 }

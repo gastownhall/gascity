@@ -34,17 +34,26 @@ func (s *Server) currentCityEventCursor() (string, error) {
 
 // EmitTypedEvent records a typed async result event to the given recorder.
 func EmitTypedEvent(rec events.Recorder, eventType, subject string, payload events.Payload) {
-	raw, err := json.Marshal(payload)
+	e, err := typedEvent(eventType, subject, payload)
 	if err != nil {
-		log.Printf("api: marshal %s: %v", eventType, err)
+		log.Printf("api: %v", err)
 		return
 	}
-	rec.Record(events.Event{
+	rec.Record(e)
+}
+
+// typedEvent is the typed async result event EmitTypedEvent records.
+func typedEvent(eventType, subject string, payload events.Payload) (events.Event, error) {
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return events.Event{}, fmt.Errorf("marshal %s: %w", eventType, err)
+	}
+	return events.Event{
 		Type:    eventType,
 		Actor:   "api",
 		Subject: subject,
 		Payload: raw,
-	})
+	}, nil
 }
 
 // EmitRequestFailed records a request.failed event to the given recorder.
@@ -64,6 +73,25 @@ func (s *Server) emitAsyncResult(eventType, subject string, payload events.Paylo
 		return
 	}
 	EmitTypedEvent(rec, eventType, subject, payload)
+}
+
+// emitMessageResult records a /submit or /messages terminal event through
+// its city's shared op state (session_ops.go): a delivery that outlived the
+// Server it started on reports to the event log the supervisor serves the
+// city with now, not the one the city's restart closed, and an event that
+// log refuses is kept until a log takes it. A Server with no op state
+// records to its own event log.
+func (s *Server) emitMessageResult(eventType, subject string, payload events.Payload) {
+	if s.ops == nil {
+		s.emitAsyncResult(eventType, subject, payload)
+		return
+	}
+	e, err := typedEvent(eventType, subject, payload)
+	if err != nil {
+		log.Printf("api: %v", err)
+		return
+	}
+	s.ops.city.emit(s, requestIDFromPayload(payload), e)
 }
 
 func (s *Server) emitRequestFailed(requestID, operation, errorCode, errorMessage string) {
@@ -133,7 +161,7 @@ func (s *Server) emitSessionCreateFailedFor(requestID, sessionID, errorCode, err
 // emitSessionMessageSucceeded records a request.result.session.message event.
 // op is the operation the request was recorded as, nil when it was not.
 func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome, op *ConversationOp) {
-	s.emitAsyncResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
+	s.emitMessageResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
 		RequestID:          requestID,
 		SessionID:          sessionID,
 		Queued:             out.Queued,
@@ -150,7 +178,7 @@ func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage str
 
 // emitSessionSubmitSucceeded records a request.result.session.submit event.
 func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string, op *ConversationOp) {
-	s.emitAsyncResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
+	s.emitMessageResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
 		RequestID:          requestID,
 		SessionID:          sessionID,
 		Queued:             out.Queued,
@@ -167,10 +195,11 @@ func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage stri
 	s.emitRequestFailedOp(requestID, RequestOperationSessionSubmit, errorCode, errorMessage, op)
 }
 
-// emitRequestFailedOp records a request.failed event carrying the operation
-// the failed request was recorded as; a nil op is the legacy payload.
+// emitRequestFailedOp records a /submit or /messages request.failed event
+// carrying the operation the failed request was recorded as; a nil op is the
+// legacy payload.
 func (s *Server) emitRequestFailedOp(requestID, operation, errorCode, errorMessage string, op *ConversationOp) {
-	s.emitAsyncResult(events.RequestFailed, "", RequestFailedPayload{
+	s.emitMessageResult(events.RequestFailed, "", RequestFailedPayload{
 		RequestID:    requestID,
 		Operation:    operation,
 		ErrorCode:    errorCode,

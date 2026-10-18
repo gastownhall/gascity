@@ -1684,7 +1684,7 @@ calls = 1
 [[count]]
 path = "internal/api/session_ops_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 7
 
 [[count]]
 path = "internal/api/session_ops_test.go"

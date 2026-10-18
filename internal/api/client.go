@@ -1487,39 +1487,17 @@ func (c *Client) submitSession(id, message string, intent session.SubmitIntent, 
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	// `gc session submit` is an operator's own send, so it resumes a held
-	// session (CONTRACT v5.9 D8).
-	resume := true
-	body := genclient.SubmitSessionJSONRequestBody{Message: message, Resume: &resume}
-	if intent != "" {
-		i := genclient.SubmitIntent(intent)
-		body.Intent = &i
-	}
-	var params *genclient.SubmitSessionParams
-	if key != "" {
-		params = &genclient.SubmitSessionParams{XGCRequest: "true", IdempotencyKey: &key}
-	}
-	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, params, body)
+	accepted, err := c.postSubmitSession(id, message, intent, key)
 	if err != nil {
-		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	if resp == nil {
-		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	if resp.JSON202 == nil {
-		return SessionSubmitResponse{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
-	}
-	if out, done, err := replayedSubmitOutcome(resp.JSON202, intent); done {
+	if out, done, err := replayedSubmitOutcome(accepted, intent); done {
 		return out, err
 	}
-	requestID := resp.JSON202.RequestId
 
 	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
 	defer cancel()
-	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionSubmit, RequestOperationSessionSubmit, resp.JSON202.EventCursor)
+	env, err := c.waitForEvent(ctx, accepted.RequestId, events.RequestResultSessionSubmit, RequestOperationSessionSubmit, accepted.EventCursor)
 	if err != nil {
 		return SessionSubmitResponse{}, err
 	}
@@ -1540,6 +1518,37 @@ func (c *Client) submitSession(id, message string, intent session.SubmitIntent, 
 		Queued: p.Queued,
 		Intent: session.SubmitIntent(p.Intent),
 	}, nil
+}
+
+// postSubmitSession posts one submit request and returns its 202 body; key,
+// when set, is the request's Idempotency-Key.
+func (c *Client) postSubmitSession(id, message string, intent session.SubmitIntent, key string) (*genclient.AsyncAcceptedBody, error) {
+	// `gc session submit` is an operator's own send, so it resumes a held
+	// session (CONTRACT v5.9 D8).
+	resume := true
+	body := genclient.SubmitSessionJSONRequestBody{Message: message, Resume: &resume}
+	if intent != "" {
+		i := genclient.SubmitIntent(intent)
+		body.Intent = &i
+	}
+	params := &genclient.SubmitSessionParams{XGCRequest: "true"}
+	if key != "" {
+		params.IdempotencyKey = &key
+	}
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, params, body)
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return nil, err
+	}
+	if resp.JSON202 == nil {
+		return nil, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return resp.JSON202, nil
 }
 
 // replayedSubmitOutcome answers a 202 that replays a finished submit from the

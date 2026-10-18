@@ -147,15 +147,17 @@ type Admission struct {
 
 // Recorder records one surface's requests under one gate mode. Executor is
 // ExecutorAPI or ExecutorCLI; Admit refuses any other. Open opens
-// the op store lazily; the caller caches it. Inflight is the API's in-flight
-// registry; nil (the CLI) means never adopt. Degraded, when set, is told of
-// every store failure the recorder degrades past. Logger receives the
-// recorder's rate-limited degrade lines and late-result lines; nil is
-// slog.Default(). Done, when closed (its owner shutting down or replaced),
-// ends any background close retry, leaving the op to the sweeper; the entry
-// stays held until the op's finish_by, so a same-key retry in this process
-// does not adopt an op whose effect may already have landed. nil never
-// closes.
+// the op store lazily; the caller caches it. Admit opens it once per
+// admission and Finish closes through that store; a background close retry
+// calls Open again for each attempt, so it closes through whatever store Open
+// answers by then. Inflight is the API's in-flight registry; nil (the CLI)
+// means never adopt. Degraded, when set, is told of every store failure the
+// recorder degrades past. Logger receives the recorder's rate-limited
+// degrade lines and late-result lines; nil is slog.Default(). Done, when
+// closed (its owner shutting down), ends any background close retry, leaving
+// the op to the sweeper; the entry stays held until the op's finish_by, so a
+// same-key retry in this process does not adopt an op whose effect may
+// already have landed. nil never closes.
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -513,18 +515,19 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 	return opjournal.Op{}, err
 }
 
-// closeInBackground keeps closing the op, backing off, until it closes, its
-// finish_by passes (the sweeper owns it then) or the recorder's Done closes,
-// then releases the entry. When Done ends the retry before finish_by, the
-// entry is held until finish_by: the request ran in this process and its
-// effect may have landed, so a same-key retry must find it in flight rather
-// than adopt it (DES-O0API I3, §12).
+// closeInBackground keeps closing the op, backing off and reopening the
+// store for each attempt, until it closes, its finish_by passes (the sweeper
+// owns it then) or the recorder's Done closes, then releases the entry. When
+// Done ends the retry before finish_by, the entry is held until finish_by:
+// the request ran in this process and its effect may have landed, so a
+// same-key retry must find it in flight rather than adopt it (DES-O0API I3,
+// §12).
 func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- struct{}) {
 	r := a.rec
 	defer close(done)
 	gap := closeRetryGap
 	for !r.Clock.Now().After(a.Op.FinishBy) && r.wait(gap) {
-		_, err := a.store.CloseKnown(a.Op, outcome, string(r.Executor))
+		err := r.closeOpened(a.Op, outcome)
 		switch {
 		case err == nil:
 			a.release()
@@ -539,6 +542,16 @@ func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- str
 	}
 	r.count(a.Op.Kind, StageClose, ResultFailed, "")
 	a.releaseAtFinishBy()
+}
+
+// closeOpened closes op with outcome through the store Open answers now.
+func (r *Recorder) closeOpened(op opjournal.Op, outcome opjournal.Outcome) error {
+	st, err := r.Open()
+	if err != nil {
+		return err
+	}
+	_, err = st.CloseKnown(op, outcome, string(r.Executor))
+	return err
 }
 
 // releaseAtFinishBy releases the entry at the op's finish_by, or now when it

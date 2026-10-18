@@ -166,7 +166,7 @@ func TestFinishReusesAdmitsStore(t *testing.T) {
 }
 
 // The background close retry ends when the recorder's Done closes (its
-// owner shutting down or replaced), instead of retrying until finish_by. The
+// owner shutting down), instead of retrying until finish_by. The
 // entry stays held until finish_by: the request's API did not die, so a
 // same-key retry in this process must not adopt the op and deliver it a
 // second time (DES-O0API I3, §12). At finish_by the entry is released and the

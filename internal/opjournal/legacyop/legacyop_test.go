@@ -488,6 +488,35 @@ func TestFinish(t *testing.T) {
 			t.Fatalf("gave up at %s, before finish_by %s", e.clk.Now(), adm.Op.FinishBy)
 		}
 	})
+	t.Run("the background close reopens the store for each attempt", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		adm, _ := r.Admit(msg("k1", "hello"))
+		r.sleep = func(time.Duration) { e.clk.Advance(time.Minute) }
+		e.fault.updateForever = true
+		healthy, err := opjournal.NewStore(beads.SessionStore{Store: e.mem}, e.clk, opjournal.WithIDPrefix("gc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reopens atomic.Int32
+		r.Open = func() (*opjournal.Store, error) {
+			if reopens.Add(1) == 1 {
+				return nil, errors.New("transport: refused")
+			}
+			return healthy, nil
+		}
+		f := adm.Finish(Result{Outcome: out})
+		if f.Closed || f.Background == nil {
+			t.Fatalf("Finish = %+v, want a background close", f)
+		}
+		<-f.Background
+		if got, _ := e.st.Get(adm.Op.ID); got.Status != opjournal.StatusClosed || got.Outcome != out {
+			t.Fatalf("stored %+v", got)
+		}
+		if r.Inflight.Len() != 0 || reopens.Load() != 2 {
+			t.Fatalf("registry %d, reopened %d times; want 0 and 2", r.Inflight.Len(), reopens.Load())
+		}
+	})
 	t.Run("leave open, then a same-key retry adopts", func(t *testing.T) {
 		e := newEnv(t)
 		r := apiRecorder(e, gate.Auto)

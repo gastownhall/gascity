@@ -728,7 +728,7 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 	// replay returns the original 202 body — same request_id and event_cursor —
 	// without starting a second delivery. The target is folded into the scope
 	// because it lives in the URL, not the body.
-	accepted, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "submit"), input.IdempotencyKey, input.Body,
+	accepted, err := s.withMessageIdempotency(sessionActionIdempotencyPath(input.ID, "submit"), input.IdempotencyKey, input.Body,
 		func() (asyncAcceptedBody, error) {
 			return s.acceptSessionSubmit(ctx, input)
 		})
@@ -742,41 +742,71 @@ func (s *Server) humaHandleSessionSubmit(ctx context.Context, input *SessionSubm
 // message op under the ops.content gate (session_ops.go), starts the
 // asynchronous delivery, and returns the 202 body.
 func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitInput) (asyncAcceptedBody, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
-		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
-	}
-	conv, err := s.sessionTargetDeliverable(ctx, store.Store, input.ID)
-	if err != nil {
-		if errors.Is(err, session.ErrSessionNotFound) {
-			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
-		}
-		// Ambiguous bare names and configured-name/live-bead conflicts are
-		// deterministic client addressing errors: map them through the resolve
-		// helper so they surface as 409 (matching /stop, /respond, and the
-		// synchronous message twin) instead of a 500 from humaStoreError.
-		return asyncAcceptedBody{}, humaResolveError(err)
-	}
-	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
-		return asyncAcceptedBody{}, err
-	}
-
 	intent := input.Body.Intent
 	if intent == "" {
 		intent = session.SubmitIntentDefault
 	}
-
-	// The cursor is captured before admission and before the goroutine: a
-	// fast terminal event, or a replay's re-emitted one, lands after it.
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
-	}
-	opReq := &messageOpRequest{
-		target: input.ID, conv: conv, key: input.IdempotencyKey, text: input.Body.Message,
+	req := &messageOpRequest{
+		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
 		intent: intent, operation: RequestOperationSessionSubmit,
 	}
-	adm, replay, err := s.admitMessageOp(ctx, store.Store, opReq, eventCursor)
+	message, resume := input.Body.Message, input.Body.Resume
+	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
+		s.deliverSubmit(d, message, intent, resume)
+	})
+}
+
+// deliverSubmit delivers an accepted /submit: it submits message to the
+// session, closes the op from the result and emits the terminal event.
+func (s *Server) deliverSubmit(d messageDelivery, message string, intent session.SubmitIntent, resume bool) {
+	id, err := s.resolveDeliveryTarget(context.Background(), d)
+	if err != nil {
+		op := s.finishMessageOp(d.adm, messageOpResult(false, err, nil))
+		s.emitSessionSubmitFailed(d.reqID, "resolve_failed", err.Error(), op)
+		return
+	}
+	outcome, submitErr := s.submitMessageToSession(context.Background(), d.store, id, message, intent, resume)
+	op := s.finishMessageOp(d.adm, messageOpResult(outcome.Queued, submitErr, outcome.Interrupt))
+	if submitErr != nil {
+		s.emitSessionSubmitFailed(d.reqID, sessionSubmitFailureCode(submitErr), submitErr.Error(), op)
+		return
+	}
+	s.emitSessionSubmitSucceeded(d.reqID, id, outcome, string(intent), op)
+}
+
+// messageDelivery is an accepted /submit or /messages request, handed to
+// its delivery goroutine.
+type messageDelivery struct {
+	adm   *legacyop.Admission
+	reqID string
+	store beads.Store
+	// target is the session as addressed; deliverTo, when set, is the
+	// session the delivery goes to without re-resolving target.
+	target    string
+	deliverTo string
+}
+
+// acceptMessageOp is the acceptance /submit and /messages share: it
+// validates req's target, admits req as a message op under the ops.content
+// gate (session_ops.go), starts deliver on its own goroutine and returns the
+// 202 body. A replay is answered with its body and starts nothing.
+func (s *Server) acceptMessageOp(ctx context.Context, req *messageOpRequest, deliver func(messageDelivery)) (asyncAcceptedBody, error) {
+	store := s.state.SessionsBeadStore()
+	if store.Store == nil {
+		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
+	}
+	conv, err := s.messageTargetConversation(ctx, store.Store, req.target)
+	if err != nil {
+		return asyncAcceptedBody{}, err
+	}
+	req.conv = conv
+	// The cursor is captured before admission and before the goroutine: a
+	// fast terminal event, or a replay's re-emitted one, lands after it.
+	eventCursor, err := s.currentCityEventCursor()
+	if err != nil {
+		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
+	}
+	adm, replay, err := s.admitMessageOp(ctx, store.Store, req, eventCursor)
 	if err != nil {
 		return asyncAcceptedBody{}, err
 	}
@@ -785,46 +815,63 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 	}
 	handedOff := false
 	defer releaseOnPanic(adm, &handedOff)
-	reqID, reqIDErr := messageRequestID(adm)
-	if reqIDErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
+	reqID, err := messageRequestID(adm)
+	if err != nil {
+		return asyncAcceptedBody{}, apierr.Internal.Msg(err.Error())
 	}
 	body := acceptedMessageBody(adm, reqID, eventCursor)
-	adm.Accept(inflightAnswer{operation: RequestOperationSessionSubmit, body: body})
+	adm.Accept(inflightAnswer{operation: req.operation, body: body})
 	s.ops.runAfterAdmit()
 
-	message, resume := input.Body.Message, input.Body.Resume
-	sessionTarget := input.ID
+	d := messageDelivery{adm: adm, reqID: reqID, store: store.Store, target: req.target}
 	// Require delivers to the op's conversation: the op is the request.
 	// Otherwise the delivery re-resolves the target, as it always has.
-	deliverTo := ""
 	if adm.Recorded && s.ops.content.Mode == gate.Require {
-		deliverTo = opReq.conv
+		d.deliverTo = req.conv
 	}
+	operation := req.operation
 	handedOff = true
 	go func() {
-		defer s.recoverMessageOp(adm, reqID, RequestOperationSessionSubmit)
-		id := deliverTo
-		if id == "" {
-			resolved, err := s.resolveSessionIDMaterializingNamedWithContext(context.Background(), store.Store, sessionTarget)
-			if err != nil {
-				op := s.finishMessageOp(adm, messageOpResult(false, err, nil))
-				s.emitSessionSubmitFailed(reqID, "resolve_failed", err.Error(), op)
-				return
-			}
-			id = resolved
-			s.noteTargetMoved(adm, id)
-		}
-		outcome, submitErr := s.submitMessageToSession(context.Background(), store.Store, id, message, intent, resume)
-		op := s.finishMessageOp(adm, messageOpResult(outcome.Queued, submitErr, outcome.Interrupt))
-		if submitErr != nil {
-			s.emitSessionSubmitFailed(reqID, sessionSubmitFailureCode(submitErr), submitErr.Error(), op)
-		} else {
-			s.emitSessionSubmitSucceeded(reqID, id, outcome, string(intent), op)
-		}
+		defer s.recoverMessageOp(adm, reqID, operation)
+		deliver(d)
 	}()
-
 	return body, nil
+}
+
+// messageTargetConversation validates a /submit or /messages target: a
+// deliverable session with no pending interaction. It returns the target's
+// conversation, "" for a configured named session with no row yet.
+func (s *Server) messageTargetConversation(ctx context.Context, store beads.Store, target string) (string, error) {
+	conv, err := s.sessionTargetDeliverable(ctx, store, target)
+	if errors.Is(err, session.ErrSessionNotFound) {
+		return "", apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", target))
+	}
+	if err != nil {
+		// Ambiguous bare names and configured-name/live-bead conflicts are
+		// deterministic client addressing errors: map them through the resolve
+		// helper so they surface as 409 (matching /stop, /respond, and the
+		// synchronous message twin) instead of a 500 from humaStoreError.
+		return "", humaResolveError(err)
+	}
+	if err := s.rejectPendingInteraction(ctx, store, target); err != nil {
+		return "", err
+	}
+	return conv, nil
+}
+
+// resolveDeliveryTarget is the session d delivers to: d.deliverTo when set,
+// else d.target resolved now, materializing a configured named session; a
+// target that moved off the op's conversation is noted.
+func (s *Server) resolveDeliveryTarget(ctx context.Context, d messageDelivery) (string, error) {
+	if d.deliverTo != "" {
+		return d.deliverTo, nil
+	}
+	id, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, d.store, d.target)
+	if err != nil {
+		return "", err
+	}
+	s.noteTargetMoved(d.adm, id)
+	return id, nil
 }
 
 // recoverMessageOp turns a panic in a message delivery goroutine into a
@@ -843,7 +890,7 @@ func (s *Server) recoverMessageOp(adm *legacyop.Admission, requestID, operation 
 func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMessageInput) (*SessionMessageOutput, error) {
 	// Idempotency: accept (and deliver) at most once per Idempotency-Key; see
 	// humaHandleSessionSubmit.
-	accepted, err := withIdempotency(s.idem, sessionActionIdempotencyPath(input.ID, "messages"), input.IdempotencyKey, input.Body,
+	accepted, err := s.withMessageIdempotency(sessionActionIdempotencyPath(input.ID, "messages"), input.IdempotencyKey, input.Body,
 		func() (asyncAcceptedBody, error) {
 			return s.acceptSessionMessage(ctx, input)
 		})
@@ -857,140 +904,102 @@ func (s *Server) humaHandleSessionMessage(ctx context.Context, input *SessionMes
 // a message op under the ops.content gate (session_ops.go), starts the
 // asynchronous delivery, and returns the 202 body.
 func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessageInput) (asyncAcceptedBody, error) {
-	store := s.state.SessionsBeadStore()
-	if store.Store == nil {
-		return asyncAcceptedBody{}, apierr.ServiceUnavailable.Msg("no bead store configured")
-	}
-	conv, err := s.sessionTargetDeliverable(ctx, store.Store, input.ID)
-	if err != nil {
-		if errors.Is(err, session.ErrSessionNotFound) {
-			return asyncAcceptedBody{}, apierr.SessionNotFound.Msg(fmt.Sprintf("session %q not found and not a configured named session", input.ID))
-		}
-		// Ambiguous bare names and configured-name/live-bead conflicts are
-		// deterministic client addressing errors: map them through the resolve
-		// helper so they surface as 409 (matching /stop, /respond, and the
-		// synchronous message twin) instead of a 500 from humaStoreError.
-		return asyncAcceptedBody{}, humaResolveError(err)
-	}
-	if err := s.rejectPendingInteraction(ctx, store.Store, input.ID); err != nil {
-		return asyncAcceptedBody{}, err
-	}
-
-	// The cursor is captured before admission and before the goroutine; see
-	// acceptSessionSubmit.
-	eventCursor, cursorErr := s.currentCityEventCursor()
-	if cursorErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(cursorErr.Error())
-	}
-	opReq := &messageOpRequest{
-		target: input.ID, conv: conv, key: input.IdempotencyKey, text: input.Body.Message,
+	req := &messageOpRequest{
+		target: input.ID, key: input.IdempotencyKey, text: input.Body.Message,
 		intent: session.SubmitIntentDefault, operation: RequestOperationSessionMessage,
 	}
-	adm, replay, err := s.admitMessageOp(ctx, store.Store, opReq, eventCursor)
-	if err != nil {
-		return asyncAcceptedBody{}, err
-	}
-	if replay != nil {
-		return *replay, nil
-	}
-	handedOff := false
-	defer releaseOnPanic(adm, &handedOff)
-	reqID, reqIDErr := messageRequestID(adm)
-	if reqIDErr != nil {
-		return asyncAcceptedBody{}, apierr.Internal.Msg(reqIDErr.Error())
-	}
-	body := acceptedMessageBody(adm, reqID, eventCursor)
-	adm.Accept(inflightAnswer{operation: RequestOperationSessionMessage, body: body})
-	s.ops.runAfterAdmit()
-
 	message, resume := input.Body.Message, input.Body.Resume
-	sessionTarget := input.ID
-	deliverTo := ""
-	if adm.Recorded && s.ops.content.Mode == gate.Require {
-		deliverTo = opReq.conv
+	return s.acceptMessageOp(ctx, req, func(d messageDelivery) {
+		s.deliverMessage(d, message, resume)
+	})
+}
+
+// messageResult is the result of one /messages send: the session it went to
+// and its outcome, or the error code its terminal event carries.
+type messageResult struct {
+	sessionID string
+	outcome   messageOutcome
+	errorCode string
+	err       error
+}
+
+// messageSend is one /messages send racing sessionMessageAsyncTimeout. The
+// send posts its one result; once the request's terminal event is out, a
+// late result is only logged.
+type messageSend struct {
+	reqID, target string
+	results       chan messageResult
+	emitted       atomic.Bool
+}
+
+// post hands r to the delivery waiting on the send, or logs it when the
+// request's terminal event is already out.
+func (m *messageSend) post(r messageResult) {
+	if !m.emitted.Load() {
+		m.results <- r
+		return
 	}
-	handedOff = true
-	go func() {
-		defer s.recoverMessageOp(adm, reqID, RequestOperationSessionMessage)
+	if r.err != nil {
+		log.Printf("api: late session.message result after timeout request_id=%s target=%s error_code=%s err=%v", m.reqID, m.target, r.errorCode, r.err)
+		return
+	}
+	log.Printf("api: late session.message result after timeout request_id=%s target=%s session_id=%s", m.reqID, m.target, r.sessionID)
+}
 
-		type messageResult struct {
-			sessionID string
-			outcome   messageOutcome
-			errorCode string
-			err       error
-		}
-
-		resultCh := make(chan messageResult, 1)
-		var terminalEmitted atomic.Bool
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
-		sendResult := func(result messageResult) {
-			if terminalEmitted.Load() {
-				if result.err != nil {
-					log.Printf("api: late session.message result after timeout request_id=%s target=%s error_code=%s err=%v", reqID, sessionTarget, result.errorCode, result.err)
-				} else {
-					log.Printf("api: late session.message result after timeout request_id=%s target=%s session_id=%s", reqID, sessionTarget, result.sessionID)
-				}
-				return
-			}
-			resultCh <- result
-		}
-		go func() {
-			defer func() {
-				if r := recover(); r != nil {
-					sendResult(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
-				}
-			}()
-			id := deliverTo
-			if id == "" {
-				resolved, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, store.Store, sessionTarget)
-				if err != nil {
-					sendResult(messageResult{errorCode: "resolve_failed", err: err})
-					return
-				}
-				id = resolved
-				s.noteTargetMoved(adm, id)
-			}
-			outcome, err := s.sendUserMessageToSession(ctx, store.Store, id, message, resume)
-			if err != nil {
-				code := "message_failed"
-				if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
-					code = "timeout"
-				}
-				sendResult(messageResult{sessionID: id, errorCode: code, err: err})
-				return
-			}
-			sendResult(messageResult{sessionID: id, outcome: outcome})
-		}()
-
-		// emit closes the op from the result, then emits its terminal event.
-		emit := func(result messageResult) {
-			terminalEmitted.Store(true)
-			op := s.finishMessageOp(adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
-			if result.err != nil {
-				s.emitSessionMessageFailed(reqID, result.errorCode, result.err.Error(), op)
-				return
-			}
-			s.emitSessionMessageSucceeded(reqID, result.sessionID, result.outcome, op)
-		}
-		timer := time.NewTimer(sessionMessageAsyncTimeout)
-		defer timer.Stop()
+// deliverMessage delivers an accepted /messages: it runs the send on its own
+// goroutine under sessionMessageAsyncTimeout, closes the op from the send's
+// result, or from a timeout when the send outlives it, and emits the
+// terminal event.
+func (s *Server) deliverMessage(d messageDelivery, message string, resume bool) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	send := &messageSend{reqID: d.reqID, target: d.target, results: make(chan messageResult, 1)}
+	go s.sendMessage(ctx, d, send, message, resume)
+	timer := time.NewTimer(sessionMessageAsyncTimeout)
+	defer timer.Stop()
+	var result messageResult
+	select {
+	case result = <-send.results:
+	case <-timer.C:
+		cancel()
 		select {
-		case result := <-resultCh:
-			emit(result)
-		case <-timer.C:
-			cancel()
-			select {
-			case result := <-resultCh:
-				emit(result)
-				return
-			default:
-			}
-			emit(messageResult{errorCode: "timeout", err: messageTimeoutError{}})
+		case result = <-send.results:
+		default:
+			result = messageResult{errorCode: "timeout", err: messageTimeoutError{}}
+		}
+	}
+	send.emitted.Store(true)
+	op := s.finishMessageOp(d.adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
+	if result.err != nil {
+		s.emitSessionMessageFailed(d.reqID, result.errorCode, result.err.Error(), op)
+		return
+	}
+	s.emitSessionMessageSucceeded(d.reqID, result.sessionID, result.outcome, op)
+}
+
+// sendMessage sends message to d's session and posts the result to send; a
+// panic posts an internal_error result.
+func (s *Server) sendMessage(ctx context.Context, d messageDelivery, send *messageSend, message string, resume bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			send.post(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
 		}
 	}()
-
-	return body, nil
+	id, err := s.resolveDeliveryTarget(ctx, d)
+	if err != nil {
+		send.post(messageResult{errorCode: "resolve_failed", err: err})
+		return
+	}
+	outcome, err := s.sendUserMessageToSession(ctx, d.store, id, message, resume)
+	if err != nil {
+		code := "message_failed"
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+			code = "timeout"
+		}
+		send.post(messageResult{sessionID: id, errorCode: code, err: err})
+		return
+	}
+	send.post(messageResult{sessionID: id, outcome: outcome})
 }
 
 // --- Session Stop ---

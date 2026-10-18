@@ -23,10 +23,27 @@ package api
 // The in-flight registry is per city per process (cityOps), not per Server:
 // the supervisor builds a new Server for a city whenever the city's State
 // changes, while the old Server's deliveries may still run, and adoption
-// reads "not in the registry" as "its API died" (D9, I3). For the same
-// reason a replaced or dropped Server whose op close is still failing stops
-// retrying but keeps the entry until the op's finish_by: its message may
-// have landed, so a same-key retry must not adopt and deliver it again.
+// reads "not in the registry" as "its API died" (D9, I3). Such a delivery
+// reports to the city's live Server, the one the supervisor serves the city
+// with: its terminal event goes to that Server's event log and its op closes
+// through that Server's store, since the city's restart may have closed the
+// old State's. A close that keeps failing is retried until the op closes,
+// its finish_by passes or the process shuts down, and its in-flight entry is
+// held until the op closes or its finish_by passes: its message may have
+// landed, so a same-key retry must not adopt and deliver it again.
+//
+// The supervisor builds a restarted city's new Server only when a request
+// for the city arrives, so a delivery can finish after the restart closed
+// the old State's event log while no new Server is live. A terminal event
+// the event log refuses is kept, per city, and recorded in order the next
+// time a log takes it: when the supervisor builds the city's next Server,
+// before the city's next /submit or /messages terminal event, and before a
+// same-key retry of its request is answered, from the LRU, the in-flight
+// registry or the op row. While it cannot be, that retry is answered 409
+// in_flight instead of a 202 with no event after its cursor, as is a replay
+// whose re-emitted event the log refuses. Kept events are bounded
+// (maxKeptEvents) and live only in the process: one dropped at the bound, or
+// still kept at shutdown, is logged.
 
 import (
 	"context"
@@ -79,48 +96,211 @@ func (messageTimeoutError) Unwrap() error { return context.DeadlineExceeded }
 // another session between the 202 and the delivery (DES-O0API §6.1).
 const opTargetMovedResult = "op_target_moved"
 
+// maxKeptEvents bounds the terminal events a city keeps for an event log that
+// refuses them; past it the oldest is dropped, and logged.
+const maxKeptEvents = 1024
+
+// keptEvent is a terminal event an event log refused, kept to record later.
+type keptEvent struct {
+	requestID string
+	event     events.Event
+}
+
 // cityOps is the operation-journal state one process shares across every
 // Server it builds for one city: the in-flight registry, which must outlive
-// a Server whose deliveries are still running (I3), and the degrade
-// reporter, whose latch is per process (§5.5). It is safe for concurrent use.
+// a Server whose deliveries are still running (I3); the degrade reporter,
+// whose latch is per process (§5.5); the city's live Server, the one the
+// supervisor serves the city with, through which every Server's deliveries
+// report and close; the terminal events its event log refused, kept to
+// record later; and the done channel that ends the city's background close
+// retries when the process shuts down. It is safe for concurrent use.
 type cityOps struct {
 	inflight *legacyop.Inflight
 	degraded *OpsDegradeReporter
+	done     chan struct{}
+	stopOnce sync.Once
+	// logf writes the kept events' log lines; tests capture them.
+	logf func(format string, args ...any)
 
-	mu       sync.Mutex
-	recorder func() events.Recorder
+	// emitMu serializes the city's terminal events, so the kept ones are
+	// recorded in order and before any later one, and guards kept. It is
+	// taken before mu.
+	emitMu sync.Mutex
+	kept   []keptEvent
+
+	mu   sync.Mutex
+	live *Server
 }
 
-// newCityOps returns a city's empty shared op state.
+// newCityOps returns a city's empty shared op state, with no live Server.
 func newCityOps() *cityOps {
-	c := &cityOps{inflight: legacyop.NewInflight()}
-	c.degraded = NewOpsDegradeReporter(c.eventRecorder, clock.Real{})
+	c := &cityOps{inflight: legacyop.NewInflight(), done: make(chan struct{}), logf: log.Printf}
+	c.degraded = NewOpsDegradeReporter(func() events.Recorder { return c.eventLog(nil) }, clock.Real{})
 	return c
 }
 
-// attach makes recorder, the newest Server's event recorder, the one the
-// city's degrade events go to.
-func (c *cityOps) attach(recorder func() events.Recorder) {
+// publish makes s the city's live Server: the supervisor serves the city
+// with it now.
+func (c *cityOps) publish(s *Server) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.recorder = recorder
+	c.live = s
 }
 
-// eventRecorder is the attached Server's event recorder, or nil.
-func (c *cityOps) eventRecorder() events.Recorder {
+// retire leaves the city with no live Server when s is the live one: the
+// supervisor replaced or dropped it.
+func (c *cityOps) retire(s *Server) {
 	c.mu.Lock()
-	recorder := c.recorder
-	c.mu.Unlock()
-	if recorder == nil {
+	defer c.mu.Unlock()
+	if c.live == s {
+		c.live = nil
+	}
+}
+
+// liveServer is the city's live Server, or nil.
+func (c *cityOps) liveServer() *Server {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.live
+}
+
+// eventLog is the event log the city's events go to: the live Server's, or
+// from's when the city has none. It is nil when there is no such Server or
+// its State has no event provider.
+func (c *cityOps) eventLog(from *Server) events.Recorder {
+	srv := c.liveServer()
+	if srv == nil {
+		srv = from
+	}
+	if srv == nil {
 		return nil
 	}
-	return recorder()
+	ep := srv.state.EventProvider()
+	if ep == nil {
+		return nil
+	}
+	return ep
+}
+
+// recordAcked records e to rec and returns rec's refusal: an AckRecorder's
+// error, such as a closed log's. A recorder that cannot acknowledge (an exec
+// script) is taken at its word: recording the event to it again could only
+// duplicate it.
+func recordAcked(rec events.Recorder, e events.Event) error {
+	if ack, ok := rec.(events.AckRecorder); ok {
+		return ack.RecordAck(e)
+	}
+	rec.Record(e)
+	return nil
+}
+
+// emit records requestID's terminal event e to the city's event log (from's,
+// when the city has no live Server), after the events kept before it. An
+// event the log refuses is kept, to be recorded when the supervisor builds
+// the city's next Server, before the city's next emit, or before a same-key
+// retry of its request is answered.
+func (c *cityOps) emit(from *Server, requestID string, e events.Event) {
+	c.emitMu.Lock()
+	defer c.emitMu.Unlock()
+	rec := c.eventLog(from)
+	if rec == nil {
+		c.logf("api: no event provider for %s result %s", e.Type, requestID)
+		return
+	}
+	err := c.recordKeptLocked(rec)
+	if err == nil {
+		err = recordAcked(rec, e)
+	}
+	if err == nil {
+		return
+	}
+	c.logf("api: keeping the %s result %s, which the event log refused: %v", e.Type, requestID, err)
+	if len(c.kept) == maxKeptEvents {
+		c.logf("api: dropping the kept %s result %s: %d results are kept", c.kept[0].event.Type, c.kept[0].requestID, maxKeptEvents)
+		c.kept = slices.Delete(c.kept, 0, 1)
+	}
+	c.kept = append(c.kept, keptEvent{requestID: requestID, event: e})
+}
+
+// recordKeptLocked records the kept events to rec, oldest first, and returns
+// the first refusal: the refused event and those after it stay kept. c.emitMu
+// must be held.
+func (c *cityOps) recordKeptLocked(rec events.Recorder) error {
+	for len(c.kept) > 0 {
+		k := c.kept[0]
+		if err := recordAcked(rec, k.event); err != nil {
+			return err
+		}
+		c.logf("api: recorded the kept %s result %s", k.event.Type, k.requestID)
+		c.kept = slices.Delete(c.kept, 0, 1)
+	}
+	return nil
+}
+
+// flushLocked records the kept events to the city's event log (from's, when
+// the city has no live Server), leaving kept those it refuses. c.emitMu must
+// be held.
+func (c *cityOps) flushLocked(from *Server) {
+	if len(c.kept) == 0 {
+		return
+	}
+	rec := c.eventLog(from)
+	if rec == nil {
+		return
+	}
+	if err := c.recordKeptLocked(rec); err != nil {
+		c.logf("api: the event log refused %d kept results: %v", len(c.kept), err)
+	}
+}
+
+// flush records the kept events as flushLocked does.
+func (c *cityOps) flush(from *Server) {
+	c.emitMu.Lock()
+	defer c.emitMu.Unlock()
+	c.flushLocked(from)
+}
+
+// flushKeeps records the kept events as flush does and reports whether
+// requestID's terminal event is still kept: the event log refused it.
+func (c *cityOps) flushKeeps(from *Server, requestID string) bool {
+	c.emitMu.Lock()
+	defer c.emitMu.Unlock()
+	c.flushLocked(from)
+	return c.keepsLocked(requestID)
+}
+
+// keeps reports whether one of requestID's terminal events is kept.
+func (c *cityOps) keeps(requestID string) bool {
+	c.emitMu.Lock()
+	defer c.emitMu.Unlock()
+	return c.keepsLocked(requestID)
+}
+
+// keepsLocked is keeps with c.emitMu held.
+func (c *cityOps) keepsLocked(requestID string) bool {
+	return slices.ContainsFunc(c.kept, func(k keptEvent) bool { return k.requestID == requestID })
+}
+
+// shutdown ends the city's background close retries: the process is shutting
+// down. An op whose close was still being retried stays open, its in-flight
+// entry held until its finish_by, then the sweeper's. The kept terminal
+// events are recorded if the city's event log takes them now; the rest are
+// lost with the process, and logged. It is idempotent.
+func (c *cityOps) shutdown() {
+	c.stopOnce.Do(func() {
+		close(c.done)
+		c.emitMu.Lock()
+		defer c.emitMu.Unlock()
+		c.flushLocked(nil)
+		for _, k := range c.kept {
+			c.logf("api: the process is shutting down: the kept %s result %s is lost", k.event.Type, k.requestID)
+		}
+		c.kept = nil
+	})
 }
 
 // serverOps is one Server's operation-journal state: the content recorder
-// over its city's shared state, the lazily opened op store, and the done
-// channel that ends the recorder's background close retries when the Server
-// is dropped.
+// over its city's shared state and the lazily opened op store.
 type serverOps struct {
 	city    *cityOps
 	content *legacyop.Recorder
@@ -137,22 +317,20 @@ type serverOps struct {
 	// there.
 	afterAdmit func()
 
-	done     chan struct{}
-	stopOnce sync.Once
-
 	mu   sync.Mutex
 	st   *opjournal.Store
 	over beads.Store
 }
 
 // newServerOps builds s's op state over its boot-latched gates and city, the
-// city's shared state (nil: a city of its own). It runs once at Server
-// construction, after the gates are latched.
+// city's shared state. It runs once at Server construction, after the gates
+// are latched. The supervisor publishes the Server it serves a city with;
+// a nil city gives s a city of its own, with s its live Server.
 func newServerOps(s *Server, city *cityOps) *serverOps {
 	if city == nil {
 		city = newCityOps()
+		city.publish(s)
 	}
-	city.attach(func() events.Recorder { return s.state.EventProvider() })
 	o := &serverOps{
 		city: city,
 		clk:  clock.Real{},
@@ -161,29 +339,63 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 		},
 		logf:     log.Printf,
 		recordOp: telemetry.RecordOpRecord,
-		done:     make(chan struct{}),
 	}
 	o.content = &legacyop.Recorder{
 		Mode:     s.bootFlags.OpsContent(),
 		Executor: legacyop.ExecutorAPI,
-		Open:     func() (*opjournal.Store, error) { return o.store(s.state.SessionsBeadStore()) },
+		Open:     s.openOpStore,
 		Inflight: city.inflight,
 		Clock:    o.clk,
 		Degraded: func(d legacyop.Degrade) { city.degraded.Report(rollout.KeyOpsContent, d) },
-		Done:     o.done,
+		Done:     city.done,
 	}
 	return o
 }
 
-// shutdown ends the Server's background close retries: the supervisor
-// dropped or replaced it. An op whose close was still being retried stays
-// open, its in-flight entry held until its finish_by, then the sweeper's.
-// It is idempotent and does nothing on nil.
-func (o *serverOps) shutdown() {
-	if o == nil {
-		return
+// publishOps makes s its city's live Server; a Server with no op state has
+// nothing to publish.
+func (s *Server) publishOps() {
+	if s.ops != nil {
+		s.ops.city.publish(s)
 	}
-	o.stopOnce.Do(func() { close(o.done) })
+}
+
+// retireOps leaves s's city with no live Server when s is the live one.
+func (s *Server) retireOps() {
+	if s.ops != nil {
+		s.ops.city.retire(s)
+	}
+}
+
+// flushOps records the terminal events s's city kept while its event log
+// refused them: the supervisor just published s, whose event log may take
+// them.
+func (s *Server) flushOps() {
+	if s.ops != nil {
+		s.ops.city.flush(s)
+	}
+}
+
+// liveServer is the Server s's deliveries report and close through: its
+// city's live Server, or s itself when the city has none (the supervisor
+// dropped it) or s has no op state.
+func (s *Server) liveServer() *Server {
+	if s.ops == nil {
+		return s
+	}
+	if live := s.ops.city.liveServer(); live != nil {
+		return live
+	}
+	return s
+}
+
+// openOpStore opens the op store over the live Server's sessions store: a
+// replaced Server's background close retry closes through the store of the
+// State the supervisor serves the city with now, not the one the city's
+// restart closed.
+func (s *Server) openOpStore() (*opjournal.Store, error) {
+	live := s.liveServer()
+	return live.ops.store(live.state.SessionsBeadStore())
 }
 
 // healthy tells the degrade reporter that stages of the content gate just
@@ -296,15 +508,29 @@ func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *mes
 	if adm.Decision != legacyop.Replay {
 		return adm, nil, nil
 	}
+	body, err := s.replayAnswer(adm, req.operation, cursor)
+	return nil, body, err
+}
+
+// replayAnswer is the body a Replay admission answers operation's request
+// with (DES-O0API §6.2): the running request's 202 while it runs, else the
+// stored op's, whose terminal event is re-emitted for operation's endpoint.
+func (s *Server) replayAnswer(adm *legacyop.Admission, operation, cursor string) (*asyncAcceptedBody, error) {
 	if adm.Cached != nil {
 		answer, ok := adm.Cached.(inflightAnswer)
-		if !ok || answer.operation != req.operation {
+		if !ok || answer.operation != operation {
 			// The running request emits its terminal event for its own
 			// endpoint only, so a waiter on another endpoint would never
 			// match it: busy until it finishes, then a stored replay.
-			return nil, nil, apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
+			return nil, requestInFlight()
 		}
-		return nil, &answer.body, nil
+		// Its terminal event may be kept, refused by the event log: record
+		// it before answering, and answer busy while it cannot be, so the
+		// 202 has its event after its cursor.
+		if s.ops.city.flushKeeps(s, answer.body.RequestID) {
+			return nil, requestInFlight()
+		}
+		return &answer.body, nil
 	}
 	body := asyncAcceptedBody{
 		Status:         "accepted",
@@ -314,8 +540,42 @@ func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *mes
 		Replayed:       true,
 		Op:             conversationOpWire(adm.Op),
 	}
-	s.emitMessageOpProjection(req.operation, adm.Op)
-	return nil, &body, nil
+	// The replay's re-emitted event is a terminal event too: busy while one
+	// of the op's is kept, without keeping another, so the 202 has its event
+	// after its cursor.
+	if s.ops.city.flushKeeps(s, adm.Op.ID) {
+		return nil, requestInFlight()
+	}
+	s.emitMessageOpProjection(operation, adm.Op)
+	if s.ops.city.keeps(adm.Op.ID) {
+		return nil, requestInFlight()
+	}
+	return &body, nil
+}
+
+// withMessageIdempotency is withIdempotency for /submit and /messages: a
+// retry the LRU answers from its cached 202 is answered busy while that
+// request's terminal event is kept, as replayAnswer answers one the LRU
+// misses, so the 202 has its event after its cursor.
+func (s *Server) withMessageIdempotency(path, key string, body any, accept func() (asyncAcceptedBody, error)) (asyncAcceptedBody, error) {
+	cached := true
+	v, err := withIdempotency(s.idem, path, key, body, func() (asyncAcceptedBody, error) {
+		cached = false
+		return accept()
+	})
+	if err != nil || !cached || s.ops == nil {
+		return v, err
+	}
+	if s.ops.city.flushKeeps(s, v.RequestID) {
+		return asyncAcceptedBody{}, requestInFlight()
+	}
+	return v, nil
+}
+
+// requestInFlight answers a same-key request busy (409 in_flight), as the
+// Idempotency-Key LRU answers one whose first request is still running.
+func requestInFlight() error {
+	return apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
 }
 
 // messageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
@@ -350,7 +610,7 @@ func opAdmitError(err error, key string) error {
 	var busy *legacyop.BusyError
 	switch {
 	case errors.As(err, &busy):
-		return apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
+		return requestInFlight()
 	case errors.Is(err, opjournal.ErrKeyReuse):
 		return apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with a different request")
 	case errors.Is(err, legacyop.ErrUnavailable):
@@ -399,9 +659,10 @@ func messageOpResult(queued bool, err error, interrupt *session.TurnInterruptRep
 
 // finishMessageOp closes adm from res, before the terminal event is emitted
 // (I10), and returns the op that event carries: nil when the request was not
-// recorded. A close that keeps failing retries in the background; in require
-// the event then waits for that retry to end, in auto it is emitted at once
-// with the op still open (DES-O0API §6.1 step 8).
+// recorded. A close that keeps failing retries in the background, holding the
+// in-flight entry, and the event is emitted at once with the op still open,
+// in every mode (DES-O0API §6.1 step 8): a client stops waiting long before
+// the op's finish_by, and its retry without a key would deliver again.
 func (s *Server) finishMessageOp(adm *legacyop.Admission, res legacyop.Result) *ConversationOp {
 	if adm == nil {
 		return nil
@@ -414,16 +675,13 @@ func (s *Server) finishMessageOp(adm *legacyop.Admission, res legacyop.Result) *
 		s.ops.healthy(legacyop.StageClose)
 		return conversationOpWire(f.Op)
 	}
-	if f.Background != nil && s.ops.content.Mode == gate.Require {
-		<-f.Background
-	}
 	return s.currentOpWire(adm.Op)
 }
 
-// currentOpWire re-reads op for the wire, falling back to the copy held when
-// the read fails.
+// currentOpWire re-reads op for the wire through the live Server's op store,
+// falling back to the copy held when the read fails.
 func (s *Server) currentOpWire(op opjournal.Op) *ConversationOp {
-	if st := s.ops.cached(); st != nil {
+	if st := s.liveServer().ops.cached(); st != nil {
 		if cur, err := st.Get(op.ID); err == nil {
 			return conversationOpWire(cur)
 		}
@@ -461,7 +719,7 @@ func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
 	if arm == opjournal.ArmSucceeded {
 		queued := op.Outcome.Result.Via == legacyop.ViaLegacyQueued
 		if operation == RequestOperationSessionSubmit {
-			s.emitAsyncResult(events.RequestResultSessionSubmit, op.Conversation, SessionSubmitSucceededPayload{
+			s.emitMessageResult(events.RequestResultSessionSubmit, op.Conversation, SessionSubmitSucceededPayload{
 				RequestID: op.ID,
 				SessionID: op.Conversation,
 				Queued:    queued,
@@ -470,7 +728,7 @@ func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
 			})
 			return
 		}
-		s.emitAsyncResult(events.RequestResultSessionMessage, op.Conversation, SessionMessageSucceededPayload{
+		s.emitMessageResult(events.RequestResultSessionMessage, op.Conversation, SessionMessageSucceededPayload{
 			RequestID: op.ID,
 			SessionID: op.Conversation,
 			Queued:    queued,
@@ -563,8 +821,9 @@ type opsDegradeLatch struct {
 }
 
 // NewOpsDegradeReporter returns a reporter that records to the recorder
-// recorder returns at each report (nil there drops the event) and dates its
-// latch with clk.
+// recorder returns at each report and dates its latch with clk. A report
+// made while recorder returns nil, or whose event the recorder refuses, is
+// dropped without latching its class.
 func NewOpsDegradeReporter(recorder func() events.Recorder, clk clock.Clock) *OpsDegradeReporter {
 	return &OpsDegradeReporter{recorder: recorder, clk: clk, classes: map[opsDegradeKey]opsDegradeLatch{}}
 }
@@ -573,27 +832,23 @@ func NewOpsDegradeReporter(recorder func() events.Recorder, clk clock.Clock) *Op
 // rollout key: ops.content, ops.control or ops.lifecycle) when d's class was
 // healthy and its last event is at least opsDegradeInterval old; either way
 // the class is degraded until its stage reports success. A degrade under a
-// mode that does not record (off) is not a degrade and is ignored.
+// mode that does not record (off) is not a degrade and is ignored. One with
+// no recorder to record to, or whose event the recorder refuses (an
+// AckRecorder's error, such as a closed log's), leaves its class as it was,
+// so the class's next failure raises the event again: a degrade event is not
+// kept, as a terminal event is.
 func (r *OpsDegradeReporter) Report(gateKey string, d legacyop.Degrade) {
 	if r == nil || (d.Mode != gate.Auto && d.Mode != gate.Require) {
 		return
 	}
-	key := opsDegradeKey{gate: gateKey, surface: d.Surface, stage: d.Stage, reason: d.Reason}
-	now := r.clk.Now()
-	r.mu.Lock()
-	latch, seen := r.classes[key]
-	due := !latch.degraded && (!seen || !now.Before(latch.lastEvent.Add(opsDegradeInterval)))
-	latch.degraded = true
-	if due {
-		latch.lastEvent = now
-	}
-	r.classes[key] = latch
-	r.mu.Unlock()
-	if !due {
-		return
-	}
 	rec := r.recorder()
 	if rec == nil {
+		return
+	}
+	key := opsDegradeKey{gate: gateKey, surface: d.Surface, stage: d.Stage, reason: d.Reason}
+	now := r.clk.Now()
+	prior, seen, due := r.markDegraded(key, now)
+	if !due {
 		return
 	}
 	detail := ""
@@ -610,15 +865,56 @@ func (r *OpsDegradeReporter) Report(gateKey string, d legacyop.Degrade) {
 	})
 	if err != nil {
 		log.Printf("api: marshal %s: %v", events.OpsRecordingDegraded, err)
+		r.unmark(key, prior, seen, now)
 		return
 	}
-	rec.Record(events.Event{
+	err = recordAcked(rec, events.Event{
 		Type:    events.OpsRecordingDegraded,
 		Actor:   d.Surface,
 		Subject: gateKey,
 		Message: fmt.Sprintf("op recording degraded: gate=%s mode=%s surface=%s stage=%s reason=%s", gateKey, d.Mode, d.Surface, d.Stage, d.Reason),
 		Payload: payload,
 	})
+	if err != nil {
+		log.Printf("api: the event log refused %s for gate=%s surface=%s stage=%s reason=%s: %v", events.OpsRecordingDegraded, gateKey, d.Surface, d.Stage, d.Reason, err)
+		r.unmark(key, prior, seen, now)
+	}
+}
+
+// markDegraded marks key's class degraded at now and reports whether this
+// failure raises an event (due): the class was healthy and its last event is
+// at least opsDegradeInterval old. A due failure dates the class's last event
+// now. prior and seen are the class's state before the mark, for unmark.
+func (r *OpsDegradeReporter) markDegraded(key opsDegradeKey, now time.Time) (prior opsDegradeLatch, seen, due bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	prior, seen = r.classes[key]
+	due = !prior.degraded && (!seen || !now.Before(prior.lastEvent.Add(opsDegradeInterval)))
+	latch := prior
+	latch.degraded = true
+	if due {
+		latch.lastEvent = now
+	}
+	r.classes[key] = latch
+	return prior, seen, due
+}
+
+// unmark reverts the due mark made at now on key's class, whose event was not
+// recorded, to its prior state, or forgets the class when it was not seen, so
+// its next failure raises the event. A class whose last event is dated
+// otherwise since is left as it is.
+func (r *OpsDegradeReporter) unmark(key opsDegradeKey, prior opsDegradeLatch, seen bool, now time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	cur, ok := r.classes[key]
+	if !ok || !cur.lastEvent.Equal(now) {
+		return
+	}
+	if !seen {
+		delete(r.classes, key)
+		return
+	}
+	r.classes[key] = prior
 }
 
 // Healthy marks every degrade class of gate and surface at stages healthy:

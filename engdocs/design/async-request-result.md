@@ -39,14 +39,22 @@ progression.
    outcome class. A request whose executor crashed after the 202 has none
    until it is retried.
 5. Results are projections of the op: the executor closes the op, then
-   emits the terminal event.
+   emits the terminal event. When the close keeps failing, the event goes
+   out at once, in every `ops.content` mode, and carries the op still
+   open: the close retries in the background, holding the in-flight entry
+   (rule 6), until it lands, the op's `finish_by` passes (the sweeper
+   closes it then) or the process shuts down.
 6. A same-key retry on the **same** endpoint while the first request is
    still running gets the first request's 202 (same `request_id`, same
    `event_cursor`). A same-key retry on the **other** endpoint while it
    runs gets 409 `in_flight`: the running request emits its terminal
    event for its own operation only, so the other endpoint's waiter would
-   never match it. Once the request has finished, either endpoint gets the
-   stored outcome and a terminal event for its own operation.
+   never match it. Once the request has finished, a retry answered from
+   the API's per-city `Idempotency-Key` cache (the same endpoint and
+   target spelling, for at most 30 minutes, and not across an API or city
+   restart) gets the first request's 202 again, whose terminal event is
+   after its cursor; any other retry gets the stored outcome and a
+   terminal event for its own operation.
 7. A replay's `error_code` is derived from the stored outcome, which
    keeps the failure's class but not the step that failed, so it can
    differ from the original's: a session closed or gone during the
@@ -63,12 +71,37 @@ progression.
    process, not one per per-city `Server`: the supervisor builds a new
    `Server` when a city's state changes while the old one may still be
    delivering, and a retry must find that delivery instead of re-running
-   it. A replaced or dropped `Server` stops retrying a failing op close
-   and leaves the op open, but its in-flight entry stays held until the
-   op's `finish_by`: the message may already have landed, so a same-key
-   retry in that process gets the first request's 202 (or 409 `in_flight`
-   on the other endpoint) rather than adopting the op and delivering it
-   again. After `finish_by` the sweeper closes the op.
+   it. Such a delivery reports and closes through the city's live
+   `Server`, the one the supervisor serves the city with when the
+   delivery finishes (its own `Server` when the supervisor dropped the
+   city): its terminal event goes to that `Server`'s event log, where a
+   client of the new `Server` reads it, and a failing op close retries
+   through that `Server`'s store. Until the op closes, its in-flight entry
+   stays held, at most until `finish_by`: the message may already have
+   landed, so a same-key retry in that process gets the first request's
+   202 (or 409 `in_flight` on the other endpoint) rather than adopting
+   the op and delivering it again. After `finish_by` the sweeper closes
+   the op. The supervisor builds a restarted city's new `Server` only
+   when a request for the city arrives, so a delivery can finish after
+   the restart closed the old event log and before any new `Server` is
+   live. A `/submit` or `/messages` terminal event the event log refuses
+   is kept, in order, and recorded the next time a log takes it: when the
+   supervisor builds the city's next `Server`, before the city's next
+   `/submit` or `/messages` terminal event, and before a same-key retry
+   of its request is answered, whether the `Idempotency-Key` cache, the
+   in-flight registry or the stored op answers it. While it cannot be
+   recorded, that retry gets 409 `in_flight` instead of a 202, and so
+   does a replay whose re-emitted event the log refuses, so no retry is
+   answered 202 while its request's terminal event is kept. Nothing else
+   records it: a client that only watches the event stream, or whose 202
+   came before the log refused the event, does not see it until one of
+   those happens. A city keeps at most 1024 such events; past that it
+   drops the oldest and logs it, and a dropped event is never recorded,
+   so a client holding that request's 202 may never see its terminal
+   event. Kept events live only in the API process: any it cannot record
+   by shutdown are logged and lost.
+   An `ops.recording_degraded` event the log refuses is not kept; its
+   class stays unlatched, so the class's next failure raises it again.
 
 ## The pattern
 

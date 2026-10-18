@@ -255,12 +255,7 @@ func (s *opSweeper) sweep(mode rollout.Mode) bool {
 	s.healthy(legacyop.StageOpen)
 	stats, err := legacyop.Sweep(st, s.clk.Now(), opSweepLimit, opSweepActor)
 	s.logSweep(stats)
-	// A read that stopped at the limit or its page cap may have ops behind
-	// it. It counts only when an op closed, so a head no pass gets past, or a
-	// batch whose every close fails for good, cannot keep a gates-off ticker
-	// alive; the pass that stops the loop that way says so.
-	progressed := stats.Closed+stats.Raced > 0
-	left := stats.Pending > 0 || ((stats.Full || stats.Truncated) && progressed)
+	left := opSweepLeftWork(stats)
 	if err != nil {
 		reason := legacyop.DegradeReason(err)
 		if stats.Failed == 0 {
@@ -287,6 +282,17 @@ func (s *opSweeper) logStoppedRead(stats legacyop.SweepStats) {
 	}
 	s.logf("op-sweep: every ops gate is off and this pass closed no op after its read stopped at %s, "+
 		"so the sweeper stops and leaves the expired legacy ops it did not close open; gc doctor's ops-recording check reports them", at)
+}
+
+// opSweepLeftWork reports whether a pass's stats show work a later pass can
+// finish: pending ops, or a read that stopped at the limit or its page cap,
+// which may have ops behind it. A stopped read counts only when an op
+// closed, so a head no pass gets past, or a batch whose every close fails
+// for good, cannot keep a gates-off ticker alive; the pass that stops the
+// loop that way says so (logStoppedRead).
+func opSweepLeftWork(stats legacyop.SweepStats) bool {
+	progressed := stats.Closed+stats.Raced > 0
+	return stats.Pending > 0 || ((stats.Full || stats.Truncated) && progressed)
 }
 
 // healthy tells the degrade reporter that the sweeper's stages just worked,
