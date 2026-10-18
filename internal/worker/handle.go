@@ -190,7 +190,8 @@ type InterruptRequest struct {
 	// session refuses with runtime.ErrInputFenceUnsupported before sending
 	// anything; a miss is a *runtime.FenceMismatchError, and a session that
 	// is not running, or has no session row, is one finding it absent (both
-	// handles). Past that the handles differ. A SessionHandle maps the
+	// handles; a turn-scoped interrupt on a SessionHandle with no session
+	// created yet is refused first, as Turn documents). Past that the handles differ. A SessionHandle maps the
 	// liveness it reads before the stop as session.Manager.StopTurnFenced
 	// documents: an exited agent is a miss finding it dead, and a read that
 	// cannot answer is runtime.ErrRuntimeUnavailable. A RuntimeHandle
@@ -212,7 +213,10 @@ type InterruptRequest struct {
 	// capabilities record starts, fence at least checked and see ends at
 	// least inferred: runtime.ErrTurnIdentityUnsupported, or
 	// session.ErrTurnInterruptUnsupported when the runtime cannot interrupt
-	// at all. It returns nil only once a read of the session's turns shows
+	// at all, and runtime.ErrTurnIdentityUnsupported too when a
+	// SessionHandle has no session created yet, fenced or not. A closed
+	// session row is an error wrapping runtime.ErrSessionNotFound, nothing
+	// sent. It returns nil only once a read of the session's turns shows
 	// the turn no longer current (or the session gone) within 15 s of the
 	// check; a *runtime.TurnNotCurrentError when the turn was not current,
 	// or the runtime not running, nothing sent; an error wrapping

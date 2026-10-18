@@ -321,8 +321,8 @@ func TestTurnInterruptHonorsTheInputFence(t *testing.T) {
 			sent := sentInputs(fake, s.info.SessionName)
 			if stale {
 				var miss *runtime.FenceMismatchError
-				if !errors.As(err, &miss) {
-					t.Fatalf("Interrupt(stale fence) = %v, want *FenceMismatchError", err)
+				if !errors.As(err, &miss) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+					t.Fatalf("Interrupt(stale fence) = %v, want *FenceMismatchError, not unknown", err)
 				}
 				if len(sent) != 0 {
 					t.Fatalf("a stale fence sent %v", sent)
@@ -346,13 +346,133 @@ func TestTurnInterruptHonorsTheInputFence(t *testing.T) {
 		s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
 		fake.Calls = nil
 		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1, Fence: runtime.InputFence{Generation: -1, Token: "tok"}})
-		if err == nil || errors.Is(err, runtime.ErrTurnNotEnded) {
-			t.Fatalf("Interrupt(invalid fence) = %v, want the fence's validation error", err)
+		if !errors.Is(err, runtime.ErrInvalidInputFence) || errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+			t.Fatalf("Interrupt(invalid fence) = %v, want only ErrInvalidInputFence", err)
 		}
 		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
 			t.Fatalf("an invalid fence sent %v", got)
 		}
 	})
+	t.Run("invalid fence/runtime handle", func(t *testing.T) {
+		fake := runtime.NewFake()
+		h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake}))
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{"turn-worker": {"acp-1", ""}}
+		fake.Calls = nil
+		err := h.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1", Fence: runtime.InputFence{Generation: -1, Token: "tok"}})
+		if !errors.Is(err, runtime.ErrInvalidInputFence) || errors.Is(err, runtime.ErrInputFenceUnsupported) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			t.Fatalf("Interrupt(invalid fence) = %v, want only ErrInvalidInputFence", err)
+		}
+		if got := sentInputs(fake, "turn-worker"); len(got) != 0 {
+			t.Fatalf("an invalid fence sent %v", got)
+		}
+	})
+}
+
+// Once the keys are sent, a family wait that finds the session gone (a bare
+// runtime.ErrSessionNotFound) leaves the turn not seen to end: the result is
+// runtime.ErrTurnNotEnded, never the "nothing sent" *TurnNotCurrentError.
+func TestTurnInterruptSentThenRuntimeGoneIsNotEnded(t *testing.T) {
+	assertNotEnded := func(t *testing.T, err error, sent, want []string) {
+		t.Helper()
+		var nc *runtime.TurnNotCurrentError
+		if !errors.Is(err, runtime.ErrTurnNotEnded) || errors.As(err, &nc) || errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("Interrupt = %v, want only ErrTurnNotEnded", err)
+		}
+		if !slices.Equal(sent, want) {
+			t.Fatalf("sent %v, want %v", sent, want)
+		}
+	}
+	t.Run("claude idle wait", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: false})
+		fake := idle.Fake
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+		ageTranscript(t, path, clock.now().Add(-time.Minute))
+		fake.WaitForIdleErrors[s.info.SessionName] = runtime.ErrSessionNotFound
+		fake.Calls = nil
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1})
+		assertNotEnded(t, err, sentInputs(fake, s.info.SessionName), []string{"Interrupt"})
+	})
+	t.Run("codex boundary wait", func(t *testing.T) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: fake}), "codex", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		path := s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+		ageTranscript(t, path, clock.now().Add(-time.Hour))
+		fake.InterruptBoundaryErrors[s.info.SessionName] = runtime.ErrSessionNotFound
+		fake.Calls = nil
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1})
+		assertNotEnded(t, err, sentInputs(fake, s.info.SessionName), []string{"SendKeys(Escape)"})
+	})
+}
+
+// A runtime that stops after the check reads the turn current, before the
+// keys, sent nothing and hosts no turn: a *TurnNotCurrentError.
+func TestTurnInterruptRuntimeGoneBeforeTheKeysIsNotCurrent(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: false})
+	fake := idle.Fake
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+	timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s.handle.turns.timing = timing
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+	ageTranscript(t, path, clock.now().Add(-time.Minute))
+	idle.state.before = func(call int) {
+		if call == 1 {
+			if err := fake.Stop(s.info.SessionName); err != nil {
+				t.Errorf("Stop: %v", err)
+			}
+		}
+	}
+	fake.Calls = nil
+	err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1})
+	var nc *runtime.TurnNotCurrentError
+	if !errors.As(err, &nc) || errors.Is(err, runtime.ErrTurnNotEnded) {
+		t.Fatalf("Interrupt(runtime gone before the keys) = %v, want *TurnNotCurrentError", err)
+	}
+	if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+		t.Fatalf("sent %v, want nothing", got)
+	}
+}
+
+// A closed session row answers a turn-scoped interrupt with an error wrapping
+// runtime.ErrSessionNotFound, nothing sent, on either turn source.
+func TestTurnInterruptClosedRowIsSessionNotFound(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		profile runtime.Profile
+		family  string
+		turn    string
+		setup   func(*testing.T, *turnSession, *runtime.Fake)
+	}{
+		{name: "transcript", profile: runtime.ProfileTmux, family: "codex", turn: codexTurn1, setup: func(t *testing.T, s *turnSession, _ *runtime.Fake) {
+			s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+		}},
+		{name: "protocol", profile: runtime.ProfileACP, family: "claude", turn: "acp-1", setup: func(_ *testing.T, s *turnSession, fake *runtime.Fake) {
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+			fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1"}}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			s := newTurnSession(t, profiled(tc.profile, runtime.FullFake{Fake: fake}), tc.family, "")
+			tc.setup(t, &s, fake)
+			if err := s.store.Close(s.info.ID); err != nil {
+				t.Fatal(err)
+			}
+			fake.Calls = nil
+			err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: tc.turn})
+			if !errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("Interrupt(closed row) = %v, want ErrSessionNotFound", err)
+			}
+			if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+				t.Fatalf("sent %v, want nothing", got)
+			}
+		})
+	}
 }
 
 // The session mutation lock wait and the check are bounded by ctx: a call

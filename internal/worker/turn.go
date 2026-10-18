@@ -713,7 +713,7 @@ func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpk
 		// The stop found no turn to interrupt (a suspended row, a runtime
 		// not running) and sent nothing.
 		return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
-	case checked && errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+	case checked && errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable) && !errors.Is(err, runtime.ErrTurnNotEnded):
 		// The runtime stopped between the check and the keys: nothing was
 		// sent, and no turn runs.
 		return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
