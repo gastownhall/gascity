@@ -70,11 +70,16 @@ A custom template is held (its rows are kept and nothing is created) when:
   (trace cause `pool-scale-check-partial`);
 - the lane has no fresh result for it: no run yet, a failed or timed-out
   run, a result three patrols old, or a carried result that lacks it
-  (`scale-check-source-unread`);
-- a work assignment for it was first seen no earlier than the start of the
-  run its count is from, which may still count that work as unassigned
-  (`scale-check-stale-vs-claim`). The new claim wakes the lane, so the hold
-  lasts about one run.
+  (`scale-check-source-unread`).
+
+A run may still count as unassigned a bead that a session claimed after
+the run started. So the decide subtracts, from each custom template's
+count, the template's work assignments first seen no earlier than that
+start (never below zero; trace cause `scale-check-stale-vs-claim`). An
+assignment belongs to the template its work routes to, or, for unrouted
+work, to the claimant's template. This can only under-create, and a real
+backlog still scales up. A new claim wakes the lane, and a newer run's
+publish wakes the planner, so a subtraction lasts about one run.
 
 `gc doctor` has a `daemon-session-reconciler` check:
 

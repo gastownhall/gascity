@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/agentutil"
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -43,10 +44,11 @@ const (
 	gatePoolSlotShaped  = "named-identity-pool-slot-shaped"
 )
 
-// Template-partial causes of a custom scale_check: the template's own check
-// failed; the scale_check source has no fresh run of it (none yet, failed,
-// timed out or stale, or a result carried over a reload that lacks it); or
-// the run predates a claim the pass already counts (claimHeldTemplates).
+// Template causes of a custom scale_check: the template's own check failed;
+// the scale_check source has no fresh run of it (none yet, failed, timed out
+// or stale, or a result carried over a reload that lacks it); or its count
+// was cut by claims newer than its run (claimsAfterRun), which retains
+// nothing.
 const (
 	causeScaleCheckPartial    = "pool-scale-check-partial"
 	causeScaleCheckUnread     = "scale-check-source-unread"
@@ -78,7 +80,7 @@ func (p *decidePass) plan() {
 func (p *decidePass) demand() {
 	collected := p.in.Demand.Collected
 	collected.CustomCounts, collected.CustomPartials = nil, nil
-	held := p.claimHeldTemplates()
+	claimed := p.claimsAfterRun()
 	if templates := p.in.Demand.CustomCheckTemplates; len(templates) > 0 {
 		collected.CustomCounts = make(map[string]int, len(templates))
 		for _, template := range templates {
@@ -86,8 +88,12 @@ func (p *decidePass) demand() {
 			if p.in.ScaleCheck != nil {
 				count = p.in.ScaleCheck.Counts[template]
 			}
+			if k := claimed[template]; k > 0 && count > 0 {
+				count = max(0, count-k)
+				p.markTemplate(template, false, causeScaleCheckStaleClaim)
+			}
 			collected.CustomCounts[template] = count
-			if p.in.ScaleCheck.partial(template) || held[template] {
+			if p.in.ScaleCheck.partial(template) {
 				collected.CustomPartials = markScaleCheckPartialTemplate(collected.CustomPartials, template)
 			}
 		}
@@ -97,7 +103,7 @@ func (p *decidePass) demand() {
 	collected.UnassignedRouted = projected
 	p.merged = mergeCollectedDemand(p.cfg, collected)
 	for template := range p.merged.PoolScaleCheckPartial {
-		for _, cause := range p.scaleCheckCauses(template, held) {
+		for _, cause := range p.scaleCheckCauses(template) {
 			p.markTemplate(template, true, cause)
 		}
 	}
@@ -116,46 +122,39 @@ func (p *decidePass) demand() {
 		p.in.Demand.ReadyAssigned, p.merged.ScaleCheckCounts, io.Discard)
 }
 
-// scaleCheckCauses are the causes of template's scale-check partial: for a
-// custom scale_check template, its own failed check, an unread run of it,
-// and a held claim, each that applies; for any other, its own probe's.
-func (p *decidePass) scaleCheckCauses(template string, held map[string]bool) []string {
-	if !slices.Contains(p.in.Demand.CustomCheckTemplates, template) {
-		return []string{causeScaleCheckPartial}
+// scaleCheckCauses are the causes of template's scale-check partial: an
+// unread run of a custom scale_check template, else its own probe's failure.
+func (p *decidePass) scaleCheckCauses(template string) []string {
+	if slices.Contains(p.in.Demand.CustomCheckTemplates, template) {
+		if _, counted := p.in.ScaleCheck.countOf(template); !counted {
+			return []string{causeScaleCheckUnread}
+		}
 	}
-	var causes []string
-	r := p.in.ScaleCheck
-	if _, counted := r.countOf(template); !counted {
-		causes = append(causes, causeScaleCheckUnread)
-	} else if r.Partial[template] {
-		causes = append(causes, causeScaleCheckPartial)
-	}
-	if held[template] {
-		causes = append(causes, causeScaleCheckStaleClaim)
-	}
-	if len(causes) == 0 {
-		causes = append(causes, causeScaleCheckPartial)
-	}
-	return causes
+	return []string{causeScaleCheckPartial}
 }
 
-// claimHeldTemplates is the scale_check pairing guard: the custom
-// scale_check templates with a work assignment the planner first saw no
-// earlier than the start of the run their counts are from. That run may have
-// counted the work as new unassigned demand while the pass already counts
-// the claim, so v2 would plan a session for work a session holds. A held
-// template reads as its check failed: it keeps its rows and plans no fresh
-// create until a run that started after the claim, which the gather's wake
-// on a new claim starts within about one run. A claim counts for the
-// template its work routes to and for the template of the row it names.
-func (p *decidePass) claimHeldTemplates() map[string]bool {
+// claimsAfterRun is the scale_check pairing guard: for each custom
+// scale_check template, how many of its open work assignments the planner
+// first saw no earlier than the start of the run its count is from. That
+// run may have counted each such bead as new unassigned demand while the
+// pass already counts the claim, so demand subtracts them from the count
+// (never below zero): it removes exactly the possible double counts, can
+// only under-create, and lets a real backlog through. A run that starts
+// after the claims counts them itself, and its publish wakes the planner.
+// A claim is the template's that its work routes to, normalized as the pool
+// demand attributes it (computePoolDesiredStatesAt); unrouted work is the
+// claimant row's template's.
+func (p *decidePass) claimsAfterRun() map[string]int {
 	d := p.in.Demand
 	if p.in.ScaleCheck == nil || len(d.CustomCheckTemplates) == 0 || len(p.in.ClaimsSeen) == 0 {
 		return nil
 	}
 	var rowTemplate map[string]string
-	out := make(map[string]bool)
+	out := make(map[string]int)
 	for i, wb := range d.AssignedWork {
+		if wb.Status != "in_progress" && wb.Status != "open" {
+			continue
+		}
 		c, ok := workClaimOf(d, i)
 		if !ok {
 			continue
@@ -163,19 +162,22 @@ func (p *decidePass) claimHeldTemplates() map[string]bool {
 		if seen, ok := p.in.ClaimsSeen[c]; !ok || seen.Before(p.in.ScaleCheckStartedAt) {
 			continue
 		}
-		if rowTemplate == nil {
-			rowTemplate = make(map[string]string)
-			for _, info := range p.decidable {
-				template := normalizedSessionTemplateInfo(info, p.cfg)
-				for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
-					rowTemplate[id] = template
+		owner := routedToOrLegacyWorkflowTarget(wb)
+		if owner == "" {
+			if rowTemplate == nil {
+				rowTemplate = make(map[string]string)
+				for _, info := range p.decidable {
+					template := normalizedSessionTemplateInfo(info, p.cfg)
+					for _, id := range sessionBeadAssigneeIdentitiesInfo(info) {
+						rowTemplate[id] = template
+					}
 				}
 			}
+			owner = rowTemplate[c.assignee]
 		}
-		for _, template := range []string{strings.TrimSpace(wb.Metadata[beadmeta.RoutedToMetadataKey]), rowTemplate[c.assignee]} {
-			if template != "" && slices.Contains(d.CustomCheckTemplates, template) {
-				out[template] = true
-			}
+		owner = normalizeAgentTemplateIdentity(p.cfg, agentutil.NormalizePoolRouteTarget(p.cfg, owner))
+		if owner != "" && slices.Contains(d.CustomCheckTemplates, owner) {
+			out[owner]++
 		}
 	}
 	return out

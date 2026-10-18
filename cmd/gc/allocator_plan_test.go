@@ -1334,78 +1334,165 @@ func TestAllocator_RealizeNeverSelectsANamedRowForAPoolRequest(t *testing.T) {
 	}
 }
 
-// Kills the pairing guard holding the wrong templates, or none: a custom
-// template is held (scale-check-stale-vs-claim, kept rows, no create) when
-// an assignment the planner first saw no earlier than the run started
-// routes to it or names one of its rows; not for an older claim, another
-// template's claim, a claim the planner never saw, or with no run. Also
-// kills a template the run lacks (a result carried over a reload) traced as
-// its own check failing: it reads scale-check-source-unread.
-func TestAllocator_ScaleCheckClaimHold(t *testing.T) {
+// claimGuardCity decides a city with worker (custom check, count) and plain
+// (no check): gc-1 (worker, slot 1) busy on old work w-0, gc-3 (worker, slot
+// 2, alias worker-2 when alias) and gc-2 (plain) awake. w is the claim under
+// test, first seen at seen relative to the run's start (noSeen: never), and
+// noRun publishes no run.
+func claimGuardCity(t *testing.T, w beads.Bead, count int, seen time.Duration, noSeen, noRun, alias bool, counts map[string]int) allocDecision {
+	t.Helper()
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 4), allocPoolAgent("plain", 4)}}
+	gc3 := poolRow("gc-3", "worker", 2, "active")
+	if alias {
+		gc3 = poolRow("gc-3", "worker", 2, "active", "alias", "worker-2")
+	}
+	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "active"), gc3, poolRow("gc-2", "plain", 1, "active")).
+		alive("s-gc-1", InventoryAttrs{}).alive("s-gc-3", InventoryAttrs{}).alive("s-gc-2", InventoryAttrs{})
 	started := allocNow.Add(-time.Minute)
-	claim := func(id, assignee, routedTo string) beads.Bead {
-		b := beads.Bead{ID: id, Title: id, Type: "task", Status: "in_progress", Assignee: assignee, Metadata: map[string]string{}}
-		if routedTo != "" {
-			b.Metadata[beadmeta.RoutedToMetadataKey] = routedTo
+	w0 := beads.Bead{ID: "w-0", Title: "w-0", Type: "task", Status: "in_progress", Assignee: "gc-1", Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"}}
+	f.in.Demand.CustomCheckTemplates = []string{"worker"}
+	f.in.Demand.AssignedWork, f.in.Demand.AssignedStoreRefs = []beads.Bead{w0, w}, []string{"", ""}
+	if !noRun {
+		if counts == nil {
+			counts = map[string]int{"worker": count}
 		}
+		f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: counts}, started
+	}
+	c0, _ := workClaimOf(f.in.Demand, 0)
+	f.in.ClaimsSeen = map[workClaim]time.Time{c0: started.Add(-time.Hour)}
+	if c1, ok := workClaimOf(f.in.Demand, 1); ok && !noSeen {
+		f.in.ClaimsSeen[c1] = started.Add(seen)
+	}
+	return f.decide()
+}
+
+// workerAllocation is worker's accepted count and planned slots.
+func workerAllocation(d allocDecision) string {
+	var slots []int
+	for _, plan := range d.Plans {
+		if plan.Template == "worker" {
+			slots = append(slots, plan.Plan.poolSlot)
+		}
+	}
+	return fmt.Sprintf("desired %d, creates %v", d.Snapshot.PoolDesired["worker"], slots)
+}
+
+// Kills the pairing guard cutting the wrong template's count, or none, or
+// cutting by the wrong amount (PAR-SC re-review). A run's count may still
+// include a bead claimed after the run started; the decide subtracts each
+// such claim from the count of the template that owns it: the template its
+// work routes to, normalized as pool demand attributes it (a slot-suffixed
+// route, a legacy workflow run target), or for unrouted work the claimant
+// row's template. Over the review's ownership matrix the subtracted
+// decision (stale count, claim newer than the run) equals the decision a
+// run that saw the claim gives (fresh count), and a cut is traced
+// scale-check-stale-vs-claim. An older claim, a claim the planner never
+// saw, or no run cuts nothing; a template the run lacks reads
+// scale-check-source-unread.
+func TestAllocator_ScaleCheckClaimHold(t *testing.T) {
+	work := func(assignee, routed string, extra map[string]string) beads.Bead {
+		b := beads.Bead{ID: "w-1", Title: "w-1", Type: "task", Status: "in_progress", Assignee: assignee, Metadata: map[string]string{}}
+		if routed != "" {
+			b.Metadata[beadmeta.RoutedToMetadataKey] = routed
+		}
+		maps.Copy(b.Metadata, extra)
 		return b
 	}
-	cases := []struct {
-		name    string
-		work    beads.Bead
-		seen    time.Duration // when the planner first saw the claim, after started
-		noSeen  bool
-		noRun   bool
-		counts  map[string]int
-		held    bool
-		unread  bool
-		creates bool
+	workflow := map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow, beadmeta.RunTargetMetadataKey: "worker"}
+	matrix := []struct {
+		name, assignee, routed string
+		extra                  map[string]string
+		alias                  bool
+		stale, fresh           int // the run's count for worker, before and after the claim
+		cut                    bool
 	}{
-		{name: "routed claim newer than the run", work: claim("w-1", "someone", "custom"), seen: time.Second, held: true},
-		{name: "claim seen as the run started", work: claim("w-1", "someone", "custom"), seen: 0, held: true},
-		{name: "claim on a custom row, unrouted", work: claim("w-1", "gc-1", ""), seen: time.Second, held: true},
-		{name: "claim older than the run", work: claim("w-1", "gc-1", "custom"), seen: -time.Second, creates: true},
-		{name: "another template's claim", work: claim("w-1", "someone", "plain"), seen: time.Second, creates: true},
-		{name: "claim the planner never saw", work: claim("w-1", "gc-1", "custom"), noSeen: true, creates: true},
-		{name: "no run", work: claim("w-1", "gc-1", "custom"), seen: time.Second, noRun: true, unread: true},
-		{name: "run lacks the template", work: claim("w-1", "someone", "plain"), seen: time.Second, counts: map[string]int{"other": 1}, unread: true},
+		{name: "worker-routed, by worker row id", assignee: "gc-3", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row session name", assignee: "s-gc-3", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row agent name", assignee: "worker-2", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by worker row alias", assignee: "worker-2", routed: "worker", alias: true, stale: 1, fresh: 0, cut: true},
+		{name: "unrouted, by worker row id", assignee: "gc-3", stale: 0, fresh: 0},
+		{name: "unrouted, by worker row id, check counts it", assignee: "gc-3", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by plain row", assignee: "gc-2", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "worker-routed, by a human", assignee: "alice", routed: "worker", stale: 1, fresh: 0, cut: true},
+		{name: "plain-routed, by worker row", assignee: "gc-3", routed: "plain", stale: 2, fresh: 2},
+		{name: "plain-routed, by plain row", assignee: "gc-2", routed: "plain", stale: 2, fresh: 2},
+		{name: "slot-suffixed worker-3 route, check counts canonical only", assignee: "gc-2", routed: "worker-3", stale: 0, fresh: 0},
+		{name: "slot-suffixed worker-3 route, check counts it", assignee: "gc-2", routed: "worker-3", stale: 1, fresh: 0, cut: true},
+		{name: "legacy workflow run target, check counts it", assignee: "gc-2", extra: workflow, stale: 1, fresh: 0, cut: true},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			cfg := &config.City{Agents: []config.Agent{allocPoolAgent("custom", 4), allocPoolAgent("plain", 4)}}
-			f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "custom", 1, "active")).alive("s-gc-1", InventoryAttrs{})
-			f.in.Demand.CustomCheckTemplates = []string{"custom"}
-			f.in.Demand.AssignedWork, f.in.Demand.AssignedStoreRefs = []beads.Bead{tc.work}, []string{""}
-			if !tc.noRun {
-				counts := tc.counts
-				if counts == nil {
-					counts = map[string]int{"custom": 2}
-				}
-				f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: counts}, started
+	for _, c := range matrix {
+		t.Run(c.name, func(t *testing.T) {
+			w := work(c.assignee, c.routed, c.extra)
+			guarded := claimGuardCity(t, w, c.stale, time.Second, false, false, c.alias, nil)
+			fresh := claimGuardCity(t, w, c.fresh, -time.Hour, false, false, c.alias, nil)
+			if got, want := workerAllocation(guarded), workerAllocation(fresh); got != want {
+				t.Errorf("stale count with a newer claim: %s; a run that saw the claim: %s", got, want)
 			}
-			if !tc.noSeen {
-				c, _ := workClaimOf(f.in.Demand, 0)
-				f.in.ClaimsSeen = map[workClaim]time.Time{c: started.Add(tc.seen)}
-			}
-			d := f.decide()
-			tp := d.Snapshot.Partial.Templates["custom"]
-			if got := slices.Contains(tp.Causes, causeScaleCheckStaleClaim); got != tc.held {
-				t.Errorf("held = %t (causes %v), want %t", got, tp.Causes, tc.held)
-			}
-			if got := slices.Contains(tp.Causes, causeScaleCheckUnread); got != tc.unread {
-				t.Errorf("unread = %t (causes %v), want %t", got, tp.Causes, tc.unread)
-			}
-			if tc.held || tc.unread {
-				if !tp.Retain || slices.Contains(tp.Causes, causeScaleCheckPartial) {
-					t.Errorf("causes %v retain %t; want retained, not %s", tp.Causes, tp.Retain, causeScaleCheckPartial)
-				}
-				if e := entryOf(t, d, "gc-1"); e.Desired == desireDrain || e.Desired == desireSleep {
-					t.Errorf("held template's row = %s, want kept", e.Desired)
-				}
-			}
-			if got := len(d.Plans) > 0; got != tc.creates {
-				t.Errorf("planned %d create(s), want creates %t", len(d.Plans), tc.creates)
+			if cut := slices.Contains(guarded.Snapshot.Partial.Templates["worker"].Causes, causeScaleCheckStaleClaim); cut != c.cut {
+				t.Errorf("traced %s = %t, want %t", causeScaleCheckStaleClaim, cut, c.cut)
 			}
 		})
+	}
+	claim := work("gc-3", "worker", nil)
+	for _, c := range []struct {
+		name          string
+		seen          time.Duration
+		noSeen, noRun bool
+		counts        map[string]int
+		wantDesired   int
+		cut, unread   bool
+	}{
+		{name: "claim seen as the run started", seen: 0, wantDesired: 3, cut: true},
+		{name: "claim older than the run", seen: -time.Second, wantDesired: 4},
+		{name: "claim the planner never saw", noSeen: true, wantDesired: 4},
+		{name: "no run", seen: time.Second, noRun: true, wantDesired: 2, unread: true},
+		{name: "run lacks the template", seen: time.Second, counts: map[string]int{"other": 1}, wantDesired: 2, unread: true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			d := claimGuardCity(t, claim, 2, c.seen, c.noSeen, c.noRun, false, c.counts)
+			tp := d.Snapshot.Partial.Templates["worker"]
+			if got := d.Snapshot.PoolDesired["worker"]; got != c.wantDesired {
+				t.Errorf("worker desired %d, want %d (%s)", got, c.wantDesired, workerAllocation(d))
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckStaleClaim); got != c.cut {
+				t.Errorf("cut = %t (causes %v), want %t", got, tp.Causes, c.cut)
+			}
+			if got := slices.Contains(tp.Causes, causeScaleCheckUnread); got != c.unread {
+				t.Errorf("unread = %t (causes %v), want %t", got, tp.Causes, c.unread)
+			}
+			if c.unread && (!tp.Retain || slices.Contains(tp.Causes, causeScaleCheckPartial)) {
+				t.Errorf("causes %v retain %t; want retained, not %s", tp.Causes, tp.Retain, causeScaleCheckPartial)
+			}
+		})
+	}
+}
+
+// Kills the all-or-nothing hold the subtraction replaced (PAR-SC re-review),
+// and a cut by anything but the number of newer claims: with one or two
+// claims first seen during every run, a backlog of 5 still scales up, by
+// the count less those claims, on every cycle.
+func TestScaleCheckClaimStreamStillScalesUp(t *testing.T) {
+	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 8)}}
+	rows := []beads.Bead{poolRow("gc-1", "worker", 1, "active")}
+	for cycle := range 10 {
+		f := newAllocFixture(t, cfg).sessions(rows...).alive("s-gc-1", InventoryAttrs{})
+		runStart := allocNow.Add(time.Duration(cycle) * 4 * time.Second)
+		claims := 1 + cycle%2
+		f.in.Demand.CustomCheckTemplates = []string{"worker"}
+		f.in.ScaleCheck, f.in.ScaleCheckStartedAt = &scaleCheckResult{Counts: map[string]int{"worker": 5}}, runStart
+		f.in.ClaimsSeen = map[workClaim]time.Time{}
+		for i := range claims {
+			f.in.Demand.AssignedWork = append(f.in.Demand.AssignedWork, beads.Bead{
+				ID: fmt.Sprintf("w-%d-%d", cycle, i), Title: "w", Type: "task", Status: "in_progress", Assignee: "gc-1",
+				Metadata: map[string]string{beadmeta.RoutedToMetadataKey: "worker"},
+			})
+			f.in.Demand.AssignedStoreRefs = append(f.in.Demand.AssignedStoreRefs, "")
+			c, _ := workClaimOf(f.in.Demand, i)
+			f.in.ClaimsSeen[c] = runStart.Add(time.Second) // seen while the run was in flight
+		}
+		// gc-1 takes its claims; the count less the newer claims is new demand.
+		if got, want := len(f.decide().Plans), 5-claims; got != want {
+			t.Fatalf("cycle %d: %d creates for a count of 5 less %d newer claim(s), want %d", cycle, got, claims, want)
+		}
 	}
 }

@@ -71,15 +71,21 @@ import (
 // The lane is paced at the patrol interval and woken (plannerRuntime.wakeReads)
 // by every key-less, allocator or control-dispatch enqueue (socket and API
 // pokes; a CLI writer such as gc sling pokes key-less), every config reload,
-// and a pass that first sees a work assignment (gather), so a custom
-// scale_check run that predates a claim is replaced within about one run;
-// and by a read that ended after its pass published.
+// and a planner pass that first sees a work assignment while the config has
+// a custom scale_check (gather); and by a read that ended after its pass
+// published. A publish whose scale_check run started later than the last
+// one's wakes the planner even with the same counts (wakes), so the decide's
+// claim subtraction (claimsAfterRun) ends within about one run of the claim:
+// the lane's minimum gap, the run, then the planner's pass.
 //
 // Across a config reload the scale_check source serves the result the last
 // publish served, less the templates whose check changed, until the new
 // config's run ends; it ages from its own end. A pass that runs no check
 // (the city suspended) clears that result and voids every run started
-// before it, so nothing read before a suspension is served after resume.
+// before it, so nothing read before a suspension is served after resume. A
+// pass judges suspension once, when it starts (passEnv), so a suspend and
+// resume that both fall between two passes are not seen: a result read
+// before them is then served like any other, while it is fresh.
 
 const (
 	// externalReadsMinGap is the least idle time between two woken passes,
@@ -248,13 +254,20 @@ func (r *externalReadsRecording) sameContent(o *externalReadsRecording) bool {
 }
 
 // wakes reports whether publishing r after prev at now must wake the
-// allocator: new content, or a source stale in prev that r serves fresh.
+// allocator: new content, a source stale in prev that r serves fresh, or a
+// scale_check run that started after prev's. A newer run with the same
+// counts still lifts the decide's claim subtraction (claimsAfterRun), which
+// is measured from its run's start.
 func (r *externalReadsRecording) wakes(prev *externalReadsRecording, now time.Time) bool {
 	if !prev.sameContent(r) {
 		return true
 	}
 	for key, s := range r.Sources {
-		if !prev.fresh(prev.Sources[key], now) && r.fresh(s, now) {
+		was := prev.Sources[key]
+		if !prev.fresh(was, now) && r.fresh(s, now) {
+			return true
+		}
+		if key.kind == sourceScaleCheck && s.StartedAt.After(was.StartedAt) {
 			return true
 		}
 	}

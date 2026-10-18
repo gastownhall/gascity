@@ -276,7 +276,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	var newClaim bool
 	w.ClaimsSeen, newClaim = p.claimsSeenAt(w.Demand, now)
 	if newClaim && len(w.Demand.CustomCheckTemplates) > 0 && e.WakeReads != nil {
-		e.WakeReads() // a custom count may predate the claim: run the checks again
+		e.WakeReads() // a custom count may predate the claim: a newer run ends its subtraction
 	}
 
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)

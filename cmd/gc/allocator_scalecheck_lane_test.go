@@ -512,14 +512,14 @@ func claimSkewDecide(t *testing.T, p *planner, cfg *config.City, cityPath string
 // the work after the check's run started. The pass counts the claim from
 // the cache at once, but the run's count still holds the work as new
 // demand, so without the pairing guard v2 plans a session for work a
-// session holds. With it, the template holds its creates and keeps its row
-// (scale-check-stale-vs-claim), the gather wakes the lane, and the hold ends
-// with the next run, which counts the claim; a new unassigned bead is then
-// demand again, unheld. Claimed by the row's ID and its session name, the
-// work is the row's, so the new bead plans a create; claimed by its agent
-// name, pool demand does not count it as the row's, so the awake row takes
-// the new bead.
-func TestScaleCheckClaimSkewHoldsCreates(t *testing.T) {
+// session holds. With it, the claim is subtracted from the count
+// (scale-check-stale-vs-claim): no create, the row not drained, and the
+// gather wakes the lane. The subtraction ends with the next run, which
+// counts the claim itself; a new unassigned bead is then demand again.
+// Claimed by the row's ID and its session name, the work is the row's, so
+// the new bead plans a create; claimed by its agent name, pool demand does
+// not count it as the row's, so the awake row takes the new bead.
+func TestScaleCheckClaimSkewSubtractsTheClaim(t *testing.T) {
 	for who, creates := range map[string]int{"gc-1": 1, "s-gc-1": 1, "worker-1": 0} {
 		t.Run(who, func(t *testing.T) { claimSkewCase(t, who, creates) })
 	}
@@ -554,7 +554,7 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
 	alive := []string{"s-gc-1"}
 	var wakes atomic.Int64
-	held := func(d allocDecision) bool {
+	cut := func(d allocDecision) bool {
 		return slices.Contains(d.Snapshot.Partial.Templates["worker"].Causes, causeScaleCheckStaleClaim)
 	}
 
@@ -562,8 +562,8 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	if !passAndJoin(ctx, at(lane, t0)) {
 		t.Fatal("pass 1 declined")
 	}
-	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t0, &wakes); held(d) {
-		t.Fatalf("before any claim: held %+v", d.Snapshot.Partial.Templates["worker"])
+	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t0, &wakes); cut(d) {
+		t.Fatalf("before any claim: cut %+v", d.Snapshot.Partial.Templates["worker"])
 	}
 
 	assignee, inProgress := who, "in_progress"
@@ -572,23 +572,23 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	}
 	t1 := t0.Add(time.Second)
 	d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t1, &wakes)
-	if len(d.Plans) != 0 || !held(d) || wakes.Load() != 1 {
+	if len(d.Plans) != 0 || !cut(d) || wakes.Load() != 1 {
 		t.Fatalf("claim newer than the run: %d create(s), causes %v, %d lane wakes; want none, %s, one wake",
 			len(d.Plans), d.Snapshot.Partial.Templates["worker"].Causes, wakes.Load(), causeScaleCheckStaleClaim)
 	}
-	if e := entryOf(t, d, "gc-1"); !e.InDesired || e.Desired == desireDrain || e.Desired == desireSleep {
-		t.Fatalf("held template's row = in desired %t, %s; want kept", e.InDesired, e.Desired)
+	if e := entryOf(t, d, "gc-1"); e.Desired == desireDrain || e.Desired == desireSleep {
+		t.Fatalf("the claimant's row = %s; want not drained", e.Desired)
 	}
-	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t1.Add(time.Second), &wakes); len(d.Plans) != 0 || !held(d) || wakes.Load() != 1 {
-		t.Fatalf("same claim, next pass on the same run: %d create(s), held %t, %d wakes; want none, held, no new wake", len(d.Plans), held(d), wakes.Load())
+	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t1.Add(time.Second), &wakes); len(d.Plans) != 0 || !cut(d) || wakes.Load() != 1 {
+		t.Fatalf("same claim, next pass on the same run: %d create(s), cut %t, %d wakes; want none, cut, no new wake", len(d.Plans), cut(d), wakes.Load())
 	}
 
 	t2 := t0.Add(3 * time.Second)
 	if !passAndJoin(ctx, at(lane, t2)) {
 		t.Fatal("pass 2 declined")
 	}
-	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t2, &wakes); len(d.Plans) != 0 || held(d) {
-		t.Fatalf("run newer than the claim: %d create(s), held %t; want none and no hold", len(d.Plans), held(d))
+	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t2, &wakes); len(d.Plans) != 0 || cut(d) {
+		t.Fatalf("run newer than the claim: %d create(s), cut %t; want none and no cut", len(d.Plans), cut(d))
 	}
 
 	if _, err := cache.Create(beads.Bead{
@@ -601,8 +601,8 @@ func claimSkewCase(t *testing.T, who string, finalCreates int) {
 	if !passAndJoin(ctx, at(lane, t3)) {
 		t.Fatal("pass 3 declined")
 	}
-	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t3, &wakes); len(d.Plans) != finalCreates || held(d) {
-		t.Fatalf("new unassigned work after the hold: %d create(s), held %t; want %d and no hold", len(d.Plans), held(d), finalCreates)
+	if d := claimSkewDecide(t, p, cfg, cityPath, cache, alive, lane.recording(), t3, &wakes); len(d.Plans) != finalCreates || cut(d) {
+		t.Fatalf("new unassigned work after the cut: %d create(s), cut %t; want %d and no cut", len(d.Plans), cut(d), finalCreates)
 	}
 }
 
@@ -709,4 +709,67 @@ func TestExternalReadsScaleCheckRunInFlightAtResumeNotServed(t *testing.T) {
 			t.Fatalf("after run 2 ended: %+v, want w=2", r)
 		}
 	})
+}
+
+// Kills a newer scale_check run that does not wake the planner (PAR-SC
+// re-review): the decide's claim subtraction is measured from the run's
+// start, so a run that started after a claim ends the subtraction even when
+// it publishes the same counts. Its publish wakes the planner; a pass that
+// publishes the same run again does not.
+func TestExternalReadsNewScaleCheckRunWakesThePlanner(t *testing.T) {
+	ctx := context.Background()
+	cfg := &config.City{Agents: []config.Agent{{Name: "worker", ScaleCheck: "constant"}}}
+	lane, wakes := newTestBackstopLane(externalReadsEnv{CityName: "city", Cfg: cfg})
+	lane.steps = nil
+	lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
+	lane.runner = func(string, string, map[string]string) (string, error) { return "2", nil }
+	t0 := censusNow
+	if !passAndJoin(ctx, at(lane, t0)) {
+		t.Fatal("pass 1 declined")
+	}
+	before := wakes.Load()
+	if !passAndJoin(ctx, at(lane, t0.Add(2*time.Second))) {
+		t.Fatal("pass 2 declined")
+	}
+	if wakes.Load() != before+1 {
+		t.Fatalf("a newer run with the same counts woke the planner %d times, want once", wakes.Load()-before)
+	}
+	rec := lane.recording()
+	same := &externalReadsRecording{Seq: rec.Seq + 1, FreshFor: rec.FreshFor, Sources: rec.Sources}
+	if same.wakes(rec, t0.Add(2*time.Second)) {
+		t.Fatal("republishing the same run would wake the planner, want not")
+	}
+}
+
+// Kills a reassigned claim kept at its first sight (PAR-SC re-review): a
+// claim is its bead and assignee, so a new assignee is first seen when the
+// pass sees it, an unchanged one keeps its first sight, and a claim no
+// longer held is forgotten.
+func TestClaimsSeenAtReassignedClaimIsNew(t *testing.T) {
+	p := newPlanner(realPlannerClock{}, func() time.Duration { return time.Minute }, nil, newInflightMap(), nil, io.Discard)
+	view := func(assignees ...string) demandView {
+		var d demandView
+		for i, a := range assignees {
+			d.AssignedWork = append(d.AssignedWork, beads.Bead{ID: fmt.Sprintf("w-%d", i+1), Assignee: a, Status: "in_progress"})
+			d.AssignedStoreRefs = append(d.AssignedStoreRefs, "")
+		}
+		return d
+	}
+	t0, t1, t2 := censusNow, censusNow.Add(time.Second), censusNow.Add(2*time.Second)
+	claim := func(id, assignee string) workClaim {
+		return workClaim{bead: storeScopedBeadKey{StoreRef: normalizeDemandStoreRef(""), ID: id}, assignee: assignee}
+	}
+	if seen, fresh := p.claimsSeenAt(view("gc-1", "gc-2"), t0); !fresh || !seen[claim("w-1", "gc-1")].Equal(t0) {
+		t.Fatalf("first pass: %v, new %t; want both seen at %v", seen, fresh, t0)
+	}
+	seen, fresh := p.claimsSeenAt(view("gc-3", "gc-2"), t1)
+	if !fresh || !seen[claim("w-1", "gc-3")].Equal(t1) || !seen[claim("w-2", "gc-2")].Equal(t0) {
+		t.Fatalf("w-1 reassigned to gc-3: %v, new %t; want w-1 seen at %v, w-2 still at %v", seen, fresh, t1, t0)
+	}
+	if _, ok := seen[claim("w-1", "gc-1")]; ok {
+		t.Fatal("the old assignee's claim is still held after the reassignment")
+	}
+	if seen, fresh := p.claimsSeenAt(view("gc-3"), t2); fresh || len(seen) != 1 || !seen[claim("w-1", "gc-3")].Equal(t1) {
+		t.Fatalf("w-2 released: %v, new %t; want only w-1 at %v, nothing new", seen, fresh, t1)
+	}
 }
