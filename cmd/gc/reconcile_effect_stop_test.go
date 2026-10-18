@@ -8,6 +8,7 @@ import (
 	"testing/synctest"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -838,32 +839,42 @@ func TestDormantFinalizeClearsALeftoverRequest(t *testing.T) {
 // loop. A confirmed execution-stalled stop gives back the claim its marker
 // names, so the seat closes and a fresh seat takes the claim; another
 // in-progress bead of the seat's, or the same drain for another reason,
-// keeps its work as before. That is the rolled-back backstops' stop: with the
-// work ladder on, the stop is the ladder's recycle, which keeps the claim
-// (PHASE1-2 §6.5).
+// keeps its work as before.
+//
+// T9 (mc-358yo, PHASE1-2 §6.5): with the work ladder off (the backstops'
+// stop), a claim the seat records that a turn began, by
+// execution_claim_started at the row's current token, is kept unless a
+// dispatch hold parks it; a work_started entry, or an earlier incarnation's
+// stamp, would keep a claim the seat was woken on and never ran, and bring
+// the v5.10x loop back, so the claim goes back as before. With the ladder
+// on, the stop is the ladder's recycle, which keeps the claim whatever the
+// records say: the ladder gives back an unstarted claim itself, by a CAS
+// proving it unstarted, and never asks a stop to. A marker the backstops did
+// not write for the row's own incarnation names nothing.
 func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 	for _, c := range []struct {
 		name    string
 		reason  string
 		release bool
 		other   bool   // the seat holds a second in-progress bead
-		started string // the seat names the claim started: "cell", "stamp" or "unreadable"
+		started string // the seat's record: "cell", "stamp" (current token), "old-stamp" or "unreadable"
 		ladder  bool   // the work ladder is on: the stop is its recycle
+		hold    string // a dispatch hold label on the claim
 		stale   bool   // the backstop's marker is another incarnation's
 	}{
 		{name: "execution-stalled", reason: executionStalledDrainReason, release: true},
 		{name: "execution-stalled, a second claim held", reason: executionStalledDrainReason, release: true, other: true},
 		{name: "another drain reason", reason: drainOrphaned},
-		// T9 (mc-358yo): a claim the seat names as started is not given back,
-		// whoever requested the stop.
-		{name: "execution-stalled, started by work_started", reason: executionStalledDrainReason, started: "cell"},
-		{name: "execution-stalled, started by execution_claim_started", reason: executionStalledDrainReason, started: "stamp"},
-		{name: "execution-stalled, work_started unreadable", reason: executionStalledDrainReason, started: "unreadable"},
-		// With the ladder on, the stop is its recycle, which keeps the claim;
-		// turned off after the recycle was decided, a marker the backstops did
-		// not write for this incarnation names nothing.
-		{name: "execution-stalled, the work ladder's recycle", reason: executionStalledDrainReason, ladder: true},
-		{name: "execution-stalled, the ladder turned off, a stale marker", reason: executionStalledDrainReason, stale: true},
+		{name: "ladder off: work_started names it, released (v5.10x)", reason: executionStalledDrainReason, release: true, started: "cell"},
+		{name: "ladder off: an earlier incarnation's stamp, released (v5.10x)", reason: executionStalledDrainReason, release: true, started: "old-stamp"},
+		{name: "ladder off: this incarnation's stamp, kept", reason: executionStalledDrainReason, started: "stamp"},
+		{name: "ladder off: stamped but hold:mayor, released", reason: executionStalledDrainReason, release: true, started: "stamp", hold: beadmeta.HoldMayorLabel},
+		{name: "ladder off: a stale marker, kept", reason: executionStalledDrainReason, stale: true},
+		{name: "ladder on: work_started names it, kept", reason: executionStalledDrainReason, started: "cell", ladder: true},
+		{name: "ladder on: an earlier incarnation's stamp, kept", reason: executionStalledDrainReason, started: "old-stamp", ladder: true},
+		{name: "ladder on: work_started unreadable, kept", reason: executionStalledDrainReason, started: "unreadable", ladder: true},
+		{name: "ladder on: started but hold:external, kept", reason: executionStalledDrainReason, started: "cell", ladder: true, hold: beadmeta.HoldExternalLabel},
+		{name: "ladder on: no record, kept (the ladder releases it itself)", reason: executionStalledDrainReason, ladder: true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			var claimID, otherID string
@@ -903,10 +914,23 @@ func TestExecutionStalledStopReleasesItsClaimAndCloses(t *testing.T) {
 				if err := store.SetMetadataBatch(id, map[string]string{executionClaimNudgeWorkKey: claim.ID, executionClaimNudgeTokenKey: token}); err != nil {
 					t.Fatal(err)
 				}
+				if c.hold != "" {
+					if err := store.Update(claim.ID, beads.UpdateOpts{Labels: []string{c.hold}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				row, err = store.Get(id)
+				if err != nil {
+					t.Fatal(err)
+				}
 				switch c.started {
 				case "cell":
 					casSetMeta(t, store, id, session.WorkStartedKey, session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Bead: claim.ID, Via: session.WorkStartedViaClaim})))
 				case "stamp":
+					if err := store.SetMetadata(id, executionClaimStartedKey, row.Metadata["instance_token"]+"|"+claim.ID); err != nil {
+						t.Fatal(err)
+					}
+				case "old-stamp":
 					if err := store.SetMetadata(id, executionClaimStartedKey, "tok-old|"+claim.ID); err != nil {
 						t.Fatal(err)
 					}

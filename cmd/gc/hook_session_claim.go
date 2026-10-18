@@ -207,8 +207,10 @@ const (
 	// hookStartedReleasing: the controller's work_ladder.release names the
 	// claim; it must not be handed out.
 	hookStartedReleasing
-	// hookStartedStale: the row is closed, or another incarnation's.
+	// hookStartedStale: the row is another incarnation's.
 	hookStartedStale
+	// hookStartedClosed: the row is closed; no turn of it can run the claim.
+	hookStartedClosed
 )
 
 // hookStartedWriteAttempts bounds the CAS retries against the controller's
@@ -218,13 +220,19 @@ const hookStartedWriteAttempts = 5
 var errWorkStartedContended = errors.New("work_started: the row moved on every attempt")
 
 // decideWorkStarted is the started write's decision on a fresh read of the
-// row: refuse a closed row or another incarnation's (stale), refuse a claim
+// row: refuse a closed row and another incarnation's (stale), refuse a claim
 // the controller is releasing, skip one already recorded, else record it
-// first in the cell. A cell it cannot read is an error and is never
-// overwritten: unreadable, it reads as "every claim is started".
-func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStartedKey, via string, now time.Time) (hookStartedResult, session.MetadataPatch, error) {
+// first in the cell. A cell it cannot read is replaced by one holding just
+// this claim, and reset reports the read error: the entries it held are lost
+// (they read as "every claim started" while unreadable, and the hook reports
+// the reset off the pane), but the cell is readable again, so a drain-ack and
+// the ladder judge each claim by its own record from here on.
+func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStartedKey, via string, now time.Time) (res hookStartedResult, patch session.MetadataPatch, reset error) {
 	rowGen, _ := strconv.ParseInt(strings.TrimSpace(fresh.Generation), 10, 64)
-	if fresh.Closed || strings.TrimSpace(fresh.InstanceToken) != fence.Token || (fence.HasGen && rowGen != fence.Gen) {
+	switch {
+	case fresh.Closed:
+		return hookStartedClosed, nil, nil
+	case strings.TrimSpace(fresh.InstanceToken) != fence.Token || (fence.HasGen && rowGen != fence.Gen):
 		return hookStartedStale, nil, nil
 	}
 	if session.WorkLadderReleases(fresh.WorkLadderRaw, key.Store, key.Bead) {
@@ -232,7 +240,7 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 	}
 	cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
 	if err != nil {
-		return hookStartedUnrecorded, nil, err
+		cell, reset = session.WorkStarted{}, err
 	}
 	if cell.Names(key.Store, key.Bead) {
 		return hookStartedAlreadyRecorded, nil, nil
@@ -242,7 +250,7 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 		gen = fence.Gen
 	}
 	cell = cell.With(session.WorkStartedEntry{Store: key.Store, Bead: key.Bead, Gen: gen, At: now.UTC(), Via: via})
-	return hookStartedRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell)}, nil
+	return hookStartedRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell)}, reset
 }
 
 // hookRecordWorkStarted is the production RecordWorkStarted seam, through the
@@ -257,22 +265,24 @@ func hookRecordWorkStarted(sessionID string, fence hookStartedFence, key hookSta
 
 // recordWorkStarted runs decideWorkStarted under UpdateRowFenced. A CAS lost
 // on every attempt is an error, as is a store that cannot fence: the caller
-// fails open.
+// fails open. A write that replaced an unreadable cell returns Recorded with
+// an error naming the reset, which the caller reports as it reports a
+// failure: the claims the old cell held are no longer recorded.
 func recordWorkStarted(front *session.Store, sessionID string, fence hookStartedFence, key hookStartedKey, via string, now time.Time) (hookStartedResult, error) {
 	var res hookStartedResult
-	var decideErr error
+	var reset error
 	wrote, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
 		var patch session.MetadataPatch
-		res, patch, decideErr = decideWorkStarted(fresh, fence, key, via, now)
+		res, patch, reset = decideWorkStarted(fresh, fence, key, via, now)
 		return session.RowPatch{Metadata: patch}, len(patch) > 0
 	})
 	switch {
 	case err != nil:
 		return hookStartedUnrecorded, err
-	case decideErr != nil:
-		return hookStartedUnrecorded, decideErr
 	case res == hookStartedRecorded && !wrote:
 		return hookStartedUnrecorded, errWorkStartedContended
+	case reset != nil:
+		return res, fmt.Errorf("work_started was unreadable and was reset to this claim; the claims it held are unrecorded: %w", reset)
 	}
 	return res, nil
 }

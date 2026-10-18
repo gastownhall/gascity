@@ -97,12 +97,12 @@ func (w WorkStarted) Names(store, bead string) bool {
 	return false
 }
 
-// With is w with e recorded first, any entry for the same (store, bead)
-// dropped, and the oldest beyond the cap dropped.
+// With is w with e recorded first, every entry naming the same claim dropped
+// (Names' matching), and the oldest beyond the cap dropped.
 func (w WorkStarted) With(e WorkStartedEntry) WorkStarted {
 	out := WorkStarted{V: workCellVersion, Claims: []WorkStartedEntry{e}}
 	for _, c := range w.Claims {
-		if c.Store == e.Store && c.Bead == e.Bead {
+		if sameClaim(c.Store, c.Bead, e.Store, e.Bead) {
 			continue
 		}
 		if len(out.Claims) == workStartedCap {

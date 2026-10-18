@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"slices"
 	"strings"
@@ -11,7 +12,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -192,6 +195,7 @@ func (l *startedLog) ops(output string, row *startedRow, record hookRecordWorkSt
 			l.unrecorded = append(l.unrecorded, beadID)
 		},
 		EmitExecutionStepStarted: func(step beads.Bead, _ string, _ []string, _ string) {
+			l.add("step_started:" + step.ID)
 			l.stepStarted = append(l.stepStarted, step.ID)
 		},
 		StampSessionClaim: func(_, beadID string) error { l.add("current:" + beadID); return nil },
@@ -329,9 +333,9 @@ func TestHookClaimStaleIncarnationRecordsNothing(t *testing.T) {
 			}
 		})
 	}
-	// The pure decision too: a closed row is stale.
-	if res, patch, _ := decideWorkStarted(session.Info{Closed: true, InstanceToken: startedToken, Generation: "7"}, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true}, hookStartedKey{Bead: "b"}, "claim", time.Now()); res != hookStartedStale || patch != nil {
-		t.Fatalf("closed row: %v %v, want stale and no patch", res, patch)
+	// The pure decision too: a closed row is refused, as closed.
+	if res, patch, _ := decideWorkStarted(session.Info{Closed: true, InstanceToken: startedToken, Generation: "7"}, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true}, hookStartedKey{Bead: "b"}, "claim", time.Now()); res != hookStartedClosed || patch != nil {
+		t.Fatalf("closed row: %v %v, want closed and no patch", res, patch)
 	}
 }
 
@@ -557,5 +561,302 @@ func TestStartedClaimHeldIsInThePublishedSchema(t *testing.T) {
 	all, drain := hookClaimSchemaReasonEnums(t)
 	if !slices.Contains(all, hookClaimWorkReasonStartedClaimHeld) || slices.Contains(drain, hookClaimWorkReasonStartedClaimHeld) {
 		t.Fatalf("schema reasons %v (drain %v): want %q admitted, as a work reason only", all, drain, hookClaimWorkReasonStartedClaimHeld)
+	}
+}
+
+// drainAckFenceRun is one no-work `gc hook --claim --drain-ack` against a
+// work_started cell and a live bead read, through the fence.
+func drainAckFenceRun(t *testing.T, cell string, read func(beadID string) (beads.Bead, error)) (hookClaimJSONResult, *startedLog, string) {
+	t.Helper()
+	l := &startedLog{}
+	ops := l.ops(`[]`, nil, nil)
+	ops.ReadWorkStarted = func(string) (string, error) { return cell, nil }
+	ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+		return read(beadID)
+	}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr)
+	return decodeTurnBoundResult(t, stdout.buf.String()), l, stderr.String()
+}
+
+func startedCell(entries ...session.WorkStartedEntry) string {
+	w := session.WorkStarted{}
+	for _, e := range entries {
+		w = w.With(e)
+	}
+	return session.EncodeWorkStarted(w)
+}
+
+// TestHookDrainAckFenceSkipsDispatchHolds (must-fix 2, gas-kg6): a started
+// claim parked on a dispatch hold is never work the hook serves, so it does
+// not hold the ack: the drain is acknowledged. Kills a fence that ignores
+// either hold label.
+func TestHookDrainAckFenceSkipsDispatchHolds(t *testing.T) {
+	for _, hold := range []string{beadmeta.HoldMayorLabel, beadmeta.HoldExternalLabel} {
+		t.Run(hold, func(t *testing.T) {
+			got, l, stderr := drainAckFenceRun(t, startedCell(session.WorkStartedEntry{Store: startedStoreRef, Bead: "p-1"}), func(id string) (beads.Bead, error) {
+				return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-1", Labels: []string{hold}}, nil
+			})
+			if got.Action != "drain" || !l.acked || !got.DrainAcknowledged {
+				t.Fatalf("result %+v, acked %v, stderr %q; want the drain acknowledged past a %s claim", got, l.acked, stderr, hold)
+			}
+		})
+	}
+}
+
+// TestHookDrainAckFenceReadsAnswerNotFoundAndForeignStores (must-fix 3): a
+// bead the store no longer has holds nothing, and an entry naming another
+// store whose read fails here is skipped; either way the ack goes through. A
+// failed read of an entry of this store still fails safe (T7). Kills an entry
+// for a purged or foreign bead blocking every drain-ack.
+func TestHookDrainAckFenceReadsAnswerNotFoundAndForeignStores(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		entry session.WorkStartedEntry
+		err   error
+		acked bool
+	}{
+		{"not found here", session.WorkStartedEntry{Store: startedStoreRef, Bead: "gone-1"}, fmt.Errorf("bd show gone-1: %w", beads.ErrNotFound), true},
+		{"another store, unreadable here", session.WorkStartedEntry{Store: "rig:other", Bead: "o-1"}, errors.New("bd: no issue o-1 in this database"), true},
+		{"this store, unreadable", session.WorkStartedEntry{Store: startedStoreRef, Bead: "h-1"}, errors.New("bd: connection refused"), false},
+		{"unknown store, unreadable", session.WorkStartedEntry{Bead: "h-1"}, errors.New("bd: connection refused"), false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			got, l, stderr := drainAckFenceRun(t, startedCell(c.entry), func(string) (beads.Bead, error) { return beads.Bead{}, c.err })
+			if l.acked != c.acked || got.DrainAcknowledged != c.acked {
+				t.Fatalf("result %+v, acked %v, stderr %q; want acked=%v", got, l.acked, stderr, c.acked)
+			}
+		})
+	}
+}
+
+// TestHookDrainAckFenceFindsAHeldClaimBehindOthers (E20): the fence reads
+// every entry, not only the newest: a held claim behind a closed one, a held
+// one and a purged one still holds the ack.
+func TestHookDrainAckFenceFindsAHeldClaimBehindOthers(t *testing.T) {
+	cell := startedCell(
+		session.WorkStartedEntry{Store: startedStoreRef, Bead: "held-1"},
+		session.WorkStartedEntry{Store: startedStoreRef, Bead: "gone-1"},
+		session.WorkStartedEntry{Store: startedStoreRef, Bead: "parked-1"},
+		session.WorkStartedEntry{Store: startedStoreRef, Bead: "done-1"},
+	)
+	got, l, _ := drainAckFenceRun(t, cell, func(id string) (beads.Bead, error) {
+		switch id {
+		case "held-1":
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-1"}, nil
+		case "gone-1":
+			return beads.Bead{}, beads.ErrNotFound
+		case "parked-1":
+			return beads.Bead{ID: id, Status: "in_progress", Assignee: "worker-1", Labels: []string{beadmeta.HoldMayorLabel}}, nil
+		default:
+			return beads.Bead{ID: id, Status: "closed", Assignee: "worker-1"}, nil
+		}
+	})
+	if got.Reason != hookClaimWorkReasonStartedClaimHeld || got.BeadID != "held-1" || l.acked {
+		t.Fatalf("result %+v, acked %v; want started_claim_held for held-1, the oldest entry", got, l.acked)
+	}
+}
+
+// TestHookClaimRecordsStartedBeforeTheStepStartedEvent (E3): a graph step
+// handed to a turn is recorded in work_started before its
+// execution.step_started is emitted, so a refused hand-over emits none.
+func TestHookClaimRecordsStartedBeforeTheStepStartedEvent(t *testing.T) {
+	row := newStartedRow(t, nil)
+	l := &startedLog{}
+	ops := l.ops(startedRoutedWork, row, nil)
+	ops.ReadWorkMeta = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, error) {
+		return beads.Bead{ID: beadID, Status: "in_progress", Assignee: assignee, Metadata: map[string]string{
+			beadmeta.RootBeadIDMetadataKey: "root-1", beadmeta.StepIDMetadataKey: "step-1", beadmeta.SessionIDMetadataKey: startedSessionID,
+		}}, nil
+	}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr); code != 0 {
+		t.Fatalf("code %d; stderr=%s", code, stderr.String())
+	}
+	rec, step := l.index("record:work-1"), l.index("step_started:work-1")
+	if rec < 0 || step < 0 || rec > step {
+		t.Fatalf("effects %v: want the started record before execution.step_started", l.log)
+	}
+}
+
+// TestHookClaimResetsAnUnreadableCell (E2b, nit 9): a work_started cell the
+// hook cannot read is replaced by a readable one holding the claim it hands
+// out, and the reset is reported off the pane (work.started_unrecorded: the
+// claims the old cell held are no longer recorded). The claim is delivered.
+func TestHookClaimResetsAnUnreadableCell(t *testing.T) {
+	row := newStartedRow(t, map[string]string{session.WorkStartedKey: "{"})
+	l := &startedLog{}
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), l.ops(startedRoutedWork, row, nil), stdout, &stderr)
+
+	if got := decodeTurnBoundResult(t, stdout.buf.String()); code != 0 || got.BeadID != "work-1" {
+		t.Fatalf("code %d, result %+v; want work-1 delivered", code, got)
+	}
+	if cell := row.cell(t); len(cell.Claims) != 1 || !cell.Names(startedStoreRef, "work-1") {
+		t.Fatalf("work_started = %+v, want a readable cell holding work-1", cell)
+	}
+	if len(l.unrecorded) != 1 || !strings.Contains(stderr.String(), "unreadable") {
+		t.Fatalf("unrecorded %v, stderr %q; want the reset reported", l.unrecorded, stderr.String())
+	}
+}
+
+// TestHookClaimOnAClosedRowGivesTheMintedClaimBack (nit 7): no turn of a
+// closed row runs a claim, so a minted one is given back before the stale
+// drain, and nothing is recorded; an adopted one is left to the close
+// cascade.
+func TestHookClaimOnAClosedRowGivesTheMintedClaimBack(t *testing.T) {
+	for _, c := range []struct {
+		name, output string
+		minted       bool
+	}{
+		{"minted", startedRoutedWork, true},
+		{"adopted", startedAssignedWork, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newStartedRow(t, nil)
+			if err := row.store.Close(row.id); err != nil {
+				t.Fatal(err)
+			}
+			l := &startedLog{}
+			stdout := &orderedWriter{l: l}
+			var stderr bytes.Buffer
+			doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), l.ops(c.output, row, nil), stdout, &stderr)
+
+			got := decodeTurnBoundResult(t, stdout.buf.String())
+			if got.Action != "drain" || got.Reason != hookClaimReasonStaleSession || c.minted != (len(l.releases) == 1) || row.store.rowWrites != 0 {
+				t.Fatalf("result %+v, releases %v, row writes %d; want the stale drain, the minted claim given back, nothing recorded", got, l.releases, row.store.rowWrites)
+			}
+		})
+	}
+}
+
+// TestForgetWorkStartedLeavesAClosedRow (E21): the unwind writes nothing to a
+// closed row.
+func TestForgetWorkStartedLeavesAClosedRow(t *testing.T) {
+	cell := startedCell(session.WorkStartedEntry{Store: startedStoreRef, Bead: "work-1"})
+	row := newStartedRow(t, map[string]string{session.WorkStartedKey: cell})
+	if err := row.store.Close(row.id); err != nil {
+		t.Fatal(err)
+	}
+	if err := forgetWorkStarted(row.front, startedSessionID, hookStartedKey{Store: startedStoreRef, Bead: "work-1"}); err != nil {
+		t.Fatal(err)
+	}
+	if row.store.rowWrites != 0 || row.meta(t, session.WorkStartedKey) != cell {
+		t.Fatalf("row writes %d, cell %q; want the closed row untouched", row.store.rowWrites, row.meta(t, session.WorkStartedKey))
+	}
+}
+
+// TestHookDiscoveryOptionsCarryIdentities (E1): plain `gc hook` hands the
+// drain-ack fence the seat's identities, as --claim does.
+func TestHookDiscoveryOptionsCarryIdentities(t *testing.T) {
+	got := hookDiscoveryOptions("worker-1", []string{"worker-1", "sess-1"}, []string{"GC_SESSION_ID=sess-1"}, hookCommandOptions{DrainAck: true, JSON: true}, true)
+	if got.Assignee != "worker-1" || !slices.Equal(got.IdentityCandidates, []string{"worker-1", "sess-1"}) || !got.DrainAck || !got.JSON || !got.StrictDrainAck || len(got.Env) != 1 {
+		t.Fatalf("discovery options %+v", got)
+	}
+}
+
+// TestRuntimeDrainAckRefusesASeatHoldingStartedWork (should-fix 4): a seat's
+// own `gc runtime drain-ack` is refused while it holds started work the
+// drain-ack release would keep, with nothing acknowledged; an operator's ack
+// is not checked. Acking would stop the seat with the claim kept on it, and
+// the assigned-work wake would restart it, in a loop.
+func TestRuntimeDrainAckRefusesASeatHoldingStartedWork(t *testing.T) {
+	prevHeld, prevRelease := drainAckStartedClaimsHeld, drainAckReleaseHeldClaims
+	t.Cleanup(func() { drainAckStartedClaimsHeld, drainAckReleaseHeldClaims = prevHeld, prevRelease })
+	drainAckReleaseHeldClaims = func(string, string, io.Writer) {}
+	for _, c := range []struct {
+		name     string
+		operator bool
+		held     []string
+		want     int
+	}{
+		{"own ack, started work held", false, []string{"g-1"}, drainAckRefused},
+		{"own ack, nothing held", false, nil, 0},
+		{"operator ack", true, []string{"g-1"}, 0},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			checked := false
+			drainAckStartedClaimsHeld = func(string, string, io.Writer) []string { checked = true; return c.held }
+			dops := newFakeDrainOps()
+			var stdout, stderr bytes.Buffer
+			code := runtimeDrainAck(dops, sessionRuntimeTarget{sessionName: "worker-1", display: "worker-1"}, c.operator, "", false, &stdout, &stderr)
+			if code != c.want || dops.acked["worker-1"] != (c.want == 0) || checked == c.operator {
+				t.Fatalf("code %d (want %d), acked %v, checked %v; stderr=%s", code, c.want, dops.acked["worker-1"], checked, stderr.String())
+			}
+		})
+	}
+}
+
+// TestStartedGateBlockedClaimSurvivesTheNudge is mc-ilr3b's scenario end to
+// end, over real stores: the seat's hook hands it a claim and records it as
+// started; the step then blocks on a gate, so the work query serves it no
+// more; the seat is nudged with a --drain-ack nudge and runs the hook. The
+// hook answers started_claim_held and acks nothing, a direct
+// `gc runtime drain-ack` of its own would be refused (startedClaimsKept), and
+// had an ack happened anyway the drain-ack release keeps the claim. It stays
+// in_progress on the seat throughout.
+func TestStartedGateBlockedClaimSurvivesTheNudge(t *testing.T) {
+	work := splittest.NewWorkStore(t, "gc")
+	claim := mustCreateDrainAckBead(t, work, beads.Bead{Title: "gate-blocked step", Type: "task", Metadata: routedToWorker()}, "", "")
+	row := newStartedRow(t, nil)
+	legs := testWorkLegs("", servingCity("worker"), work, nil)
+	seatBead := func() beads.Bead {
+		b, err := row.store.Get(row.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	readClaim := func(_ context.Context, _ string, _ []string, beadID, _ string) (beads.Bead, error) {
+		return work.Get(beadID)
+	}
+
+	// The hand-over: a real claim of the bead, recorded on the row.
+	l := &startedLog{}
+	ops := l.ops(`[{"id":"`+claim.ID+`","status":"open","metadata":{"gc.routed_to":"worker"}}]`, row, nil)
+	ops.Claim = func(_ context.Context, _ string, _ []string, beadID, assignee string) (beads.Bead, bool, error) {
+		status := "in_progress"
+		if err := work.Update(beadID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			return beads.Bead{}, false, err
+		}
+		b, err := work.Get(beadID)
+		return b, true, err
+	}
+	ops.ReadWorkMeta = readClaim
+	stdout := &orderedWriter{l: l}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr); code != 0 || !row.cell(t).Names("", claim.ID) {
+		t.Fatalf("hand-over: code %d, cell %+v; stderr=%s", code, row.cell(t), stderr.String())
+	}
+
+	// Gate-blocked and nudged: the query serves nothing; the nudge carries
+	// --drain-ack; the ack would run the real drain-ack release.
+	l = &startedLog{}
+	ops = l.ops(`[]`, row, nil)
+	ops.ReadWorkStarted = func(string) (string, error) { return row.meta(t, session.WorkStartedKey), nil }
+	ops.ReadWorkMeta = readClaim
+	ops.DrainAck = func(w io.Writer) error {
+		l.acked = true
+		releaseUnexecutedClaimsOnDrainAck(legs, seatBead(), drainAckReleaseBudget, w)
+		return nil
+	}
+	stdout = &orderedWriter{l: l}
+	doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr)
+	if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Reason != hookClaimWorkReasonStartedClaimHeld || l.acked {
+		t.Fatalf("nudged hook: result %+v, acked %v; want started_claim_held and no ack", got, l.acked)
+	}
+
+	seat := drainAckSessionBead()
+	seat.Metadata[session.WorkStartedKey] = row.meta(t, session.WorkStartedKey)
+	scope := releaseScopeOwn(seat)
+	if kept, err := startedClaimsKept(seatWorkFor(legs, scope), scope, releaseSeatOfBead(seat)); err != nil || len(kept) != 1 || kept[0].bead.ID != claim.ID {
+		t.Fatalf("a direct drain-ack's check found %v, %v; want the claim, so the ack is refused", kept, err)
+	}
+	releaseUnexecutedClaimsOnDrainAck(legs, seat, drainAckReleaseBudget, &stderr)
+	if status, assignee := drainAckBeadStatus(t, work, claim.ID); status != "in_progress" || assignee != "worker-1" {
+		t.Fatalf("claim is %s/%q; want it in_progress on the seat", status, assignee)
 	}
 }

@@ -479,15 +479,15 @@ func (p poolExecutionBackstop) state(s beads.Bead, target backstopTarget) (same 
 
 // content is the agent's configured claim nudge. A seat whose stamp shows the
 // marker's claim started this incarnation gets the held-claim default when
-// none is configured (heldClaimNudgeFor, the claim backstop's fallback
-// without --drain-ack, mc-ilr3b): its escalation is vetoed, so with nothing to
+// none is configured (heldClaimNudgeFor: the started-rung text, which names
+// the claim and carries no --drain-ack, mc-ilr3b): its escalation is vetoed, so with nothing to
 // send it would wait at its prompt forever. A seat seen started on a pass whose stamp write failed gets no
 // default; escalatesNext holds it until the stamp lands. A started seat whose
 // template names no configured agent gets no default either, and is held as
 // executing, as in the stamp-failure case.
 func (p poolExecutionBackstop) content(s beads.Bead) string {
 	if p.markedStarted(s, s.Metadata[executionClaimNudgeWorkKey]) {
-		return heldClaimNudgeFor(p.cfg, s)
+		return heldClaimNudgeFor(p.cfg, s, s.Metadata[executionClaimNudgeWorkKey])
 	}
 	return claimNudgeFor(p.cfg, s)
 }

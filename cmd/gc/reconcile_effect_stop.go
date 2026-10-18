@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -110,26 +111,42 @@ type stopPlan struct {
 }
 
 // stalledClaim is the claim an execution-stalled stop gives back: its bead
-// and the seat that holds it.
+// and the seat that holds it. started is the seat's record that a turn began
+// it (stalledClaimOf), which keeps it unless it is on a dispatch hold.
 type stalledClaim struct {
-	beadID string
-	row    session.Info
+	beadID  string
+	row     session.Info
+	started bool
 }
 
-// stalledClaimOf is the claim an execution-stalled stop of row gives back:
-// the backstop marker's, unless the seat names it as started, by its
-// work_started cell (or a cell it cannot read) or its execution_claim_started
-// stamp. Whoever requested the stop, it gives back only unstarted work
-// (mc-358yo, PHASE1-2 §6.5).
-func stalledClaimOf(row session.Info, meta map[string]string) stalledClaim {
+// stalledClaimOf is the claim an execution-stalled stop of row gives back,
+// and whether the seat records that a turn began it (mc-358yo, PHASE1-2
+// §6.5).
+//
+// With the work ladder off, the execution backstop requests the stop, and its
+// own record is execution_claim_started at the row's current instance token
+// (startedValue), the stamp that already vetoes its drain. Only that names the
+// claim started: work_started names every claim the hook handed out, and a
+// stamp from an earlier incarnation names one the seat was woken on and never
+// ran, so keeping either would leave the seat asleep holding the claim, the
+// assigned-work wake would restart it on it, and the backstop would drain it
+// again: the v5.10x loop. With the ladder on, the stop is the ladder's
+// recycle, and either record keeps the claim (work_started unreadable keeps
+// it too).
+func stalledClaimOf(row session.Info, meta map[string]string, ladderOn bool) stalledClaim {
 	beadID := strings.TrimSpace(meta[executionClaimNudgeWorkKey])
-	seat := releaseSeat{}
-	seat.nameStarted(startedClaimBead(meta[executionClaimStartedKey]))
-	seat.nameWorkStarted(row.WorkStartedRaw)
-	if beadID == "" || seat.namesStarted(beadID) {
+	if beadID == "" {
 		return stalledClaim{}
 	}
-	return stalledClaim{beadID: beadID, row: row}
+	stamp := strings.TrimSpace(meta[executionClaimStartedKey])
+	started := stamp == strings.TrimSpace(meta["instance_token"])+"|"+beadID
+	if ladderOn {
+		seat := releaseSeat{}
+		seat.nameRecorded(startedClaimBead(stamp))
+		seat.nameWorkStarted(row.WorkStartedRaw)
+		started = seat.recordedUnread || seat.recorded[beadID]
+	}
+	return stalledClaim{beadID: beadID, row: row, started: started}
 }
 
 // corpseObject is the corpse a confirmed stop removes: its leaf and the
@@ -163,7 +180,7 @@ func stopDecide(v txView) txStep {
 	name := strings.TrimSpace(v.Row.SessionName)
 	plan := stopPlan{name: name, names: processNamesFor(v.World, v.Row), now: v.Now, idle: isIdleReason(v.It.Reason), restart: v.It.Reason == decideRestartRequested}
 	if stopReason(v.It) == executionStalledDrainReason && x7Releases(v.World, v.Meta) {
-		plan.stalled = stalledClaimOf(v.Row, v.Meta)
+		plan.stalled = stalledClaimOf(v.Row, v.Meta, workLadderOn(v.World))
 	}
 	switch rt := v.RT; rt.Class {
 	case rtAbsent:
@@ -277,6 +294,10 @@ func releaseStalledClaim(r *closeReleases, c stalledClaim) {
 	}
 	for _, hit := range hits {
 		if hit.bead.ID != c.beadID {
+			continue
+		}
+		if c.started && !beadmeta.HasDispatchHold(hit.bead.Labels) {
+			fmt.Fprintf(r.stderr, "execution-stalled stop: %s keeps claim %s: the seat records that a turn began it\n", c.row.ID, c.beadID) //nolint:errcheck // best-effort
 			continue
 		}
 		// The stranded repair's policy: the claim's route kept, its release

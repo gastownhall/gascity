@@ -549,16 +549,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
-	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Assignee: assignee,
-		// The drain-ack fence matches a started claim's assignee against
-		// these, on this door as on --claim.
-		IdentityCandidates: identityCandidates,
-		Env:                queryEnv,
-		DrainAck:           opts.DrainAck,
-		JSON:               opts.JSON,
-		StrictDrainAck:     drainAckStrictConfig(cfg),
-	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
+	return doHookDiscovery(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, drainAckStrictConfig(cfg)), hookClaimOps{}, runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -1330,6 +1321,21 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 		return fmt.Errorf("%w: %w", beads.ErrStoreUnavailable, err)
 	}
 	return err
+}
+
+// hookDiscoveryOptions are plain `gc hook`'s options for the drain fences it
+// shares with --claim. The drain-ack fence matches a started claim's assignee
+// against the seat's identities, on this door as on --claim, so they travel
+// here too.
+func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCommandOptions, strict bool) hookClaimOptions {
+	return hookClaimOptions{
+		Assignee:           assignee,
+		IdentityCandidates: identities,
+		Env:                env,
+		DrainAck:           opts.DrainAck,
+		JSON:               opts.JSON,
+		StrictDrainAck:     strict,
+	}
 }
 
 // doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the

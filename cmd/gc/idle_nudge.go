@@ -61,11 +61,12 @@ const (
 
 const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
-// defaultHeldClaimNudge is the default for a seat that already holds its claim
-// (the execution backstop's started seat): no --drain-ack, which on a hook
-// answer of no work, the started step gate- or hold-blocked, acked a drain
-// and gave the claim back (mc-ilr3b). PHASE1-2 §6.6's claim text.
-const defaultHeldClaimNudge = "Run gc hook --claim --json now; it returns the work assigned to you. Execute it."
+// defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
+// started its step, the execution backstop's started seat: PHASE1-2 §6.6's
+// started-rung text. It carries no --drain-ack, which on a hook answer of no
+// work, the started step gate- or hold-blocked, acked a drain and gave the
+// claim back (mc-ilr3b).
+const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
 
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
@@ -646,13 +647,13 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return nudge
 }
 
-// heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat that holds its
-// claim: its configured nudge, else defaultHeldClaimNudge, and "" when its
-// template names no configured agent.
-func heldClaimNudgeFor(cfg *config.City, session beads.Bead) string {
+// heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
+// has started: its configured nudge, else defaultHeldClaimNudge naming the
+// claim, and "" when its template names no configured agent.
+func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
 	nudge, known := configuredClaimNudgeFor(cfg, session)
 	if known && nudge == "" {
-		return defaultHeldClaimNudge
+		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
 	}
 	return nudge
 }
