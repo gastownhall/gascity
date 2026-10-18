@@ -8,7 +8,9 @@ package main
 //
 // Doorbells (DES-O1 §7.3) start or wake a conversation's worker: Poke for
 // in-process producers, the controller-socket verb lane:<conversation>[:<op>],
-// each worker's own timer at its PassResult.Next, and the anti-entropy scan
+// the ledger feed's page apply (CH-4), which pokes every conversation whose
+// op or runtime row an out-of-band write changed (pokeChangedRows), each
+// worker's own timer at its PassResult.Next, and the anti-entropy scan
 // (opjournal.Store.OpenLaneConversations). The scan runs at boot, and then
 // every laneHostScanInterval while a kind is listed in [ops] authoritative or
 // the last scan found an open lane op, so with the list empty an idle city
@@ -341,7 +343,8 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 }
 
 // startConversationLaneHost starts the controller's lane host until ctx
-// ends, with [ops] authoritative as the controller loaded it at start.
+// ends, with [ops] authoritative as the controller loaded it at start, and
+// rings it from the controller's ledger feeds.
 func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conversationLaneHost {
 	var kinds []string
 	if cfg := cs.Config(); cfg != nil {
@@ -349,7 +352,37 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 	}
 	h := newConversationLaneHost(cs, kinds)
 	h.start(ctx)
+	cs.ledgerFeeds.setRowsChanged(h.pokeChangedRows)
 	return h
+}
+
+// pokeChangedRows is the ledger-feed doorbell: it pokes, once each, the
+// conversations whose op rows (gc:op) or runtime row (gc:rt) are among rows,
+// which a refresh pass found changed out of band. A host that is not running
+// ignores it.
+func (h *conversationLaneHost) pokeChangedRows(rows []beads.Bead) {
+	for _, conv := range laneConversationsOfRows(rows) {
+		h.Poke(conv)
+	}
+}
+
+// laneConversationsOfRows lists, in first-seen order, the conversations rows
+// name through an op row's or a runtime row's conversation label.
+func laneConversationsOfRows(rows []beads.Bead) []string {
+	opPrefix, rtPrefix := opjournal.ConversationLabel(""), opjournal.RuntimeConversationLabel("")
+	var convs []string
+	for _, b := range rows {
+		for _, label := range b.Labels {
+			conv, ok := strings.CutPrefix(label, opPrefix)
+			if !ok {
+				conv, ok = strings.CutPrefix(label, rtPrefix)
+			}
+			if ok && conv != "" && !slices.Contains(convs, conv) {
+				convs = append(convs, conv)
+			}
+		}
+	}
+	return convs
 }
 
 // start decides whether the host runs, publishes it for the city's socket

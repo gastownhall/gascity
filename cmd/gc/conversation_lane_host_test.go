@@ -9,6 +9,7 @@ import (
 	"go/parser"
 	"go/token"
 	"net"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -1647,4 +1648,74 @@ func TestLaneHostLogsAbsentConversation(t *testing.T) {
 		}
 	}
 	t.Fatalf("logs = %q, want %q", hh.logLines(), want)
+}
+
+// TestLaneConversationsOfRows pins which rows ring the ledger-feed doorbell:
+// an op row and a runtime row name their conversation, once each, in
+// first-seen order; any other row names none.
+func TestLaneConversationsOfRows(t *testing.T) {
+	rows := []beads.Bead{
+		{ID: "gc-op-1", Labels: []string{opjournal.LabelOp, opjournal.ConversationLabel("gc-a")}},
+		{ID: "gc-s1", Labels: []string{"gc:session"}},
+		{ID: "gc-rt-1", Labels: []string{opjournal.LabelRuntime, opjournal.RuntimeConversationLabel("gc-b")}},
+		{ID: "gc-op-2", Labels: []string{opjournal.LabelOp, opjournal.ConversationLabel("gc-a")}},
+		{ID: "gc-fact-1", Labels: []string{opjournal.LabelFact, opjournal.FactConversationLabel("gc-c")}},
+	}
+	if got, want := laneConversationsOfRows(rows), []string{"gc-a", "gc-b"}; !slices.Equal(got, want) {
+		t.Fatalf("conversations = %q, want %q", got, want)
+	}
+}
+
+// TestLaneHostLedgerFeedDoorbellRunsAPass proves a changed op row the
+// ledger feed hands the host pokes its conversation: its pass delivers.
+func TestLaneHostLedgerFeedDoorbellRunsAPass(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f)
+	hh.start()
+	hh.h.wg.Wait() // the boot scan found nothing and the loop ended
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	row, err := f.store.Get(op.ID)
+	if err != nil {
+		t.Fatalf("reading the op row: %v", err)
+	}
+	hh.h.pokeChangedRows([]beads.Bead{{ID: "gc-other", Labels: []string{"gc:session"}}, row})
+	if p := hh.nextPass(t); p.conv != f.id || p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want an accepted delivery over %s", p, f.id)
+	}
+}
+
+// TestLedgerFeedRingsTheLaneHost proves the feed hands every refresh pass's
+// changed rows to the lane host's doorbell, under the legacy reconciler and
+// under v2 alike, and rings nothing for the echo of a write the cache made.
+func TestLedgerFeedRingsTheLaneHost(t *testing.T) {
+	for _, v2 := range []bool{false, true} {
+		t.Run(fmt.Sprintf("v2=%v", v2), func(t *testing.T) {
+			h := newFeedHarness(t, newJournalingStore())
+			if v2 {
+				h.set.setWake(&controllerWake{planner: newTestPlanner()})
+			}
+			var mu sync.Mutex
+			var rung []string
+			h.set.setRowsChanged(func(rows []beads.Bead) {
+				mu.Lock()
+				defer mu.Unlock()
+				rung = append(rung, laneConversationsOfRows(rows)...)
+			})
+			labels := []string{opjournal.LabelOp, opjournal.ConversationLabel("gc-conv")}
+			if _, err := h.cache.Create(beads.Bead{Title: "own op", Labels: labels}); err != nil {
+				t.Fatal(err)
+			}
+			h.step()
+			if _, err := h.store.Create(beads.Bead{Title: "out-of-band op", Labels: labels}); err != nil {
+				t.Fatal(err)
+			}
+			h.step()
+			mu.Lock()
+			defer mu.Unlock()
+			if want := []string{"gc-conv"}; !slices.Equal(rung, want) {
+				t.Fatalf("doorbell rang for %q, want %q: the out-of-band row once, the echo never", rung, want)
+			}
+		})
+	}
 }
