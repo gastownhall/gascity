@@ -43,6 +43,14 @@ const (
 	gatePoolSlotShaped  = "named-identity-pool-slot-shaped"
 )
 
+// Template-partial causes of a custom scale_check: the template's own check
+// failed, or the scale_check source has no fresh run (none yet, failed,
+// timed out or stale), which holds every custom template alike.
+const (
+	causeScaleCheckPartial = "pool-scale-check-partial"
+	causeScaleCheckUnread  = "scale-check-source-unread"
+)
+
 // standInPrefix marks the ID of an in-flight create's stand-in row.
 const standInPrefix = "pending-create:"
 
@@ -68,6 +76,7 @@ func (p *decidePass) plan() {
 func (p *decidePass) demand() {
 	collected := p.in.Demand.Collected
 	collected.CustomCounts, collected.CustomPartials = nil, nil
+	unread := p.in.ScaleCheck == nil
 	if templates := p.in.Demand.CustomCheckTemplates; len(templates) > 0 {
 		collected.CustomCounts = make(map[string]int, len(templates))
 		for _, template := range templates {
@@ -86,7 +95,11 @@ func (p *decidePass) demand() {
 	collected.UnassignedRouted = projected
 	p.merged = mergeCollectedDemand(p.cfg, collected)
 	for template := range p.merged.PoolScaleCheckPartial {
-		p.markTemplate(template, true, "pool-scale-check-partial")
+		cause := causeScaleCheckPartial
+		if unread && slices.Contains(p.in.Demand.CustomCheckTemplates, template) {
+			cause = causeScaleCheckUnread
+		}
+		p.markTemplate(template, true, cause)
 	}
 	for template := range p.merged.PoolPartialRetention {
 		p.markTemplate(template, true, "pool-partial-retention")

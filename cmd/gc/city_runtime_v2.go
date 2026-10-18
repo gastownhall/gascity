@@ -269,6 +269,7 @@ func (cr *CityRuntime) reloadV2(p *tickPass, source reloadSource) {
 		cr.v2.softReload(p.ctx, reloadIntent{Source: source, Soft: p.manualReload != nil && p.manualReload.soft}, &r)
 	}
 	cr.v2.planner.markDirty("reload")
+	cr.v2.wakeReads()
 	p.manualReply = r
 	if p.manualReload != nil {
 		p.manualReloadCompleted = true

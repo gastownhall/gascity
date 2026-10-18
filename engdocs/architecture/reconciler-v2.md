@@ -53,6 +53,14 @@ chat auto-suspend, an unadmitted runtime), and a city whose class
 stores fail C0.7 does not boot. A refused v2 never falls back to legacy:
 remove the key to run legacy.
 
+A custom `scale_check` is admitted (PAR-SC). The external-reads lane runs
+every custom check off the pass (`allocator_scalecheck_lane.go`), and the
+decide reads its latest result; while the city is suspended no check runs.
+Until a run of the current config has ended, the lane serves the last
+result it published; once that result is three patrols old, or when there
+is none, every custom template is held: its rows are kept and nothing is
+created (trace cause `scale-check-source-unread`).
+
 `gc doctor` has a `daemon-session-reconciler` check:
 
 | Value | Result |

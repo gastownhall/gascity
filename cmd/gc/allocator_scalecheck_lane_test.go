@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"maps"
 	"math/rand/v2"
@@ -16,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -93,11 +95,17 @@ func scaleCheckSource(rec *externalReadsRecording) (sourceResult, bool) {
 // scale_check pools that are enabled run; a named session's backing pool runs
 // without a probe env, as legacy's does. A missing, stale or timed-out result
 // is partial for every template, and the result is stamped when its run
-// ended.
+// ended. The pass that starts the run publishes without it; the run
+// publishes its own late result (publishLateResult), starting no second run.
 func TestExternalReadsScaleCheckSourcePartialOnErrorAndEnvFailure(t *testing.T) {
 	checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
 	lane, wakes := newScaleCheckSourceLane("", scaleCheckCity(), checks)
 	maxAge := 3 * backstopTestInterval
+	gate := make(chan struct{})
+	lane.runner = func(command, dir string, env map[string]string) (string, error) {
+		<-gate
+		return checks.run(command, dir, env)
+	}
 
 	if !lane.recording().scaleCheck(censusNow).partial("ok") {
 		t.Fatal("before the first pass: ok trusted, want partial")
@@ -105,6 +113,11 @@ func TestExternalReadsScaleCheckSourcePartialOnErrorAndEnvFailure(t *testing.T) 
 	if !at(lane, censusNow).pass(context.Background()) {
 		t.Fatal("pass declined")
 	}
+	if _, ok := scaleCheckSource(lane.recording()); ok || wakes.Load() != 1 {
+		t.Fatalf("the pass that started the run published it (or woke %d times), want neither", wakes.Load())
+	}
+	close(gate)
+	at(lane, censusNow) // the run ends and publishes itself
 	r := lane.recording().scaleCheck(censusNow)
 	if src, _ := scaleCheckSource(lane.recording()); !src.EndedAt.Equal(censusNow) {
 		t.Fatalf("result ended at %v, want the run's end %v", src.EndedAt, censusNow)
@@ -134,8 +147,8 @@ func TestExternalReadsScaleCheckSourcePartialOnErrorAndEnvFailure(t *testing.T) 
 	if !lane.recording().scaleCheck(censusNow.Add(maxAge + time.Nanosecond)).partial("ok") {
 		t.Fatal("stale result: ok trusted, want partial")
 	}
-	if wakes.Load() != 1 {
-		t.Fatalf("allocator woken %d times after the first pass, want 1", wakes.Load())
+	if wakes.Load() != 2 {
+		t.Fatalf("allocator woken %d times after the run published, want 2", wakes.Load())
 	}
 	timedOut := &externalReadsRecording{FreshFor: maxAge, Sources: map[sourceKey]sourceResult{{kind: sourceScaleCheck}: {EndedAt: censusNow, Err: errSourceTimeout}}}
 	if !timedOut.scaleCheck(censusNow).partial("ok") {
@@ -346,5 +359,186 @@ func TestScaleCheckLaneWorkMatchesBuildDemandTargets(t *testing.T) {
 	}
 	if !suspendedRigSeen {
 		t.Fatal("no fixture has a custom scale_check pool on a suspended rig")
+	}
+}
+
+// scaleCheckLegCity is demandReadsTestConfig plus a custom scale_check
+// pool, so the lane reads a lane-fed leg and the scale_check source.
+func scaleCheckLegCity() *config.City {
+	cfg := demandReadsTestConfig()
+	cfg.Agents = append(cfg.Agents, config.Agent{Name: "checked", ScaleCheck: "check"})
+	return cfg
+}
+
+// Kills a pass that waits on the custom scale_checks before it publishes
+// the bd/PG legs (PAR-SC review): with the check hung, the first pass
+// publishes the leg at once, without waiting out the source deadline, and
+// publishes no scale_check result; once the check ends, its late result is
+// published at once, with no pass.
+func TestExternalReadsLegsDoNotWaitForScaleChecks(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := beads.NewMemStore()
+		if _, err := store.Create(routedDemandBead("")); err != nil {
+			t.Fatal(err)
+		}
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		defer releaseOnce.Do(func() { close(release) })
+		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: scaleCheckLegCity(), CityStore: store})
+		lane.steps = nil
+		lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
+		lane.runner = func(string, string, map[string]string) (string, error) {
+			<-release
+			return "4", nil
+		}
+		startBackstopLaneInBubble(t, lane)
+		synctest.Wait()
+		rec := lane.recording()
+		if leg, ok := recordedLeg(rec, store); backstopSeq(lane) != 1 || !ok || len(leg.RawOpen) != 1 {
+			t.Fatalf("with the check hung: seq %d, leg recorded=%t; want the leg published at once", backstopSeq(lane), ok)
+		}
+		if src, ok := scaleCheckSource(rec); ok {
+			t.Fatalf("with the check hung: published scale_check %+v, want none yet", src)
+		}
+		releaseOnce.Do(func() { close(release) })
+		synctest.Wait()
+		if r := lane.recording().scaleCheck(time.Now()); r == nil || r.Counts["checked"] != 4 || backstopSeq(lane) != 2 {
+			t.Fatalf("after the check ended: scale_check %+v at seq %d, want checked=4 published at once (seq 2)", r, backstopSeq(lane))
+		}
+	})
+}
+
+// Kills a reload that holds every custom template's creates for the new
+// config's first run (PAR-SC review): until that run ends, the lane serves
+// the result the last publish served, aged from its own end, so it reads
+// partial once 3 × patrol old; the new run's result then replaces it.
+func TestExternalReadsReloadServesLastScaleCheckUntilNewRunEnds(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		release := make(chan struct{})
+		var releaseOnce sync.Once
+		defer releaseOnce.Do(func() { close(release) })
+		oldCfg := &config.City{Agents: []config.Agent{{Name: "w", ScaleCheck: "check-old"}}}
+		newCfg := &config.City{Agents: []config.Agent{{Name: "w", ScaleCheck: "check-new"}}}
+		var cfg atomic.Pointer[config.City]
+		cfg.Store(oldCfg)
+		lane := newExternalReadsLane(backstopTestInterval, func() (externalReadsEnv, error) {
+			return externalReadsEnv{CityName: "city", Cfg: cfg.Load()}, nil
+		}, nil, func(fn func(), _ string) bool { fn(); return false }, nil, io.Discard)
+		lane.steps = nil
+		lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
+		lane.runner = func(command, _ string, _ map[string]string) (string, error) {
+			if command == "check-new" {
+				<-release
+				return "2", nil
+			}
+			return "7", nil
+		}
+		startBackstopLaneInBubble(t, lane)
+		advanceBackstop(externalReadsMinGap)
+		served, ok := scaleCheckSource(lane.recording())
+		if r := lane.recording().scaleCheck(time.Now()); !ok || r == nil || r.Counts["w"] != 7 {
+			t.Fatalf("before the reload: scale_check %+v, want the old config's 7", r)
+		}
+		cfg.Store(newCfg)
+		lane.wake()
+		advanceBackstop(externalReadsMinGap)
+		src, ok := scaleCheckSource(lane.recording())
+		if r := lane.recording().scaleCheck(time.Now()); !ok || r == nil || r.Counts["w"] != 7 || !src.EndedAt.Equal(served.EndedAt) || src.InFlightSince.IsZero() {
+			t.Fatalf("new config's run in flight: source %+v, result %+v; want the old result, aged from %v, marked in flight", src, r, served.EndedAt)
+		}
+		advanceBackstop(time.Until(served.EndedAt.Add(3*backstopTestInterval)) + time.Second)
+		if r := lane.recording().scaleCheck(time.Now()); r != nil {
+			t.Fatalf("3 patrols past the old result with the new run hung: %+v, want partial", r)
+		}
+		releaseOnce.Do(func() { close(release) })
+		advanceBackstop(externalReadsMinGap)
+		if r := lane.recording().scaleCheck(time.Now()); r == nil || r.Counts["w"] != 2 {
+			t.Fatalf("after the new run ended: %+v, want the new config's 2", r)
+		}
+	})
+}
+
+// countingLiveStore counts the live Lists of its store.
+type countingLiveStore struct {
+	beads.Store
+	lists *atomic.Int64
+}
+
+func (s countingLiveStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Live {
+		s.lists.Add(1)
+	}
+	return s.Store.List(q)
+}
+
+// Kills a late scale_check that wakes the lane for a full pass: each pass
+// would start the check again, end it late again and read every leg again,
+// a loop at the lane's minimum gap. A check slower than the legs ends after
+// every pass publishes, and over three patrols the lane still reads the leg
+// and runs the check once per patrol pass, while each late result is
+// published.
+func TestExternalReadsLateScaleCheckDoesNotRestartReads(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		store := countingLiveStore{Store: beads.NewMemStore(), lists: &atomic.Int64{}}
+		if _, err := store.Create(routedDemandBead("")); err != nil {
+			t.Fatal(err)
+		}
+		lane, _ := newTestBackstopLane(externalReadsEnv{Cfg: scaleCheckLegCity(), CityStore: store})
+		lane.steps = nil
+		lane.queryEnv = func(string, *config.City, *config.Agent) (map[string]string, error) { return nil, nil }
+		var runs atomic.Int64
+		lane.runner = func(string, string, map[string]string) (string, error) {
+			<-time.After(time.Second)
+			return fmt.Sprint(runs.Add(1)), nil
+		}
+		startBackstopLaneInBubble(t, lane)
+		advanceBackstop(3*backstopTestInterval + externalReadsMinGap)
+		if got := runs.Load(); got != 4 {
+			t.Errorf("over 3 patrols: %d scale_check runs, want 4 (one per patrol pass)", got)
+		}
+		if got := store.lists.Load(); got != 4 {
+			t.Errorf("over 3 patrols: %d live reads of the leg, want 4 (one per patrol pass)", got)
+		}
+		if r := lane.recording().scaleCheck(time.Now()); r == nil || r.Counts["checked"] != 4 {
+			t.Errorf("scale_check = %+v, want the fourth run's count published", r)
+		}
+	})
+}
+
+// Kills the reload carry-over reaching across a suspension: once a pass has
+// seen the city suspended, the result read before it is never served again,
+// so after resume the custom templates read partial until the first new run
+// ends, as legacy's first tick after resume runs the checks before it
+// trusts them.
+func TestExternalReadsResumeServesNoPreSuspensionScaleCheck(t *testing.T) {
+	tc := suspendCases[0]
+	ctx := context.Background()
+	cityPath := t.TempDir()
+	cfg := scaleCheckCity()
+	checks := &scriptedScaleChecks{out: map[string]string{"check-ok": "3", "check-named": "1"}}
+	lane, _ := newScaleCheckSourceLane(cityPath, cfg, checks)
+	if !passAndJoin(ctx, at(lane, censusNow)) || lane.recording().scaleCheck(censusNow).partial("ok") {
+		t.Fatal("before suspending: ok not trusted")
+	}
+	tc.suspend(t, cfg, cityPath)
+	if !passAndJoin(ctx, at(lane, censusNow.Add(time.Second))) {
+		t.Fatal("a pass declined while the city is suspended")
+	}
+	tc.resume(t, cfg, cityPath)
+	gate := make(chan struct{})
+	lane.runner = func(command, dir string, env map[string]string) (string, error) {
+		<-gate
+		return checks.run(command, dir, env)
+	}
+	resumed := censusNow.Add(2 * time.Second)
+	if !at(lane, resumed).pass(ctx) {
+		t.Fatal("pass after resume declined")
+	}
+	if r := lane.recording().scaleCheck(resumed); !r.partial("ok") {
+		t.Errorf("after resume, before the new run ended: %+v served, want ok partial", r)
+	}
+	close(gate)
+	if !passAndJoin(ctx, at(lane, resumed)) || lane.recording().scaleCheck(resumed).partial("ok") {
+		t.Error("after the new run ended: ok still partial")
 	}
 }

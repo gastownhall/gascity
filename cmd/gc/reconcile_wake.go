@@ -26,6 +26,9 @@ type controllerWake struct {
 	planner                     *planner
 	// waitDepClosed, set with planner, hears each closed bead's ID (GUAR-010).
 	waitDepClosed func(id string)
+	// wakeReads, set with planner, wakes the external-reads lane on every
+	// enqueue.
+	wakeReads func()
 	// now, when set, is the clock routed enqueues rate-limit their landed
 	// report by; nil is time.Now, whose readings compare on the monotonic
 	// clock, so a wall-clock step neither floods nor silences the report.
@@ -98,6 +101,9 @@ func (w *controllerWake) Enqueue(reason string, keys ...reconcilekey.Key) bool {
 	}
 	if w.planner != nil {
 		w.planner.markDirty(reason)
+		if w.wakeReads != nil {
+			w.wakeReads()
+		}
 		return w.reportLanded()
 	}
 	return legacyEnqueue(w.pokeCh, w.controlDispatcherCh, keys...)

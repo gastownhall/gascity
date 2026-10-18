@@ -237,6 +237,15 @@ func (rt *plannerRuntime) start(parent context.Context) bool {
 	return true
 }
 
+// wakeReads asks the lane for a pass, so a poke or a reload reaches the
+// legs and custom scale_checks it reads without waiting out the patrol. It
+// never blocks, and does nothing before start.
+func (rt *plannerRuntime) wakeReads() {
+	if l := rt.lane.Load(); l != nil {
+		l.wake()
+	}
+}
+
 // waitDependencyClosed runs the lane's waits step alone when a pending deps
 // wait watches id (GUAR-010). It never blocks, and does nothing before start.
 func (rt *plannerRuntime) waitDependencyClosed(id string) {

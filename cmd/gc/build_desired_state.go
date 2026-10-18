@@ -5396,11 +5396,7 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	if bp != nil {
 		// The v2 realization memo counts its occupancy's slots once (A3).
 		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
-			for slot := 1; unlimited || slot <= upper; slot++ {
-				if usedSlots[slot] || held[slot] {
-					continue
-				}
-				usedSlots[slot] = true
+			if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
 				return slot, nil
 			}
 			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())

@@ -1104,7 +1104,10 @@ func TestAllocator_PlanNeverEditsItsInputs(t *testing.T) {
 
 // Kills: a scale_check partial read for a template with no custom check
 // (P3-3 obligation): every other template reads partial on the lane's
-// result, so only the custom-check templates are asked.
+// result, so only the custom-check templates are asked. Also kills an unread
+// source traced as the template's own check failing: with no lane result
+// the cause is scale-check-source-unread, and with a result whose check
+// failed it is pool-scale-check-partial.
 func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	cfg := &config.City{Agents: []config.Agent{allocPoolAgent("worker", 3), allocPoolAgent("custom", 3)}}
 	f := newAllocFixture(t, cfg).sessions(poolRow("gc-1", "worker", 1, "asleep"))
@@ -1113,8 +1116,12 @@ func TestAllocator_ScaleCheckPartialOnlyForCustomCheckTemplates(t *testing.T) {
 	if _, partial := d.Snapshot.Partial.Templates["worker"]; partial {
 		t.Fatalf("worker read partial with no custom check: %+v", d.Snapshot.Partial)
 	}
-	if !d.Snapshot.Partial.Templates["custom"].Retain {
-		t.Fatalf("custom with no lane result must read partial: %+v", d.Snapshot.Partial)
+	if tp := d.Snapshot.Partial.Templates["custom"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckUnread) || slices.Contains(tp.Causes, causeScaleCheckPartial) {
+		t.Fatalf("custom with no lane result = %+v, want retained for %s, not %s", tp, causeScaleCheckUnread, causeScaleCheckPartial)
+	}
+	f.in.ScaleCheck = &scaleCheckResult{Counts: map[string]int{"custom": 0}, Partial: map[string]bool{"custom": true}}
+	if tp := f.decide().Snapshot.Partial.Templates["custom"]; !tp.Retain || !slices.Contains(tp.Causes, causeScaleCheckPartial) || slices.Contains(tp.Causes, causeScaleCheckUnread) {
+		t.Fatalf("custom whose check failed = %+v, want retained for %s, not %s", tp, causeScaleCheckPartial, causeScaleCheckUnread)
 	}
 	if e := entryOf(t, d, "gc-1"); e.Desired != desireDrain {
 		t.Fatalf("idle worker row = %s, want drain (not retained by another template's partial)", e.Desired)

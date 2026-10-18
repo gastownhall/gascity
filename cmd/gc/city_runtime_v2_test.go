@@ -1638,3 +1638,45 @@ func TestV2LaneHoldsTheControllersStrandedAlerter(t *testing.T) {
 		t.Fatal("the started lane does not hold the controller's alerter")
 	}
 }
+
+// idleExternalReadsLane is an unstarted lane: a wake only sets wantReads
+// and signals wakeCh.
+func idleExternalReadsLane() *externalReadsLane {
+	return newExternalReadsLane(time.Minute, func() (externalReadsEnv, error) { return externalReadsEnv{}, nil }, nil, nil, nil, io.Discard)
+}
+
+// Kills a reload or a poke that marks only the planner dirty (PAR-SC
+// review): the external-reads lane, which runs the custom scale_checks and
+// the bd/PG legs, would wait out its patrol before reading the new config
+// or the poked work. A v2 config reload and an enqueue through the wiring's
+// wake each wake the lane.
+func TestV2ReloadAndEnqueueWakeTheExternalReadsLane(t *testing.T) {
+	cr, _ := newPhaseFixtureRuntime(t, true, false)
+	cr.activeReload.soft = false
+	rt := attachTestV2(t, cr)
+	rt.publishEnv()
+	rt.softReload = func(_ context.Context, intent reloadIntent, r *reloadControlReply) {
+		v2SoftReloadUnavailable(intent, r)
+	}
+	lane := idleExternalReadsLane()
+	rt.lane.Store(lane)
+	runFixtureTick(cr, "reload")
+	if !lane.wantReads.Load() || len(lane.wakeCh) != 1 {
+		t.Fatal("a v2 config reload did not wake the external-reads lane")
+	}
+
+	plain, _ := newPhaseFixtureRuntime(t, false, false)
+	cfg := *plain.cfg
+	cfg.Daemon.SessionReconciler = "v2"
+	w, err := newControllerWiring(&cfg, noEnv, io.Discard)
+	if err != nil {
+		t.Fatalf("newControllerWiring: %v", err)
+	}
+	t.Cleanup(w.v2.stop)
+	lane = idleExternalReadsLane()
+	w.v2.lane.Store(lane)
+	w.wake.Enqueue(wakeReasonSocket)
+	if !lane.wantReads.Load() || len(lane.wakeCh) != 1 {
+		t.Fatal("a key-less enqueue did not wake the external-reads lane")
+	}
+}
