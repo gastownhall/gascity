@@ -80,7 +80,7 @@ func NewFakeProfile(p Profile, b ProfileBackend) Provider {
 	core, timed := profileProvider{b, profileCapabilities[p]}, sleepTrait{SessionSleepCapabilityTimedOnly}
 	switch p {
 	case ProfileTmux:
-		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}}
+		return tmuxProfile{core, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, b, sleepTrait{SessionSleepCapabilityFull}, localTranscriptTrait{}, steerTrait{SteerKeystroke}}
 	case ProfileACP:
 		return acpProfile{core, b, b, b, b, b, b, b, b, b, b, b, freshTrait{}, sidecarTrait{}, timed, transportTrait{}, localTranscriptTrait{}}
 	case ProfileSubprocess:
@@ -107,6 +107,7 @@ type (
 	transportTrait     struct{}                  // acp's
 	probeBudgetTrait   struct{ d time.Duration } // exec's idle-proof budget: zero without the idle boundary, which the profile does not declare
 	turnInterruptTrait struct{ m TurnInterruptMode }
+	steerTrait         struct{ m SteerMode }
 	// localTranscriptTrait is tmux's, acp's, subprocess's and herdr's: the
 	// agent runs on this host.
 	localTranscriptTrait struct{}
@@ -115,6 +116,8 @@ type (
 func (t sleepTrait) SleepCapability(string) SessionSleepCapability { return t.c }
 
 func (t turnInterruptTrait) TurnInterruptMode(string) TurnInterruptMode { return t.m }
+
+func (t steerTrait) SteerMode(string) SteerMode { return t.m }
 
 func (t probeBudgetTrait) IdleProbeBudget() time.Duration { return t.d }
 
@@ -178,6 +181,7 @@ type (
 		UnattendedSessionStopper
 		sleepTrait
 		localTranscriptTrait
+		steerTrait
 	}
 	acpProfile struct {
 		Provider

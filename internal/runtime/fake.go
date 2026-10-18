@@ -48,6 +48,7 @@ type Fake struct {
 	SleepCapabilityValue    SessionSleepCapability
 	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
 	InputFencingValue       InputFencing      // reported by InputFencing; empty reads as atomic
+	SteerModeValue          SteerMode         // reported by SteerMode; empty reads as keystroke
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
@@ -915,6 +916,18 @@ func (f *Fake) TurnInterruptMode(string) TurnInterruptMode {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.TurnInterruptModeValue
+}
+
+// SteerMode returns the configured steer mode, keystroke when unset: the
+// fake types NudgeNow as tmux does. It records no call: like
+// TurnInterruptMode it reports a fixed trait of the runtime.
+func (f *Fake) SteerMode(string) SteerMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SteerModeValue == "" {
+		return SteerKeystroke
+	}
+	return f.SteerModeValue
 }
 
 // LastStartConfig returns the Config used in the most recent Start call for

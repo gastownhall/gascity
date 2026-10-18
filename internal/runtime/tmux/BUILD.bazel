@@ -22,6 +22,7 @@ go_library(
         "session_env_file.go",
         "session_object.go",
         "state_cache.go",
+        "steer.go",
         "theme.go",
         "tmux.go",
     ],
