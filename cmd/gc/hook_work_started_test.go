@@ -809,19 +809,26 @@ func TestRuntimeDrainAckRefusesASeatHoldingStartedWork(t *testing.T) {
 // TestDrainAckPassRefusesBeforeReleasingAnything (should-fix 4, review item
 // 2): the started-claim check is the release pass's own read, under its
 // budget. A seat's own ack that holds a started claim releases nothing, not
-// even its unstarted claims; an --operator ack whose caller's token names
-// the seat is refused outright; an operator from outside releases the
-// unstarted claim and keeps the started one.
+// even its unstarted claims, and is refused with no city config too (the
+// refusal releases nothing, so it needs none); an --operator ack whose
+// caller's token or session ID names the seat is refused outright (the
+// session-ID half catches a name-only target, which runtimeDrainAck's early
+// check cannot see); an operator from outside releases the unstarted claim
+// and keeps the started one.
 func TestDrainAckPassRefusesBeforeReleasingAnything(t *testing.T) {
 	for _, c := range []struct {
 		name          string
 		caller        drainAckCaller
+		ownID         bool // the caller's GC_SESSION_ID is the seat's bead ID
+		noConfig      bool
 		refusal       string
 		unstartedOpen bool
 	}{
-		{"own ack", drainAckCaller{}, "an operator acks from outside this session with --operator", false},
-		{"operator, the seat's own token", drainAckCaller{operator: true, token: "tok-1"}, "--operator acks another session from outside it", false},
-		{"operator from outside", drainAckCaller{operator: true, token: "tok-9"}, "", true},
+		{"own ack", drainAckCaller{}, false, false, "an operator acks from outside this session with --operator", false},
+		{"own ack, no city config", drainAckCaller{}, false, true, "an operator acks from outside this session with --operator", false},
+		{"operator, the seat's own token", drainAckCaller{operator: true, token: "tok-1"}, false, false, "--operator acks another session from outside it", false},
+		{"operator, the seat's own session ID", drainAckCaller{operator: true, token: "tok-9"}, true, false, "--operator acks another session from outside it", false},
+		{"operator from outside", drainAckCaller{operator: true, token: "tok-9", sessionID: "other"}, false, false, "", true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			store := beads.NewMemStore()
@@ -833,8 +840,15 @@ func TestDrainAckPassRefusesBeforeReleasingAnything(t *testing.T) {
 			unstarted := mustCreateDrainAckBead(t, store, beads.Bead{Title: "unstarted", Type: "task", Metadata: routedToWorker()}, "in_progress", "worker-1")
 			casSetMeta(t, store, seat.ID, session.WorkStartedKey, startedCell(session.WorkStartedEntry{Bead: started.ID}))
 
+			caller, cfg := c.caller, servingCity("worker")
+			if c.ownID {
+				caller.sessionID = seat.ID
+			}
+			if c.noConfig {
+				cfg = nil
+			}
 			var stderr bytes.Buffer
-			refusal := releaseUnexecutedClaimsForSessionStore("", servingCity("worker"), store, nil, "worker-1", c.caller, &stderr)
+			refusal := releaseUnexecutedClaimsForSessionStore("", cfg, store, nil, "worker-1", caller, &stderr)
 
 			if (c.refusal == "") != (refusal == "") || !strings.Contains(refusal, c.refusal) {
 				t.Fatalf("refusal %q, want one containing %q", refusal, c.refusal)

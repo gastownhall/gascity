@@ -259,12 +259,8 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 		late, lateErr := lateSeatWork(sw.Legs(), scope, p.statuses, nil)
 		claims, err = appendUniqueSeatWork(claims, late), errors.Join(err, lateErr)
 	}
-	if sw.Legs().cfg == nil && len(claims) > 0 {
-		return ReleaseOutcome{}, errors.Join(err, errReleaseNoConfig)
-	}
-	if err != nil && p.startedKeeps {
-		return ReleaseOutcome{}, err
-	}
+	// The refusal needs no config: it releases nothing, so a seat whose
+	// config did not load is still refused, not acked past its started work.
 	if opts.RefuseStarted {
 		out := ReleaseOutcome{Why: map[string]string{}, Route: map[string]string{}}
 		for _, c := range claims {
@@ -275,6 +271,12 @@ func ReleaseClaims(sw *SeatWork, scope ReleaseScope, seat releaseSeat, why relea
 		if out.Refused {
 			return out, err
 		}
+	}
+	if sw.Legs().cfg == nil && len(claims) > 0 {
+		return ReleaseOutcome{}, errors.Join(err, errReleaseNoConfig)
+	}
+	if err != nil && p.startedKeeps {
+		return ReleaseOutcome{}, err
 	}
 	return releaseListed(claims, why, seat, sw.Legs().cfg, opts), err
 }
