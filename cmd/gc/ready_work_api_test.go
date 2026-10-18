@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -190,18 +192,60 @@ func TestControllerReadyWorkSkipsSuspendedRigs(t *testing.T) {
 	}
 }
 
-// TestControllerReadyWorkRefusesWhileAConfigReloadIsPending pins the leg-set
-// guard: a staged config change could add, remove or rebind a rig, so the
-// controller refuses rather than answer for a different set of stores than a
-// fresh read would.
-func TestControllerReadyWorkRefusesWhileAConfigReloadIsPending(t *testing.T) {
+// TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange pins
+// that the controller answers from the config it has published while a reload
+// is due, even though the config on disk has changed since.
+//
+// configDirty records that a reload is due. It says nothing about whether the
+// published config and the stores agree: controllerState.update publishes them
+// together. A refusal keyed on it turned the endpoint off on maintainer-city
+// (8d5: 0 of 60 requests answered); ga-wc5dmg tracks why the flag stayed set
+// there. The city.toml on disk here has dropped bravo, so a controller that
+// read the config from disk instead of the one it published would answer
+// without bravo's rows.
+func TestControllerReadyWorkAnswersWhileTheConfigWatcherHasFlaggedAChange(t *testing.T) {
 	f := newReadyWorkSplitFixture(t)
+	var cityToml strings.Builder
+	cityToml.WriteString("[workspace]\nname = " + strconv.Quote(f.cityName) + "\n")
+	for _, rig := range f.cfg.Rigs {
+		if rig.Name == "bravo" {
+			continue
+		}
+		cityToml.WriteString("\n[[rigs]]\nname = " + strconv.Quote(rig.Name) + "\npath = " + strconv.Quote(rig.Path) + "\nprefix = " + strconv.Quote(rig.Prefix) + "\n")
+		if rig.SuspendedOnStart {
+			cityToml.WriteString("suspended_on_start = true\n")
+		}
+	}
+	if err := os.WriteFile(filepath.Join(f.cityPath, "city.toml"), []byte(cityToml.String()), 0o644); err != nil {
+		t.Fatalf("write city.toml: %v", err)
+	}
+	onDisk, err := loadCityConfig(f.cityPath, io.Discard)
+	if err != nil {
+		t.Fatalf("loading the edited city.toml: %v", err)
+	}
+	for _, rig := range onDisk.Rigs {
+		if rig.Name == "bravo" {
+			t.Fatalf("the city.toml on disk still declares bravo; the test needs a disk config that differs from the published one")
+		}
+	}
+
 	cs := f.controller()
 	var dirty atomic.Bool
 	dirty.Store(true)
 	cs.configDirty = &dirty
-	if _, err := cs.ReadyWork(context.Background(), readywork.Query{}); !errors.Is(err, errReadyWorkConfigPending) {
-		t.Fatalf("ReadyWork with a pending reload = %v, want errReadyWorkConfigPending", err)
+	got, err := cs.ReadyWork(context.Background(), readywork.Query{})
+	if err != nil {
+		t.Fatalf("ReadyWork with a reload due = %v; the controller must answer from its published config", err)
+	}
+	if want := f.inProcess(t, readywork.Query{}); !reflect.DeepEqual(got, want) {
+		t.Fatalf("ReadyWork with a reload due differs from the in-process answer over the published config and the same stores")
+	}
+	servedBravo := false
+	for _, row := range got {
+		servedBravo = servedBravo || strings.HasPrefix(row.ID, "rb-")
+	}
+	if !servedBravo {
+		t.Fatalf("ReadyWork served no row from bravo, which the published config serves; the controller must not read the config on disk")
 	}
 }
 
@@ -254,16 +298,14 @@ func TestReadyRoutesThroughTheController(t *testing.T) {
 }
 
 // TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure pins the safe
-// route: a controller that refuses (here a pending config reload) is answered
-// by the in-process read, which on this city fails loud on its broken rig,
-// exactly as `gc ready` did before the endpoint existed.
+// route: a controller that refuses (here, a serving rig whose store it does
+// not hold) is answered by the in-process read, which on this city fails loud
+// on its broken rig, exactly as `gc ready` did before the endpoint existed.
 func TestReadyFallsBackToTheInProcessReadOnAnyControllerFailure(t *testing.T) {
 	newReadyCityWithBrokenRig(t)
 	f := newReadyWorkSplitFixture(t)
+	delete(f.rigs, "bravo")
 	cs := f.controller()
-	var dirty atomic.Bool
-	dirty.Store(true)
-	cs.configDirty = &dirty
 	client := readyWorkTestServer(t, cs)
 	prev := readyAPIClient
 	readyAPIClient = func(string) (*api.Client, string) { return client, "" }

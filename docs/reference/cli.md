@@ -3602,10 +3602,12 @@ does; their work comes back when the rig is resumed. The city store and a
 relocated graph store are always read.
 
 When the city's controller is running, it answers the query from the stores it
-already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), reading every store
-live, never from a cache. The answer is the one this command would compute
-itself, without opening a store. If the controller is not running, refuses, or
-does not answer within 10s, this command reads the stores itself. GC_NO_API=1
+already holds open (GET /v0/city/&#123;cityName&#125;/work/ready), with the reader this
+command runs, reading every store live, never from a cache. It reads the rigs
+of the config the controller has loaded: a rig added, removed or rebound in the
+city's config takes effect in its answer at the controller's next config
+reload. If the controller is not running, refuses, or does not answer within
+10s, this command loads the config and reads the stores itself. GC_NO_API=1
 forces the local read.
 
 ```
