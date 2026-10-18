@@ -97,17 +97,21 @@ func TestLaneExecSteerCapIsRuntimeTimesFamily(t *testing.T) {
 // Caps.Steer apart from the session's row or the runtime's steer mode: the
 // lane asks the steer-capability source (session.SupportsSteerForInfo in
 // production) once, about the row the pass's view came from and the mode the
-// runtime reports, and Caps.Steer is that answer while the runtime is live.
-// It is the agreement test's complement: with no family in the keystroke
-// table, only a seam can tell a row-blind probe from a row-reading one.
+// runtime reports for the probed session's name, and Caps.Steer is that
+// answer while the runtime is live. It is the agreement test's complement:
+// with no family in the keystroke table, only a seam can tell a row-blind
+// probe from a row-reading one. The runtime reports keystroke only for the
+// probed session's name, so a probe that asks auto or hybrid about another
+// name (and so reads another backend's mode) is caught too.
 func TestLaneExecSteerCapAsksAboutTheProbedRow(t *testing.T) {
 	for _, answer := range []bool{true, false} {
 		t.Run(fmt.Sprint(answer), func(t *testing.T) {
 			f := newLaneFixture(t, func(m map[string]string) { m["provider"], m["builtin_ancestor"] = "my-wrap", "codex" })
-			f.sp.SteerModeValue = runtime.SteerKeystroke
 			st := f.laneStore(t)
 			v, info := f.view(t)
-			e := newConversationLaneExec(f.deps(st), info)
+			deps := f.deps(st)
+			deps.sp = steerModeForName{Fake: f.sp, name: f.name, mode: runtime.SteerKeystroke}
+			e := newConversationLaneExec(deps, info)
 			type ask struct {
 				info session.Info
 				mode runtime.SteerMode
@@ -130,6 +134,23 @@ func TestLaneExecSteerCapAsksAboutTheProbedRow(t *testing.T) {
 			}
 		})
 	}
+}
+
+// steerModeForName is a runtime that reports mode for the session name and
+// [runtime.SteerNone] for every other name, as auto and hybrid answer for
+// the backend a name routes to.
+type steerModeForName struct {
+	*runtime.Fake
+	name string
+	mode runtime.SteerMode
+}
+
+// SteerMode reports s.mode for s.name only.
+func (s steerModeForName) SteerMode(name string) runtime.SteerMode {
+	if name == s.name {
+		return s.mode
+	}
+	return runtime.SteerNone
 }
 
 // TestLaneSteerCapNeedsAKeyedSteer kills a lane that steers a runtime that
@@ -160,7 +181,9 @@ func TestLaneSteerCapNeedsAKeyedSteer(t *testing.T) {
 // is derived apart from the supports_steer session responses report
 // (session.SubmissionCapabilitiesForRuntime over the row): for rows with no
 // provider, a wrapped provider, a provider kind, ACP by transport or by
-// provider, under every steer mode, the two agree.
+// provider, under every steer mode, the two agree. While the keystroke
+// table is empty it cannot, on its own, catch a Caps.Steer that ignores the
+// row; TestLaneExecSteerCapAsksAboutTheProbedRow covers that.
 func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 	rows := map[string]laneFixtureOpt{
 		"no provider":      func(map[string]string) {},

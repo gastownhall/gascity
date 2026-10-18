@@ -21,7 +21,7 @@ const (
 	// ([ImmediateNudgeProvider], or a fenced nudge with Immediate set) is
 	// that steer: a caller steers every mode through the immediate nudge, so
 	// a runtime that reports this mode must route its immediate nudge into
-	// the running turn. The immediate nudge carries no delivery key, so a
+	// the running turn. No runtime deduplicates an immediate nudge yet, so a
 	// steer is not deduplicated even where a runtime's keyed nudge is; the
 	// conversation lane steers no runtime that deduplicates.
 	SteerProtocol SteerMode = "protocol"
