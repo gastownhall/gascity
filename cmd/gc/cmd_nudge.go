@@ -672,6 +672,10 @@ func classifyQueuedNudgeIDs(cityPath string, ids []string, now time.Time) (map[s
 }
 
 func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation: the target
+	// resolution, the step reminder and every store open each loaded it again
+	// (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// --inject writes a <system-reminder> straight into a provider's system
 	// prompt, and gc stages the overlays that call it into the session work
 	// directory — commonly a city or rig root — so a human who opens the same

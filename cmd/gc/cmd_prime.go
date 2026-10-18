@@ -275,6 +275,10 @@ func doPrimeWithHookFormat(args []string, stdout, stderr io.Writer, hookMode boo
 // (ga-q8wgom.1.2), non-nil only when strictMode is true and an agent with a
 // prompt_template was resolved.
 func doPrimeWithHookFormatOpts(args []string, stdout, stderr io.Writer, hookMode bool, hookFormat string, strictMode, consumeHandoff bool) (int, *promptBudgetJSON) {
+	// One composed city-config load for the whole invocation: the session
+	// proof, the provider-key write, the mail and step-reminder injections and
+	// every store open each loaded it again (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	agentName, sessionTemplateContext := primeInvocationAgentName(args)
 	var hookContext primeHookContext
 	suppressHookPrompt := false

@@ -531,6 +531,10 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation: the suspension
+	// check, the mail provider, the target resolution and every store open each
+	// loaded it again (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// --inject writes a <system-reminder> straight into a provider's system
 	// prompt. With no recipient argument the mailbox falls back through
 	// GC_SESSION_ID/GC_ALIAS/GC_AGENT to "human"
