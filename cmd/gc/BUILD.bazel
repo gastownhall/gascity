@@ -2083,6 +2083,7 @@ go_test(
         "split_topology_env_test.go",
         "sql_open_guard_test.go",
         "stage1_plan_test.go",
+        "start_gate_classification_test.go",
         "start_output_test.go",
         "startup_health_materialization_test.go",
         "startup_health_reconcile_test.go",
