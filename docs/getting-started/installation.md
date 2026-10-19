@@ -252,9 +252,9 @@ your machine. Nothing you build is uploaded.
 | Docs | `make check-docs` |
 | Added packages, files, or imports | `make bazel-sync`, then commit the result |
 
-Plain `go test ./...` still works for a quick check of one package, but it
-is not what CI runs and skips the lint, formatting, and generated-file
-checks. See
+Plain `go test ./...` still works for a human's quick check of one package
+(agents run tests only with `bazel test`), but it is not what CI runs and
+skips the lint, formatting, and generated-file checks. See
 [CONTRIBUTING.md](https://github.com/gastownhall/gascity/blob/main/CONTRIBUTING.md)
 for the full contributor workflow and the
 [Bazel quickstart](https://github.com/gastownhall/gascity/blob/main/engdocs/bazel-quickstart.md)

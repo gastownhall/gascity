@@ -73,10 +73,14 @@ BUILD files (the `BUILD files in sync` gate checks this). See
 the CI optimization loop.
 
 **Plain `go test` is not the gate, and agents do not run it.** Iterate on
-one package with `bazel test //internal/config:config_test
---test_filter=TestX`: only changed inputs re-run, and an unchanged target
-returns its cached result. `go test ./internal/config -run TestX` remains a
-convenience for a human working offline. It runs none of the nogo, format,
+one package with `bazel test //internal/config:config_test`, narrowed to the
+tests you changed with `--test_filter='^<TestName>$'`: only changed inputs
+re-run, and an unchanged target returns its cached result. A filter that
+matches no test still passes, so when the run is your evidence, add
+`--test_output=all --test_arg=-test.v` and check that the named tests ran.
+AGENTS.md "Build and test" maps the other `go test` flags onto Bazel's.
+`go test ./internal/config -run '^<TestName>$'` remains a convenience for a
+human working offline. It runs none of the nogo, format,
 generated-artifact or policy targets, uses your host's environment instead
 of the pinned one, and a pass there is not evidence for CI. The Go-native
 make targets (`make test-go`, `make check-go`, `make test-acceptance-go`,
@@ -198,11 +202,14 @@ used: the test binary panics at init, naming the directory to remove.
   `internal/git`'s `SanitizedEnv` and `HermeticEnv` keep it.
 - A testscript subcommand (the test binary re-invoked as `gc` or `bd`) is not
   seeded; the testscript owns that env.
-- To check that a test path spawns no auto-maintenance, make every check due
-  and trace git: set `GIT_CONFIG_COUNT=1`,
+- To check that a test path spawns no auto-maintenance (for humans working
+  offline), make every check due and trace git: set `GIT_CONFIG_COUNT=1`,
   `GIT_CONFIG_KEY_0=maintenance.geometric-repack.auto` and
   `GIT_CONFIG_VALUE_0=-1` in the environment of a direct `go test`, and point
   `GIT_TRACE` at a file. Each `built-in: git maintenance run` line is one spawn.
+  Under remote execution, agent hosts' default, `--test_env` delivers them to
+  the worker and the trace is written there, so an empty local trace proves
+  nothing.
   Naming these variables in `EXTRA_TEST_ENV` does not reach the test binaries
   of `make test-fast-parallel`: the per-job `env -i` blocks in
   `scripts/test-local-parallel` and `scripts/test-go-test-shard` forward only
@@ -731,11 +738,11 @@ To re-pin, anyone with write access:
    failed run's step summary.
 2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
    `platforms/BUILD.bazel`. `bazel test //scripts:scripts_test
-   --test_filter=RBEWorkerEnv` checks that they agree with each other and
-   with `go.mod`. The PR's `worker-host` job runs the pinned rbe-worker's
-   `cmd/product-check` (worker items) against this checkout on every PR,
-   and fails if the manifest does not match the worker: its measured
-   package list, its dolt, the test `PATH`, the pin.
+   --test_filter='^TestRBEWorker(PlatformPins|Env)'` checks that they agree
+   with each other and with `go.mod`. The PR's `worker-host` job runs the
+   pinned rbe-worker's `cmd/product-check` (worker items) against this
+   checkout on every PR, and fails if the manifest does not match the
+   worker: its measured package list, its dolt, the test `PATH`, the pin.
    rbe-worker's own CI runs the same check against gascity's main, but
    only as information, and it gates nothing here.
    Make the same change in gastownhall/beads (its
@@ -1039,8 +1046,14 @@ authoritative p95; the history format requires twenty comparable successful
 samples for an authoritative p95.
 
 ```bash
-bazel test //path:name_test --test_filter='^TestName$' --runs_per_test=10 --nocache_test_results
+bazel test //<dir>:<leaf>_test --test_filter='^<TestName>$' --test_sharding_strategy=disabled --runs_per_test=10 --nocache_test_results
 ```
+
+`--runs_per_test=10` runs ten separate actions, so Bazel reports their spread
+(`Stats over 10 runs`). `--nocache_test_results` keeps a cached result from
+standing in for a run, and `--test_sharding_strategy=disabled` keeps a sharded
+target's empty shards out of those numbers. (`--test_arg=-test.count=10`
+repeats the test inside one action instead, which yields one time.)
 
 Compare like runner, OS, architecture, CPU count, cache condition, and suite
 variant. A single warm-cache run is diagnostic, not a regression baseline.
@@ -1368,10 +1381,20 @@ The generated table above lists the policy rows and their owners but no counts.
 The counts are in `test/test-resource-counts.toml`, a generated file of
 `[[count]]` records (path, resource, calls, plus `medium` and `tagged` where
 they apply). Never edit it by hand. When a test change moves a count, regenerate
-with:
+the file from the repository root with:
 
 ```bash
-go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
+```
+
+`bazel run` executes the test binary on your machine, and `GC_TEST_REPO_ROOT`
+points it at your checkout, so the rewrite lands there. `bazel test` cannot
+regenerate: it runs the test in a sandbox, so adding `--test_arg=-update` to a
+`bazel test` run passes and changes nothing in your checkout. A human working
+offline can run the same generator with `go test`:
+
+```bash
+go test ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
 ```
 
 `-update` checks the policy rows first, then rewrites the counts file and the
@@ -1523,9 +1546,10 @@ diagnostics, override the default explicitly:
 GC_FAST_UNIT=0 ./scripts/test-integration-shard packages-cmd-gc-3-of-6
 ```
 
-Raw `go test` is still appropriate for a focused package or a single failing
-test. Do not use it as the default for full local sweeps when a sharded target
-exists.
+A focused package or a single failing test runs on its Bazel target with
+`--test_filter` (AGENTS.md "Build and test"). Raw `go test` is a human's
+offline shortcut, never the default for a full local sweep when a sharded
+target exists.
 
 The `productmetrics_testhook` profile has six named owners, including the
 real CLI re-exec process contract. In CI it is the Bazel target
@@ -1830,7 +1854,8 @@ scope allocation succeeds. Everywhere else (CI runners, macOS, containers)
 the entrypoints run unchanged. Nested runners detect existing slice
 membership through `/proc/self/cgroup` and never double-wrap. Set
 `GC_TEST_NO_SLICE=1` to opt out explicitly. The decision matrix is covered
-by `scripts/test-slice-enroll-test` (run by `go test ./scripts`).
+by `scripts/test-slice-enroll-test` (run by
+`bazel test //scripts:scripts_test --test_sharding_strategy=disabled --test_filter='^TestSliceEnrollFallbackMatrix$'`).
 
 Only the wrapped entrypoints listed above are enrolled. Makefile targets
 that invoke `go test` directly — `test-acceptance*`, `test-integration`,
@@ -1970,11 +1995,12 @@ func TestRealTmuxSession(t *testing.T) {
 When to use: proving real-boundary composition and testing lifecycle behavior
 that exists only with real processes. Shared conformance proves fake parity.
 
-For the broad suite, run `make test-integration-shards-parallel`. Raw `go test`
-is for a focused package or test, for example:
+For the broad suite, run `make test-integration` (its Go-native runner is
+`make test-integration-shards-parallel`). A focused package or test runs on
+its Bazel target, for example:
 
 ```bash
-go test -tags integration -run '^TestHumaBinary$' ./test/integration/
+bazel test --config=integration //test/integration:integration_test --test_filter='^TestHumaBinary_'
 ```
 
 **Supervisor binary smoke test** (`test/integration/huma_binary_test.go`):
@@ -1982,8 +2008,8 @@ builds `gc`, boots the supervisor against an isolated `GC_HOME`, waits
 for `/health`, fetches `/openapi.json`, and runs `gc cities` as a
 subprocess. Proves the whole stack — build tags, Huma registration,
 listener bootstrap, socket paths — wires end-to-end through a real
-binary. Run with `make test-integration-huma` or
-`go test -tags integration -run TestHumaBinary ./test/integration/`.
+binary. Run it with the `bazel test` command above;
+`make test-integration-huma` is its Go-native twin.
 
 **Supervisor API contract tests** (`test/integration/gc_live_contract_test.go`
 and focused cases in `test/integration/huma_binary_test.go`): build the real
@@ -2046,8 +2072,10 @@ both paths. Responses decode into the generated Go wire types
 (`internal/api/genclient`) and the `internal/runproj` projection structs, never
 `map[string]any`, so a wire-shape drift fails compilation.
 
-Run it in isolation with `make dashboard-e2e-go`
-(`go test -tags integration ./test/dashport/...`). It is a Tier 3 integration
+Run it in isolation with
+`bazel test --config=integration //test/dashport:dashport_test` (add
+`--test_filter='^TestAnchorRunProjection$'` for the anchor test alone);
+`make dashboard-e2e-go` is its Go-native twin. It is a Tier 3 integration
 package: the CI `packages` integration shard (`go list ./...` under
 `scripts/test-integration-shard packages`, invoked by
 `make test-integration-shards-parallel`) picks it up automatically alongside the
@@ -2144,9 +2172,9 @@ Run them with `make check-docs`, which is:
 bazel test //test/docsync:docsync_test
 ```
 
-(`go test ./test/docsync` works for a quick local iteration; it is also what
-the pre-commit hook runs, behind a banner, on a host that cannot run Bazel's
-test binaries. See "Hosts that cannot load the pinned ICU runtime".)
+(`go test ./test/docsync`, a human's offline shortcut, is also what the
+pre-commit hook runs, behind a banner, on a host that cannot run Bazel's test
+binaries. See "Hosts that cannot load the pinned ICU runtime".)
 
 ### Additional integration guidance
 
@@ -2330,7 +2358,7 @@ provider/E2E manifest and required lane/cadence execution; it does not own
 constructor-to-contract source binding.
 
 <!-- BEGIN CHECKED RUNTIME PROVIDER LEDGER -->
-This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.
+This table is rendered from `internal/testutil/providerledger` and checked by `bazel test //internal/testutil/providerledger:providerledger_test`; edit the Go ledger, then regenerate this block from the repository root with `GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update` (or paste the expected block printed on drift).
 
 | Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |
 |---|---|---|---|---|---|---|---|

@@ -1285,12 +1285,14 @@ func (s *sim) failf(inv, format string, args ...any) {
 	}
 }
 
-// report fails t with the seed's violations and its schedule.
+// report fails t with the seed's violations, the command that reruns t's
+// top-level test on the seed, and its schedule.
 func (s *sim) report(t *testing.T) {
 	t.Helper()
 	if len(s.failures) > 0 {
-		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: GC_V2_SIM_SEED=%d go test -run TestSimCorpus ./cmd/gc/\nschedule:\n%s",
-			s.seed, s.lag, strings.Join(s.failures, "\n  "), s.seed, strings.Join(s.schedule, "\n"))
+		test, _, _ := strings.Cut(t.Name(), "/")
+		t.Errorf("seed %d (inventory lag %t) violated:\n  %s\nreplay: bazel test //cmd/gc:gc_test --test_sharding_strategy=disabled --test_filter='^%s$' --test_env=GC_V2_SIM_SEED=%d\nschedule:\n%s",
+			s.seed, s.lag, strings.Join(s.failures, "\n  "), test, s.seed, strings.Join(s.schedule, "\n"))
 	}
 }
 

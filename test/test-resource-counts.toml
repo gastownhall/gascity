@@ -1,6 +1,6 @@
 # GENERATED FILE - DO NOT EDIT BY HAND.
 # Per-file counts for the P0.4 source resource census (owner: ga-cp3hwi).
-# Regenerate: go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+# Regenerate: GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
 version = 1
 
 [[count]]

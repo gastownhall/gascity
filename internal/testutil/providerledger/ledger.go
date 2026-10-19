@@ -707,7 +707,7 @@ func RenderMarkdown(entries []Entry) string {
 	var out strings.Builder
 	out.WriteString(MarkdownStart)
 	out.WriteString("\n")
-	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `go test ./internal/testutil/providerledger`; edit the Go ledger, then use the expected block printed on drift.\n\n")
+	out.WriteString("This table is rendered from `internal/testutil/providerledger` and checked by `bazel test //internal/testutil/providerledger:providerledger_test`; edit the Go ledger, then regenerate this block from the repository root with `GC_TEST_REPO_ROOT=\"$PWD\" bazel run //internal/testutil/providerledger:providerledger_test -- -test.run='^TestCatalogMatchesProductionWiringAndDocumentation$' -update` (or paste the expected block printed on drift).\n\n")
 	out.WriteString("| Provider path | Roles | Reusable type | Port | Constructor | Discovery | Contract | Status |\n")
 	out.WriteString("|---|---|---|---|---|---|---|---|\n")
 	for _, entry := range entries {
