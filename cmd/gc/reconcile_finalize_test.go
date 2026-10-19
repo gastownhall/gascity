@@ -136,7 +136,7 @@ func TestFinalizeDrainAckStoppedSession_PrunesWorkerDir(t *testing.T) {
 	probe := &fakeGitProbe{isRepo: true}
 	orig := newGitProbe
 	t.Cleanup(func() { newGitProbe = orig })
-	newGitProbe = func(workDir string) gitProbe { return probe }
+	newGitProbe = func(_ string) gitProbe { return probe }
 
 	env.setSessionMetadata(&b, session.DrainAckStopPendingPatch(env.clk.Now().UTC()))
 	info := env.sessionInfo(b.ID)

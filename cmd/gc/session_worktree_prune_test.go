@@ -40,7 +40,7 @@ func (f *fakeGitProbe) HasUnpushedCommitsResult() (bool, error) {
 	return f.hasUnpushed, f.unpushedErr
 }
 
-func (f *fakeGitProbe) HasStashesForBranchResult(branch string) (bool, error) {
+func (f *fakeGitProbe) HasStashesForBranchResult(_ string) (bool, error) {
 	return f.hasStashes, f.stashesErr
 }
 
