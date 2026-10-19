@@ -615,6 +615,12 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 // to set AwakeWorkBead.Ready from the store's deps gate rather than guessing
 // from status, so a blocked open bead does not hold its session awake. Nil
 // leaves every open assigned bead non-ready.
+func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
+	return func(opts *startExecutionOptions) {
+		opts.readyAssignedFlags = readyAssignedFlags
+	}
+}
+
 // withParkedSeats hands the reconciler the pass's park verdicts (parkSeats),
 // decided by the caller over its whole assigned-work read and readiness: the
 // pool-free branch holds a parked seat instead of stranding it. Without it
@@ -622,12 +628,6 @@ func withDeferSessionClosesOnBoot() startExecutionOption {
 func withParkedSeats(parked parkedSeats) startExecutionOption {
 	return func(opts *startExecutionOptions) {
 		opts.parkedSeats = parked
-	}
-}
-
-func withReadyAssignedFlags(readyAssignedFlags []bool) startExecutionOption {
-	return func(opts *startExecutionOptions) {
-		opts.readyAssignedFlags = readyAssignedFlags
 	}
 }
 

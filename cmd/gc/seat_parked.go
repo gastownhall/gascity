@@ -21,10 +21,14 @@ package main
 // survives a controller restart unchanged and needs no marker of its own.
 // Anything that is not plainly parked keeps today's path: a seat holding
 // started work, a seat whose runtime died (runtime-missing), a seat past its
-// bound, a fresh-wake seat, and a slot-bounded pool's oldest seats while its
-// slots are full. A seat a pass sent down the stranded path parks again once
-// it is parked-shaped and eligible: the hold comes before the repair, so a
-// one-pass fallback (a full pool, a read that failed) loses no context.
+// bound or whose slept_at sits ahead of the clock, a fresh-wake seat, and a
+// slot-bounded pool's oldest seats while its slots are full. A seat a pass
+// sent down the stranded path parks again once it is parked-shaped and
+// eligible: the hold comes before the repair, so a one-pass fallback (a full
+// pool, a read that failed) loses no context. The park ends that stranding
+// episode: it clears the marker the fallback left, as a seat seen alive again
+// clears it, so a later fallback ages a fresh one through the confirm grace
+// rather than repairing at once.
 
 import (
 	"fmt"
@@ -45,6 +49,11 @@ import (
 // the pool, so a seat that cannot come back never holds work forever. It
 // covers a long review loop (hours) and a day of waiting on a human.
 const parkedWorkMaxHold = 24 * time.Hour
+
+// parkedSleptAtFutureSkew bounds how far past the pass time a seat's slept_at
+// may sit and still park it: a later one proves nothing (a clock stepped
+// back, a bad write), and must never stretch parkedWorkMaxHold.
+const parkedSleptAtFutureSkew = 5 * time.Minute
 
 // parkVerdict is one row's park decision for a pass.
 type parkVerdict struct {
@@ -207,8 +216,9 @@ func holdsPoolSlot(info sessionpkg.Info, hasWork bool, now time.Time) bool {
 // voluntary stop (the drain-ack finalize's and the idle stop's sleep_reason
 // idle), under no hold, whose template is configured and not fresh-wake
 // (wake_mode=fresh keeps no conversation to resume, and the planner never
-// reuses such a row asleep), inside its bound from slept_at. It returns the
-// slept_at and the bound's end.
+// reuses such a row asleep), inside its bound from slept_at, which sits less
+// than parkedSleptAtFutureSkew past now. It returns the slept_at and the
+// bound's end.
 func parkableRow(info sessionpkg.Info, agent *config.Agent, now time.Time) (slept, until time.Time, ok bool) {
 	switch {
 	case agent == nil,
@@ -220,7 +230,7 @@ func parkableRow(info sessionpkg.Info, agent *config.Agent, now time.Time) (slep
 		return time.Time{}, time.Time{}, false
 	}
 	slept, err := time.Parse(time.RFC3339, strings.TrimSpace(info.SleptAt))
-	if err != nil {
+	if err != nil || slept.Sub(now) >= parkedSleptAtFutureSkew {
 		return time.Time{}, time.Time{}, false
 	}
 	until = slept.Add(parkedWorkMaxHold)
@@ -341,25 +351,26 @@ func liveParkedWork(work []strandedAssignedWork, readErr error, seat releaseSeat
 	return true, nil
 }
 
-// holdsParkedSeat is the pool-free branch's park decision (legacy): the
-// tick's verdict parks the seat, or the seat was eligible and its own live
-// read, through the tick's seat work, finds only parked work. A live read
-// that failed holds the seat for this tick, logged: it neither parks nor
-// strands on no answer.
-func holdsParkedSeat(sw *SeatWork, info sessionpkg.Info, v parkVerdict, now time.Time, stderr io.Writer) bool {
+// holdsParkedSeat is the pool-free branch's park decision (legacy): held
+// when the tick's verdict parks the seat, or the seat was eligible and its
+// own live read, through the tick's seat work, finds only parked work; parked
+// when either accepts the park. A live read that failed holds the seat for
+// this tick, logged, and accepts no park: it neither parks nor strands on no
+// answer.
+func holdsParkedSeat(sw *SeatWork, info sessionpkg.Info, v parkVerdict, now time.Time, stderr io.Writer) (held, parked bool) {
 	switch {
 	case v.Parked:
-		return true
+		return true, true
 	case !v.Eligible:
-		return false
+		return false, false
 	}
 	work, readErr := collectSessionAssignedWorkInfo(sw, info)
 	parked, err := liveParkedWork(work, readErr, releaseSeatOfInfo(info), now)
 	if err != nil {
 		fmt.Fprintf(stderr, "session reconciler: holding %s this tick: parked check: %v\n", info.ID, err) //nolint:errcheck // best-effort stderr
-		return true
+		return true, false
 	}
-	return parked
+	return parked, parked
 }
 
 // parkSeatsForDemand is parkSeats over a demand read: its assigned work, the

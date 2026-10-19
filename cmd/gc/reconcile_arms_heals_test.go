@@ -588,6 +588,19 @@ func awakeHealCases(t *testing.T, state string) {
 	}
 }
 
+// parkedClearCase is a pool seat parked on pre-assigned blocked work
+// (ga-ylpbsy.16) that still carries the marker a stranded pass left: A21
+// proposes the parked clear, a fresh heal.
+func parkedClearCase(t *testing.T) *healCase {
+	t.Helper()
+	slept := gatherNow.Add(-time.Hour)
+	c := newHealCase(t, livenessGone, desireSleep, "pool_managed", "true", "pool_slot", "1", "state", "asleep", "sleep_reason", "idle",
+		"slept_at", slept.UTC().Format(time.RFC3339), strandedEventEmittedKey, rowAt(-time.Hour))
+	e := c.a.Snapshot.Entries[c.k]
+	e.Template, e.Park = "worker", parkVerdict{Eligible: true, Parked: true, Until: slept.Add(parkedWorkMaxHold)}
+	return c
+}
+
 // ownRuntimeCase is a row whose runtime the inventory reads alive at
 // censusNow, carrying token.
 func ownRuntimeCase(t *testing.T, token string, meta ...string) *healCase {
@@ -944,6 +957,7 @@ func TestNoArmActsOnACensusOnlyRow(t *testing.T) {
 		{"A19 drain void", decideDrainVoid + drainSuspended, func(t *testing.T) *healCase {
 			return newHealCase(t, livenessAlive, desireWake, append([]string{"state", "active"}, intentAt(drainSuspended, "3")...)...)
 		}},
+		{"A21 parked clear", decideParkedClear, parkedClearCase},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := tc.row(t)

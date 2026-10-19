@@ -1,7 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"io"
+	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
@@ -9,6 +13,8 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -113,9 +119,32 @@ func TestReconcileSessionBeads_ParkedSeatReadLiveWhenTheViewMissesItsPin(t *test
 	}
 }
 
+// A park only the seat's own live read accepts ends a stranding episode too:
+// the aged marker an earlier tick stamped clears, and the seat is not repaired.
+func TestReconcileSessionBeads_ParkedSeatReadLiveClearsAnAgedMarker(t *testing.T) {
+	env, session, pinned, rec := parkedSeatEnv(t, time.Hour, nil)
+	env.setSessionMetadata(&session, map[string]string{
+		strandedEventEmittedKey: env.clk.Now().Add(-strandedRepairConfirmGrace - time.Minute).UTC().Format(time.RFC3339),
+	})
+	other := beads.Bead{ID: "elsewhere", Status: "open", Assignee: "someone-else"}
+	runParkedTick(t, env, session.ID, []beads.Bead{other}, []bool{false})
+	if got := len(rec.strandedEvents()); got != 0 {
+		t.Fatalf("session.stranded events = %d, want none: the live read finds only a blocked pin", got)
+	}
+	if got, _ := env.store.Get(session.ID); got.Status == "closed" || got.Metadata[strandedEventEmittedKey] != "" {
+		t.Fatalf("session %s %v, want open with the aged marker cleared", got.Status, got.Metadata)
+	}
+	if p, _ := env.store.Get(pinned.ID); p.Assignee != session.ID || p.Status != "open" {
+		t.Fatalf("pin %s/%q, want still open and assigned to the seat: no repair", p.Status, p.Assignee)
+	}
+}
+
 // A full slot-bounded pool unparks its oldest seat, which takes the stranded
 // path; once a slot is free again inside the confirm grace, the seat parks
-// again, and the repair never runs (owner decision D2b).
+// again, and the repair never runs (owner decision D2b). The park ends that
+// stranding episode: its marker clears, so the next full pool strands the seat
+// afresh, with a new event and a new grace, rather than repairing it at once
+// on the first episode's aged marker.
 func TestReconcileSessionBeads_UnparkedSeatParksAgainWhenASlotFrees(t *testing.T) {
 	env, seat, pinned, rec := parkedSeatEnv(t, time.Hour, nil)
 	env.cfg.Agents[0].MaxActiveSessions = intPtr(2)
@@ -129,8 +158,8 @@ func TestReconcileSessionBeads_UnparkedSeatParksAgainWhenASlotFrees(t *testing.T
 		env.clk.Time = env.clk.Time.Add(strandedRepairConfirmGrace + time.Minute)
 		runParkedTick(t, env, seat.ID, []beads.Bead{pinned}, []bool{false})
 	}
-	if got, _ := env.store.Get(seat.ID); got.Status == "closed" {
-		t.Fatalf("session closed (%v), want parked again: no repair", got.Metadata)
+	if got, _ := env.store.Get(seat.ID); got.Status == "closed" || got.Metadata[strandedEventEmittedKey] != "" {
+		t.Fatalf("session %s %v, want parked again, unmarked: no repair", got.Status, got.Metadata)
 	}
 	if p, _ := env.store.Get(pinned.ID); p.Assignee != seat.ID {
 		t.Fatalf("pin assignee %q, want its seat", p.Assignee)
@@ -138,10 +167,23 @@ func TestReconcileSessionBeads_UnparkedSeatParksAgainWhenASlotFrees(t *testing.T
 	if got := len(rec.strandedEvents()); got != 1 {
 		t.Fatalf("session.stranded events = %d, want the one episode", got)
 	}
+	// The pool fills again, long past the first episode's grace.
+	runParkedTick(t, env, seat.ID, []beads.Bead{pinned}, []bool{false}, busy)
+	got, _ := env.store.Get(seat.ID)
+	if got.Status == "closed" || got.Metadata[strandedEventEmittedKey] != env.clk.Now().UTC().Format(time.RFC3339) {
+		t.Fatalf("session %s %v, want open with a fresh marker: a new episode", got.Status, got.Metadata)
+	}
+	if p, _ := env.store.Get(pinned.ID); p.Assignee != seat.ID {
+		t.Fatalf("pin assignee %q, want its seat: the new episode's grace has not passed", p.Assignee)
+	}
+	if got := len(rec.strandedEvents()); got != 2 {
+		t.Fatalf("session.stranded events = %d, want a second episode's", got)
+	}
 }
 
 // The pool-free branch's live check on a seat only eligible to park: a read
-// that fails holds the seat for the tick, logged, rather than stranding it.
+// that fails holds the seat for the tick, logged, rather than stranding it,
+// but accepts no park, so no marker clears on it.
 func TestHoldsParkedSeatHoldsOnAFailedRead(t *testing.T) {
 	env, sess, _, _ := parkedSeatEnv(t, time.Hour, nil)
 	info, err := sessionFrontDoor(env.store).Get(sess.ID)
@@ -150,14 +192,30 @@ func TestHoldsParkedSeatHoldsOnAFailedRead(t *testing.T) {
 	}
 	sw := newSeatWork(testWorkLegs(env.city, env.cfg, failingReadyStore{env.store}, nil))
 	var logged strings.Builder
-	if !holdsParkedSeat(sw, info, parkVerdict{Eligible: true}, env.clk.Now(), &logged) {
-		t.Fatal("holdsParkedSeat = false, want the seat held on a failed read")
+	if held, parked := holdsParkedSeat(sw, info, parkVerdict{Eligible: true}, env.clk.Now(), &logged); !held || parked {
+		t.Fatalf("holdsParkedSeat = (held %t, parked %t), want held, not parked, on a failed read", held, parked)
 	}
 	if !strings.Contains(logged.String(), "parked check") || !strings.Contains(logged.String(), "ready query down") {
 		t.Fatalf("log %q, want the failed read reported", logged.String())
 	}
-	if holdsParkedSeat(sw, info, parkVerdict{}, env.clk.Now(), &logged) {
-		t.Fatal("holdsParkedSeat = true for a seat not eligible to park")
+	if held, parked := holdsParkedSeat(sw, info, parkVerdict{}, env.clk.Now(), &logged); held || parked {
+		t.Fatalf("holdsParkedSeat = (held %t, parked %t) for a seat not eligible to park", held, parked)
+	}
+}
+
+// The live check that finds the seat parked, or the verdict that already
+// did, accepts the park as well as holding the seat.
+func TestHoldsParkedSeatAcceptsAPark(t *testing.T) {
+	env, sess, _, _ := parkedSeatEnv(t, time.Hour, nil)
+	info, err := sessionFrontDoor(env.store).Get(sess.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	sw := newSeatWork(testWorkLegs(env.city, env.cfg, env.store, nil))
+	for _, v := range []parkVerdict{{Eligible: true}, {Eligible: true, Parked: true, Until: env.clk.Now().Add(time.Hour)}} {
+		if held, parked := holdsParkedSeat(sw, info, v, env.clk.Now(), io.Discard); !held || !parked {
+			t.Fatalf("holdsParkedSeat(%+v) = (held %t, parked %t), want the park accepted", v, held, parked)
+		}
 	}
 }
 
@@ -246,6 +304,15 @@ func TestParkedSeatFixturesEndStates(t *testing.T) {
 				t.Fatalf("%s: %d stranded events, row %v; want the seat stranded", copyName, strandedEvents(o), o.rows["gc-1"].Metadata)
 			}
 		},
+		"a parked seat a pass stranded clears its marker": func(t *testing.T, copyName string, o parityOutcome) {
+			row, pin := o.rows["gc-1"], o.work["gp-1"]
+			if row.Status == "closed" || row.Metadata[strandedEventEmittedKey] != "" || strandedEvents(o) != 0 {
+				t.Fatalf("%s: row %s %v, %d stranded events; want parked again: open, unmarked, no event", copyName, row.Status, row.Metadata, strandedEvents(o))
+			}
+			if pin.Assignee != "gc-1" || pin.Status != "open" {
+				t.Fatalf("%s: pin %s/%q, want open on its seat", copyName, pin.Status, pin.Assignee)
+			}
+		},
 		"a parked seat whose pin is ready wakes in place": func(t *testing.T, copyName string, o parityOutcome) {
 			row := o.rows["gc-1"]
 			if row.Status == "closed" || row.Metadata["generation"] == "1" || strandedEvents(o) != 0 {
@@ -266,6 +333,231 @@ func TestParkedSeatFixturesEndStates(t *testing.T) {
 			rows := f.converged(t, cityPath)
 			check(t, "legacy", legacyParity(t, f, cityPath, rows))
 			check(t, "v2", v2Parity(t, f, cityPath, rows))
+		})
+	}
+}
+
+// seedRealClockParkedSeat seeds store with a pool seat of template asleep on
+// its drain, slept sleptAgo before the real clock the production passes read,
+// holding one open pin blocked by an open bead. The store mints the IDs.
+func seedRealClockParkedSeat(t *testing.T, store beads.Store, template string, sleptAgo time.Duration) (seatID, pinID string) {
+	t.Helper()
+	slept := time.Now().UTC().Add(-sleptAgo)
+	row := poolRow("seat", template, 1, "asleep", "sleep_reason", "idle",
+		"slept_at", slept.Format(time.RFC3339), "last_woke_at", slept.Add(-time.Hour).Format(time.RFC3339))
+	row.ID = ""
+	seat, err := store.Create(row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	blocker, err := store.Create(beads.Bead{Title: "review loop", Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pin, err := store.Create(beads.Bead{Title: "finalize", Type: "task", Assignee: seat.ID, Metadata: map[string]string{"gc.routed_to": template}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.DepAdd(pin.ID, blocker.ID, "blocks"); err != nil {
+		t.Fatal(err)
+	}
+	return seat.ID, pin.ID
+}
+
+// checkParkedSeatPass checks a production pass over that seat: wantStranded
+// session.stranded events, the stranded marker only with them, the seat open
+// and asleep, and the pin still open on it.
+func checkParkedSeatPass(t *testing.T, store beads.Store, seatID, pinID string, stranded []events.Event, wantStranded int) {
+	t.Helper()
+	if len(stranded) != wantStranded {
+		t.Fatalf("session.stranded events = %d, want %d", len(stranded), wantStranded)
+	}
+	seat, err := store.Get(seatID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if seat.Status == "closed" || seat.Metadata["state"] != "asleep" || (seat.Metadata[strandedEventEmittedKey] != "") != (wantStranded > 0) {
+		t.Fatalf("seat %s %v, want open and asleep, marked only when stranded", seat.Status, seat.Metadata)
+	}
+	if pin, err := store.Get(pinID); err != nil || pin.Assignee != seatID || pin.Status != "open" {
+		t.Fatalf("pin %s/%q (%v), want still open on its seat", pin.Status, pin.Assignee, err)
+	}
+}
+
+// The production tick (beadReconcileTick) on both of its branches: the boot
+// pass decides the pool counts itself, and a steady pass reads the counts its
+// demand snapshot decided, where a parked seat is no demand. Either hands the
+// reconciler the verdict that holds a parked seat. The seat past its bound is
+// the control: it strands on both branches and is demand, so a pass that
+// never reaches the hold, or a snapshot that never parks, cannot pass. The
+// boot pass's own counts stay unpinned: with headroom in the pool, a parked
+// seat counted as demand changes nothing the reconciler does with it.
+func TestBeadReconcileTickHoldsAParkedSeat(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		snapshot     bool // a steady pass over the demand snapshot's counts
+		sleptAgo     time.Duration
+		wantStranded int
+		wantDemand   int // the demand snapshot's worker count, on a steady pass
+	}{
+		{name: "the boot pass", sleptAgo: time.Hour},
+		{name: "a steady pass", snapshot: true, sleptAgo: time.Hour},
+		{name: "the boot pass, past the bound", sleptAgo: parkedWorkMaxHold + time.Hour, wantStranded: 1},
+		{name: "a steady pass, past the bound", snapshot: true, sleptAgo: parkedWorkMaxHold + time.Hour, wantStranded: 1, wantDemand: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
+			store := beads.NewMemStore()
+			seatID, pinID := seedRealClockParkedSeat(t, store, "worker", tc.sleptAgo)
+			rec := events.NewFake()
+			cfg := workerCity(3)
+			cr := &CityRuntime{
+				cityPath: t.TempDir(), cityName: cfg.Workspace.Name, cfg: cfg, sp: runtime.NewFake(),
+				standaloneCityStore: store, sessionDrains: newDrainTracker(),
+				rec: rec, stdout: io.Discard, stderr: io.Discard,
+			}
+			cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cr.cityPath, cr.cityName, io.Discard)
+			t.Cleanup(func() { cr.asyncStarts.wait(-1); cr.asyncStops.wait(-1) })
+			snap, err := loadSessionBeadSnapshot(store)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.snapshot {
+				result := cr.loadDemandSnapshot(snap, nil, "poke", false).result
+				if result.PoolDesiredCounts == nil {
+					t.Fatal("the demand snapshot decided no pool counts")
+				}
+				if got := result.PoolDesiredCounts["worker"]; got != tc.wantDemand {
+					t.Fatalf("the demand snapshot counted %d worker sessions, want %d", got, tc.wantDemand)
+				}
+				cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snap, nil, false)
+			} else {
+				result := cr.buildDesiredState(snap, nil)
+				if result.PoolDesiredCounts != nil {
+					t.Fatalf("the boot build decided pool counts %v, want them left to the tick", result.PoolDesiredCounts)
+				}
+				cr.beadReconcileTick(context.Background(), newSeatWork(cr.workLegs()), result, snap, nil, true)
+			}
+
+			stranded, err := rec.List(events.Filter{Type: events.SessionStranded})
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkParkedSeatPass(t, store, seatID, pinID, stranded, tc.wantStranded)
+		})
+	}
+}
+
+// The control-dispatcher tick (controlDispatcherTick) holds a parked
+// dispatcher seat with the verdict its pool counts read: the counts drop the
+// seat from demand, and the reconciler of the same pass holds it rather than
+// stranding it. The seat past its bound is the control: it strands, so a pass
+// that never reaches the seat cannot pass.
+func TestControlDispatcherTickHoldsAParkedSeat(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		sleptAgo     time.Duration
+		wantStranded int
+	}{
+		{name: "parked", sleptAgo: time.Hour},
+		{name: "past the bound", sleptAgo: parkedWorkMaxHold + time.Hour, wantStranded: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
+			store := beads.NewMemStore()
+			seatID, pinID := seedRealClockParkedSeat(t, store, config.ControlDispatcherAgentName, tc.sleptAgo)
+			rec := events.NewFake()
+			cfg := &config.City{
+				Workspace: config.Workspace{Name: "test-city"},
+				Agents: []config.Agent{{
+					Name:              config.ControlDispatcherAgentName,
+					StartCommand:      config.ControlDispatcherStartCommandFor("{{.Agent}}"),
+					MaxActiveSessions: intPtr(3),
+				}},
+			}
+			sp := runtime.NewFake()
+			cr := &CityRuntime{
+				cityPath: t.TempDir(), cityName: cfg.Workspace.Name, cfg: cfg, sp: sp, dops: newDrainOps(sp),
+				standaloneCityStore: store, sessionDrains: newDrainTracker(),
+				rec: rec, stdout: io.Discard, stderr: io.Discard,
+				// No managed Dolt here: the preflight must not exec the beads script.
+				managedDoltHealth: func(context.Context, string) error { return nil },
+			}
+			cr.buildFnWithSessionBeads = supervisorBuildAgentsFnWithSessionBeads(cr.cityPath, cr.cityName, io.Discard)
+			t.Cleanup(func() { cr.asyncStarts.wait(-1); cr.asyncStops.wait(-1) })
+
+			cr.controlDispatcherTick(context.Background())
+
+			stranded, err := rec.List(events.Filter{Type: events.SessionStranded})
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkParkedSeatPass(t, store, seatID, pinID, stranded, tc.wantStranded)
+		})
+	}
+}
+
+// The one-shot start (doStartStandalone, cmd_start.go) holds a parked seat
+// with the verdict its pool counts read. The seat past its bound is the
+// control. Its counts stay unpinned, as the boot tick's do.
+func TestStartStandaloneHoldsAParkedSeat(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		sleptAgo     time.Duration
+		wantStranded int
+	}{
+		{name: "parked", sleptAgo: time.Hour},
+		{name: "past the bound", sleptAgo: parkedWorkMaxHold + time.Hour, wantStranded: 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			setSessionCircuitBreakerForTest(t, newSessionCircuitBreaker(sessionCircuitBreakerConfig{}))
+			cityPath := t.TempDir()
+			clearInheritedBeadsEnv(t)
+			t.Chdir(t.TempDir())
+			cityTOML := `[workspace]
+name = "parked-seat-city"
+provider = "shell"
+
+[providers.shell]
+command = "echo"
+
+[beads]
+provider = "file"
+
+[[agent]]
+name = "worker"
+scope = "city"
+max_active_sessions = 3
+`
+			if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(cityTOML), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			if err := ensureScopedFileStoreLayout(cityPath); err != nil {
+				t.Fatal(err)
+			}
+			if err := ensurePersistedScopeLocalFileStore(cityPath); err != nil {
+				t.Fatal(err)
+			}
+			store, err := openScopeLocalFileStore(cityPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			seatID, pinID := seedRealClockParkedSeat(t, store, "worker", tc.sleptAgo)
+			oldBuild := buildSessionProviderByName
+			t.Cleanup(func() { buildSessionProviderByName = oldBuild })
+			buildSessionProviderByName = func(_ *config.City, _ string, _ config.SessionConfig, _, _ string) (runtime.Provider, error) {
+				return runtime.NewFake(), nil
+			}
+
+			var stdout, stderr bytes.Buffer
+			if code := doStartStandalone([]string{cityPath}, false, &stdout, &stderr); code != 0 {
+				t.Fatalf("doStartStandalone exit = %d\nstderr:\n%s", code, stderr.String())
+			}
+			stranded, err := events.ReadFiltered(filepath.Join(cityPath, ".gc", "events.jsonl"), events.Filter{Type: events.SessionStranded})
+			if err != nil {
+				t.Fatal(err)
+			}
+			checkParkedSeatPass(t, store, seatID, pinID, stranded, tc.wantStranded)
 		})
 	}
 }

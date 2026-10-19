@@ -5185,8 +5185,19 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 		}
 		// A seat parked on pre-assigned blocked work (ga-ylpbsy.16) is not
 		// stranded: no diagnostic, no repair. The assigned-work wake restarts
-		// it once its work is ready; past its bound it strands as below.
-		parkedSeat := poolFreeable && hasAssignedWork && !killedSeat && holdsParkedSeat(sw, infoByID[target.info.ID], parked[target.info.ID], clk.Now().UTC(), stderr)
+		// it once its work is ready; past its bound it strands as below. The
+		// park ends any stranding episode an earlier tick began (a full
+		// pool's fallback): its marker clears, as an alive tick's does, so a
+		// later fallback ages a fresh one.
+		parkedSeat, parkAccepted := false, false
+		if poolFreeable && hasAssignedWork && !killedSeat {
+			parkedSeat, parkAccepted = holdsParkedSeat(sw, infoByID[target.info.ID], parked[target.info.ID], clk.Now().UTC(), stderr)
+		}
+		if parkAccepted {
+			if fold := clearStrandedEventMarker(store, infoByID[target.info.ID], snapshot, stderr); fold != nil {
+				tick.apply(target.info.ID, fold)
+			}
+		}
 		if poolFreeable && hasAssignedWork && !killedSeat && !parkedSeat {
 			// The runtime is gone but the session bead still owns
 			// in_progress work — almost always a CLI process that
@@ -5207,8 +5218,9 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			// reclaim it, then close the session bead to free the slot. The
 			// storeQueryPartial gate ensures a transient store miss can never clear
 			// a live claim. The confirmation window tracks CONTINUOUS non-liveness:
-			// clearStrandedEventMarker (invoked on every alive tick, above) drops
-			// the marker the instant the session is seen alive again, so a worker
+			// clearStrandedEventMarker (invoked on every alive tick and every
+			// accepted park, above) drops the marker the instant the session is
+			// seen alive again or parks, so a worker
 			// that stranded, was respawned on this same bead, and recovered must
 			// re-age a FRESH marker here — a recovered-then-drained worker cannot
 			// fire the repair on the first episode's stale timestamp. Reuses
@@ -6028,7 +6040,8 @@ func emitSessionStrandedDiagnostic(
 }
 
 // clearStrandedEventMarker drops the stranded_event_emitted_at marker whenever
-// the session is observed ALIVE again. This is the clear-on-recovery half of the
+// the session is observed ALIVE again, or parks on pre-assigned blocked work
+// (ga-ylpbsy.16). This is the clear-on-recovery half of the
 // confirmation-window contract: strandedEventEmittedKey tracks CONTINUOUS
 // non-liveness, NOT a one-shot "ever stranded this generation" flag.
 //
@@ -6046,7 +6059,11 @@ func emitSessionStrandedDiagnostic(
 // FRESH marker: emitSessionStrandedDiagnostic re-emits per episode (restoring
 // per-episode observability) and the repair must re-confirm non-liveness across
 // a new window before it acts. alive ⟹ runtime is up ⟹ not stranded, so the
-// clear is always safe here.
+// clear is always safe here. A parked seat is not stranded either: its runtime
+// stopped by its own choice and its work cannot run yet, so a seat a full
+// pool's fallback stranded, then parked again, must not carry that episode's
+// aged marker into the next fallback, where the repair would release its pin
+// at once.
 //
 // Returns the metadata patch it applied so the reconciler folds it onto the
 // infoByID snapshot (write-returns-Info), or nil when there was nothing to clear

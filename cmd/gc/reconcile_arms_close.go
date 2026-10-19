@@ -25,7 +25,8 @@ const (
 	decideFailedCreateLeased = "close-held:pending-create-leased" // SESS-058
 	decideClosePoolSlot      = "close-pool-slot"
 	decideStrandedHold       = "stranded-hold"
-	decideParkedHold         = "parked-hold" // a seat parked on pre-assigned blocked work (ga-ylpbsy.16)
+	decideParkedHold         = "parked-hold"  // a seat parked on pre-assigned blocked work (ga-ylpbsy.16)
+	decideParkedClear        = "parked-clear" // that seat's park clears the marker a stranded pass left
 	decideCloseOrphan        = "close-orphan"
 )
 
@@ -89,7 +90,13 @@ func armClose(r *rowFacts) (intent, bool) {
 			// Parked on pre-assigned blocked work (ga-ylpbsy.16): not
 			// stranded. The assigned-work wake restarts this seat once its
 			// work is ready; past the bound the stranded branch takes it.
+			// The park ends a stranding episode an earlier pass began (a
+			// full pool's fallback), as an alive row's does (SESS-603): its
+			// marker clears, fresh, so a later fallback ages a new one.
 			r.after(requeueUntil(now, e.Park.Until))
+			if strings.TrimSpace(info.StrandedEventEmittedAt) != "" {
+				return r.heal(intentRowHealFresh, decideParkedClear, session.MetadataPatch{strandedEventEmittedKey: ""})
+			}
 			return intent{Reason: decideParkedHold}, true
 		}
 		aged, held := r.strandedMarker()

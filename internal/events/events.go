@@ -207,7 +207,10 @@ const (
 	// bead after its runtime has exited — i.e., the worker process is
 	// gone but the bead's assignee/state still references it. Surfaces
 	// the reconciler-detected leak so pack-level subscribers can decide
-	// whether to clear-assignee-and-respawn or escalate.
+	// whether to clear-assignee-and-respawn or escalate. A pool seat parked
+	// on pre-assigned blocked work (cmd/gc/seat_parked.go) does not fire it;
+	// one that stops parking (past its bound, or crowded out of a full
+	// slot-bounded pool) fires it though its work is an open, unstarted pin.
 	SessionStranded = "session.stranded"
 	// SessionPoolSlotRetiredAtDrainDeadline fires when the reconciler force-
 	// retires a pool-managed session bead that entered drain and never

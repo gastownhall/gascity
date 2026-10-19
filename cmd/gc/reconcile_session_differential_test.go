@@ -1239,6 +1239,20 @@ func parityFixtures() []parityFixture {
 			Explain: started("gc-1", "s-gc-1", "worker-1", nil),
 		},
 		{
+			// A seat an earlier pass stranded (a full pool's fallback) that
+			// parks again, its marker long aged: the park ends that
+			// stranding episode, so both copies clear the marker, as an
+			// alive row's does, with no event and no repair.
+			Name: "a parked seat a pass stranded clears its marker", Behaviors: []string{"SESS-603", "SESS-624"},
+			Rows: []parityRow{poolRow("gc-1", "worker", 1, "asleep", "instance_token", "tok-gc-1", "sleep_reason", "idle", "slept_at", at(-time.Hour), "last_woke_at", at(-2*time.Hour), "session_key", "conversation-1", "stranded_event_emitted_at", at(-time.Hour))},
+			Work: []parityRow{
+				{ID: "gb-1", Title: "gb-1", Type: "task", Status: "open"},
+				{ID: "gp-1", Title: "gp-1", Type: "task", Status: "open", Assignee: "gc-1", Metadata: map[string]string{"gc.routed_to": "worker"}},
+			},
+			Deps:    []beads.Dep{{IssueID: "gp-1", DependsOnID: "gb-1", Type: "blocks"}},
+			Explain: map[string]string{"row:gc-1:*policy": "sleep-policy-keys"},
+		},
+		{
 			Name: "a workless idle pool slot whose runtime is gone closes", Behaviors: []string{"SESS-626"},
 			Rows:    []parityRow{poolRow("gc-1", "worker", 1, "asleep", "sleep_reason", "idle", "slept_at", at(-time.Hour))},
 			Explain: map[string]string{"row:gc-1:*reason": "§12.2#17 orphan-close-reason"},

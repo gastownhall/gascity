@@ -114,16 +114,28 @@ resolution `nudge-on-route` applies at route time. A dependent with both an
 assignee and a route is nudged at its assignee only: a claimed bead belongs
 to its session.
 
-Either way, it skips a dependent that another `blocks` blocker still holds
-(`gc bd dep list <dep> --direction=down --type=blocks --json` lists a blocker
-other than the one that closed whose status is neither `closed` nor `pinned`,
-the two bd treats as satisfied). Its assignee or routed target has nothing to
-do yet, and a nudge to an asleep seat parked on the dependent would wake that
-seat for nothing; the seat wakes on its own once the dependent is ready. The
-skipped pair is recorded like a nudged one, so later runs in the lookback do
-not read its blockers again; the close of the dependent's last blocker is a
-pair of its own, and nudges. A blocker read that fails proves nothing, and
-the nudge goes out.
+Either way, it skips a dependent that a `blocks` blocker still holds as gc's
+readiness rule judges it
+(`gc bd dep list <dep> --direction=down --type=blocks --json`): a blocker
+other than the one that closed whose status is not `closed`, or any blocker,
+the closing one included, that closed blocked (`gc.work_outcome=blocked`),
+unless it is a formula step (`gc.step_ref` set) whose `gc.outcome` is
+`pass`. Its assignee or routed target has nothing to do yet, and a nudge to
+an asleep seat parked on the dependent would wake that seat for nothing; the
+seat wakes on its own once the dependent is ready. A `pinned` blocker holds
+too, whether the read reports it `pinned` (the bd passthrough) or `open` (the
+in-process class-binding read, which folds it). bd's own readiness counts it
+satisfied, so a dependent only a pinned blocker holds is not nudged, but a
+seat parked on it still wakes: the park reads the store's ready query. gc
+itself never pins a bead.
+A pair the closing blocker's own blocked close holds is not recorded, whether
+or not another blocker holds the dependent too, so that blocker's later close
+that passes still nudges. A pair only another blocker holds is recorded like
+a nudged one, so later runs in the lookback do not read its blockers again;
+the close of the dependent's last blocker is a pair of its own, and nudges. A
+row the read cannot judge (an external row, for a blocker outside the
+dependent's store, or a row with no status) holds nothing, and a blocker read
+that fails proves nothing: the nudge goes out.
 
 **Cross-rig.** A `prefix -> rig` lookup built from `gc rig list` scopes the
 dependency lookup and the assignee nudge to the rig that owns each bead, so
