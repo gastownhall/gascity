@@ -65,6 +65,7 @@ var optionalInterfaces = map[string]reflect.Type{
 	"SessionObjectKiller":             reflect.TypeFor[runtime.SessionObjectKiller](),
 	"SessionRosterProvider":           reflect.TypeFor[runtime.SessionRosterProvider](),
 	"SleepCapabilityProvider":         reflect.TypeFor[runtime.SleepCapabilityProvider](),
+	"SteerCapabilityProvider":         reflect.TypeFor[runtime.SteerCapabilityProvider](),
 	"TransportCapabilityProvider":     reflect.TypeFor[runtime.TransportCapabilityProvider](),
 	"TurnEventProvider":               reflect.TypeFor[runtime.TurnEventProvider](),
 	"TurnFenceProvider":               reflect.TypeFor[runtime.TurnFenceProvider](),
@@ -181,7 +182,7 @@ func execConnectionPack(t *testing.T) string {
 // or fewer than the provider production builds, other capabilities, another
 // answer from a fixed trait (sleep capability, fresh reads, an identity
 // sidecar, a transport, an idle-proof budget, a turn-interrupt mode, input
-// fencing, local transcripts), or no
+// fencing, local transcripts, a steer mode), or no
 // backend checked.
 func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 	backends := productionBackends(t)
@@ -207,7 +208,7 @@ func TestFakeProfilesMatchTheirBackends(t *testing.T) {
 // traits are p's answers to the optional interfaces that report a backend's
 // fixed traits, "-" for one it does not implement.
 func traits(p runtime.Provider) string {
-	out := []string{"-", "-", "-", "-", "-", "-", "-", "-"}
+	out := []string{"-", "-", "-", "-", "-", "-", "-", "-", "-"}
 	if s, ok := p.(runtime.SleepCapabilityProvider); ok {
 		out[0] = string(s.SleepCapability("s"))
 	}
@@ -231,6 +232,9 @@ func traits(p runtime.Provider) string {
 	}
 	if f, ok := p.(runtime.LocalTranscriptProvider); ok {
 		out[7] = strconv.FormatBool(f.LocalTranscripts())
+	}
+	if f, ok := p.(runtime.SteerCapabilityProvider); ok {
+		out[8] = string(f.SteerMode("s"))
 	}
 	return strings.Join(out, " ")
 }

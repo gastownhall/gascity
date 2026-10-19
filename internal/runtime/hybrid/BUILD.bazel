@@ -6,6 +6,7 @@ go_library(
         "fence.go",
         "hybrid.go",
         "proctable.go",
+        "steer.go",
         "turn_identity.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/runtime/hybrid",

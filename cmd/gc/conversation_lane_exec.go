@@ -21,6 +21,9 @@ import (
 const (
 	// laneViaLive is the via of a delivery typed into a live runtime.
 	laneViaLive = "live"
+	// laneViaSteer is the via of a steer typed into a running turn
+	// (DES-O1 §10.4).
+	laneViaSteer = "steer"
 	// laneDegradationTurnStartUnobserved marks a delivery the runtime
 	// accepted without seeing the turn it should start
 	// (runtime.ErrNudgeDeliveredUnobserved).
@@ -80,6 +83,10 @@ type conversationLaneExec struct {
 	matches func(nudgeTarget, worker.LiveObservation) (bool, error)
 	handle  func(nudgeTarget) (worker.Handle, error)
 	idle    func(nudgeTarget, worker.LiveObservation) bool
+	// steerable says whether a session row takes a steer from a runtime
+	// that steers in a mode; production reads session.SupportsSteerForInfo,
+	// the source session responses read too.
+	steerable func(session.Info, runtime.SteerMode) bool
 	// live is the handle the last probe resolved; Deliver types through it.
 	live worker.Handle
 	// lastCaps and capsRead are the capabilities the first Probe read,
@@ -165,6 +172,7 @@ func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversation
 	e.idle = func(t nudgeTarget, obs worker.LiveObservation) bool {
 		return pollerSessionIdleEnough(t, e.deps.sp, defaultNudgePollQuiescence, obs)
 	}
+	e.steerable = session.SupportsSteerForInfo
 	e.sessionTurns = func(id string) (worker.TurnHandle, error) {
 		return workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, id)
 	}
@@ -316,7 +324,9 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps, wi
 // recorded never reads as in progress), that the conversation's row does not
 // stamp as hosted elsewhere for its current generation (DES-BX D7). Dedup is
 // the worker boundary's read of whether the routed runtime deduplicates
-// keyed deliveries. Nothing steers, responds or injects in band here.
+// keyed deliveries. A live runtime steers where its steer mode and the
+// session row allow it (e.steerable; D-STEER), per laneSteerCap. Nothing
+// responds or injects in band here.
 func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.Caps, error) {
 	name := e.target.sessionName
 	caps := opjournal.Caps{
@@ -339,7 +349,18 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 			caps.Live = false
 		}
 	}
+	caps.Steer = laneSteerCap(caps, e.steerable(e.info, runtime.SteerModeFor(e.deps.sp, name)))
 	return caps, nil
+}
+
+// laneSteerCap is Caps.Steer for caps whose session row and runtime steer
+// mode allow a steer (steerable): only a live runtime steers, and never one
+// that deduplicates by delivery key (Caps.Dedup). A steer goes out through
+// the immediate nudge, which no runtime keys yet (runtime.SteerProtocol), so
+// a re-taken steer would be applied again while the plan, trusting Dedup,
+// leaves out the D-NOTE repeat line.
+func laneSteerCap(caps opjournal.Caps, steerable bool) bool {
+	return caps.Live && !caps.Dedup && steerable
 }
 
 // hostedElsewhere reports whether stamp says another host serves message for
@@ -371,7 +392,10 @@ var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a ha
 
 // Deliver implements opjournal.Executor: one fenced live-only nudge of the
 // delivery's text, verbatim, under its delivery key, through the handle its
-// probe resolved; a delivery the runtime took then gathers its turn
+// probe resolved. A steer goes out with immediate delivery, into the running
+// turn without waiting for idle (a keystroke runtime types it; a protocol
+// runtime's immediate nudge is its steer, runtime.SteerProtocol), and is
+// recorded via steer. A delivery the runtime took then gathers its turn
 // evidence within the link wait (linkEvidence).
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
@@ -382,16 +406,20 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 	if d.Fence.Token != "" {
 		fence = runtime.InputFence{Generation: d.Fence.Generation, Epoch: d.Fence.Epoch, Token: d.Fence.Token}
 	}
+	delivery := worker.NudgeDeliveryDefault
+	if d.Steer {
+		delivery = worker.NudgeDeliveryImmediate
+	}
 	at := e.deps.clk.Now()
 	res, err := h.Nudge(ctx, sessionActor(session.ActorController, e.deps.cityPath), worker.NudgeRequest{
 		Text:          d.Text,
-		Delivery:      worker.NudgeDeliveryDefault,
+		Delivery:      delivery,
 		Wake:          worker.NudgeWakeLiveOnly,
 		DeliveryKey:   laneDeliveryKeyPrefix + d.Key,
 		Fence:         fence,
 		AllowUnfenced: true,
 	})
-	out := laneDeliveryResult(res, err, at, fence.IsZero())
+	out := laneDeliveryResult(res, err, at, fence.IsZero(), d.Steer)
 	if dv, ok := out.(opjournal.Delivered); ok {
 		stampLastNudgeDeliveredAt(sessionFrontDoor(e.deps.sessions), e.info.ID, e.deps.clk.Now())
 		rec := dv.Record
@@ -404,12 +432,17 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 
 // laneDeliveryResult maps one nudge's answer to the lane's result (DES-O1
 // §7.2). unfencedReq says the request carried no fence, because the row
-// names no token. A submit the runtime could not confirm may have delivered,
-// so it is Unknown; a nudge refused on a pending interaction, whichever
-// runtime refused it, or one the runtime reports never sent, is a transient
-// miss. Any other error may have come after input reached the session, so it
-// is Unknown too: a retake under a fresh key would deliver it twice.
-func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq bool) opjournal.DeliveryResult {
+// names no token; steer says it was a steer, recorded via steer. A submit
+// the runtime could not confirm may have delivered, so it is Unknown; a
+// nudge refused on a pending interaction, whichever runtime refused it, or
+// one the runtime reports never sent, is a transient miss. Any other error
+// may have come after input reached the session, so it is Unknown too: a
+// retake under a fresh key would deliver it twice.
+func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq, steer bool) opjournal.DeliveryResult {
+	via := laneViaLive
+	if steer {
+		via = laneViaSteer
+	}
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.Delivered {
 		if res.Unfenced || unfencedReq {
 			degradation = opjournal.DegradationUnfencedDelivery
@@ -417,7 +450,7 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 		return opjournal.Delivered{
 			Record:      opjournal.DeliveryRecord{At: at, Ack: ack},
 			Evidence:    opjournal.TurnEvidence{HasSource: false},
-			Via:         laneViaLive,
+			Via:         via,
 			Degradation: degradation,
 		}
 	}

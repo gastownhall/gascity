@@ -389,6 +389,9 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.DeliveryResult {
 		return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: at, Ack: ack}, Via: laneViaLive, Degradation: degradation}
 	}
+	steered := func(ack opjournal.AckKind, degradation string) opjournal.DeliveryResult {
+		return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: at, Ack: ack}, Via: laneViaSteer, Degradation: degradation}
+	}
 	someErr := errors.New("tmux exploded")
 	permissionPrompt := fmt.Errorf("%w: session %q is waiting on a permission prompt (Edit file, request tmux-1); answer it with respond (approve or deny) before sending text",
 		runtime.ErrPendingInteraction, "s")
@@ -397,6 +400,7 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		res        worker.NudgeResult
 		err        error
 		unfenced   bool
+		steer      bool
 		want       opjournal.DeliveryResult
 		transient  bool
 		wantUnknwn bool
@@ -406,11 +410,16 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		{name: "delivered with no token", res: worker.NudgeResult{Delivered: true}, unfenced: true, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
 		{name: "unobserved", err: fmt.Errorf("submit: %w", runtime.ErrNudgeDeliveredUnobserved), want: delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
 		{name: "unobserved and unfenced", res: worker.NudgeResult{Unfenced: true}, err: runtime.ErrNudgeDeliveredUnobserved, want: delivered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
+		{name: "steer delivered", res: worker.NudgeResult{Delivered: true}, steer: true, want: steered(opjournal.AckDelivered, "")},
+		{name: "steer unobserved", err: runtime.ErrNudgeDeliveredUnobserved, steer: true, want: steered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
+		{name: "steer unobserved and unfenced", err: runtime.ErrNudgeDeliveredUnobserved, unfenced: true, steer: true, want: steered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
 		{name: "not delivered", res: worker.NudgeResult{}, transient: true},
 		{name: "pending interaction", err: fmt.Errorf("x: %w", runtime.ErrNudgeRefusedPendingInteraction), transient: true},
 		{name: "tmux permission prompt", err: permissionPrompt, transient: true},
 		{name: "tmux submit unconfirmed", err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), wantUnknwn: true},
 		{name: "tmux re-send refused after a submit", err: fmt.Errorf("%w: session %q: not re-sent: %s", tmux.ErrNudgeSubmitUnconfirmed, "s", permissionPrompt.Error()), wantUnknwn: true},
+		{name: "steer submit unconfirmed", err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), steer: true, wantUnknwn: true},
+		{name: "steer on a tmux permission prompt", err: permissionPrompt, steer: true, transient: true},
 		{name: "fence miss", err: &runtime.FenceMismatchError{Session: "s", Found: "absent"}, transient: true},
 		{name: "runtime unavailable", err: fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), transient: true},
 		{name: "partial fence miss", err: &runtime.FenceMismatchError{Session: "s", Found: "dead", Partial: true}, wantUnknwn: true},
@@ -423,7 +432,7 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		{name: "anything else may have delivered", err: someErr, wantUnknwn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := laneDeliveryResult(tc.res, tc.err, at, tc.unfenced)
+			got := laneDeliveryResult(tc.res, tc.err, at, tc.unfenced, tc.steer)
 			switch {
 			case tc.transient:
 				nd, ok := got.(opjournal.NotDelivered)

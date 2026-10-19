@@ -91,7 +91,10 @@ provider with a session-id flag whose row is `creating` without a key: that
 start's conversation has no key yet. Families without `SupportsIDLookup`
 (Codex, Gemini, OpenCode, MiMo, ZCode) still fall back to work-directory
 discovery after a keyed miss, as does `SessionLogAdapter.DiscoverTranscript`;
-see `SESSION-HISTORY-EXACT-KEY`.
+see `SESSION-HISTORY-EXACT-KEY`. OpenCode and ZCode still prefer a keyed hit
+(the mirrored export is named for the session key) before that fallback. The
+model-usage paths in `internal/worker` resolve OpenCode by key only and never
+take the fallback.
 
 ## Manual Close During Reconciliation
 

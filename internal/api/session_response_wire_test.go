@@ -58,7 +58,7 @@ func sessionResponseFromBead(info session.Info, b *beads.Bead, cfg *config.City,
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(b.Status, b.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(b.Metadata[apiNamedSessionMetadataKey]) == "true"
-	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(b.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName))
+	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(b.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName), runtime.SteerModeFor(sp, info.SessionName))
 	r.Metadata = filterMetadata(b.Metadata)
 	return r
 }
