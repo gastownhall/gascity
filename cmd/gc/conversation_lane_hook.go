@@ -8,29 +8,45 @@ package main
 // lane host, which types them at the next boundary. The pass takes only
 // notices whose `when` is boundary or after_turn; prompts, urgent content and
 // if_idle wait for the lane host (DES-O1 §16, question 2), which the planner
-// decides from Caps{InBand: true, Live: false}.
+// decides from Caps{InBand: true, Live: false}. The lane text joins the drain's
+// own text in a context the provider keeps whole only up to a cap
+// (hookLaneContextBudget), so the planner takes notices only while their text
+// fits the room the drain's own text leaves (Caps.MaxText): a backlog goes out
+// over several prompts, and a notice too long for the room waits for the lane
+// host.
 //
 // The executor's effect is the hook's own output: the lane text joins the one
 // hook context the drain writes (the clock, any legacy nudges, the lane
 // notices, the step reminder). The hook gathers no turn evidence, so a
 // delivery links exact only through the hook payload's turn id, and only for
 // a family X11's live arm verified (worker.HookPayloadTurnID); every other
-// delivery links none (no_source). When the hook deadline leaves no time to
-// record the delivery, the batch is released as maybe delivered, so the next
-// delivery carries the plain redelivery note (D-NOTE) and an at_most_once op
-// closes failed{ambiguous_delivery}. A delivery is recorded only by the
-// deadline less the archive margin (hookLaneSettleBy): a Done that has not
-// landed by then leaves the batch executing, and the lane takes it again as
-// maybe delivered once the hook's lease lapses, so a slow store never records
-// a delivery whose output gc hook run then discards.
+// delivery links none (no_source). The pass writes into the hook context only
+// while the hook deadline leaves time to record the delivery
+// (hookLaneRecordTime): with no time left the probe blocks content, so nothing
+// is taken, and a batch taken before the time ran out is released unwritten,
+// a transient miss that counts no failure and is not maybe delivered, by the
+// hook deadline itself (hookLaneDeadline). A batch whose write fails is
+// released the same way: the failed write put no notice in front of the
+// model (Deliver). A delivery is recorded only by the deadline less the
+// archive margin (hookLaneSettleBy): a Done that has not landed by then
+// leaves the batch executing, and the lane takes it again as maybe delivered
+// once the hook's lease lapses, so a slow store never records a delivery
+// whose output gc hook run then discards.
 //
-// An empty prompt costs one keyed list (hookLaneDue), and nothing on a store
-// that cannot host a lane; the lane store, the session row and the runtime row
-// are read only when the conversation holds an open lane op. The hook writes
-// op rows, the runtime row's lane cells and, after an accepted lane-only
-// delivery, the session's last-nudge-delivered stamp; never turn facts. The
-// drain rings the controller's lane host after a Done, last of all, once its
-// own output and bookkeeping are done (hookLaneRing).
+// An empty prompt whose step reminder the controller answered opens no store
+// for lanes: the controller is up, and its lane host types the conversation's
+// notices at the next boundary (hookLaneDueWithoutController). That leaves
+// two kinds of conversation waiting for a prompt whose drain takes the full
+// path: a supervisor-hosted city's, which runs no lane host until OJ-12b, and
+// that of a runtime taking input by protocol (t3bridge), whose content the
+// lane host holds not_live. Otherwise an empty prompt costs one keyed
+// list (hookLaneDue), and nothing on a store that cannot host a lane; the lane
+// store, the session row and the runtime row are read only when the
+// conversation holds an open lane op. The hook writes op rows, the runtime
+// row's lane cells and, after an accepted lane-only delivery, the session's
+// last-nudge-delivered stamp; never turn facts. The drain rings the
+// controller's lane host after a Done, last of all, once its own output and
+// bookkeeping are done (hookLaneRing).
 
 import (
 	"context"
@@ -70,32 +86,56 @@ const (
 	// time left the doorbell is skipped and the lane host's scan finds the
 	// conversation.
 	laneHookPokeLegFloor = 20 * time.Millisecond
+	// laneContentBlockHookDeadline blocks content while the hook deadline
+	// leaves no time to record a delivery.
+	laneContentBlockHookDeadline = "hook_deadline"
+	// hookLaneContextBudget is the most bytes of hook context the drain writes
+	// with lane notices in it. It is under every cap up to which a prompt
+	// hook's context reaches the model whole, each in the unit its provider
+	// counts. Claude Code keeps 10,000 characters, and 9000 bytes are at most
+	// 9000 characters. Codex keeps a handler's additionalContext while its
+	// approximate token count, a quarter of its bytes rounded up (codex-rs
+	// approx_token_count), is within the handler's additionalContextLimit,
+	// 2,500 when unset as in gc's .codex/hooks.json: 10,000 bytes, however
+	// the text tokenizes. Gemini documents no cap. Past a cap the model sees
+	// only a preview, and the lane would record as delivered notices the
+	// model never saw.
+	hookLaneContextBudget = 9000
 )
 
 // hookLaneReachesModel reports whether a prompt hook of hookFormat, run by
-// provider (as GC_PROVIDER names it), puts its output in front of the model:
-// the JSON formats gc writes for codex, gemini and antigravity, and plain
-// text for the claude family and the opencode and mimocode plugins, the
-// family read from the name (worker.HookFamily), so groq and cerebras run the
-// opencode plugin. Other families' prompt hooks read stdout as a control
-// document (cursor) or drop plain text (copilot), so an in-band delivery
-// there would be recorded and never seen.
+// provider (as GC_PROVIDER names it), puts its output in front of the model
+// of the agent's own conversation as its turn starts: the JSON formats gc
+// writes for codex and gemini, and plain text for the claude family, the
+// family read from the name (worker.HookFamily). Other families' prompt hooks
+// read stdout as a control document (cursor) or drop plain text (copilot), so
+// an in-band delivery there would be recorded and never seen. The opencode and
+// mimocode plugins (which groq and cerebras run too) drain for every session
+// in their process, Task subagents and session-less generate calls as well as
+// the agent's own, under the agent's environment, so a delivery there could be
+// recorded into a prompt the agent's conversation never sees. Antigravity
+// drains before every model call of a turn (PreInvocation) into an ephemeral
+// message that later calls drop, so a delivery there could be recorded after
+// one call saw it mid-turn. Their notices wait for the lane host.
 func hookLaneReachesModel(hookFormat, provider string) bool {
 	switch strings.ToLower(strings.TrimSpace(hookFormat)) {
-	case hookOutputFormatCodex, hookOutputFormatGemini, hookOutputFormatAntigravity:
+	case hookOutputFormatCodex, hookOutputFormatGemini:
 		return true
 	case "":
-		switch worker.HookFamily(provider) {
-		case "claude", "opencode", "mimocode":
-			return true
-		}
+		return worker.HookFamily(provider) == "claude"
 	}
 	return false
 }
 
-// errLaneHookDeadline is the cause of a release when the hook deadline left
-// no time to record a delivery whose text the hook already wrote.
-var errLaneHookDeadline = errors.New("hook deadline too close to record the in-band delivery; the output may already be in the turn")
+// errLaneHookDeadline is why the in-band pass writes nothing when the hook
+// deadline leaves no time to record a delivery: its notices wait for the next
+// drain or the lane host.
+var errLaneHookDeadline = errors.New("hook deadline too close to record an in-band delivery")
+
+// errLaneHookNoRoom is why the in-band pass writes nothing for a delivery
+// whose text is over the room the hook context has left for it: its notices
+// wait for a later drain or the lane host.
+var errLaneHookNoRoom = errors.New("the in-band delivery's text is over the room the hook context has for it")
 
 // errLaneHookControl is a control effect asked of the in-band executor. The
 // planner never takes one for a runtime that is not live, so it is a bug;
@@ -121,6 +161,25 @@ func hookLaneDue(sessions beads.Store, conv string, stderr io.Writer) bool {
 		return false
 	}
 	return due
+}
+
+// hookLaneDueWithoutController reports whether an empty prompt's drain takes
+// the full path for the in-band pass over conversation conv (hookLaneDue over
+// the sessions store of cityPath). It is not asked when the controller answered
+// the hook's step reminder (step): the controller is up, and its lane host
+// serves the conversation, so the prompt opens no store for lanes. Two kinds
+// of conversation the lane host does not serve wait the same way: a
+// supervisor-hosted city's, which runs no lane host until OJ-12b, and that of
+// a runtime taking input by protocol (t3bridge), whose content the lane host
+// holds not_live. There the pass runs when a drain takes the full path anyway
+// (a queued nudge, a step reminder, a usage sample), over the store that path
+// opened. Without the controller's answer the hook read the step reminder in
+// process, so the probe reads through the invocation's store memo.
+func hookLaneDueWithoutController(conv, cityPath string, step *wispStepLookup, stderr io.Writer) bool {
+	if conv == "" || step.answered() {
+		return false
+	}
+	return hookLaneDue(hookLaneSessionStore(cityPath, nil, stderr), conv, stderr)
 }
 
 // hookLaneConversation is the conversation the in-band pass serves: the
@@ -165,7 +224,8 @@ func hookLaneLeaseTTL(now time.Time) time.Duration {
 // delivery: the deadline gc hook run handed this process less the archive
 // margin, the time the drain keeps to ack or release its legacy nudges and
 // exit before the runner discards its output. It is zero without a deadline,
-// and with one that does not parse, whose ack check refuses the delivery.
+// and with one that does not parse, whose deadline check refuses before the
+// Take.
 func hookLaneSettleBy() time.Time {
 	deadline, ok, err := inheritedHookDeadline()
 	if err != nil || !ok {
@@ -174,9 +234,51 @@ func hookLaneSettleBy() time.Time {
 	return deadline.Add(-hookArchiveMargin(deadline, hookProcessStart))
 }
 
+// hookLaneRecordTime is the pass's deadline check, asked before it takes a
+// batch and again before it writes one: nil while the deadline gc hook run
+// handed this process leaves the archive margin to record a delivery,
+// errLaneHookDeadline once it does not, and the parse error of a deadline
+// that does not parse, which leaves no time either.
+func hookLaneRecordTime() error {
+	ok, err := hookDeadlineLeavesArchiveTime(time.Now(), hookProcessStart)
+	switch {
+	case err != nil:
+		return err
+	case !ok:
+		return errLaneHookDeadline
+	default:
+		return nil
+	}
+}
+
+// hookLaneDeadline is the last instant the pass may release a batch it took
+// and did not get in front of the model (Deliver): the deadline gc hook run
+// handed this process, when the runner kills it. The release records nothing
+// about the hook's output, so it may land past the settle-by time, but not
+// once the drain is gone. It is zero without a deadline and with one that
+// does not parse, whose check refuses before the Take.
+func hookLaneDeadline() time.Time {
+	deadline, ok, err := inheritedHookDeadline()
+	if err != nil || !ok {
+		return time.Time{}
+	}
+	return deadline
+}
+
 // hookLanePayloadTurnID is the turn id a hook payload names for provider; a
 // seam so tests can stand in for a family X11's live arm verified.
 var hookLanePayloadTurnID = worker.HookPayloadTurnID
+
+// hookLaneTextRoom is the room the hook context leaves for the lane text
+// beside around, the drain's own text in it: hookLaneContextBudget less the
+// bytes around takes, zero or less once around fills the budget.
+func hookLaneTextRoom(around ...string) int {
+	room := hookLaneContextBudget
+	for _, text := range around {
+		room -= len(text)
+	}
+	return room
+}
 
 // hookLanePass is one in-band pass over the hook's conversation.
 type hookLanePass struct {
@@ -190,7 +292,15 @@ type hookLanePass struct {
 	// settleBy is the last instant the pass may record a delivery
 	// (hookLaneSettleBy), zero for no bound.
 	settleBy time.Time
-	// provider is the session's provider family; payload the hook's stdin.
+	// deadline is the last instant the pass may release a batch it took and
+	// did not get in front of the model (hookLaneDeadline), zero for no bound.
+	deadline time.Time
+	// room is the most bytes of lane text the hook context has room for
+	// (hookLaneTextRoom), at least 1: the probe's caps take no more
+	// (Caps.MaxText) and Deliver writes no more.
+	room int
+	// provider is the session's provider, as GC_PROVIDER names it; payload
+	// the hook's stdin.
 	provider string
 	payload  []byte
 	clk      clock.Clock
@@ -198,9 +308,9 @@ type hookLanePass struct {
 	// emit writes the one hook context, carrying text; the pass calls it at
 	// most once, and only when it took a batch.
 	emit func(text string) error
-	// ackAllowed reports whether the hook deadline leaves time to record
-	// the delivery of laneOps lane ops beside whatever else the drain wrote.
-	ackAllowed func(laneOps int) bool
+	// recordTime is the deadline check (hookLaneRecordTime): the pass takes
+	// and writes a batch only while it answers nil.
+	recordTime func() error
 	// stampDelivered stamps the session's last nudge delivery after an
 	// accepted Done; the drain stamps it instead when legacy nudges rode
 	// along, after their ack.
@@ -213,11 +323,6 @@ type hookLaneOutcome struct {
 	// emitErr its error.
 	emitted bool
 	emitErr error
-	// ackAllowed is the deadline's answer when emitted without error, asked
-	// before the pass's Done. A no releases the legacy nudges the context
-	// carries too; after a yes the drain asks again before it acks them,
-	// since the Done has run in between.
-	ackAllowed bool
 	// accepted reports that the pass recorded a delivery.
 	accepted bool
 	// done reports that the pass recorded a Done, so the drain rings the
@@ -250,6 +355,9 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 	}
 	exec := &hookLaneExec{pass: p, info: info}
 	res, err := lane.Pass(ctx, view, exec)
+	if exec.refused != nil {
+		p.notef("conversation %s: %v; its notices stay out of the hook context and wait for the next drain or the lane host", p.conv, exec.refused)
+	}
 	if err != nil {
 		p.notef("pass over conversation %s: %v", p.conv, err)
 	}
@@ -258,11 +366,10 @@ func (p hookLanePass) run(ctx context.Context) hookLaneOutcome {
 		stampLastNudgeDeliveredAt(sessionFrontDoor(p.sessions), p.conv, p.clk.Now())
 	}
 	return hookLaneOutcome{
-		emitted:    exec.emitted,
-		emitErr:    exec.emitErr,
-		ackAllowed: exec.ackAllowed,
-		accepted:   accepted,
-		done:       res.Done != "",
+		emitted:  exec.emitted,
+		emitErr:  exec.emitErr,
+		accepted: accepted,
+		done:     res.Done != "",
 	}
 }
 
@@ -318,43 +425,54 @@ func hookLaneRing(cityPath, conv string, out hookLaneOutcome) {
 type hookLaneExec struct {
 	pass hookLanePass
 	info session.Info
-	// emitted, emitErr and ackAllowed record the effect for the drain.
-	emitted    bool
-	emitErr    error
-	ackAllowed bool
+	// emitted and emitErr record the effect for the drain; refused is why
+	// the pass did not write: the deadline check's answer, or a text over
+	// the room.
+	emitted bool
+	emitErr error
+	refused error
 }
 
 var _ opjournal.Executor = (*hookLaneExec)(nil)
 
 // hookLaneCaps are the in-band executor's capabilities: no live input, an
 // in-band injection into the starting turn, fenced by the check the probe
-// makes, as a system-reminder block, gathering no turn evidence, under a
-// lease of leaseTTL.
-func hookLaneCaps(leaseTTL time.Duration) opjournal.Caps {
+// makes, as a system-reminder block of at most room bytes (positive),
+// gathering no turn evidence, under a lease of leaseTTL.
+func hookLaneCaps(leaseTTL time.Duration, room int) opjournal.Caps {
 	return opjournal.Caps{
 		InBand:   true,
 		Input:    opjournal.FenceChecked,
 		Text:     opjournal.TextReminder,
 		LinkWait: 0,
 		LeaseTTL: leaseTTL,
+		MaxText:  room,
 	}
 }
 
 // Probe implements opjournal.Executor: the hook runs at the start of a turn
 // in the runtime itself, so it is available, running and at a boundary.
-// Content is blocked when the row's content gate says so, or when the hook's
-// incarnation is not the one the row names (a zombie runtime).
+// Content is blocked when the row's content gate says so, when the hook's
+// incarnation is not the one the row names (a zombie runtime), or when the
+// hook deadline leaves no time to record a delivery, so the pass takes
+// nothing it could not record.
 func (e *hookLaneExec) Probe(_ context.Context, conv opjournal.ConversationView) (opjournal.Probe, error) {
 	p := opjournal.Probe{
 		Available: true,
 		Running:   true,
 		Boundary:  opjournal.TriYes,
 		TurnLive:  opjournal.TriUnknown,
-		Caps:      hookLaneCaps(e.pass.leaseTTL),
+		Caps:      hookLaneCaps(e.pass.leaseTTL, e.pass.room),
 	}
 	p.ContentBlock = session.ContentGate(e.info, true, e.pass.clk.Now())
 	if p.ContentBlock == "" && !hookLaneFenceMatches(e.pass.fence, conv) {
 		p.ContentBlock = laneContentBlockIncarnation
+	}
+	if p.ContentBlock == "" {
+		if err := e.pass.recordTime(); err != nil {
+			e.refused = err
+			p.ContentBlock = laneContentBlockHookDeadline
+		}
 	}
 	return p, nil
 }
@@ -368,22 +486,33 @@ func hookLaneFenceMatches(hook runtime.InputFence, conv opjournal.ConversationVi
 }
 
 // Deliver implements opjournal.Executor: it writes the delivery's text into
-// the hook context, then accepts it, to be recorded by the pass's settleBy,
-// when the deadline leaves time to record it, and otherwise reports it maybe
-// delivered.
+// the hook context and accepts it, to be recorded by the pass's settleBy. It
+// checks first that the text fits the room the context has for it, which the
+// probe's caps already hold the batch to, and asks the deadline check again:
+// with a text over the room, or once the time to record the delivery is gone,
+// it writes nothing and releases the batch as a transient miss, which counts
+// no failure and is not maybe delivered, by the pass's deadline. A write that
+// fails releases the batch the same way, as unseen: the drain writes the hook
+// context in one write to the pipe gc hook run reads, which fails once that
+// reader is gone (gc ignores SIGPIPE, so the drain lives to release it), and
+// a JSON format that cannot encode its document writes nothing.
 func (e *hookLaneExec) Deliver(_ context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	if e.emitted {
-		return opjournal.NotDelivered{Transient: true, Cause: errors.New("conversation lane: the hook context was already written")}
+		return opjournal.NotDelivered{Transient: true, Cause: errors.New("conversation lane: the hook context was already written"), SettleBy: e.pass.deadline}
+	}
+	if len(d.Text) > e.pass.room {
+		e.refused = fmt.Errorf("%w: %d bytes, room for %d", errLaneHookNoRoom, len(d.Text), e.pass.room)
+		return opjournal.NotDelivered{Transient: true, Cause: e.refused, SettleBy: e.pass.deadline}
+	}
+	if err := e.pass.recordTime(); err != nil {
+		e.refused = err
+		return opjournal.NotDelivered{Transient: true, Cause: err, SettleBy: e.pass.deadline}
 	}
 	at := e.pass.clk.Now()
 	e.emitted = true
 	if err := e.pass.emit(d.Text); err != nil {
 		e.emitErr = err
-		return opjournal.NotDelivered{Cause: fmt.Errorf("writing the hook context: %w", err)}
-	}
-	e.ackAllowed = e.pass.ackAllowed(len(d.Ops))
-	if !e.ackAllowed {
-		return opjournal.Unknown{Cause: errLaneHookDeadline}
+		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("writing the hook context: %w", err), SettleBy: e.pass.deadline}
 	}
 	return opjournal.Delivered{
 		Record: opjournal.DeliveryRecord{
@@ -425,32 +554,39 @@ func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Write
 // hookDrainLane runs the in-band pass for an injecting drain when conversation
 // conv holds an open lane op; knownDue says the drain's fast path already
 // found one, so the probe is not run again. write writes the drain's one hook
-// context with the lane text; legacy is the count of legacy nudges that
-// context also carries, which the pass's deadline answer counts beside its
-// own ops. The pass records its delivery by hookLaneSettleBy, which leaves
-// the drain the archive margin to ack or release them. With nothing due it
-// costs the one keyed probe and writes nothing. The drain rings the lane host
-// itself (hookLaneRing) when it is done.
-func hookDrainLane(sessions beads.Store, conv string, knownDue bool, provider string, payload []byte, legacy int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
+// context with the lane text, which may take up to room bytes of it
+// (hookLaneTextRoom); legacy is the count of legacy nudges that context also
+// carries, after whose ack the drain stamps the delivery itself. A context
+// with no room left takes no lane text: the pass does not run. The pass takes
+// and writes a batch only while the deadline leaves time to record it
+// (hookLaneRecordTime), and records its delivery by hookLaneSettleBy, which
+// leaves the drain the archive margin to ack or release the legacy nudges.
+// With nothing due it costs the one keyed probe and writes nothing. The drain
+// rings the lane host itself (hookLaneRing) when it is done.
+func hookDrainLane(sessions beads.Store, conv string, knownDue bool, payload []byte, legacy, room int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
 	if !knownDue && !hookLaneDue(sessions, conv, stderr) {
+		return hookLaneOutcome{}
+	}
+	if room <= 0 {
+		fmt.Fprintf(stderr, "gc nudge drain: conversation lanes: conversation %s: the hook context leaves no room for lane notices; they wait for the next drain or the lane host\n", conv) //nolint:errcheck // best-effort stderr
 		return hookLaneOutcome{}
 	}
 	ctx, cancel := hookLaneContext()
 	defer cancel()
 	return hookLanePass{
-		sessions: sessions,
-		conv:     conv,
-		fence:    hookLaneFence(),
-		leaseTTL: hookLaneLeaseTTL(time.Now()),
-		settleBy: hookLaneSettleBy(),
-		provider: provider,
-		payload:  payload,
-		clk:      clock.Real{},
-		stderr:   stderr,
-		emit:     write,
-		ackAllowed: func(laneOps int) bool {
-			return hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", legacy+laneOps), stderr)
-		},
+		sessions:       sessions,
+		conv:           conv,
+		fence:          hookLaneFence(),
+		leaseTTL:       hookLaneLeaseTTL(time.Now()),
+		settleBy:       hookLaneSettleBy(),
+		deadline:       hookLaneDeadline(),
+		room:           room,
+		provider:       os.Getenv("GC_PROVIDER"),
+		payload:        payload,
+		clk:            clock.Real{},
+		stderr:         stderr,
+		emit:           write,
+		recordTime:     hookLaneRecordTime,
 		stampDelivered: legacy == 0,
 	}.run(ctx)
 }

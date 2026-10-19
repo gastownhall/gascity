@@ -17,9 +17,9 @@ import (
 // effect inside the lease.
 var errLeaseTooShort = errors.New("opjournal: no time left in the lease to run the effect")
 
-// errSettleByPassed ends a Done whose delivery's SettleBy passed before the
+// errSettleByPassed ends a Done whose result's SettleBy passed before the
 // Done landed: the batch stays executing until its lease lapses.
-var errSettleByPassed = errors.New("opjournal: the delivery's settle-by time passed before its Done landed; it is taken again, as maybe delivered, once its lease lapses")
+var errSettleByPassed = errors.New("opjournal: the effect's settle-by time passed before its Done landed; it is taken again, as maybe delivered, once its lease lapses")
 
 // resultKind is an effect result's arm.
 type resultKind int
@@ -136,6 +136,19 @@ func (er effectResult) doneArm() DoneArm {
 		return DoneRejected
 	default:
 		return DoneReleased
+	}
+}
+
+// settleBy is the last instant the lane may record the result, zero for no
+// bound: a delivery's or a release's SettleBy.
+func (er effectResult) settleBy() time.Time {
+	switch er.kind {
+	case resultDelivered:
+		return er.delivered.SettleBy
+	case resultNotDelivered:
+		return er.notDelivered.SettleBy
+	default:
+		return time.Time{}
 	}
 }
 
@@ -385,7 +398,7 @@ type doneItem struct {
 // this Take's lease is rewritten at its fresh revision; an op another lane
 // re-took, or that closed otherwise, is left alone (I9). It runs on past ctx,
 // for the time left in the lease bounded by doneMinBudget and doneMaxBudget,
-// but never past a delivery's SettleBy.
+// but never past the result's SettleBy.
 func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectResult, preCall time.Time, res *PassResult) error {
 	er, success := l.settle(tb, er, preCall)
 	now := l.now()
@@ -408,7 +421,7 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	}
 	budget := min(max(tb.lease.Deadline.Sub(now)-doneBudgetSlack, doneMinBudget), doneMaxBudget)
 	var cause error
-	if settleBy := er.delivered.SettleBy; er.kind == resultDelivered && !settleBy.IsZero() && settleBy.Sub(now) < budget {
+	if settleBy := er.settleBy(); !settleBy.IsZero() && settleBy.Sub(now) < budget {
 		budget, cause = settleBy.Sub(now), errSettleByPassed
 	}
 	dctx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), budget, cause)

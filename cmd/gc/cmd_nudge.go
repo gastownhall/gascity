@@ -764,7 +764,8 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// (which depends only on the city and the hook's identity env). The hook
 	// context written is therefore the same as the full path's, so skip the
 	// resolution; a queued item, an open lane op of the hook's conversation
-	// (one keyed probe) or a usage sample takes the full path.
+	// (one keyed probe, asked only while the controller is down:
+	// hookLaneDueWithoutController) or a usage sample takes the full path.
 	wispPrefetched := false
 	if inject && !contextUsage.ok {
 		if explicit && nudgeQueueIsEmpty(explicitCity) {
@@ -774,9 +775,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 			// resolves, so a non-empty reminder still needs that proof. Recheck
 			// the queue too: a nudge enqueued during the lookup must be claimed.
 			if wispExtra == "" && nudgeQueueIsEmpty(explicitCity) {
-				if laneConv != "" {
-					laneDue = hookLaneDue(hookLaneSessionStore(explicitCity, nil, stderr), laneConv, stderr)
-				}
+				laneDue = hookLaneDueWithoutController(laneConv, explicitCity, stepLookup, stderr)
 				if !laneDue {
 					return 0
 				}
@@ -811,14 +810,15 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 
 	// injectLane runs the in-band lane pass for the hook's conversation
 	// (conversation_lane_hook.go). Its text joins the one hook context, after
-	// the legacy nudges out carries (legacy of them).
+	// the legacy nudges out carries (legacy of them), in the room the rest of
+	// that context leaves.
 	injectLane := func(out string, legacy int) hookLaneOutcome {
 		if laneConv == "" {
 			return hookLaneOutcome{}
 		}
 		laneCity = target.cityPath
 		sessions := hookLaneSessionStore(target.cityPath, target.cfg, stderr)
-		return hookDrainLane(sessions, laneConv, laneDue, target.providerFamily(), hookInput, legacy, func(laneText string) error {
+		return hookDrainLane(sessions, laneConv, laneDue, hookInput, legacy, hookLaneTextRoom(injectPrefix, out, wispExtra), func(laneText string) error {
 			emittedHookContext = true
 			return writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+laneText+wispExtra)
 		}, stderr)
@@ -826,6 +826,9 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	// injectLaneOnly is the injecting drain with no legacy nudge to deliver.
 	injectLaneOnly := func() int {
 		lane = injectLane("", 0)
+		if lane.emitErr != nil {
+			fmt.Fprintf(stderr, "gc nudge drain: writing the hook context: %v\n", lane.emitErr) //nolint:errcheck
+		}
 		return 0
 	}
 
@@ -899,9 +902,6 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		out = formatNudgeRuntimeMessage(items)
 	}
 	var writeErr error
-	// lane records the in-band lane pass's part in the hook context; when it
-	// wrote the context, its deadline answer of no releases the legacy nudges
-	// too.
 	if inject {
 		// Fold the clock, the due lane notices and the active formula step
 		// into the nudge so a single provider-formatted payload carries all;
@@ -928,15 +928,8 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	if inject {
 		// gc hook run discards this output if the hook overruns its deadline,
 		// so ack only while there is time to finish; otherwise release the
-		// claims so the next drain delivers the nudges again. A lane pass that
-		// wrote the context and found no time already said so for both; one
-		// that found time has run its Done since, so the deadline is asked
-		// again.
-		ackAllowed := !lane.emitted || lane.ackAllowed
-		if ackAllowed {
-			ackAllowed = hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", len(items)), stderr)
-		}
-		if !ackAllowed {
+		// claims so the next drain delivers the nudges again.
+		if !hookDeadlineAllowsNudgeAck(fmt.Sprintf("%d injected nudge(s)", len(items)), stderr) {
 			if err := releaseQueuedNudgeClaims(target.cityPath, queuedNudgeIDs(items)); err != nil {
 				fmt.Fprintf(stderr, "gc nudge drain: releasing injected nudges: %v; their lease expiry returns them\n", err) //nolint:errcheck
 			}

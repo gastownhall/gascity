@@ -389,6 +389,10 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		f.autoHandoff(t)
 		f.sendMail(t, "status please")
 	}
+	// The controller holds the city's store and answers the step reminder.
+	controllerUp := func(t *testing.T, f hookBudgetFixture) {
+		withActiveWorkStepClient(t, readyWorkTestServer(t, hookCityController(t, f)), "")
+	}
 	return []hookBudgetScenario{
 		{name: "mail check --inject/empty", seed: none, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "mail check --inject/one mail", seed: oneMail, run: mailCheckInject, ceiling: hookBudgetCeiling{Requests: 7, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "status please"},
@@ -401,8 +405,11 @@ func hookBudgetScenarios() []hookBudgetScenario {
 		// the lane store is opened only when an op is open. A family whose
 		// output is dropped pays no probe. A rig-scoped agent's empty prompt
 		// opens two stores: the step reminder reads the rig's, and the probe
-		// the city's sessions store.
+		// the city's sessions store. These rows run with the controller down;
+		// with it up, an empty prompt opens no store at all: the controller
+		// answers the step reminder, and its lane host serves the lanes.
 		{name: "nudge drain --inject/empty", seed: none, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 8, Opens: 1, SessionGets: 0, GetMisses: 0}},
+		{name: "nudge drain --inject/empty controller up", seed: controllerUp, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 0, Opens: 0, SessionGets: 0, GetMisses: 0}},
 		{name: "nudge drain --inject/empty with usage stdin", seed: none, run: nudgeDrainInjectWithUsage, ceiling: hookBudgetCeiling{Requests: 10, Opens: 1, SessionGets: 1, GetMisses: 0}},
 		{name: "nudge drain --inject/active step", seed: func(t *testing.T, f hookBudgetFixture) { f.activeStep(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 9, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "inspect"},
 		{name: "nudge drain --inject/one nudge", seed: func(t *testing.T, f hookBudgetFixture) { f.queueNudge(t) }, run: nudgeDrainInject, ceiling: hookBudgetCeiling{Requests: 14, Opens: 1, SessionGets: 1, GetMisses: 0}, wantStdout: "review queued work"},

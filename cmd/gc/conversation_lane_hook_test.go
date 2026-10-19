@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -22,18 +23,24 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
-// hookLaneHarness runs in-band passes over a lane fixture: the hook's output,
-// its deadline answer and the leases its ops were held under while the output
-// was written are recorded.
+// hookLaneHarness runs in-band passes over a lane fixture: the hook's output
+// and the leases its ops were held under while the output was written are
+// recorded, and its deadline checks answer as record says.
 type hookLaneHarness struct {
 	f        *laneFixture
 	st       *opjournal.Store
 	fence    runtime.InputFence
 	leaseTTL time.Duration
 	payload  []byte
-	ack      bool
-	emitErr  error
-	emitted  []string
+	// record answers the pass's deadline checks in turn; once it runs out,
+	// the deadline leaves time to record a delivery.
+	record []error
+	// deadline is the hook deadline the pass releases a refused batch by.
+	deadline time.Time
+	// room is the room the hook context has for the lane text.
+	room    int
+	emitErr error
+	emitted []string
 	// leases are the leases of the ops open when each output was written.
 	leases []opjournal.Lease
 	stderr bytes.Buffer
@@ -41,9 +48,15 @@ type hookLaneHarness struct {
 
 func newHookLaneHarness(t *testing.T, opts ...laneFixtureOpt) *hookLaneHarness {
 	t.Helper()
+	return newHookLaneHarnessOver(t, newLaneTestStore(), opts...)
+}
+
+// newHookLaneHarnessOver is newHookLaneHarness over the sessions store store.
+func newHookLaneHarnessOver(t *testing.T, store beads.Store, opts ...laneFixtureOpt) *hookLaneHarness {
+	t.Helper()
 	t.Setenv(hookDeadlineEnv, "")
-	f := newLaneFixture(t, opts...)
-	h := &hookLaneHarness{f: f, st: f.laneStore(t), ack: true, leaseTTL: laneHookLeaseTTLNoDeadline}
+	f := newLaneFixtureOver(t, store, opts...)
+	h := &hookLaneHarness{f: f, st: f.laneStore(t), leaseTTL: laneHookLeaseTTLNoDeadline, room: hookLaneContextBudget}
 	h.fence = runtime.InputFence{Generation: 1, Epoch: 1, Token: f.token}
 	return h
 }
@@ -54,6 +67,8 @@ func (h *hookLaneHarness) pass() hookLanePass {
 		conv:     h.f.id,
 		fence:    h.fence,
 		leaseTTL: h.leaseTTL,
+		deadline: h.deadline,
+		room:     h.room,
 		provider: "claude",
 		payload:  h.payload,
 		clk:      h.f.clk,
@@ -63,7 +78,14 @@ func (h *hookLaneHarness) pass() hookLanePass {
 			h.recordLeases()
 			return h.emitErr
 		},
-		ackAllowed:     func(int) bool { return h.ack },
+		recordTime: func() error {
+			if len(h.record) == 0 {
+				return nil
+			}
+			err := h.record[0]
+			h.record = h.record[1:]
+			return err
+		},
 		stampDelivered: true,
 	}
 }
@@ -121,7 +143,7 @@ func TestHookLanePassDeliversNoticesInBand(t *testing.T) {
 	steer := f.propose(t, h.st, f.msg("k-steer", opjournal.RoleNotice, "steer now", notice(opjournal.WhenSteer)))
 
 	out := h.run(t)
-	if !out.emitted || out.emitErr != nil || !out.ackAllowed || !out.accepted {
+	if !out.emitted || out.emitErr != nil || !out.accepted {
 		t.Fatalf("outcome = %+v; want one accepted in-band write; stderr=%s", out, h.stderr.String())
 	}
 	delivered := []opjournal.Op{f.get(t, h.st, boundary.ID), f.get(t, h.st, afterTurn.ID)}
@@ -157,18 +179,20 @@ func TestHookLanePassDeliversNoticesInBand(t *testing.T) {
 	if !out.done {
 		t.Fatalf("outcome = %+v; want the Done reported so the drain rings the lane host", out)
 	}
-	if got := laneSessionMarker(t, f, session.MetadataLastNudgeDeliveredAt); got == "" {
+	if got := laneLastNudgeStamp(t, f); got == "" {
 		t.Fatal("an accepted in-band delivery left no last-nudge stamp")
 	}
 }
 
-func laneSessionMarker(t *testing.T, f *laneFixture, key string) string {
+// laneLastNudgeStamp is the session's last-nudge-delivered stamp, empty when
+// no delivery stamped it.
+func laneLastNudgeStamp(t *testing.T, f *laneFixture) string {
 	t.Helper()
 	b, err := f.store.Get(f.id)
 	if err != nil {
 		t.Fatalf("reading the session row: %v", err)
 	}
-	return b.Metadata[key]
+	return b.Metadata[session.MetadataLastNudgeDeliveredAt]
 }
 
 // TestHookLanePassJoinsTheTurn proves the in-band executor's probe and
@@ -214,75 +238,167 @@ func (e *hookLaneRecordingExec) Deliver(ctx context.Context, d opjournal.Deliver
 	return e.hookLaneExec.Deliver(ctx, d)
 }
 
-// TestHookLanePassDeadlineShortRelease proves a deadline-short write: the
-// batch is released with maybe_delivered (the output may be in the turn),
-// and the next delivery, on this non-deduplicating runtime, carries the
-// plain redelivery note (D-NOTE) and nothing that names the op.
-func TestHookLanePassDeadlineShortRelease(t *testing.T) {
+// TestHookLanePassDeadlineShortTakesNothing proves a pass whose hook deadline
+// leaves no time to record a delivery takes nothing: no Take and no write
+// into the hook context, the op untouched (no attempt, no failure, not maybe
+// delivered) and the skip said on stderr. The next pass with time delivers
+// it once, with no redelivery note.
+func TestHookLanePassDeadlineShortTakesNothing(t *testing.T) {
 	h := newHookLaneHarness(t)
 	f := h.f
 	op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
-	h.ack = false
+	h.record = []error{errLaneHookDeadline}
 	out := h.run(t)
-	if !out.emitted || out.ackAllowed || out.accepted {
-		t.Fatalf("outcome = %+v; want a write the deadline did not let it record", out)
+	if out.emitted || out.accepted || out.done || len(h.emitted) != 0 {
+		t.Fatalf("outcome = %+v, outputs %q; want nothing taken or written", out, h.emitted)
 	}
-	first, err := opjournal.RenderDelivery([]opjournal.Op{op}, opjournal.TextReminder, false)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(h.emitted) != 1 || h.emitted[0] != first || strings.Contains(first, opjournal.RedeliveryNote) {
-		t.Fatalf("first hook output = %q, want %q with no note", h.emitted, first)
+	if len(h.record) != 0 {
+		t.Fatal("the probe did not ask the deadline")
 	}
 	cur := f.get(t, h.st, op.ID)
-	if cur.Status == opjournal.StatusClosed || cur.MaybeDelivered != 1 || cur.Attempt != 1 {
-		t.Fatalf("op after the short release = %s attempt %d maybe_delivered %d; want open, attempt 1, maybe_delivered 1", cur.Status, cur.Attempt, cur.MaybeDelivered)
+	if cur.Status != op.Status || !cur.Lease.IsZero() || cur.Attempt != 0 || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+		t.Fatalf("op = %s lease %v attempt %d failures %d maybe_delivered %d; want it untouched", cur.Status, cur.Lease, cur.Attempt, cur.Failures, cur.MaybeDelivered)
 	}
-	if !out.done {
-		t.Fatalf("outcome after the release = %+v; want the Done reported", out)
+	if want := errLaneHookDeadline.Error() + "; its notices stay out of the hook context"; !strings.Contains(h.stderr.String(), want) {
+		t.Fatalf("stderr = %q; want %q", h.stderr.String(), want)
 	}
-	if got := laneSessionMarker(t, f, session.MetadataLastNudgeDeliveredAt); got != "" {
-		t.Fatalf("a released delivery stamped the session (%q)", got)
+	if got := laneLastNudgeStamp(t, f); got != "" {
+		t.Fatalf("a pass that took nothing stamped the session (%q)", got)
 	}
+	h.wantCleanDelivery(t, h.run(t), op, 1)
+}
 
-	h.ack = true
-	f.clk.Advance(time.Hour)
-	out = h.run(t)
-	if !out.accepted || len(h.emitted) != 2 {
-		t.Fatalf("redelivery outcome = %+v, outputs %d; want an accepted second write; stderr=%s", out, len(h.emitted), h.stderr.String())
+// TestHookLanePassDeadlineRaceReleases proves a batch the pass took while the
+// hook deadline left time, but found none left at the write, is released
+// unwritten: nothing joins the hook context, and the op returns to the lane
+// after the transient backoff with no failure counted and not maybe
+// delivered, so the next pass delivers it once with no redelivery note.
+func TestHookLanePassDeadlineRaceReleases(t *testing.T) {
+	h := newHookLaneHarness(t)
+	f := h.f
+	op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
+	h.record = []error{nil, errLaneHookDeadline}
+	out := h.run(t)
+	if out.emitted || out.accepted || !out.done || len(h.emitted) != 0 {
+		t.Fatalf("outcome = %+v, outputs %q; want a Done releasing the batch, nothing written", out, h.emitted)
 	}
-	cur = f.get(t, h.st, op.ID)
-	want, err := opjournal.RenderDelivery([]opjournal.Op{cur}, opjournal.TextReminder, true)
-	if err != nil {
-		t.Fatal(err)
+	if len(h.record) != 0 {
+		t.Fatal("the write did not ask the deadline again")
 	}
-	if h.emitted[1] != want || !strings.Contains(h.emitted[1], opjournal.RedeliveryNote) {
-		t.Fatalf("redelivered hook output = %q, want %q carrying the note", h.emitted[1], want)
+	cur := f.get(t, h.st, op.ID)
+	if cur.Status != opjournal.StatusAccepted || !cur.Lease.IsZero() || cur.Attempt != 1 || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+		t.Fatalf("op = %s lease %v attempt %d failures %d maybe_delivered %d; want released after attempt 1, no failure, not maybe delivered",
+			cur.Status, cur.Lease, cur.Attempt, cur.Failures, cur.MaybeDelivered)
 	}
-	for _, id := range h.identifiers([]opjournal.Op{cur}) {
-		if id != "" && strings.Contains(h.emitted[1], id) {
-			t.Fatalf("redelivered hook output carries identifier %q", id)
-		}
+	if want := "transient: " + errLaneHookDeadline.Error(); cur.LastError != want {
+		t.Fatalf("last error = %q, want %q", cur.LastError, want)
 	}
-	if cur.Outcome.Arm != opjournal.ArmSucceeded || cur.Attempt != 2 || cur.MaybeDelivered != 1 {
-		t.Fatalf("op = %+v attempt %d maybe_delivered %d; want succeeded on attempt 2 with maybe_delivered 1", cur.Outcome, cur.Attempt, cur.MaybeDelivered)
+	if want := f.clk.Now().Add(opjournal.TransientBackoffBase); !cur.RetryAt.Equal(want) {
+		t.Fatalf("retry at %s, want %s, the first transient backoff", cur.RetryAt, want)
+	}
+	if !strings.Contains(h.stderr.String(), errLaneHookDeadline.Error()) {
+		t.Fatalf("stderr = %q; want the release said", h.stderr.String())
+	}
+	if got := laneLastNudgeStamp(t, f); got != "" {
+		t.Fatalf("a released batch stamped the session (%q)", got)
+	}
+	f.clk.Advance(time.Minute)
+	h.wantCleanDelivery(t, h.run(t), op, 2)
+}
+
+// TestHookLanePassDeadlineShortAtMostOnce proves an at_most_once notice the
+// hook deadline kept out of the hook context, before its Take or at its
+// write, stays open and never maybe delivered, and the next pass with time
+// delivers it exactly once.
+func TestHookLanePassDeadlineShortAtMostOnce(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		record []error
+		// attempt is the attempt that delivers it.
+		attempt int
+	}{
+		{"before the take", []error{errLaneHookDeadline}, 1},
+		{"at the write", []error{nil, errLaneHookDeadline}, 2},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHookLaneHarness(t)
+			f := h.f
+			op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, "once only", notice(opjournal.WhenBoundary), func(r *opjournal.Request) {
+				r.Policy.Guarantee = opjournal.GuaranteeAtMostOnce
+			}))
+			h.record = tc.record
+			h.run(t)
+			if cur := f.get(t, h.st, op.ID); cur.Status == opjournal.StatusClosed || cur.MaybeDelivered != 0 || cur.Failures != 0 || len(h.emitted) != 0 {
+				t.Fatalf("op = %s %+v maybe_delivered %d failures %d, outputs %q; want it open, unwritten and never maybe delivered",
+					cur.Status, cur.Outcome, cur.MaybeDelivered, cur.Failures, h.emitted)
+			}
+			f.clk.Advance(time.Minute)
+			h.wantCleanDelivery(t, h.run(t), op, tc.attempt)
+		})
 	}
 }
 
-// TestHookLanePassDeadlineShortAtMostOnce proves an at_most_once notice whose
-// write the deadline cut short closes failed{ambiguous_delivery}: it is never
-// delivered again.
-func TestHookLanePassDeadlineShortAtMostOnce(t *testing.T) {
-	h := newHookLaneHarness(t)
-	f := h.f
-	op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, "once only", notice(opjournal.WhenBoundary), func(r *opjournal.Request) {
-		r.Policy.Guarantee = opjournal.GuaranteeAtMostOnce
-	}))
-	h.ack = false
-	h.run(t)
-	cur := f.get(t, h.st, op.ID)
-	if cur.Status != opjournal.StatusClosed || cur.Outcome.Arm != opjournal.ArmFailed || cur.Outcome.Reason != opjournal.ReasonAmbiguousDelivery {
-		t.Fatalf("op = %s %+v; want failed{ambiguous_delivery}", cur.Status, cur.Outcome)
+// TestHookLanePassDeadlineRaceReleaseEndsAtTheDeadline proves the release of
+// a batch the pass did not get in front of the model, the deadline refusing
+// the write or the write failing, runs only to the hook deadline, not to the
+// floor of a Done's budget: a ledger too slow to land it by then leaves the op
+// executing with no failure counted, for the lane to take again once the
+// hook's lease lapses.
+func TestHookLanePassDeadlineRaceReleaseEndsAtTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		record  []error
+		emitErr error
+		// writes is how many writes the pass tries: none once the deadline
+		// refuses, one that fails.
+		writes int
+	}{
+		{"the deadline refused the write", []error{nil, errLaneHookDeadline}, nil, 0},
+		{"the write failed", nil, errors.New("broken pipe"), 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var deadlines []time.Time
+			h := newHookLaneHarnessOver(t, doneStallingStore{laneTestStore: newLaneTestStore(), deadlines: &deadlines})
+			f := h.f
+			op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
+			h.record = tc.record
+			h.emitErr = tc.emitErr
+			h.deadline = f.clk.Now().Add(100 * time.Millisecond)
+			start := time.Now()
+			out := h.run(t)
+			if out.emitted != (tc.writes > 0) || len(h.emitted) != tc.writes || out.done {
+				t.Fatalf("outcome = %+v, outputs %q; want %d write(s) and no Done landed", out, h.emitted, tc.writes)
+			}
+			if len(deadlines) != 1 || !deadlines[0].Before(start.Add(time.Second)) {
+				t.Fatalf("release batch deadlines = %v; want one, by the hook deadline 100ms after %s", deadlines, start)
+			}
+			cur := f.get(t, h.st, op.ID)
+			if cur.Status != opjournal.StatusExecuting || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+				t.Fatalf("op = %s failures %d maybe_delivered %d; want it executing, no failure counted", cur.Status, cur.Failures, cur.MaybeDelivered)
+			}
+		})
+	}
+}
+
+// wantCleanDelivery asserts out is the harness's one write, op's delivery
+// with no redelivery note, and that op closed succeeded on attempt with no
+// failure counted, never maybe delivered.
+func (h *hookLaneHarness) wantCleanDelivery(t *testing.T, out hookLaneOutcome, op opjournal.Op, attempt int) {
+	t.Helper()
+	if !out.accepted || len(h.emitted) != 1 {
+		t.Fatalf("outcome = %+v, outputs %d; want one accepted write; stderr=%s", out, len(h.emitted), h.stderr.String())
+	}
+	want, err := opjournal.RenderDelivery([]opjournal.Op{op}, opjournal.TextReminder, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h.emitted[0] != want || strings.Contains(h.emitted[0], opjournal.RedeliveryNote) {
+		t.Fatalf("hook output = %q, want %q with no redelivery note", h.emitted[0], want)
+	}
+	cur := h.f.get(t, h.st, op.ID)
+	if cur.Outcome.Arm != opjournal.ArmSucceeded || cur.Attempt != attempt || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+		t.Fatalf("op = %+v attempt %d failures %d maybe_delivered %d; want succeeded on attempt %d, no failure, never maybe delivered",
+			cur.Outcome, cur.Attempt, cur.Failures, cur.MaybeDelivered, attempt)
 	}
 }
 
@@ -405,18 +521,129 @@ func TestHookLanePassHonorsTheContentGate(t *testing.T) {
 }
 
 // TestHookLanePassWriteFailure proves a hook context that could not be
-// written releases the batch as not delivered, with no maybe_delivered.
+// written releases the batch as a transient miss: the write error is
+// reported, and the op returns to the lane after the transient backoff with
+// no failure counted and not maybe delivered, so an at_most_once notice stays
+// open too. The next pass delivers it once with no redelivery note.
 func TestHookLanePassWriteFailure(t *testing.T) {
-	h := newHookLaneHarness(t)
-	op := h.f.propose(t, h.st, h.f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary)))
-	h.emitErr = errors.New("broken pipe")
-	out := h.run(t)
-	if !out.emitted || out.emitErr == nil || out.accepted {
-		t.Fatalf("outcome = %+v; want the write error reported", out)
+	for _, guarantee := range []opjournal.Guarantee{opjournal.GuaranteeAtLeastOnce, opjournal.GuaranteeAtMostOnce} {
+		t.Run(string(guarantee), func(t *testing.T) {
+			h := newHookLaneHarness(t)
+			f := h.f
+			op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, "mail arrived", notice(opjournal.WhenBoundary), func(r *opjournal.Request) {
+				r.Policy.Guarantee = guarantee
+			}))
+			h.emitErr = errors.New("broken pipe")
+			out := h.run(t)
+			if !out.emitted || !errors.Is(out.emitErr, h.emitErr) || out.accepted || !out.done {
+				t.Fatalf("outcome = %+v; want the write error reported and a Done releasing the batch", out)
+			}
+			cur := f.get(t, h.st, op.ID)
+			if cur.Status != opjournal.StatusAccepted || !cur.Lease.IsZero() || cur.Attempt != 1 || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+				t.Fatalf("op = %s lease %v attempt %d failures %d maybe_delivered %d; want released after attempt 1, no failure, not maybe delivered",
+					cur.Status, cur.Lease, cur.Attempt, cur.Failures, cur.MaybeDelivered)
+			}
+			if want := "transient: writing the hook context: broken pipe"; cur.LastError != want {
+				t.Fatalf("last error = %q, want %q", cur.LastError, want)
+			}
+			if want := f.clk.Now().Add(opjournal.TransientBackoffBase); !cur.RetryAt.Equal(want) {
+				t.Fatalf("retry at %s, want %s, the first transient backoff", cur.RetryAt, want)
+			}
+			if got := laneLastNudgeStamp(t, f); got != "" {
+				t.Fatalf("a failed write stamped the session (%q)", got)
+			}
+			h.emitErr, h.emitted = nil, nil
+			f.clk.Advance(time.Minute)
+			h.wantCleanDelivery(t, h.run(t), op, 2)
+		})
 	}
-	cur := h.f.get(t, h.st, op.ID)
-	if cur.Status == opjournal.StatusClosed || cur.MaybeDelivered != 0 || cur.Failures != 1 {
-		t.Fatalf("op = %s maybe_delivered %d failures %d; want open, not maybe delivered, one failure", cur.Status, cur.MaybeDelivered, cur.Failures)
+}
+
+// TestHookLanePassTakesOnlyWhatFitsTheRoom proves the pass holds its batch to
+// the room the hook context has for the lane text (Caps.MaxText): with room
+// for one notice, it writes that notice alone and leaves the next untaken,
+// and the next pass delivers it.
+func TestHookLanePassTakesOnlyWhatFitsTheRoom(t *testing.T) {
+	h := newHookLaneHarness(t)
+	f := h.f
+	first := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, strings.Repeat("a", 400), notice(opjournal.WhenBoundary)))
+	second := f.propose(t, h.st, f.msg("k2", opjournal.RoleNotice, strings.Repeat("b", 400), notice(opjournal.WhenBoundary)))
+	alone, err := opjournal.RenderDelivery([]opjournal.Op{first}, opjournal.TextReminder, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.room = len(alone)
+	if out := h.run(t); !out.accepted || len(h.emitted) != 1 || h.emitted[0] != alone {
+		t.Fatalf("outcome = %+v, outputs %q; want the first notice alone, its %d bytes", out, h.emitted, len(alone))
+	}
+	if cur := f.get(t, h.st, second.ID); cur.Status == opjournal.StatusClosed || cur.Attempt != 0 {
+		t.Fatalf("second notice = %s attempt %d; want it left untaken", cur.Status, cur.Attempt)
+	}
+	h.emitted = nil
+	if out := h.run(t); !out.accepted || len(h.emitted) != 1 || !strings.Contains(h.emitted[0], strings.Repeat("b", 400)) {
+		t.Fatalf("next pass = %+v, outputs %q; want the second notice", out, h.emitted)
+	}
+}
+
+// TestHookLanePassLeavesANoticeTooLongForTheRoom proves a notice whose text
+// alone is over the room is not taken: nothing is written, and the op is left
+// untouched for a runtime with room.
+func TestHookLanePassLeavesANoticeTooLongForTheRoom(t *testing.T) {
+	h := newHookLaneHarness(t)
+	f := h.f
+	op := f.propose(t, h.st, f.msg("k1", opjournal.RoleNotice, strings.Repeat("a", 400), notice(opjournal.WhenBoundary)))
+	alone, err := opjournal.RenderDelivery([]opjournal.Op{op}, opjournal.TextReminder, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h.room = len(alone) - 1
+	if out := h.run(t); out.emitted || out.done || len(h.emitted) != 0 {
+		t.Fatalf("outcome = %+v, outputs %q; want nothing taken or written", out, h.emitted)
+	}
+	if cur := f.get(t, h.st, op.ID); cur.Status == opjournal.StatusClosed || cur.Attempt != 0 || !cur.Lease.IsZero() {
+		t.Fatalf("op = %s attempt %d lease %v; want it untouched", cur.Status, cur.Attempt, cur.Lease)
+	}
+}
+
+// TestHookLaneDeliverRefusesATextOverTheRoom proves Deliver writes no text
+// longer than the room, whatever batch it is handed: it releases the batch as
+// a transient miss by the hook deadline and keeps the reason, and a text that
+// fits is written.
+func TestHookLaneDeliverRefusesATextOverTheRoom(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	var emitted []string
+	exec := &hookLaneExec{pass: hookLanePass{
+		room:       10,
+		deadline:   deadline,
+		clk:        clock.Real{},
+		emit:       func(text string) error { emitted = append(emitted, text); return nil },
+		recordTime: func() error { return nil },
+	}}
+	res := exec.Deliver(context.Background(), opjournal.Delivery{Text: strings.Repeat("x", 11)})
+	if nd, ok := res.(opjournal.NotDelivered); !ok || !nd.Transient || !errors.Is(nd.Cause, errLaneHookNoRoom) || !nd.SettleBy.Equal(deadline) {
+		t.Fatalf("Deliver(11 bytes) = %#v; want a transient release over the room, by the deadline", res)
+	}
+	if len(emitted) != 0 || exec.emitted || !errors.Is(exec.refused, errLaneHookNoRoom) {
+		t.Fatalf("outputs %q (emitted %v), refused %v; want nothing written and the refusal kept", emitted, exec.emitted, exec.refused)
+	}
+	if res := exec.Deliver(context.Background(), opjournal.Delivery{Text: strings.Repeat("x", 10)}); len(emitted) != 1 {
+		t.Fatalf("Deliver(10 bytes) = %#v, outputs %q; want the text that fits written", res, emitted)
+	} else if _, ok := res.(opjournal.Delivered); !ok {
+		t.Fatalf("Deliver(10 bytes) = %#v; want Delivered", res)
+	}
+}
+
+// TestHookLaneTextRoom proves the room the hook context leaves the lane text:
+// the budget less the drain's own text, and none once that text fills it.
+func TestHookLaneTextRoom(t *testing.T) {
+	if got := hookLaneTextRoom(); got != hookLaneContextBudget {
+		t.Fatalf("room beside nothing = %d, want the budget %d", got, hookLaneContextBudget)
+	}
+	if got := hookLaneTextRoom("clock\n", "", "step"); got != hookLaneContextBudget-10 {
+		t.Fatalf("room beside 10 bytes = %d, want %d", got, hookLaneContextBudget-10)
+	}
+	if got := hookLaneTextRoom(strings.Repeat("x", hookLaneContextBudget)); got > 0 {
+		t.Fatalf("room beside a full context = %d, want none", got)
 	}
 }
 
@@ -574,8 +801,8 @@ func (f *hookLaneDrainFixture) drain(t *testing.T) hookBudgetRun {
 
 // TestNudgeDrainInjectLaneGolden pins the injecting drain's hook output with
 // lane notices due: alone, beside a legacy nudge, with a prompt left for the
-// lane host, and after a deadline-short release (the plain note). The output
-// is one hook context, and it carries no identifier (I14).
+// lane host, and after a delivery that ended unknown (the plain note). The
+// output is one hook context, and it carries no identifier (I14).
 func TestNudgeDrainInjectLaneGolden(t *testing.T) {
 	goldenDir, err := filepath.Abs(filepath.Join("testdata", "hook_lane"))
 	if err != nil {
@@ -585,8 +812,6 @@ func TestNudgeDrainInjectLaneGolden(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		seed func(t *testing.T, f *hookLaneDrainFixture) []opjournal.Op
-		// short runs a first drain the deadline cuts short.
-		short bool
 		// waits says the ops stay for the lane host.
 		waits bool
 	}{
@@ -600,29 +825,13 @@ func TestNudgeDrainInjectLaneGolden(t *testing.T) {
 		{name: "prompt waits", waits: true, seed: func(t *testing.T, f *hookLaneDrainFixture) []opjournal.Op {
 			return []opjournal.Op{f.propose(t, "fix the build", func(r *opjournal.Request) { r.Policy.Message.Role = opjournal.RolePrompt })}
 		}},
-		{name: "redelivery note", short: true, seed: func(t *testing.T, f *hookLaneDrainFixture) []opjournal.Op {
-			return []opjournal.Op{f.propose(t, "mail arrived")}
+		{name: "redelivery note", seed: func(t *testing.T, f *hookLaneDrainFixture) []opjournal.Op {
+			return []opjournal.Op{f.maybeDeliver(t, f.propose(t, "mail arrived"))}
 		}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newHookLaneDrainFixture(t)
 			ops := tc.seed(t, f)
-			if tc.short {
-				t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(2*time.Second)))
-				prevStart := hookProcessStart
-				hookProcessStart = time.Now().Add(-100 * time.Hour)
-				first := f.drain(t)
-				hookProcessStart = prevStart
-				t.Setenv(hookDeadlineEnv, "")
-				if !strings.Contains(first.stderr, "hook deadline too close") {
-					t.Fatalf("first drain was not cut short: stderr=%s", first.stderr)
-				}
-				cur, err := f.st.Get(ops[0].ID)
-				if err != nil || cur.MaybeDelivered != 1 {
-					t.Fatalf("op after the short drain = %+v, %v; want maybe_delivered 1", cur, err)
-				}
-				f.ageRetry(t, cur)
-			}
 			run := f.drain(t)
 			if run.code != 0 {
 				t.Fatalf("exit %d; stderr=%s", run.code, run.stderr)
@@ -669,6 +878,37 @@ func TestNudgeDrainInjectLaneGolden(t *testing.T) {
 	}
 }
 
+// maybeDeliver runs a lane pass whose delivery of op ends unknown, as a
+// runtime gone mid-delivery leaves it, and ages its retry gate: op is back on
+// the lane maybe delivered, for the next drain to deliver with the note.
+func (f *hookLaneDrainFixture) maybeDeliver(t *testing.T, op opjournal.Op) opjournal.Op {
+	t.Helper()
+	lane, err := opjournal.NewLane(f.st, laneHostName, clock.Real{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	view, _, _, err := readConversationLaneView(sessionFrontDoor(f.sessions), f.sessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := lane.Pass(context.Background(), view, laneUnknownExec{laneBoundaryExec{boundary: opjournal.TriYes}}); err != nil {
+		t.Fatalf("lane pass: %v", err)
+	}
+	cur, err := f.st.Get(op.ID)
+	if err != nil || cur.Status == opjournal.StatusClosed || cur.MaybeDelivered != 1 {
+		t.Fatalf("op after the unknown delivery = %+v, %v; want it open, maybe delivered on attempt 1", cur, err)
+	}
+	f.ageRetry(t, cur)
+	return cur
+}
+
+// laneUnknownExec is laneBoundaryExec with every delivery ending unknown.
+type laneUnknownExec struct{ laneBoundaryExec }
+
+func (laneUnknownExec) Deliver(context.Context, opjournal.Delivery) opjournal.DeliveryResult {
+	return opjournal.Unknown{Cause: errors.New("the runtime went away mid-delivery")}
+}
+
 // ageRetry moves op's retry gate into the past, as the release's backoff
 // running out would.
 func (f *hookLaneDrainFixture) ageRetry(t *testing.T, op opjournal.Op) {
@@ -687,26 +927,29 @@ func (f *hookLaneDrainFixture) ageRetry(t *testing.T, op opjournal.Op) {
 }
 
 // TestHookLaneReachesModel pins which prompt hooks put their output in front
-// of the model: the JSON formats, and plain text only for the claude family
-// and the opencode and mimocode plugins, the family read from the provider's
-// name, so groq and cerebras (the opencode plugin) and claude spellings count.
+// of the model as the turn starts: the codex and gemini JSON formats, and
+// plain text only for the claude family, the family read from the provider's
+// name, so claude spellings count. The opencode and mimocode plugins, which
+// groq and cerebras run too, drain for every session in their process, and
+// antigravity drains before every model call into an ephemeral message, so
+// their notices wait for the lane host.
 func TestHookLaneReachesModel(t *testing.T) {
 	for _, tc := range []struct {
 		format, provider string
 		want             bool
 	}{
 		{"", "claude", true},
-		{"", "opencode", true},
-		{"", "mimocode", true},
-		{"", "groq", true},
-		{"", "cerebras", true},
 		{"", "claude-eco", true},
 		{"", "claude/tmux-cli", true},
 		{"", " Claude ", true},
 		{hookOutputFormatCodex, "codex", true},
 		{hookOutputFormatGemini, "gemini", true},
-		{hookOutputFormatAntigravity, "antigravity", true},
+		{hookOutputFormatAntigravity, "antigravity", false},
 		{" Codex ", "", true},
+		{"", "opencode", false},
+		{"", "mimocode", false},
+		{"", "groq", false},
+		{"", "cerebras", false},
 		{"", "cursor", false},
 		{"", "copilot", false},
 		{"", "kiro", false},
@@ -753,20 +996,25 @@ func (f *hookLaneDrainFixture) countLaneLists(t *testing.T) *laneListCounts {
 	return lists
 }
 
-// TestNudgeDrainInjectLaneSkipsFamiliesWithoutInBandOutput proves a family
-// whose prompt hook does not put plain text in front of the model (cursor,
-// copilot) takes no lane op and does not even probe for one: the notice waits
-// for the lane host.
+// TestNudgeDrainInjectLaneSkipsFamiliesWithoutInBandOutput proves a hook
+// whose output does not reach the model at the start of the turn takes no
+// lane op and does not even probe for one: plain text for a family that does
+// not show it (cursor, copilot), and antigravity's ephemeral message, which
+// it writes before every model call. The notice waits for the lane host.
 func TestNudgeDrainInjectLaneSkipsFamiliesWithoutInBandOutput(t *testing.T) {
-	for _, family := range []string{"cursor", "copilot", ""} {
-		t.Run("family "+family, func(t *testing.T) {
+	for _, tc := range []struct{ format, family string }{
+		{"", "cursor"}, {"", "copilot"}, {"", ""}, {hookOutputFormatAntigravity, "antigravity"},
+	} {
+		t.Run(fmt.Sprintf("format %q family %q", tc.format, tc.family), func(t *testing.T) {
 			f := newHookLaneDrainFixture(t)
-			t.Setenv("GC_PROVIDER", family)
+			t.Setenv("GC_PROVIDER", tc.family)
 			op := f.propose(t, "mail arrived")
 			lists := f.countLaneLists(t)
-			run := f.drain(t)
+			run := recordHookCommand(t, func(stdout, stderr io.Writer) int {
+				return cmdNudgeDrainWithFormat(nil, true, tc.format, stdout, stderr)
+			})
 			if strings.Contains(run.stdout, "mail arrived") {
-				t.Fatalf("a %q hook wrote the lane notice:\n%s", family, run.stdout)
+				t.Fatalf("a %q %q hook wrote the lane notice:\n%s", tc.format, tc.family, run.stdout)
 			}
 			if cur, err := f.st.Get(op.ID); err != nil || cur.Attempt != 0 || cur.Status == opjournal.StatusClosed {
 				t.Fatalf("op = %+v, %v; want it left for the lane host", cur, err)
@@ -851,7 +1099,50 @@ func TestHookLaneSettleBy(t *testing.T) {
 	}
 	t.Setenv(hookDeadlineEnv, "soon")
 	if got := hookLaneSettleBy(); !got.IsZero() {
-		t.Fatalf("unparseable deadline: settle by %s, want no bound (the ack check refuses the delivery)", got)
+		t.Fatalf("unparseable deadline: settle by %s, want no bound (the deadline check refuses before the Take)", got)
+	}
+}
+
+// TestHookLaneRecordTime proves the pass's deadline check: there is time to
+// record a delivery without a deadline or with the archive margin still
+// ahead, none once the margin is gone, and a deadline that does not parse
+// refuses with its parse error.
+func TestHookLaneRecordTime(t *testing.T) {
+	prevStart := hookProcessStart
+	t.Cleanup(func() { hookProcessStart = prevStart })
+	hookProcessStart = time.Now().Add(-100 * time.Hour)
+	t.Setenv(hookDeadlineEnv, "")
+	if err := hookLaneRecordTime(); err != nil {
+		t.Fatalf("no deadline: %v, want time to record", err)
+	}
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(time.Minute)))
+	if err := hookLaneRecordTime(); err != nil {
+		t.Fatalf("a minute left: %v, want time to record", err)
+	}
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(time.Second)))
+	if err := hookLaneRecordTime(); !errors.Is(err, errLaneHookDeadline) {
+		t.Fatalf("a second left: %v, want %v", err, errLaneHookDeadline)
+	}
+	t.Setenv(hookDeadlineEnv, "soon")
+	if err := hookLaneRecordTime(); err == nil || errors.Is(err, errLaneHookDeadline) || !strings.Contains(err.Error(), hookDeadlineEnv) {
+		t.Fatalf("unparseable deadline: %v, want the parse error", err)
+	}
+}
+
+// TestHookLaneDeadline proves a refused batch's release is bounded by the
+// inherited hook deadline itself, and by nothing without one or with one that
+// does not parse.
+func TestHookLaneDeadline(t *testing.T) {
+	deadline := time.Now().Add(time.Minute).Truncate(time.Millisecond)
+	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(deadline))
+	if got := hookLaneDeadline(); !got.Equal(deadline) {
+		t.Fatalf("deadline = %s, want %s", got, deadline)
+	}
+	for _, raw := range []string{"", "soon"} {
+		t.Setenv(hookDeadlineEnv, raw)
+		if got := hookLaneDeadline(); !got.IsZero() {
+			t.Fatalf("%s=%q: deadline = %s, want none", hookDeadlineEnv, raw, got)
+		}
 	}
 }
 
@@ -1016,31 +1307,48 @@ func withShortHookDeadline(t *testing.T, fn func()) {
 	fn()
 }
 
-// TestNudgeDrainInjectLaneShortDeadlineReleasesLegacy proves one deadline
-// answer covers a combined write: when it refuses, the legacy nudge the lane
-// pass wrote alongside its notice is released for redelivery, never acked,
-// and the lane op is maybe delivered. The answer counts both.
-func TestNudgeDrainInjectLaneShortDeadlineReleasesLegacy(t *testing.T) {
-	f := newHookLaneDrainFixture(t)
-	f.queueNudge(t)
-	op := f.propose(t, "mail arrived")
-	var run hookBudgetRun
-	withShortHookDeadline(t, func() { run = f.drain(t) })
-	if !strings.Contains(run.stdout, "review queued work") || !strings.Contains(run.stdout, "mail arrived") {
-		t.Fatalf("combined output missing a part:\n%s", run.stdout)
-	}
-	if !strings.Contains(run.stderr, "2 injected nudge(s)") {
-		t.Fatalf("stderr = %q; want the deadline answer to count the legacy nudge and the notice", run.stderr)
-	}
-	state, err := nudgequeue.LoadState(f.cityDir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(state.Pending) != 1 {
-		t.Fatalf("legacy nudge not released: pending %d in flight %d dead %d; stderr=%s", len(state.Pending), len(state.InFlight), len(state.Dead), run.stderr)
-	}
-	if cur, err := f.st.Get(op.ID); err != nil || cur.MaybeDelivered != 1 || cur.Status == opjournal.StatusClosed {
-		t.Fatalf("lane op = %+v, %v; want open with maybe_delivered 1", cur, err)
+// TestNudgeDrainInjectLaneShortDeadlineTakesNothing proves a drain whose hook
+// deadline leaves no time to record a delivery takes no lane op: the notice
+// stays out of the hook context, untouched (no attempt, no failure, not maybe
+// delivered) for the next drain or the lane host, and the skip is said on
+// stderr. A legacy nudge the drain wrote alone is released for redelivery,
+// never acked.
+func TestNudgeDrainInjectLaneShortDeadlineTakesNothing(t *testing.T) {
+	for _, legacy := range []bool{true, false} {
+		t.Run(fmt.Sprintf("legacy nudge %v", legacy), func(t *testing.T) {
+			f := newHookLaneDrainFixture(t)
+			if legacy {
+				f.queueNudge(t)
+			}
+			op := f.propose(t, "mail arrived")
+			var run hookBudgetRun
+			withShortHookDeadline(t, func() { run = f.drain(t) })
+			if run.code != 0 || strings.Contains(run.stdout, "mail arrived") || strings.Contains(run.stdout, "review queued work") != legacy {
+				t.Fatalf("exit %d, output:\n%s\nwant the notice kept out and the legacy nudge (%v) written", run.code, run.stdout, legacy)
+			}
+			if !strings.Contains(run.stderr, errLaneHookDeadline.Error()) {
+				t.Fatalf("stderr = %q; want the pass's skip said", run.stderr)
+			}
+			if cur, err := f.st.Get(op.ID); err != nil || cur.Status == opjournal.StatusClosed || cur.Attempt != 0 || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+				t.Fatalf("lane op = %+v, %v; want it untouched", cur, err)
+			}
+			if len(f.pokes) != 0 {
+				t.Fatalf("doorbells = %v; want none, the pass recorded no Done", f.pokes)
+			}
+			if !legacy {
+				return
+			}
+			if !strings.Contains(run.stderr, "too close to ack 1 injected nudge(s)") {
+				t.Fatalf("stderr = %q; want the legacy ack refused", run.stderr)
+			}
+			state, err := nudgequeue.LoadState(f.cityDir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(state.Pending) != 1 {
+				t.Fatalf("legacy nudge not released: pending %d in flight %d dead %d; stderr=%s", len(state.Pending), len(state.InFlight), len(state.Dead), run.stderr)
+			}
+		})
 	}
 }
 
@@ -1071,6 +1379,156 @@ func TestNudgeDrainInjectLaneCarriesTheStepReminder(t *testing.T) {
 	run := f.drain(t)
 	if !strings.Contains(run.stdout, "mail arrived") || !strings.Contains(run.stdout, "inspect") {
 		t.Fatalf("lane context lost a part:\n%s\nstderr=%s", run.stdout, run.stderr)
+	}
+}
+
+// codexHookContextTokenCap is the cap Codex holds a hook handler's
+// additionalContext to when the handler sets no additionalContextLimit, as
+// none in gc's .codex/hooks.json does (codex-rs hooks/src/output_spill.rs).
+const codexHookContextTokenCap = 2500
+
+// codexApproxTokens is the count Codex measures an additionalContext by
+// against its cap: a quarter of its bytes, rounded up (codex-rs
+// utils/string approx_token_count), not the tokens a tokenizer would make.
+func codexApproxTokens(text string) int { return (len(text) + 3) / 4 }
+
+// hookModelContext is the hook context a provider puts in front of the model
+// from a drain's stdout in format: the text itself for the plain format, and
+// the decoded additionalContext of the one document a JSON format writes.
+func hookModelContext(t *testing.T, format, stdout string) string {
+	t.Helper()
+	if format == "" {
+		return stdout
+	}
+	var doc struct {
+		HookSpecificOutput struct {
+			AdditionalContext string `json:"additionalContext"`
+		} `json:"hookSpecificOutput"`
+	}
+	if err := json.Unmarshal([]byte(stdout), &doc); err != nil {
+		t.Fatalf("%s hook output is not one JSON document: %v\n%.300s", format, err, stdout)
+	}
+	return doc.HookSpecificOutput.AdditionalContext
+}
+
+// TestNudgeDrainInjectLaneFitsTheHookContextBudget proves the hook context a
+// drain writes with lane notices in it stays within hookLaneContextBudget, the
+// clock line and the legacy nudge beside them counted, in every format whose
+// output reaches the model, measured as the model gets it (a JSON format's
+// additionalContext, decoded). It stays within Codex's cap as Codex counts
+// it too, for identifier and markup text that a tokenizer would split finer
+// than prose. A backlog over the room goes out over several drains, each
+// notice once.
+func TestNudgeDrainInjectLaneFitsTheHookContextBudget(t *testing.T) {
+	dense := strings.Repeat("gc-7f3a.<op:k/9>&_x2;", 95)
+	for _, tc := range []struct{ name, format string }{
+		{"plain", ""},
+		{"codex", hookOutputFormatCodex},
+		{"gemini", hookOutputFormatGemini},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newHookLaneDrainFixture(t)
+			if tc.format != "" {
+				t.Setenv("GC_PROVIDER", tc.format)
+			}
+			f.queueNudge(t)
+			var ops []opjournal.Op
+			for i := range 6 {
+				key := func(r *opjournal.Request) { r.ClientKey = fmt.Sprintf("k:big-%d", i) }
+				ops = append(ops, f.propose(t, fmt.Sprintf("notice %d %s", i, dense), key))
+			}
+			delivered := func() int {
+				n := 0
+				for _, op := range ops {
+					if cur, err := f.st.Get(op.ID); err == nil && cur.Outcome.Arm == opjournal.ArmSucceeded {
+						n++
+					}
+				}
+				return n
+			}
+			drain := func() string {
+				t.Helper()
+				run := recordHookCommand(t, func(stdout, stderr io.Writer) int {
+					return cmdNudgeDrainWithFormat(nil, true, tc.format, stdout, stderr)
+				})
+				text := hookModelContext(t, tc.format, run.stdout)
+				if len(text) > hookLaneContextBudget || codexApproxTokens(text) > codexHookContextTokenCap {
+					t.Fatalf("hook context is %d bytes, %d tokens as Codex counts them; want at most %d bytes and %d tokens; stderr=%s",
+						len(text), codexApproxTokens(text), hookLaneContextBudget, codexHookContextTokenCap, run.stderr)
+				}
+				return text
+			}
+			if text := drain(); !strings.Contains(text, "review queued work") || !strings.Contains(text, "notice 0 ") {
+				t.Fatalf("first hook context lost the legacy nudge or the first notice:\n%.300s", text)
+			}
+			if n := delivered(); n == 0 || n == len(ops) {
+				t.Fatalf("first drain delivered %d of %d notices; want the ones that fit, not all", n, len(ops))
+			}
+			for range ops {
+				if delivered() == len(ops) {
+					break
+				}
+				if text := drain(); !strings.Contains(text, "notice ") {
+					t.Fatalf("a later hook context carries no notice:\n%.300s", text)
+				}
+			}
+			for _, op := range ops {
+				if cur, err := f.st.Get(op.ID); err != nil || cur.Outcome.Arm != opjournal.ArmSucceeded || cur.Attempt != 1 {
+					t.Fatalf("op %s = %+v attempt %d, %v; want each notice delivered once", op.ID, cur.Outcome, cur.Attempt, err)
+				}
+			}
+		})
+	}
+}
+
+// TestNudgeDrainInjectLaneRunsNoPassWithoutRoom proves a drain whose own hook
+// context already fills the budget takes no lane op: its legacy nudge is
+// written alone, the notice stays untouched for a later drain or the lane
+// host, and the skip is said on stderr.
+func TestNudgeDrainInjectLaneRunsNoPassWithoutRoom(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	big := strings.Repeat("y", hookLaneContextBudget)
+	if err := enqueueQueuedNudge(f.cityDir, newQueuedNudge(hookBudgetIdentity, big, time.Now().Add(-time.Minute))); err != nil {
+		t.Fatalf("enqueueQueuedNudge: %v", err)
+	}
+	resetHookBudgetProcessState(t)
+	op := f.propose(t, "mail arrived")
+	run := f.drain(t)
+	if strings.Contains(run.stdout, "mail arrived") || !strings.Contains(run.stdout, big) {
+		t.Fatalf("output carries the notice, or lost the legacy nudge:\n%.200s", run.stdout)
+	}
+	if !strings.Contains(run.stderr, "leaves no room for lane notices") {
+		t.Fatalf("stderr = %q; want the skip said", run.stderr)
+	}
+	if cur, err := f.st.Get(op.ID); err != nil || cur.Status == opjournal.StatusClosed || cur.Attempt != 0 {
+		t.Fatalf("lane op = %+v, %v; want it untouched", cur, err)
+	}
+}
+
+// TestNudgeDrainInjectLaneControllerUpEmptyPromptOpensNoStore proves an empty
+// prompt whose step reminder the controller answered opens no store for
+// lanes, even with a lane op open: the controller's lane host serves the
+// conversation, and the notice stays for it.
+func TestNudgeDrainInjectLaneControllerUpEmptyPromptOpensNoStore(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	op := f.propose(t, "mail arrived")
+	withActiveWorkStepClient(t, readyWorkTestServer(t, hookCityController(t, f.hookBudgetFixture)), "")
+	laneStores := 0
+	prev := hookLaneSessionStore
+	hookLaneSessionStore = func(string, *config.City, io.Writer) beads.Store {
+		laneStores++
+		return f.sessions
+	}
+	t.Cleanup(func() { hookLaneSessionStore = prev })
+	run := f.drain(t)
+	if run.opens != 0 || laneStores != 0 {
+		t.Fatalf("the drain opened %d stores and asked for the lane store %d times; want none with the controller up", run.opens, laneStores)
+	}
+	if strings.Contains(run.stdout, "mail arrived") || len(f.pokes) != 0 {
+		t.Fatalf("output carries the notice, or rang the lane host %v:\n%s", f.pokes, run.stdout)
+	}
+	if cur, err := f.st.Get(op.ID); err != nil || cur.Status == opjournal.StatusClosed || cur.Attempt != 0 {
+		t.Fatalf("lane op = %+v, %v; want it left for the lane host", cur, err)
 	}
 }
 
@@ -1116,7 +1574,8 @@ func (hookLaneFailingWriter) Write([]byte) (int, error) { return 0, errors.New("
 
 // TestNudgeDrainInjectLaneWriteFailureAcksNothing proves a combined hook
 // context the drain could not write acks neither part: the legacy nudge is
-// recorded failed, not acked, and the lane op is not delivered.
+// recorded failed, not acked, and the lane op is released, not delivered: no
+// failure counted, not maybe delivered.
 func TestNudgeDrainInjectLaneWriteFailureAcksNothing(t *testing.T) {
 	f := newHookLaneDrainFixture(t)
 	f.queueNudge(t)
@@ -1138,8 +1597,29 @@ func TestNudgeDrainInjectLaneWriteFailureAcksNothing(t *testing.T) {
 	if item.ID == "" || item.LastError == "" {
 		t.Fatalf("legacy nudge after a failed write = %+v (pending %d in flight %d dead %d); want it kept with the write failure recorded", item, len(state.Pending), len(state.InFlight), len(state.Dead))
 	}
-	if cur, err := f.st.Get(op.ID); err != nil || cur.Status == opjournal.StatusClosed || cur.Failures != 1 {
-		t.Fatalf("lane op = %+v, %v; want open with one failure", cur, err)
+	if cur, err := f.st.Get(op.ID); err != nil || cur.Status != opjournal.StatusAccepted || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+		t.Fatalf("lane op = %+v, %v; want it released, no failure counted, not maybe delivered", cur, err)
+	}
+}
+
+// TestNudgeDrainInjectLaneOnlyWriteFailureIsReported proves a lane-only hook
+// context the drain could not write is said on stderr, where the combined
+// write's failure is recorded on its legacy nudges, and the lane op is
+// released, not delivered: no failure counted, not maybe delivered.
+func TestNudgeDrainInjectLaneOnlyWriteFailureIsReported(t *testing.T) {
+	f := newHookLaneDrainFixture(t)
+	op := f.propose(t, "mail arrived")
+	run := recordHookCommand(t, func(_, stderr io.Writer) int {
+		return cmdNudgeDrainWithFormat(nil, true, "", hookLaneFailingWriter{}, stderr)
+	})
+	if run.code != 0 {
+		t.Fatalf("exit %d; the hook never fails the prompt; stderr=%s", run.code, run.stderr)
+	}
+	if !strings.Contains(run.stderr, "writing the hook context") || !strings.Contains(run.stderr, "broken pipe") {
+		t.Fatalf("stderr = %q; want the write failure said", run.stderr)
+	}
+	if cur, err := f.st.Get(op.ID); err != nil || cur.Status != opjournal.StatusAccepted || cur.Failures != 0 || cur.MaybeDelivered != 0 {
+		t.Fatalf("lane op = %+v, %v; want it released, no failure counted, not maybe delivered", cur, err)
 	}
 }
 
@@ -1267,7 +1747,7 @@ func (b doneStallingBatcher) ApplyGuarded(ctx context.Context, batch beads.Guard
 }
 
 // TestNudgeDrainInjectLaneSlowDoneReleasesLegacy proves a pass whose deadline
-// answer was yes, but whose Done outlasts the archive margin, retires
+// checks found time, but whose Done outlasts the archive margin, retires
 // nothing: the Done ends at the pass's settle-by time and leaves the lane op
 // executing, to be taken again as maybe delivered once its lease lapses, and
 // the drain asks the deadline again before its ack, so it releases the
@@ -1285,7 +1765,7 @@ func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
 	prevStart := hookProcessStart
 	hookProcessStart = time.Now().Add(-100 * time.Hour)
 	t.Cleanup(func() { hookProcessStart = prevStart })
-	// The full archive margin and 2s more: the pass's deadline answer comes
+	// The full archive margin and 2s more: the pass's deadline checks come
 	// well inside the 2s, and its Done is held past them.
 	t.Setenv(hookDeadlineEnv, hookDeadlineEnvValue(time.Now().Add(hookDeadlineArchiveMarginMax+2*time.Second)))
 	settleBy := hookLaneSettleBy()
@@ -1293,8 +1773,8 @@ func TestNudgeDrainInjectLaneSlowDoneReleasesLegacy(t *testing.T) {
 	if !strings.Contains(run.stdout, "review queued work") || !strings.Contains(run.stdout, "mail arrived") {
 		t.Fatalf("combined output missing a part:\n%s\nstderr=%s", run.stdout, run.stderr)
 	}
-	if strings.Contains(run.stderr, "2 injected nudge(s)") {
-		t.Fatalf("the pass's own deadline answer was no; it must come before %s:\n%s", settleBy, run.stderr)
+	if strings.Contains(run.stderr, errLaneHookDeadline.Error()) {
+		t.Fatalf("the pass's own deadline checks found no time; they must come before %s:\n%s", settleBy, run.stderr)
 	}
 	if len(deadlines) != 1 || deadlines[0].After(settleBy.Add(100*time.Millisecond)) {
 		t.Fatalf("Done batch deadlines = %v; want one, by the settle-by time %s", deadlines, settleBy)
@@ -1395,11 +1875,11 @@ func TestNudgeDrainInjectTokenlessHook(t *testing.T) {
 	}
 }
 
-// TestNudgeDrainInjectJSONFormatsRunTheLanePass: the JSON hook formats run the
-// in-band pass whatever GC_PROVIDER names, and write one JSON document that
-// carries the notice.
+// TestNudgeDrainInjectJSONFormatsRunTheLanePass: the codex and gemini JSON
+// hook formats run the in-band pass whatever GC_PROVIDER names, and write one
+// JSON document that carries the notice.
 func TestNudgeDrainInjectJSONFormatsRunTheLanePass(t *testing.T) {
-	for _, format := range []string{hookOutputFormatCodex, hookOutputFormatGemini, hookOutputFormatAntigravity} {
+	for _, format := range []string{hookOutputFormatCodex, hookOutputFormatGemini} {
 		t.Run(format, func(t *testing.T) {
 			f := newHookLaneDrainFixture(t)
 			t.Setenv("GC_PROVIDER", format)

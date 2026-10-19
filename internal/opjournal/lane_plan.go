@@ -673,17 +673,20 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	if inBand || boundary == TriNo {
 		mode = LinkJoins
 	}
-	batch := tp.formBatch(items, mode, inBand, rp.baseSeq, caps.Dedup, rp.groups)
+	batch := tp.formBatch(items, mode, inBand, rp.baseSeq, caps, rp.groups)
 	if batch != nil {
 		tp.busy = false
 	}
 	return batch
 }
 
-// formBatch picks the batch from the classified items. whole says the runtime
-// deduplicates by delivery key, so a replay group goes whole or not at all;
-// groups holds every replay group's open members, in the class or not.
-func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64, whole bool, groups map[string][]Op) *contentBatch {
+// formBatch picks the batch from the classified items under the runtime's
+// caps. A runtime that deduplicates by delivery key gets a replay group whole
+// or not at all; groups holds every replay group's open members, in the class
+// or not. A head whose text alone is over caps.MaxText waits text_too_long and
+// holds the items behind it.
+func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree bool, baseSeq uint64, caps Caps, groups map[string][]Op) *contentBatch {
+	whole := caps.Dedup
 	for {
 		head := -1
 		for i, it := range items {
@@ -703,9 +706,15 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 		full := false
 		replay := items[head].e.maybeDelivered()
 		group := groups[items[head].e.op.DeliveryKey]
+		text := textBudget{max: caps.MaxText, style: caps.Text, note: replay && !whole}
+		if !text.fits([]Op{items[head].e.op}) {
+			tp.wait(items[head].e.op, WaitTextTooLong, "")
+			items[head].eligible, items[head].stop = false, true
+			continue
+		}
 		if replay {
 			var split bool
-			picked, full, split = pickReplay(items, head, whole, group)
+			picked, full, split = pickReplay(items, head, whole, group, text)
 			if split {
 				// The head waits for its group and, as a blocking waiter,
 				// holds everything after it (I8).
@@ -714,7 +723,7 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 				continue
 			}
 		} else {
-			picked, full = pickFresh(items, head)
+			picked, full = pickFresh(items, head, text)
 		}
 		if !replay || groupHasNonRider(items, head, group) {
 			// A replay group of riders only lost its starter to a close;
@@ -754,12 +763,12 @@ func (tp *takePlan) formBatch(items []contentItem, mode LinkMode, ridersFree boo
 
 // pickReplay picks the head's replay group: the open items that share its
 // delivery key (an item this pass closes has left the group), within the
-// limits. A member that is not eligible, sits behind a stop, or is in group
-// but not among the items (the rules kept it out of the class) is left for a
-// later Take; when whole is set that would split the group, so split is
-// reported and nothing is picked.
-func pickReplay(items []contentItem, head int, whole bool, group []Op) (picked []int, full, split bool) {
-	var lim batchLimits
+// limits and the text budget. A member that is not eligible, sits behind a
+// stop, or is in group but not among the items (the rules kept it out of the
+// class) is left for a later Take; when whole is set that would split the
+// group, so split is reported and nothing is picked.
+func pickReplay(items []contentItem, head int, whole bool, group []Op, text textBudget) (picked []int, full, split bool) {
+	lim := batchLimits{text: text}
 	stopped := false
 	for i, it := range items {
 		if it.stop && i != head {
@@ -817,9 +826,10 @@ func inReplayGroup(items []contentItem, head, i int) bool {
 }
 
 // pickFresh picks the longest fresh prefix from head: it stops at a stop, at
-// a maybe-delivered op and at the first op the limits refuse.
-func pickFresh(items []contentItem, head int) ([]int, bool) {
-	var lim batchLimits
+// a maybe-delivered op and at the first op the limits or the text budget
+// refuse.
+func pickFresh(items []contentItem, head int, text textBudget) ([]int, bool) {
+	lim := batchLimits{text: text}
 	var picked []int
 	for i := head; i < len(items); i++ {
 		it := items[i]
@@ -840,11 +850,14 @@ func pickFresh(items []contentItem, head int) ([]int, bool) {
 	return picked, false
 }
 
-// batchLimits admits ops up to one prompt, MaxBatchOps ops and
-// MaxBatchPayload bytes.
+// batchLimits admits ops up to one prompt, MaxBatchOps ops, MaxBatchPayload
+// bytes and the text budget.
 type batchLimits struct {
 	ops, payload int
 	prompt       bool
+	text         textBudget
+	// admitted are the ops admitted, kept only under a text budget.
+	admitted []Op
 }
 
 func (l *batchLimits) admit(op Op) bool {
@@ -852,10 +865,32 @@ func (l *batchLimits) admit(op Op) bool {
 	if l.ops+1 > MaxBatchOps || l.payload+len(op.Payload) > MaxBatchPayload || (prompt && l.prompt) {
 		return false
 	}
+	if l.text.max > 0 {
+		l.admitted = append(l.admitted, op)
+		if !l.text.fits(l.admitted) {
+			l.admitted = l.admitted[:len(l.admitted)-1]
+			return false
+		}
+	}
 	l.ops++
 	l.payload += len(op.Payload)
 	l.prompt = l.prompt || prompt
 	return true
+}
+
+// textBudget is the most bytes of text one delivery may carry (Caps.MaxText;
+// 0 is no cap), rendered in style, ending in the RedeliveryNote when note is
+// set.
+type textBudget struct {
+	max   int
+	style TextStyle
+	note  bool
+}
+
+// fits reports whether the delivery of ops, a batch the limits admit, renders
+// within the budget.
+func (b textBudget) fits(ops []Op) bool {
+	return b.max == 0 || len(renderDelivery(ops, b.style, b.note)) <= b.max
 }
 
 // dropLoneRiders drops after_turn riders from a batch that holds no

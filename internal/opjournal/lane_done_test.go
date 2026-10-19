@@ -322,3 +322,65 @@ func TestLaneDoneBeforeSettleBySucceeds(t *testing.T) {
 		t.Fatalf("op %s %+v", got.Status, got.Outcome)
 	}
 }
+
+// errNoTimeToWrite is releaseExec's transient cause.
+var errNoTimeToWrite = errors.New("no time left to write the delivery")
+
+// releaseExec is a fake executor whose deliveries write nothing and answer
+// NotDelivered as transient, naming a SettleBy of in after the call, and which
+// calls effect, when set, as each runs.
+func releaseExec(h *laneHarness, in time.Duration, effect func()) *fakeExec {
+	exec := newFakeExec(h.clk)
+	exec.deliver = func(Delivery) DeliveryResult {
+		if effect != nil {
+			effect()
+		}
+		return NotDelivered{Transient: true, Cause: errNoTimeToWrite, SettleBy: h.clk.Now().Add(in)}
+	}
+	return exec
+}
+
+// A release whose Done is still waiting on the store when its SettleBy comes
+// ends then, as a delivery's does, and tries no further batch: the batch stays
+// executing, with no failure counted and nothing maybe delivered.
+func TestLaneDoneReleaseEndsAtSettleBy(t *testing.T) {
+	const settleIn = 50 * time.Millisecond
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("n", RoleNotice, "fyi"))
+	sb := &stallingBatcher{inner: h.batcher.inner}
+	h.batcher.inner = sb
+	lane := h.lane(t, "ctl")
+	lane.sleep = sleepCtx
+	res, err := lane.Pass(context.Background(), view(), releaseExec(h, settleIn, func() { sb.stall.Store(true) }))
+	if !errors.Is(err, errSettleByPassed) {
+		t.Fatalf("pass err = %v, want the settle-by cause", err)
+	}
+	if res.Done != "" || len(res.Closed) != 0 {
+		t.Fatalf("pass reported done %q closed %v though nothing settled", res.Done, res.Closed)
+	}
+	if left := sb.stalled(); len(left) != 1 || left[0] > settleIn {
+		t.Fatalf("the Done's batches had %v left, want one with at most the %s to its SettleBy", left, settleIn)
+	}
+	if got := h.get(t, op.ID); got.Status != StatusExecuting || got.Failures != 0 || got.MaybeDelivered != 0 {
+		t.Fatalf("op %s failures %d maybe_delivered %d, want executing with neither counted", got.Status, got.Failures, got.MaybeDelivered)
+	}
+}
+
+// A release that lands before its SettleBy backs off as transient, counting
+// no failure and marking nothing maybe delivered.
+func TestLaneDoneReleaseBeforeSettleByBacksOff(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneMsg("n", RoleNotice, "fyi"))
+	res, err := h.lane(t, "ctl").Pass(context.Background(), view(), releaseExec(h, 10*time.Second, nil))
+	if err != nil || res.Done != DoneReleased {
+		t.Fatalf("pass = %+v, %v", res, err)
+	}
+	got := h.get(t, op.ID)
+	if got.Status != StatusAccepted || got.Failures != 0 || got.MaybeDelivered != 0 || got.LastError != lastError(lastErrorTransient, errNoTimeToWrite) {
+		t.Fatalf("op %s failures %d maybe_delivered %d last_error %q, want released as transient with neither counted",
+			got.Status, got.Failures, got.MaybeDelivered, got.LastError)
+	}
+	if want := h.clk.Now().Add(TransientBackoffBase); !got.RetryAt.Equal(want) {
+		t.Fatalf("op retries at %s, want %s", got.RetryAt, want)
+	}
+}
