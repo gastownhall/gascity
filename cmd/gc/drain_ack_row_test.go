@@ -222,12 +222,20 @@ func TestDrainAckRowWithoutConditionalWriter(t *testing.T) {
 }
 
 // preE3DoRuntimeDrainAck is doRuntimeDrainAck as it was before E3, frozen as
-// the legacy oracle.
-func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
+// the legacy oracle. verifyAck adds the GC_DRAIN_ACK read-back the legacy
+// path makes after the env ack (verifiedAckDrainOps); the v2 path, whose row
+// is the ack, does not read back.
+func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, verifyAck, jsonOutput bool, stdout, stderr io.Writer) int {
 	drainAckReleaseHeldClaims(cityPath, sn, drainAckCaller{}, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
+	}
+	if verifyAck {
+		if acked, err := dops.isDrainAcked(sn); err != nil || !acked {
+			fmt.Fprintf(stderr, "gc runtime drain-ack: GC_DRAIN_ACK did not persist on session %q\n", sn) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 	}
 	if err := drainAckPokeController(cityPath, reconcilekey.SessionRef(sessionID, sn)); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
@@ -380,7 +388,7 @@ func TestRuntimeDrainAckModeSwitch(t *testing.T) {
 				}
 				target := sessionRuntimeTarget{cityPath: cityPath, display: display, sessionName: tc.sessionName}
 				oracle := runDrainAck(t, store, id, func(dops drainOps, stdout, stderr io.Writer) int {
-					return preE3DoRuntimeDrainAck(dops, cityPath, tc.sessionName, tc.sessionName, "", false, stdout, stderr)
+					return preE3DoRuntimeDrainAck(dops, cityPath, tc.sessionName, tc.sessionName, "", !city.strict, false, stdout, stderr)
 				})
 				got := runDrainAck(t, store, id, func(dops drainOps, stdout, stderr io.Writer) int {
 					return runtimeDrainAck(dops, target, tc.operator, tc.envToken, false, stdout, stderr)

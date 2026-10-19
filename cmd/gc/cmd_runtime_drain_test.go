@@ -1378,6 +1378,35 @@ func TestDoRuntimeDrainAckError(t *testing.T) {
 	}
 }
 
+// lostAckDrainOps models a runtime that resolved a server not hosting the
+// session: the ack write reports success (session-gone is skipped as benign)
+// but GC_DRAIN_ACK never lands.
+type lostAckDrainOps struct{ *fakeDrainOps }
+
+func (lostAckDrainOps) setDrainAck(string) error { return nil }
+
+func TestDoRuntimeDrainAckFailsWhenAckDidNotPersist(t *testing.T) {
+	poked := false
+	old := drainAckPokeController
+	drainAckPokeController = func(string, reconcilekey.Key) error { poked = true; return nil }
+	t.Cleanup(func() { drainAckPokeController = old })
+
+	var stdout, stderr bytes.Buffer
+	code := doRuntimeDrainAck(lostAckDrainOps{newFakeDrainOps()}, t.TempDir(), "worker", "worker", "", drainAckCaller{}, false, &stdout, &stderr)
+	if code != 1 {
+		t.Fatalf("code = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+	}
+	if poked {
+		t.Fatal("controller poked although the ack did not persist")
+	}
+	if !strings.Contains(stderr.String(), "GC_DRAIN_ACK did not persist") {
+		t.Fatalf("stderr = %q, want a did-not-persist error", stderr.String())
+	}
+	if stdout.Len() != 0 {
+		t.Fatalf("stdout = %q, want empty", stdout.String())
+	}
+}
+
 func TestJoinDrainAckMutationErrorsMissingSessionBeadIsIdempotent(t *testing.T) {
 	err := joinDrainAckMutationErrors(
 		fmt.Errorf("setting metadata on %q: %w", "gc-missing", beads.ErrNotFound),

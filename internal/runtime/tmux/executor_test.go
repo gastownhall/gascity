@@ -289,6 +289,38 @@ func TestRunInjectsSocketFlag(t *testing.T) {
 	}
 }
 
+// TestRunPinsCallerServerFromTMUX covers a gc command run inside an agent pane
+// whose TMUX_TMPDIR differs from the one the server was started with. A bare
+// "-L <name>" makes the tmux client ignore $TMUX and resolve the socket
+// directory from TMUX_TMPDIR, so it can reach a different server. When $TMUX
+// names a socket whose basename is the configured SocketName, run pins that
+// exact server with -S; any other $TMUX keeps the -L resolution.
+func TestRunPinsCallerServerFromTMUX(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		tmux string
+		want []string
+	}{
+		{"outside tmux", "", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"inside the named server", "/run/user/1000/tmux-1000/bright-lights,4242,0", []string{"-u", "-S", "/run/user/1000/tmux-1000/bright-lights", "list-sessions"}},
+		{"inside another server", "/tmp/tmux-1000/default,4242,0", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+		{"malformed TMUX", ",4242,0", []string{"-u", "-L", "bright-lights", "list-sessions"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("TMUX", tc.tmux)
+			fe := &fakeExecutor{}
+			tm := &Tmux{cfg: Config{SocketName: "bright-lights"}, exec: fe}
+			_, _ = tm.run("list-sessions")
+			if len(fe.calls) != 1 {
+				t.Fatalf("expected 1 call, got %d", len(fe.calls))
+			}
+			if !slices.Equal(fe.calls[0], tc.want) {
+				t.Fatalf("args = %v, want %v", fe.calls[0], tc.want)
+			}
+		})
+	}
+}
+
 func TestRunNoSocketFlagWhenEmpty(t *testing.T) {
 	fe := &fakeExecutor{}
 	tm := &Tmux{cfg: DefaultConfig(), exec: fe}

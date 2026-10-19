@@ -1339,7 +1339,36 @@ func doRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %s\n", refusal) //nolint:errcheck // best-effort stderr
 		return drainAckRefused
 	}
-	return finishRuntimeDrainAck(dops, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+	return finishRuntimeDrainAck(verifiedAckDrainOps{drainOps: dops}, cityPath, targetName, sn, sessionID, jsonOutput, stdout, stderr)
+}
+
+// verifiedAckDrainOps is the legacy path's drainOps: after the env ack it
+// reads GC_DRAIN_ACK back and fails the ack when the flag did not persist.
+// setDrainAck skips "session gone" errors as benign so a drain-ack racing
+// controller teardown stays a success, but when the runtime resolves a tmux
+// server that does not host this session (for example a stale socket under a
+// different TMUX_TMPDIR), that same skip fabricates success: the agent
+// believes the seat was handed back while the real session keeps holding it.
+// An in-session caller still alive to see this exit code is, by construction,
+// in a session that still exists; for an explicitly named remote target a
+// benign teardown race can trip this, and a retry then reports the session as
+// genuinely gone. The strict path does not need this: its row is the ack.
+type verifiedAckDrainOps struct {
+	drainOps
+}
+
+func (o verifiedAckDrainOps) setDrainAck(sessionName string) error {
+	if err := o.drainOps.setDrainAck(sessionName); err != nil {
+		return err
+	}
+	acked, err := o.isDrainAcked(sessionName)
+	if err != nil {
+		return fmt.Errorf("GC_DRAIN_ACK did not persist on session %q (verify failed: %w); the runtime likely resolved a tmux server that does not host this session (TMUX_TMPDIR mismatch), seat handoff NOT complete", sessionName, err)
+	}
+	if !acked {
+		return fmt.Errorf("GC_DRAIN_ACK did not persist on session %q (verify: flag not set after write); the runtime likely resolved a tmux server that does not host this session (TMUX_TMPDIR mismatch), seat handoff NOT complete", sessionName)
+	}
+	return nil
 }
 
 // finishRuntimeDrainAck is the ack after the release: the env flag, the poke

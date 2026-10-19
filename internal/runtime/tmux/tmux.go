@@ -497,15 +497,35 @@ func (t *Tmux) runCtxRaw(ctx context.Context, args ...string) (string, error) {
 	defer cancel()
 	allArgs := []string{"-u"}
 	if t.cfg.SocketName != "" {
-		allArgs = append(allArgs, "-L", t.cfg.SocketName)
+		socketFlags := []string{"-L", t.cfg.SocketName}
+		// With a bare "-L <name>" the tmux client ignores $TMUX and resolves
+		// the socket DIRECTORY from the caller's TMUX_TMPDIR (else /tmp), so
+		// a gc run inside an agent pane whose environment inherited a
+		// TMUX_TMPDIR different from the server that hosts it talks to the
+		// wrong server and cannot see the caller's own session (e.g.
+		// drain-ack fails "no such session" against a live foreign server,
+		// or fails open as a silent false ack against a stale socket). When
+		// the calling process is inside a tmux whose socket basename matches
+		// SocketName, pin that exact server with -S: $TMUX carries the full
+		// socket path of the server hosting this process's pane, which is by
+		// construction the server that owns the caller's session, regardless
+		// of the inherited TMUX_TMPDIR. Callers outside tmux (the controller,
+		// operator shells) keep the existing -L resolution unchanged.
+		if env := os.Getenv("TMUX"); env != "" {
+			if path := strings.SplitN(env, ",", 2)[0]; path != "" && filepath.Base(path) == t.cfg.SocketName {
+				socketFlags = []string{"-S", path}
+			}
+		}
+		allArgs = append(allArgs, socketFlags...)
 	}
 	allArgs = append(allArgs, args...)
 	return t.exec.executeCtx(ctx, allArgs)
 }
 
 // run executes a tmux command and returns stdout. All commands include -u
-// for UTF-8 regardless of locale; when SocketName is set, -L <socket> is
-// injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
+// for UTF-8 regardless of locale; when SocketName is set, -L <socket> (or
+// -S <path> from $TMUX when the caller sits inside that same named server)
+// is injected after -u (see https://github.com/steveyegge/gastown/issues/1219).
 // Every invocation is bounded by tmuxSubprocessTimeout via runCtx.
 func (t *Tmux) run(args ...string) (string, error) {
 	return t.runCtx(context.Background(), args...)
