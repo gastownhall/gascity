@@ -3591,13 +3591,20 @@ func (t *Tmux) targetLooksLikeAnyProvider(target string, providers ...string) bo
 //
 // Call this after starting Claude and waiting for it to initialize (WaitForCommand),
 // but before sending any prompts. Idempotent: safe to call on sessions without dialogs.
+//
+// ctx carries the session's startup deadline, which the watch for a late Codex
+// dialog may spend a share of (see runtime.WithSessionStartDeadline).
 func (t *Tmux) AcceptStartupDialogs(ctx context.Context, sess string) error {
-	return t.DismissKnownDialogs(ctx, sess, 8*time.Second)
+	return t.dismissKnownDialogs(ctx, sess, 8*time.Second, runtime.WithSessionStartDeadline())
 }
 
 // DismissKnownDialogs dismisses known trust, permissions, and rate-limit
 // dialogs using a bounded timeout.
 func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration) error {
+	return t.dismissKnownDialogs(ctx, sess, timeout)
+}
+
+func (t *Tmux) dismissKnownDialogs(ctx context.Context, sess string, timeout time.Duration, opts ...runtime.StartupDialogOption) error {
 	// Gate external-CLAUDE.md-import auto-acceptance to imports within the
 	// pane's own repository; an import that escapes the repo is left for a
 	// human. Both lookups are best-effort: if either fails, the trust root
@@ -3620,7 +3627,7 @@ func (t *Tmux) DismissKnownDialogs(ctx context.Context, sess string, timeout tim
 			}
 			return nil
 		},
-		runtime.WithTrustedImportRoot(trustRoot),
+		append([]runtime.StartupDialogOption{runtime.WithTrustedImportRoot(trustRoot)}, opts...)...,
 	)
 }
 

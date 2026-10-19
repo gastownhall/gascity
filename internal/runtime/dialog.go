@@ -113,6 +113,10 @@ type startupDialogConfig struct {
 	// workspace tree are accepted automatically; when empty the modal is left
 	// for a human. See externalImportsTrusted.
 	trustedImportRoot string
+	// sessionStart marks ctx's deadline as the session's startup deadline,
+	// which a Codex startup watch may spend a share of. See
+	// WithSessionStartDeadline.
+	sessionStart bool
 }
 
 // WithTrustedImportRoot restricts external-CLAUDE.md-import auto-acceptance to
@@ -123,6 +127,17 @@ type startupDialogConfig struct {
 // read.
 func WithTrustedImportRoot(dir string) StartupDialogOption {
 	return func(c *startupDialogConfig) { c.trustedImportRoot = dir }
+}
+
+// WithSessionStartDeadline marks the call as part of starting the session, with
+// ctx carrying the session's startup deadline ([session] startup_timeout). A
+// Codex pane that has not settled is then watched for a late startup dialog
+// past the dialog timeout, up to codexStartupWatchBudgetFraction of what
+// remains of that deadline (see watchCodexStartup). Calls on a running
+// session, such as the session layer's deferred check before a send, leave it
+// off, so their short timeout still bounds the watch.
+func WithSessionStartDeadline() StartupDialogOption {
+	return func(c *startupDialogConfig) { c.sessionStart = true }
 }
 
 func newStartupDialogConfig(opts []StartupDialogOption) startupDialogConfig {
@@ -344,7 +359,10 @@ func codexStartupPending(content string) bool {
 // such dialog gets a fresh pass: a Codex pane can add up to
 // maxCodexStartupDialogRounds watches and passes. A short timeout shortens each
 // watch, so a 2s one, such as the session layer's deferred Codex check, can end
-// before a dialog Codex draws up to 3.0s after its composer.
+// before a dialog Codex draws up to 3.0s after its composer. With
+// WithSessionStartDeadline and a ctx deadline, the watches of a Codex that has
+// not settled run past timeout, together until codexStartupWatchBudgetFraction
+// of what remained of that deadline at the call.
 func AcceptStartupDialogsWithTimeout(
 	ctx context.Context,
 	timeout time.Duration,
@@ -352,6 +370,10 @@ func AcceptStartupDialogsWithTimeout(
 	sendKeys func(keys ...string) error,
 	opts ...StartupDialogOption,
 ) error {
+	var watchLimit time.Time
+	if newStartupDialogConfig(opts).sessionStart {
+		watchLimit = codexStartupWatchLimit(ctx)
+	}
 	for round := 0; ; round++ {
 		if err := acceptStartupDialogsOnce(ctx, timeout, peek, sendKeys, opts...); err != nil {
 			return err
@@ -359,7 +381,7 @@ func AcceptStartupDialogsWithTimeout(
 		if round == maxCodexStartupDialogRounds {
 			return nil
 		}
-		late, err := watchCodexStartup(ctx, timeout, peek)
+		late, err := watchCodexStartup(ctx, timeout, watchLimit, peek)
 		if err != nil || !late {
 			return err
 		}
@@ -371,22 +393,49 @@ func AcceptStartupDialogsWithTimeout(
 // pass, so one call runs at most maxCodexStartupDialogRounds+1 passes.
 const maxCodexStartupDialogRounds = 3
 
+// codexStartupWatchBudgetFraction caps how much of the caller's remaining
+// startup deadline, measured when AcceptStartupDialogsWithTimeout begins, its
+// watches may reach while Codex has not settled (see watchCodexStartup). The
+// rest stays with the start steps that follow: readiness, session setup and
+// the startup nudge, whose retries take at most half of what then remains.
+const codexStartupWatchBudgetFraction = 0.75
+
+// codexStartupWatchLimit returns the dialog-clock time the watches may reach:
+// codexStartupWatchBudgetFraction of ctx's remaining deadline from now. It is
+// the zero time when ctx has no deadline.
+func codexStartupWatchLimit(ctx context.Context) time.Time {
+	ctxDeadline, ok := ctx.Deadline()
+	if !ok {
+		return time.Time{}
+	}
+	budget := time.Duration(float64(time.Until(ctxDeadline)) * codexStartupWatchBudgetFraction)
+	return dialogClock.Now().Add(budget)
+}
+
 // watchCodexStartup waits for a Codex pane to finish starting and reports
 // whether a startup dialog appeared instead. Codex 0.156+ draws its composer
 // before configuring the session, then can replace it with a dialog such as
-// "Hooks need review" seconds later (1.6-3.0s measured on 0.162.1). The
-// composer's "› " is the same signal the ordered handlers read as "no dialog is
-// coming", so without this watch a late dialog parks the session (#6464).
-// Startup is finished once Codex draws its status line under the composer.
-// Only a starting Codex composer is watched (see codexStartupPending), and only
-// a dialog that newly replaces it triggers another pass. That pass answers only
-// the dialogs the ordered pass recognizes: a late trust prompt is answered once
-// containsWorkspaceTrustDialog matches the 0.156+ wording (#6734). The watch is
-// bounded by timeout and logs when it expires, because a Codex build or config
-// that never draws the status line waits that long on every start.
+// "Hooks need review" or "Trust this folder?" seconds later (1.6-3.0s measured
+// on an idle 0.162.1 host, 30s on a loaded one). The composer's "› " is the
+// same signal the ordered handlers read as "no dialog is coming", so without
+// this watch a late dialog parks the session (#6464). Startup is finished once
+// Codex draws its status line under the composer. Only a starting Codex
+// composer is watched (see codexStartupPending), and only a dialog that newly
+// replaces it triggers another pass, which answers the dialogs the ordered pass
+// recognizes.
+//
+// A slow start, resume or wake on a loaded host can leave Codex unsettled long
+// past timeout with a dialog still to come, and nothing on screen says whether
+// one is. So the watch runs until limit, the share of the session's startup
+// deadline from codexStartupWatchLimit, or until timeout if that is later. A
+// zero limit, from a call that is not a session start (see
+// WithSessionStartDeadline) or has no startup deadline, keeps the plain timeout
+// bound. The watch logs when it expires, because a Codex build or config that
+// never draws the status line waits that long on every start.
 func watchCodexStartup(
 	ctx context.Context,
 	timeout time.Duration,
+	limit time.Time,
 	peek func(lines int) (string, error),
 ) (bool, error) {
 	content, err := peek(startupDialogPeekLines)
@@ -399,7 +448,11 @@ func watchCodexStartup(
 	if !codexStartupPending(content) {
 		return false, nil
 	}
-	deadline := dialogClock.Now().Add(timeout)
+	start := dialogClock.Now()
+	deadline := start.Add(timeout)
+	if limit.After(deadline) {
+		deadline = limit
+	}
 	for dialogClock.Now().Before(deadline) {
 		sleep(ctx, dialogPollInterval)
 		if err := ctx.Err(); err != nil {
@@ -418,7 +471,7 @@ func watchCodexStartup(
 		}
 	}
 	dialogLogf("startup dialogs: Codex drew no status line (\"<model> · <dir>\") under its composer within %v; "+
-		"stopped watching for a late startup dialog", timeout)
+		"stopped watching for a late startup dialog", dialogClock.Now().Sub(start))
 	return false, nil
 }
 
