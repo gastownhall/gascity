@@ -317,10 +317,14 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 	ephemeralRows := `[
 		{"id":"bd-ephemeral","title":"ephemeral","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:02Z","labels":["scope"],"ephemeral":true}
 	]`
+	noHistoryRows := `[
+		{"id":"bd-no-history","title":"no-history","status":"open","issue_type":"task","created_at":"2026-05-01T00:00:01Z","labels":["scope"],"no_history":true}
+	]`
 	cases := []struct {
 		name                  string
 		query                 beads.ListQuery
 		wantIDs               []string
+		wantNoListCall        bool
 		wantIncludeTemplates  bool
 		wantUnlimitedPrelimit bool
 		wantEphemeralQuery    bool
@@ -340,12 +344,13 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 			wantIDs: []string{"bd-history"},
 		},
 		{
-			name:                  "wisps tier keeps no-history and ephemeral rows",
-			query:                 beads.ListQuery{Label: "scope", TierMode: beads.TierWisps},
-			wantIDs:               []string{"bd-no-history", "bd-ephemeral"},
-			wantIncludeTemplates:  true,
-			wantUnlimitedPrelimit: true,
-			wantEphemeralQuery:    true,
+			// Both halves of the wisp tier are bd query reads, so the tier
+			// never lists the issues table's rows.
+			name:               "wisps tier keeps no-history and ephemeral rows",
+			query:              beads.ListQuery{Label: "scope", TierMode: beads.TierWisps},
+			wantIDs:            []string{"bd-no-history", "bd-ephemeral"},
+			wantNoListCall:     true,
+			wantEphemeralQuery: true,
 		},
 		{
 			name:                 "both tiers keeps all storage rows",
@@ -365,6 +370,8 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 				switch {
 				case strings.HasPrefix(cmd, "bd list "):
 					return []byte(listRows), nil
+				case strings.HasPrefix(cmd, "bd query ") && strings.Contains(cmd, "no_history=true"):
+					return []byte(noHistoryRows), nil
 				case strings.HasPrefix(cmd, "bd query "):
 					return []byte(ephemeralRows), nil
 				default:
@@ -377,13 +384,15 @@ func TestBdStoreListStorageTierConformance(t *testing.T) {
 				t.Fatalf("List: %v", err)
 			}
 			listCmd := firstCallWithPrefix(calls, "bd list ")
-			if listCmd == "" {
-				t.Fatalf("calls = %#v, want bd list call", calls)
+			if (listCmd == "") != tc.wantNoListCall {
+				t.Fatalf("bd list presence = %v, want %v; calls = %#v", listCmd != "", !tc.wantNoListCall, calls)
 			}
-			assertCommandContains(t, listCmd, "--include-ephemeral", false)
-			assertCommandContains(t, listCmd, "--include-templates", tc.wantIncludeTemplates)
-			if tc.query.Limit > 0 {
-				assertCommandContains(t, listCmd, "--limit 0", tc.wantUnlimitedPrelimit)
+			if listCmd != "" {
+				assertCommandContains(t, listCmd, "--include-ephemeral", false)
+				assertCommandContains(t, listCmd, "--include-templates", tc.wantIncludeTemplates)
+				if tc.query.Limit > 0 {
+					assertCommandContains(t, listCmd, "--limit 0", tc.wantUnlimitedPrelimit)
+				}
 			}
 			if gotQuery := firstCallWithPrefix(calls, "bd query "); (gotQuery != "") != tc.wantEphemeralQuery {
 				t.Fatalf("bd query presence = %v, want %v; calls = %#v", gotQuery != "", tc.wantEphemeralQuery, calls)
