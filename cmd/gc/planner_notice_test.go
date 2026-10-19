@@ -1182,13 +1182,12 @@ func TestDeliverWarmBindClaimNudgeNudgesAProtocolModeSlotDirectly(t *testing.T) 
 	}
 }
 
-// TestDrainReminderStaysDirectWithTheMessageLane pins that the drain
-// reminder keeps its direct delivery under [ops] authoritative = [message]:
-// the lane's content gate holds content for a draining row, which is the
-// only row this reminder is for.
-func TestDrainReminderStaysDirectWithTheMessageLane(t *testing.T) {
-	f := newLaneFixture(t)
-	newNoticeLaneHost(t, f, "message")
+// wedgeDrainReminderRow puts f's row in the drain reminder's wedge: pool
+// managed, drain-ack stop-pending with a drain to scope a budget to, the
+// runtime alive, idle and unacknowledged. It returns the drain's drain_at
+// and the row's Info.
+func wedgeDrainReminderRow(t *testing.T, f *laneFixture) (string, sessionpkg.Info) {
+	t.Helper()
 	drainAt := f.clk.Now().Add(-3 * time.Hour).UTC().Format(time.RFC3339)
 	if err := f.store.SetMetadataBatch(f.id, map[string]string{
 		"state": string(sessionpkg.StateDraining), "state_reason": sessionpkg.DrainAckStopPendingReason,
@@ -1199,9 +1198,75 @@ func TestDrainReminderStaysDirectWithTheMessageLane(t *testing.T) {
 	mustSetMeta(t, f.sp, f.name, reconcilerDrainAckSourceKey, reconcilerDrainAckSourceValue)
 	f.sp.SetActivity(f.name, f.clk.Now().Add(-30*time.Minute))
 	_, info := f.view(t)
-	if got := sessionpkg.ContentGate(info, true, f.clk.Now()); got != sessionpkg.ContentGateDraining {
-		t.Fatalf("content gate = %q, want draining: the reason the reminder stays direct", got)
+	return drainAt, info
+}
+
+// TestDrainReminderProposesANoticeOpWhenTheLaneExecutesMessages: under
+// [ops] authoritative = [message] the drain reminder is a planner notice op
+// keyed by its drain, not a direct nudge, and its attempt is spent.
+func TestDrainReminderProposesANoticeOpWhenTheLaneExecutesMessages(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	drainAt, info := wedgeDrainReminderRow(t, f)
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
+		t.Fatalf("outcome = %v, want proposed; journal %q", got, out.String())
 	}
+	if n := len(f.nudges()); n != 0 {
+		t.Fatalf("direct nudges = %d, want 0: the lane delivers the reminder", n)
+	}
+	op := f.get(t, f.laneStore(t), noticeOpID(t, f, drainReminderNoticePurpose, drainAt, "", 1))
+	if op.Payload != drainReminderContent(info) || op.Causation != f.id {
+		t.Fatalf("op = %+v, want the drain reminder about %s", op, f.id)
+	}
+	if m := op.Policy.Message; m.Role != opjournal.RoleNotice || m.When != opjournal.WhenBoundary || m.Wake != opjournal.WakeLiveOnly ||
+		op.Producer.Principal != laneDrainNoticeClass.Principal {
+		t.Fatalf("op policy %+v from %q, want the drain notice class %+v", m, op.Producer.Principal, laneDrainNoticeClass)
+	}
+	if want := laneT0.Add(plannerNoticeStartWithin(drainReminderInterval)); !op.StartBy.Equal(want) {
+		t.Errorf("start_by = %s, want %s", op.StartBy, want)
+	}
+	if got := f.meta(t, drainReminderCountKey); got != "1" {
+		t.Fatalf("%s = %q, want 1: the proposal spends the attempt", drainReminderCountKey, got)
+	}
+	if !strings.Contains(out.String(), "drain-reminder: queued drain reminder 1/3 for "+f.name) {
+		t.Errorf("journal = %q", out.String())
+	}
+	// The next attempt, one cadence on, is attempt 2 of the same drain.
+	f.clk.Advance(drainReminderInterval)
+	_, info = f.view(t)
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
+		t.Fatalf("second outcome = %v, want proposed; journal %q", got, out.String())
+	}
+	f.get(t, f.laneStore(t), noticeOpID(t, f, drainReminderNoticePurpose, drainAt, "", 2))
+}
+
+// TestDrainReminderNudgesDirectlyWithTheLaneOff: with [ops] authoritative
+// empty the drain reminder is today's direct nudge and writes no op.
+func TestDrainReminderNudgesDirectlyWithTheLaneOff(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f)
+	_, info := wedgeDrainReminderRow(t, f)
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderDelivered {
+		t.Fatalf("outcome = %v, want delivered; journal %q", got, out.String())
+	}
+	if nudges := f.nudges(); len(nudges) != 1 || nudges[0].Message != drainReminderContent(info) {
+		t.Fatalf("nudges = %+v, want the one direct reminder", nudges)
+	}
+	if n := len(f.openOps(t)); n != 0 {
+		t.Fatalf("open ops = %d, want none", n)
+	}
+}
+
+// TestDrainReminderNudgesAProtocolModeSessionDirectly: no lane can type
+// into a protocol-mode runtime no other host serves, so the reminder is
+// typed directly as before.
+func TestDrainReminderNudgesAProtocolModeSessionDirectly(t *testing.T) {
+	f := newLaneFixture(t)
+	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	newNoticeLaneHost(t, f, "message")
+	_, info := wedgeDrainReminderRow(t, f)
 	var out bytes.Buffer
 	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderDelivered {
 		t.Fatalf("outcome = %v, want delivered; journal %q", got, out.String())
@@ -1209,9 +1274,108 @@ func TestDrainReminderStaysDirectWithTheMessageLane(t *testing.T) {
 	if n := len(f.nudges()); n != 1 {
 		t.Fatalf("direct nudges = %d, want 1", n)
 	}
-	convs, _, err := f.laneStore(t).OpenLaneConversations(10)
-	if err != nil || len(convs) != 0 {
-		t.Fatalf("open lane conversations = %v, %v; want none", convs, err)
+	if n := len(f.openOps(t)); n != 0 {
+		t.Fatalf("open ops = %d, want none", n)
+	}
+}
+
+// TestDrainReminderWaitsOnAnInFlightNotice: while an earlier attempt's
+// notice is being delivered, the next attempt writes nothing and is not
+// spent.
+func TestDrainReminderWaitsOnAnInFlightNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	drainAt, info := wedgeDrainReminderRow(t, f)
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
+		t.Fatalf("outcome = %v, want proposed", got)
+	}
+	st := f.laneStore(t)
+	first := noticeOpID(t, f, drainReminderNoticePurpose, drainAt, "", 1)
+	if _, err := st.Transition(first, opjournal.StatusSubmitted, opjournal.StatusExecuting, laneHostName); err != nil {
+		t.Fatalf("starting the first notice: %v", err)
+	}
+	f.clk.Advance(drainReminderInterval)
+	_, info = f.view(t)
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderHeld {
+		t.Fatalf("outcome = %v, want held behind the in-flight notice; journal %q", got, out.String())
+	}
+	noticeOpAbsent(t, st, noticeOpID(t, f, drainReminderNoticePurpose, drainAt, "", 2))
+	if got := f.meta(t, drainReminderCountKey); got != "1" {
+		t.Fatalf("%s = %q, want 1: a held attempt is not spent", drainReminderCountKey, got)
+	}
+}
+
+// TestDrainReminderRetriesAFailingNoticeThenSpendsItAsUndeliverable: a
+// proposal that fails leaves the attempt unspent for a later tick, up to
+// plannerNoticeMaxFailures in a row, when the attempt is spent and counted
+// as undeliverable, so the budget still reaches its end.
+func TestDrainReminderRetriesAFailingNoticeThenSpendsItAsUndeliverable(t *testing.T) {
+	store := &failingOpListStore{laneTestStore: newLaneTestStore()}
+	f := newLaneFixtureOver(t, store)
+	newNoticeLaneHost(t, f, "message")
+	_, info := wedgeDrainReminderRow(t, f)
+	store.fail.Store(true)
+	var out bytes.Buffer
+	for tick := 1; tick < plannerNoticeMaxFailures; tick++ {
+		if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderSkipped {
+			t.Fatalf("tick %d: outcome = %v, want skipped", tick, got)
+		}
+		if got := f.meta(t, drainReminderCountKey); got != "" {
+			t.Fatalf("tick %d: %s = %q, want unset so a later tick retries", tick, drainReminderCountKey, got)
+		}
+	}
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderSkipped {
+		t.Fatalf("at the limit: outcome = %v, want skipped", got)
+	}
+	if got, failed := f.meta(t, drainReminderCountKey), f.meta(t, drainReminderFailedKey); got != "1" || failed != "1" {
+		t.Fatalf("count, failed = %q, %q at the limit, want 1, 1", got, failed)
+	}
+	if n := len(f.nudges()); n != 0 {
+		t.Fatalf("a failing notice fell back to %d direct nudges, want 0", n)
+	}
+	if !strings.Contains(out.String(), "was undeliverable") {
+		t.Errorf("journal = %q, want the undeliverable line", out.String())
+	}
+}
+
+// TestDrainReminderDeliveredByTheLaneHostToADrainingSession runs the drain
+// reminder end to end: the started host delivers its notice into the
+// draining session (I7's exemption), as a notice block.
+func TestDrainReminderDeliveredByTheLaneHostToADrainingSession(t *testing.T) {
+	f := newLaneFixture(t)
+	hh := newLaneHostHarness(t, f, "message")
+	hh.start()
+	hh.waitTicker(t)
+	drainAt, info := wedgeDrainReminderRow(t, f)
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
+		t.Fatalf("outcome = %v, want proposed; journal %q", got, out.String())
+	}
+	st := f.laneStore(t)
+	id := noticeOpID(t, f, drainReminderNoticePurpose, drainAt, "", 1)
+	deadline := time.After(laneWaitBudget)
+	for {
+		if got := f.get(t, st, id); got.Status == opjournal.StatusClosed {
+			if got.Outcome.Arm != opjournal.ArmSucceeded {
+				t.Fatalf("outcome = %+v, want succeeded", got.Outcome)
+			}
+			break
+		}
+		select {
+		case <-deadline:
+			t.Fatal("the host never delivered the drain reminder")
+		case <-hh.passes:
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+	nudges := f.nudges()
+	text := drainReminderContent(info)
+	if len(nudges) != 1 || !strings.Contains(nudges[0].Message, text) || nudges[0].Message == text {
+		t.Fatalf("nudges = %+v, want one notice block carrying the reminder", nudges)
+	}
+	if got := sessionpkg.State(f.meta(t, "state")); got != sessionpkg.StateDraining {
+		t.Fatalf("state = %q, want still draining", got)
 	}
 }
 

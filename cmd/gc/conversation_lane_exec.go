@@ -162,40 +162,50 @@ func (e *conversationLaneExec) probe(ctx context.Context, conv opjournal.Convers
 		return opjournal.Probe{}, fmt.Errorf("probing session %s: %w", e.info.ID, err)
 	}
 	p.Running, p.ContentBlock, p.Pending, p.Boundary = look.running, look.block, look.pending, look.boundary
+	if look.block != "" && look.drainNoticeBlock == "" {
+		p.ContentAdmit = []opjournal.ContentClass{laneDrainNoticeClass}
+	}
 	e.live = look.handle
 	return p, nil
 }
 
 // laneLook is one look at the runtime.
 type laneLook struct {
-	running  bool
-	block    string
-	pending  string
-	boundary opjournal.Tri
-	handle   worker.Handle
+	running bool
+	// block is why content may not start, drainNoticeBlock why the drain
+	// reminder's notice (laneDrainNoticeClass) may not: the one content a
+	// draining row admits (session.GateContentDrainNotice).
+	block            string
+	drainNoticeBlock string
+	pending          string
+	boundary         opjournal.Tri
+	handle           worker.Handle
 }
 
-// look observes the runtime, gates content on the row (session.ContentGate)
-// and on the live incarnation, and, only for a running runtime content may
-// reach, resolves its handle once and reads the pending interaction and the
-// idle boundary through it.
+// look observes the runtime, gates content on the row (session.ContentGate,
+// for any content and for the drain reminder's notice) and on the live
+// incarnation, and, only for a running runtime some content may reach,
+// resolves its handle once and reads the pending interaction and the idle
+// boundary through it.
 func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (laneLook, error) {
 	obs, err := e.observe(e.target)
 	if err != nil {
 		return laneLook{}, err
 	}
 	l := laneLook{running: obs.Running && obs.Alive}
-	l.block = session.ContentGate(e.info, l.running, e.deps.clk.Now())
-	if l.running && l.block == "" {
+	now := e.deps.clk.Now()
+	l.block = session.ContentGate(e.info, l.running, now, session.GateContentAny)
+	l.drainNoticeBlock = session.ContentGate(e.info, l.running, now, session.GateContentDrainNotice)
+	if l.running && (l.block == "" || l.drainNoticeBlock == "") {
 		matches, err := e.matches(e.target, obs)
 		if err != nil {
 			return laneLook{}, fmt.Errorf("matching session %s's live generation: %w", e.info.ID, err)
 		}
 		if !matches {
-			l.block = laneContentBlockIncarnation
+			l.block, l.drainNoticeBlock = laneContentBlockIncarnation, laneContentBlockIncarnation
 		}
 	}
-	if !l.running || l.block != "" || !caps.Live {
+	if !l.running || (l.block != "" && l.drainNoticeBlock != "") || !caps.Live {
 		return l, nil
 	}
 	h, err := e.handle(e.target)

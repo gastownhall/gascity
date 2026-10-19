@@ -588,13 +588,17 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 	if inBand {
 		boundary = TriYes
 	}
-	var blockReason WaitReason
-	blockDetail := ""
-	switch {
-	case probe.ContentBlock != "":
-		blockReason, blockDetail = WaitContentBlock, probe.ContentBlock
-	case probe.Pending != "":
-		blockReason = WaitPendingInteraction
+	// blockOf is why op waits on the runtime's state before anything else:
+	// the content block, unless op is of a class the probe admits past it,
+	// then a pending interaction.
+	blockOf := func(op Op) (WaitReason, string) {
+		switch {
+		case probe.ContentBlock != "" && !probe.admits(op):
+			return WaitContentBlock, probe.ContentBlock
+		case probe.Pending != "":
+			return WaitPendingInteraction, ""
+		}
+		return "", ""
 	}
 	items := make([]contentItem, 0, len(rp.content))
 	for _, e := range rp.content {
@@ -606,6 +610,7 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 		}
 		op := e.op
 		m := op.Policy.Message
+		blockReason, blockDetail := blockOf(op)
 		switch {
 		case blockReason != "":
 			tp.wait(op, blockReason, blockDetail)

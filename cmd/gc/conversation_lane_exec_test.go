@@ -953,6 +953,99 @@ func TestLaneExecIncarnationMismatchBlocksContent(t *testing.T) {
 	}
 }
 
+// TestLaneExecAdmitsTheDrainNoticeIntoADrainingRow pins the executor's half
+// of I7's exemption: a draining row's probe blocks content as draining but
+// admits the drain reminder's notice class, so the lane delivers that notice
+// and nothing else; a stale incarnation blocks the notice too.
+func TestLaneExecAdmitsTheDrainNoticeIntoADrainingRow(t *testing.T) {
+	draining := func(meta map[string]string) {
+		meta["state"] = string(session.StateDraining)
+		meta["state_reason"] = session.DrainAckStopPendingReason
+	}
+	drainNotice := func(r *opjournal.Request) {
+		r.Producer = opjournal.Producer{Principal: laneDrainNoticeClass.Principal, Actor: opjournal.ActorController}
+		r.Policy.Message = opjournal.MessagePolicy{Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly}
+	}
+	t.Run("delivers the drain notice, holds the rest", func(t *testing.T) {
+		f := newLaneFixture(t, draining)
+		st := f.laneStore(t)
+		prompt := f.propose(t, st, f.msg("prompt", opjournal.RolePrompt, "work"))
+		other := f.propose(t, st, f.msg("other", opjournal.RoleNotice, "claim", func(r *opjournal.Request) {
+			drainNotice(r)
+			r.Producer.Principal = plannerNoticePrincipalPrefix + "idle-claim-nudge"
+		}))
+		notice := f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", drainNotice))
+		for range 3 {
+			if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+				t.Fatalf("Pass: %v", err)
+			}
+		}
+		if got := f.get(t, st, notice.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSucceeded {
+			t.Fatalf("drain notice = %s %+v, want closed succeeded", got.Status, got.Outcome)
+		}
+		for _, id := range []string{prompt.ID, other.ID} {
+			if got := f.get(t, st, id); got.Status != opjournal.StatusSubmitted {
+				t.Fatalf("op %s = %s, want still submitted behind the draining block", id, got.Status)
+			}
+		}
+		nudges := f.nudges()
+		if len(nudges) != 1 || !strings.Contains(nudges[0].Message, "ack your drain") {
+			t.Fatalf("nudges = %+v, want only the drain notice", nudges)
+		}
+	})
+	t.Run("stale incarnation", func(t *testing.T) {
+		f := newLaneFixture(t, draining)
+		if err := f.sp.SetMeta(f.name, "GC_SESSION_ID", "gc-someone-else"); err != nil {
+			t.Fatal(err)
+		}
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", drainNotice))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		if err != nil || res.Took != opjournal.TakeNone || len(res.Waits) != 1 || res.Waits[0].Reason != opjournal.WaitContentBlock {
+			t.Fatalf("Pass = %+v, %v; want a content_block wait", res, err)
+		}
+		if len(f.nudges()) != 0 {
+			t.Fatal("a stale incarnation received the drain notice")
+		}
+	})
+	// A hold blocks a consume only off a running runtime (HoldVerdict), so a
+	// held draining row is one whose runtime has stopped.
+	t.Run("held draining row", func(t *testing.T) {
+		f := newLaneFixture(t, draining, func(meta map[string]string) {
+			meta["sleep_intent"] = string(session.SleepReasonUserHold)
+			meta["held_until"] = laneT0.Add(time.Hour).Format(time.RFC3339)
+		})
+		if err := f.sp.Stop(f.name); err != nil {
+			t.Fatal(err)
+		}
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", drainNotice))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		if err != nil || res.Took != opjournal.TakeNone || res.Wake || len(res.Waits) != 1 || res.Waits[0].Reason != opjournal.WaitContentBlock {
+			t.Fatalf("Pass = %+v, %v; want a content_block wait and no wake", res, err)
+		}
+		if len(f.nudges()) != 0 {
+			t.Fatal("a held row received the drain notice")
+		}
+	})
+	t.Run("kill pending", func(t *testing.T) {
+		f := newLaneFixture(t, func(meta map[string]string) {
+			meta["state"] = string(session.StateAsleep)
+			meta["state_reason"] = session.KillPendingReason
+			meta["sleep_reason"] = string(session.SleepReasonKilled)
+			meta["slept_at"] = laneT0.Format(time.RFC3339)
+		})
+		st := f.laneStore(t)
+		f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", drainNotice))
+		res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+		// The kill's asleep row is dormant to the lane before the gate is
+		// asked; either way the notice waits.
+		if err != nil || res.Took != opjournal.TakeNone || len(res.Waits) != 1 || len(f.nudges()) != 0 {
+			t.Fatalf("Pass = %+v, %v; want the drain notice to wait", res, err)
+		}
+	})
+}
+
 // laneSeamCounts counts the executor's handle and idle calls.
 type laneSeamCounts struct {
 	handles, idles atomic.Int32

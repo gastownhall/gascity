@@ -66,6 +66,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessions "github.com/gastownhall/gascity/internal/session"
 )
@@ -132,6 +133,10 @@ const (
 	drainReminderHeld
 	// drainReminderDelivered: a reminder was reserved and delivered.
 	drainReminderDelivered
+	// drainReminderProposed: a reminder was proposed as a planner notice op
+	// and reserved; the conversation lane delivers it at the session's
+	// boundary.
+	drainReminderProposed
 	// drainReminderExhausted: the budget is spent and the row is still
 	// unacknowledged. On the enterprise line this is the escalation's cue.
 	drainReminderExhausted
@@ -201,6 +206,20 @@ func remindStopPendingDrain(sp runtime.Provider, store beads.Store, info session
 	return maybeRemindDrainingSession(sp, store, info, clk, stdout)
 }
 
+// drainReminderNoticePurpose names the drain reminder as a planner notice.
+const drainReminderNoticePurpose = "drain-reminder"
+
+// laneDrainNoticeClass is the drain reminder's notice op as the conversation
+// lane's content class: the one content a draining row admits (I7's
+// exemption, session.GateContentDrainNotice). It matches the policy
+// plannerNoticeRequest gives every planner notice, from this purpose's
+// principal.
+var laneDrainNoticeClass = opjournal.ContentClass{
+	Role:      opjournal.RoleNotice,
+	When:      opjournal.WhenBoundary,
+	Principal: plannerNoticePrincipalPrefix + drainReminderNoticePurpose,
+}
+
 // drainReminderDue is the loaded pacing state for a row that has cleared the
 // cheap eligibility gates and is due for evaluation. now is sampled once so
 // every downstream gate reasons from the same instant.
@@ -214,7 +233,10 @@ type drainReminderDue struct {
 	// budget meets an acknowledgement the previous drain left bound to the same
 	// still-live token.
 	// Non-empty by construction: drainID is only non-empty when this is.
-	token     string
+	token string
+	// row is the session bead the state was loaded from, which a planner
+	// notice is proposed against.
+	row       beads.Bead
 	attempts  int
 	failed    int
 	last      time.Time
@@ -260,6 +282,7 @@ func loadDrainReminderDue(store beads.Store, info sessions.Info, clk clock.Clock
 	return drainReminderDue{
 		drainID:   drainID,
 		token:     strings.TrimSpace(bead.Metadata["instance_token"]),
+		row:       bead,
 		attempts:  attempts,
 		failed:    failed,
 		last:      last,
@@ -398,22 +421,30 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 	return drainReminderDelivered, true
 }
 
-// deliverDrainReminder writes the pacing marker ahead of the nudge, exactly as
-// the sibling backstops do: a crash between the two costs one attempt but can
-// never replay an unbounded stream. A nudge error still spends the attempt (the
-// write-ahead is what bounds the loop, and unwinding it would let a permanently
-// input-dead pane re-send forever) and records that nothing ARRIVED, so the
-// escalation reports what actually happened.
+// deliverDrainReminder delivers one due reminder.
 //
-// It delivers directly even when the controller's lane host executes message
-// ops, unlike the other planner notices (planner_notice.go): the lane's content
-// gate holds content for a draining row (session.ContentGate), and a draining
-// row is the only one this reminder is for.
+// When the controller's lane host executes message ops for store and a lane
+// can type into the session, the reminder is a planner notice op
+// (proposeDrainReminderNotice) that the lane delivers at the session's
+// boundary: the lane's content gate admits the drain reminder's notice into
+// a draining row (session.GateContentDrainNotice), and nothing else.
+//
+// Otherwise it writes the pacing marker ahead of the nudge, exactly as the
+// sibling backstops do: a crash between the two costs one attempt but can
+// never replay an unbounded stream. A nudge error still spends the attempt
+// (the write-ahead is what bounds the loop, and unwinding it would let a
+// permanently input-dead pane re-send forever) and records that nothing
+// ARRIVED, so the escalation reports what actually happened.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
+	if lane := plannerNoticeLaneFor(store); lane != nil {
+		if outcome, handled := proposeDrainReminderNotice(lane, store, info, name, due, stdout); handled {
+			return outcome
+		}
+	}
 	if !writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, due.failed, due.now, stdout) {
 		return drainReminderSkipped
 	}
-	if err := sp.Nudge(name, runtime.TextContent(drainReminderContent(info))); err != nil {
+	if err := nudgeDrainReminder(sp, name, info); err != nil {
 		// A nil return is not proof of delivery: the seam adapter answers nil when
 		// it cannot attach, so some failures are invisible here and counted as
 		// delivered. That is the best knowledge available at this boundary, and it
@@ -429,6 +460,87 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 		"%s: drain reminder %d/%d delivered to %s (stop-pending, unacked)\n",
 		drainReminderLabel, due.attempts+1, drainReminderMaxAttempts, name)
 	return drainReminderDelivered
+}
+
+// nudgeDrainReminder types the reminder into the session directly: with
+// [ops] authoritative empty, without a lane host for the sessions store, or
+// for a session no lane can type into.
+func nudgeDrainReminder(sp runtime.Provider, name string, info sessions.Info) error {
+	return sp.Nudge(name, runtime.TextContent(drainReminderContent(info)))
+}
+
+// drainReminderNotice is the due reminder as a planner notice: keyed by its
+// drain (the row's drain_at; the incarnation is the key's token) and its
+// attempt, about the session row itself, and standing until just before the
+// next attempt is due.
+func drainReminderNotice(info sessions.Info, due drainReminderDue) plannerNotice {
+	return plannerNotice{
+		Purpose:     drainReminderNoticePurpose,
+		Trigger:     strings.TrimSpace(due.row.Metadata["drain_at"]),
+		Causation:   strings.TrimSpace(info.ID),
+		Attempt:     due.attempts + 1,
+		Content:     drainReminderContent(info),
+		StartWithin: plannerNoticeStartWithin(drainReminderInterval),
+	}
+}
+
+// proposeDrainReminderNotice is the reminder's delivery through the
+// conversation lane, the op proposed before its marker (the op is idempotent
+// by key, so a crash between the two re-proposes the same op and then
+// spends the attempt). handled is false when no lane can type into the
+// session, for the caller to nudge directly; otherwise:
+//   - while an earlier attempt's notice is in flight nothing is written and
+//     the attempt is not spent (drainReminderHeld);
+//   - a proposed attempt, or one whose op already stood, is spent
+//     (drainReminderProposed);
+//   - a notice the op store refuses for the request itself is spent at once,
+//     and one that fails plannerNoticeMaxFailures times in a row is spent
+//     then, each counted as undeliverable; a failure short of that leaves the
+//     attempt for a later tick, logged at most once per laneErrorLogInterval.
+//
+// Nothing falls back to a direct nudge once a lane serves the session.
+func proposeDrainReminderNotice(lane plannerNoticeLane, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) (drainReminderOutcome, bool) {
+	n := drainReminderNotice(info, due)
+	failKey := plannerNoticeFailureKey(info.ID, n)
+	outcome, op, err := proposePlannerNotice(lane, due.row, n)
+	if err != nil && !plannerNoticeRefused(err) {
+		failures, logNow := lane.noticeFailed(failKey)
+		if failures < plannerNoticeMaxFailures {
+			if logNow {
+				fmt.Fprintf(stdout, "%s: notice for %s failed (%d of %d before reminder %d/%d is spent): %v\n", //nolint:errcheck // best-effort
+					drainReminderLabel, name, failures, plannerNoticeMaxFailures, n.Attempt, drainReminderMaxAttempts, err)
+			}
+			return drainReminderSkipped, true
+		}
+	}
+	lane.noticeRecovered(failKey)
+	failed := due.failed
+	var line string
+	switch {
+	case err != nil && plannerNoticeRefused(err):
+		failed++
+		line = fmt.Sprintf("reminder %d/%d to %s was undeliverable: its notice was refused: %v", n.Attempt, drainReminderMaxAttempts, name, err)
+	case err != nil:
+		failed++
+		line = fmt.Sprintf("reminder %d/%d to %s was undeliverable: its notice failed %d times in a row: %v", n.Attempt, drainReminderMaxAttempts, name, plannerNoticeMaxFailures, err)
+	case outcome == plannerNoticeDirect:
+		return drainReminderSkipped, false
+	case outcome == plannerNoticePending:
+		return drainReminderHeld, true
+	case outcome == plannerNoticeAlreadyProposed:
+		line = fmt.Sprintf("drain reminder %d/%d for %s was already proposed (%s, %s); attempt spent", n.Attempt, drainReminderMaxAttempts, name, op.ID, op.Status)
+	default:
+		line = fmt.Sprintf("queued drain reminder %d/%d for %s (stop-pending, unacked)", n.Attempt, drainReminderMaxAttempts, name)
+	}
+	if !writeDrainReminderMarker(store, info, due.drainID, n.Attempt, failed, due.now, stdout) {
+		return drainReminderSkipped, true
+	}
+	fmt.Fprintf(stdout, "%s: %s\n", drainReminderLabel, line) //nolint:errcheck // best-effort
+	if failed > due.failed {
+		return drainReminderSkipped, true
+	}
+	clearDrainReminderHold(store, info)
+	return drainReminderProposed, true
 }
 
 // drainReminderIdentity names the ONE drain a budget belongs to: this

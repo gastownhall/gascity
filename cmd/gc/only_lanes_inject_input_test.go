@@ -36,12 +36,9 @@ var laneInjectAllowlist = map[string]string{
 	// for the sessions store, or for a session no lane can type into.
 	"nudge_backstop.go:runNudgeBackstop":   "legacy planner notice",
 	"warm_bind_nudge.go:nudgeWarmBindSlot": "legacy planner notice",
+	"drain_reminder.go:nudgeDrainReminder": "legacy planner notice",
 	// The work ladder's one delivery seam; W5 swaps it for a planner notice.
 	"work_ladder_lane.go:ladderDeliver": "legacy planner notice (work ladder)",
-	// The drain reminder's audience is a draining row, which the lane's
-	// content gate holds. Whether this entry is permanent awaits a ruling
-	// (ga-iw4nv1).
-	"drain_reminder.go:deliverDrainReminder": "drain reminder (content gate holds draining rows)",
 }
 
 // laneInjectSite is one place a scanned file types input: its site name and

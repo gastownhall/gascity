@@ -580,6 +580,57 @@ func TestPlanTakeContentBlocks(t *testing.T) {
 	}
 }
 
+// TestPlanTakeContentAdmitPassesOnlyItsClass pins a host's narrow I7
+// exemption: under a content block, only content of an admitted class
+// (role, when and principal, all three) is taken; every neighbor waits on
+// the block, and the admitted class still waits on a pending interaction.
+func TestPlanTakeContentAdmitPassesOnlyItsClass(t *testing.T) {
+	p := newPlanner(t)
+	const admitted = "gc:planner/drain-reminder"
+	from := func(principal string) func(*Request) {
+		return func(r *Request) { r.Producer.Principal = principal }
+	}
+	notice := p.op(laneMsg("notice", RoleNotice, "x", withWhen(WhenBoundary), from(admitted)))
+	probe := idleProbe()
+	probe.ContentBlock = "draining"
+	probe.ContentAdmit = []ContentClass{{Role: RoleNotice, When: WhenBoundary, Principal: admitted}}
+	if tp := takeFor(t, []Op{notice}, probe); !slices.Equal(takenOf(tp), []string{notice.ID}) {
+		t.Fatalf("admitted notice: taken %v, waits %+v", takenOf(tp), tp.waits)
+	}
+	for name, op := range map[string]Op{
+		"other principal": p.op(laneMsg("other", RoleNotice, "x", withWhen(WhenBoundary), from("gc:planner/idle-claim-nudge"))),
+		"prompt":          p.op(laneMsg("prompt", RolePrompt, "x", withWhen(WhenBoundary), from(admitted))),
+		"steer":           p.op(laneMsg("steer", RoleNotice, "x", withWhen(WhenSteer), from(admitted))),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tp := takeFor(t, []Op{op}, probe)
+			if tp.take != nil || len(tp.waits) != 1 || tp.waits[0].Reason != WaitContentBlock || tp.waits[0].Detail != "draining" {
+				t.Fatalf("taken %v, waits %+v; want a content_block wait", takenOf(tp), tp.waits)
+			}
+			tp = takeFor(t, []Op{op, notice}, probe)
+			if got := takenOf(tp); !slices.Equal(got, []string{notice.ID}) {
+				t.Fatalf("beside the admitted notice: taken %v, want only it", got)
+			}
+		})
+	}
+	t.Run("pending interaction", func(t *testing.T) {
+		pending := probe
+		pending.Pending = "?"
+		tp := takeFor(t, []Op{notice}, pending)
+		if tp.take != nil || len(tp.waits) != 1 || tp.waits[0].Reason != WaitPendingInteraction {
+			t.Fatalf("taken %v, waits %+v; want a pending_interaction wait", takenOf(tp), tp.waits)
+		}
+	})
+	t.Run("no block", func(t *testing.T) {
+		open := idleProbe()
+		open.ContentAdmit = probe.ContentAdmit
+		other := p.op(laneMsg("free", RoleNotice, "x", withWhen(WhenBoundary)))
+		if tp := takeFor(t, []Op{other}, open); tp.take == nil {
+			t.Fatalf("an admit list without a block held content: waits %+v", tp.waits)
+		}
+	})
+}
+
 func TestPlanTakeWake(t *testing.T) {
 	p := newPlanner(t)
 	need := p.op(laneMsg("a", RoleNotice, "x"))

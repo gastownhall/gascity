@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -173,10 +174,32 @@ type Probe struct {
 	Pending string
 	// ContentBlock is why content may not start now (I7), or "".
 	ContentBlock string
+	// ContentAdmit names the content ContentBlock does not hold: a host's
+	// narrow exemption from its own block, which the host has already
+	// gated by every other reason. Empty admits nothing; it means nothing
+	// without a ContentBlock.
+	ContentAdmit []ContentClass
 	// Fence is the incarnation the executor will guard on. A non-zero fence
 	// must match the view's generation and epoch.
 	Fence Fence
 	Caps  Caps
+}
+
+// ContentClass is a class of content ops: those of role Role and when
+// When from principal Principal. An op is of the class only when all three
+// match.
+type ContentClass struct {
+	Role      Role
+	When      When
+	Principal string
+}
+
+// admits reports whether op is of a class p.ContentAdmit names.
+func (p Probe) admits(op Op) bool {
+	m := op.Policy.Message
+	return slices.ContainsFunc(p.ContentAdmit, func(c ContentClass) bool {
+		return c.Role == m.Role && c.When == m.When && c.Principal == op.Producer.Principal
+	})
 }
 
 // Executor runs a conversation's effects. Hosts implement it over their

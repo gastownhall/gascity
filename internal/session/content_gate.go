@@ -27,12 +27,32 @@ const (
 	ContentGateStarting = "starting"
 )
 
+// GateContent is what a lane would start in a session, as far as
+// ContentGate tells content apart.
+type GateContent int
+
+const (
+	// GateContentAny is any content: a prompt, a steer or a notice.
+	GateContentAny GateContent = iota
+	// GateContentDrainNotice is the drain protocol's notice: the reminder
+	// asking a draining session's agent to acknowledge its drain. Its
+	// audience is a draining row, so it is the one content "draining" admits
+	// (I7's exemption). The caller classifies the op; nothing else may be
+	// passed as this.
+	GateContentDrainNotice
+)
+
 // ContentGate reports why content may not start a delivery into info's
 // session now, or "" when the row allows it. running is whether its runtime
-// is running, as observed by the caller. It reads only the row, so it is
-// pure: a generation mismatch between the row and the live runtime, which
-// needs a runtime read, is the caller's to check. The first matching reason
-// wins, in the order the constants list them.
+// is running, as observed by the caller; content is what would start. It
+// reads only the row, so it is pure: a generation mismatch between the row
+// and the live runtime, which needs a runtime read, is the caller's to check.
+// The first matching reason wins, in the order the constants list them.
+//
+// I7 has one exemption (ga-iw4nv1): "draining" does not hold
+// GateContentDrainNotice, the drain protocol's own notice to the draining
+// row. Every other reason still holds it, in the same order, and "draining"
+// holds all other content.
 //
 // It does not yet see a v2 stop request (the drain_intent_* keys at the
 // current generation, which the v2 drain writes before it sets state to
@@ -40,15 +60,18 @@ const (
 // field for them. In that window content can start a turn in a session v2 is
 // about to drain, so I7 holds here only from state=draining on, until the
 // session package owns a "stop requested at generation g" predicate this
-// gate can call (ga-f35wnp, due before a lane producer lands).
-func ContentGate(info Info, running bool, now time.Time) string {
+// gate can call (ga-f35wnp: inert while [ops] authoritative is empty by
+// default and no producer writes lane ops; the predicate is a hard
+// precondition before message joins a default authoritative list or a lane
+// producer is switched on).
+func ContentGate(info Info, running bool, now time.Time, content GateContent) string {
 	state := State(strings.TrimSpace(info.MetadataState))
 	switch {
 	case IsKillPendingInfo(info, now):
 		return ContentGateKillPending
 	case HoldVerdictInfo(info, running, now):
 		return ContentGateHeld
-	case state == StateDraining:
+	case state == StateDraining && content != GateContentDrainNotice:
 		return ContentGateDraining
 	case DispositionOfInfo(info).IdleStop:
 		return ContentGateStopPending
