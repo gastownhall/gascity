@@ -76,6 +76,7 @@ go_test(
         "gastown_sling_test.go",
         "gastown_witness_test.go",
         "gc_bd_latency_test.go",
+        "gc_bd_teardown_linux_test.go",
         "gc_live_contract_store_conflict_test.go",
         "gc_live_contract_test.go",
         "gc_seat_hook_latency_test.go",

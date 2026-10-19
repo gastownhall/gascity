@@ -72,32 +72,7 @@ func TestGcBdLatencyBudget(t *testing.T) {
 	requireDoltIntegration(t)
 
 	env := newIsolatedCommandEnv(t, true)
-	cityName := uniqueCityName()
-	cityDir := filepath.Join(t.TempDir(), cityName)
-	registerIntegrationDoltSQLServerCleanup(t, cityDir)
-	configPath := filepath.Join(t.TempDir(), "latency.toml")
-	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n", cityName)
-	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
-		t.Fatalf("writing city config: %v", err)
-	}
-	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
-	registerCityCommandEnv(cityDir, env)
-	t.Cleanup(func() {
-		unregisterCityCommandEnv(cityDir)
-		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
-		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
-	})
-
-	rigDir := filepath.Join(t.TempDir(), "latency-rig-alpha")
-	if err := os.MkdirAll(rigDir, 0o755); err != nil {
-		t.Fatalf("creating rig dir: %v", err)
-	}
-	registerIntegrationDoltSQLServerCleanup(t, rigDir)
-	if out, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
-		return runGCDoltWithEnv(env, cityDir, "rig", "add", rigDir)
-	}); err != nil {
-		t.Fatalf("gc rig add: %v\noutput: %s", err, out)
-	}
+	cityDir, rigDir := newGCBdLatencyFixture(t, env, t.TempDir())
 
 	// Only the timed calls find bd through the recorder: the supervisor, and so
 	// the controller's own bd calls, keeps the PATH it was started with.
@@ -294,4 +269,38 @@ func gcBdLatencyChildren(samples []gcBdLatencySample) string {
 		argvs = append(argvs, strings.Join(child.Argv[:min(2, len(child.Argv))], " "))
 	}
 	return count + " [" + strings.Join(argvs, "; ") + "]"
+}
+
+// newGCBdLatencyFixture owns the city, rig and teardown used by the latency
+// guard and its canceled-writer regression. root outlives all its cleanups.
+func newGCBdLatencyFixture(t *testing.T, env []string, root string) (string, string) {
+	t.Helper()
+	cityName := uniqueCityName()
+	cityDir := filepath.Join(root, cityName)
+	registerIntegrationDoltSQLServerCleanup(t, cityDir)
+	configPath := filepath.Join(root, "latency.toml")
+	cityToml := fmt.Sprintf("[workspace]\nname = %q\n\n[session]\nprovider = \"subprocess\"\n", cityName)
+	if err := os.WriteFile(configPath, []byte(cityToml), 0o644); err != nil {
+		t.Fatalf("writing city config: %v", err)
+	}
+	initCityWithManagedDoltRecovery(t, env, configPath, cityDir)
+	registerCityCommandEnv(cityDir, env)
+	t.Cleanup(func() {
+		unregisterCityCommandEnv(cityDir)
+		runGCDoltWithEnv(env, "", "stop", cityDir)                //nolint:errcheck // best-effort cleanup
+		runGCDoltWithEnv(env, "", "supervisor", "stop", "--wait") //nolint:errcheck // best-effort cleanup
+	})
+
+	rigDir := filepath.Join(root, "latency-rig-alpha")
+	if err := os.MkdirAll(rigDir, 0o755); err != nil {
+		t.Fatalf("creating rig dir: %v", err)
+	}
+	registerIntegrationDoltSQLServerCleanup(t, rigDir)
+	if out, err := retryOnDoltDirtyTableMigrationRace(func() (string, error) {
+		return runGCDoltWithEnv(env, cityDir, "rig", "add", rigDir)
+	}); err != nil {
+		t.Fatalf("gc rig add: %v\noutput: %s", err, out)
+	}
+
+	return cityDir, rigDir
 }
