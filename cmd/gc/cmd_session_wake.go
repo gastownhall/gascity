@@ -93,11 +93,7 @@ func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON 
 	}
 
 	cityPath, cityErr := resolveCity()
-	var cfg *config.City
-	var cfgErr error
-	if cityErr == nil {
-		cfg, cfgErr = loadCityConfig(cityPath, stderr)
-	}
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, stderr)
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
 		opKey:                     key,
 		cfgErr:                    cfgErr,
@@ -246,7 +242,9 @@ var errWakeNotAdmitted = errors.New("wake not admitted")
 // refuses the wake after that create, and the created session stays,
 // started or left for the controller to start. An op admitted for a row
 // resolution did not end up returning is closed as target_moved, and the op
-// started over for the row it returned.
+// started over for the row it returned. A closed row named by its ID is
+// refused before any op, unless the wake's key already names one on that row
+// (refuseClosedWakeTarget).
 func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target string) (string, cliOpStart, error) {
 	admitted, start := "", cliOpStart(0)
 	id, err := resolveSessionIDMaterializingNamedBeforeReopen(deps.cityPath, deps.cfg, sessStore, target, func(closedID string) error {
@@ -264,7 +262,40 @@ func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target st
 	case admitted != "" && admitted == id:
 		return id, start, nil
 	}
+	if err := refuseClosedWakeTarget(op, sessStore, id); err != nil {
+		return "", 0, err
+	}
 	return id, op.retarget(id), nil
+}
+
+// refuseClosedWakeTarget refuses, before its op is proposed, a recorded wake
+// whose target resolved to a closed row its key names no op on: a row named
+// by its ID resolves closed, and the wake can only refuse it, as it does
+// unrecorded ("session X is closed"). Recorded, that refusal would hold the
+// key on the row's conversation, and a wake of a configured named session by
+// alias under the same key, which reopens that row, would replay it instead
+// of reopening. So it is a front-door refusal and writes no op. A key that
+// already names an op on the row (a wake the row has closed since) passes, so
+// admission answers from that op as it does by alias: a same-key retry
+// replays the wake. A key whose op does not read is refused as one that names
+// none, with a warning that it was not checked. A row that does not read is
+// left to the wake, which reports it.
+func refuseClosedWakeTarget(op *cliOp, sessStore beads.Store, id string) error {
+	if !op.recording() {
+		return nil
+	}
+	if b, err := sessStore.Get(id); err != nil || b.Status != "closed" {
+		return nil
+	}
+	principal, _ := cliPrincipal(cliOpLookupEnv)
+	_, found, err := op.keyedOp(id, principal)
+	if found {
+		return nil
+	}
+	if err != nil {
+		fmt.Fprintf(op.req.stderr, "%s: warning: op journal: %v; --key %s was not checked for an op on session %s to answer from\n", op.req.verb, err, op.req.key, id) //nolint:errcheck // best-effort stderr
+	}
+	return fmt.Errorf("session %s is closed", id)
 }
 
 // emitSessionWakeResult prints a wake's success output, a replay's included.

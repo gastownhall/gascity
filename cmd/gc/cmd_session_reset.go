@@ -38,8 +38,10 @@ alias so the controller can create a replacement. A create that is still
 starting, or whose runtime is running, is never rolled back.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
-with the same --key of a reset that rolled back must name the session by ID:
-the rollback released its alias.`,
+with the same --key of a reset that rolled back replays it only when it names
+the session by its ID: the rollback released the alias, and once the
+replacement the controller creates holds it, a rerun by the alias resets that
+session.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionReset(args, key, stdout, stderr, jsonOutput) != 0 {
@@ -163,6 +165,7 @@ func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON
 		op.finishErr(nil)
 	} else {
 		op.finishOutcome(opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyRollback}})
+		op.noteReplayByID(args[0])
 	}
 
 	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))

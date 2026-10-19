@@ -503,18 +503,21 @@ func TestSessionWakeOpGateFromConfig(t *testing.T) {
 	cliOpWantOutcome(t, cliOpOnly(t, f.rec), opjournal.ArmSucceeded, "", legacyop.ViaLegacy)
 }
 
+// A wake the session's lifecycle refuses (a row on its way to closed) closes
+// its op refused with the conflicting state. A closed row never gets that
+// far: TestSessionWakeOpByIDOfAClosedRowWritesNoOp.
 func TestSessionWakeOpConflictClosesRefused(t *testing.T) {
 	newCLIOpHarness(t, map[string]string{"GC_OPS_LIFECYCLE": "auto"})
 	f := newCLIOpWakeFixture(t)
-	if err := f.rec.Close(f.id); err != nil {
-		t.Fatalf("closing session bead: %v", err)
+	if err := f.rec.SetMetadataBatch(f.id, map[string]string{"state": "closing"}); err != nil {
+		t.Fatalf("marking the session closing: %v", err)
 	}
 	code, _, stderr := f.run(t, "", false)
 	if code != 1 {
-		t.Fatalf("wake of a closed session = %d, want 1; stderr=%s", code, stderr)
+		t.Fatalf("wake of a closing session = %d, want 1; stderr=%s", code, stderr)
 	}
 	op := cliOpOnly(t, f.rec)
-	cliOpWantOutcome(t, op, opjournal.ArmFailed, "refused:closed", "")
+	cliOpWantOutcome(t, op, opjournal.ArmFailed, "refused:closing", "")
 }
 
 func TestSessionWakeOpWillNotStartClosesRefused(t *testing.T) {

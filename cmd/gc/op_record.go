@@ -8,8 +8,11 @@ package main
 // record executed by legacy:cli: the CLI never adopts an op (it cannot tell
 // whether another CLI process is still running one), so every CLI op closes,
 // and an op this process cannot close is left to the controller's op sweeper,
-// which closes it at finish_by. The gate is resolved once per process from
-// the loaded city config, as every rollout gate is; with it off nothing is
+// which closes it past finish_by. The sweeper latches the ops gates at the
+// controller's start, and with every one off it stops once a pass leaves no
+// work, so such an op may wait for the controller's next start; gc doctor
+// reports it until then. The gate is resolved once per process from the
+// loaded city config, as every rollout gate is; with it off nothing is
 // recorded and no store is opened.
 //
 // Output (DES-O0API §8.3): stdout stays the command's own; JSON results gain
@@ -24,14 +27,27 @@ package main
 // under --json, in the failure envelope.
 //
 // A replay finds its op only once the target resolves to the row the op
-// names: a closed session's alias no longer resolves, so a same-key rerun of
-// a close (or of a reset that rolled back) must name the session by its ID.
-// A kill's op is scoped to the session generation it killed, so a same-key
-// rerun after the session restarted on its own row as a later generation
-// answers from that earlier op, noting the restart. A pool seat the
-// reconciler replaced is a new session on a new row, though it may keep the
-// killed seat's alias, so a same-key rerun of that kill must name the killed
-// session by its ID: by the alias, it would kill the replacement.
+// names. A closed session's alias no longer resolves to it, so a same-key
+// rerun of a close (or of a reset that rolled back) must name the session by
+// its ID: by the alias it finds no session, or, once another session holds
+// the alias (a configured named session is created again under its name), it
+// acts on that one. A run that named its target by alias names the ID on
+// stderr. A wake of a closed row named by its ID is refused before its op is
+// proposed, as front-door refusals are, so it leaves its key free for the wake
+// of the configured named session by alias, which reopens that row. A key that
+// already names an op on that row (a wake the row has closed since) is
+// answered from that op instead, as by the alias: a same-key retry by the ID
+// replays that wake.
+//
+// A kill's op is scoped to the session generation the row names before the
+// runtime lease. Under the lease, a recorded kill refuses a row that has moved
+// to another generation since (a start ran while it waited for the lease):
+// it stops only the run its op names. A same-key rerun after the session
+// restarted on its own row as a later generation answers from that earlier
+// op, noting the restart. A pool seat the reconciler replaced is a new session
+// on a new row, though it may keep the killed seat's alias, so a same-key
+// rerun of that kill must name the killed session by its ID: by the alias, it
+// would kill the replacement.
 
 import (
 	"errors"
@@ -74,7 +90,8 @@ const (
 	// leaves no token characters.
 	cliOpRefusedWakeConflict = "wake_conflict"
 	// cliOpRefusedTargetMoved closes an op admitted for a target the verb
-	// did not end up acting on.
+	// did not end up acting on: a row a wake's resolution did not return, or
+	// a generation a start moved a kill's session past.
 	cliOpRefusedTargetMoved = "target_moved"
 )
 
@@ -88,6 +105,8 @@ const (
 	cliOpKeyNoWithdrawnNote = " (without the first run's wait_nudges_withdrawn in --json)"
 	cliOpKeyNoModeNote      = " (without the first run's mode in --json)"
 	cliOpKeyRestartedNote   = ", even after the session restarted under the same ID"
+	// cliOpSweptNote says what becomes of an op this run leaves open.
+	cliOpSweptNote = "the controller's op sweeper closes it past its deadline; one that started with every ops gate off may not sweep again until its next start, and gc doctor reports the op until then"
 )
 
 // addOpKeyFlag adds --key to a recorded CLI verb. replayNote, when set,
@@ -226,6 +245,17 @@ func startCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) (*cli
 	return op, op.start()
 }
 
+// cliCityConfig is the city config a session verb runs under, with the error
+// its op's request carries as cfgErr when there is no config: cityErr when the
+// city did not resolve, so the verb says its [ops] gates were not read, else
+// loadCityConfig's own. Config warnings go to warn.
+func cliCityConfig(cityPath string, cityErr error, warn io.Writer) (*config.City, error) {
+	if cityErr != nil {
+		return nil, cityErr
+	}
+	return loadCityConfig(cityPath, warn)
+}
+
 // preflight opens the op store and checks --key ahead of a verb's
 // resolution, which may itself write (wake materializes a named session's
 // row): under require a store that cannot record, and then an invalid key,
@@ -266,6 +296,7 @@ func (o *cliOp) start() cliOpStart {
 	req := o.req
 	rec := o.rec
 	if req.unrecordable != "" && rec.Mode == rollout.Require {
+		rec.Refused(req.kind, req.unrecordable)
 		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(req.unrecordableCause()), "", req.key)
 		return cliOpRefused
 	}
@@ -322,23 +353,39 @@ func (o *cliOp) start() cliOpStart {
 // fails, which the admission that follows makes again and reports.
 func (o *cliOp) rescopeRestartedKill(principal string) {
 	req := o.req
-	if req.kind != opjournal.KindKill || req.key == "" || req.scope.Kind != opjournal.ScopeSession || o.rec.Mode == rollout.Off {
+	if req.kind != opjournal.KindKill || req.scope.Kind != opjournal.ScopeSession {
 		return
 	}
-	st, err := o.rec.Open()
-	if err != nil {
-		return
-	}
-	id, err := opjournal.DeriveID(st.Prefix(), req.conversation, principal, req.key)
-	if err != nil {
-		return
-	}
-	prior, err := st.Get(id)
-	if err != nil || prior.Kind != opjournal.KindKill || prior.Scope.Kind != opjournal.ScopeSession || prior.Scope.Generation >= req.scope.Generation {
+	prior, found, _ := o.keyedOp(req.conversation, principal)
+	if !found || prior.Kind != opjournal.KindKill || prior.Scope.Kind != opjournal.ScopeSession || prior.Scope.Generation >= req.scope.Generation {
 		return
 	}
 	o.restartedAs = req.scope.Generation
 	o.req.scope = prior.Scope
+}
+
+// keyedOp reads the op the request's client --key already names on
+// conversation under principal: the op its admission answers from. found is
+// false when there is none: the gate records nothing, the key was minted (it
+// names no earlier op), or no op is stored at the key's id. err is any other
+// failure to read it, the op store's open included.
+func (o *cliOp) keyedOp(conversation, principal string) (prior opjournal.Op, found bool, err error) {
+	if o.req.key == "" || !o.recording() {
+		return opjournal.Op{}, false, nil
+	}
+	st, err := o.rec.Open()
+	if err != nil {
+		return opjournal.Op{}, false, err
+	}
+	id, err := opjournal.DeriveID(st.Prefix(), conversation, principal, o.req.key)
+	if err != nil {
+		return opjournal.Op{}, false, err
+	}
+	prior, err = st.Get(id)
+	if errors.Is(err, beads.ErrNotFound) {
+		return opjournal.Op{}, false, nil
+	}
+	return prior, err == nil, err
 }
 
 // restartNote notes, after a message about a rescoped kill's earlier op,
@@ -360,6 +407,54 @@ func (o *cliOp) retarget(conversation string) cliOpStart {
 	}
 	o.req.conversation = conversation
 	return o.start()
+}
+
+// recording reports whether the op's gate records at all (auto or require).
+func (o *cliOp) recording() bool {
+	return o.rec.Mode == rollout.Auto || o.rec.Mode == rollout.Require
+}
+
+// recordedExecution reports whether an op row backs the run this process
+// executes: admitted to execute, and recorded.
+func (o *cliOp) recordedExecution() bool {
+	return o != nil && o.adm != nil && o.adm.Recorded && o.adm.Decision == legacyop.Execute
+}
+
+// killScopeMoved checks a recorded kill's session row, read under the
+// runtime lease, against the generation its op is scoped to, read before the
+// lease. It returns an error naming both when the row names another
+// generation now: a start ran while the kill waited for the lease, so the
+// runtime the kill would stop is not the run its op names. A kill that is not
+// recorded, or a row that does not read with a generation, passes: the
+// kill's own fresh read then decides, as it does unrecorded.
+func (o *cliOp) killScopeMoved(front *session.Store, id string) error {
+	if !o.recordedExecution() || o.req.scope.Kind != opjournal.ScopeSession {
+		return nil
+	}
+	info, err := front.Get(id)
+	now, unrecordable, _ := cliOpSessionScope(info, err)
+	if unrecordable != "" || now.Generation == o.req.scope.Generation {
+		return nil
+	}
+	rerun := "rerun the kill"
+	if o.req.key != "" {
+		rerun += " without --key"
+	}
+	return fmt.Errorf("session %s is at generation %d, not generation %d, which op %s was recorded for: a start ran while this kill waited for its runtime lease, so nothing was killed (%s to kill the new run)",
+		id, now.Generation, o.req.scope.Generation, o.adm.Op.ID, rerun)
+}
+
+// noteReplayByID tells a recorded run under a client --key that named its
+// target otherwise than by the session ID it resolved to (target) that a
+// same-key rerun replays it only by that ID. Call it once the run has left
+// the target's alias free (a close, a reset that rolled back): by the alias,
+// a rerun acts on whatever session holds it by then, such as a configured
+// named session created again under its name.
+func (o *cliOp) noteReplayByID(target string) {
+	if !o.recordedExecution() || o.req.key == "" || target == o.req.conversation {
+		return
+	}
+	fmt.Fprintf(o.req.stderr, "%s: note: a rerun with --key %s replays this run only by the session ID %s: by %s it acts on whatever session holds that name then\n", o.req.verb, o.req.key, o.req.conversation, target) //nolint:errcheck // best-effort stderr
 }
 
 // mode is the gate mode of the op's kind, resolved from cfg and the env
@@ -506,7 +601,7 @@ func (o *cliOp) warnDegrade(d legacyop.Degrade) {
 	o.warned[d.Stage] = true
 	consequence := "running unrecorded"
 	if d.Stage == legacyop.StageClose {
-		consequence = "the controller's op sweeper closes the op at its deadline"
+		consequence = cliOpSweptNote
 	}
 	fmt.Fprintf(o.req.stderr, "%s: warning: op journal %s failed (%s): %v; %s\n", o.req.verb, d.Stage, d.Reason, d.Err, consequence) //nolint:errcheck // best-effort stderr
 }
@@ -530,7 +625,7 @@ func (o *cliOp) finish(res legacyop.Result) {
 	case done.Late:
 		fmt.Fprintf(o.req.stderr, "%s: warning: op %s was already closed (by the op sweeper past its deadline); this run's outcome %s was not recorded\n", o.req.verb, o.adm.Op.ID, cliOpOutcomeText(outcome)) //nolint:errcheck // best-effort stderr
 	case !o.warned[legacyop.StageClose]:
-		fmt.Fprintf(o.req.stderr, "%s: warning: op %s left open: the journal refused its outcome %s; the controller's op sweeper closes it at its deadline\n", o.req.verb, o.adm.Op.ID, cliOpOutcomeText(outcome)) //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(o.req.stderr, "%s: warning: op %s left open: the journal refused its outcome %s; %s\n", o.req.verb, o.adm.Op.ID, cliOpOutcomeText(outcome), cliOpSweptNote) //nolint:errcheck // best-effort stderr
 	}
 }
 

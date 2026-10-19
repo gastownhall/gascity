@@ -4355,8 +4355,10 @@ gc session attach <session-id-or-alias>
 End a conversation. Stops the runtime if active and closes the bead.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
-with the same --key must name the session by ID: a closed session's alias no
-longer resolves.
+with the same --key replays the close only when it names the session by its
+ID: a closed session's alias no longer resolves to it, and once another
+session holds the alias (a configured named session is created again under
+its name), a rerun by the alias closes that session.
 
 ```
 gc session close <session-id-or-alias> [flags]
@@ -4393,9 +4395,16 @@ keep the killed seat's alias: a rerun must name the killed session by its ID,
 since by the alias it would kill the replacement.
 
 While the ops.lifecycle gate is require, a kill whose session row cannot be
-read is refused (op_journal_unavailable, naming unreadable_target and the read
-error) and nothing is killed. At auto, or with GC_OPS_LIFECYCLE=auto set to
-break glass, it runs the best-effort kill unrecorded.
+read, or names no session generation, is refused (op_journal_unavailable,
+naming unreadable_target and the read error, or no_generation) and nothing is
+killed. At auto, or with GC_OPS_LIFECYCLE=auto set to break glass, it runs the
+best-effort kill unrecorded.
+
+A recorded kill (the gate at auto or require) names the session generation it
+read before taking the session's runtime lease. If a start runs while it waits
+for that lease, the kill stops nothing and exits 1, its op closed
+failed&#123;refused:target_moved&#125;: rerun it without --key to kill the new run. A
+rerun with the same --key replays that failure, noting the restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
@@ -4602,8 +4611,10 @@ alias so the controller can create a replacement. A create that is still
 starting, or whose runtime is running, is never rolled back.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
-with the same --key of a reset that rolled back must name the session by ID:
-the rollback released its alias.
+with the same --key of a reset that rolled back replays it only when it names
+the session by its ID: the rollback released the alias, and once the
+replacement the controller creates holds it, a rerun by the alias resets that
+session.
 
 ```
 gc session reset <session-id-or-alias> [flags]

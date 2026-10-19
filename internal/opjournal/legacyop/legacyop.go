@@ -410,6 +410,15 @@ func (r *Recorder) Unrecorded(kind opjournal.Kind, key, reason string) *Admissio
 	return &Admission{Decision: Execute, Key: key, rec: r}
 }
 
+// Refused counts a request the caller refuses in require because it knows it
+// cannot record it (Unrecorded's causes), under reason, as Admit counts a
+// require refusal. It counts nothing in another mode.
+func (r *Recorder) Refused(kind opjournal.Kind, reason string) {
+	if r.Mode == gate.Require {
+		r.count(kind, StageAdmit, ResultRefused, reason)
+	}
+}
+
 // Accept stores the request's answer in its in-flight entry, so a same-key
 // request replays it while this one runs. answer must be non-nil: the replay
 // carries the open op, which has no outcome to build an answer from, so a nil

@@ -1754,11 +1754,7 @@ func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJS
 	}
 
 	cityPath, cityErr := resolveCity()
-	var cfg *config.City
-	var cfgErr error
-	if cityErr == nil {
-		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
-	}
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, configWarnWriter(asJSON, stderr))
 	// Every store consumer here is session-class (session-ID resolution, held_until
 	// suspend patch, session worker handle), so route the whole flow through the
 	// session coordination-class store for relocation-safety.
@@ -1858,8 +1854,10 @@ func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
-with the same --key must name the session by ID: a closed session's alias no
-longer resolves.`,
+with the same --key replays the close only when it names the session by its
+ID: a closed session's alias no longer resolves to it, and once another
+session holds the alias (a configured named session is created again under
+its name), a rerun by the alias closes that session.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
 			if cmdSessionClose(args, key, stdout, stderr, jsonOutput) != 0 {
@@ -1883,11 +1881,7 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	}
 
 	cityPath, cityErr := resolveCity()
-	var cfg *config.City
-	var cfgErr error
-	if cityErr == nil {
-		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
-	}
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, configWarnWriter(asJSON, stderr))
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
 	// store for relocation-safety. The post-close work-release below
@@ -1986,6 +1980,7 @@ func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON
 	// leaves the op to the sweeper, and a same-key rerun is not told the
 	// cleanup happened.
 	op.finishErr(nil)
+	op.noteReplayByID(args[0])
 	return emitSessionCloseResult(stdout, stderr, asJSON, sessionID, len(closeResult.WaitNudgeIDs), op)
 }
 
@@ -2474,9 +2469,16 @@ keep the killed seat's alias: a rerun must name the killed session by its ID,
 since by the alias it would kill the replacement.
 
 While the ops.lifecycle gate is require, a kill whose session row cannot be
-read is refused (op_journal_unavailable, naming unreadable_target and the read
-error) and nothing is killed. At auto, or with GC_OPS_LIFECYCLE=auto set to
-break glass, it runs the best-effort kill unrecorded.
+read, or names no session generation, is refused (op_journal_unavailable,
+naming unreadable_target and the read error, or no_generation) and nothing is
+killed. At auto, or with GC_OPS_LIFECYCLE=auto set to break glass, it runs the
+best-effort kill unrecorded.
+
+A recorded kill (the gate at auto or require) names the session generation it
+read before taking the session's runtime lease. If a start runs while it waits
+for that lease, the kill stops nothing and exits 1, its op closed
+failed{refused:target_moved}: rerun it without --key to kill the new run. A
+rerun with the same --key replays that failure, noting the restart.
 
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
@@ -2512,12 +2514,8 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 		return code
 	}
 
-	cityPath, err := resolveCity()
-	var cfg *config.City
-	var cfgErr error
-	if err == nil {
-		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
-	}
+	cityPath, cityErr := resolveCity()
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, configWarnWriter(asJSON, stderr))
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
 	// route the whole flow through the session coordination-class store for
@@ -2623,6 +2621,16 @@ func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer
 		releaseLease, leaseOverridden = lease.Release, overridden
 		defer releaseLease()
 		killBy.Lease = lease
+	}
+	// A recorded kill stops only the generation its op is scoped to. A start
+	// that ran while the kill waited for the lease has made another run, which
+	// the kill refuses rather than stop under an op that does not name it; the
+	// op closes once the lease is released, as on every other path.
+	if err := op.killScopeMoved(sessionFrontDoor(sessStore), sessionID); err != nil {
+		releaseLease()
+		op.finishOutcome(cliOpRefusedOutcome(cliOpRefusedTargetMoved))
+		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	// The fence, the stop and the asleep sync are Manager.KillFencedReport's,
 	// the same kill the API's routes run: under the lease taken above, it
@@ -2744,7 +2752,7 @@ func recordSessionKillStop(info session.Info, beadErr error, cfg *config.City) {
 // failure other than busy never holds the kill hostage: it falls back to the
 // name's flock alone, with a warning.
 func killRuntimeLease(ctx context.Context, front *session.Store, req session.RuntimeLeaseRequest, force bool, stderr io.Writer) (lease *session.RuntimeLease, overridden bool, err error) {
-	lease, err = session.WaitOperatorRuntimeLease(ctx, front, req)
+	lease, err = sessionKillWaitLease(ctx, front, req)
 	if force && errors.Is(err, session.ErrRuntimeLeaseBusy) {
 		lease, err = session.ForceRuntimeLease(front, req)
 		overridden = err == nil
@@ -2759,6 +2767,10 @@ func killRuntimeLease(ctx context.Context, front *session.Store, req session.Run
 // sessionKillHandle builds the worker handle `gc session kill` stops through.
 // A var so a test can hand the command a handle that cannot fence the kill.
 var sessionKillHandle = workerHandleForSessionWithConfig
+
+// sessionKillWaitLease waits for the runtime lease `gc session kill` takes. A
+// var so a test can finish a start that holds the lease while the kill waits.
+var sessionKillWaitLease = session.WaitOperatorRuntimeLease
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
