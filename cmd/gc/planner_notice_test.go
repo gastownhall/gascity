@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // newNoticeLaneHost registers a running lane host over f's sessions store
@@ -2125,5 +2126,128 @@ func TestDrainReminderDirectAttemptSettlesAnUndeliveredLaneNotice(t *testing.T) 
 	}
 	if !strings.Contains(out.String(), "reminder 1/3 to "+f.name+" was undeliverable: the lane never delivered its notice") {
 		t.Errorf("journal = %q", out.String())
+	}
+}
+
+// TestDrainReminderCountsNoticesTheLaneExpiresUndelivered drives real lane
+// passes between attempts over a session that never reaches a boundary: each
+// notice closes expired_before_start without a delivery, so by the next
+// attempt it is closed and undelivered, and every attempt counts it
+// undeliverable. The exhaustion line says so rather than claiming three
+// ignored reminders.
+func TestDrainReminderCountsNoticesTheLaneExpiresUndelivered(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	wedgeDrainReminderRow(t, f)
+	st := f.laneStore(t)
+	busy := func(e *conversationLaneExec) opjournal.Executor {
+		e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
+		return e
+	}
+	var out bytes.Buffer
+	for attempt := 1; attempt <= drainReminderMaxAttempts; attempt++ {
+		_, info := f.view(t)
+		if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderProposed {
+			t.Fatalf("attempt %d outcome = %v, want proposed; journal %q", attempt, got, out.String())
+		}
+		if got, want := f.meta(t, drainReminderFailedKey), strconv.Itoa(attempt-1); got != want {
+			t.Fatalf("after attempt %d %s = %q, want %s", attempt, drainReminderFailedKey, got, want)
+		}
+		if _, err := f.pass(context.Background(), t, f.lane(t, st), st, busy); err != nil {
+			t.Fatalf("pass: %v", err)
+		}
+		f.clk.Advance(drainReminderInterval)
+		if _, err := f.pass(context.Background(), t, f.lane(t, st), st, busy); err != nil {
+			t.Fatalf("pass: %v", err)
+		}
+		if n := len(f.openOps(t)); n != 0 {
+			t.Fatalf("after attempt %d open ops = %d, want the notice closed expired", attempt, n)
+		}
+	}
+	_, info := f.view(t)
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderExhausted {
+		t.Fatalf("outcome = %v, want exhausted; journal %q", got, out.String())
+	}
+	row := f.row(t)
+	if failed := row.Metadata[drainReminderFailedKey]; failed != "3" {
+		t.Fatalf("%s = %q, want 3", drainReminderFailedKey, failed)
+	}
+	if n := len(f.nudges()); n != 0 {
+		t.Fatalf("direct nudges = %d, want 0", n)
+	}
+	phrase := drainReminderSpendPhrase(drainReminderMaxAttempts, drainReminderMaxAttempts)
+	if drainReminderSpendPhraseFor(row) != phrase || !strings.Contains(out.String(), "exhausted for "+f.name+" after "+phrase) {
+		t.Errorf("phrase %q; journal %q; want %q", drainReminderSpendPhraseFor(row), out.String(), phrase)
+	}
+	if strings.Contains(out.String(), "unanswered") {
+		t.Errorf("journal claims unanswered reminders: %q", out.String())
+	}
+}
+
+// TestDrainReminderNudgesARestartPendingWedgeDirectlyWithTheMessageLane: the
+// direct fallback is any gate hold other than draining, not just the idle
+// latch's stop_pending; a draining wedge with a recorded restart reads
+// restart_pending and is nudged directly with no op.
+func TestDrainReminderNudgesARestartPendingWedgeDirectlyWithTheMessageLane(t *testing.T) {
+	for _, key := range []string{"restart_requested", "continuation_reset_pending"} {
+		t.Run(key, func(t *testing.T) {
+			f := newLaneFixture(t)
+			newNoticeLaneHost(t, f, "message")
+			wedgeDrainReminderRow(t, f)
+			if err := f.store.SetMetadataBatch(f.id, map[string]string{key: "true"}); err != nil {
+				t.Fatal(err)
+			}
+			_, info := f.view(t)
+			if got := sessionpkg.ContentGate(info, true, f.clk.Now(), sessionpkg.GateContentDrainNotice); got != sessionpkg.ContentGateRestartPending {
+				t.Fatalf("gate = %q, want restart_pending", got)
+			}
+			var out bytes.Buffer
+			if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderDelivered {
+				t.Fatalf("outcome = %v, want delivered; journal %q", got, out.String())
+			}
+			if nudges := f.nudges(); len(nudges) != 1 || nudges[0].Message != drainReminderContent(info) {
+				t.Fatalf("nudges = %+v, want the one direct reminder", nudges)
+			}
+			if n := len(f.openOps(t)); n != 0 {
+				t.Fatalf("open ops = %d, want none", n)
+			}
+		})
+	}
+}
+
+// TestDrainReminderDirectMarkerOmitsTheSettledKey: with the lane off the
+// pacing marker is the one written before the lane existed; an absent settled
+// count reads as every attempt settled, so the direct path adds none.
+func TestDrainReminderDirectMarkerOmitsTheSettledKey(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f)
+	_, info := wedgeDrainReminderRow(t, f)
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderDelivered {
+		t.Fatalf("outcome = %v, want delivered; journal %q", got, out.String())
+	}
+	row := f.row(t)
+	if v, ok := row.Metadata[drainReminderSettledKey]; ok {
+		t.Fatalf("%s = %q written on the direct path, want absent", drainReminderSettledKey, v)
+	}
+	if attempts, _, settled, _ := drainReminderState(row, drainReminderIdentity(row)); attempts != 1 || settled != 1 {
+		t.Fatalf("attempts, settled = %d, %d; want 1, 1", attempts, settled)
+	}
+}
+
+// TestDrainReminderStateReadsAnAbsentSettledCountAsAllSettled: a marker
+// written before the settled count existed settles every attempt.
+func TestDrainReminderStateReadsAnAbsentSettledCountAsAllSettled(t *testing.T) {
+	last := laneT0
+	row := beads.Bead{Metadata: map[string]string{
+		"instance_token": "tok", "drain_at": "at",
+		drainReminderDrainKey: "tok/at", drainReminderCountKey: "3", drainReminderFailedKey: "1",
+		drainReminderAtKey: last.UTC().Format(time.RFC3339),
+	}}
+	if attempts, failed, settled, _ := drainReminderState(row, "tok/at"); attempts != 3 || failed != 1 || settled != 3 {
+		t.Fatalf("attempts, failed, settled = %d, %d, %d; want 3, 1, 3", attempts, failed, settled)
+	}
+	if drainRemindersSpent(row, last.Add(drainReminderInterval-time.Second)) || !drainRemindersSpent(row, last.Add(drainReminderInterval)) {
+		t.Fatal("a fully settled legacy budget does not keep the ordinary answer window")
 	}
 }

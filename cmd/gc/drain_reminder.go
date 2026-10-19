@@ -511,6 +511,7 @@ func drainReminderQuietHold(sp runtime.Provider, store beads.Store, info session
 // ARRIVED, so the escalation reports what actually happened.
 func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.Info, name string, due drainReminderDue, stdout io.Writer) drainReminderOutcome {
 	failed := due.failed
+	journalPrior := func() {}
 	if lane := plannerNoticeLaneFor(store); lane != nil {
 		block := drainReminderNoticeBlock(due)
 		if block == "" {
@@ -525,18 +526,19 @@ func deliverDrainReminder(sp runtime.Provider, store beads.Store, info sessions.
 			if priorUndelivered {
 				failed++
 			}
-			journalDrainReminderPrior(stdout, name, due, priorUndelivered, priorErr)
+			journalPrior = func() { journalDrainReminderPrior(stdout, name, due, priorUndelivered, priorErr) }
 		}
 	}
-	if !writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, failed, due.attempts+1, due.now, stdout) {
+	if !writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts+1, failed, due.attempts+1, due.now, stdout) {
 		return drainReminderSkipped
 	}
+	journalPrior()
 	if err := nudgeDrainReminder(sp, name, info); err != nil {
 		// A nil return is not proof of delivery: the seam adapter answers nil when
 		// it cannot attach, so some failures are invisible here and counted as
 		// delivered. That is the best knowledge available at this boundary, and it
 		// errs toward the gentler journal line.
-		writeDrainReminderMarker(store, info, due.drainID, due.attempts+1, failed+1, due.attempts+1, due.now, stdout)
+		writeDrainReminderMarker(store, info, due.row, due.drainID, due.attempts+1, failed+1, due.attempts+1, due.now, stdout)
 		fmt.Fprintf(stdout, //nolint:errcheck // best-effort
 			"%s: reminder %d/%d to %s was undeliverable: %v\n",
 			drainReminderLabel, due.attempts+1, drainReminderMaxAttempts, name, err)
@@ -652,7 +654,7 @@ func proposeDrainReminderNotice(lane plannerNoticeLane, store beads.Store, info 
 	if priorUndelivered {
 		failed++
 	}
-	if !writeDrainReminderMarker(store, info, due.drainID, n.Attempt, failed, settled, due.now, stdout) {
+	if !writeDrainReminderMarker(store, info, due.row, due.drainID, n.Attempt, failed, settled, due.now, stdout) {
 		return drainReminderSkipped, true
 	}
 	fmt.Fprintf(stdout, "%s: %s\n", drainReminderLabel, line) //nolint:errcheck // best-effort
@@ -800,14 +802,22 @@ func drainReminderSpendPhraseFor(bead beads.Bead) string {
 	return drainReminderSpendPhrase(attempts, failed)
 }
 
-func writeDrainReminderMarker(store beads.Store, info sessions.Info, drainID string, attempts, failed, settled int, now time.Time, stdout io.Writer) bool {
-	err := store.SetMetadataBatch(info.ID, map[string]string{
-		drainReminderCountKey:   strconv.Itoa(attempts),
-		drainReminderFailedKey:  strconv.Itoa(failed),
-		drainReminderSettledKey: strconv.Itoa(settled),
-		drainReminderAtKey:      now.UTC().Format(time.RFC3339),
-		drainReminderDrainKey:   drainID,
-	})
+// writeDrainReminderMarker writes the pacing marker over row, the session
+// bead the state was loaded from. The settled count is written only when it
+// says something an absent key does not (some attempt unsettled) or the row
+// already carries one to overwrite, so a budget spent wholly on direct
+// nudges leaves the marker it left before the lane existed.
+func writeDrainReminderMarker(store beads.Store, info sessions.Info, row beads.Bead, drainID string, attempts, failed, settled int, now time.Time, stdout io.Writer) bool {
+	patch := map[string]string{
+		drainReminderCountKey:  strconv.Itoa(attempts),
+		drainReminderFailedKey: strconv.Itoa(failed),
+		drainReminderAtKey:     now.UTC().Format(time.RFC3339),
+		drainReminderDrainKey:  drainID,
+	}
+	if _, carried := row.Metadata[drainReminderSettledKey]; carried || settled != attempts {
+		patch[drainReminderSettledKey] = strconv.Itoa(settled)
+	}
+	err := store.SetMetadataBatch(info.ID, patch)
 	if err != nil {
 		fmt.Fprintf(stdout, "%s: marking %s failed: %v\n", drainReminderLabel, info.ID, err) //nolint:errcheck // best-effort
 		return false
