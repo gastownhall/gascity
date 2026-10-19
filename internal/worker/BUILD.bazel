@@ -78,6 +78,7 @@ go_test(
         "handle_test.go",
         "handle_transcriptmeta_test.go",
         "invocation_telemetry_label_test.go",
+        "invocation_telemetry_opencode_test.go",
         "invocation_telemetry_recording_test.go",
         "invocation_telemetry_test.go",
         "invocation_telemetry_usagefact_test.go",

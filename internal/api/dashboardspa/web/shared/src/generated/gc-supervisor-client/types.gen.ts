@@ -5568,6 +5568,7 @@ export type StrandedClaim = {
 export type SubmissionCapabilities = {
     supports_follow_up: boolean;
     supports_interrupt_now: boolean;
+    supports_steer: boolean;
 };
 
 /**

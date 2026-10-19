@@ -244,6 +244,16 @@ yet settled.
   payload's `RunID` is wired today, resolved through the shared
   `beadmeta.ResolveRunID` that the compute-fact emitter also uses so a run's model
   and compute facts group together.
+- **Model-fact coverage is per transcript family: claude, codex, opencode.**
+  Families outside `invocationUsageSpecs` are skipped before any transcript
+  discovery. OpenCode mirrors a session as one JSON export named for its
+  `session_key` (`<root>/<session_key>.json`), so it is resolved by that key,
+  never by workdir (sessions sharing a workdir would be attributed each other's
+  export), and the whole export is parsed rather than tail-windowed. The
+  provider-recorded per-call `cost` is carried through `TailUsage.ReportedCostUSD`
+  and preferred over the price table, since the price table cannot know the
+  upstream (for example OpenRouter) a session routed through. A call with no
+  reported cost falls back to the registry and is flagged `Unpriced` on a miss.
 - **`gc costs` reads the local sink, not the event log** (see the `gc costs`
   section): it reflects facts only under the default `local` provider. The read
   is resilient to a partially corrupt log: a malformed line (a torn mid-append,

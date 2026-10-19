@@ -51,6 +51,19 @@ const (
 type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
 	SupportsInterruptNow bool `json:"supports_interrupt_now"`
+	// SupportsSteer reports that a steer reaches the session's running turn
+	// ([SupportsSteerForInfo]): the runtime's steer mode combined with the
+	// session's provider family, whichever host delivers the steer. No
+	// submit intent steers yet: the capability is read by conversation-lane
+	// producers, whose steers only the conversation lane delivers. The
+	// lane's Caps.Steer is this capability only while the lane runs the
+	// conversation live; it is false while another host serves the
+	// conversation or the runtime cancels turns by protocol, which the lane
+	// does not run live yet, and there a steer waits not_live whatever its
+	// on_unsupported policy. On a live lane, a steer the session cannot take
+	// follows that policy: boundary waits for the turn's boundary, fail
+	// closes the op failed{unsupported}.
+	SupportsSteer bool `json:"supports_steer"`
 }
 
 // SubmitOutcome reports whether a submit was delivered now or queued.
@@ -68,7 +81,8 @@ type SubmitOutcome struct {
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
-// persisted session metadata and whether deferred queueing is available.
+// persisted session metadata and whether deferred queueing is available. It
+// knows no runtime, so it never reports SupportsSteer.
 func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQueue bool) SubmissionCapabilities {
 	transport := transportFromMetadata(beads.Bead{Metadata: metadata})
 	return SubmissionCapabilities{
@@ -79,13 +93,16 @@ func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQu
 
 // SubmissionCapabilitiesForRuntime is [SubmissionCapabilitiesForMetadata] for
 // a session whose runtime cancels turns in mode, the session's
-// [runtime.TurnInterruptModeFor]: a runtime that cannot interrupt the
-// session's turn withdraws interrupt_now.
-func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode) SubmissionCapabilities {
+// [runtime.TurnInterruptModeFor], and steers in steer, its
+// [runtime.SteerModeFor]: a runtime that cannot interrupt the session's turn
+// withdraws interrupt_now, and steer is the runtime's mode combined with the
+// session's provider family ([SupportsSteerForInfo]).
+func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode, steer runtime.SteerMode) SubmissionCapabilities {
 	caps := SubmissionCapabilitiesForMetadata(metadata, hasDeferredQueue)
 	if refusesTurnInterrupt(beads.Bead{Metadata: metadata}, mode) {
 		caps.SupportsInterruptNow = false
 	}
+	caps.SupportsSteer = supportsSteerForMetadata(metadata, steer)
 	return caps
 }
 
@@ -95,13 +112,15 @@ func supportsInterruptNowForMetadata(metadata map[string]string) bool {
 
 // SubmissionCapabilities reports which semantic submit intents the session can
 // currently support. A runtime that cannot interrupt the session's turn
-// withdraws interrupt_now.
+// withdraws interrupt_now; steer is the runtime's steer mode combined with the
+// session's provider family.
 func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, error) {
 	b, sessName, err := m.loadSessionBead(id, true)
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForRuntime(b.Metadata, m.deferredQueue() != nil, runtime.TurnInterruptModeFor(m.sp, sessName)), nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, m.deferredQueue() != nil,
+		runtime.TurnInterruptModeFor(m.sp, sessName), runtime.SteerModeFor(m.sp, sessName)), nil
 }
 
 // refusesTurnInterrupt reports whether a runtime with mode cannot replace the

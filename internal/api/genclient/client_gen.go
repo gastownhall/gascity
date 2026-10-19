@@ -5924,6 +5924,7 @@ type StrandedClaim struct {
 type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
 	SupportsInterruptNow bool `json:"supports_interrupt_now"`
+	SupportsSteer        bool `json:"supports_steer"`
 }
 
 // SubmitIntent Semantic delivery choice for a user message on a session submit request.
