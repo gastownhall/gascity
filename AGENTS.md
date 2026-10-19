@@ -246,34 +246,46 @@ becoming more useful as models improve — it becomes LESS useful instead.
 
 ## Build and test
 
-**Bazel is the build and test system; `bazel test` is what CI gates on**
-(`.github/workflows/bazel.yml`). Plain `go test` is a quick inner-loop
-convenience only: it skips nogo lint/vet, formatting, generated-artifact
-and policy targets, and a green `go test` is not evidence a change passes CI.
+**Bazel is the build and test system, and `bazel test` is authoritative:**
+it is what CI gates on (`.github/workflows/bazel.yml`). Agents run tests
+only with `bazel test`, also while iterating on one package. Do not run
+`go test`: it skips nogo lint/vet, formatting, generated-artifact and policy
+targets, a green `go test` is not evidence a change passes CI, and agent
+hosts may refuse it.
 
 | Tier | Command (`make` alias) |
 |---|---|
 | Unit + nogo + format + generated + policy | `bazel test //...` (`make test`) |
-| One package while iterating | `bazel test //internal/config:config_test` |
+| One package while iterating | `bazel test //internal/config:config_test --test_filter='^TestName$'` |
 | Acceptance (Tier A) | `bazel test --config=acceptance //test/acceptance:acceptance_test` (`make test-acceptance`) |
 | Integration-tagged packages (gating) | `bazel test --config=integration //test:integration_packages` |
 | `test/integration` (evidence-only in CI) | `bazel test --config=integration //test/integration:integration_test` |
 | Docs sync | `bazel test //test/docsync:docsync_test` (`make check-docs`) |
 
+- **Targets.** A package's tests are `//<dir>:<last dir element>_test`
+  (`//cmd/gc:gc_test`); a subtree is `//internal/beads/...`. `go test`'s
+  `-run` is `--test_filter` (one per invocation, for every target named),
+  `-count=N` is `--runs_per_test=N`, `-v` is `--test_output=all` and
+  `-tags integration` is `--config=integration`. Results are cached by
+  input, so re-running an unchanged target is free and the cached result is
+  the same evidence; do not add `--nocache_test_results` to re-prove a pass.
+  Bazel runs only the test files `BUILD.bazel` lists: run `make bazel-sync`
+  after adding one, or the target passes without running it.
 - **Where it runs.** Agent hosts' `~/.bazelrc` names rbe-west's executor, so
-  plain `bazel test` executes remotely; never run whole-repo `go test`
-  fan-out on shared hosts. Contributors use `--config=fork-cache` (anonymous
-  read-only cache, local execution of misses); maintainers with an rbe-west
-  client certificate use `--config=remote-exec` (ask your human before
-  adding either to `.bazelrc.local`). Details: TESTING.md
-  "Bazel cache tiers" and `engdocs/bazel-quickstart.md`.
+  plain `bazel test` executes remotely. Contributors use
+  `--config=fork-cache` (anonymous read-only cache, local execution of
+  misses); maintainers with an rbe-west client certificate use
+  `--config=remote-exec` (ask your human before adding either to
+  `.bazelrc.local`). Details: TESTING.md "Bazel cache tiers" and
+  `engdocs/bazel-quickstart.md`.
 - **BUILD files.** After changing imports or adding packages or files, run
   `make bazel-sync` and commit the result; the `BUILD files in sync` CI gate
   fails otherwise. Never commit machine-specific endpoints; they belong in
   `.bazelrc.local`.
 - **Go-native twins** (`make test-go`, `make check-go`, `make
   test-acceptance-go`, `make test-integration-go`, `make test-fast-parallel`)
-  exist for offline work and hosts Bazel does not serve (macOS jobs).
+  exist for humans working offline and for hosts Bazel does not serve (macOS
+  jobs). Agents do not run them.
 - **Never run `go clean -cache`** — it corrupts shared build caches.
   `go clean -testcache` is fine. Maintainers on the shared build hosts: read
   `engdocs/contributors/maintainer-environment.md` before touching `GOCACHE`

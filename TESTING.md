@@ -61,8 +61,8 @@ matters: they set the `gotags` define, the timeout and, for integration,
 - **Maintainers:** `--config=remote-exec` with an rbe-west mTLS client
   certificate executes on rbe-west's `oss` pool.
 - **Agent hosts:** the operator's `~/.bazelrc` names the executor and
-  certificate, so plain `bazel test` executes remotely; whole-repo `go
-  test` fan-out on a shared host is never the right tool.
+  certificate, so plain `bazel test` executes remotely. Agents there run
+  `bazel test` only, never `go test`.
 
 Put `build --config=fork-cache` or `build --config=remote-exec` in the
 gitignored `.bazelrc.local` to make it your default, or pass it per command
@@ -72,16 +72,19 @@ BUILD files (the `BUILD files in sync` gate checks this). See
 `engdocs/bazel-quickstart.md` for setup and `engdocs/bazel-ci-budget.md` for
 the CI optimization loop.
 
-**Plain `go test` is an inner-loop convenience, not the gate.** `go test
-./internal/config -run TestX` is fine for a quick edit-compile-run cycle on
-one package. It runs none of the nogo, format, generated-artifact or policy
-targets, uses your host's environment instead of the pinned one, and a pass
-there is not evidence for CI. The Go-native make targets (`make test-go`,
-`make check-go`, `make test-acceptance-go`, `make test-integration-go`,
-`make check-docs-go`, and the sharded runners under "Cross-category runners"
-below) exist for offline work and for hosts Bazel does not serve, such as
-the macOS jobs. Workflow jobs that still run a Go-native suite call these
-`-go` names explicitly, so each workflow says which engine it uses.
+**Plain `go test` is not the gate, and agents do not run it.** Iterate on
+one package with `bazel test //internal/config:config_test
+--test_filter=TestX`: only changed inputs re-run, and an unchanged target
+returns its cached result. `go test ./internal/config -run TestX` remains a
+convenience for a human working offline. It runs none of the nogo, format,
+generated-artifact or policy targets, uses your host's environment instead
+of the pinned one, and a pass there is not evidence for CI. The Go-native
+make targets (`make test-go`, `make check-go`, `make test-acceptance-go`,
+`make test-integration-go`, `make check-docs-go`, and the sharded runners
+under "Cross-category runners" below) exist for offline work and for hosts
+Bazel does not serve, such as the macOS jobs. Workflow jobs that still run a
+Go-native suite call these `-go` names explicitly, so each workflow says
+which engine it uses.
 
 `//go:build integration` tests outside `test/integration` run in the
 `integration-packages` lane, the Bazel form of `go test -tags integration`
@@ -727,12 +730,12 @@ To re-pin, anyone with write access:
 1. Take the manifest and pin line from the drift issue, or from the
    failed run's step summary.
 2. Commit the manifest as `tools/rbe/worker-env.txt` and the pin in
-   `platforms/BUILD.bazel`. `go test ./scripts/ -run RBEWorkerEnv`
-   checks that they agree with each other and with `go.mod`. The PR's
-   `worker-host` job runs the pinned rbe-worker's `cmd/product-check`
-   (worker items) against this checkout on every PR, and fails if the
-   manifest does not match the worker: its measured package list, its
-   dolt, the test `PATH`, the pin.
+   `platforms/BUILD.bazel`. `bazel test //scripts:scripts_test
+   --test_filter=RBEWorkerEnv` checks that they agree with each other and
+   with `go.mod`. The PR's `worker-host` job runs the pinned rbe-worker's
+   `cmd/product-check` (worker items) against this checkout on every PR,
+   and fails if the manifest does not match the worker: its measured
+   package list, its dolt, the test `PATH`, the pin.
    rbe-worker's own CI runs the same check against gascity's main, but
    only as information, and it gates nothing here.
    Make the same change in gastownhall/beads (its
@@ -1036,7 +1039,7 @@ authoritative p95; the history format requires twenty comparable successful
 samples for an authoritative p95.
 
 ```bash
-go test -count=10 -run '^TestName$' ./path
+bazel test //path:name_test --test_filter='^TestName$' --runs_per_test=10 --nocache_test_results
 ```
 
 Compare like runner, OS, architecture, CPU count, cache condition, and suite
@@ -1279,7 +1282,7 @@ requires the source path to be beneath `cmd/gc/`.
 Run the focused check with:
 
 ```bash
-go test -count=1 ./internal/testpolicy/resourcecensus -run '^TestRepositoryLedgerMatchesCensusAndDocumentation$'
+bazel test //internal/testpolicy/resourcecensus:resourcecensus_test --test_filter='^TestRepositoryLedgerMatchesCensusAndDocumentation$'
 ```
 
 The historical regex totals remain visible as point-in-time audit evidence.
