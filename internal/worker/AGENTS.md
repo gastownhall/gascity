@@ -63,7 +63,17 @@ when the context ends. Take the bound from the caller's own context.
   with one type: a joiner of another type's observation gets an unavailable
   error, not its answer. Turn keys (`turnObservationKey`) name the city
   directory and the session, for a `SessionHandle` and a `RuntimeHandle` alike
-  (`RuntimeHandleConfig.CityPath`).
+  (`RuntimeHandleConfig.CityPath`). A turn read made under the session
+  mutation lock (the turn-scoped interrupt's check) joins no shared read: its
+  session load and runtime probes go through `ObserveBounded` under a
+  `locked-` turn key of their own (`observeTurnRead`), so a shared read that
+  began before the lock, holding the session as it was then, never answers
+  it. Its failure direction is the opposite of a watcher's: a watcher leaves
+  a turn open on an idle reading it did not get, while the check refuses as
+  unknown (`idleUnknown`), since only a busy reading counts as the turn
+  running. That includes `ErrObservationOutstanding`, which every later
+  check's own reading gets at once while one an earlier check left wedged is
+  still out.
 
 ## Turn sources
 

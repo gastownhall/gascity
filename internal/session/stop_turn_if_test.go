@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"sync"
 	"testing"
 	"time"
 
@@ -116,6 +117,16 @@ func newProtocolTurnSession(t *testing.T, turns ...string) (*Manager, *runtime.F
 	return mgr, sp, info
 }
 
+// assertTurnInterruptUnknown asserts err is unknown (runtime.ErrRuntimeUnavailable)
+// and in no other class a caller tells apart.
+func assertTurnInterruptUnknown(t *testing.T, err error) {
+	t.Helper()
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) ||
+		errors.Is(err, runtime.ErrTurnNotCurrent) {
+		t.Fatalf("InterruptTurn = %v, want ErrRuntimeUnavailable alone", err)
+	}
+}
+
 func turnFenceCalls(sp *runtime.Fake) []string {
 	var out []string
 	for _, c := range sp.SnapshotCalls() {
@@ -159,11 +170,31 @@ func TestManagerInterruptTurn(t *testing.T) {
 		}
 	})
 	t.Run("dispatch failure is unknown", func(t *testing.T) {
-		mgr, sp, info := newProtocolTurnSession(t, "t1")
-		sp.InterruptTurnErrors = map[string]error{info.SessionName: runtime.ErrRuntimeUnavailable}
-		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
-		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
-			t.Fatalf("InterruptTurn(dispatch fails) = %v, want ErrRuntimeUnavailable only", err)
+		// A runtime's own errors name no class: a T3 RPC that failed, an
+		// ACP read's bare ctx error. Each is unknown, and only that.
+		for name, dispatchErr := range map[string]error{
+			"rpc error":       errors.New("t3 rpc orchestration.dispatchCommand: connection reset by peer"),
+			"bare ctx error":  context.Canceled,
+			"already unknown": fmt.Errorf("bridge: %w", runtime.ErrRuntimeUnavailable),
+		} {
+			t.Run(name, func(t *testing.T) {
+				mgr, sp, info := newProtocolTurnSession(t, "t1")
+				sp.InterruptTurnErrors = map[string]error{info.SessionName: dispatchErr}
+				_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
+				assertTurnInterruptUnknown(t, err)
+			})
+		}
+	})
+	t.Run("a ctx ended before the dispatch sends nothing", func(t *testing.T) {
+		// The lock is free, so InterruptTurn takes it although ctx ended:
+		// nothing is dispatched, and the result is unknown.
+		mgr, sp, info := newProtocolTurnSession(t, "t1", "")
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := mgr.InterruptTurn(ctx, info.ID, "t1")
+		assertTurnInterruptUnknown(t, err)
+		if got := turnFenceCalls(sp); len(got) != 0 {
+			t.Fatalf("calls after ctx ended: %v", got)
 		}
 	})
 	t.Run("suspended row has no turn", func(t *testing.T) {
@@ -263,6 +294,200 @@ func TestStopTurnIfRuntimeGoneAfterTheCheck(t *testing.T) {
 			}
 			if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
 				t.Fatalf("sent %v to a runtime gone", callMethods(sent))
+			}
+		})
+	}
+}
+
+// cachedRunning is a runtime whose IsRunning answers from cache.running, as a
+// provider's state cache does (tmux's can read a live session stopped),
+// while its fresh liveness read is FullFake's, failing with cache.liveErr
+// when that is set. cache.onMode, when set, runs as its interrupt mode is
+// read: a stop reads it once, after it found a turn and before the keys.
+type cachedRunning struct {
+	runtime.FullFake
+	cache *runningCache
+}
+
+type runningCache struct {
+	mu      sync.Mutex
+	running func() bool // nil: the fake's own answer
+	liveErr error
+	onMode  func()
+}
+
+func (c *runningCache) set(running func() bool, liveErr error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.running, c.liveErr = running, liveErr
+}
+
+func (p cachedRunning) IsRunning(name string) bool {
+	p.cache.mu.Lock()
+	defer p.cache.mu.Unlock()
+	if p.cache.running != nil {
+		return p.cache.running()
+	}
+	return p.FullFake.IsRunning(name)
+}
+
+func (p cachedRunning) TurnInterruptMode(name string) runtime.TurnInterruptMode {
+	p.cache.mu.Lock()
+	onMode := p.cache.onMode
+	p.cache.mu.Unlock()
+	if onMode != nil {
+		onMode()
+	}
+	return p.FullFake.TurnInterruptMode(name)
+}
+
+func (p cachedRunning) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	p.cache.mu.Lock()
+	err := p.cache.liveErr
+	p.cache.mu.Unlock()
+	if err != nil {
+		return runtime.Liveness{}, err
+	}
+	return p.FullFake.ObserveLivenessSince(name, processNames, since)
+}
+
+// newCachedRunningSession is a keystroke Claude session on a cachedRunning
+// runtime over sp.
+func newCachedRunningSession(t *testing.T) (*Manager, *runtime.Fake, Info, *runningCache) {
+	t.Helper()
+	sp := runtime.NewFake()
+	cache := &runningCache{}
+	mgr, info, _ := newFencedStopSessionOn(t, cachedRunning{runtime.FullFake{Fake: sp}, cache}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
+	return mgr, sp, info, cache
+}
+
+// Kills a checked stop that takes a cached "not running" for no turn: with a
+// check, whether the runtime runs, before the check and again before the
+// keys, is a fresh liveness read's. One that finds the agent up gets the
+// keys whatever IsRunning says, one that finds its agent gone sends nothing,
+// and one that cannot answer is unknown, nothing sent.
+func TestStopTurnIfDecidesTheRuntimeOnAFreshRead(t *testing.T) {
+	stale := func() bool { return false }
+	t.Run("stale cache before the check", func(t *testing.T) {
+		mgr, sp, info, cache := newCachedRunningSession(t)
+		cache.set(stale, nil)
+		checks := 0
+		if err := mgr.StopTurnIf(context.Background(), info.ID, func() error { checks++; return nil }); err != nil {
+			t.Fatalf("StopTurnIf(stale cache) = %v, want nil: the fresh read finds the agent up", err)
+		}
+		if checks != 1 || countMethod(inputCalls(sp.SnapshotCalls(), info.SessionName), "Interrupt") != 1 {
+			t.Fatalf("check ran %d times and sent %v, want the check once and the interrupt", checks, callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)))
+		}
+	})
+	t.Run("stale cache after the check", func(t *testing.T) {
+		mgr, sp, info, cache := newCachedRunningSession(t)
+		err := mgr.StopTurnIf(context.Background(), info.ID, func() error { cache.set(stale, nil); return nil })
+		if err != nil {
+			t.Fatalf("StopTurnIf(stale cache after the check) = %v, want nil, not the runtime gone", err)
+		}
+		if countMethod(inputCalls(sp.SnapshotCalls(), info.SessionName), "Interrupt") != 1 {
+			t.Fatalf("sent %v, want the interrupt", callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)))
+		}
+	})
+	t.Run("agent gone after the check", func(t *testing.T) {
+		mgr, sp, info, _ := newCachedRunningSession(t)
+		err := mgr.StopTurnIf(context.Background(), info.ID, func() error {
+			sp.Zombies[info.SessionName] = true // the pane lives on, its agent exited
+			return nil
+		})
+		if !errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+			t.Fatalf("StopTurnIf(agent gone after the check) = %v, want ErrSessionNotFound alone", err)
+		}
+		if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+			t.Fatalf("sent %v to a pane whose agent exited", callMethods(sent))
+		}
+	})
+	for _, when := range []string{"before", "after"} {
+		t.Run("unreadable "+when+" the check", func(t *testing.T) {
+			mgr, sp, info, cache := newCachedRunningSession(t)
+			unreadable := errors.New("tmux: list-panes failed")
+			if when == "before" {
+				cache.set(nil, unreadable)
+			}
+			checks := 0
+			err := mgr.StopTurnIf(context.Background(), info.ID, func() error {
+				checks++
+				cache.set(nil, unreadable)
+				return nil
+			})
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, runtime.ErrTurnNotEnded) {
+				t.Fatalf("StopTurnIf(unreadable %s the check) = %v, want ErrRuntimeUnavailable alone", when, err)
+			}
+			if want := map[string]int{"before": 0, "after": 1}[when]; checks != want {
+				t.Fatalf("check ran %d times, want %d", checks, want)
+			}
+			if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+				t.Fatalf("sent %v on a read that could not answer", callMethods(sent))
+			}
+		})
+	}
+}
+
+// Kills a StopTurn that waits after sending nothing: a runtime that stops
+// after the stop found a turn, before the keys, gets nothing, so no wait runs
+// that could fail it with ErrTurnNotEnded ("the interrupt was sent").
+func TestStopTurnGoneAtTheKeysWaitsForNothing(t *testing.T) {
+	mgr, sp, info, cache := newCachedRunningSession(t)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("tmux: session not found")
+	cache.onMode = func() {
+		if err := sp.Stop(info.SessionName); err != nil {
+			t.Errorf("Stop: %v", err)
+		}
+	}
+	sp.Calls = nil
+	if err := mgr.StopTurn(info.ID); err != nil {
+		t.Fatalf("StopTurn(runtime gone at the keys) = %v, want nil: nothing was sent", err)
+	}
+	if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
+		t.Fatalf("sent %v to a runtime gone", callMethods(sent))
+	}
+	if n := countMethod(sp.SnapshotCalls(), "WaitForIdle"); n != 0 {
+		t.Fatalf("WaitForIdle ran %d times after nothing was sent, want none", n)
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 1 {
+		t.Fatalf("the runtime stopped %d times, want once, at the mode read after the turn was found", n)
+	}
+}
+
+// Kills a follow-up interrupt sent on the first check alone: a soft-escape
+// family's Ctrl-C fallback interrupts whatever turn runs when it lands, so
+// a checked stop sends it only once the check passes again. A refusal sends
+// nothing more and fails the stop as sent but not seen to end, the refusal
+// in its text only.
+func TestStopTurnIfChecksAgainBeforeTheFallback(t *testing.T) {
+	for _, fam := range []string{"codex", "kimi"} {
+		t.Run(fam+"/check passes again", func(t *testing.T) {
+			mgr, sp, info, _ := newFencedStopSession(t, fam, nil, runtime.TurnInterruptKeystroke)
+			checks := 0
+			if err := mgr.StopTurnIf(context.Background(), info.ID, func() error { checks++; return nil }); err != nil {
+				t.Fatalf("StopTurnIf: %v", err)
+			}
+			if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"SendKeys(Escape)", "Interrupt"}; !slices.Equal(got, want) {
+				t.Fatalf("sent %v, want %v", got, want)
+			}
+			if checks != 2 {
+				t.Fatalf("check ran %d times, want 2: before the Escape and before the fallback", checks)
+			}
+		})
+		t.Run(fam+"/check refuses the fallback", func(t *testing.T) {
+			mgr, sp, info, _ := newFencedStopSession(t, fam, nil, runtime.TurnInterruptKeystroke)
+			checks := 0
+			err := mgr.StopTurnIf(context.Background(), info.ID, func() error {
+				if checks++; checks > 1 {
+					return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: "t1"}
+				}
+				return nil
+			})
+			if !errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+				t.Fatalf("StopTurnIf(fallback refused) = %v, want ErrTurnNotEnded alone: the Escape was sent", err)
+			}
+			if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"SendKeys(Escape)"}; !slices.Equal(got, want) {
+				t.Fatalf("sent %v, want %v: no fallback after a refusal", got, want)
 			}
 		})
 	}
@@ -379,11 +604,13 @@ func TestManagerInterruptTurnEdges(t *testing.T) {
 		}
 	})
 	t.Run("gone after a failed attempt is unknown", func(t *testing.T) {
+		// Unknown, and only that: a caller that tests not-found first must
+		// not read "maybe sent" as "nothing sent".
 		mgr, sp, info := newProtocolTurnSession(t, "t1")
 		sp.InterruptTurnErrors = map[string]error{info.SessionName: fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound)}
 		_, err := mgr.InterruptTurn(context.Background(), info.ID, "t1")
-		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) {
-			t.Fatalf("InterruptTurn(gone after an attempt) = %v, want ErrRuntimeUnavailable", err)
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotCurrent) || errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("InterruptTurn(gone after an attempt) = %v, want ErrRuntimeUnavailable alone", err)
 		}
 	})
 	t.Run("a failed wait is not ended, and only that", func(t *testing.T) {

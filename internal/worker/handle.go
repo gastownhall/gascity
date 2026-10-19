@@ -191,20 +191,21 @@ type InterruptRequest struct {
 	// anything; a miss is a *runtime.FenceMismatchError, and a session that
 	// is not running, or has no session row, is one finding it absent (both
 	// handles; a turn-scoped interrupt on a SessionHandle with no session
-	// created yet is refused first, as Turn documents). Past that the handles differ. A SessionHandle maps the
-	// liveness it reads before the stop as session.Manager.StopTurnFenced
-	// documents: an exited agent is a miss finding it dead, and a read that
-	// cannot answer is runtime.ErrRuntimeUnavailable. A RuntimeHandle
-	// takes no liveness read and leaves the verdict to the runtime's guard;
-	// tmux's checks the agent pane, not the agent process, so an interrupt
-	// into an exited agent whose pane lives on can return nil. It is a
-	// capability and never serialized. A turn-scoped interrupt takes it too,
-	// as a separate axis from the turn (X11 §3.1): a turn names what to
-	// interrupt, not which incarnation hosts it, since a resumed incarnation
-	// can carry on its predecessor's transcript. On a transcript source every
-	// key goes under the fence, after the turn check; a protocol source's
-	// runtime takes no input fence on its turn interrupt, so a fenced one is
-	// refused with runtime.ErrInputFenceUnsupported, nothing sent.
+	// created yet is refused first, as Turn documents). Past that the
+	// handles differ. A SessionHandle maps the liveness it reads before the
+	// stop as session.Manager.StopTurnFenced documents: an exited agent is a
+	// miss finding it dead, and a read that cannot answer is
+	// runtime.ErrRuntimeUnavailable. A RuntimeHandle takes no liveness read
+	// and leaves the verdict to the runtime's guard; tmux's checks the agent
+	// pane, not the agent process, so an interrupt into an exited agent
+	// whose pane lives on can return nil. It is a capability and never
+	// serialized. A turn-scoped interrupt takes it too, as a separate axis
+	// from the turn (X11 §3.1): a turn names what to interrupt, not which
+	// incarnation hosts it, since a resumed incarnation can carry on its
+	// predecessor's transcript. On a transcript source every key goes under
+	// the fence, after the turn check; a protocol source's runtime takes no
+	// input fence on its turn interrupt, so a fenced one is refused with
+	// runtime.ErrInputFenceUnsupported, nothing sent.
 	Fence runtime.InputFence `json:"-"`
 	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
 	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
@@ -215,18 +216,21 @@ type InterruptRequest struct {
 	// session.ErrTurnInterruptUnsupported when the runtime cannot interrupt
 	// at all, and runtime.ErrTurnIdentityUnsupported too when a
 	// SessionHandle has no session created yet, fenced or not. A closed
-	// session row is an error wrapping runtime.ErrSessionNotFound, nothing
-	// sent. It returns nil only once a read of the session's turns shows
-	// the turn no longer current (or the session gone) within 15 s of the
-	// check; a *runtime.TurnNotCurrentError when the turn was not current,
-	// or the runtime not running, nothing sent; an error wrapping
-	// runtime.ErrTurnNotEnded when it was interrupted but not seen to end,
-	// which wraps no other sentinel (the last failure is in its text only),
-	// so "sent" is never misread as unknown; and an error wrapping
+	// session row, or one closed by the time the stop or the interrupt holds
+	// the session mutation lock, is an error wrapping
+	// runtime.ErrSessionNotFound, nothing sent; a row that will not load is
+	// runtime.ErrRuntimeUnavailable, nothing sent. It returns nil only once
+	// a read of the session's turns shows the turn no longer current (or
+	// the session gone) within 15 s of the check; a
+	// *runtime.TurnNotCurrentError when the turn was not current, or the
+	// runtime not running by a fresh liveness read, nothing sent; an error
+	// wrapping runtime.ErrTurnNotEnded when it was interrupted but not seen
+	// to end, which wraps no other sentinel (the last failure is in its text
+	// only), so "sent" is never misread as unknown; and an error wrapping
 	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
-	// sent, or when the turn could not be checked before ctx ended (nothing
-	// sent then). ctx bounds the wait for the session mutation lock and the
-	// check before the keys.
+	// sent, or when the turn could not be checked before ctx ended or its
+	// idle state could not be read (nothing sent then). ctx bounds the wait
+	// for the session mutation lock and the check before the keys.
 	Turn string `json:"turn,omitempty"`
 }
 

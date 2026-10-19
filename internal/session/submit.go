@@ -280,7 +280,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 		return false, err
 	}
-	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
+	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, nil); err != nil {
 		if mode == runtime.TurnInterruptProtocol {
 			// A protocol runtime's Stop may leave it running, so a restart
 			// would interrupt nothing and nudge the message into the turn.
@@ -360,14 +360,15 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // fresh read decides the miss, as it may have stopped since its caller read
 // it running.
 func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
-	_, err := m.sendTurnInterruptLocked(ctx, b, sessName, mode)
+	_, err := m.sendTurnInterruptLocked(ctx, b, sessName, mode, false)
 	return err
 }
 
 // sendTurnInterruptLocked is stopTurnLocked, also reporting none when it
-// found no turn to interrupt and sent nothing.
-func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) (none bool, err error) {
-	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
+// found no turn to interrupt and sent nothing. fresh decides whether the
+// runtime runs from a fresh liveness read, as stopFindsNoTurn documents.
+func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, fresh bool) (none bool, err error) {
+	if none, err := m.stopFindsNoTurn(ctx, b, sessName, fresh); none {
 		return true, err
 	}
 	switch mode {
@@ -391,7 +392,16 @@ func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, ses
 	return false, nil
 }
 
-func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
+// waitForInterruptIdleLocked waits for a family that settles to an idle
+// prompt after its interrupt to read idle, sending the keystroke sequence's
+// follow-up interrupt on the way: a soft-escape family's Ctrl-C fallback once
+// the Escape has not settled it within softInterruptFallbackWait, or
+// Gemini's immediate confirm. The follow-up interrupts whatever turn runs
+// when it lands, so a checked stop (StopTurnIf) passes its check as still:
+// the follow-up goes only once still passes again, and a refusal sends
+// nothing more and fails the wait, the refusal in its text only, since the
+// first key was sent.
+func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, still func() error) error {
 	if !waitsForIdleAfterInterrupt(b) {
 		return nil
 	}
@@ -406,18 +416,29 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		}
 		return err
 	}
+	followUp := func(what string) error {
+		if still != nil {
+			if err := still(); err != nil {
+				return fmt.Errorf("%s: not sent, the turn check refused it (%s)", what, err.Error())
+			}
+		}
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
 	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
-			if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
+			if err := followUp("confirming interrupt after soft escape"); err != nil {
+				return err
 			}
 			return waitForIdle(15 * time.Second)
 		}
 		if err := waitForIdle(softInterruptFallbackWait); err == nil {
 			return nil
 		}
-		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
+		if err := followUp("interrupting session with control-c fallback"); err != nil {
+			return err
 		}
 	}
 	return waitForIdle(15 * time.Second)

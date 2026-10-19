@@ -3,11 +3,14 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -438,6 +441,130 @@ func TestTurnInterruptRuntimeGoneBeforeTheKeysIsNotCurrent(t *testing.T) {
 	}
 }
 
+// staleRunningBackend is a tmux-shaped backend whose IsRunning, as the tmux
+// state cache can, reads the session stopped once stale is set, while a
+// fresh liveness read still finds the agent up.
+type staleRunningBackend struct {
+	inputHookBackend
+	stale *atomic.Bool
+}
+
+func (b staleRunningBackend) IsRunning(name string) bool {
+	return !b.stale.Load() && b.inputHookBackend.IsRunning(name)
+}
+
+// A cached IsRunning that reads a live runtime stopped is no proof that no
+// turn runs: before the check and again before the keys, the check's stop
+// decides on a fresh liveness read, so the turn is interrupted, never
+// reported not current with nothing sent.
+func TestTurnInterruptTrustsAFreshReadOverAStaleRunningCache(t *testing.T) {
+	t.Run("stale before the check", func(t *testing.T) {
+		fake := runtime.NewFake()
+		stale := new(atomic.Bool)
+		var path string
+		backend := staleRunningBackend{inputHookBackend{
+			idleScript: idleScript{FullFake: runtime.FullFake{Fake: fake}, state: &idleScriptState{}},
+			onInput:    func(string) { appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n") },
+		}, stale}
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, backend), "codex", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		path = s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+		ageTranscript(t, path, clock.now().Add(-time.Hour))
+		stale.Store(true)
+		fake.Calls = nil
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: a fresh read finds the agent up", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, []string{"SendKeys(Escape)"}) {
+			t.Fatalf("sent %v, want [SendKeys(Escape)]", got)
+		}
+	})
+	t.Run("stale after the check", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: false}, idleAnswer{idle: true}, idleAnswer{idle: true})
+		stale := new(atomic.Bool)
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, staleRunningBackend{inputHookBackend{idleScript: idle}, stale}), "claude", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+		ageTranscript(t, path, clock.now().Add(-time.Minute))
+		idle.state.before = func(call int) {
+			if call == 1 { // the check's own reading
+				stale.Store(true)
+			}
+		}
+		idle.Calls = nil
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil once the idle readings end it: a fresh read finds the agent up", err)
+		}
+		if got, want := sentInputs(idle.Fake, s.info.SessionName), []string{"Interrupt", "ClearInput"}; !slices.Equal(got, want) {
+			t.Fatalf("sent %v, want %v", got, want)
+		}
+	})
+}
+
+// The check under the session mutation lock takes only a busy idle reading as
+// the turn running: one it did not get refuses as unknown, nothing sent, never
+// a pass. That includes a reading an earlier check left wedged, which answers
+// each later check's own reading at once (ErrObservationOutstanding).
+func TestTurnInterruptCheckRefusesWithoutAnIdleReading(t *testing.T) {
+	// claudeOn is a tmux Claude session whose target turn is open in a
+	// transcript quiet for a minute, so the check takes idle readings.
+	claudeOn := func(t *testing.T, idle idleScript) turnSession {
+		t.Helper()
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+		ageTranscript(t, s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z")), time.Now().Add(-time.Minute))
+		idle.Calls = nil
+		return s
+	}
+	assertUnknown := func(t *testing.T, err error, s turnSession, fake *runtime.Fake) {
+		t.Helper()
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) ||
+			errors.Is(err, runtime.ErrTurnNotCurrent) || errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("Interrupt = %v, want ErrRuntimeUnavailable alone", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("sent %v, want nothing", got)
+		}
+	}
+	t.Run("an earlier check's reading still wedged", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		unwedge, unwedged := make(chan struct{}), make(chan struct{})
+		idle.state.before = func(call int) {
+			if call == 1 {
+				<-unwedge
+				close(unwedged)
+			}
+		}
+		t.Cleanup(func() {
+			close(unwedge)
+			<-unwedged
+		})
+		s := claudeOn(t, idle)
+		ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+		defer cancel()
+		assertUnknown(t, s.handle.Interrupt(ctx, InterruptRequest{Turn: claudeTurn1}), s, idle.Fake)
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1})
+		assertUnknown(t, err, s, idle.Fake)
+		if !errors.Is(err, ErrObservationOutstanding) {
+			t.Fatalf("Interrupt = %v, want the wedged reading's ErrObservationOutstanding", err)
+		}
+		if calls := idle.idleCalls(); calls != 1 {
+			t.Fatalf("SnapshotIdle calls = %d, want only the wedged one", calls)
+		}
+	})
+	for name, answer := range map[string]error{
+		"a failed reading":         errors.New("tmux: capture-pane failed"),
+		"an indeterminate reading": runtime.ErrIdleIndeterminate,
+	} {
+		t.Run(name, func(t *testing.T) {
+			idle := newIdleScript(idleAnswer{err: answer})
+			s := claudeOn(t, idle)
+			assertUnknown(t, s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1}), s, idle.Fake)
+		})
+	}
+}
+
 // A closed session row answers a turn-scoped interrupt with an error wrapping
 // runtime.ErrSessionNotFound, nothing sent, on either turn source.
 func TestTurnInterruptClosedRowIsSessionNotFound(t *testing.T) {
@@ -612,6 +739,39 @@ func TestTurnInterruptSettle(t *testing.T) {
 		})
 		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
 			t.Fatalf("Interrupt = %v, want nil: the target left Current", err)
+		}
+	})
+	t.Run("a successor after the Escape gets no fallback", func(t *testing.T) {
+		// The Escape ends the target and the agent starts its next turn
+		// before the family's idle wait reads idle. The Ctrl-C fallback
+		// would interrupt that successor, so the check runs again first and
+		// refuses it: nothing more is sent, and the target has settled.
+		s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+			appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n"+codexStarted(codexTurn2, "2026-10-08T02:22:41.000Z", 1791426161)+"\n")
+		})
+		fake.WaitForIdleErrors[s.info.SessionName] = errors.New("still busy")
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the target left Current", err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, []string{"SendKeys(Escape)"}) {
+			t.Fatalf("sent %v, want [SendKeys(Escape)]: no fallback into the successor", got)
+		}
+	})
+	t.Run("the fallback goes once the check passes again", func(t *testing.T) {
+		// The Escape leaves the target open, so the check passes again and
+		// the Ctrl-C fallback goes; that ends the turn.
+		inputs := 0
+		s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+			if inputs++; inputs == 2 {
+				appendTranscript(t, path, codexAborted(codexTurn1, "2026-10-08T02:22:40.000Z")+"\n")
+			}
+		})
+		fake.WaitForIdleErrors[s.info.SessionName] = errors.New("still busy")
+		if err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1}); err != nil {
+			t.Fatalf("Interrupt = %v, want nil: the fallback ended the target", err)
+		}
+		if got, want := sentInputs(fake, s.info.SessionName), []string{"SendKeys(Escape)", "Interrupt"}; !slices.Equal(got, want) {
+			t.Fatalf("sent %v, want %v", got, want)
 		}
 	})
 	t.Run("a failed family wait is re-read from the transcript", func(t *testing.T) {
@@ -796,4 +956,247 @@ func assertTurnInterrupt(t *testing.T, h Handle, turn string, wantErr error) {
 	if wantErr != nil && !errors.Is(err, wantErr) {
 		t.Fatalf("Interrupt(%s) = %v, want %v", turn, err, wantErr)
 	}
+}
+
+// lockedLoadStore is a session store that runs onLocked once, at the first
+// read of the session made while its mutation lock is held: the Manager's
+// own load under the lock, after every read the handle made before it. A
+// non-nil error from onLocked is that read's answer.
+type lockedLoadStore struct {
+	beads.Store
+	id       string
+	once     sync.Once
+	onLocked func() error
+}
+
+func (s *lockedLoadStore) Get(id string) (beads.Bead, error) {
+	var err error
+	if id == s.id && sessionMutationLockHeld(id) {
+		s.once.Do(func() { err = s.onLocked() })
+	}
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return s.Store.Get(id)
+}
+
+// sessionMutationLockHeld reports whether session id's mutation lock is held
+// now, without waiting for it.
+func sessionMutationLockHeld(id string) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := sessionpkg.WithSessionMutationLockContext(ctx, id, func() error { return nil })
+	return errors.Is(err, sessionpkg.ErrSessionMutationBusy)
+}
+
+// onLockedLoad runs onLocked at the Manager's load of the session row under
+// the session mutation lock (lockedLoadStore), on a Manager of its own.
+func (s *turnSession) onLockedLoad(t *testing.T, onLocked func() error) {
+	t.Helper()
+	store := &lockedLoadStore{Store: s.store, id: s.info.ID, onLocked: onLocked}
+	s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+}
+
+// startSharedRead puts a shared read of key in flight that answers stale only
+// as the test ends, and returns once it is in flight: a read that joins it
+// waits for that answer.
+func startSharedRead[T any](t *testing.T, key string, stale T) {
+	t.Helper()
+	started, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+	go func() {
+		defer close(done)
+		_, _ = ObserveShared(context.Background(), key, func(context.Context) (T, error) {
+			close(started)
+			<-release
+			return stale, nil
+		})
+	}()
+	<-started
+	t.Cleanup(func() {
+		close(release)
+		<-done
+	})
+}
+
+// The Manager loads the session row again under the session mutation lock:
+// a row closed since the handle's plan read is not found and one that will
+// not load is unknown, nothing sent either way, on either turn source.
+func TestTurnInterruptRowLoadUnderTheLock(t *testing.T) {
+	sources := []struct {
+		name    string
+		profile runtime.Profile
+		family  string
+		turn    string
+		setup   func(*testing.T, *turnSession, *runtime.Fake)
+	}{
+		{name: "transcript", profile: runtime.ProfileTmux, family: "codex", turn: codexTurn1, setup: func(t *testing.T, s *turnSession, _ *runtime.Fake) {
+			s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+		}},
+		{name: "protocol", profile: runtime.ProfileACP, family: "claude", turn: "acp-1", setup: func(_ *testing.T, s *turnSession, fake *runtime.Fake) {
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+			fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1", ""}}
+		}},
+	}
+	for _, src := range sources {
+		for _, tc := range []struct {
+			name     string
+			onLocked func(s turnSession) error
+			want     error
+			not      []error
+		}{
+			{
+				name:     "closed",
+				onLocked: func(s turnSession) error { return s.store.Close(s.info.ID) },
+				want:     runtime.ErrSessionNotFound,
+				not:      []error{runtime.ErrRuntimeUnavailable, runtime.ErrTurnNotCurrent, runtime.ErrTurnNotEnded},
+			},
+			{
+				name:     "unreadable",
+				onLocked: func(turnSession) error { return errors.New("store: connection reset by peer") },
+				want:     runtime.ErrRuntimeUnavailable,
+				not:      []error{runtime.ErrSessionNotFound, runtime.ErrTurnNotCurrent, runtime.ErrTurnNotEnded},
+			},
+		} {
+			t.Run(src.name+"/"+tc.name, func(t *testing.T) {
+				fake := runtime.NewFake()
+				s := newTurnSession(t, profiled(src.profile, runtime.FullFake{Fake: fake}), src.family, "")
+				src.setup(t, &s, fake)
+				s.onLockedLoad(t, func() error { return tc.onLocked(s) })
+				fake.Calls = nil
+				err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: src.turn})
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("Interrupt = %v, want %v", err, tc.want)
+				}
+				for _, other := range tc.not {
+					if errors.Is(err, other) {
+						t.Fatalf("Interrupt = %v, want %v alone, not %v too", err, tc.want, other)
+					}
+				}
+				if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+					t.Fatalf("sent %v, want nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// On a protocol source every failure the runtime's turn fence does not
+// classify is unknown, on both handles: a dispatch error that names no class,
+// and a ctx that ended before the dispatch, which sends nothing. On a
+// SessionHandle that ctx ends once the session mutation lock is taken, as it
+// can between the plan read and the dispatch.
+func TestProtocolTurnInterruptUnclassifiedFailureIsUnknown(t *testing.T) {
+	assertUnknown := func(t *testing.T, err error) {
+		t.Helper()
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) ||
+			errors.Is(err, runtime.ErrTurnNotCurrent) || errors.Is(err, runtime.ErrSessionNotFound) {
+			t.Fatalf("Interrupt = %v, want ErrRuntimeUnavailable alone", err)
+		}
+	}
+	protocolSession := func(t *testing.T) (turnSession, *runtime.Fake) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1", ""}}
+		fake.Calls = nil
+		return s, fake
+	}
+	protocolRuntime := func(t *testing.T) (*RuntimeHandle, *runtime.Fake) {
+		fake := runtime.NewFake()
+		h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake}))
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{"turn-worker": {"acp-1", ""}}
+		fake.Calls = nil
+		return h, fake
+	}
+	for name, dispatchErr := range map[string]error{
+		"dispatch error": errors.New("t3 rpc orchestration.dispatchCommand: connection reset by peer"),
+		// t3bridge's dispatch whose retry's fresh read found the thread
+		// unbound: it may have reached T3, so its not-found is no class.
+		"gone after a failed attempt": fmt.Errorf("t3 rpc orchestration.dispatchCommand: not retried after attempt 1 failed: %w: %w",
+			runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound),
+	} {
+		t.Run("session handle/"+name, func(t *testing.T) {
+			s, fake := protocolSession(t)
+			fake.InterruptTurnErrors = map[string]error{s.info.SessionName: dispatchErr}
+			assertUnknown(t, s.handle.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"}))
+		})
+		t.Run("runtime handle/"+name, func(t *testing.T) {
+			h, fake := protocolRuntime(t)
+			fake.InterruptTurnErrors = map[string]error{"turn-worker": dispatchErr}
+			assertUnknown(t, h.Interrupt(context.Background(), InterruptRequest{Turn: "acp-1"}))
+		})
+	}
+	t.Run("session handle/ctx ends under the lock", func(t *testing.T) {
+		s, fake := protocolSession(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		s.onLockedLoad(t, func() error { cancel(); return nil })
+		assertUnknown(t, s.handle.Interrupt(ctx, InterruptRequest{Turn: "acp-1"}))
+		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("sent %v after ctx ended", got)
+		}
+	})
+	t.Run("runtime handle/ctx already ended", func(t *testing.T) {
+		h, fake := protocolRuntime(t)
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		assertUnknown(t, h.Interrupt(ctx, InterruptRequest{Turn: "acp-1"}))
+		if got := sentInputs(fake, "turn-worker"); len(got) != 0 {
+			t.Fatalf("sent %v after ctx ended", got)
+		}
+	})
+}
+
+// The check under the session mutation lock reads the session and its idle
+// state itself: a shared read already in flight, which began before the lock
+// and holds the session as it was then, never answers it. Each case keeps
+// such a read in flight for the whole call, holding what would pass the
+// check (a row naming the conversation the target ran in, a busy reading);
+// the check reads what is there now and refuses, nothing sent.
+func TestTurnInterruptCheckJoinsNoReadFromBeforeTheLock(t *testing.T) {
+	t.Run("session reload", func(t *testing.T) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: fake}), "codex", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		// The row names a conversation running codexTurn2; the one it named
+		// before ran codexTurn1, still open in that rollout.
+		ageTranscript(t, s.writeTranscript(t, "codex", codexStarted(codexTurn2, "2026-10-08T02:23:01.007Z", 1791426181)), clock.now().Add(-time.Hour))
+		stale := s
+		stale.info.SessionKey = otherConversation
+		ageTranscript(t, stale.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142)), clock.now().Add(-time.Hour))
+		s.onLockedLoad(t, func() error {
+			startSharedRead(t, turnObservationKey("session", s.handle.turnObservationScope(), s.info.ID), stale.info)
+			return nil
+		})
+		fake.Calls = nil
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: codexTurn1})
+		var nc *runtime.TurnNotCurrentError
+		if !errors.As(err, &nc) || nc.Current.TurnID != codexTurn2 {
+			t.Fatalf("Interrupt = %v, want *TurnNotCurrentError reading %s from the row as it is", err, codexTurn2)
+		}
+		if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("sent %v, want nothing", got)
+		}
+	})
+	t.Run("idle reading", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+		timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+		s.handle.turns.timing = timing
+		ageTranscript(t, s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z")), clock.now().Add(-time.Minute))
+		startSharedRead(t, turnObservationKey("idle", s.handle.turnObservationScope(), s.info.SessionName), idleReading{idle: false, supported: true})
+		idle.Calls = nil
+		err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1})
+		if !errors.Is(err, runtime.ErrTurnNotCurrent) {
+			t.Fatalf("Interrupt = %v, want ErrTurnNotCurrent: the check's own idle readings end the turn", err)
+		}
+		if got := sentInputs(idle.Fake, s.info.SessionName); len(got) != 0 {
+			t.Fatalf("sent %v, want nothing", got)
+		}
+		if calls := idle.idleCalls(); calls != 2 {
+			t.Fatalf("SnapshotIdle calls = %d, want the check's own 2", calls)
+		}
+	})
 }
