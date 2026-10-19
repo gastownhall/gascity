@@ -3,13 +3,16 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worker"
 )
 
@@ -73,10 +76,35 @@ func (s *scriptedTurns) reads() int {
 // turns, and a virtual clock for the link wait.
 type turnLaneFixture struct {
 	*laneFixture
-	sp      runtime.Provider
-	turns   *scriptedTurns
-	mu      sync.Mutex
-	elapsed time.Duration // virtual time the link waits slept
+	sp    runtime.Provider
+	turns *scriptedTurns
+	// transcript reads the scripted turns as a transcript source, on this
+	// host's clock, instead of through the runtime.
+	transcript bool
+	mu         sync.Mutex
+	elapsed    time.Duration // virtual time the link waits slept
+}
+
+// laneStubTurns is a worker.TurnHandle answering from caps and read.
+type laneStubTurns struct {
+	worker.TurnHandle
+	caps    worker.TurnCapabilities
+	capsErr error
+	read    func(context.Context) (runtime.TurnHistory, error)
+}
+
+func (s laneStubTurns) TurnCapabilities(context.Context) (worker.TurnCapabilities, error) {
+	return s.caps, s.capsErr
+}
+
+func (s laneStubTurns) CurrentTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	return s.read(ctx)
+}
+
+// laneTranscriptCaps are a transcript source's capabilities.
+var laneTranscriptCaps = worker.TurnCapabilities{
+	TurnCapabilities: runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded},
+	Source:           worker.TurnSourceTranscript,
 }
 
 func newTurnLaneFixture(t *testing.T, p runtime.Profile, opts ...laneFixtureOpt) *turnLaneFixture {
@@ -109,6 +137,13 @@ func (f *turnLaneFixture) exec(t *testing.T, st *opjournal.Store) (*conversation
 		defer f.mu.Unlock()
 		f.elapsed += max(d, 0)
 		return ctx.Err() == nil
+	}
+	if f.transcript {
+		e.turns = func() (worker.TurnHandle, error) {
+			return laneStubTurns{caps: laneTranscriptCaps, read: func(ctx context.Context) (runtime.TurnHistory, error) {
+				return f.turns.TurnHistory(ctx, f.name)
+			}}, nil
+		}
 	}
 	return e, v
 }
@@ -153,21 +188,25 @@ func running(id string, also ...runtime.EndedTurn) runtime.TurnHistory {
 // TestLaneLinksScriptedTurns pins DES-O1 §7.7's links: on a runtime with
 // scripted turns every delivered op closes with the scripted turn and the
 // expected confidence, a competing turn gives ambiguous, a silent runtime
-// gives none after the link wait, and the wait never runs past it.
+// gives none after the link wait, and the wait never runs past it. A T3
+// source, with no message stamp to link by, links none without a read, even
+// when T3 restores an ended turn as its latest after the probe.
 func TestLaneLinksScriptedTurns(t *testing.T) {
-	readErr := errors.New("snapshot unreadable")
+	readErr := errors.New("transcript unreadable")
+	restored := runtime.EndedTurn{TurnID: t3Turn("t0"), StartedAt: laneT0.Add(-time.Minute), EndedAt: laneT0.Add(-30 * time.Second), Status: runtime.TurnStatusCompleted}
 	for _, tc := range []struct {
-		name      string
-		profile   runtime.Profile
-		opts      []laneFixtureOpt
-		acpCaps   bool
-		history   func(delivered, readsSince int) (runtime.TurnHistory, error)
-		turn      string
-		link      opjournal.LinkConfidence
-		basis     opjournal.LinkBasis
-		fullWait  bool
-		minReads  int
-		unchecked bool
+		name       string
+		profile    runtime.Profile
+		opts       []laneFixtureOpt
+		acpCaps    bool
+		transcript bool
+		history    func(delivered, readsSince int) (runtime.TurnHistory, error)
+		turn       string
+		link       opjournal.LinkConfidence
+		basis      opjournal.LinkBasis
+		fullWait   bool
+		minReads   int
+		noReads    bool
 	}{
 		{
 			name:    "exact: the one new turn on a serial source",
@@ -181,8 +220,8 @@ func TestLaneLinksScriptedTurns(t *testing.T) {
 			turn: t3Turn("t1"), link: opjournal.LinkExact, basis: opjournal.BasisACPSerial,
 		},
 		{
-			name:    "correlated: the one new turn",
-			profile: runtime.ProfileT3Bridge,
+			name:    "correlated: the one new turn on this host's clock",
+			profile: runtime.ProfileTmux, transcript: true,
 			history: func(delivered, readsSince int) (runtime.TurnHistory, error) {
 				if delivered == 0 || readsSince < 2 {
 					return idleHistory, nil
@@ -193,7 +232,7 @@ func TestLaneLinksScriptedTurns(t *testing.T) {
 		},
 		{
 			name:    "ambiguous: a competing turn",
-			profile: runtime.ProfileT3Bridge,
+			profile: runtime.ProfileTmux, transcript: true,
 			history: func(delivered, _ int) (runtime.TurnHistory, error) {
 				if delivered == 0 {
 					return idleHistory, nil
@@ -205,13 +244,13 @@ func TestLaneLinksScriptedTurns(t *testing.T) {
 		},
 		{
 			name:    "none: a silent runtime",
-			profile: runtime.ProfileT3Bridge,
+			profile: runtime.ProfileTmux, transcript: true,
 			history: func(int, int) (runtime.TurnHistory, error) { return idleHistory, nil },
 			link:    opjournal.LinkNone, basis: opjournal.BasisNoCandidate, fullWait: true, minReads: 6,
 		},
 		{
 			name:    "none: every read after the effect failed",
-			profile: runtime.ProfileT3Bridge,
+			profile: runtime.ProfileTmux, transcript: true,
 			history: func(delivered, _ int) (runtime.TurnHistory, error) {
 				if delivered == 0 {
 					return idleHistory, nil
@@ -220,9 +259,36 @@ func TestLaneLinksScriptedTurns(t *testing.T) {
 			},
 			link: opjournal.LinkNone, basis: opjournal.BasisReadFailed, fullWait: true, minReads: 6,
 		},
+		{
+			name:    "none: a T3 source with no message stamp",
+			profile: runtime.ProfileT3Bridge,
+			history: func(delivered, _ int) (runtime.TurnHistory, error) {
+				if delivered == 0 {
+					return idleHistory, nil
+				}
+				return running(t3Turn("t1")), nil
+			},
+			link: opjournal.LinkNone, basis: opjournal.BasisNoSource, noReads: true,
+		},
+		{
+			name:    "none: T3 restores an ended turn as latest after the probe",
+			profile: runtime.ProfileT3Bridge,
+			history: func(delivered, readsSince int) (runtime.TurnHistory, error) {
+				switch {
+				case delivered == 0:
+					return runtime.TurnHistory{}, nil // t0 ended and T3 cleared its latest turn
+				case readsSince == 0:
+					return runtime.TurnHistory{Recent: []runtime.EndedTurn{restored}}, nil // t0's diff completed: restored
+				default:
+					return running(t3Turn("t1")), nil
+				}
+			},
+			link: opjournal.LinkNone, basis: opjournal.BasisNoSource, noReads: true,
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			f := newTurnLaneFixture(t, tc.profile, tc.opts...)
+			f.transcript = tc.transcript
 			if tc.acpCaps {
 				f.laneFixture.sp.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{f.name: {{
 					Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact,
@@ -246,7 +312,11 @@ func TestLaneLinksScriptedTurns(t *testing.T) {
 			if !tc.fullWait && f.waited() == opjournal.DefaultLinkWait {
 				t.Fatal("a decided link waited out the whole link wait")
 			}
-			if n := f.turns.reads(); n < max(tc.minReads, 1) {
+			n := f.turns.reads()
+			if tc.noReads && n != 0 {
+				t.Fatalf("turn reads after the effect = %d, want none", n)
+			}
+			if !tc.noReads && n < max(tc.minReads, 1) {
 				t.Fatalf("turn reads after the effect = %d, want at least %d", n, max(tc.minReads, 1))
 			}
 		})
@@ -256,7 +326,8 @@ func TestLaneLinksScriptedTurns(t *testing.T) {
 // TestLaneLinkWaitStopsWithTheEffect proves the link wait ends with the
 // delivery's context: once it ends, no further read is made.
 func TestLaneLinkWaitStopsWithTheEffect(t *testing.T) {
-	f := newTurnLaneFixture(t, runtime.ProfileT3Bridge)
+	f := newTurnLaneFixture(t, runtime.ProfileTmux)
+	f.transcript = true
 	var reads int
 	f.turns.history = func(int, int) (runtime.TurnHistory, error) {
 		reads++
@@ -335,8 +406,8 @@ func TestLaneExecProtocolDeliversOnlyAtItsBoundary(t *testing.T) {
 	if calls := f.nudges(); len(calls) != 1 || calls[0].Message != "hi" {
 		t.Fatalf("runtime nudges = %+v, want the prompt once", calls)
 	}
-	if got := f.get(t, st, op.ID); got.Outcome.Result.Turn != t3Turn("t1") || got.Outcome.Result.TurnLink != opjournal.LinkCorrelated {
-		t.Fatalf("outcome = %+v; want linked to t1, correlated", got.Outcome)
+	if r := f.get(t, st, op.ID).Outcome.Result; r.Turn != "" || r.TurnLink != opjournal.LinkNone || r.TurnBasis != opjournal.BasisNoSource {
+		t.Fatalf("outcome = %+v; want linked none/no_source: a T3 source has no message stamp to link by", r)
 	}
 }
 
@@ -449,5 +520,226 @@ func TestLaneTurnTraitsOf(t *testing.T) {
 				t.Fatalf("traits = %+v, want %+v", got, tc.want)
 			}
 		})
+	}
+}
+
+// laneNotes records the notes an executor makes.
+type laneNotes struct {
+	mu    sync.Mutex
+	notes []string
+}
+
+func (n *laneNotes) note(stage string, err error) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	n.notes = append(n.notes, stage+": "+err.Error())
+}
+
+func (n *laneNotes) all() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return slices.Clone(n.notes)
+}
+
+// TestLaneExecTurnTraitsFallbacks pins how a probe reads a session whose
+// turn capabilities it cannot read: a session that is gone has no source; an
+// unavailable read is an unavailable probe for a protocol-mode runtime,
+// read again by the next probe, and no source, noted, for a keystroke-mode
+// one; and a row no session handle is built from reads the runtime's turns,
+// noted.
+func TestLaneExecTurnTraitsFallbacks(t *testing.T) {
+	unavailable := fmt.Errorf("loading the session: %w", runtime.ErrRuntimeUnavailable)
+	t.Run("gone", func(t *testing.T) {
+		f := newTurnLaneFixture(t, runtime.ProfileT3Bridge)
+		e, v := f.exec(t, f.laneStore(t))
+		e.turns = func() (worker.TurnHandle, error) { return nil, session.ErrSessionNotFound }
+		p, err := e.Probe(context.Background(), v)
+		if err != nil || !p.Available || e.turnHandle != nil || e.traits != (laneTurnTraits{}) {
+			t.Fatalf("Probe = %+v, %v (traits %+v); want available with no turn source", p, err, e.traits)
+		}
+	})
+	t.Run("unavailable, protocol mode", func(t *testing.T) {
+		f := newTurnLaneFixture(t, runtime.ProfileT3Bridge)
+		f.turns.history = func(int, int) (runtime.TurnHistory, error) { return idleHistory, nil }
+		e, v := f.exec(t, f.laneStore(t))
+		var notes laneNotes
+		e.deps.note = notes.note
+		resolve := e.turns
+		e.turns = func() (worker.TurnHandle, error) {
+			return laneStubTurns{capsErr: unavailable}, nil
+		}
+		p, err := e.Probe(context.Background(), v)
+		if err != nil || p.Available || p.TurnLive != opjournal.TriUnknown || p.Fence != laneFence(v) {
+			t.Fatalf("Probe = %+v, %v; want unavailable, no error", p, err)
+		}
+		e.turns = resolve
+		if p, err = e.Probe(context.Background(), v); err != nil || !p.Available || !e.traits.protocol || p.Boundary != opjournal.TriYes {
+			t.Fatalf("next Probe = %+v, %v (traits %+v); want the traits read again, at the boundary", p, err, e.traits)
+		}
+		if n := notes.all(); len(n) != 0 {
+			t.Fatalf("notes = %q, want none: the probe answered unavailable", n)
+		}
+	})
+	t.Run("unavailable, keystroke mode", func(t *testing.T) {
+		f := newTurnLaneFixture(t, runtime.ProfileTmux)
+		e, v := f.exec(t, f.laneStore(t))
+		var notes laneNotes
+		e.deps.note = notes.note
+		e.turns = func() (worker.TurnHandle, error) { return laneStubTurns{capsErr: unavailable}, nil }
+		p, err := e.Probe(context.Background(), v)
+		if err != nil || !p.Available || !p.Caps.Live || e.turnHandle != nil {
+			t.Fatalf("Probe = %+v, %v; want available and live with no turn source", p, err)
+		}
+		if n := notes.all(); len(n) != 1 || !strings.HasPrefix(n[0], "turns: ") || !strings.Contains(n[0], "unreadable") {
+			t.Fatalf("notes = %q, want the fallback noted once", n)
+		}
+	})
+	t.Run("no session handle", func(t *testing.T) {
+		f := newTurnLaneFixture(t, runtime.ProfileT3Bridge)
+		f.turns.history = func(int, int) (runtime.TurnHistory, error) { return idleHistory, nil }
+		e, v := f.exec(t, f.laneStore(t))
+		var notes laneNotes
+		e.deps.note = notes.note
+		e.sessionTurns = func(string) (worker.TurnHandle, error) { return nil, errors.New("session row unreadable") }
+		p, err := e.Probe(context.Background(), v)
+		if err != nil || !p.Available || e.turnHandle == nil || !e.traits.protocol || p.TurnLive != opjournal.TriNo {
+			t.Fatalf("Probe = %+v, %v (traits %+v); want the runtime's turns read", p, err, e.traits)
+		}
+		if n := notes.all(); len(n) != 1 || !strings.Contains(n[0], "session row unreadable") {
+			t.Fatalf("notes = %q, want the fallback noted once", n)
+		}
+	})
+}
+
+// TestLaneExecProtocolLiveNeedsRecordedStarts pins Caps.Live for a
+// protocol-mode runtime: live only when its turns, starts included, are
+// reported, since a turn whose start is not recorded never reads as in
+// progress and the boundary would always read yes.
+func TestLaneExecProtocolLiveNeedsRecordedStarts(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		caps worker.TurnCapabilities
+		live bool
+	}{
+		{name: "starts recorded", caps: worker.TurnCapabilities{TurnCapabilities: runtime.TurnCapabilities{Start: runtime.TurnStartRecorded}, Source: worker.TurnSourceProtocol}, live: true},
+		{name: "starts unrecorded", caps: worker.TurnCapabilities{Source: worker.TurnSourceProtocol}},
+		{name: "no source", caps: worker.TurnCapabilities{Source: worker.TurnSourceNone}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTurnLaneFixture(t, runtime.ProfileT3Bridge)
+			e, v := f.exec(t, f.laneStore(t))
+			e.turns = func() (worker.TurnHandle, error) {
+				return laneStubTurns{caps: tc.caps, read: func(context.Context) (runtime.TurnHistory, error) { return idleHistory, nil }}, nil
+			}
+			p, err := e.Probe(context.Background(), v)
+			if err != nil || p.Caps.Live != tc.live {
+				t.Fatalf("Probe = caps %+v, %v; want Live %v", p.Caps, err, tc.live)
+			}
+		})
+	}
+}
+
+// TestLaneLinkEvidenceSource pins which sources a delivery is linked by: a
+// transcript (its cutoff on this host's clock) and ACP (serial) are; a T3
+// source is only once the runtime stamped the message.
+func TestLaneLinkEvidenceSource(t *testing.T) {
+	recorded := runtime.TurnCapabilities{Start: runtime.TurnStartRecorded}
+	stamped := laneT0.Add(time.Second)
+	for _, tc := range []struct {
+		name      string
+		caps      worker.TurnCapabilities
+		transport string
+		messageAt time.Time
+		want      bool
+	}{
+		{name: "transcript", caps: worker.TurnCapabilities{TurnCapabilities: recorded, Source: worker.TurnSourceTranscript}, want: true},
+		{name: "acp", caps: worker.TurnCapabilities{TurnCapabilities: recorded, Source: worker.TurnSourceProtocol}, transport: "acp", want: true},
+		{name: "t3, no stamp", caps: worker.TurnCapabilities{TurnCapabilities: recorded, Source: worker.TurnSourceProtocol}},
+		{name: "t3, stamped", caps: worker.TurnCapabilities{TurnCapabilities: recorded, Source: worker.TurnSourceProtocol}, messageAt: stamped, want: true},
+		{name: "starts unrecorded", caps: worker.TurnCapabilities{Source: worker.TurnSourceTranscript}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTurnLaneFixture(t, runtime.ProfileTmux)
+			e, _ := f.exec(t, f.laneStore(t))
+			e.turnHandle = laneStubTurns{read: func(context.Context) (runtime.TurnHistory, error) { return idleHistory, nil }}
+			e.traits = laneTurnTraitsOf(tc.caps, tc.transport)
+			e.lastCaps.LinkWait = time.Millisecond
+			ev := e.linkEvidence(context.Background(), opjournal.DeliveryRecord{At: laneT0, MessageAt: tc.messageAt, Generation: 1, Mode: opjournal.LinkStarts, Ack: opjournal.AckDelivered})
+			if ev.HasSource != tc.want {
+				t.Fatalf("HasSource = %v, want %v", ev.HasSource, tc.want)
+			}
+		})
+	}
+}
+
+// TestLaneLinkReadBoundedByTheWait proves no link read holds a delivery past
+// the link wait: a read runs under a context that ends with the wait, and a
+// read that ignores its context is abandoned when the wait passes.
+func TestLaneLinkReadBoundedByTheWait(t *testing.T) {
+	const wait = 50 * time.Millisecond
+	for _, tc := range []struct {
+		name       string
+		honorsCtx  bool
+		wantReason error
+	}{
+		{name: "the read honors its context", honorsCtx: true, wantReason: context.DeadlineExceeded},
+		{name: "the read ignores its context", wantReason: runtime.ErrRuntimeUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newTurnLaneFixture(t, runtime.ProfileTmux)
+			e, _ := f.exec(t, f.laneStore(t))
+			e.now, e.wait = time.Now, laneLinkWait
+			release := make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			deadlines := make(chan bool, 8)
+			e.turnHandle = laneStubTurns{read: func(ctx context.Context) (runtime.TurnHistory, error) {
+				_, has := ctx.Deadline()
+				deadlines <- has
+				if tc.honorsCtx {
+					<-ctx.Done()
+					return runtime.TurnHistory{}, ctx.Err()
+				}
+				<-release
+				return idleHistory, nil
+			}}
+			e.traits = laneTurnTraitsOf(laneTranscriptCaps, "")
+			e.lastCaps.LinkWait = wait
+			out := make(chan opjournal.TurnEvidence, 1)
+			start := time.Now()
+			go func() {
+				out <- e.linkEvidence(context.Background(), opjournal.DeliveryRecord{At: laneT0, Generation: 1, Mode: opjournal.LinkStarts, Ack: opjournal.AckDelivered})
+			}()
+			select {
+			case ev := <-out:
+				if took := time.Since(start); took > 20*wait {
+					t.Fatalf("link evidence took %s, want about the %s wait", took, wait)
+				}
+				if !errors.Is(ev.ReadErr, tc.wantReason) {
+					t.Fatalf("ReadErr = %v, want %v", ev.ReadErr, tc.wantReason)
+				}
+			case <-time.After(laneWaitBudget):
+				t.Fatalf("the link wait of %s held the delivery past %s", wait, laneWaitBudget)
+			}
+			if !<-deadlines {
+				t.Fatal("the link read ran under a context with no deadline")
+			}
+		})
+	}
+}
+
+// TestLaneNoteTurnReadOldestFirst pins one read's order in the evidence: its
+// ended turns oldest start first (TurnHistory lists them newest first), then
+// the running turn.
+func TestLaneNoteTurnReadOldestFirst(t *testing.T) {
+	older := runtime.EndedTurn{TurnID: "a", StartedAt: laneT0, EndedAt: laneT0.Add(time.Second), Status: runtime.TurnStatusCompleted}
+	newer := runtime.EndedTurn{TurnID: "b", StartedAt: laneT0.Add(2 * time.Second), EndedAt: laneT0.Add(3 * time.Second), Status: runtime.TurnStatusCompleted}
+	hist := runtime.TurnHistory{Current: runtime.TurnState{TurnID: "c"}, CurrentStart: laneT0.Add(4 * time.Second), Recent: []runtime.EndedTurn{newer, older}}
+	ev := laneNoteTurnRead(opjournal.TurnEvidence{}, 1, hist, nil)
+	var ids []string
+	for _, s := range ev.Seen {
+		ids = append(ids, s.ID)
+	}
+	if want := []string{"a", "b", "c"}; !slices.Equal(ids, want) {
+		t.Fatalf("seen = %q, want %q", ids, want)
 	}
 }

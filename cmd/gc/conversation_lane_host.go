@@ -357,9 +357,9 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 }
 
 // pokeChangedRows is the ledger-feed doorbell: it pokes, once each, the
-// conversations whose op rows (gc:op) or runtime row (gc:rt) are among rows,
-// which a refresh pass found changed out of band. A host that is not running
-// ignores it.
+// conversations whose lane op rows (gc:op), closed op rows or runtime row
+// (gc:rt) are among rows, which a refresh pass found changed out of band
+// (laneConversationsOfRows). A host that is not running ignores it.
 func (h *conversationLaneHost) pokeChangedRows(rows []beads.Bead) {
 	for _, conv := range laneConversationsOfRows(rows) {
 		h.Poke(conv)
@@ -367,15 +367,20 @@ func (h *conversationLaneHost) pokeChangedRows(rows []beads.Bead) {
 }
 
 // laneConversationsOfRows lists, in first-seen order, the conversations rows
-// name through an op row's or a runtime row's conversation label.
+// name through a runtime row's conversation label or a lane-relevant op
+// row's: a lane op's, or a closed op's, which a lane op can wait on as its
+// after. An open legacy op row rings nothing: no lane executes it, so a pass
+// for it would read the session and the conversation's ops live for
+// nothing. An op row that does not decode rings, so its pass reports it.
 func laneConversationsOfRows(rows []beads.Bead) []string {
 	opPrefix, rtPrefix := opjournal.ConversationLabel(""), opjournal.RuntimeConversationLabel("")
 	var convs []string
 	for _, b := range rows {
 		for _, label := range b.Labels {
-			conv, ok := strings.CutPrefix(label, opPrefix)
+			conv, ok := strings.CutPrefix(label, rtPrefix)
 			if !ok {
-				conv, ok = strings.CutPrefix(label, rtPrefix)
+				conv, ok = strings.CutPrefix(label, opPrefix)
+				ok = ok && laneOpRowRings(b)
 			}
 			if ok && conv != "" && !slices.Contains(convs, conv) {
 				convs = append(convs, conv)
@@ -383,6 +388,13 @@ func laneConversationsOfRows(rows []beads.Bead) []string {
 		}
 	}
 	return convs
+}
+
+// laneOpRowRings reports whether op row b rings the doorbell: a lane op, a
+// closed op, or a row that does not decode as an op.
+func laneOpRowRings(b beads.Bead) bool {
+	op, err := opjournal.DecodeOp(b)
+	return err != nil || op.Executor == opjournal.ExecutorLane || op.Status == opjournal.StatusClosed
 }
 
 // start decides whether the host runs, publishes it for the city's socket
@@ -695,6 +707,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		sp:       h.env.SessionProvider(),
 		lane:     st,
 		clk:      h.clk,
+		note:     h.noteError,
 	}, info)
 	res, err := lane.Pass(h.ctx, view, exec)
 	h.notePass(conv, res, err)

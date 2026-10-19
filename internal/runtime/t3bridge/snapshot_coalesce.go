@@ -16,16 +16,22 @@ import (
 // read k ends, in the goroutine and under the context of the first of its
 // callers to see read k end, so no read outlives every caller waiting for it.
 // However many sessions a conversation-lane host polls at once, the bridge
-// then has at most one snapshot read in flight and one queued. The zero
-// value is ready to use.
+// then has at most one snapshot read in flight and one queued. A caller that
+// any read ending after it arrived serves (shared) takes the read in flight
+// instead. A queued read whose callers all gave up is dropped, or, if it
+// became the read in flight meanwhile, ended unread. The zero value is ready
+// to use.
 type freshReads struct {
 	mu sync.Mutex
 	// running is the read in flight, or about to be run by one of its
 	// callers; next is the read queued behind it.
 	running *freshRead
 	next    *freshRead
-	// readHook, a test seam, runs at the start of each read.
-	readHook func()
+	// readHook, a test seam, runs at the start of each read; abandonHook,
+	// another, runs as a waiter whose context ended gives up its read,
+	// before it takes mu.
+	readHook    func()
+	abandonHook func()
 }
 
 // freshRead is one shared read. Its fields under "result" are written by the
@@ -74,6 +80,43 @@ func (f *freshReads) do(ctx context.Context, read func(context.Context) (map[str
 	}
 }
 
+// shared answers ctx's caller with the read in flight, if one is running,
+// else as do does. It is for a caller content with any read that ends after
+// it arrived, such as one whose cached snapshot went stale: it need not wait
+// for the read after the one in flight. A read that ended because the
+// context of the caller that ran it ended, while ctx still allows, answers
+// it as do would.
+func (f *freshReads) shared(ctx context.Context, read func(context.Context) (map[string]interface{}, error)) (map[string]interface{}, error) {
+	f.mu.Lock()
+	r := f.running
+	if r != nil && !r.claimed {
+		// About to be run by one of its callers, which arrived after the
+		// read before it started: as fresh as do's.
+		r = nil
+	}
+	if r != nil {
+		r.waiters++
+	}
+	f.mu.Unlock()
+	if r == nil {
+		return f.do(ctx, read)
+	}
+	defer func() {
+		f.mu.Lock()
+		r.waiters--
+		f.mu.Unlock()
+	}()
+	select {
+	case <-r.done:
+	case <-ctx.Done():
+		return nil, fmt.Errorf("waiting for a T3 snapshot: %w", ctx.Err())
+	}
+	if r.ctx == nil || r.err != nil && r.ctx.Err() != nil && ctx.Err() == nil {
+		return f.do(ctx, read)
+	}
+	return r.snap, r.err
+}
+
 // join enters the caller in a read: a new one it must run (prev nil) when
 // none is in flight, else the read queued behind prev, the one in flight.
 func (f *freshReads) join() (r, prev *freshRead) {
@@ -103,17 +146,27 @@ func (f *freshReads) await(ctx context.Context, r *freshRead, done <-chan struct
 		default:
 		}
 	}
+	if f.abandonHook != nil {
+		f.abandonHook()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	r.waiters--
-	if r.waiters == 0 && !r.claimed {
-		// No caller is left to run it.
-		if f.running == r {
-			f.running = nil
-		}
-		if f.next == r {
-			f.next = nil
-		}
+	if r.waiters > 0 || r.claimed {
+		return false
+	}
+	// No caller is left to run r.
+	switch {
+	case f.running == r:
+		// The read before it ended since this caller looked, so r is the
+		// read in flight, with callers queued behind it: end it unread, as
+		// perform ends a read, so the first of them to see it end runs
+		// theirs.
+		r.claimed = true
+		f.running, f.next = f.next, nil
+		close(r.done)
+	case f.next == r:
+		f.next = nil
 	}
 	return false
 }
@@ -150,6 +203,16 @@ func (f *freshReads) perform(ctx context.Context, r *freshRead, read func(contex
 	f.running, f.next = f.next, nil
 	f.mu.Unlock()
 	close(r.done)
+}
+
+// inFlight is how many callers wait for, or run, the read in flight.
+func (f *freshReads) inFlight() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.running == nil {
+		return 0
+	}
+	return f.running.waiters
 }
 
 // queued is how many callers wait for the read queued behind the one in

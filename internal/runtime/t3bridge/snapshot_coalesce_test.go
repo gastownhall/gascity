@@ -7,6 +7,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 )
@@ -41,10 +42,31 @@ func (g *gatedReads) read(ctx context.Context) (map[string]interface{}, error) {
 	}
 }
 
-// waitFor spins until cond holds.
-func waitFor(cond func() bool) {
+// waitForBudget bounds waitFor, so a regression fails instead of hanging.
+const waitForBudget = 10 * time.Second
+
+// waitFor spins until cond holds, failing t when it has not within
+// waitForBudget.
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	deadline := time.Now().Add(waitForBudget)
 	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("condition not met within %s", waitForBudget)
+		}
 		goruntime.Gosched()
+	}
+}
+
+// answered is ch's answer, failing t when none comes within waitForBudget.
+func answered(t *testing.T, ch <-chan freshResult) freshResult {
+	t.Helper()
+	select {
+	case r := <-ch:
+		return r
+	case <-time.After(waitForBudget):
+		t.Fatalf("no answer within %s", waitForBudget)
+		return freshResult{}
 	}
 }
 
@@ -69,15 +91,15 @@ func TestFreshReadsCoalesceByGeneration(t *testing.T) {
 	var f freshReads
 	g := newGatedReads(3)
 	first := f.goDo(t.Context(), g.read)
-	waitFor(func() bool { return g.started.Load() == 1 })
+	waitFor(t, func() bool { return g.started.Load() == 1 })
 	second := f.goDo(t.Context(), g.read)
 	third := f.goDo(t.Context(), g.read)
-	waitFor(func() bool { return f.queued() == 2 })
+	waitFor(t, func() bool { return f.queued() == 2 })
 	close(g.gates[0])
 	if r := <-first; r.err != nil || r.snap["read"] != 1 {
 		t.Fatalf("first caller = %v, %v; want read 1", r.snap, r.err)
 	}
-	waitFor(func() bool { return g.started.Load() == 2 })
+	waitFor(t, func() bool { return g.started.Load() == 2 })
 	close(g.gates[1])
 	for i, ch := range []<-chan freshResult{second, third} {
 		if r := <-ch; r.err != nil || r.snap["read"] != 2 {
@@ -101,21 +123,21 @@ func TestFreshReadsWaiterContext(t *testing.T) {
 	var f freshReads
 	g := newGatedReads(3)
 	first := f.goDo(t.Context(), g.read)
-	waitFor(func() bool { return g.started.Load() == 1 })
+	waitFor(t, func() bool { return g.started.Load() == 1 })
 
 	ctxA, cancelA := context.WithCancel(t.Context())
 	ctxB, cancelB := context.WithCancel(t.Context())
 	a := f.goDo(ctxA, g.read)
 	b := f.goDo(ctxB, g.read)
-	waitFor(func() bool { return f.queued() == 2 })
+	waitFor(t, func() bool { return f.queued() == 2 })
 	impatient, cancelImpatient := context.WithCancel(t.Context())
 	gone := f.goDo(impatient, g.read)
-	waitFor(func() bool { return f.queued() == 3 })
+	waitFor(t, func() bool { return f.queued() == 3 })
 	cancelImpatient()
 	if r := <-gone; !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("a waiter whose context ended = %v; want its context error", r.err)
 	}
-	waitFor(func() bool { return f.queued() == 2 })
+	waitFor(t, func() bool { return f.queued() == 2 })
 
 	close(g.gates[0])
 	if r := <-first; r.err != nil {
@@ -123,7 +145,7 @@ func TestFreshReadsWaiterContext(t *testing.T) {
 	}
 	// Read 2 runs under the context of whichever waiter ran it; end that
 	// context, and the other waiter reads again.
-	waitFor(func() bool { return g.started.Load() == 2 })
+	waitFor(t, func() bool { return g.started.Load() == 2 })
 	g.mu.Lock()
 	runner := g.ctxs[1]
 	g.mu.Unlock()
@@ -137,7 +159,7 @@ func TestFreshReadsWaiterContext(t *testing.T) {
 	if r := <-ran; !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("the waiter whose read its context ended = %v; want its cancellation", r.err)
 	}
-	waitFor(func() bool { return g.started.Load() == 3 })
+	waitFor(t, func() bool { return g.started.Load() == 3 })
 	close(g.gates[2])
 	if r := <-other; r.err != nil || r.snap["read"] != 3 {
 		t.Fatalf("a waiter whose shared read another's context ended = %v, %v; want a read of its own", r.snap, r.err)
@@ -152,10 +174,10 @@ func TestFreshReadsAbandonedQueue(t *testing.T) {
 	var f freshReads
 	g := newGatedReads(2)
 	first := f.goDo(t.Context(), g.read)
-	waitFor(func() bool { return g.started.Load() == 1 })
+	waitFor(t, func() bool { return g.started.Load() == 1 })
 	ctx, cancel := context.WithCancel(t.Context())
 	gone := f.goDo(ctx, g.read)
-	waitFor(func() bool { return f.queued() == 1 })
+	waitFor(t, func() bool { return f.queued() == 1 })
 	cancel()
 	if r := <-gone; !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("a waiter whose context ended = %v; want its context error", r.err)
@@ -204,14 +226,14 @@ func TestTurnHistoryReadsCoalesce(t *testing.T) {
 		_, err := p.TurnHistory(t.Context(), turnFenceSession)
 		errs <- err
 	}()
-	waitFor(func() bool { return started.Load() == 1 })
+	waitFor(t, func() bool { return started.Load() == 1 })
 	for range callers - 1 {
 		go func() {
 			_, err := p.TurnHistory(t.Context(), turnFenceSession)
 			errs <- err
 		}()
 	}
-	waitFor(func() bool { return p.fresh.queued() == callers-1 })
+	waitFor(t, func() bool { return p.fresh.queued() == callers-1 })
 	close(release)
 	for range callers {
 		if err := <-errs; err != nil {
@@ -220,5 +242,78 @@ func TestTurnHistoryReadsCoalesce(t *testing.T) {
 	}
 	if calls := server.snapshotCalls(); calls != 2 {
 		t.Fatalf("snapshot reads = %d for %d concurrent turn reads, want 2", calls, callers)
+	}
+}
+
+// TestFreshReadsAbandonedRunningRead pins the interleaving where the last
+// waiter of the queued read gives up as the read before it ends: by the time
+// it takes the lock its read is the one in flight, unclaimed, and a later
+// caller already queued behind it. The abandoned read ends unread, so the
+// later caller runs its own, and the coalescer serves callers after it.
+func TestFreshReadsAbandonedRunningRead(t *testing.T) {
+	var f freshReads
+	g := newGatedReads(3)
+	close(g.gates[1])
+	close(g.gates[2])
+	abandoning := make(chan struct{})
+	resume := make(chan struct{})
+	f.abandonHook = func() {
+		close(abandoning)
+		<-resume
+	}
+	first := f.goDo(t.Context(), g.read)
+	waitFor(t, func() bool { return g.started.Load() == 1 })
+	ctx, cancel := context.WithCancel(t.Context())
+	gone := f.goDo(ctx, g.read)
+	waitFor(t, func() bool { return f.queued() == 1 })
+	cancel()
+	<-abandoning
+	f.abandonHook = nil
+
+	// Read 1 ends: the abandoned read is now the one in flight, and a new
+	// caller queues behind it.
+	close(g.gates[0])
+	if r := answered(t, first); r.err != nil || r.snap["read"] != 1 {
+		t.Fatalf("first caller = %v, %v; want read 1", r.snap, r.err)
+	}
+	later := f.goDo(t.Context(), g.read)
+	waitFor(t, func() bool { return f.queued() == 1 })
+	close(resume)
+	if r := answered(t, gone); !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("the waiter that gave up = %v; want its context error", r.err)
+	}
+	if r := answered(t, later); r.err != nil || r.snap["read"] != 2 {
+		t.Fatalf("the caller queued behind the abandoned read = %v, %v; want read 2, run by itself", r.snap, r.err)
+	}
+	if r := answered(t, f.goDo(context.Background(), g.read)); r.err != nil || r.snap["read"] != 3 {
+		t.Fatalf("a later caller = %v, %v; want read 3", r.snap, r.err)
+	}
+}
+
+// TestFreshReadsSharedTakesTheReadInFlight proves a caller content with any
+// read that ends after it arrived (a stale cache) takes the read in flight
+// instead of queueing for the next, and runs its own when none is.
+func TestFreshReadsSharedTakesTheReadInFlight(t *testing.T) {
+	var f freshReads
+	g := newGatedReads(2)
+	first := f.goDo(t.Context(), g.read)
+	waitFor(t, func() bool { return g.started.Load() == 1 })
+	out := make(chan freshResult, 1)
+	go func() {
+		snap, err := f.shared(context.Background(), g.read)
+		out <- freshResult{snap, err}
+	}()
+	waitFor(t, func() bool { return f.inFlight() == 2 })
+	close(g.gates[0])
+	answered(t, first)
+	if r := answered(t, out); r.err != nil || r.snap["read"] != 1 {
+		t.Fatalf("shared caller during read 1 = %v, %v; want read 1", r.snap, r.err)
+	}
+	close(g.gates[1])
+	if snap, err := f.shared(t.Context(), g.read); err != nil || snap["read"] != 2 {
+		t.Fatalf("shared caller with no read in flight = %v, %v; want a read of its own", snap, err)
+	}
+	if n := g.started.Load(); n != 2 {
+		t.Fatalf("reads = %d, want 2", n)
 	}
 }

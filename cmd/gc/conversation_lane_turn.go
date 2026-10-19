@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"time"
 
@@ -108,8 +109,12 @@ func (l laneTurnLook) boundary() opjournal.Tri {
 
 // readTurnTraits resolves the handle the executor reads turns through and
 // reads the session's turn traits, once per executor. A session that is
-// gone has none.
+// gone has none. A read that is unavailable is errLaneTurnsUnavailable for
+// a protocol-mode runtime, whose boundary its turns are, and for a
+// keystroke-mode one, whose boundary is the quiescence rule, no turn source
+// for this executor, noted.
 func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
+	e.turnHandle, e.traits = nil, laneTurnTraits{}
 	h, err := e.turns()
 	if err == nil {
 		var caps worker.TurnCapabilities
@@ -119,12 +124,23 @@ func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
 			return nil
 		}
 	}
-	if errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, session.ErrSessionNotFound) {
-		e.turnHandle, e.traits = nil, laneTurnTraits{}
+	switch {
+	case errors.Is(err, runtime.ErrSessionNotFound), errors.Is(err, session.ErrSessionNotFound):
 		return nil
+	case errors.Is(err, runtime.ErrRuntimeUnavailable) && e.protocol:
+		return fmt.Errorf("%w: %w", errLaneTurnsUnavailable, err)
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		e.note("turns", fmt.Errorf("session %s's turn capabilities unreadable; linking its deliveries none: %w", e.info.ID, err))
+		return nil
+	default:
+		return err
 	}
-	return err
 }
+
+// errLaneTurnsUnavailable is a protocol-mode runtime's turn capabilities
+// read that was unavailable: the probe answers unavailable, as for a look
+// that was.
+var errLaneTurnsUnavailable = errors.New("turn capabilities unavailable")
 
 // readTurns reads the session's turns once through the executor's turn
 // handle.
@@ -138,11 +154,24 @@ func (e *conversationLaneExec) readTurns(ctx context.Context) (runtime.TurnHisto
 // linkEvidence gathers the turn evidence of the delivery rec records, after
 // its effect (DES-O1 §4.8): reads of the session's turns, the first at once,
 // then backing off, until CorrelateTurn decides the link or the caps' link
-// wait passes; no read runs past the wait. It starts from the probe's look,
-// which the lane sets again from its own probe.
+// wait passes. Each read is bounded by what is left of the wait and
+// abandoned when it passes (linkRead), so no read holds the delivery
+// past it, even one that ignores its context. It starts from the probe's
+// look, which the lane sets again from its own probe.
+//
+// A source has evidence to link by only when its starts are recorded and a
+// delivery can be told from a turn another input started: by the runtime's
+// stamp of the message (rec.MessageAt), by a start on this host's clock
+// (SameClock, the history diff's cutoff), or by only gc's input starting
+// turns (Serial). A T3 source has none of these until the runtime's message
+// stamp is recorded (OJ-7): X11 §5.4 links its delivery only by that stamp,
+// and a history diff would link a turn the delivery did not start (a turn T3
+// restores as latest after the probe, or a human's started meanwhile). Its
+// delivery links none, no_source.
 func (e *conversationLaneExec) linkEvidence(ctx context.Context, rec opjournal.DeliveryRecord) opjournal.TurnEvidence {
+	tellable := e.traits.sameClock || e.traits.serial || !rec.MessageAt.IsZero()
 	ev := opjournal.TurnEvidence{
-		HasSource:   e.traits.starts && e.turnHandle != nil,
+		HasSource:   e.traits.starts && e.turnHandle != nil && tellable,
 		SameClock:   e.traits.sameClock,
 		Serial:      e.traits.serial,
 		LiveAtProbe: e.lastTurn.live,
@@ -159,9 +188,7 @@ func (e *conversationLaneExec) linkEvidence(ctx context.Context, rec opjournal.D
 		if remaining <= 0 {
 			return ev
 		}
-		rctx, cancel := context.WithTimeout(ctx, remaining)
-		hist, err := e.readTurns(rctx)
-		cancel()
+		hist, err := e.linkRead(ctx, remaining)
 		ev = laneNoteTurnRead(ev, rec.Generation, hist, err)
 		if _, decided := opjournal.CorrelateTurn(rec, ev); decided {
 			return ev
@@ -171,6 +198,24 @@ func (e *conversationLaneExec) linkEvidence(ctx context.Context, rec opjournal.D
 		}
 		backoff = min(2*backoff, laneLinkBackoffMax)
 	}
+}
+
+// linkRead is one read of the link wait, given up after d: the read runs
+// under a context that ends then, and is abandoned if it has not answered by
+// then (worker.ObserveBounded), as a transcript scan that ignores its
+// context would not be. While an abandoned read is still running, the
+// session's next link read answers unavailable without starting another.
+func (e *conversationLaneExec) linkRead(ctx context.Context, d time.Duration) (runtime.TurnHistory, error) {
+	rctx, cancel := context.WithTimeout(ctx, d)
+	defer cancel()
+	return worker.ObserveBounded(rctx, laneLinkReadKey(e.deps.cityPath, e.info.ID), e.readTurns)
+}
+
+// laneLinkReadKey keys a session's link reads, apart from its probes'
+// observations (laneObservationKey), so a wedged link read never blocks a
+// probe.
+func laneLinkReadKey(cityPath, sessionID string) string {
+	return "lane-link\x00" + cityPath + "\x00" + sessionID
 }
 
 // laneNoteTurnRead adds one read after the effect to ev: a failed read sets

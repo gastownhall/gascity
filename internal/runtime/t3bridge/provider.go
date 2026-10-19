@@ -1515,7 +1515,9 @@ func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 		return snapshot, nil
 	}
 	p.mu.Unlock()
-	return p.rpcSnapshotFresh(context.Background())
+	// A stale cache takes the read in flight, if one is: it need not be
+	// answered by a read that started after it arrived.
+	return p.fresh.shared(context.Background(), p.rpcSnapshotRead)
 }
 
 // rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
