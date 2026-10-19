@@ -33,7 +33,12 @@ package api
 // old State's. A close that keeps failing is retried until the op closes,
 // its finish_by passes or the process shuts down, and its in-flight entry is
 // held until the op closes or its finish_by passes: its message may have
-// landed, so a same-key retry must not adopt and deliver it again.
+// landed, so a same-key retry must not adopt and deliver it again. Past
+// finish_by a same-key retry closes the op failed{deadline_in_flight}, as the
+// controller's sweeper does, and replays it; it never adopts it. A recorded
+// delivery's own timeout (sessionMessageAsyncTimeout,
+// sessionSubmitAsyncTimeout) ends inside its op's finish_by, so the op
+// closes from the delivery's result, or from that timeout, first.
 //
 // The supervisor builds a restarted city's new Server only when a request
 // for the city arrives, so a delivery can finish after the restart closed
@@ -44,9 +49,11 @@ package api
 // same-key retry of its request is answered, from the LRU, the in-flight
 // registry or the op row. While it cannot be, that retry is answered 409
 // in_flight instead of a 202 with no event after its cursor, as is a replay
-// whose re-emitted event the log refuses. Kept events are bounded
-// (maxKeptEvents) and live only in the process: one dropped at the bound, or
-// still kept at shutdown, is logged.
+// whose re-emitted event the log refuses. When the log takes a kept event of
+// a replay's request, endpoint and type, that event lands after the replay's
+// cursor and stands for its re-emitted one, which is not recorded too. Kept
+// events are bounded (maxKeptEvents) and live only in the process: one
+// dropped at the bound, or still kept at shutdown, is logged.
 
 import (
 	"context"
@@ -73,8 +80,8 @@ import (
 )
 
 // messageSentinels maps the message path's legacy errors onto op outcomes
-// (DES-O0API §6.3). The delivery timeout of /messages is reported as
-// context.DeadlineExceeded.
+// (DES-O0API §6.3). The delivery timeouts of /messages and of a recorded
+// /submit are reported as context.DeadlineExceeded.
 var messageSentinels = legacyop.Sentinels{
 	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
 	ConversationClosed:  []error{session.ErrSessionClosed},
@@ -95,6 +102,18 @@ func (messageTimeoutError) Error() string {
 // Unwrap classifies the timeout as a deadline.
 func (messageTimeoutError) Unwrap() error { return context.DeadlineExceeded }
 
+// submitTimeoutError is a recorded /submit's delivery timeout, classified as
+// context.DeadlineExceeded for the op outcome.
+type submitTimeoutError struct{}
+
+// Error names the bound the delivery outlived.
+func (submitTimeoutError) Error() string {
+	return fmt.Sprintf("session.submit timed out after %s", sessionSubmitAsyncTimeout)
+}
+
+// Unwrap classifies the timeout as a deadline.
+func (submitTimeoutError) Unwrap() error { return context.DeadlineExceeded }
+
 // opTargetMovedResult counts a recorded message whose target re-resolved to
 // another session between the 202 and the delivery (DES-O0API §6.1).
 const opTargetMovedResult = "op_target_moved"
@@ -103,20 +122,22 @@ const opTargetMovedResult = "op_target_moved"
 // refuses them; past it the oldest is dropped, and logged.
 const maxKeptEvents = 1024
 
-// keptEvent is a terminal event an event log refused, kept to record later.
+// keptEvent is a terminal event an event log refused, kept to record later:
+// requestID's, for operation's endpoint.
 type keptEvent struct {
 	requestID string
+	operation string
 	event     events.Event
 }
 
 // cityOps is the operation-journal state one process shares across every
 // Server it builds for one city: the in-flight registry, which must outlive
 // a Server whose deliveries are still running (I3); the degrade reporter,
-// whose latch is per process (§5.5); the city's live Server, the one the
-// supervisor serves the city with, through which every Server's deliveries
-// report and close; the terminal events its event log refused, kept to
-// record later; and the done channel that ends the city's background close
-// retries when the process shuts down. It is safe for concurrent use.
+// whose latch is per city per process (§5.5); the city's live Server, the
+// one the supervisor serves the city with, through which every Server's
+// deliveries report and close; the terminal events its event log refused,
+// kept to record later; and the done channel that ends the city's background
+// close retries when the process shuts down. It is safe for concurrent use.
 type cityOps struct {
 	inflight *legacyop.Inflight
 	degraded *OpsDegradeReporter
@@ -127,7 +148,11 @@ type cityOps struct {
 
 	// emitMu serializes the city's terminal events, so the kept ones are
 	// recorded in order and before any later one, and guards kept. It is
-	// taken before mu.
+	// held across the event log's Record in every ops.content mode, off
+	// included, so a slow log, such as an exec provider's script forked per
+	// event, holds back the city's other terminal events, and the answer to
+	// a same-key retry the LRU, the in-flight registry or the stored op
+	// gives, until that Record returns. It is taken before mu.
 	emitMu sync.Mutex
 	kept   []keptEvent
 
@@ -197,14 +222,46 @@ func recordAcked(rec events.Recorder, e events.Event) error {
 	return nil
 }
 
-// emit records requestID's terminal event e to the city's event log (from's,
-// when the city has no live Server), after the events kept before it. An
-// event the log refuses is kept, to be recorded when the supervisor builds
-// the city's next Server, before the city's next emit, or before a same-key
-// retry of its request is answered.
-func (c *cityOps) emit(from *Server, requestID string, e events.Event) {
+// emit records requestID's terminal event e for operation's endpoint to the
+// city's event log (from's, when the city has no live Server), after the
+// events kept before it. An event the log refuses is kept, to be recorded
+// when the supervisor builds the city's next Server, before the city's next
+// emit, or before a same-key retry of its request is answered.
+func (c *cityOps) emit(from *Server, requestID, operation string, e events.Event) {
 	c.emitMu.Lock()
 	defer c.emitMu.Unlock()
+	c.emitLocked(from, requestID, operation, e)
+}
+
+// emitReplay records a stored replay's terminal event e for requestID on
+// operation's endpoint as emit does, and reports whether one of requestID's
+// terminal events is still kept, the event log refusing it: the replay is
+// busy. While one of them stays kept after the flush, e is neither recorded
+// nor kept. A kept event the log takes now that matches e's request,
+// endpoint and type, the first request's or an earlier replay's, lands after
+// the replay's cursor and is its event, so e is not recorded too. One for the
+// other endpoint does not stand in for e, since a waiter on this one would
+// never match it, nor does one of another type: the executor's event of an
+// op whose close kept failing, closed since with another outcome
+// (engdocs/design/async-request-result.md, request_id rule 4).
+func (c *cityOps) emitReplay(from *Server, requestID, operation string, e events.Event) bool {
+	c.emitMu.Lock()
+	defer c.emitMu.Unlock()
+	keptAsE := slices.ContainsFunc(c.kept, func(k keptEvent) bool {
+		return k.requestID == requestID && k.operation == operation && k.event.Type == e.Type
+	})
+	c.flushLocked(from)
+	if c.keepsLocked(requestID) {
+		return true
+	}
+	if !keptAsE {
+		c.emitLocked(from, requestID, operation, e)
+	}
+	return c.keepsLocked(requestID)
+}
+
+// emitLocked is emit with c.emitMu held.
+func (c *cityOps) emitLocked(from *Server, requestID, operation string, e events.Event) {
 	rec := c.eventLog(from)
 	if rec == nil {
 		c.logf("api: no event provider for %s result %s", e.Type, requestID)
@@ -222,7 +279,7 @@ func (c *cityOps) emit(from *Server, requestID string, e events.Event) {
 		c.logf("api: dropping the kept %s result %s: %d results are kept", c.kept[0].event.Type, c.kept[0].requestID, maxKeptEvents)
 		c.kept = slices.Delete(c.kept, 0, 1)
 	}
-	c.kept = append(c.kept, keptEvent{requestID: requestID, event: e})
+	c.kept = append(c.kept, keptEvent{requestID: requestID, operation: operation, event: e})
 }
 
 // recordKeptLocked records the kept events to rec, oldest first, and returns
@@ -272,23 +329,18 @@ func (c *cityOps) flushKeeps(from *Server, requestID string) bool {
 	return c.keepsLocked(requestID)
 }
 
-// keeps reports whether one of requestID's terminal events is kept.
-func (c *cityOps) keeps(requestID string) bool {
-	c.emitMu.Lock()
-	defer c.emitMu.Unlock()
-	return c.keepsLocked(requestID)
-}
-
-// keepsLocked is keeps with c.emitMu held.
+// keepsLocked reports whether one of requestID's terminal events is kept.
+// c.emitMu must be held.
 func (c *cityOps) keepsLocked(requestID string) bool {
 	return slices.ContainsFunc(c.kept, func(k keptEvent) bool { return k.requestID == requestID })
 }
 
 // shutdown ends the city's background close retries: the process is shutting
 // down. An op whose close was still being retried stays open, its in-flight
-// entry held until its finish_by, then the sweeper's. The kept terminal
-// events are recorded if the city's event log takes them now; the rest are
-// lost with the process, and logged. It is idempotent.
+// entry held until its finish_by; past it the sweeper, or a same-key retry,
+// closes the op expired. The kept terminal events are recorded if the city's
+// event log takes them now; the rest are lost with the process, and logged.
+// It is idempotent.
 func (c *cityOps) shutdown() {
 	c.stopOnce.Do(func() {
 		close(c.done)
@@ -546,12 +598,9 @@ func (s *Server) replayAnswer(adm *legacyop.Admission, operation, cursor string)
 	}
 	// The replay's re-emitted event is a terminal event too: busy while one
 	// of the op's is kept, without keeping another, so the 202 has its event
-	// after its cursor.
-	if s.ops.city.flushKeeps(s, adm.Op.ID) {
-		return nil, requestInFlight()
-	}
-	s.emitMessageOpProjection(operation, adm.Op)
-	if s.ops.city.keeps(adm.Op.ID) {
+	// after its cursor, and only one: a kept one of its type for this
+	// endpoint, recorded now, is that event (cityOps.emitReplay).
+	if s.emitMessageOpProjection(operation, adm.Op) {
 		return nil, requestInFlight()
 	}
 	return &body, nil
@@ -713,35 +762,35 @@ func (o *serverOps) runAfterAdmit() {
 
 // emitMessageOpProjection re-emits a finished message op's terminal event for
 // the replaying request's endpoint, projected from the op (DES-O0API §6.3):
-// a request whose original waiter missed the event still gets one. The
-// projection carries no will_start, will_not_start_reason, interrupt or
-// original error message; its message, the error_message of a failure, says
-// what it replays and that the retry's own options took no effect (§3.1).
-func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
+// a request whose original waiter missed the event still gets one. It
+// reports whether one of the op's terminal events is still kept, the event
+// log refusing it, as cityOps.emitReplay does. The projection carries no
+// will_start, will_not_start_reason, interrupt or original error message; its
+// message, the error_message of a failure, says what it replays and that the
+// retry's own options took no effect (§3.1).
+func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) bool {
 	wire := conversationOpWire(op)
 	arm, reason := op.Outcome.Effective()
 	message := replayMessage(op.ID, arm, reason)
 	if arm == opjournal.ArmSucceeded {
 		queued := op.Outcome.Result.Via == legacyop.ViaLegacyQueued
 		if operation == RequestOperationSessionSubmit {
-			s.emitReplayEvent(events.RequestResultSessionSubmit, op.Conversation, message, SessionSubmitSucceededPayload{
+			return s.emitReplayEvent(operation, events.RequestResultSessionSubmit, op.Conversation, message, SessionSubmitSucceededPayload{
 				RequestID: op.ID,
 				SessionID: op.Conversation,
 				Queued:    queued,
 				Intent:    string(submitIntentForWhen(op.Policy.Message.When)),
 				Op:        wire,
 			})
-			return
 		}
-		s.emitReplayEvent(events.RequestResultSessionMessage, op.Conversation, message, SessionMessageSucceededPayload{
+		return s.emitReplayEvent(operation, events.RequestResultSessionMessage, op.Conversation, message, SessionMessageSucceededPayload{
 			RequestID: op.ID,
 			SessionID: op.Conversation,
 			Queued:    queued,
 			Op:        wire,
 		})
-		return
 	}
-	s.emitReplayEvent(events.RequestFailed, "", message, RequestFailedPayload{
+	return s.emitReplayEvent(operation, events.RequestFailed, "", message, RequestFailedPayload{
 		RequestID:    op.ID,
 		Operation:    operation,
 		ErrorCode:    messageReplayErrorCode(operation, reason),
@@ -750,16 +799,19 @@ func (s *Server) emitMessageOpProjection(operation string, op opjournal.Op) {
 	})
 }
 
-// emitReplayEvent records a replay's terminal event through its city's op
-// state, as emitMessageResult does, with the replay's message on the event.
-func (s *Server) emitReplayEvent(eventType, subject, message string, payload events.Payload) {
+// emitReplayEvent records a replay's terminal event for operation's endpoint
+// through its city's op state (cityOps.emitReplay), with the replay's message
+// on the event, and reports whether one of its request's terminal events is
+// still kept.
+func (s *Server) emitReplayEvent(operation, eventType, subject, message string, payload events.Payload) bool {
+	requestID := requestIDFromPayload(payload)
 	e, err := typedEvent(eventType, subject, payload)
 	if err != nil {
 		s.ops.logf("api: %v", err)
-		return
+		return s.ops.city.flushKeeps(s, requestID)
 	}
 	e.Message = message
-	s.ops.city.emit(s, requestIDFromPayload(payload), e)
+	return s.ops.city.emitReplay(s, requestID, operation, e)
 }
 
 // replayOptionsNote ends a replay's message (DES-O0API §3.1): resume and the

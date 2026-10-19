@@ -8,13 +8,14 @@ import "sync"
 // by Finish once the op closes, is left open (as the handler's panic recovery
 // leaves it) or gets an invalid outcome, by Admit or Finish themselves when
 // they panic, and, after a close that kept failing, by the background close
-// retry once its close lands or its op's finish_by passes, or by a timer at
-// finish_by when the recorder's Done ends that retry first. So the set is
-// bounded by concurrent requests plus the requests whose close has not
+// retry once its close lands or its op's finish_by passes, or by a timer just
+// past finish_by when the recorder's Done ends that retry first. So the set
+// is bounded by concurrent requests plus the requests whose close has not
 // landed, each held until about its op's finish_by, and no same-key request
 // in this process can see "open, not in flight" while the executor still
 // runs, nor before the finish_by of an op whose close did not land: its
-// effect may already have landed.
+// effect may already have landed. Past finish_by a same-key Admit closes such
+// an op as expired instead of adopting it.
 //
 // The registry is the only in-flight signal adoption reads, so adoption
 // assumes one API process per city (DES-O0API D9, I3): another API process,

@@ -35,7 +35,14 @@ import (
 // to isolate mutation logic from reads and streaming.
 
 var (
-	sessionMessageAsyncTimeout      = sessionMessageTimeout
+	sessionMessageAsyncTimeout = sessionMessageTimeout
+	// sessionSubmitAsyncTimeout bounds a recorded /submit's delivery. It ends
+	// well inside the op's finish_by, ExecutionBound after admission or
+	// adoption, so the op closes from the delivery's result, or from this
+	// timeout, with time left for that close to land: the sweeper, or a
+	// same-key retry, closes an op expired only once no delivery waits on it.
+	// An unrecorded /submit has no op to close and is not bounded.
+	sessionSubmitAsyncTimeout       = legacyop.ExecutionBound - 5*time.Minute
 	sessionCreateCommandableTimeout = 120 * time.Second
 )
 
@@ -759,22 +766,54 @@ func (s *Server) acceptSessionSubmit(ctx context.Context, input *SessionSubmitIn
 	})
 }
 
-// deliverSubmit delivers an accepted /submit: it submits message to the
-// session, closes the op from the result and emits the terminal event.
+// deliverSubmit delivers an accepted /submit: it runs the submit on its own
+// goroutine, under sessionSubmitAsyncTimeout when the request is recorded,
+// closes the op from the submit's result, or from a timeout when the submit
+// outlives it, and emits the terminal event. An unrecorded submit has no op
+// to close by a finish_by and is waited for however long it takes.
 func (s *Server) deliverSubmit(d messageDelivery, message string, intent session.SubmitIntent, resume bool) {
-	id, err := s.resolveDeliveryTarget(context.Background(), d)
+	var timeout time.Duration
+	if d.adm != nil && d.adm.Recorded {
+		timeout = sessionSubmitAsyncTimeout
+	}
+	result := awaitSend(d, RequestOperationSessionSubmit, timeout, submitTimeoutError{}, func(ctx context.Context, send *messageSend) {
+		s.sendSubmit(ctx, d, send, message, intent, resume)
+	})
+	op := s.finishMessageOp(d.adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
+	if result.err != nil {
+		s.emitSessionSubmitFailed(d.reqID, result.errorCode, result.err.Error(), op)
+		return
+	}
+	s.emitSessionSubmitSucceeded(d.reqID, result.sessionID, result.outcome, string(intent), op)
+}
+
+// sendSubmit submits message to d's session and posts the result to send. A
+// submit that fails because the delivery's timeout canceled it posts a
+// timeout; a panic posts an internal_error result. Any other deadline or
+// cancellation keeps /submit's legacy submit_failed, unlike /messages, though
+// its op closes deadline_in_flight and a replay reports timeout
+// (engdocs/design/async-request-result.md, request_id rule 7).
+func (s *Server) sendSubmit(ctx context.Context, d messageDelivery, send *messageSend, message string, intent session.SubmitIntent, resume bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			send.post(messageResult{errorCode: "internal_error", err: fmt.Errorf("panic: %v", r)})
+		}
+	}()
+	id, err := s.resolveDeliveryTarget(ctx, d)
 	if err != nil {
-		op := s.finishMessageOp(d.adm, messageOpResult(false, err, nil))
-		s.emitSessionSubmitFailed(d.reqID, "resolve_failed", err.Error(), op)
+		send.post(messageResult{errorCode: "resolve_failed", err: err})
 		return
 	}
-	outcome, submitErr := s.submitMessageToSession(context.Background(), d.store, id, message, intent, resume)
-	op := s.finishMessageOp(d.adm, messageOpResult(outcome.Queued, submitErr, outcome.Interrupt))
-	if submitErr != nil {
-		s.emitSessionSubmitFailed(d.reqID, sessionSubmitFailureCode(submitErr), submitErr.Error(), op)
+	outcome, err := s.submitMessageToSession(ctx, d.store, id, message, intent, resume)
+	if err != nil {
+		code := sessionSubmitFailureCode(err)
+		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
+			code = "timeout"
+		}
+		send.post(messageResult{sessionID: id, errorCode: code, err: err})
 		return
 	}
-	s.emitSessionSubmitSucceeded(d.reqID, id, outcome, string(intent), op)
+	send.post(messageResult{sessionID: id, outcome: outcome})
 }
 
 // messageDelivery is an accepted /submit or /messages request, handed to
@@ -917,8 +956,8 @@ func (s *Server) acceptSessionMessage(ctx context.Context, input *SessionMessage
 	})
 }
 
-// messageResult is the result of one /messages send: the session it went to
-// and its outcome, or the error code its terminal event carries.
+// messageResult is the result of one /submit or /messages send: the session
+// it went to and its outcome, or the error code its terminal event carries.
 type messageResult struct {
 	sessionID string
 	outcome   messageOutcome
@@ -926,13 +965,13 @@ type messageResult struct {
 	err       error
 }
 
-// messageSend is one /messages send racing sessionMessageAsyncTimeout. The
+// messageSend is one /submit or /messages send its delivery waits on. The
 // send posts its one result; once the request's terminal event is out, a
 // late result is only logged.
 type messageSend struct {
-	reqID, target string
-	results       chan messageResult
-	emitted       atomic.Bool
+	reqID, target, operation string
+	results                  chan messageResult
+	emitted                  atomic.Bool
 }
 
 // post hands r to the delivery waiting on the send, or logs it when the
@@ -943,10 +982,41 @@ func (m *messageSend) post(r messageResult) {
 		return
 	}
 	if r.err != nil {
-		log.Printf("api: late session.message result after timeout request_id=%s target=%s error_code=%s err=%v", m.reqID, m.target, r.errorCode, r.err)
+		log.Printf("api: late %s result after timeout request_id=%s target=%s error_code=%s err=%v", m.operation, m.reqID, m.target, r.errorCode, r.err)
 		return
 	}
-	log.Printf("api: late session.message result after timeout request_id=%s target=%s session_id=%s", m.reqID, m.target, r.sessionID)
+	log.Printf("api: late %s result after timeout request_id=%s target=%s session_id=%s", m.operation, m.reqID, m.target, r.sessionID)
+}
+
+// awaitSend runs send on its own goroutine for delivery d of operation and
+// returns its result. When timeout is positive and the send outlives it,
+// awaitSend cancels the send's context and returns a timeout result carrying
+// timedOut; the send's result after that is only logged. A zero timeout
+// waits however long the send takes.
+func awaitSend(d messageDelivery, operation string, timeout time.Duration, timedOut error, send func(context.Context, *messageSend)) messageResult {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m := &messageSend{reqID: d.reqID, target: d.target, operation: operation, results: make(chan messageResult, 1)}
+	go send(ctx, m)
+	var expired <-chan time.Time
+	if timeout > 0 {
+		timer := time.NewTimer(timeout)
+		defer timer.Stop()
+		expired = timer.C
+	}
+	var result messageResult
+	select {
+	case result = <-m.results:
+	case <-expired:
+		cancel()
+		select {
+		case result = <-m.results:
+		default:
+			result = messageResult{errorCode: "timeout", err: timedOut}
+		}
+	}
+	m.emitted.Store(true)
+	return result
 }
 
 // deliverMessage delivers an accepted /messages: it runs the send on its own
@@ -954,24 +1024,9 @@ func (m *messageSend) post(r messageResult) {
 // result, or from a timeout when the send outlives it, and emits the
 // terminal event.
 func (s *Server) deliverMessage(d messageDelivery, message string, resume bool) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	send := &messageSend{reqID: d.reqID, target: d.target, results: make(chan messageResult, 1)}
-	go s.sendMessage(ctx, d, send, message, resume)
-	timer := time.NewTimer(sessionMessageAsyncTimeout)
-	defer timer.Stop()
-	var result messageResult
-	select {
-	case result = <-send.results:
-	case <-timer.C:
-		cancel()
-		select {
-		case result = <-send.results:
-		default:
-			result = messageResult{errorCode: "timeout", err: messageTimeoutError{}}
-		}
-	}
-	send.emitted.Store(true)
+	result := awaitSend(d, RequestOperationSessionMessage, sessionMessageAsyncTimeout, messageTimeoutError{}, func(ctx context.Context, send *messageSend) {
+		s.sendMessage(ctx, d, send, message, resume)
+	})
 	op := s.finishMessageOp(d.adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
 	if result.err != nil {
 		s.emitSessionMessageFailed(d.reqID, result.errorCode, result.err.Error(), op)

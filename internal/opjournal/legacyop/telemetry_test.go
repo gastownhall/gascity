@@ -171,8 +171,9 @@ func TestFinishReusesAdmitsStore(t *testing.T) {
 // owner shutting down), instead of retrying until finish_by. The
 // entry stays held until finish_by: the request's API did not die, so a
 // same-key retry in this process must not adopt the op and deliver it a
-// second time (DES-O0API I3, §12). At finish_by the entry is released and the
-// op is the sweeper's.
+// second time (DES-O0API I3, §12). The entry is released just past
+// finish_by, never at it, so a same-key retry then closes the op as expired
+// rather than adopting it.
 func TestBackgroundCloseEndsOnDone(t *testing.T) {
 	e := newEnv(t)
 	r := apiRecorder(e, gate.Auto)
@@ -203,15 +204,32 @@ func TestBackgroundCloseEndsOnDone(t *testing.T) {
 	if _, err := r.Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
 		t.Fatalf("same key after Done: %v, want ErrBusy (no adoption)", err)
 	}
-	if want := adm.Op.FinishBy.Sub(e.clk.Now()); releaseHold == nil || holdFor != want {
-		t.Fatalf("hold = %s (set %v), want %s, until finish_by", holdFor, releaseHold != nil, want)
+	if want := adm.Op.FinishBy.Sub(e.clk.Now()) + time.Nanosecond; releaseHold == nil || holdFor != want {
+		t.Fatalf("hold = %s (set %v), want %s, until just past finish_by", holdFor, releaseHold != nil, want)
 	}
+	// The hold ends at finish_by itself: the entry stays held a moment longer.
+	e.clk.Advance(holdFor - time.Nanosecond)
+	releaseHold()
+	if r.Inflight.Len() != 1 || holdFor != time.Nanosecond {
+		t.Fatalf("registry %d, re-held for %s at finish_by; want the entry held 1ns more", r.Inflight.Len(), holdFor)
+	}
+	if _, err := r.Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
+		t.Fatalf("same key at finish_by: %v, want ErrBusy (no adoption)", err)
+	}
+	e.clk.Advance(holdFor)
 	releaseHold()
 	if r.Inflight.Len() != 0 {
-		t.Fatalf("registry %d at finish_by", r.Inflight.Len())
+		t.Fatalf("registry %d past finish_by", r.Inflight.Len())
 	}
 	if got, _ := e.st.Get(adm.Op.ID); got.Status != opjournal.StatusSubmitted {
 		t.Fatalf("op %s after Done", got.Status)
+	}
+	// The store recovers before the sweeper runs: a same-key retry closes the
+	// op as expired rather than adopting it.
+	e.fault.updateForever = false
+	again, err := r.Admit(msg("k1", "hello"))
+	if err != nil || again.Decision != Replay || again.Adopted || again.Op.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
+		t.Fatalf("same key past finish_by = %+v, %v; want a replay of deadline_in_flight", again, err)
 	}
 }
 
@@ -239,9 +257,10 @@ func TestBackgroundCloseEndsOnDonePastFinishBy(t *testing.T) {
 
 // Healthy is told of each close the store answers, the op closed or found
 // already closed, before the entry is released: in Finish, in the background
-// retry after Finish has returned, and in the CLI's expiry rule (DES-O0API
-// §5.5). A close the store fails, a background retry that finish_by or Done
-// ends and an invalid outcome are not health.
+// retry after Finish has returned, and in Admit's expiry rule (DES-O0API
+// §5.5). A close the store fails, an expiry rule that writes nothing because
+// the op was adopted since, a background retry that finish_by or Done ends
+// and an invalid outcome are not health.
 func TestHealthyIsToldOfEachAnsweredClose(t *testing.T) {
 	out := succeeded(ViaLegacyDelivered)
 	// watch records the stages r tells Healthy, failing a call made once the
@@ -337,6 +356,33 @@ func TestHealthyIsToldOfEachAnsweredClose(t *testing.T) {
 			t.Fatalf("Admit = %+v, %v; want a replay of the expired op", adm, err)
 		}
 		check(t, healthy, StageClose)
+	})
+	t.Run("the API's expiry rule", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		healthy := watch(t, r)
+		e.seed(t, msg("k1", "hello"), ExecutorAPI)
+		e.clk.Advance(ExecutionBound + time.Second)
+		if adm, err := r.Admit(msg("k1", "hello")); err != nil || adm.Decision != Replay {
+			t.Fatalf("Admit = %+v, %v; want a replay of the expired op", adm, err)
+		}
+		check(t, healthy, StageClose)
+	})
+	t.Run("an expiry rule that finds the op adopted", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		var healthy []string
+		r.Healthy = func(stage string) { healthy = append(healthy, stage) }
+		op := e.seed(t, msg("k1", "hello"), ExecutorAPI)
+		e.clk.Advance(ExecutionBound + time.Second)
+		// Another API process adopts the op after the rule read it expired.
+		if _, err := e.st.Adopt(op.ID, op.Attempt, string(ExecutorAPI), e.clk.Now().Add(ExecutionBound)); err != nil {
+			t.Fatal(err)
+		}
+		if adm, err := r.closeExpired(e.st, "k1", false, op, e.clk.Now()); !errors.Is(err, ErrBusy) {
+			t.Fatalf("closeExpired = %+v, %v; want busy", adm, err)
+		}
+		check(t, &healthy)
 	})
 	t.Run("a background retry finish_by ends", func(t *testing.T) {
 		e := newEnv(t)

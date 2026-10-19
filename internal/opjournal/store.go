@@ -477,8 +477,8 @@ func (s *Store) writeKnown(op, next Op) (Op, bool, error) {
 // closed the op. Otherwise it writes nothing and returns the op as it stands:
 // an op an adopter moved (a later finish_by), a lane op, an op not yet expired
 // and an op another closer reached first all stay as they are. The sweeper
-// and the CLI's expiry rule close through it, so neither ever closes an op
-// before its current finish_by (DES-O0API I7).
+// and the legacy recorder's expiry rule (legacyop's Admit) close through it,
+// so neither ever closes an op before its current finish_by (DES-O0API I7).
 func (s *Store) CloseExpired(op Op, now time.Time, by string) (Op, bool, error) {
 	if err := validateText("close by", by, maxPrincipalLen); err != nil {
 		return Op{}, false, err

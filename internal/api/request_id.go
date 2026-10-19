@@ -75,13 +75,13 @@ func (s *Server) emitAsyncResult(eventType, subject string, payload events.Paylo
 	EmitTypedEvent(rec, eventType, subject, payload)
 }
 
-// emitMessageResult records a /submit or /messages terminal event through
-// its city's shared op state (session_ops.go): a delivery that outlived the
-// Server it started on reports to the event log the supervisor serves the
-// city with now, not the one the city's restart closed, and an event that
-// log refuses is kept until a log takes it. A Server with no op state
-// records to its own event log.
-func (s *Server) emitMessageResult(eventType, subject string, payload events.Payload) {
+// emitMessageResult records operation's /submit or /messages terminal event
+// through its city's shared op state (session_ops.go): a delivery that
+// outlived the Server it started on reports to the event log the supervisor
+// serves the city with now, not the one the city's restart closed, and an
+// event that log refuses is kept until a log takes it. A Server with no op
+// state records to its own event log.
+func (s *Server) emitMessageResult(operation, eventType, subject string, payload events.Payload) {
 	if s.ops == nil {
 		s.emitAsyncResult(eventType, subject, payload)
 		return
@@ -91,7 +91,7 @@ func (s *Server) emitMessageResult(eventType, subject string, payload events.Pay
 		log.Printf("api: %v", err)
 		return
 	}
-	s.ops.city.emit(s, requestIDFromPayload(payload), e)
+	s.ops.city.emit(s, requestIDFromPayload(payload), operation, e)
 }
 
 func (s *Server) emitRequestFailed(requestID, operation, errorCode, errorMessage string) {
@@ -161,7 +161,7 @@ func (s *Server) emitSessionCreateFailedFor(requestID, sessionID, errorCode, err
 // emitSessionMessageSucceeded records a request.result.session.message event.
 // op is the operation the request was recorded as, nil when it was not.
 func (s *Server) emitSessionMessageSucceeded(requestID, sessionID string, out messageOutcome, op *ConversationOp) {
-	s.emitMessageResult(events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
+	s.emitMessageResult(RequestOperationSessionMessage, events.RequestResultSessionMessage, sessionID, SessionMessageSucceededPayload{
 		RequestID:          requestID,
 		SessionID:          sessionID,
 		Queued:             out.Queued,
@@ -178,7 +178,7 @@ func (s *Server) emitSessionMessageFailed(requestID, errorCode, errorMessage str
 
 // emitSessionSubmitSucceeded records a request.result.session.submit event.
 func (s *Server) emitSessionSubmitSucceeded(requestID, sessionID string, out messageOutcome, intent string, op *ConversationOp) {
-	s.emitMessageResult(events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
+	s.emitMessageResult(RequestOperationSessionSubmit, events.RequestResultSessionSubmit, sessionID, SessionSubmitSucceededPayload{
 		RequestID:          requestID,
 		SessionID:          sessionID,
 		Queued:             out.Queued,
@@ -199,7 +199,7 @@ func (s *Server) emitSessionSubmitFailed(requestID, errorCode, errorMessage stri
 // carrying the operation the failed request was recorded as; a nil op is the
 // legacy payload.
 func (s *Server) emitRequestFailedOp(requestID, operation, errorCode, errorMessage string, op *ConversationOp) {
-	s.emitMessageResult(events.RequestFailed, "", RequestFailedPayload{
+	s.emitMessageResult(operation, events.RequestFailed, "", RequestFailedPayload{
 		RequestID:    requestID,
 		Operation:    operation,
 		ErrorCode:    errorCode,

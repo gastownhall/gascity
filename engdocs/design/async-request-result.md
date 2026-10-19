@@ -45,8 +45,9 @@ progression.
    outcome class, except for an op whose close kept failing (rule 5). Its
    executor's event went out with the op still open, and the op can then
    close with another outcome: failed `deadline_in_flight` when the
-   sweeper closes it after its `finish_by`, or the outcome of a same-key
-   retry that adopted it and ran it again. A later replay reports that
+   sweeper, or a same-key retry, closes it after its `finish_by`, or the
+   outcome of a same-key retry that adopted it before its `finish_by`, in
+   another API process, and ran it again. A later replay reports that
    outcome, for example `request.failed` with `timeout` for a message that
    was delivered, so a replayed failure does not prove the message did not
    land. A request whose executor crashed after the 202 has none until it
@@ -59,8 +60,8 @@ progression.
    emits the terminal event. When the close keeps failing, the event goes
    out at once, in every `ops.content` mode, and carries the op still
    open: the close retries in the background, holding the in-flight entry
-   (rule 6), until it lands, the op's `finish_by` passes (the sweeper
-   closes it then) or the process shuts down.
+   (rule 6), until it lands, the op's `finish_by` passes (the sweeper, or
+   a same-key retry, closes it then) or the process shuts down.
 6. When the server records both requests (rule 2), a same-key retry on
    the **same** endpoint while the first request is still running gets
    the first request's 202 (same `request_id`, same `event_cursor`). A
@@ -95,9 +96,11 @@ progression.
    differ from the original's: a session closed or gone during the
    delivery (originally `submit_failed` or `message_failed`) replays as
    `resolve_failed`, and a deadline or cancellation inside `/submit`
-   (originally `submit_failed`) replays as `timeout`. The original `error_message` is
-   not kept either: a replay's says which op it replays and its outcome,
-   and that the retry's own options took no effect (rule 6).
+   (originally `submit_failed`, or `timeout` when a recorded `/submit`'s
+   own delivery timeout caused it; see the client contract) replays as
+   `timeout`. The original `error_message` is not kept either: a replay's
+   says which op it replays and its outcome, and that the retry's own
+   options took no effect (rule 6).
 8. A retry the `Idempotency-Key` cache misses still passes the front-door
    checks first: an unknown target is 404 and a session waiting on a
    pending interaction (for example an approval the first message raised)
@@ -124,12 +127,20 @@ progression.
    landed, so a same-key retry in that process gets the first request's
    202 (or 409 `in_flight` on the other endpoint) rather than adopting
    the op and delivering it again. After `finish_by` the sweeper closes
-   the op. The supervisor builds a restarted city's new `Server` only
-   when a request for the city arrives, so a delivery can finish after
-   the restart closed the old event log and before any new `Server` is
-   live. In every `ops.content` mode, `off` included, a `/submit` or
-   `/messages` terminal event goes to the city's live `Server`'s event
-   log (its own `Server`'s when the supervisor dropped the city), whether
+   the op failed `deadline_in_flight`, and a same-key retry that finds it
+   still open closes it so and replays it (rule 4): no retry adopts an op
+   past its `finish_by`. A recorded delivery's own timeout ends inside its
+   op's `finish_by` (client contract), so the op closes from the
+   delivery's result, or from that timeout, first. The margin is fixed,
+   five minutes for `/submit` and eleven for `/messages`, and the store
+   I/O around the delivery spends it first: on a store that slow, the
+   sweeper can close the op `deadline_in_flight` before a late success
+   lands, and that success's event then carries the op so closed. The
+   supervisor builds a restarted city's new `Server` only when a request
+   for the city arrives, so a delivery can finish after the restart closed
+   the old event log and before any new `Server` is live. In every
+   `ops.content` mode, `off` included, a `/submit` or `/messages` terminal
+   event goes to the city's live `Server`'s event log (its own `Server`'s when the supervisor dropped the city), whether
    or not its request was recorded, and one the log refuses is kept, in
    order, and recorded the next time a log takes it: when the
    supervisor builds the city's next `Server`, before the city's next
@@ -145,7 +156,13 @@ progression.
    drops the oldest and logs it, and a dropped event is never recorded,
    so a client holding that request's 202 may never see its terminal
    event. Kept events live only in the API process: any it cannot record
-   by shutdown are logged and lost.
+   by shutdown are logged and lost. A replay that gets the log to take a
+   kept event of its request with the same `type` for its own endpoint
+   re-emits no other: that one is after its `event_cursor`. A city's
+   terminal events are recorded one at a time, in every `ops.content`
+   mode, `off` included: while its event log is slow to take one (an exec
+   provider runs its script once per event), the city's other terminal
+   events, and the answers to same-key retries, wait for it.
    An `ops.recording_degraded` event the log refuses is not kept; its
    class stays unlatched, so the class's next failure raises it again.
 
@@ -422,6 +439,14 @@ the API adapter: the server emits `request.failed` with
 the SSE stream. If the provider path ignores cancellation and returns
 after that timeout, the API logs a late `session.message` result with
 the request ID instead of emitting a second terminal event.
+
+A recorded `session.submit` (rule 2) is bounded at ten minutes, inside
+its op's `finish_by`: past that, the server closes the op failed
+`deadline_in_flight`, emits `request.failed` with `error_code=timeout`,
+and logs a late result instead of emitting a second terminal event. An
+unrecorded `session.submit` is not bounded: its terminal event comes when
+the submit returns. The CLI waits four minutes for either, as for
+`session.message`.
 6. On failure, `error_code` + `error_message` describe the problem.
 7. Do NOT use the resource before the success event arrives.
 

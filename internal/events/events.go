@@ -508,7 +508,9 @@ const (
 	// (ops.content, ops.control, ops.lifecycle) that is auto or require: in
 	// auto the request ran unrecorded or its op stayed open, in require it
 	// was refused. Latched by the emitter to at most one event per (gate,
-	// surface, stage, reason) per ten minutes per process (DES-O0API D13).
+	// surface, stage, reason) per ten minutes per reporter: one per city per
+	// process for the API, one for the controller's op sweeper (DES-O0API
+	// D13).
 	OpsRecordingDegraded = "ops.recording_degraded"
 
 	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
