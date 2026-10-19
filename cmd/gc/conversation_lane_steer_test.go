@@ -197,9 +197,10 @@ func TestLaneSteerCapNeedsAKeyedSteer(t *testing.T) {
 // conversation live. While the keystroke table is empty it cannot, on its
 // own, catch a Caps.Steer that ignores the row;
 // TestLaneExecSteerCapAsksAboutTheProbedRow covers that. A runtime that
-// cancels turns by protocol is the documented split (SESSION-RUNTIME-025):
-// supports_steer still reads its steer mode, whichever host delivers, while
-// the lane does not run it live and steers nothing.
+// cancels turns by protocol and does not report its turns is the documented
+// split (SESSION-RUNTIME-025): supports_steer still reads its steer mode,
+// whichever host delivers, while the lane does not run it live and steers
+// nothing.
 func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 	rows := map[string]laneFixtureOpt{
 		"no provider":      func(map[string]string) {},
@@ -241,10 +242,10 @@ func TestLaneExecSteerCapAgreesWithSessionReads(t *testing.T) {
 
 // TestLaneExecProtocolModeSteerWaitsNotLive pins what the split between
 // supports_steer and Caps.Steer means for a steer (SESSION-RUNTIME-025): a
-// runtime that cancels turns and steers by protocol reads supports_steer
-// true, yet the lane does not run it live, so a steer to its busy session
-// whose on_unsupported is fail waits not_live with nothing typed, never
-// closing failed{unsupported}.
+// runtime that cancels turns and steers by protocol but does not report its
+// turns reads supports_steer true, yet the lane does not run it live, so a
+// steer to its busy session whose on_unsupported is fail waits not_live with
+// nothing typed, never closing failed{unsupported}.
 func TestLaneExecProtocolModeSteerWaitsNotLive(t *testing.T) {
 	f := newLaneFixture(t, laneProvider("codex"))
 	f.sp.SteerModeValue = runtime.SteerProtocol

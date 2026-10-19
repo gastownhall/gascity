@@ -58,8 +58,9 @@ type SubmissionCapabilities struct {
 	// producers, whose steers only the conversation lane delivers. The
 	// lane's Caps.Steer is this capability only while the lane runs the
 	// conversation live; it is false while another host serves the
-	// conversation or the runtime cancels turns by protocol, which the lane
-	// does not run live yet, and there a steer waits not_live whatever its
+	// conversation or the runtime cancels turns by protocol and its own
+	// protocol does not report its turns, starts included, which the lane
+	// does not run live, and there a steer waits not_live whatever its
 	// on_unsupported policy. On a live lane, a steer the session cannot take
 	// follows that policy: boundary waits for the turn's boundary, fail
 	// closes the op failed{unsupported}.
