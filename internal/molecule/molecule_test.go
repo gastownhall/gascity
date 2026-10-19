@@ -3374,6 +3374,53 @@ func TestInstantiateStampsFormulaHash(t *testing.T) {
 	}
 }
 
+// A root cooked from an extends-based formula must carry the same provenance
+// pair as any other root: the child file as gc.formula_source and that file's
+// hash as gc.formula_hash.
+func TestCookStampsFormulaHashForExtendsFormula(t *testing.T) {
+	dir := t.TempDir()
+	parentContent := []byte(`formula = "mol-hash-base"
+
+[[steps]]
+id = "build"
+title = "Build"
+type = "task"
+`)
+	childContent := []byte(`formula = "mol-hash-child"
+extends = ["mol-hash-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+type = "task"
+needs = ["build"]
+`)
+	if err := os.WriteFile(filepath.Join(dir, "mol-hash-base.toml"), parentContent, 0o644); err != nil {
+		t.Fatalf("write parent: %v", err)
+	}
+	childPath := filepath.Join(dir, "mol-hash-child.toml")
+	if err := os.WriteFile(childPath, childContent, 0o644); err != nil {
+		t.Fatalf("write child: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	result, err := Cook(context.Background(), store, "mol-hash-child", []string{dir}, Options{})
+	if err != nil {
+		t.Fatalf("Cook: %v", err)
+	}
+	root, err := store.Get(result.RootID)
+	if err != nil {
+		t.Fatalf("Get root: %v", err)
+	}
+
+	if got := root.Metadata[beadmeta.FormulaSourceMetadataKey]; got != childPath {
+		t.Errorf("%s = %q, want child path %q", beadmeta.FormulaSourceMetadataKey, got, childPath)
+	}
+	if got, want := root.Metadata[beadmeta.FormulaHashMetadataKey], formula.ContentHash(childContent); got != want {
+		t.Errorf("%s = %q, want child file hash %q", beadmeta.FormulaHashMetadataKey, got, want)
+	}
+}
+
 func TestInstantiateNoHashWhenEmpty(t *testing.T) {
 	store := beads.NewMemStore()
 	recipe := &formula.Recipe{
