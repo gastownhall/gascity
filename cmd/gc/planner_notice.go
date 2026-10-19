@@ -8,9 +8,9 @@ package main
 // lists message) they stop typing into the runtime themselves: each reminder
 // becomes one message{notice, boundary, wake: live_only} op that the lane
 // delivers at the session's next boundary. With the list empty, without a
-// lane host for the sessions store (a supervisor-hosted city), or for a
-// session no lane host can type into (a protocol-mode runtime no other host
-// serves), the reminders are delivered exactly as before.
+// running lane host for the sessions store, or for a session no lane host
+// can type into (a protocol-mode runtime no other host serves), the
+// reminders are delivered exactly as before.
 //
 // The lane host is found through the controller's lane-host registry by the
 // sessions store the reminder writes its markers to, so the legacy reconciler
@@ -498,9 +498,11 @@ func (h *conversationLaneHost) noticeStore() (*opjournal.Store, error) {
 func (h *conversationLaneHost) noticeNow() time.Time { return h.clk.Now() }
 
 // servesNotice reports whether a lane can type a notice into the session:
-// the host's live executor can (laneTypesLive, the rule its caps follow),
-// or the conversation's runtime row stamps another host serving message for
-// the row's generation (hostedElsewhere), whose lane then delivers it.
+// the host's live executor can (laneTypesLive, its caps' rule for a
+// keystroke-mode runtime), or the conversation's runtime row stamps another
+// host serving message for the row's generation (hostedElsewhere), whose
+// lane then delivers it. A protocol-mode session is nudged directly, as
+// before, even where this host's executor serves it from its turns.
 func (h *conversationLaneHost) servesNotice(st *opjournal.Store, sessName string, view opjournal.ConversationView) (bool, error) {
 	if laneTypesLive(h.env.SessionProvider(), sessName) {
 		return true, nil

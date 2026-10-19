@@ -140,6 +140,8 @@ type Formula struct {
 
 	// ContentHash is the SHA-256 hex digest of the raw formula file bytes.
 	// Set by ParseFile; empty for formulas parsed from in-memory bytes.
+	// Resolve keeps the child's hash for an extends-based formula, so it
+	// always identifies the Source file and does not cover the parents.
 	ContentHash string `json:"content_hash,omitempty"`
 
 	compilerRequirementSources []formulaCompilerConstraint

@@ -620,8 +620,9 @@ func TestLaneExecUnconfirmedSubmitMayHaveDelivered(t *testing.T) {
 	}
 }
 
-// TestLaneExecProtocolModeWaitsNotLive proves a protocol-mode runtime is not
-// live until OJ-12b: content waits not_live and nothing is typed.
+// TestLaneExecProtocolModeWaitsNotLive proves a protocol-mode runtime that
+// does not report its turns has no boundary to deliver at, so it is not
+// live: content waits not_live and nothing is typed.
 func TestLaneExecProtocolModeWaitsNotLive(t *testing.T) {
 	f := newLaneFixture(t)
 	f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol

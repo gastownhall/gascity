@@ -109,7 +109,7 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 	case st.State == laneHostStateNone || st.State == "":
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("conversation lanes on (%s): the controller runs no lane host for this city, so the listed kinds go unserved", listed)
-		r.FixHint = "a supervisor-hosted city (`gc start`) does not start the lane host yet; to serve the list, " + laneHostStandaloneRemedy(ctx.CityPath) + ", or empty [ops] authoritative"
+		r.FixHint = "the running controller predates the lane host; restart the city (`gc stop`, then `gc start`), or empty [ops] authoritative"
 		return r
 	case st.State == laneHostStateUnavailable:
 		r.Status = doctor.StatusWarning

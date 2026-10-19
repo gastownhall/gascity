@@ -8,7 +8,9 @@ package main
 //
 // Doorbells (DES-O1 §7.3) start or wake a conversation's worker: Poke for
 // in-process producers, the controller-socket verb lane:<conversation>[:<op>],
-// each worker's own timer at its PassResult.Next, and the anti-entropy scan
+// the ledger feed's page apply (CH-4), which pokes every conversation whose
+// op or runtime row an out-of-band write changed (pokeChangedRows), each
+// worker's own timer at its PassResult.Next, and the anti-entropy scan
 // (opjournal.Store.OpenLaneConversations). The scan runs at boot, and then
 // every laneHostScanInterval while a kind is listed in [ops] authoritative or
 // the last scan found an open lane op, so with the list empty an idle city
@@ -28,9 +30,9 @@ package main
 // reports. A sessions store that is missing (the city store did not open) is
 // not a refusal: the host waits for it, re-checking on the scan cadence.
 //
-// Only the standalone controller (runController) starts the host. A
-// supervisor-hosted city runs none until OJ-12b; startOneCity logs a listed
-// kind as unserved instead (warnSupervisorLaneHostGap).
+// Both controller entry points start the host right after the op sweeper:
+// the standalone controller (runController) and each supervisor-hosted city
+// (startOneCity), with the city's context.
 //
 // The view, the op rows and the wake decision read live (laneLiveSessions);
 // the executor resolves the runtime through the controller's cached sessions
@@ -44,7 +46,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"log"
 	"maps"
 	"reflect"
@@ -348,7 +349,8 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 }
 
 // startConversationLaneHost starts the controller's lane host until ctx
-// ends, with [ops] authoritative as the controller loaded it at start.
+// ends, with [ops] authoritative as the controller loaded it at start, and
+// rings it from the controller's ledger feeds.
 func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conversationLaneHost {
 	var kinds []string
 	if cfg := cs.Config(); cfg != nil {
@@ -356,26 +358,49 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 	}
 	h := newConversationLaneHost(cs, kinds)
 	h.start(ctx)
+	cs.ledgerFeeds.setRowsChanged(h.pokeChangedRows)
 	return h
 }
 
-// warnSupervisorLaneHostGap logs that a supervisor-hosted city starting with
-// a kind listed in [ops] authoritative leaves it unserved: startOneCity starts
-// no lane host until OJ-12b. Nothing is logged when no kind is listed.
-func warnSupervisorLaneHostGap(stderr io.Writer, cityName, cityPath string, cfg *config.City) {
-	if cfg == nil || len(cfg.Ops.Authoritative) == 0 {
-		return
+// pokeChangedRows is the ledger-feed doorbell: it pokes, once each, the
+// conversations whose lane op rows (gc:op), closed op rows or runtime row
+// (gc:rt) are among rows, which a refresh pass found changed out of band
+// (laneConversationsOfRows). A host that is not running ignores it.
+func (h *conversationLaneHost) pokeChangedRows(rows []beads.Bead) {
+	for _, conv := range laneConversationsOfRows(rows) {
+		h.Poke(conv)
 	}
-	fmt.Fprintf(stderr, "gc supervisor: city '%s': conversation-lanes: not started: a supervisor-hosted city runs no lane host yet, so [ops] authoritative = [%s] goes unserved (planner notices are typed directly, as with the list empty); to serve it, %s, or empty the list\n", //nolint:errcheck // best-effort stderr
-		cityName, strings.Join(cfg.Ops.Authoritative, ", "), laneHostStandaloneRemedy(cityPath))
 }
 
-// laneHostStandaloneRemedy is how the operator of the supervisor-hosted city
-// at cityPath runs it under the standalone controller, the one that starts a
-// lane host. gc start refuses --foreground for a registered city, so the
-// city leaves the supervisor first.
-func laneHostStandaloneRemedy(cityPath string) string {
-	return fmt.Sprintf("run `gc unregister %s`, then `gc start --foreground %s` (hidden from --help)", cityPath, cityPath)
+// laneConversationsOfRows lists, in first-seen order, the conversations rows
+// name through a runtime row's conversation label or a lane-relevant op
+// row's: a lane op's, or a closed op's, which a lane op can wait on as its
+// after. An open legacy op row rings nothing: no lane executes it, so a pass
+// for it would read the session and the conversation's ops live for
+// nothing. An op row that does not decode rings, so its pass reports it.
+func laneConversationsOfRows(rows []beads.Bead) []string {
+	opPrefix, rtPrefix := opjournal.ConversationLabel(""), opjournal.RuntimeConversationLabel("")
+	var convs []string
+	for _, b := range rows {
+		for _, label := range b.Labels {
+			conv, ok := strings.CutPrefix(label, rtPrefix)
+			if !ok {
+				conv, ok = strings.CutPrefix(label, opPrefix)
+				ok = ok && laneOpRowRings(b)
+			}
+			if ok && conv != "" && !slices.Contains(convs, conv) {
+				convs = append(convs, conv)
+			}
+		}
+	}
+	return convs
+}
+
+// laneOpRowRings reports whether op row b rings the doorbell: a lane op, a
+// closed op, or a row that does not decode as an op.
+func laneOpRowRings(b beads.Bead) bool {
+	op, err := opjournal.DecodeOp(b)
+	return err != nil || op.Executor == opjournal.ExecutorLane || op.Status == opjournal.StatusClosed
 }
 
 // start decides whether the host runs, publishes it for the city's socket
@@ -688,6 +713,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 		sp:       h.env.SessionProvider(),
 		lane:     st,
 		clk:      h.clk,
+		note:     h.noteError,
 	}, info)
 	res, err := lane.Pass(h.ctx, view, exec)
 	h.notePass(conv, res, err)

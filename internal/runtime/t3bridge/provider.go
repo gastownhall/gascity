@@ -76,10 +76,16 @@ type Provider struct {
 	// the thread and its dispatch.
 	fenceChecked func(name string)
 
+	// fresh coalesces fresh snapshot reads (DES-T3I D7).
+	fresh freshReads
+
 	// Cached snapshot for batching multiple IsRunning/ProcessAlive calls.
+	// snapshotClears counts clearSnapshotCache calls: a read that started
+	// before the latest clear does not refill the cache.
 	snapshotSnapshot map[string]interface{}
 	snapshotCache    map[string]string // threadID → session status
 	snapshotCacheAt  time.Time
+	snapshotClears   uint64
 }
 
 type threadBinding struct {
@@ -1371,30 +1377,12 @@ func (p *Provider) threadSessionStatus(threadID string) string {
 	if err != nil {
 		return ""
 	}
-
-	cache := make(map[string]string)
-	for _, raw := range snapshotItems(snapshot, "threads") {
-		thread, _ := raw.(map[string]interface{})
-		if thread == nil {
-			continue
-		}
-		id, _ := thread["id"].(string)
-		session, _ := thread["session"].(map[string]interface{})
-		if session != nil {
-			st, _ := session["status"].(string)
-			cache[id] = st
-		}
-	}
-
-	p.mu.Lock()
-	p.snapshotCache = cache
-	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
-
-	return cache[threadID]
+	return snapshotThreadStatuses(snapshot)[threadID]
 }
 
-func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
+// snapshotThreadStatuses maps each thread id in snapshot to its session
+// status.
+func snapshotThreadStatuses(snapshot map[string]interface{}) map[string]string {
 	cache := make(map[string]string)
 	for _, raw := range snapshotItems(snapshot, "threads") {
 		thread, _ := raw.(map[string]interface{})
@@ -1408,16 +1396,37 @@ func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 			cache[id] = st
 		}
 	}
+	return cache
+}
 
+// cacheSnapshot caches snapshot for the bridge's cached readers.
+func (p *Provider) cacheSnapshot(snapshot map[string]interface{}) {
 	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
+	p.cacheSnapshotRead(snapshot, clears)
+}
+
+// cacheSnapshotRead caches snapshot, read by a read that started when the
+// cache had been cleared clears times, unless the cache was cleared since:
+// that read may predate the write the clear followed.
+func (p *Provider) cacheSnapshotRead(snapshot map[string]interface{}, clears uint64) {
+	cache := snapshotThreadStatuses(snapshot)
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.snapshotClears != clears {
+		return
+	}
 	p.snapshotSnapshot = snapshot
 	p.snapshotCache = cache
 	p.snapshotCacheAt = time.Now()
-	p.mu.Unlock()
 }
 
+// clearSnapshotCache empties the cache after a write the bridge made, so the
+// next cached read is answered by a read that started after the write.
 func (p *Provider) clearSnapshotCache() {
 	p.mu.Lock()
+	p.snapshotClears++
 	p.snapshotSnapshot = nil
 	p.snapshotCache = nil
 	p.snapshotCacheAt = time.Time{}
@@ -1504,21 +1513,37 @@ func (p *Provider) rpcHTTPSnapshot(ctx context.Context, bearerToken string) (map
 	return nil, lastErr
 }
 
+// rpcSnapshot returns the cached snapshot while it is younger than
+// snapshotCacheTTL, else reads one. A cache that only aged out takes the
+// read in flight, if one is; a cache a write cleared (or never filled) waits
+// for a read that started after it arrived, so the write is visible.
 func (p *Provider) rpcSnapshot() (map[string]interface{}, error) {
 	p.mu.Lock()
-	if time.Since(p.snapshotCacheAt) < snapshotCacheTTL && p.snapshotSnapshot != nil {
-		snapshot := p.snapshotSnapshot
+	cached := p.snapshotSnapshot
+	if cached != nil && time.Since(p.snapshotCacheAt) < snapshotCacheTTL {
 		p.mu.Unlock()
-		return snapshot, nil
+		return cached, nil
 	}
 	p.mu.Unlock()
-	return p.rpcSnapshotFresh(context.Background())
+	if cached == nil {
+		return p.rpcSnapshotFresh(context.Background())
+	}
+	return p.fresh.shared(context.Background(), p.rpcSnapshotRead)
 }
 
 // rpcSnapshotFresh reads the orchestration snapshot from T3, bounded by ctx,
 // never from the cache, and caches what it read for the bridge's other
-// readers.
+// readers. Concurrent callers share reads by generation (freshReads): each
+// is answered by a read that started after it arrived.
 func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}, error) {
+	return p.fresh.do(ctx, p.rpcSnapshotRead)
+}
+
+// rpcSnapshotRead is one snapshot read for rpcSnapshotFresh.
+func (p *Provider) rpcSnapshotRead(ctx context.Context) (map[string]interface{}, error) {
+	p.mu.Lock()
+	clears := p.snapshotClears
+	p.mu.Unlock()
 	bearerToken, err := resolveBearerSessionToken()
 	if err != nil {
 		return nil, err
@@ -1535,7 +1560,7 @@ func (p *Provider) rpcSnapshotFresh(ctx context.Context) (map[string]interface{}
 	if err != nil {
 		return nil, err
 	}
-	p.cacheSnapshot(snapshot)
+	p.cacheSnapshotRead(snapshot, clears)
 	return snapshot, nil
 }
 

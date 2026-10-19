@@ -2159,7 +2159,7 @@
             ]
           },
           "type": "array",
-          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. The default is empty, and message is not on by\ndefault anywhere yet. This build accepts message only. Experimental: no\nrequest surface writes lane ops yet, so listing a kind changes no\nrequest's delivery in this build. Only a standalone controller\n(gc start --foreground) runs the lane host that delivers lane ops; a\nsupervisor-hosted city runs none, and gc doctor reports a listed kind\nthere as an error. The lane delivers live only to keystroke-mode\nruntimes (tmux); a protocol-mode runtime's (t3bridge) lane ops wait\nnot_live until their start deadline. A listed kind needs a sessions\nstore with guarded batches. A change takes effect at the next\ncontroller start."
+          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. The default is empty, and message is not on by\ndefault anywhere yet. This build accepts message only. Experimental: no\nrequest surface writes lane ops yet, so listing a kind changes no\nrequest's delivery in this build. The city's controller, standalone\nor supervisor-hosted, runs the lane host that delivers lane ops, and\ngc doctor reports a listed kind as an error when no lane host serves\nthe city. A keystroke-mode runtime (tmux) takes delivery at an idle\nboundary, a protocol-mode runtime (t3bridge) at its turn boundary.\nA listed kind needs a sessions store with guarded batches. A change\ntakes effect at the next controller start."
         }
       },
       "additionalProperties": false,
