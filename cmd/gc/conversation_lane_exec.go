@@ -187,6 +187,13 @@ type laneLook struct {
 // incarnation, and, only for a running runtime some content may reach,
 // resolves its handle once and reads the pending interaction and the idle
 // boundary through it.
+//
+// A draining row admits the drain notice, so its look resolves the handle
+// and reads the pending interaction and the boundary whatever its open ops
+// are: the probe does not see them, and a pass with only prompts open pays
+// one handle and one idle read that its content_block wait does not use.
+// A pass runs only for a row with open ops, so an idle draining row pays
+// nothing.
 func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (laneLook, error) {
 	obs, err := e.observe(e.target)
 	if err != nil {

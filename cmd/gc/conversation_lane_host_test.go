@@ -1293,6 +1293,40 @@ func TestLaneHostBusyWorkersYieldToTheQueue(t *testing.T) {
 	}
 }
 
+// TestLaneHostReprobesABusyDrainNoticeWithoutAPass proves a busy drain
+// notice in a draining row backs off on re-probes like any busy content: the
+// row's draining block, which the probe admits the notice past, is not a
+// change a full pass must plan.
+func TestLaneHostReprobesABusyDrainNoticeWithoutAPass(t *testing.T) {
+	f := newLaneFixture(t, func(meta map[string]string) {
+		meta["state"] = string(session.StateDraining)
+		meta["state_reason"] = session.DrainAckStopPendingReason
+	})
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", func(r *opjournal.Request) {
+		r.Producer = opjournal.Producer{Principal: laneDrainNoticeClass.Principal, Actor: opjournal.ActorController}
+		r.Policy.Message = opjournal.MessagePolicy{Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly}
+	}))
+	hh := newLaneHostHarness(t, f)
+	hh.h.newExec = func(deps laneExecDeps, info session.Info) opjournal.Executor {
+		e := newConversationLaneExec(deps, info)
+		e.idle = func(nudgeTarget, worker.LiveObservation) bool { return false }
+		return e
+	}
+	hh.start()
+	if p := hh.nextPass(t); !p.out.res.Busy {
+		t.Fatalf("first pass = %+v, want busy", p.out.res)
+	}
+	tm := hh.nextTimer(t)
+	f.clk.Advance(tm.d)
+	tm.c <- f.clk.Now()
+	if !hh.nextReprobe(t) {
+		t.Fatal("the re-probe of a busy drain notice reported a change")
+	}
+	hh.nextTimer(t)
+	hh.noPass(t)
+}
+
 // TestLaneHostReprobesBusyRuntimeWithoutRows proves a busy conversation's
 // backoff re-probes the runtime without a full pass or any op-row read, and
 // the first re-probe that finds a boundary runs the pass that delivers. The

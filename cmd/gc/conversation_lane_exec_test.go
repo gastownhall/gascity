@@ -974,6 +974,14 @@ func TestLaneExecAdmitsTheDrainNoticeIntoADrainingRow(t *testing.T) {
 			drainNotice(r)
 			r.Producer.Principal = plannerNoticePrincipalPrefix + "idle-claim-nudge"
 		}))
+		warmBind := f.propose(t, st, f.msg("warm", opjournal.RoleNotice, "bind", func(r *opjournal.Request) {
+			drainNotice(r)
+			r.Producer.Principal = plannerNoticePrincipalPrefix + warmBindNoticePurpose
+		}))
+		drainPrompt := f.propose(t, st, f.msg("drain-prompt", opjournal.RolePrompt, "work", func(r *opjournal.Request) {
+			drainNotice(r)
+			r.Policy.Message.Role = opjournal.RolePrompt
+		}))
 		notice := f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", drainNotice))
 		for range 3 {
 			if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
@@ -983,7 +991,7 @@ func TestLaneExecAdmitsTheDrainNoticeIntoADrainingRow(t *testing.T) {
 		if got := f.get(t, st, notice.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSucceeded {
 			t.Fatalf("drain notice = %s %+v, want closed succeeded", got.Status, got.Outcome)
 		}
-		for _, id := range []string{prompt.ID, other.ID} {
+		for _, id := range []string{prompt.ID, other.ID, warmBind.ID, drainPrompt.ID} {
 			if got := f.get(t, st, id); got.Status != opjournal.StatusSubmitted {
 				t.Fatalf("op %s = %s, want still submitted behind the draining block", id, got.Status)
 			}
@@ -993,6 +1001,53 @@ func TestLaneExecAdmitsTheDrainNoticeIntoADrainingRow(t *testing.T) {
 			t.Fatalf("nudges = %+v, want only the drain notice", nudges)
 		}
 	})
+	t.Run("probe admits only the drain notice class", func(t *testing.T) {
+		for name, opts := range map[string][]laneFixtureOpt{
+			"ready row":    nil,
+			"draining row": {draining},
+		} {
+			f := newLaneFixture(t, opts...)
+			st := f.laneStore(t)
+			v, info := f.view(t)
+			p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+			if err != nil {
+				t.Fatalf("%s: Probe: %v", name, err)
+			}
+			var want []opjournal.ContentClass
+			if name == "draining row" {
+				want = []opjournal.ContentClass{laneDrainNoticeClass}
+			}
+			if !slices.Equal(p.ContentAdmit, want) {
+				t.Fatalf("%s: ContentAdmit = %+v, want %+v", name, p.ContentAdmit, want)
+			}
+		}
+	})
+	// A draining row with a later reason in the gate's order holds the drain
+	// notice too: only "draining" is exempt.
+	for name, later := range map[string]laneFixtureOpt{
+		"idle stop latch":   func(meta map[string]string) { meta["sleep_intent"] = "idle-stop-pending" },
+		"restart requested": func(meta map[string]string) { meta["restart_requested"] = "true" },
+		"reset pending":     func(meta map[string]string) { meta["continuation_reset_pending"] = "true" },
+		"create claim":      func(meta map[string]string) { meta["pending_create_claim"] = "true" },
+	} {
+		t.Run("draining row, "+name, func(t *testing.T) {
+			f := newLaneFixture(t, draining, later)
+			st := f.laneStore(t)
+			v, info := f.view(t)
+			p, err := newConversationLaneExec(f.deps(st), info).Probe(context.Background(), v)
+			if err != nil || p.ContentBlock == "" || len(p.ContentAdmit) != 0 {
+				t.Fatalf("Probe = block %q admit %+v, %v; want a block that admits nothing", p.ContentBlock, p.ContentAdmit, err)
+			}
+			notice := f.propose(t, st, f.msg("drain", opjournal.RoleNotice, "ack your drain", drainNotice))
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, nil)
+			if err != nil || res.Took != opjournal.TakeNone || len(res.Waits) != 1 || res.Waits[0].Reason != opjournal.WaitContentBlock {
+				t.Fatalf("Pass = %+v, %v; want a content_block wait", res, err)
+			}
+			if len(f.nudges()) != 0 || f.get(t, st, notice.ID).Status != opjournal.StatusSubmitted {
+				t.Fatal("the drain notice passed a reason other than draining")
+			}
+		})
+	}
 	t.Run("stale incarnation", func(t *testing.T) {
 		f := newLaneFixture(t, draining)
 		if err := f.sp.SetMeta(f.name, "GC_SESSION_ID", "gc-someone-else"); err != nil {

@@ -39,7 +39,9 @@ package main
 // The drain reminder is a planner notice too, though its audience is a row
 // in state=draining, which the lane's content gate (I7, session.ContentGate)
 // holds all other content from: the gate admits the drain reminder's notice
-// (session.GateContentDrainNotice, laneDrainNoticeClass) and nothing else.
+// (session.GateContentDrainNotice, laneDrainNoticeClass) and nothing else. A
+// row the gate holds the notice from for another reason is nudged directly
+// (deliverDrainReminder).
 
 import (
 	"errors"
@@ -304,6 +306,53 @@ func plannerNoticeOpen(lane plannerNoticeLane, s beads.Bead, n plannerNotice) (b
 	due, err := plannerNoticesDue(st, s.ID, plannerNoticePrincipalPrefix+n.Purpose,
 		plannerNoticeCorrelation(n, plannerNoticeToken(s)), lane.noticeNow())
 	return len(due) > 0, err
+}
+
+// plannerNoticeFate is what became of one attempt's notice op.
+type plannerNoticeFate int
+
+const (
+	// plannerNoticeFateNone: the attempt has no op (it was typed directly,
+	// or its proposal never landed), so nothing more is known of it.
+	plannerNoticeFateNone plannerNoticeFate = iota
+	// plannerNoticeFateDelivered: the lane delivered it.
+	plannerNoticeFateDelivered
+	// plannerNoticeFateUndelivered: it closed without a delivery (expired,
+	// canceled, superseded or failed), or stands open past its start_by,
+	// which the lane closes as expired.
+	plannerNoticeFateUndelivered
+	// plannerNoticeFateStands: it is in flight, or open and still due.
+	plannerNoticeFateStands
+)
+
+// plannerNoticeAttemptFate reads notice n's attempt op in session row s's
+// conversation, for its current incarnation, and reports its fate at now.
+// It issues one read.
+func plannerNoticeAttemptFate(lane plannerNoticeLane, s beads.Bead, n plannerNotice, now time.Time) (plannerNoticeFate, error) {
+	st, err := lane.noticeStore()
+	if err != nil {
+		return plannerNoticeFateNone, fmt.Errorf("reading planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, s.ID, err)
+	}
+	req := plannerNoticeRequest(s.ID, plannerNoticeToken(s), n, now)
+	id, err := opjournal.DeriveID(st.Prefix(), s.ID, req.Producer.Principal, req.ClientKey)
+	if err != nil {
+		return plannerNoticeFateNone, fmt.Errorf("deriving planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, s.ID, err)
+	}
+	op, err := st.Get(id)
+	switch {
+	case errors.Is(err, beads.ErrNotFound):
+		return plannerNoticeFateNone, nil
+	case err != nil:
+		return plannerNoticeFateNone, fmt.Errorf("reading planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, s.ID, err)
+	case op.Status == opjournal.StatusClosed:
+		if arm, _ := op.Outcome.Effective(); arm == opjournal.ArmSucceeded {
+			return plannerNoticeFateDelivered, nil
+		}
+		return plannerNoticeFateUndelivered, nil
+	case plannerNoticeStillDue(op, now):
+		return plannerNoticeFateStands, nil
+	}
+	return plannerNoticeFateUndelivered, nil
 }
 
 // plannerNoticesDue are conv's open notices from principal with correlation

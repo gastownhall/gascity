@@ -177,7 +177,8 @@ type Probe struct {
 	// ContentAdmit names the content ContentBlock does not hold: a host's
 	// narrow exemption from its own block, which the host has already
 	// gated by every other reason. Empty admits nothing; it means nothing
-	// without a ContentBlock.
+	// without a ContentBlock. An admitted op never asks for a wake: the
+	// block, not the op, decides whether the row may start.
 	ContentAdmit []ContentClass
 	// Fence is the incarnation the executor will guard on. A non-zero fence
 	// must match the view's generation and epoch.

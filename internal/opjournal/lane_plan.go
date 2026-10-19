@@ -618,7 +618,9 @@ func (tp *takePlan) planContent(rp rulesPlan, probe Probe, now time.Time) *conte
 			tp.wait(op, WaitNotLive, "")
 		case caps.Live && !probe.Running:
 			tp.wait(op, WaitNotRunning, "")
-			if wantsWake(op) {
+			// An op admitted past a content block never wakes the runtime:
+			// the block, not the op, decides whether the row may start.
+			if wantsWake(op) && probe.ContentBlock == "" {
 				tp.wake = true
 			}
 		case inBand:

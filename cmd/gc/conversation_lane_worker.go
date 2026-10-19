@@ -250,10 +250,11 @@ func laneWaitsForStart(res opjournal.PassResult) bool {
 }
 
 // laneProbeStillBusy reports whether a re-probe found the runtime as a busy
-// pass left it: running and live, nothing blocking content, no pending
-// interaction, and no boundary yet. Anything else is a change a full pass
-// must plan.
+// pass left it: running and live, nothing blocking content (or a block the
+// probe admits some content past, as a draining row admits the drain
+// notice a busy pass left waiting), no pending interaction, and no boundary
+// yet. Anything else is a change a full pass must plan.
 func laneProbeStillBusy(p opjournal.Probe) bool {
-	return p.Available && p.Running && p.Caps.Live && p.ContentBlock == "" && p.Pending == "" &&
-		p.Boundary != opjournal.TriYes
+	return p.Available && p.Running && p.Caps.Live && (p.ContentBlock == "" || len(p.ContentAdmit) > 0) &&
+		p.Pending == "" && p.Boundary != opjournal.TriYes
 }

@@ -621,6 +621,15 @@ func TestPlanTakeContentAdmitPassesOnlyItsClass(t *testing.T) {
 			t.Fatalf("taken %v, waits %+v; want a pending_interaction wait", takenOf(tp), tp.waits)
 		}
 	})
+	t.Run("admitted op raises no wake", func(t *testing.T) {
+		stopped := probe
+		stopped.Running = false
+		wake := p.op(laneMsg("wake", RoleNotice, "x", withWhen(WhenBoundary), from(admitted)))
+		tp := takeFor(t, []Op{wake}, stopped)
+		if tp.take != nil || tp.wake || len(tp.waits) != 1 || tp.waits[0].Reason != WaitNotRunning {
+			t.Fatalf("taken %v, wake %v, waits %+v; want a not_running wait and no wake past the block", takenOf(tp), tp.wake, tp.waits)
+		}
+	})
 	t.Run("no block", func(t *testing.T) {
 		open := idleProbe()
 		open.ContentAdmit = probe.ContentAdmit

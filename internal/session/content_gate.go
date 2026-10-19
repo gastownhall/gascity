@@ -60,8 +60,8 @@ const (
 // field for them. In that window content can start a turn in a session v2 is
 // about to drain, so I7 holds here only from state=draining on, until the
 // session package owns a "stop requested at generation g" predicate this
-// gate can call (ga-f35wnp: inert while [ops] authoritative is empty by
-// default and no producer writes lane ops; the predicate is a hard
+// gate can call (ga-f35wnp: inert while [ops] authoritative is empty (the
+// default), so no producer writes lane ops; the predicate is a hard
 // precondition before message joins a default authoritative list or a lane
 // producer is switched on).
 func ContentGate(info Info, running bool, now time.Time, content GateContent) string {
