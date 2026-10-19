@@ -59,14 +59,15 @@ func waitFor(t *testing.T, cond func() bool) {
 }
 
 // answered is ch's answer, failing t when none comes within waitForBudget.
-func answered(t *testing.T, ch <-chan freshResult) freshResult {
+func answered[T any](t *testing.T, ch <-chan T) T {
 	t.Helper()
 	select {
 	case r := <-ch:
 		return r
 	case <-time.After(waitForBudget):
 		t.Fatalf("no answer within %s", waitForBudget)
-		return freshResult{}
+		var zero T
+		return zero
 	}
 }
 
@@ -96,13 +97,13 @@ func TestFreshReadsCoalesceByGeneration(t *testing.T) {
 	third := f.goDo(t.Context(), g.read)
 	waitFor(t, func() bool { return f.queued() == 2 })
 	close(g.gates[0])
-	if r := <-first; r.err != nil || r.snap["read"] != 1 {
+	if r := answered(t, first); r.err != nil || r.snap["read"] != 1 {
 		t.Fatalf("first caller = %v, %v; want read 1", r.snap, r.err)
 	}
 	waitFor(t, func() bool { return g.started.Load() == 2 })
 	close(g.gates[1])
 	for i, ch := range []<-chan freshResult{second, third} {
-		if r := <-ch; r.err != nil || r.snap["read"] != 2 {
+		if r := answered(t, ch); r.err != nil || r.snap["read"] != 2 {
 			t.Fatalf("caller %d arriving during read 1 = %v, %v; want read 2", i+2, r.snap, r.err)
 		}
 	}
@@ -134,13 +135,13 @@ func TestFreshReadsWaiterContext(t *testing.T) {
 	gone := f.goDo(impatient, g.read)
 	waitFor(t, func() bool { return f.queued() == 3 })
 	cancelImpatient()
-	if r := <-gone; !errors.Is(r.err, context.Canceled) {
+	if r := answered(t, gone); !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("a waiter whose context ended = %v; want its context error", r.err)
 	}
 	waitFor(t, func() bool { return f.queued() == 2 })
 
 	close(g.gates[0])
-	if r := <-first; r.err != nil {
+	if r := answered(t, first); r.err != nil {
 		t.Fatalf("first caller: %v", r.err)
 	}
 	// Read 2 runs under the context of whichever waiter ran it; end that
@@ -156,12 +157,12 @@ func TestFreshReadsWaiterContext(t *testing.T) {
 		cancelB()
 		ran, other = b, a
 	}
-	if r := <-ran; !errors.Is(r.err, context.Canceled) {
+	if r := answered(t, ran); !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("the waiter whose read its context ended = %v; want its cancellation", r.err)
 	}
 	waitFor(t, func() bool { return g.started.Load() == 3 })
 	close(g.gates[2])
-	if r := <-other; r.err != nil || r.snap["read"] != 3 {
+	if r := answered(t, other); r.err != nil || r.snap["read"] != 3 {
 		t.Fatalf("a waiter whose shared read another's context ended = %v, %v; want a read of its own", r.snap, r.err)
 	}
 	cancelA()
@@ -179,11 +180,11 @@ func TestFreshReadsAbandonedQueue(t *testing.T) {
 	gone := f.goDo(ctx, g.read)
 	waitFor(t, func() bool { return f.queued() == 1 })
 	cancel()
-	if r := <-gone; !errors.Is(r.err, context.Canceled) {
+	if r := answered(t, gone); !errors.Is(r.err, context.Canceled) {
 		t.Fatalf("a waiter whose context ended = %v; want its context error", r.err)
 	}
 	close(g.gates[0])
-	<-first
+	answered(t, first)
 	close(g.gates[1])
 	if snap, err := f.do(t.Context(), g.read); err != nil || snap["read"] != 2 {
 		t.Fatalf("the next caller = %v, %v; want read 2, run by itself", snap, err)
@@ -236,7 +237,7 @@ func TestTurnHistoryReadsCoalesce(t *testing.T) {
 	waitFor(t, func() bool { return p.fresh.queued() == callers-1 })
 	close(release)
 	for range callers {
-		if err := <-errs; err != nil {
+		if err := answered(t, errs); err != nil {
 			t.Fatalf("TurnHistory: %v", err)
 		}
 	}
@@ -267,7 +268,7 @@ func TestFreshReadsAbandonedRunningRead(t *testing.T) {
 	gone := f.goDo(ctx, g.read)
 	waitFor(t, func() bool { return f.queued() == 1 })
 	cancel()
-	<-abandoning
+	answered(t, abandoning)
 	f.abandonHook = nil
 
 	// Read 1 ends: the abandoned read is now the one in flight, and a new
@@ -315,5 +316,169 @@ func TestFreshReadsSharedTakesTheReadInFlight(t *testing.T) {
 	}
 	if n := g.started.Load(); n != 2 {
 		t.Fatalf("reads = %d, want 2", n)
+	}
+}
+
+// TestFreshReadsSharedRereadsWhenTheRunnerGaveUp proves a shared caller whose
+// read in flight ended because the context of the caller running it ended
+// reads again under its own context, so a lane probe's deadline never
+// becomes another caller's error.
+func TestFreshReadsSharedRereadsWhenTheRunnerGaveUp(t *testing.T) {
+	var f freshReads
+	g := newGatedReads(2)
+	close(g.gates[1])
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	runner := f.goDo(ctx, g.read)
+	waitFor(t, func() bool { return g.started.Load() == 1 })
+	out := make(chan freshResult, 1)
+	go func() {
+		snap, err := f.shared(context.Background(), g.read)
+		out <- freshResult{snap, err}
+	}()
+	waitFor(t, func() bool { return f.inFlight() == 2 })
+	cancel()
+	if r := answered(t, runner); !errors.Is(r.err, context.Canceled) {
+		t.Fatalf("the caller whose context ended = %v; want its cancellation", r.err)
+	}
+	if r := answered(t, out); r.err != nil || r.snap["read"] != 2 {
+		t.Fatalf("shared caller whose read the runner's context ended = %v, %v; want read 2, its own", r.snap, r.err)
+	}
+}
+
+// snapshotSessionStatus is the turn-fence session's status in snap.
+func snapshotSessionStatus(snap map[string]interface{}) string {
+	return snapshotThreadSessionStatus(snapshotThreadBySessionName(snap, turnFenceSession))
+}
+
+// stoppedTurnSnapshot is the turn-fence session after a Stop.
+func stoppedTurnSnapshot() map[string]interface{} {
+	return turnSnapshot(map[string]interface{}{"status": "stopped", "activeTurnId": nil})
+}
+
+// holdFirstRead blocks server's answer to the first snapshot read, chosen
+// before it blocks, until the returned release is called (or t ends),
+// reporting how many reads server has answered or holds.
+func holdFirstRead(t *testing.T, server *t3BridgeTestServer) (release func(), started *atomic.Int32) {
+	gate := make(chan struct{})
+	release = sync.OnceFunc(func() { close(gate) })
+	t.Cleanup(release)
+	started = &atomic.Int32{}
+	server.mu.Lock()
+	defer server.mu.Unlock()
+	server.snapshotHook = func() {
+		if started.Add(1) == 1 {
+			<-gate
+		}
+	}
+	return release, started
+}
+
+// TestRPCSnapshotAfterAClearIsNotAnsweredByAReadBeforeIt pins
+// RUNTIME-CONTRACT-014's read-after-write rule: a write the bridge made
+// (Stop, Interrupt, Start) clears the snapshot cache, and the next cached
+// read is answered by a read that started after the clear, never by a fresh
+// read already in flight (a lane probe's turn read), and caches what it read.
+func TestRPCSnapshotAfterAClearIsNotAnsweredByAReadBeforeIt(t *testing.T) {
+	stopped := stoppedTurnSnapshot()
+	server := newTurnFenceServer(t, turnRunning("t1"), stopped, stopped, stopped)
+	p := newTurnFenceTestProvider(t, server)
+	release, started := holdFirstRead(t, server)
+	probe := make(chan error, 1)
+	go func() {
+		_, err := p.TurnHistory(t.Context(), turnFenceSession)
+		probe <- err
+	}()
+	waitFor(t, func() bool { return started.Load() == 1 })
+
+	p.clearSnapshotCache()
+	out := make(chan freshResult, 1)
+	go func() {
+		snap, err := p.rpcSnapshot()
+		out <- freshResult{snap, err}
+	}()
+	waitFor(t, func() bool { return p.fresh.queued() == 1 })
+	release()
+	if err := answered(t, probe); err != nil {
+		t.Fatalf("TurnHistory: %v", err)
+	}
+	r := answered(t, out)
+	if r.err != nil {
+		t.Fatalf("rpcSnapshot: %v", r.err)
+	}
+	if got := snapshotSessionStatus(r.snap); got != "stopped" {
+		t.Fatalf("rpcSnapshot after a write's cache clear = %q, from a read that started before it; want stopped", got)
+	}
+	cached, err := p.rpcSnapshot()
+	if err != nil {
+		t.Fatalf("cached rpcSnapshot: %v", err)
+	}
+	if got := snapshotSessionStatus(cached); got != "stopped" {
+		t.Fatalf("the cache after that read holds %q; want stopped", got)
+	}
+	if calls := server.snapshotCalls(); calls != 2 {
+		t.Fatalf("snapshot reads = %d, want 2: the probe's and the cleared caller's", calls)
+	}
+}
+
+// TestSnapshotReadBeforeAClearIsNotCached proves a read that started before
+// the bridge cleared its cache does not refill it: the next cached read
+// reads again instead of serving the pre-write state for the cache's TTL.
+func TestSnapshotReadBeforeAClearIsNotCached(t *testing.T) {
+	stopped := stoppedTurnSnapshot()
+	server := newTurnFenceServer(t, turnRunning("t1"), stopped, stopped)
+	p := newTurnFenceTestProvider(t, server)
+	release, started := holdFirstRead(t, server)
+	probe := make(chan error, 1)
+	go func() {
+		_, err := p.TurnHistory(t.Context(), turnFenceSession)
+		probe <- err
+	}()
+	waitFor(t, func() bool { return started.Load() == 1 })
+	p.clearSnapshotCache()
+	release()
+	if err := answered(t, probe); err != nil {
+		t.Fatalf("TurnHistory: %v", err)
+	}
+	if status := p.threadSessionStatus("thread-" + turnFenceSession); status != "stopped" {
+		t.Fatalf("thread status after the clear = %q, from a read that started before it; want stopped", status)
+	}
+	if calls := server.snapshotCalls(); calls != 2 {
+		t.Fatalf("snapshot reads = %d, want 2", calls)
+	}
+}
+
+// TestRPCSnapshotStaleCacheSharesTheReadInFlight proves a cached read whose
+// cache only aged out (no write cleared it) takes the fresh read in flight
+// rather than queueing a read of its own.
+func TestRPCSnapshotStaleCacheSharesTheReadInFlight(t *testing.T) {
+	server := newTurnFenceServer(t, turnIdle(), turnIdle())
+	p := newTurnFenceTestProvider(t, server)
+	p.cacheSnapshot(turnIdle())
+	p.mu.Lock()
+	p.snapshotCacheAt = time.Now().Add(-2 * snapshotCacheTTL)
+	p.mu.Unlock()
+	release, started := holdFirstRead(t, server)
+	probe := make(chan error, 1)
+	go func() {
+		_, err := p.TurnHistory(t.Context(), turnFenceSession)
+		probe <- err
+	}()
+	waitFor(t, func() bool { return started.Load() == 1 })
+	out := make(chan freshResult, 1)
+	go func() {
+		snap, err := p.rpcSnapshot()
+		out <- freshResult{snap, err}
+	}()
+	waitFor(t, func() bool { return p.fresh.inFlight() == 2 })
+	release()
+	if err := answered(t, probe); err != nil {
+		t.Fatalf("TurnHistory: %v", err)
+	}
+	if r := answered(t, out); r.err != nil {
+		t.Fatalf("rpcSnapshot: %v", r.err)
+	}
+	if calls := server.snapshotCalls(); calls != 1 {
+		t.Fatalf("snapshot reads = %d, want 1: the stale cache shares the probe's read", calls)
 	}
 }

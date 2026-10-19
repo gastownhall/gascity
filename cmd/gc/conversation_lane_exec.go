@@ -214,12 +214,16 @@ func (e *conversationLaneExec) readCaps(ctx context.Context, conv opjournal.Conv
 	return nil
 }
 
+// laneUnreadCaps are the caps of a probe that could not read the runtime's:
+// valid, so the pass plans from the probe, and not live.
+var laneUnreadCaps = opjournal.Caps{Input: opjournal.FenceNone, Text: opjournal.TextReminder}
+
 // laneCapsProbe is the probe of a readCaps that failed with err: unavailable
 // when the runtime's turn capabilities were (errLaneTurnsUnavailable), as a
 // look that was unavailable is, else err.
 func laneCapsProbe(conv opjournal.ConversationView, err error) (opjournal.Probe, error) {
 	if errors.Is(err, errLaneTurnsUnavailable) {
-		return opjournal.Probe{Fence: laneFence(conv), TurnLive: opjournal.TriUnknown}, nil
+		return opjournal.Probe{Fence: laneFence(conv), TurnLive: opjournal.TriUnknown, Caps: laneUnreadCaps}, nil
 	}
 	return opjournal.Probe{}, err
 }

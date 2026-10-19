@@ -580,6 +580,19 @@ func TestLaneExecTurnTraitsFallbacks(t *testing.T) {
 			t.Fatalf("notes = %q, want none: the probe answered unavailable", n)
 		}
 	})
+	t.Run("unavailable, protocol mode, through the pass", func(t *testing.T) {
+		f := newTurnLaneFixture(t, runtime.ProfileT3Bridge)
+		f.turns.history = func(int, int) (runtime.TurnHistory, error) { return idleHistory, nil }
+		st := f.laneStore(t)
+		l := f.lane(t, st)
+		f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+		e, v := f.exec(t, st)
+		e.turns = func() (worker.TurnHandle, error) { return laneStubTurns{capsErr: unavailable}, nil }
+		res, err := l.Pass(context.Background(), v, e)
+		if err != nil || res.Took != opjournal.TakeNone || !laneWaitsFor(res, opjournal.WaitUnavailable) {
+			t.Fatalf("Pass = %+v, %v; want the op waiting unavailable, no error", res, err)
+		}
+	})
 	t.Run("unavailable, keystroke mode", func(t *testing.T) {
 		f := newTurnLaneFixture(t, runtime.ProfileTmux)
 		e, v := f.exec(t, f.laneStore(t))
