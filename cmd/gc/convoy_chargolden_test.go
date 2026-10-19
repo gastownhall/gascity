@@ -1,8 +1,10 @@
 package main
 
 import (
+	"io"
 	"testing"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -27,8 +29,10 @@ func TestConvoyList_CharacterizationGolden(t *testing.T) {
 		}
 	})
 	h.runCharGolden(t, charCommand{
-		name:     "convoy-list",
-		route:    routeConvoyList,
+		name: "convoy-list",
+		route: func(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+			return routeConvoyList(cityPath, c, nilReason, convoyListOptions{jsonOut: jsonOut}, stdout, stderr)
+		},
 		readback: convoyReadback,
 	})
 }

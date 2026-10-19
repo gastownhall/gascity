@@ -660,6 +660,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   gascity 0.1.6 pin (`sha:3b3b89f2011e`) are recorded as superseded, so
   `gc doctor --fix` migrates cities still pinned to them.
 
+- **`gc convoy list` hides synthetic convoys by default.** The convoys gc
+  mints for a formula launch on a single bead and for each drained work unit
+  (metadata `gc.synthetic=true`) are left out of the table and of `--json`
+  output, which a busy city filled with thousands of them. The output says how
+  many were hidden (`summary.hidden_synthetic` in `--json`);
+  `--include-synthetic` lists them again. Convoys you create and the
+  auto-convoy `gc sling` wraps a bead in are listed as before.
+
 - **A suspended rig or city is left cold.** gc no longer touches the bead
   store of a suspended rig, or of any scope of a suspended city. That covers
   cache scans, demand, order-tracking sweeps, the completions sweep,
@@ -1008,6 +1016,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   records it once. Deletes made outside the controller, such as a script's
   `bd purge` or `gc bd delete`, are not covered, and runs stranded before this
   fix stay listed (#5934).
+
+- **`gc convoy list` no longer stops at 100 convoys when the controller
+  serves it.** The API lane read only the first page of `/convoys` and dropped
+  the rest without a word; it now follows `next_cursor` to the end. The
+  commands that open every convoy store (`gc convoy list` and `stranded`,
+  `gc beads list` and `show` when served locally) or resolve a convoy by id
+  (`gc convoy status`, `add`, `close`, `target`, `land`) also stop reloading
+  the whole city config once per bead store they open.
 
 - **A config reload no longer creates or rebinds a city's bead store.** When a
   city's `.beads/metadata.json` went missing (for example, a `git` checkout
