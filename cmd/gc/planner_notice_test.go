@@ -1128,6 +1128,9 @@ func TestDeliverWarmBindClaimNudgeProposesANoticeOp(t *testing.T) {
 	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
 		t.Fatalf("marker = %q, want w-1", got)
 	}
+	if got := f.meta(t, warmBindNoticeTriggerKey); got != "w-1" {
+		t.Fatalf("notice record = %q, want w-1: the proposed notice is recorded for its withdraw", got)
+	}
 	// The marker still makes the binding fire once.
 	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, warmClaimText, alwaysUnclaimed)
 	if again := f.get(t, f.laneStore(t), op.ID); again.Revision != op.Revision {
@@ -1142,6 +1145,9 @@ func TestDeliverWarmBindClaimNudgeSpendsARefusedNotice(t *testing.T) {
 	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, row, strings.Repeat("x", opjournal.MaxInlinePayload+1), alwaysUnclaimed)
 	if got := f.meta(t, warmBindNudgedForTriggerKey); got != "w-1" {
 		t.Fatalf("marker = %q after a refused notice, want w-1: retrying it can never succeed", got)
+	}
+	if got := f.meta(t, warmBindNoticeTriggerKey); got != "" {
+		t.Fatalf("notice record = %q after a refused notice, want none: no notice stands", got)
 	}
 	if n := len(f.nudges()); n != 0 {
 		t.Fatalf("a refused notice fell back to %d direct nudges, want 0", n)
@@ -1180,6 +1186,9 @@ func TestDeliverWarmBindClaimNudgeNudgesAProtocolModeSlotDirectly(t *testing.T) 
 	}
 	if n := len(f.openOps(t)); n != 0 {
 		t.Fatalf("open ops = %d, want none", n)
+	}
+	if got := f.meta(t, warmBindNoticeTriggerKey); got != "" {
+		t.Fatalf("notice record = %q after a direct nudge, want none", got)
 	}
 }
 
@@ -1814,6 +1823,122 @@ func TestPoolClaimBackstopClearWithdrawsTheWarmBindNotice(t *testing.T) {
 	if n := store.opLists.Load() - before; n != 0 {
 		t.Fatalf("op listings on a tick with nothing to clear = %d, want 0", n)
 	}
+}
+
+// TestPoolClaimBackstopClearWithdrawsAWarmBindNoticeItNeverPaced: the slot
+// claims its bound trigger before the claim backstop first sees it, so the
+// backstop writes no marker and has none to wipe. Its clear still withdraws
+// the slot's warm-bind claim notice, through the record the warm bind left
+// beside its marker, and a later tick reads no ops.
+func TestPoolClaimBackstopClearWithdrawsAWarmBindNoticeItNeverPaced(t *testing.T) {
+	store := &countingOpListStore{laneTestStore: newLaneTestStore()}
+	f := newLaneFixtureOver(t, store)
+	newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), defaultPoolClaimNudge, alwaysUnclaimed)
+	warm := noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)
+	if got := f.get(t, st, warm); got.Status == opjournal.StatusClosed || !strings.Contains(got.Payload, "--drain-ack") {
+		t.Fatalf("the warm-bind notice = %s %q, want open with the default claim line", got.Status, got.Payload)
+	}
+	var out bytes.Buffer
+	tick := func() {
+		nudgeStalledPoolClaims(f.sp, f.cfg, f.store, []beads.Bead{f.row(t)},
+			[]beads.Bead{{ID: "w-1", Status: "in_progress", Assignee: f.name}}, nil, f.clk.Now(), poolClaimDrain{}, &out)
+	}
+
+	f.clk.Advance(10 * time.Second)
+	tick()
+	if got := f.get(t, st, warm); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.By != plannerNoticePrincipalPrefix+warmBindNoticePurpose || got.Cancel.Reason != "the claim backstop found no work outstanding" {
+		t.Fatalf("the warm-bind notice = %s %+v, want withdrawn by its producer; journal %q", got.Status, got.Cancel, out.String())
+	}
+	if got := f.meta(t, idleClaimNudgeTriggerKey); got != "" {
+		t.Fatalf("claim backstop marker = %q, want none: the backstop never paced the trigger", got)
+	}
+	if got := f.meta(t, warmBindNoticeTriggerKey); got != "" {
+		t.Fatalf("notice record = %q, want cleared with the withdraw", got)
+	}
+
+	before := store.opLists.Load()
+	tick()
+	if n := store.opLists.Load() - before; n != 0 {
+		t.Fatalf("op listings on a tick with nothing to clear = %d, want 0", n)
+	}
+}
+
+// TestExecutionBackstopMarkStartedWithdrawsTheWarmBindNotice: a slot whose
+// claimed step started with no claim backstop clear in between (the claim
+// backstop does not run on every path) still drops its warm-bind claim
+// notice: the started stamp withdraws it, so the claim line's --drain-ack
+// never reaches a started seat (mc-ilr3b).
+func TestExecutionBackstopMarkStartedWithdrawsTheWarmBindNotice(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	st := f.laneStore(t)
+	deliverWarmBindClaimNudge(context.Background(), f.sp, f.store, warmBindLaneRow(t, f, "w-1"), defaultPoolClaimNudge, alwaysUnclaimed)
+	warm := noticeOpID(t, f, warmBindNoticePurpose, "w-1", "", 1)
+	row := f.row(t)
+	var out bytes.Buffer
+	p := poolExecutionBackstop{store: f.store, stdout: &out}
+	if !p.markStarted(&row, "w-1") {
+		t.Fatal("markStarted = false, want the evidence to hold")
+	}
+	if got := f.get(t, st, warm); got.Outcome.Arm != opjournal.ArmCanceled || got.Cancel.By != plannerNoticePrincipalPrefix+warmBindNoticePurpose || got.Cancel.Reason != "the claimed step started" {
+		t.Fatalf("the warm-bind notice = %s %+v, want withdrawn by its producer; journal %q", got.Status, got.Cancel, out.String())
+	}
+	if got := f.meta(t, warmBindNoticeTriggerKey); got != "" {
+		t.Fatalf("notice record = %q, want cleared with the withdraw", got)
+	}
+}
+
+// TestPlannerNoticeClosesStaleAcrossARespawn: a notice still open when its
+// session respawns is scoped to the generation it was proposed for, so the
+// lane's next pass closes it as stale instead of typing it into the new
+// incarnation.
+func TestPlannerNoticeClosesStaleAcrossARespawn(t *testing.T) {
+	f := newLaneFixture(t)
+	h := newNoticeLaneHost(t, f, "message")
+	_, op, err := proposePlannerNotice(h, f.row(t), plannerNotice{
+		Purpose: idleClaimNudgeLabel, Trigger: "wb-1", Causation: "wb-1", Episode: "1", Attempt: 1, Content: "claim wb-1", StartWithin: time.Hour,
+	})
+	if err != nil {
+		t.Fatalf("proposing: %v", err)
+	}
+	if want := (opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1}); op.Scope != want {
+		t.Fatalf("scope = %+v, want %+v", op.Scope, want)
+	}
+	f.respawn(t, "tok-2", 2)
+
+	st := f.laneStore(t)
+	for range 3 { // as many passes as delivering a notice takes
+		if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+			t.Fatalf("Pass: %v", err)
+		}
+	}
+	if nudges := f.nudges(); len(nudges) != 0 {
+		t.Fatalf("nudges = %+v, want none: the notice was for the previous incarnation", nudges)
+	}
+	if got := f.get(t, st, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSkipped || got.Outcome.Reason != opjournal.ReasonStale {
+		t.Fatalf("notice = %s %+v, want closed skipped{stale}", got.Status, got.Outcome)
+	}
+}
+
+// respawn moves f's row and its runtime to the incarnation token at
+// generation gen, as a restart of the session does, idle long enough for the
+// quiescence rule.
+func (f *laneFixture) respawn(t *testing.T, token string, gen int) {
+	t.Helper()
+	if err := f.store.SetMetadataBatch(f.id, map[string]string{"instance_token": token, "generation": strconv.Itoa(gen)}); err != nil {
+		t.Fatalf("respawning the row: %v", err)
+	}
+	if err := f.sp.Stop(f.name); err != nil {
+		t.Fatalf("stopping the fake runtime: %v", err)
+	}
+	env := map[string]string{runtime.RuntimeEpochEnv: strconv.Itoa(gen), runtime.ContinuationEpochEnv: "1", runtime.InstanceTokenEnv: token}
+	if err := f.sp.Start(context.Background(), f.name, runtime.Config{Env: env}); err != nil {
+		t.Fatalf("starting the fake runtime: %v", err)
+	}
+	f.sp.SetActivity(f.name, time.Now().Add(-time.Minute))
+	f.token = token
 }
 
 // TestWarmBindNoticeGivesUpPastItsEpisodeBound: a trigger rebound more than

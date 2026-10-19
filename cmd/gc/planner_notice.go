@@ -26,15 +26,21 @@ package main
 //
 // A reminder whose cause clears or moves withdraws its open notices,
 // best-effort and once, on the tick that writes the marker saying so: a
-// backstop's clear withdraws its own (the claim backstop's also the warm-bind
-// claim nudge's), a backstop that observes a new target its own for the
-// target it replaces, and a started execution seat the execution backstop's.
-// A notice the lane already started keeps the cancel as a request for the
-// lane to decide. A stale notice the withdraw misses stands until its
-// start_by, within one cadence of its reminder: after a withdraw whose write
-// failed, in a v2 city on the work ladder (where the claim backstop does not
-// run), or for a trigger claimed before the claim backstop first saw it (no
-// marker to wipe).
+// backstop's clear withdraws its own, a backstop that observes a new target
+// its own for the target it replaces, and a started execution seat the
+// execution backstop's. The warm-bind claim nudge's notice is withdrawn by the
+// claim backstop's clear and by a started execution seat, through the record
+// the warm bind writes when it proposes one (withdrawWarmBindNotice), so a
+// trigger claimed before the claim backstop first saw it is covered too. A
+// notice the lane already started keeps the cancel as a request for the lane
+// to decide. A stale notice the withdraw misses stands until its start_by,
+// within one cadence of its reminder: after a withdraw whose write failed, or
+// in a v2 city on the work ladder (where the claim and execution backstops do
+// not run).
+//
+// A notice is scoped to its session's generation as well as keyed to its
+// incarnation, so one a respawn leaves open closes as stale rather than
+// reaching the next incarnation.
 //
 // The drain reminder is a planner notice too, though its audience is a row
 // in state=draining, which the lane's content gate (I7, session.ContentGate)
@@ -178,8 +184,10 @@ func plannerNoticeKey(n plannerNotice, token string) string {
 }
 
 // plannerNoticeRequest is the op request for notice n to conversation conv,
-// incarnation token, proposed at now.
-func plannerNoticeRequest(conv, token string, n plannerNotice, now time.Time) opjournal.Request {
+// incarnation token of session generation gen (at least 1, as a conversation
+// view reads it), proposed at now. The op is scoped to that generation, so
+// the lane closes it as stale once the session respawns.
+func plannerNoticeRequest(conv, token string, gen int64, n plannerNotice, now time.Time) opjournal.Request {
 	req := opjournal.Request{
 		Conversation: conv,
 		Kind:         opjournal.KindMessage,
@@ -190,6 +198,7 @@ func plannerNoticeRequest(conv, token string, n plannerNotice, now time.Time) op
 		Policy: opjournal.Policy{Message: opjournal.MessagePolicy{
 			Role: opjournal.RoleNotice, When: opjournal.WhenBoundary, Wake: opjournal.WakeLiveOnly,
 		}},
+		Scope:       opjournal.Scope{Kind: opjournal.ScopeSession, Generation: gen},
 		Causation:   n.Causation,
 		Correlation: plannerNoticeCorrelation(n, token),
 	}
@@ -231,7 +240,8 @@ func proposePlannerNotice(lane plannerNoticeLane, s beads.Bead, n plannerNotice)
 	if err != nil {
 		return plannerNoticeNone, opjournal.Op{}, fmt.Errorf("proposing planner notice %s for %s: %w", n.Purpose, conv, err)
 	}
-	serves, err := lane.servesNotice(st, strings.TrimSpace(s.Metadata["session_name"]), plannerNoticeView(s))
+	view := plannerNoticeView(s)
+	serves, err := lane.servesNotice(st, strings.TrimSpace(s.Metadata["session_name"]), view)
 	if err != nil {
 		return plannerNoticeNone, opjournal.Op{}, fmt.Errorf("proposing planner notice %s for %s: %w", n.Purpose, conv, err)
 	}
@@ -239,7 +249,7 @@ func proposePlannerNotice(lane plannerNoticeLane, s beads.Bead, n plannerNotice)
 		return plannerNoticeDirect, opjournal.Op{}, nil
 	}
 	token, now := plannerNoticeToken(s), lane.noticeNow()
-	req := plannerNoticeRequest(conv, token, n, now)
+	req := plannerNoticeRequest(conv, token, view.Generation, n, now)
 	id, err := opjournal.DeriveID(st.Prefix(), conv, req.Producer.Principal, req.ClientKey)
 	if err != nil {
 		return plannerNoticeNone, opjournal.Op{}, fmt.Errorf("deriving planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, conv, err)
@@ -333,7 +343,7 @@ func plannerNoticeAttemptFate(lane plannerNoticeLane, s beads.Bead, n plannerNot
 	if err != nil {
 		return plannerNoticeFateNone, fmt.Errorf("reading planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, s.ID, err)
 	}
-	req := plannerNoticeRequest(s.ID, plannerNoticeToken(s), n, now)
+	req := plannerNoticeRequest(s.ID, plannerNoticeToken(s), plannerNoticeView(s).Generation, n, now)
 	id, err := opjournal.DeriveID(st.Prefix(), s.ID, req.Producer.Principal, req.ClientKey)
 	if err != nil {
 		return plannerNoticeFateNone, fmt.Errorf("deriving planner notice %s attempt %d for %s: %w", n.Purpose, n.Attempt, s.ID, err)

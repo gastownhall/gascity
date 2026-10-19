@@ -580,12 +580,14 @@ func (p poolExecutionBackstop) markedStarted(s beads.Bead, beadID string) bool {
 // markStarted stamps the row's execution evidence for its incarnation and
 // beadID, and reports whether the evidence holds (it does even when the write
 // fails: the sighting is this pass's evidence, and the next pass reads again).
-// Once the stamp lands, the backstop's open notices are withdrawn: they carry
-// the unstarted claim text, whose --drain-ack a started seat must not run
+// Once the stamp lands, the backstop's open notices are withdrawn, and so is
+// the slot's warm-bind claim notice (withdrawWarmBindNotice): they carry the
+// unstarted claim text, whose --drain-ack a started seat must not run
 // (mc-ilr3b), and the next attempt carries the held-claim text.
 func (p poolExecutionBackstop) markStarted(s *beads.Bead, beadID string) bool {
 	if writeSessionMetadata(p.store, s, map[string]string{executionClaimStartedKey: startedValue(*s, beadID)}, "execution-claim-started", p.stdout) {
 		withdrawBackstopNotices(p.store, s, executionClaimNudgeLabel, "the claimed step started", p.stdout)
+		withdrawWarmBindNotice(p.store, s, "the claimed step started", p.stdout)
 	}
 	return true
 }

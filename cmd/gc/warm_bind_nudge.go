@@ -26,6 +26,13 @@ import (
 // nudge fires again: exactly once per binding.
 const warmBindNudgedForTriggerKey = "warm_bind_nudged_for_trigger"
 
+// warmBindNoticeTriggerKey records, beside the marker, the trigger whose
+// warm-bind claim notice was proposed to the conversation lane and may still
+// stand. It is what the notice's withdraw (withdrawWarmBindNotice) runs on, so
+// the notice is withdrawn whether or not the claim backstop ever paced the
+// trigger, and a row without one reads no ops.
+const warmBindNoticeTriggerKey = "warm_bind_notice_trigger"
+
 // warmBindNudgeIdleTimeout bounds how long the warm-bind claim nudge waits for
 // the slot to reach an idle input prompt before delivering, so it never injects
 // mid-turn. A warm slot with unclaimed bound work is normally already idle, so
@@ -148,7 +155,8 @@ func warmBindClaimText(cfg *config.City, s beads.Bead) string {
 // When the controller's lane host executes message ops for store and a lane can
 // type into the slot, the nudge is a planner notice op (warmBindNotice) the lane
 // delivers at the slot's boundary, and the marker records that it was proposed,
-// or given up on.
+// or given up on. A proposed notice is also recorded in warmBindNoticeTriggerKey
+// until it is withdrawn (withdrawWarmBindNotice).
 func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store beads.Store, session *beads.Bead, claimText string, probe warmClaimTriggerProbe) {
 	if sp == nil || store == nil || session == nil || probe == nil {
 		return
@@ -194,14 +202,9 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	// Delivered, proposed or given up on: stamp the marker so this binding never nudges again. Persisted on
 	// the session bead → restart-safe; mirrored in-memory so the rest of this tick
 	// reads the just-written value.
-	if err := sessionFrontDoor(store).SetMarker(session.ID, warmBindNudgedForTriggerKey, triggerID); err != nil {
-		log.Printf("warm-bind claim nudge: marking %s failed: %v", session.ID, err)
+	if !markWarmBindBinding(store, session, triggerID, result == warmBindNoticeProposed) {
 		return
 	}
-	if session.Metadata == nil {
-		session.Metadata = map[string]string{}
-	}
-	session.Metadata[warmBindNudgedForTriggerKey] = triggerID
 	switch result {
 	case warmBindNoticeProposed:
 		log.Printf("warm-bind claim nudge: queued a claim notice for %s to claim %s", name, triggerID)
@@ -210,6 +213,31 @@ func deliverWarmBindClaimNudge(ctx context.Context, sp runtime.Provider, store b
 	default:
 		log.Printf("warm-bind claim nudge: nudged %s to claim %s", name, triggerID)
 	}
+}
+
+// markWarmBindBinding stamps the warm-bind marker for triggerID on session
+// and, when noticed (the binding's notice was proposed), records that notice
+// beside it in the same write (warmBindNoticeTriggerKey). It mirrors the write
+// in memory, and reports whether it landed.
+func markWarmBindBinding(store beads.Store, session *beads.Bead, triggerID string, noticed bool) bool {
+	var err error
+	if noticed {
+		err = sessionFrontDoor(store).ApplyPatch(session.ID, map[string]string{warmBindNudgedForTriggerKey: triggerID, warmBindNoticeTriggerKey: triggerID})
+	} else {
+		err = sessionFrontDoor(store).SetMarker(session.ID, warmBindNudgedForTriggerKey, triggerID)
+	}
+	if err != nil {
+		log.Printf("warm-bind claim nudge: marking %s failed: %v", session.ID, err)
+		return false
+	}
+	if session.Metadata == nil {
+		session.Metadata = map[string]string{}
+	}
+	session.Metadata[warmBindNudgedForTriggerKey] = triggerID
+	if noticed {
+		session.Metadata[warmBindNoticeTriggerKey] = triggerID
+	}
+	return true
 }
 
 // warmBindNoticeResult is what warmBindNotice did with a binding's claim
@@ -337,6 +365,26 @@ func nudgeWarmBindSlot(ctx context.Context, sp runtime.Provider, name, triggerID
 
 // warmBindNoticePurpose names the warm-bind claim nudge as a planner notice.
 const warmBindNoticePurpose = "warm-bind-claim-nudge"
+
+// withdrawWarmBindNotice withdraws slot s's warm-bind claim notice once its
+// cause is gone (reason says how): the claim backstop found the slot's trigger
+// claimed, gone or unbound, or the execution backstop saw the claimed step
+// start. Either leaves the notice nothing to claim, and its claim text may
+// carry --drain-ack, which a started seat must not run (mc-ilr3b). It acts
+// only while warmBindNoticeTriggerKey records a proposed notice, so a trigger
+// claimed before the claim backstop first saw it is covered, and a row with
+// none reads no ops. The key is cleared first and the notice withdrawn once
+// that write lands, so the withdraw runs once, best-effort, as a backstop's
+// does once its marker is wiped (withdrawBackstopNotices).
+func withdrawWarmBindNotice(store beads.Store, s *beads.Bead, reason string, stdout io.Writer) {
+	if strings.TrimSpace(s.Metadata[warmBindNoticeTriggerKey]) == "" {
+		return
+	}
+	if !writeSessionMetadata(store, s, map[string]string{warmBindNoticeTriggerKey: ""}, warmBindNoticePurpose, stdout) {
+		return
+	}
+	withdrawBackstopNotices(store, s, warmBindNoticePurpose, reason, stdout)
+}
 
 // warmBindNoticeStartWithin bounds how long the warm-bind notice waits for
 // the slot's boundary: within the claim backstop's observe grace, after which

@@ -68,6 +68,13 @@ const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it
 // claim back (mc-ilr3b).
 const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
 
+// idleClaimNudgeLabel and continuationClaimNudgeLabel name the claim and
+// continuation backstops in their log lines and their planner notices.
+const (
+	idleClaimNudgeLabel         = "idle-claim-nudge"
+	continuationClaimNudgeLabel = "continuation-claim-nudge"
+)
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -126,7 +133,7 @@ func nudgeStalledPoolClaims(
 	// The shared engine keys work by bead ID alone, which cannot tell two
 	// same-ID beads in different stores apart, so this predicate carries its own
 	// store-scoped snapshot and leaves the engine's ID map empty.
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
+	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, idleClaimNudgeLabel, poolClaimBackstop{
 		cfg:   cfg,
 		work:  newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
 		now:   now,
@@ -186,7 +193,7 @@ func nudgeStalledPoolContinuations(
 		nil,
 		now,
 		stdout,
-		"continuation-claim-nudge",
+		continuationClaimNudgeLabel,
 		poolContinuationBackstop{
 			cfg:        cfg,
 			candidates: newPoolContinuationCandidateSnapshot(sessionBeads, candidates),
@@ -543,7 +550,7 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	if !writeSessionMetadata(store, s, map[string]string{
 		idleClaimNudgeStalledKey:      p.now.UTC().Format(time.RFC3339),
 		idleClaimNudgeStalledTokenKey: strings.TrimSpace(s.Metadata["instance_token"]),
-	}, "idle-claim-nudge", stdout) {
+	}, idleClaimNudgeLabel, stdout) {
 		return
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
@@ -554,15 +561,15 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	}
 }
 
-// clear wipes the claim backstop's pacing marker. A wipe also withdraws the
-// slot's warm-bind claim notice: the backstop clears once the slot's trigger
-// is claimed, gone or unbound, which leaves that notice nothing to claim.
+// clear wipes the claim backstop's pacing marker, and withdraws the slot's
+// warm-bind claim notice (withdrawWarmBindNotice) whether or not there was a
+// marker to wipe: the backstop clears once the slot's trigger is claimed,
+// gone or unbound, which leaves that notice nothing to claim, and a trigger
+// claimed before the backstop first saw it left no marker.
 func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
-	if !clearIdleClaimMarker(store, s, stdout) {
-		return false
-	}
-	withdrawBackstopNotices(store, s, warmBindNoticePurpose, "the claim backstop found no work outstanding", stdout)
-	return true
+	wiped := clearIdleClaimMarker(store, s, stdout)
+	withdrawWarmBindNotice(store, s, "the claim backstop found no work outstanding", stdout)
+	return wiped
 }
 
 type idleClaimWorkSnapshot struct {
@@ -716,7 +723,7 @@ func clearIdleClaimLatch(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if s.Metadata[idleClaimNudgeStalledKey] == "" && s.Metadata[idleClaimNudgeStalledTokenKey] == "" {
 		return
 	}
-	writeSessionMetadata(store, s, map[string]string{idleClaimNudgeStalledKey: "", idleClaimNudgeStalledTokenKey: ""}, "idle-claim-nudge", stdout)
+	writeSessionMetadata(store, s, map[string]string{idleClaimNudgeStalledKey: "", idleClaimNudgeStalledTokenKey: ""}, idleClaimNudgeLabel, stdout)
 }
 
 // clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
