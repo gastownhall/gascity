@@ -47,14 +47,13 @@ type OpsConfig struct {
 	// of their legacy path. The default is empty, and message is not on by
 	// default anywhere yet. This build accepts message only. Experimental: no
 	// request surface writes lane ops yet, so listing a kind changes no
-	// request's delivery in this build. Only a standalone controller
-	// (gc start --foreground) runs the lane host that delivers lane ops; a
-	// supervisor-hosted city runs none, and gc doctor reports a listed kind
-	// there as an error. The lane delivers live only to keystroke-mode
-	// runtimes (tmux); a protocol-mode runtime's (t3bridge) lane ops wait
-	// not_live until their start deadline. A listed kind needs a sessions
-	// store with guarded batches. A change takes effect at the next
-	// controller start.
+	// request's delivery in this build. The city's controller, standalone
+	// or supervisor-hosted, runs the lane host that delivers lane ops, and
+	// gc doctor reports a listed kind as an error when no lane host serves
+	// the city. A keystroke-mode runtime (tmux) takes delivery at an idle
+	// boundary, a protocol-mode runtime (t3bridge) at its turn boundary.
+	// A listed kind needs a sessions store with guarded batches. A change
+	// takes effect at the next controller start.
 	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message"`
 }
 
