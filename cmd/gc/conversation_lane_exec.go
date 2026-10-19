@@ -28,7 +28,8 @@ const (
 	// laneContentBlockIncarnation blocks content while the live runtime is
 	// not the incarnation the row names.
 	laneContentBlockIncarnation = "incarnation"
-	// lanePendingUnknown is Probe.Pending when the look failed.
+	// lanePendingUnknown is Probe.Pending for a pending interaction the
+	// runtime names no request id for.
 	lanePendingUnknown = "?"
 	// laneDeliveryKeyPrefix scopes a lane delivery key in the runtime's key
 	// space (OJ-7's format).
@@ -199,11 +200,12 @@ func (e *conversationLaneExec) look(ctx context.Context, caps opjournal.Caps) (l
 	}
 	h, err := e.handle(e.target)
 	if err != nil {
-		l.pending = lanePendingUnknown
-		return l, nil
+		return laneLook{}, fmt.Errorf("resolving session %s's handle: %w", e.info.ID, err)
 	}
 	l.handle = h
-	l.pending = lanePending(h.PendingStatus(ctx))
+	if l.pending, err = lanePending(h.PendingStatus(ctx)); err != nil {
+		return laneLook{}, fmt.Errorf("reading session %s's pending interaction: %w", e.info.ID, err)
+	}
 	l.boundary = opjournal.TriNo
 	if e.idle(e.target, obs) {
 		l.boundary = opjournal.TriYes
@@ -246,17 +248,18 @@ func hostedElsewhere(stamp opjournal.HostStamp, gen int64) bool {
 }
 
 // lanePending is the pending interaction's request id from a PendingStatus
-// answer, "" for none and lanePendingUnknown when the look failed.
-func lanePending(p *worker.PendingInteraction, _ bool, err error) string {
+// answer: "" for none, lanePendingUnknown for one with no request id, and the
+// look's error when it failed, so a failed look is never read as a prompt.
+func lanePending(p *worker.PendingInteraction, _ bool, err error) (string, error) {
 	switch {
 	case err != nil:
-		return lanePendingUnknown
+		return "", err
 	case p == nil:
-		return ""
+		return "", nil
 	case p.RequestID == "":
-		return lanePendingUnknown
+		return lanePendingUnknown, nil
 	default:
-		return p.RequestID
+		return p.RequestID, nil
 	}
 }
 
@@ -286,7 +289,7 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		Fence:         fence,
 		AllowUnfenced: true,
 	})
-	out := laneDeliveryResult(ctx, res, err, at, fence.IsZero())
+	out := laneDeliveryResult(res, err, at, fence.IsZero())
 	if _, ok := out.(opjournal.Delivered); ok {
 		stampLastNudgeDeliveredAt(sessionFrontDoor(e.deps.sessions), e.info.ID, e.deps.clk.Now())
 	}
@@ -297,8 +300,10 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 // §7.2). unfencedReq says the request carried no fence, because the row
 // names no token. A submit the runtime could not confirm may have delivered,
 // so it is Unknown; a nudge refused on a pending interaction, whichever
-// runtime refused it, is a transient miss.
-func laneDeliveryResult(ctx context.Context, res worker.NudgeResult, err error, at time.Time, unfencedReq bool) opjournal.DeliveryResult {
+// runtime refused it, or one the runtime reports never sent, is a transient
+// miss. Any other error may have come after input reached the session, so it
+// is Unknown too: a retake under a fresh key would deliver it twice.
+func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq bool) opjournal.DeliveryResult {
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.Delivered {
 		if res.Unfenced || unfencedReq {
 			degradation = opjournal.DegradationUnfencedDelivery
@@ -325,12 +330,10 @@ func laneDeliveryResult(ctx context.Context, res worker.NudgeResult, err error, 
 	case errors.As(err, &miss):
 		return opjournal.NotDelivered{Transient: true, Cause: err}
 	case errors.Is(err, runtime.ErrPendingInteraction), errors.Is(err, runtime.ErrNudgeRefusedPendingInteraction),
-		errors.Is(err, runtime.ErrRuntimeUnavailable):
+		errors.Is(err, runtime.ErrRuntimeUnavailable), errors.Is(err, runtime.ErrNudgeNotSent):
 		return opjournal.NotDelivered{Transient: true, Cause: err}
-	case ctx.Err() != nil, errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
-		return opjournal.Unknown{Cause: err}
 	default:
-		return opjournal.NotDelivered{Cause: err}
+		return opjournal.Unknown{Cause: err}
 	}
 }
 

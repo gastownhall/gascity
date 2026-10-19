@@ -1194,35 +1194,52 @@ func (p *Provider) rpcCallCheckedCtx(ctx context.Context, method string, params 
 	p.mu.Unlock()
 
 	deadline := time.Now().Add(bridgeConnectRetryWindow)
+	// written is whether an earlier attempt wrote the request and got no
+	// answer: T3 may have taken it, so every failure from then on says so.
+	written := false
+	fail := func(err error) error {
+		if written && !errors.Is(err, errRPCWrittenUnanswered) {
+			return fmt.Errorf("%w: %w", errRPCWrittenUnanswered, err)
+		}
+		return err
+	}
 	for attempt := 1; ; attempt++ {
 		result, err := p.rpcCallOnceCtx(ctx, method, params, reqID, beforeRetry != nil)
 		if err == nil {
 			return result, nil
 		}
+		written = written || errors.Is(err, errRPCWrittenUnanswered)
 		if !isTransientBridgeError(err) || time.Now().After(deadline) {
-			return nil, err
+			return nil, fail(err)
 		}
 		retry := time.NewTimer(nextBridgeRetryDelay(attempt))
 		select {
 		case <-ctx.Done():
 			retry.Stop()
-			return nil, fmt.Errorf("t3 rpc %s: %w: %w", method, ctx.Err(), err)
+			return nil, fail(fmt.Errorf("t3 rpc %s: %w: %w", method, ctx.Err(), err))
 		case <-retry.C:
 		}
 		if beforeRetry != nil {
 			if checkErr := beforeRetry(ctx); checkErr != nil {
-				return nil, fmt.Errorf("t3 rpc %s: not retried after attempt %d failed: %w: %w", method, attempt, checkErr, err)
+				return nil, fail(fmt.Errorf("t3 rpc %s: not retried after attempt %d failed: %w: %w", method, attempt, checkErr, err))
 			}
 		}
 	}
 }
 
+// errRPCWrittenUnanswered marks an RPC failure after a WebSocket candidate
+// took the whole request and no answer came back: T3 may have acted on it.
+var errRPCWrittenUnanswered = errors.New("t3 rpc request written but not answered")
+
 // rpcCallOnceCtx sends the request to each WebSocket candidate in turn until
 // one answers. With stopAfterWrite set, a candidate that takes the request and
 // then fails before answering ends the walk: the request may have reached T3.
+// A failure after any candidate took the request wraps
+// errRPCWrittenUnanswered.
 func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map[string]interface{}, reqID int, stopAfterWrite bool) (map[string]interface{}, error) {
 	var lastErr error
 	var failures []string
+	written := false
 	for _, candidate := range resolveWsURLCandidates() {
 		if err := ctx.Err(); err != nil {
 			lastErr = fmt.Errorf("%s: %w", candidate, err)
@@ -1272,6 +1289,7 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 		if answered {
 			return value, err
 		}
+		written = true
 		lastErr = fmt.Errorf("%s: %w", candidate, err)
 		failures = append(failures, lastErr.Error())
 		if stopAfterWrite {
@@ -1282,7 +1300,10 @@ func (p *Provider) rpcCallOnceCtx(ctx context.Context, method string, params map
 		lastErr = fmt.Errorf("no T3 WebSocket URL candidates")
 	}
 	if len(failures) > 1 {
-		return nil, fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
+		lastErr = fmt.Errorf("all T3 WebSocket candidates failed: %s", strings.Join(failures, "; "))
+	}
+	if written {
+		return nil, fmt.Errorf("%w: %w", errRPCWrittenUnanswered, lastErr)
 	}
 	return nil, lastErr
 }
@@ -3179,6 +3200,9 @@ func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[s
 	if err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry); err != nil {
 		if isT3Rejection(err) {
 			return fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
+		}
+		if errors.Is(err, errRPCWrittenUnanswered) {
+			return fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
 		}
 		return err
 	}

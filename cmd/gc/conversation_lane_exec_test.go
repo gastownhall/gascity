@@ -386,9 +386,6 @@ func (laneFailingGetStore) Get(string) (beads.Bead, error) {
 // tmux rows with the errors that runtime returns.
 func TestLaneExecDeliveryResultMapping(t *testing.T) {
 	at := laneT0
-	live := context.Background()
-	canceled, cancel := context.WithCancel(context.Background())
-	cancel()
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.DeliveryResult {
 		return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: at, Ack: ack}, Via: laneViaLive, Degradation: degradation}
 	}
@@ -397,7 +394,6 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		runtime.ErrPendingInteraction, "s")
 	for _, tc := range []struct {
 		name       string
-		ctx        context.Context
 		res        worker.NudgeResult
 		err        error
 		unfenced   bool
@@ -405,26 +401,29 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		transient  bool
 		wantUnknwn bool
 	}{
-		{name: "delivered", ctx: live, res: worker.NudgeResult{Delivered: true}, want: delivered(opjournal.AckDelivered, "")},
-		{name: "delivered unfenced", ctx: live, res: worker.NudgeResult{Delivered: true, Unfenced: true}, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
-		{name: "delivered with no token", ctx: live, res: worker.NudgeResult{Delivered: true}, unfenced: true, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
-		{name: "unobserved", ctx: live, err: fmt.Errorf("submit: %w", runtime.ErrNudgeDeliveredUnobserved), want: delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
-		{name: "unobserved and unfenced", ctx: live, res: worker.NudgeResult{Unfenced: true}, err: runtime.ErrNudgeDeliveredUnobserved, want: delivered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
-		{name: "not delivered", ctx: live, res: worker.NudgeResult{}, transient: true},
-		{name: "pending interaction", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrNudgeRefusedPendingInteraction), transient: true},
-		{name: "tmux permission prompt", ctx: live, err: permissionPrompt, transient: true},
-		{name: "tmux submit unconfirmed", ctx: live, err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), wantUnknwn: true},
-		{name: "tmux re-send refused after a submit", ctx: live, err: fmt.Errorf("%w: session %q: not re-sent: %s", tmux.ErrNudgeSubmitUnconfirmed, "s", permissionPrompt.Error()), wantUnknwn: true},
-		{name: "fence miss", ctx: live, err: &runtime.FenceMismatchError{Session: "s", Found: "absent"}, transient: true},
-		{name: "runtime unavailable", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), transient: true},
-		{name: "partial fence miss", ctx: live, err: &runtime.FenceMismatchError{Session: "s", Found: "dead", Partial: true}, wantUnknwn: true},
-		{name: "canceled during the call", ctx: canceled, err: someErr, wantUnknwn: true},
-		{name: "deadline during the call", ctx: live, err: fmt.Errorf("x: %w", context.DeadlineExceeded), wantUnknwn: true},
-		{name: "rejected", ctx: live, err: fmt.Errorf("x: %w", runtime.ErrNudgeRejected), want: opjournal.Rejected{KeyRejected: true, Reason: "x: " + runtime.ErrNudgeRejected.Error()}},
-		{name: "anything else", ctx: live, err: someErr, want: opjournal.NotDelivered{Cause: someErr}},
+		{name: "delivered", res: worker.NudgeResult{Delivered: true}, want: delivered(opjournal.AckDelivered, "")},
+		{name: "delivered unfenced", res: worker.NudgeResult{Delivered: true, Unfenced: true}, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
+		{name: "delivered with no token", res: worker.NudgeResult{Delivered: true}, unfenced: true, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
+		{name: "unobserved", err: fmt.Errorf("submit: %w", runtime.ErrNudgeDeliveredUnobserved), want: delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
+		{name: "unobserved and unfenced", res: worker.NudgeResult{Unfenced: true}, err: runtime.ErrNudgeDeliveredUnobserved, want: delivered(opjournal.AckDeliveredUnobserved, opjournal.DegradationUnfencedDelivery)},
+		{name: "not delivered", res: worker.NudgeResult{}, transient: true},
+		{name: "pending interaction", err: fmt.Errorf("x: %w", runtime.ErrNudgeRefusedPendingInteraction), transient: true},
+		{name: "tmux permission prompt", err: permissionPrompt, transient: true},
+		{name: "tmux submit unconfirmed", err: fmt.Errorf("%w: session %q", tmux.ErrNudgeSubmitUnconfirmed, "s"), wantUnknwn: true},
+		{name: "tmux re-send refused after a submit", err: fmt.Errorf("%w: session %q: not re-sent: %s", tmux.ErrNudgeSubmitUnconfirmed, "s", permissionPrompt.Error()), wantUnknwn: true},
+		{name: "fence miss", err: &runtime.FenceMismatchError{Session: "s", Found: "absent"}, transient: true},
+		{name: "runtime unavailable", err: fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), transient: true},
+		{name: "partial fence miss", err: &runtime.FenceMismatchError{Session: "s", Found: "dead", Partial: true}, wantUnknwn: true},
+		{name: "canceled during the call", err: fmt.Errorf("x: %w", context.Canceled), wantUnknwn: true},
+		{name: "deadline during the call", err: fmt.Errorf("x: %w", context.DeadlineExceeded), wantUnknwn: true},
+		{name: "rejected", err: fmt.Errorf("x: %w", runtime.ErrNudgeRejected), want: opjournal.Rejected{KeyRejected: true, Reason: "x: " + runtime.ErrNudgeRejected.Error()}},
+		{name: "tmux re-send failed after a submit", err: fmt.Errorf("failed to send submit sequence: %w", fmt.Errorf("%w: re-send failed: %w", tmux.ErrNudgeSubmitUnconfirmed, someErr)), wantUnknwn: true},
+		{name: "server lost after fenced input", err: fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed, fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable)), wantUnknwn: true},
+		{name: "not sent", err: fmt.Errorf("%w: nudge lock timeout for session %q", runtime.ErrNudgeNotSent, "s"), transient: true},
+		{name: "anything else may have delivered", err: someErr, wantUnknwn: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			got := laneDeliveryResult(tc.ctx, tc.res, tc.err, at, tc.unfenced)
+			got := laneDeliveryResult(tc.res, tc.err, at, tc.unfenced)
 			switch {
 			case tc.transient:
 				nd, ok := got.(opjournal.NotDelivered)
@@ -1063,6 +1062,60 @@ func TestLaneExecProbeBoundsEveryLook(t *testing.T) {
 	}
 	if d := time.Since(start); d > laneWaitBudget/2 {
 		t.Fatalf("the probe took %s, want it bounded by its budget", d)
+	}
+}
+
+// failingPendingHandle is a handle whose pending-interaction look fails.
+type failingPendingHandle struct {
+	worker.Handle
+	err error
+}
+
+func (h failingPendingHandle) PendingStatus(context.Context) (*worker.PendingInteraction, bool, error) {
+	return nil, false, h.err
+}
+
+// TestLaneExecFailedLookIsNotAPendingInteraction proves a look that cannot
+// resolve the handle, or cannot read the pending interaction, fails the
+// probe: nothing is taken and no op waits on a pending interaction the
+// runtime never reported.
+func TestLaneExecFailedLookIsNotAPendingInteraction(t *testing.T) {
+	boom := errors.New("look failed")
+	for _, tc := range []struct {
+		name string
+		wrap func(inner func(nudgeTarget) (worker.Handle, error)) func(nudgeTarget) (worker.Handle, error)
+	}{
+		{name: "handle", wrap: func(func(nudgeTarget) (worker.Handle, error)) func(nudgeTarget) (worker.Handle, error) {
+			return func(nudgeTarget) (worker.Handle, error) { return nil, boom }
+		}},
+		{name: "pending status", wrap: func(inner func(nudgeTarget) (worker.Handle, error)) func(nudgeTarget) (worker.Handle, error) {
+			return func(nt nudgeTarget) (worker.Handle, error) {
+				h, err := inner(nt)
+				if err != nil {
+					return nil, err
+				}
+				return failingPendingHandle{Handle: h, err: boom}, nil
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			st := f.laneStore(t)
+			f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hi"))
+			res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+				e.handle = tc.wrap(e.handle)
+				return e
+			})
+			if laneWaitsFor(res, opjournal.WaitPendingInteraction) {
+				t.Fatalf("Pass = %+v; a failed look waits on a pending interaction", res)
+			}
+			if !errors.Is(err, boom) || res.Took != opjournal.TakeNone {
+				t.Fatalf("Pass = %+v, %v; want the look's error and nothing taken", res, err)
+			}
+			if n := len(f.nudges()); n != 0 {
+				t.Fatalf("nudges = %d, want none", n)
+			}
+		})
 	}
 }
 

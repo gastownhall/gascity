@@ -44,12 +44,17 @@ type OpsConfig struct {
 	// process start.
 	LifecycleMode string `toml:"lifecycle,omitempty" jsonschema:"default=off,enum=off,enum=auto,enum=require"`
 	// Authoritative lists the op kinds the conversation lane executes instead
-	// of their legacy path: a listed kind's requests are written as lane ops
-	// only, and the controller's lane host delivers them. The default is
-	// empty, and message is not on by default anywhere yet. This build
-	// accepts message only. Experimental: it takes effect as each request
-	// surface gains lane delivery. A listed kind needs a sessions store with
-	// guarded batches. A change takes effect at the next controller start.
+	// of their legacy path. The default is empty, and message is not on by
+	// default anywhere yet. This build accepts message only. Experimental: no
+	// request surface writes lane ops yet, so listing a kind changes no
+	// request's delivery in this build. Only a standalone controller
+	// (gc start --foreground) runs the lane host that delivers lane ops; a
+	// supervisor-hosted city runs none, and gc doctor reports a listed kind
+	// there as an error. The lane delivers live only to keystroke-mode
+	// runtimes (tmux); a protocol-mode runtime's (t3bridge) lane ops wait
+	// not_live until their start deadline. A listed kind needs a sessions
+	// store with guarded batches. A change takes effect at the next
+	// controller start.
 	Authoritative []string `toml:"authoritative,omitempty" jsonschema:"enum=message"`
 }
 

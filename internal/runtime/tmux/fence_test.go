@@ -666,3 +666,39 @@ func TestWrapErrorNoSuchPane(t *testing.T) {
 		t.Fatalf("wrapError(no such pane) = %v, want ErrSessionNotFound", err)
 	}
 }
+
+// TestPaneGuardFinishLostServerAfterInputIsUnconfirmed proves a fenced
+// operation that lost the tmux server after its input reached the fenced
+// incarnation reports the input possibly delivered, while one that lost it
+// before any input applied stays plainly unavailable.
+func TestPaneGuardFinishLostServerAfterInputIsUnconfirmed(t *testing.T) {
+	lost := func() *fenceUnavailableError {
+		return &fenceUnavailableError{session: "lab", cause: ErrNoServer}
+	}
+	for _, tc := range []struct {
+		name        string
+		applied     bool
+		swallowed   bool
+		unconfirmed bool
+	}{
+		{name: "returned before input", applied: false},
+		{name: "swallowed before input", applied: false, swallowed: true},
+		{name: "returned after input", applied: true, unconfirmed: true},
+		{name: "swallowed after input", applied: true, swallowed: true, unconfirmed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			g := &paneGuard{name: "lab", applied: tc.applied}
+			var bodyErr error = lost()
+			if tc.swallowed {
+				g.unavailable, bodyErr = lost(), nil
+			}
+			err := g.finish(bodyErr)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("finish = %v, want ErrRuntimeUnavailable", err)
+			}
+			if got := errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed); got != tc.unconfirmed {
+				t.Fatalf("finish = %v, unconfirmed %v, want %v", err, got, tc.unconfirmed)
+			}
+		})
+	}
+}

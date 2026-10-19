@@ -168,8 +168,8 @@ type Probe struct {
 	TurnLive Tri
 	// KnownTurns are the turn ids the probe's read returned.
 	KnownTurns []string
-	// Pending is a pending interaction's request id; "?" when the look
-	// failed.
+	// Pending is a pending interaction's request id; "?" for one the
+	// runtime names no id for. A failed look is a Probe error, not Pending.
 	Pending string
 	// ContentBlock is why content may not start now (I7), or "".
 	ContentBlock string

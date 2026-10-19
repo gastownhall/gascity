@@ -130,6 +130,12 @@ var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 // errors.Is.
 var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
 
+// ErrNudgeNotSent reports that a nudge failed before any of its input
+// reached the session: nothing was delivered, so a retry cannot deliver the
+// message twice. Providers wrap their own pre-send failures with this
+// sentinel so callers can dispatch with errors.Is.
+var ErrNudgeNotSent = errors.New("nudge not sent")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".

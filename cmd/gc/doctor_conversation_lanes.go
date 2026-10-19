@@ -54,11 +54,11 @@ func (*conversationLanesDoctorCheck) Fix(_ *doctor.CheckContext) error { return 
 // Run implements doctor.Check: with the list empty, OK unless the controller
 // still serves, or waits for its store to serve, the list it started with, a
 // Warning; an Error when a kind is listed and the sessions store cannot apply
-// guarded batches, or the controller refused to start the host; a Warning
-// when the controller does not answer, runs no lane host, waits for its
-// sessions store, runs another list than city.toml's, has quarantined op
-// rows, or failed its last pass or anything since its last good one; else OK
-// with the last pass's age.
+// guarded batches, the controller runs no lane host (a supervisor-hosted
+// city), or it refused to start the host; a Warning when the controller does
+// not answer, waits for its sessions store, runs another list than
+// city.toml's, has quarantined op rows, or failed its last pass or anything
+// since its last good one; else OK with the last pass's age.
 func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.CheckResult {
 	r := &doctor.CheckResult{Name: c.Name(), Status: doctor.StatusOK}
 	var kinds []string
@@ -107,8 +107,8 @@ func (c *conversationLanesDoctorCheck) Run(ctx *doctor.CheckContext) *doctor.Che
 		r.Details = append(r.Details, err.Error())
 		return r
 	case st.State == laneHostStateNone || st.State == "":
-		r.Status = doctor.StatusWarning
-		r.Message = fmt.Sprintf("conversation lanes on (%s): the controller runs no lane host for this city", listed)
+		r.Status = doctor.StatusError
+		r.Message = fmt.Sprintf("conversation lanes on (%s): the controller runs no lane host for this city, so the listed kinds go unserved", listed)
 		r.FixHint = "a supervisor-hosted city (`gc start`) does not start the lane host yet; to serve the list, " + laneHostStandaloneRemedy(ctx.CityPath) + ", or empty [ops] authoritative"
 		return r
 	case st.State == laneHostStateUnavailable:

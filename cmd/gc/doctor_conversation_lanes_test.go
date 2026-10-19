@@ -64,7 +64,7 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 			want: "conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore)", opens: 1,
 		},
 		{name: "no reply", kinds: []string{"message"}, store: mem, queryErr: errors.New("dial: no such file"), status: doctor.StatusWarning, want: "no lane-status reply", opens: 1},
-		{name: "no host", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusWarning, want: "runs no lane host", opens: 1},
+		{name: "no host", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusError, want: "runs no lane host for this city, so the listed kinds go unserved", opens: 1},
 		{name: "refused", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateRefused, Reason: "conversation lanes need guarded batches"}, status: doctor.StatusError, want: "refused to start the lane host", opens: 1},
 		{name: "running", kinds: []string{"message"}, store: mem, st: running, status: doctor.StatusOK, want: "last pass 4s ago", opens: 1},
 		{name: "quarantined", kinds: []string{"message"}, store: mem, st: quarantined, status: doctor.StatusWarning, want: "2 op row(s) this gc cannot decode", opens: 1},

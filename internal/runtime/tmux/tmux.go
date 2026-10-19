@@ -2733,9 +2733,11 @@ const (
 //     window, and its busy proves nothing about this submit.
 //   - err: the last submit attempted failed at the tmux layer, or a look
 //     refused a submit (isLookRefusal), which ends the call with no further
-//     sends. A nil error with confirmed false means the submit reached tmux
-//     but no idle->busy transition was observed within the budget; the
-//     caller judges delivery from the pane itself (see nudgeSession).
+//     sends. A failed re-send after an earlier send succeeded wraps
+//     ErrNudgeSubmitUnconfirmed: the earlier send may have submitted. A nil
+//     error with confirmed false means the submit reached tmux but no
+//     idle->busy transition was observed within the budget; the caller
+//     judges delivery from the pane itself (see nudgeSession).
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
@@ -2747,6 +2749,7 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 	watch.observe()
 
 	var lastErr error
+	sent := false
 	for send := 0; send < submitEnterMaxSends; send++ {
 		resend := true
 		if send > 0 {
@@ -2767,9 +2770,15 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 					return false, watch.seenIdle, err
 				}
 				lastErr = err
+				if sent {
+					// An earlier send reached the pane and may have
+					// submitted: a failed re-send leaves delivery in doubt.
+					lastErr = fmt.Errorf("%w: re-send failed: %w", ErrNudgeSubmitUnconfirmed, err)
+				}
 				continue
 			}
 			lastErr = nil // a later send succeeded; don't surface an earlier transient failure
+			sent = true
 			wake()
 		}
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
@@ -3221,7 +3230,7 @@ func (t *Tmux) nudgeSession(
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+		return fmt.Errorf("%w: nudge lock timeout for session %q: previous nudge may be hung", runtime.ErrNudgeNotSent, session)
 	}
 	defer releaseNudgeLock(session)
 

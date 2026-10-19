@@ -73,7 +73,7 @@ const (
 	laneHostMaxWorkers = 64
 	// laneHostScanInterval is the anti-entropy cadence with a kind listed.
 	laneHostScanInterval = time.Minute
-	// laneHostScanLimit caps each of the scan's three keyed lists.
+	// laneHostScanLimit caps each page of the scan's keyed lists.
 	laneHostScanLimit = 500
 	// The busy re-probe backoff (DES-O1 §4.3): 2 s for the first 30 s, then
 	// 5 s, then 10 s.
@@ -266,6 +266,9 @@ type conversationLaneHost struct {
 
 	ctx context.Context
 	wg  sync.WaitGroup
+	// scanFrom is where the last scan's capped lists stopped; only the scan
+	// loop reads and writes it.
+	scanFrom opjournal.LaneScanCursor
 
 	mu      sync.Mutex
 	state   string
@@ -448,7 +451,7 @@ func (h *conversationLaneHost) step() bool {
 // scan pokes every conversation with an open lane op, and reports whether a
 // later scan is owed: it found an open lane op (one whose gate clears with no
 // doorbell of its own still drains), the city was quiescent, or the read
-// failed or was truncated.
+// failed or stopped at its page cap, which the next scan reads on from.
 func (h *conversationLaneHost) scan() (left bool) {
 	defer h.env.beginStoreWork()()
 	defer func() {
@@ -465,15 +468,16 @@ func (h *conversationLaneHost) scan() (left bool) {
 		h.noteError("store", err)
 		return true
 	}
-	convs, truncated, err := st.OpenLaneConversations(laneHostScanLimit)
+	convs, next, err := st.OpenLaneConversations(laneHostScanLimit, h.scanFrom)
 	if err != nil {
 		h.noteError("scan", err)
 		return true
 	}
+	h.scanFrom = next
 	for _, conv := range convs {
 		h.Poke(conv)
 	}
-	return truncated || len(convs) > 0
+	return !next.Done() || len(convs) > 0
 }
 
 // Poke asks for a pass over conversation conv, starting its worker when it
