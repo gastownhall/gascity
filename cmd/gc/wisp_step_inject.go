@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -108,7 +109,8 @@ func wispStepAssignees() []string {
 //  1. Find the agent's in-progress molecule bead (type=molecule or type=wisp).
 //  2. Find that molecule's in-progress type=step child — the current step.
 //  3. If no in-progress step child exists, fall back to the entry step: the
-//     first open type=step child (deterministic formula start position).
+//     first open type=step child, in created order, whose ready-blocking
+//     dependencies are all satisfied (the step bd mol current calls ready).
 //  4. If no molecule bead is assigned to the agent, follow the molecule_id
 //     bridge: an attached (v1) formula routes only the source work bead and
 //     stamps its molecule_id with the (unrouted, unassigned) root, so resolve
@@ -118,8 +120,10 @@ func wispStepAssignees() []string {
 //     it; (b) the source bead is still open+unassigned but carries
 //     gc.routed_to for one of the agent's identities — the state that exists
 //     at the exact wake (gc prime / nudge) the bridge is meant to serve,
-//     before any claim has happened. Trying (a) first prefers an
-//     already-claimed molecule over a merely-routed one when both exist.
+//     before any claim has happened. (b) is tried only when the agent has
+//     claimed nothing at all, and only for a source bead a claim could take
+//     now: claimed work, molecule or not, is the agent's assignment, and a
+//     routed bead bd ready would not offer is not (ga-qi3glw4).
 //  5. If no molecule_id bridge exists either, fall back to any in-progress bead
 //     with a non-empty Description (legacy behavior for agents not running a
 //     formula).
@@ -147,6 +151,7 @@ func resolveActiveWispStep(workStore, graphStore beads.Store, assignees []string
 type activeStepReader interface {
 	Get(id string) (beads.Bead, error)
 	List(query beads.ListQuery) ([]beads.Bead, error)
+	DepList(id, direction string) ([]beads.Dep, error)
 }
 
 // stepResolution is one step resolution: the work store the identities' beads
@@ -211,7 +216,7 @@ func (r stepResolution) activeStep(oneStore bool, assignees []string) (*beads.Be
 		var rootReader activeStepReader
 		if claimed != nil {
 			root, rootReader = r.firstMoleculeRootIn(claimed.newest(claimedBridgeSample))
-			if root == nil {
+			if root == nil && len(claimed.rows) == 0 {
 				root, rootReader = r.rootViaRoutedBridgeIn(assignees)
 			}
 		} else {
@@ -412,7 +417,8 @@ func mostRecentlyUpdatedMolecule(results []beads.Bead, molType string, logf func
 // This bridges from the source bead to its root via the molecule_id metadata
 // key, trying the claimed (in_progress+assigned) source state first and
 // falling back to the pre-claim (open, gc.routed_to) state — see
-// resolveActiveWispStep's doc comment, step 4.
+// resolveActiveWispStep's doc comment, step 4. The routed state is tried only
+// when the agent has claimed nothing at all.
 //
 // Returns nil on any error or when no bridge bead is found — callers treat nil
 // as "no bridge available" and fall through to the legacy path.
@@ -436,10 +442,14 @@ func (r stepResolution) rootViaBridgeIn(assignees []string) (*beads.Bead, active
 		Limit:     claimedBridgeSample,
 		Sort:      beads.SortCreatedDesc,
 	})
-	if err == nil {
-		if root, reader := r.firstMoleculeRootIn(results); root != nil {
-			return root, reader
-		}
+	if err != nil {
+		return nil, nil
+	}
+	if root, reader := r.firstMoleculeRootIn(results); root != nil {
+		return root, reader
+	}
+	if len(results) > 0 {
+		return nil, nil
 	}
 	return r.rootViaRoutedBridgeIn(assignees)
 }
@@ -452,6 +462,11 @@ func (r stepResolution) rootViaBridgeIn(assignees []string) (*beads.Bead, active
 // query can select on --unassigned — this is the bridge source's state at the
 // exact wake (gc prime / nudge) that is supposed to carry the agent into the
 // molecule, before any claim has happened.
+//
+// Only a source bead a claim could take now bridges (claimableBridgeSources).
+// The work query hands out no other routed bead, so a routed bead still
+// waiting on a dependency is not the agent's assignment, and no step of its
+// molecule is either.
 //
 // ListQuery.Metadata is single-valued, so each identity is its own listing, and
 // on a native store each is a scan of the open beads (about 0.37 s on
@@ -494,11 +509,28 @@ func (r stepResolution) rootViaRoutedBridgeIn(assignees []string) (*beads.Bead, 
 		if candidates.err != nil {
 			continue
 		}
-		if root, reader := r.firstMoleculeRootIn(candidates.rows); root != nil {
+		if root, reader := r.firstMoleculeRootIn(r.claimableBridgeSources(candidates.rows)); root != nil {
 			return root, reader
 		}
 	}
 	return nil, nil
+}
+
+// claimableBridgeSources returns, in order, the open routed candidates that
+// carry a molecule_id and that a claim could take now: not deferred, not on a
+// dispatch hold (beadmeta.HasDispatchHold, the hook's isHeldHookCandidate), and
+// with every ready-blocking dependency satisfied. Readiness is read only for
+// the candidates that would bridge, from the work store they live in.
+func (r stepResolution) claimableBridgeSources(candidates []beads.Bead) []beads.Bead {
+	now := time.Now()
+	var sources []beads.Bead
+	for _, c := range candidates {
+		if strings.TrimSpace(c.Metadata[beadmeta.MoleculeIDMetadataKey]) == "" || beads.IsDeferred(c, now) || beadmeta.HasDispatchHold(c.Labels) {
+			continue
+		}
+		sources = append(sources, c)
+	}
+	return r.unblockedBeads(r.work, sources, 0)
 }
 
 // firstMoleculeRootIn returns the molecule root reachable via molecule_id from
@@ -563,10 +595,15 @@ func (r stepResolution) inProgressStepChildIn(reader activeStepReader, moleculeI
 	return &best, nil
 }
 
-// entryStepChildIn returns the first open type=step child of moleculeID, read
-// from reader, the store that holds the molecule. This is the deterministic
+// entryStepChildIn returns the entry step of moleculeID, read from reader, the
+// store that holds the molecule: the first open type=step child, in created
+// order, whose ready-blocking dependencies are all satisfied. This is the
 // fallback when no step is in-progress: the formula's entry position — where
-// execution should (re)start.
+// execution should (re)start, and the step bd mol current calls ready. Created
+// order alone does not find it: a molecule's steps are created together,
+// created_at is stored to the second, and a tie breaks by id, so the first open
+// step in created order can be one still waiting on an earlier step
+// (ga-qi3glw4). Returns nil when every open step is blocked.
 func (r stepResolution) entryStepChildIn(reader activeStepReader, moleculeID string) (*beads.Bead, error) {
 	if reader == nil {
 		reader = r.graph
@@ -576,17 +613,103 @@ func (r stepResolution) entryStepChildIn(reader activeStepReader, moleculeID str
 		Type:     "step",
 		ParentID: moleculeID,
 		TierMode: beads.TierBoth,
-		Limit:    1,
 		Sort:     beads.SortCreatedAsc,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("resolving entry step for molecule %s: %w", moleculeID, err)
 	}
-	if len(results) == 0 {
+	ready := r.unblockedBeads(reader, results, 1)
+	if len(ready) == 0 {
 		return nil, nil
 	}
-	b := results[0]
-	return &b, nil
+	return &ready[0], nil
+}
+
+// unblockedBeads returns, in order, the open candidates whose ready-blocking
+// dependencies are all satisfied (beads.DependencySatisfied) — the dependency
+// half of bd ready's readiness — stopping after limit of them when limit > 0.
+// A blocker that is itself a candidate is open, so it blocks without a read;
+// any other is read once from store, and only while a candidate still needs its
+// verdict. A read that fails counts as unsatisfied: the reminder is advisory,
+// and naming work the agent cannot start as its assignment is what this check
+// prevents.
+func (r stepResolution) unblockedBeads(store activeStepReader, candidates []beads.Bead, limit int) []beads.Bead {
+	if len(candidates) == 0 {
+		return nil
+	}
+	ids := make([]string, len(candidates))
+	satisfied := make(map[string]bool, len(candidates))
+	for i, c := range candidates {
+		ids[i] = c.ID
+		satisfied[c.ID] = false
+	}
+	edges, err := downEdges(store, ids)
+	if err != nil {
+		r.logf("wisp step inject: reading the dependencies of %s: %v", strings.Join(ids, ", "), err)
+		return nil
+	}
+	var out []beads.Bead
+	for _, c := range candidates {
+		if !blockersSatisfied(store, edges[c.ID], satisfied) {
+			continue
+		}
+		out = append(out, c)
+		if limit > 0 && len(out) == limit {
+			break
+		}
+	}
+	return out
+}
+
+// blockersSatisfied reports whether every ready-blocking edge in deps points at
+// a bead that satisfies it. satisfied holds the verdicts known so far; a
+// blocker it does not hold yet is read, and its verdict recorded.
+func blockersSatisfied(store activeStepReader, deps []beads.Dep, satisfied map[string]bool) bool {
+	for _, dep := range deps {
+		if !beads.IsReadyBlockingDependencyType(dep.Type) {
+			continue
+		}
+		ok, known := satisfied[dep.DependsOnID]
+		if !known {
+			blocker, err := store.Get(dep.DependsOnID)
+			ok = err == nil && beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata))
+			satisfied[dep.DependsOnID] = ok
+		}
+		if !ok {
+			return false
+		}
+	}
+	return true
+}
+
+// downEdges reads the DOWN edges of every id: in one round trip when there is
+// more than one and the reader reads them in a batch (a store does; the live
+// handle the controller passes does not), one DepList per id otherwise. An id
+// the batch answer leaves out is read on its own, because an absent anchor is
+// not proof of no edges: some stores omit an edge-free anchor, and bd answers a
+// batch it refuses with an empty map (sourceDepReader.prefetch).
+func downEdges(store activeStepReader, ids []string) (map[string][]beads.Dep, error) {
+	edges := make(map[string][]beads.Dep, len(ids))
+	if batch, ok := store.(beads.DependencyBatchLister); ok && len(ids) > 1 {
+		got, err := batch.DepListBatch(ids)
+		if err != nil && !errors.Is(err, beads.ErrDepListBatchUnsupported) {
+			return nil, err
+		}
+		for id, deps := range got {
+			edges[id] = deps
+		}
+	}
+	for _, id := range ids {
+		if _, ok := edges[id]; ok {
+			continue
+		}
+		deps, err := store.DepList(id, "down")
+		if err != nil {
+			return nil, err
+		}
+		edges[id] = deps
+	}
+	return edges, nil
 }
 
 // beadWithDescription returns the first in-progress bead assigned to any of
