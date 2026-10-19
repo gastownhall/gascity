@@ -3852,8 +3852,8 @@ func (cr *CityRuntime) ensureEndpointCapacityGuard() *endpointCapacityGuard {
 
 // ensureStartDeferralMemo returns the city's start-deferral memo, building it
 // on first use. The main tick records into it (every start-gate site in the
-// executor does, and so would the follow-ups that add one: ga-riekfj,
-// ga-mgp7qz, ga-r7s62t) and the stale-session reaper reads it. The
+// executor that meets the criterion on startDeferralMemo does, and so would a
+// later gate that meets it) and the stale-session reaper reads it. The
 // control-dispatcher tick must not be handed it: a completed executor run
 // replaces the committed set and moves lastPassStart, so a run over the
 // control-dispatcher rows alone would erase the pool creates the main tick
