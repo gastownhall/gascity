@@ -1141,11 +1141,13 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 	openInfos := sessionBeads.OpenInfos()
 	poolWorkBeads := filterAssignedWorkBeadsForPoolDemand(cfg, cityPath, oneShotStore, openInfos, dsResult.AssignedWorkBeads, dsResult.AssignedWorkStoreRefs)
 	poolDecisionTime := time.Now()
+	// The pass's park verdicts, decided once: the pool counts and the
+	// reconciler's hold read the same set.
+	parked := parkSeatsForResult(cfg, openInfos, dsResult, poolDecisionTime.UTC())
 	poolDesired := retainScaleCheckPartialPoolDesired(
 		cfg,
 		PoolDesiredCounts(computePoolDesiredStatesParkedAt(
-			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime,
-			parkSeatsForResult(cfg, openInfos, dsResult, poolDecisionTime.UTC()), nil)),
+			cfg, poolWorkBeads, openInfos, dsResult.ScaleCheckCounts, nil, poolDecisionTime, parked, nil)),
 		sessionBeads,
 		effectivePoolPartialRetentionTemplates(dsResult),
 	)
@@ -1164,7 +1166,7 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		nil, clock.Real{}, recorder, cfg.Session.StartupTimeoutDuration(), 0,
 		stdout, stderr,
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(dsResult.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
-		withParkedSeats(parkSeatsForResult(cfg, openInfos, dsResult, time.Now().UTC())),
+		withParkedSeats(parked),
 		withAssignedWorkStores(awakeAssignedStores),
 	)
 

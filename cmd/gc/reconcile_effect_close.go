@@ -39,7 +39,10 @@ import (
 //     unclaims its work on every leg (SESS-625), and the close lands only if
 //     no release failed; with no marker, the effect stamps one and records
 //     session.stranded (SESS-624), unless every claim's detached probe still
-//     reports alive.
+//     reports alive;
+//     - a pool slot eligible to park whose live read finds only parked work
+//     neither stamps nor repairs (ga-ylpbsy.16): it clears a marker an
+//     earlier pass left, and does not close.
 //  3. The premise close, through the shared precondition (closePermitted):
 //     L5 must read Free, except for a SESS-080 phantom, whose work is the
 //     configured identity's; a repair, whose release decided; and an
@@ -203,11 +206,15 @@ type strandedWork struct {
 // strandedProbe reads the stranded branch's work, only when it applies: L5
 // found work on a pool slot that is not killed and carries no marker, or one
 // the allocation found eligible to park, whose live read decides the park
-// (a marked row's included: the hold comes before the repair). The detached
-// probes run concurrently after the read, each on its own bound
-// (detachedProbeDefaultTimeout) apart from the read's; a probe that times
-// out reads not alive, as legacy's does. One the Probe's own bound cut
-// short leaves the work unsearched, so this attempt refuses.
+// (a marked row's included: the park, which clears the marker, comes before
+// the repair). A marked row is read here only once its marker has aged or
+// cannot be parsed, since the arm holds a young one (decideStrandedHold): a
+// park only this read finds leaves a young marker in place until it ages,
+// where one the allocation finds clears it at once (decideParkedClear). The
+// detached probes run concurrently after the read, each on its own bound
+// (detachedProbeDefaultTimeout) apart from the read's; a probe that times out
+// reads not alive, as legacy's does. One the Probe's own bound cut short
+// leaves the work unsearched, so this attempt refuses.
 func strandedProbe(ctx context.Context, r effectReads, v txView) (strandedWork, error) {
 	c := v.It.Closing
 	unmarked := strings.TrimSpace(v.Row.StrandedEventEmittedAt) == ""
@@ -284,9 +291,14 @@ func closeWorkStep(v txView, stranded strandedWork, _ error) txStep {
 		// on it; the refusal backs the next attempt off.
 		return txStep{Refuse: causeParkUnread, Err: stranded.parkErr}
 	case c.Kind == closePoolSlot && c.ParkEligible && stranded.parked:
-		// Parked, not stranded (ga-ylpbsy.16): no marker, no event, no
-		// release, whatever marker an earlier pass left. A no-op settles it,
-		// so the row's wake is never paced.
+		// Parked, not stranded (ga-ylpbsy.16): no event, no release. The
+		// park ends a stranding episode an earlier pass began, as an alive
+		// row's does (SESS-603), so a marker that pass left clears and a
+		// later fallback ages a new one. The clear lands with no cause, and
+		// with no marker a no-op settles it, so the row's wake is never paced.
+		if strings.TrimSpace(v.Row.StrandedEventEmittedAt) != "" {
+			return txStep{Write: session.MetadataPatch{strandedEventEmittedKey: ""}, Done: true}
+		}
 		return txStep{Done: true, Cause: causeParked}
 	case c.Kind == closePoolSlot && c.Repair:
 		return release(releaseStrandedRepair)

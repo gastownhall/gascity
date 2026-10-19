@@ -95,6 +95,9 @@ func TestParkSeatsClassifiesOneSeat(t *testing.T) {
 		{name: "a template wake_mode=fresh has no context to keep", cfg: parkCity(config.Agent{Name: "worker", StartCommand: "true", WakeMode: "fresh"}), row: parkedRow("s1"), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 		{name: "past the bound the seat is not parked", row: parkedRow("s1", func(i *session.Info) { i.SleptAt = parkRFC(-parkedWorkMaxHold - time.Minute) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
 		{name: "an unreadable slept_at has no bound to hold to", row: parkedRow("s1", func(i *session.Info) { i.SleptAt = "soon" }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
+		{name: "a slept_at far ahead of the clock has no bound to hold to", row: parkedRow("s1", func(i *session.Info) { i.SleptAt = parkRFC(48 * time.Hour) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
+		{name: "a slept_at the skew ahead of the clock is not parked", row: parkedRow("s1", func(i *session.Info) { i.SleptAt = parkRFC(parkedSleptAtFutureSkew) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}},
+		{name: "a slept_at just inside the skew still parks", row: parkedRow("s1", func(i *session.Info) { i.SleptAt = parkRFC(parkedSleptAtFutureSkew - time.Second) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}, wantEligible: true, wantParked: true},
 		{name: "a seat a pass already stranded parks again while parked-shaped", row: parkedRow("s1", func(i *session.Info) { i.StrandedEventEmittedAt = parkRFC(-time.Minute) }), work: []beads.Bead{pin("w1", "s1")}, ready: []bool{false}, wantEligible: true, wantParked: true},
 		{name: "a deferred pin is no pool demand, so it does not park", row: parkedRow("s1"), work: []beads.Bead{func() beads.Bead {
 			b := pin("w1", "s1")
@@ -114,8 +117,15 @@ func TestParkSeatsClassifiesOneSeat(t *testing.T) {
 			if got.Eligible != tc.wantEligible || got.Parked != tc.wantParked {
 				t.Fatalf("verdict %+v, want eligible=%v parked=%v", got, tc.wantEligible, tc.wantParked)
 			}
-			if got.Parked && !got.Until.Equal(parkNow.Add(-time.Hour).Add(parkedWorkMaxHold)) {
-				t.Fatalf("until %v, want slept_at plus %v", got.Until, parkedWorkMaxHold)
+			if !got.Parked {
+				return
+			}
+			slept, err := time.Parse(time.RFC3339, tc.row.SleptAt)
+			if err != nil {
+				t.Fatalf("parked on an unreadable slept_at %q: %v", tc.row.SleptAt, err)
+			}
+			if !got.Until.Equal(slept.Add(parkedWorkMaxHold)) {
+				t.Fatalf("until %v, want slept_at %s plus %v", got.Until, tc.row.SleptAt, parkedWorkMaxHold)
 			}
 		})
 	}

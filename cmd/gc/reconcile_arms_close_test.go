@@ -952,12 +952,71 @@ func TestArmCloseHoldsAParkedSeat(t *testing.T) {
 			t.Fatalf("requeue %v, want the bound %v", next, until)
 		}
 	})
+	t.Run("a parked seat a pass stranded clears its marker, and a later fallback strands it afresh", func(t *testing.T) {
+		// The marker an earlier pass stamped (a full pool's fallback) has aged
+		// past the grace while the seat sat parked.
+		marked := append(append([]string{}, idle...), strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
+		c := newCloseCase(t, livenessGone, desireSleep, marked...)
+		p := c.blockedPin(t)
+		c.entry().Park = parkVerdict{Eligible: true, Parked: true, Until: until}
+		it, next := decideRow(c.w, c.a, c.k)
+		if it.Kind != intentRowHealFresh || it.Reason != decideParkedClear || !maps.Equal(it.Patch, session.MetadataPatch{strandedEventEmittedKey: ""}) {
+			t.Fatalf("decideRow = (%q, %q) patch %v, want the parked clear", it.Kind, it.Reason, it.Patch)
+		}
+		if !next.Equal(until) {
+			t.Fatalf("requeue %v, want the bound %v", next, until)
+		}
+		w := *c.w
+		w.Env = &reconcileEnv{SP: gone().tmux(), Cfg: c.cfg}
+		if s := runTx(context.Background(), newEffectPass(&w, c.a), it, effectSpecs[it.Kind], nil); s.Outcome != settledLanded || s.Cause != "" {
+			t.Fatalf("settlement %+v, want the clear landed with no cause: the row's wake is never paced", s)
+		}
+		if b := c.row(t); b.Status == "closed" || b.Metadata[strandedEventEmittedKey] != "" {
+			t.Fatalf("row %s %v, want open and unmarked", b.Status, b.Metadata)
+		}
+		c.w.Census = readCensus(t, gatherNow, censusLegs(rowLeg, c.store))
+		if it := c.decide(); it.Reason != decideParkedHold || it.Kind != "" {
+			t.Fatalf("decideRow = (%q, %q), want the parked hold on the unmarked row", it.Kind, it.Reason)
+		}
+		// The pool fills again: the seat falls back unmarked, so its close
+		// stamps a fresh marker and records a new episode, with no repair.
+		c.entry().Park = parkVerdict{}
+		if it := c.decide(); it.Kind != intentClose || it.Closing.Repair {
+			t.Fatalf("decideRow = (%q, %q) closing %+v, want a pool-slot close with no repair", it.Kind, it.Reason, it.Closing)
+		}
+		s := c.run(t, gone().tmux())
+		b := c.row(t)
+		if s.Outcome != settledLanded || b.Status == "closed" || b.Metadata[strandedEventEmittedKey] != gatherNow.UTC().Format(time.RFC3339) {
+			t.Fatalf("settlement %+v row %s %v, want a fresh stamp on an open row", s, b.Status, b.Metadata)
+		}
+		if len(s.Facts.Events) != 1 || s.Facts.Events[0].Type != events.SessionStranded {
+			t.Fatalf("events %+v, want the new episode's session.stranded", s.Facts.Events)
+		}
+		if got, _ := c.store.Get(p.ID); got.Assignee != c.k.ID || got.Status != "open" {
+			t.Fatalf("pin %s/%q, want still open on the seat: no repair", got.Status, got.Assignee)
+		}
+	})
 	t.Run("a seat eligible to park closes, and its close re-reads the work", func(t *testing.T) {
 		c := newCloseCase(t, livenessGone, desireSleep, idle...)
 		c.entry().Park = parkVerdict{Eligible: true, Until: until}
 		it := c.decide()
 		if it.Reason != decideClosePoolSlot || !it.Closing.ParkEligible || it.Closing.Repair {
 			t.Fatalf("decideRow = %q closing %+v, want a pool-slot close eligible to park", it.Reason, it.Closing)
+		}
+	})
+	t.Run("a young marker holds a seat eligible to park until it ages", func(t *testing.T) {
+		// No close is proposed, so the live read that would clear the marker
+		// on a park waits for it to age; the allocation's park clears it now.
+		stamped := gatherNow.Add(-time.Minute)
+		young := append(append([]string{}, idle...), strandedEventEmittedKey, stamped.Format(time.RFC3339))
+		c := newCloseCase(t, livenessGone, desireSleep, young...)
+		c.entry().Park = parkVerdict{Eligible: true, Until: until}
+		it, next := decideRow(c.w, c.a, c.k)
+		if it.Reason != decideStrandedHold || it.Kind != "" {
+			t.Fatalf("decideRow = (%q, %q), want the stranded hold", it.Kind, it.Reason)
+		}
+		if want := stamped.Add(strandedRepairConfirmGrace); !next.Equal(want) {
+			t.Fatalf("requeue %v, want the marker's age-out %v", next, want)
 		}
 	})
 	t.Run("without a verdict the close is today's", func(t *testing.T) {
@@ -1058,7 +1117,7 @@ func TestCloseEffectParksASeatHoldingOnlyBlockedPins(t *testing.T) {
 					t.Fatalf("settlement %+v row %v, want the stranded stamp", s, b.Metadata)
 				}
 			})
-			t.Run("a seat a pass stranded is held, not repaired, once it parks again", func(t *testing.T) {
+			t.Run("a seat a pass stranded parks again: no repair, its marker cleared", func(t *testing.T) {
 				c := newCloseCase(t, livenessGone, desireSleep, "state", "asleep", "sleep_reason", "idle", "slept_at", slept.UTC().Format(time.RFC3339),
 					strandedEventEmittedKey, gatherNow.Add(-time.Hour).Format(time.RFC3339))
 				c.bare = bare
@@ -1068,11 +1127,15 @@ func TestCloseEffectParksASeatHoldingOnlyBlockedPins(t *testing.T) {
 					t.Fatalf("closing %+v, want a repair eligible to park", it.Closing)
 				}
 				s := c.run(t, gone().tmux())
-				if b := c.row(t); s.Outcome != settledNoop || s.Cause != causeParked || b.Status == "closed" {
-					t.Fatalf("settlement %+v row %s, want the parked no-op", s, b.Status)
+				// The clear lands with no cause, so the row's wake is never paced.
+				if b := c.row(t); s.Outcome != settledLanded || s.Cause != "" || b.Status == "closed" || b.Metadata[strandedEventEmittedKey] != "" {
+					t.Fatalf("settlement %+v row %s %v, want the park's clear on an open row", s, b.Status, b.Metadata)
 				}
-				if got, _ := c.store.Get(p.ID); got.Assignee != c.k.ID {
-					t.Fatalf("pin assignee %q, want kept: no repair", got.Assignee)
+				if len(s.Facts.Events) != 0 {
+					t.Fatalf("events %+v, want none", s.Facts.Events)
+				}
+				if got, _ := c.store.Get(p.ID); got.Assignee != c.k.ID || got.Status != "open" {
+					t.Fatalf("pin %s/%q, want kept: no repair", got.Status, got.Assignee)
 				}
 			})
 			t.Run("a ready read that fails is no answer: no stamp, a refusal", func(t *testing.T) {

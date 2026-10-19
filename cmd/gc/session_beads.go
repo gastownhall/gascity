@@ -1568,8 +1568,9 @@ func unclaimWorkAssignedToRetiredSessionInfo(
 // episode's stranded_event_emitted_at marker (stamped by
 // emitSessionStrandedDiagnostic) before the reconciler will REPAIR — not merely
 // diagnose — a stranded pool worker. The marker tracks CONTINUOUS non-liveness:
-// clearStrandedEventMarker drops it on any alive observation, so the window
-// re-arms from zero each time the session recovers. A single not-alive
+// clearStrandedEventMarker drops it on any alive observation, and when the seat
+// parks on pre-assigned blocked work (ga-ylpbsy.16), so the window re-arms from
+// zero each time the session recovers or parks. A single not-alive
 // observation, or a worker that recovered and re-stranded, is never acted on
 // until the NEW episode persists across the window, so a transient
 // runtime-liveness glitch (or a recovered-then-cleanly-drained worker whose
@@ -1596,15 +1597,17 @@ const strandedRepairCloseReason = "stranded-repair"
 // !target.alive) with a non-degraded store read (!storeQueryPartial), and it
 // acts only once the CURRENT stranding episode's stranded_event_emitted_at
 // marker has aged past strandedRepairConfirmGrace. Because clearStrandedEventMarker
-// drops that marker on every alive observation, the marker cannot outlive the
-// episode that stamped it: a worker that stranded, was respawned on this same
+// drops that marker on every alive observation, and when the seat parks
+// (ga-ylpbsy.16), the marker cannot outlive the episode that stamped it: a seat
+// a full pool's fallback stranded that parks again starts a brand-new marker on
+// its next fallback, and a worker that stranded, was respawned on this same
 // session bead, and recovered starts a brand-new marker if it re-strands, so a
 // recovered-then-cleanly-drained worker (whose own bd close may be mid-flight
 // during the brief poolFreeable && hasAssignedWork window) can never be repaired
 // on a stale first-episode timestamp. An absent marker means no confirmed
 // stranding episode is in progress (the diagnostic early-returned — no recorder,
 // the work passed the detached-probe liveness filter, or the session recovered
-// and cleared it), so the repair defers.
+// or parked and cleared it), so the repair defers.
 //
 // The unassign step must land before the close: unclaimWorkAssignedToRetiredSessionInfo
 // reports how many releases failed via unclaimResult. If any failed, the session

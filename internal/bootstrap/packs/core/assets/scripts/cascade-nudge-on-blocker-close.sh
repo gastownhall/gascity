@@ -7,11 +7,11 @@
 #
 # This order subscribes to bead.closed events. For each closed bead it
 # resolves the dependents linked by a `blocks` dependency and nudges every
-# open or deferred dependent that no other open blocker still holds: at the
-# assignee when one holds the bead, else at its gc.routed_to target (the
-# graph.v2 claim shape leaves the assignee empty until a session claims the
-# step). A routed target may be a pool base, which nudge_routed_target
-# resolves to its active members. Idempotent: a given
+# open or deferred dependent that no blocker still holds once this one has
+# closed (see still_held): at the assignee when one holds the bead, else at
+# its gc.routed_to target (the graph.v2 claim shape leaves the assignee empty
+# until a session claims the step). A routed target may be a pool base, which
+# nudge_routed_target resolves to its active members. Idempotent: a given
 # (blocker, dependent) pair is nudged at most once. Dedup state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is
 # both city- and pack-scoped — multi-city installs never cross-pollinate.
@@ -131,20 +131,43 @@ MEMBERS
     gc session nudge "$target" "$message" >/dev/null 2>&1
 }
 
-# still_blocked reports whether dependent $1 has a `blocks` blocker other
-# than $2, the blocker whose close is being handled, that still blocks it (bd
-# treats a closed or pinned blocker as satisfied). Only a close that may have
-# unblocked the dependent is worth a nudge: while another blocker holds it,
-# its assignee has nothing to do, and a nudge to an asleep seat parked on it
-# would wake that seat for nothing (it wakes on its own once the dependent is
-# ready). A read that fails, or that cannot be parsed, proves nothing: the
-# nudge goes out, as it always has. Uses the dependent's rig args.
-still_blocked() {
+# still_held reports what still holds dependent $1 once $2, the blocker whose
+# close is being handled, has closed. A `blocks` blocker holds by gc's
+# readiness rule (beads.DependencySatisfied over beads.ReadinessWorkOutcome):
+# while it is not closed, and, once closed, while it closed blocked
+# (gc.work_outcome=blocked) unless it is a formula step (gc.step_ref set)
+# whose gc.outcome is pass. A pinned blocker holds whichever read serves it:
+# the bd passthrough reports it "pinned", and the in-process class-binding
+# read folds it to "open". bd's own readiness counts it satisfied, so a
+# dependent only a pinned blocker holds goes unnudged; a seat parked on that
+# dependent still wakes, because the park reads the store's ready query (gc
+# itself never pins a bead, and a pinned bead never closes). It prints "self"
+# when $2's own blocked close holds the dependent, whether or not another
+# blocker does too; "other" when only another blocker holds it; and nothing
+# when no blocker is known to. Only a close that may have unblocked the
+# dependent is worth a nudge: while a blocker holds it, its assignee or routed
+# target has nothing to do, and a nudge to an asleep seat parked on it would
+# wake that seat for nothing (it wakes on its own once the dependent is
+# ready). A row this read cannot judge holds nothing: an external row (a
+# blocker outside the dependent's store, whose status this read does not
+# have), a row with no status, and $2 read before its close. A read that
+# fails, or that cannot be parsed, proves nothing either: the nudge goes out,
+# as it always has. Uses the dependent's rig args.
+still_held() {
     _down="$(gc bd dep list "$1" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
-            --direction=down --type=blocks --json 2>/dev/null)" || return 1
-    _open="$(printf '%s' "$_down" \
-        | jq -r --arg b "$2" '[.[] | select(.id != $b and .status != "closed" and .status != "pinned")] | length' 2>/dev/null)" || return 1
-    [ -n "$_open" ] && [ "$_open" -gt 0 ]
+            --direction=down --type=blocks --json 2>/dev/null)" || return 0
+    printf '%s' "$_down" | jq -r --arg b "$2" '
+        def closed_blocked:
+            (.metadata // {}) as $m
+            | .status == "closed"
+              and $m["gc.work_outcome"] == "blocked"
+              and (($m["gc.step_ref"] // "") == "" or $m["gc.outcome"] != "pass");
+        def holds:
+            if .external == true or (.status // "") == "" then false
+            else .status != "closed" or closed_blocked end;
+        if any(.[]; .id == $b and closed_blocked) then "self"
+        elif any(.[]; .id != $b and holds) then "other"
+        else empty end' 2>/dev/null || true
 }
 
 # Pull recent bead.closed events. Best-effort: a read failure must not
@@ -199,13 +222,22 @@ while IFS= read -r blocker; do
         fi
         set_rig_args "$dep_id"
         [ -z "$RIG_SUSPENDED" ] || continue
-        # A still-blocked dependent's pair is recorded as handled, so the
-        # lookback's later runs do not read its blockers again: the close of
-        # its last blocker is its own (blocker, dependent) pair, and nudges.
-        if still_blocked "$dep_id" "$blocker"; then
-            STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
-            continue
-        fi
+        # A dependent this blocker's own blocked close holds is not
+        # recorded, whether or not another blocker holds it too: this
+        # blocker's later close that passes is this same pair, and must
+        # still nudge. A dependent only another blocker holds has its pair
+        # recorded as handled, so the lookback's later runs do not read its
+        # blockers again: the close of its last blocker is its own
+        # (blocker, dependent) pair, and nudges.
+        case "$(still_held "$dep_id" "$blocker")" in
+            other)
+                STATE="$(echo "$STATE" | jq --arg k "$key" --arg now "$NOW" '.[$k] = $now')"
+                continue
+                ;;
+            # Left unrecorded, so each later run in the lookback reads its
+            # blockers again: one dep list per such dependent per run.
+            self) continue ;;
+        esac
         if [ "$dep_kind" = "assignee" ]; then
             msg="blocker $blocker closed — your dependent $dep_id may be unblocked"
             if gc session nudge ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} "$target" "$msg" >/dev/null 2>&1; then
