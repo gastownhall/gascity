@@ -262,7 +262,9 @@ type InterruptCall struct {
 // it only when the probe showed RequestID pending and Interaction, the
 // occurrence the op answers, is its latest raising, still unresolved; the
 // executor answers only that request (RequestID is always set), and reports
-// Rejected skipped{stale} when the runtime shows another or none. A respond
+// Rejected skipped{stale} when the runtime shows another or none, or when
+// Interaction has ended since (Store.Raising): an identical prompt raised
+// later shares the request id. A respond
 // is at most once: after an Unknown result, or a lease that expired over its
 // attempt, it closes failed{ambiguous_delivery} and is never called again.
 type RespondCall struct {
@@ -569,9 +571,6 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		now := l.now()
 		rp := planRules(snap, conv, now, l.by())
 		l.fillWaits(&res, rp.waits, rp.wake, rp.next)
-		if err := l.endOccurrences(rp.closes); err != nil {
-			return res, err
-		}
 		switch done, err := l.writeCloses(ctx, rp.closes, rp.closeRow, snap.rt, &res); {
 		case err != nil:
 			return res, err
@@ -593,14 +592,15 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		if err != nil {
 			return res, fmt.Errorf("probing conversation %s: %w", conv.ID, err)
 		}
-		if probe, rp.raisings, err = l.noteRaisings(rp, probe, conv); err != nil {
+		var moved bool
+		switch probe, rp.raisings, moved, err = l.noteRaisings(ctx, &snap, rp, probe, conv); {
+		case err != nil:
 			return res, err
+		case moved:
+			continue
 		}
 		tp, err := planTake(rp, probe, conv, now)
 		if err != nil {
-			return res, err
-		}
-		if err := l.endOccurrences(tp.closes); err != nil {
 			return res, err
 		}
 		l.fillWaits(&res, append(rp.waits, tp.waits...), rp.wake || tp.wake, minTime(rp.next, tp.next))

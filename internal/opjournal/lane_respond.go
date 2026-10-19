@@ -1,9 +1,13 @@
 package opjournal
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // Respond outcome reasons the lane writes.
@@ -68,32 +72,60 @@ func undecodableRow(err error) bool {
 		errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrUnsupportedKind)
 }
 
-// noteRaisings records the raising the probe shows, if any, ends the
-// occurrence of every open respond whose prompt the probe shows gone
-// (clearGone), then reads the occurrence each respond candidate answers. A
-// probe sees one prompt where a runtime's request ids repeat; RecordRaising
-// numbers it the next occurrence once the last is resolved, so it is read
-// after the record. A request id the journal cannot store (too long, control
-// characters, padding), or whose raisings do not decode, is no occurrence
-// anyone can answer: the probe returned reads it as PendingUnknown, and only
-// a store error fails the pass. The look still showed that request, so the
-// occurrences it shows gone end all the same.
-func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv ConversationView) (Probe, map[string]raisingState, error) {
+// noteRaisings notes what a definitive look shows (noteLook), then reads the
+// occurrence each respond candidate answers. A probe sees one prompt where a
+// runtime's request ids repeat; RecordRaising numbers it the next occurrence
+// once the last is resolved, so it is read after the record. moved says the
+// look's write to the runtime row lost to another writer: the pass re-reads.
+func (l *ConversationLane) noteRaisings(ctx context.Context, snap *laneSnapshot, rp rulesPlan, probe Probe, conv ConversationView) (Probe, map[string]raisingState, bool, error) {
+	probe, moved, err := l.noteLook(ctx, &snap.rt, rp, probe, conv)
+	if err != nil || moved {
+		return probe, nil, moved, err
+	}
+	return probe, l.readRaisings(rp, conv), false, nil
+}
+
+// noteLook records what a definitive look shows (definitiveLook): the
+// raising of the request it shows pending, if any; the end of every
+// occurrence it shows gone (clearGone); and, in the runtime row's pending
+// cell, the occurrence it shows (notePending), so that a later look that
+// shows the prompt gone ends that occurrence even while no respond names it
+// yet. A request id the journal cannot store (too long, control characters,
+// padding), or whose raisings do not decode, is no occurrence anyone can
+// answer: the probe returned reads it as PendingUnknown, and only a store
+// error fails the pass. The look still showed that request, so the
+// occurrences it shows gone end all the same, and a cell naming an earlier
+// raising of the same request keeps it.
+func (l *ConversationLane) noteLook(ctx context.Context, rt *runtimeSnap, rp rulesPlan, probe Probe, conv ConversationView) (Probe, bool, error) {
 	pending, looked := definitiveLook(probe, conv)
-	if looked && pending != "" {
-		_, _, err := l.store.RecordRaising(conv.ID, conv.Generation, pending, FactBasisObserved, l.now())
+	if !looked {
+		return probe, false, nil
+	}
+	last := pendingCell(*rt, conv)
+	shown := ""
+	if pending != "" {
+		r, _, err := l.store.RecordRaising(conv.ID, conv.Generation, pending, FactBasisObserved, l.now())
 		switch {
 		case errors.Is(err, ErrInvalidRequest), undecodableRow(err):
 			probe.Pending = PendingUnknown
+			if req, _, perr := ParseInteractionOccurrence(last); perr == nil && req == pending {
+				shown = last
+			}
 		case err != nil:
-			return probe, nil, err
+			return probe, false, err
+		default:
+			shown = r.Raised.Interaction
 		}
 	}
-	if looked {
-		if err := l.clearGone(rp.responds, conv, pending); err != nil {
-			return probe, nil, err
-		}
+	if err := l.clearGone(goneCandidates(rp.responds, conv, last), conv, pending); err != nil {
+		return probe, false, err
 	}
+	moved, err := l.notePending(ctx, rt, rp.inc, conv, shown)
+	return probe, moved, err
+}
+
+// readRaisings reads the occurrence each respond candidate answers.
+func (l *ConversationLane) readRaisings(rp rulesPlan, conv ConversationView) map[string]raisingState {
 	var out map[string]raisingState
 	for _, e := range rp.control {
 		if !e.candidate() || e.op.Kind != KindRespond {
@@ -112,38 +144,96 @@ func (l *ConversationLane) noteRaisings(rp rulesPlan, probe Probe, conv Conversa
 		}
 		out[e.op.ID] = st
 	}
-	return probe, out, nil
+	return out
 }
 
-// clearGone ends, cleared, the open occurrence of every open respond of the
-// view's generation whose request the look shows gone: another request, or
-// none, is pending (DES-O1 §10.2, "still raised"). That covers a respond the
-// pass would not take now, waiting on a runtime that is not running or
-// backing off after a transient refusal: an identical prompt raised later is
-// another occurrence, which the old answer must not reach. An occurrence
-// whose facts do not decode is left alone; its respond waits on the read.
-func (l *ConversationLane) clearGone(responds []Op, conv ConversationView, pending string) error {
+// goneCandidates are the occurrences of the view's generation a look can show
+// gone: the one the lane's last look saw pending (last, the runtime row's
+// pending cell), which no respond may name yet while its requester chooses
+// an answer, and every open respond's, including one the pass would not take
+// now, waiting on a runtime that is not running or backing off after a
+// transient refusal. responds are the open respond ops (rulesPlan.responds).
+func goneCandidates(responds []Op, conv ConversationView, last string) []string {
+	var out []string
+	if last != "" {
+		out = append(out, last)
+	}
 	for _, op := range responds {
-		if op.Scope.Generation != conv.Generation {
-			continue
+		if op.Scope.Generation == conv.Generation && !slices.Contains(out, op.Scope.Interaction) {
+			out = append(out, op.Scope.Interaction)
 		}
-		req, _, err := ParseInteractionOccurrence(op.Scope.Interaction)
+	}
+	return out
+}
+
+// clearGone ends, cleared, each occurrence of occs (all of the view's
+// generation) whose request the look shows gone: another request, or none,
+// is pending (DES-O1 §10.2, "still raised"). An identical prompt raised
+// later is another occurrence, which an answer to the old one must not
+// reach. An end already recorded stands (endRaising), and an occurrence
+// whose facts do not decode is left alone: a respond to it waits on the read.
+func (l *ConversationLane) clearGone(occs []string, conv ConversationView, pending string) error {
+	for _, occ := range occs {
+		req, _, err := ParseInteractionOccurrence(occ)
 		if err != nil || req == pending {
 			continue
 		}
-		if err := l.store.endRaising(clearedEnd(op, l.now())); err != nil && !undecodableRow(err) {
-			return fmt.Errorf("ending interaction %s of op %s: %w", op.Scope.Interaction, op.ID, err)
+		f := interactionFact(FactInteractionResolved, conv.ID, conv.Generation, occ)
+		f.At, f.Basis, f.Reason = l.now(), FactBasisObserved, ResolvedCleared
+		if err := l.store.endRaising(f); err != nil && !undecodableRow(err) {
+			return fmt.Errorf("ending interaction %s of conversation %s: %w", occ, conv.ID, err)
 		}
 	}
 	return nil
 }
 
-// clearedEnd is the interaction.resolved that ends op's occurrence as seen
-// gone with no answer of the lane's: reason cleared, basis observed.
-func clearedEnd(op Op, now time.Time) Fact {
-	f := interactionFact(FactInteractionResolved, op.Conversation, op.Scope.Generation, op.Scope.Interaction)
-	f.At, f.Basis, f.Reason = now, FactBasisObserved, ResolvedCleared
-	return f
+// pendingCell is the occurrence rt's pending cell holds for the view's
+// generation: "" when the row holds none, or one of another generation,
+// whose runtime the look did not see.
+func pendingCell(rt runtimeSnap, conv ConversationView) string {
+	if !rt.found || rt.row.PendingGen != conv.Generation {
+		return ""
+	}
+	return rt.row.Pending
+}
+
+// notePending sets the runtime row's pending cell to shown, the occurrence a
+// definitive look shows pending ("" for none), creating the row when no Take
+// has. It writes only when the cell changes, so a look at the same prompt
+// writes nothing, and it leaves rt as written, so the Take that follows
+// guards on the row it wrote and is not re-planned. moved says the write
+// lost to another writer of the row, or ended unknown: the pass re-reads.
+func (l *ConversationLane) notePending(ctx context.Context, rt *runtimeSnap, inc incarnation, conv ConversationView, shown string) (moved bool, err error) {
+	if pendingCell(*rt, conv) == shown {
+		return false, nil
+	}
+	next := RuntimeRow{Conversation: conv.ID, Generation: inc.gen, Epoch: inc.epoch}
+	if rt.found {
+		next = rt.row
+	}
+	next.Pending, next.PendingGen = shown, 0
+	if shown != "" {
+		next.PendingGen = conv.Generation
+	}
+	item, b, err := l.rowWrite(*rt, next)
+	if err != nil {
+		return false, err
+	}
+	res, kind, err := l.store.apply(ctx, "opjournal: lane look", []beads.GuardedItem{item})
+	switch kind {
+	case batchOK:
+	case batchInvalid:
+		return false, fmt.Errorf("noting the pending interaction of conversation %s: %w", conv.ID, err)
+	default:
+		return true, nil
+	}
+	b.Revision = res.Revisions[b.ID]
+	row, err := DecodeRuntimeRow(b)
+	if err != nil {
+		return false, err
+	}
+	*rt = runtimeSnap{read: true, found: true, bead: b, row: row}
+	return false, nil
 }
 
 // over reports an occurrence read as raised and already resolved: a respond
@@ -218,26 +308,6 @@ func respondEnd(next Op, now time.Time) (Fact, bool) {
 	return f, true
 }
 
-// endOccurrences records the end of the occurrence of every lane respond it
-// closes (Store.endOccurrence), before the closes are written: a crash in
-// between leaves the ops open, and the next pass closes them again on the
-// recorded facts. Written after, a crash would leave an occurrence open whose
-// answers are spent, so the prompt still showing could not be answered under
-// a fresh key. An end withheld for another open answer is re-checked once
-// the closes land (endClosedOccurrences).
-func (l *ConversationLane) endOccurrences(closes []ruleClose) error {
-	closing := make(map[string]bool, len(closes))
-	for _, c := range closes {
-		closing[c.cur.ID] = true
-	}
-	for _, c := range closes {
-		if err := l.store.endOccurrence(c.next, closing, l.now()); err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 // occurrenceEnd is the end the close of next records for its occurrence
 // (respondEnd), less an unanswered one while another open lane respond,
 // outside closing, still answers the occurrence: an answer that sent
@@ -265,20 +335,37 @@ func (s *Store) occurrenceEnd(next Op, closing map[string]bool, now time.Time) (
 	return f, true, nil
 }
 
-// endOccurrence records the end the close of next gives its occurrence
-// (occurrenceEnd), if any, before that close is written. An occurrence whose
-// facts do not decode gets none, and the close goes on: no one can read or
-// answer that occurrence, and one undecodable row must not stall the
-// conversation (DES-O1 §4.1).
-func (s *Store) endOccurrence(next Op, closing map[string]bool, now time.Time) error {
+// endItem is the guarded create of the end the close of next gives its
+// occurrence (occurrenceEnd), for the batch that writes that close, so the
+// end lands exactly when the close does. An end written before the close
+// would stand for a close that lost its write to a Take of the op: the
+// answer that Take sends would land under an ended occurrence, and the
+// prompt still showing would be recorded as the next one. An end written
+// after would leave the occurrence open, its answers spent, on a crash in
+// between. ok is false when the close gives no end, when the occurrence was
+// never raised (an end would resolve that raising before it happens) or has
+// ended, and when its facts do not decode: no one can read or answer that
+// occurrence, and one undecodable row must not stall the conversation
+// (DES-O1 §4.1). A writer that ends the occurrence first refuses the batch
+// (beads.ErrAlreadyExists), and the re-read finds it ended.
+func (s *Store) endItem(next Op, closing map[string]bool, now time.Time) (beads.GuardedItem, bool, error) {
 	f, ok, err := s.occurrenceEnd(next, closing, now)
 	if err == nil && ok {
-		err = s.endRaising(f)
+		var raised, resolved bool
+		raised, resolved, err = s.raisingOf(f.Conversation, f.Generation, f.Interaction)
+		ok = raised && !resolved
 	}
-	if err != nil && !undecodableRow(err) {
-		return err
+	switch {
+	case err != nil && undecodableRow(err):
+		return beads.GuardedItem{}, false, nil
+	case err != nil || !ok:
+		return beads.GuardedItem{}, false, err
 	}
-	return nil
+	item, err := FactCreateItem(s.prefix, f)
+	if err != nil {
+		return beads.GuardedItem{}, false, err
+	}
+	return item, true, nil
 }
 
 // endClosedOccurrences re-checks, once closes have landed, the end of the
@@ -297,7 +384,7 @@ func (l *ConversationLane) endClosedOccurrences(closes []ruleClose) error {
 // read the other open before either close lands, and each withholds the end
 // for the other; re-read after its own close, the later of them reads both
 // closed and ends the occurrence. An end already recorded stands
-// (endRaising), and every other end is written before the close. When the
+// (endRaising), and every other end lands with the close (endItem). When the
 // other answers cannot be read the end lands anyway and the error says so,
 // as in Done (doneEnds): the close has landed, and an occurrence left open
 // with its answers spent could not be answered again.
@@ -320,12 +407,20 @@ func (s *Store) endClosed(next Op, now time.Time) error {
 // Cancel found closed: by Store.Close or outside the journal, neither of
 // which ends its occurrence, or by a close whose re-check (endClosed) did
 // not land. An unanswered end lands as endClosed lands it, even when the
-// other answers cannot be read; any other as endOccurrence writes it.
+// other answers cannot be read; any other end lands as it is, unless the
+// occurrence's facts do not decode.
 func (s *Store) endTerminal(next Op, now time.Time) error {
-	if f, ok := respondEnd(next, now); ok && f.Reason == ResolvedUnanswered {
+	f, ok := respondEnd(next, now)
+	switch {
+	case !ok:
+		return nil
+	case f.Reason == ResolvedUnanswered:
 		return s.endClosed(next, now)
 	}
-	return s.endOccurrence(next, nil, now)
+	if err := s.endRaising(f); err != nil && !undecodableRow(err) {
+		return err
+	}
+	return nil
 }
 
 // respondCall is the effect call of a taken respond op, or the rejection of

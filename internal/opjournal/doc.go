@@ -19,8 +19,9 @@
 // gc:fact-conv:<conversation>), written closed or, on a store that creates
 // rows open, closed right after the create (RecordFact); and one runtime row
 // per conversation (gc:rt, gc:rt-conv:<conversation>) at the pinned id
-// RuntimeRowID, which holds the lane cells (gen, epoch, seq, lease) and the
-// runtime and turn observations in gc.rt.* metadata; lanes and observers
+// RuntimeRowID, which holds the lane cells (gen, epoch, seq, lease, and the
+// interaction occurrence the lane last saw pending) and the runtime and turn
+// observations in gc.rt.* metadata; lanes and observers
 // update it in place under revision guards (RuntimeRowPatch builds the
 // update). Rows are no-history and never ephemeral. Type "op" is
 // ready-excluded, rows carry no gc.routed_to, and an op's assignee is only ever
@@ -97,7 +98,7 @@
 // closes (if_idle while busy: skipped{busy}; steer with fallback_fail, or a
 // respond the runtime cannot perform: failed{unsupported}); an op that may
 // have been delivered (a re-take, or one released after an Unknown result)
-// waits instead, busy or unsupported, to be replayed, and start_by bounds
+// waits instead, busy, to be replayed, and start_by bounds
 // the wait (failed{deadline_in_flight}). An after_unreadable wait names
 // the cause in its Detail; it retries after TransientBackoffBase when the
 // store failed to read the target, and waits with no timer, as after_pending
@@ -136,9 +137,11 @@
 // generation (RecordRaising). A lane respond is at most once. The first
 // accepted answer wins: a close that may have answered ends the occurrence,
 // a close with nothing sent ends it once no other open answer names it
-// (occurrenceEnd, re-read once the close lands: endClosed), and a look that
-// shows its prompt gone ends it as well (clearGone), so a prompt still
-// showing is the next occurrence. A legacy respond
+// (occurrenceEnd, re-read once the close lands: endClosed), each end in the
+// batch that writes its close (endItem), and a look that shows its prompt
+// gone ends it as well, even before any answer names it (clearGone, which
+// reads the runtime row's pending cell), so a prompt still showing is the
+// next occurrence. A legacy respond
 // keeps its client key. The digest covers the defaulted kind, policy (a
 // deliver-now's now_gen and now_turn included), scope, after and payload
 // (≤16 KiB): same id and digest returns the existing op; another digest is

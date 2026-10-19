@@ -196,23 +196,31 @@ func (l *ConversationLane) reread(ctx context.Context, lease Lease, read func() 
 // takeRowItem is the Take's runtime-row item and the row as the Take leaves
 // it (revision unset).
 func (l *ConversationLane) takeRowItem(rt runtimeSnap, spec *takeSpec, conv string, lease Lease, k uint64) (beads.GuardedItem, beads.Bead, error) {
+	next := RuntimeRow{Conversation: conv}
+	if rt.found {
+		if rt.row.Closed {
+			return beads.GuardedItem{}, beads.Bead{}, fmt.Errorf("%w: conversation %s: the runtime row is closed and does not reopen", ErrIllegalTransition, conv)
+		}
+		next = rt.row
+	}
+	next.Seq += k
+	next.Lease = lease
+	next.Generation, next.Epoch = spec.inc.gen, spec.inc.epoch
+	return l.rowWrite(rt, next)
+}
+
+// rowWrite is the guarded item that writes next over the runtime row as read
+// in rt: a create at its pinned id when there is none, else an update under
+// its revision. It returns the row as the item leaves it (revision unset).
+func (l *ConversationLane) rowWrite(rt runtimeSnap, next RuntimeRow) (beads.GuardedItem, beads.Bead, error) {
 	if !rt.found {
-		b, err := EncodeRuntimeRow(l.store.prefix, RuntimeRow{
-			Conversation: conv, Generation: spec.inc.gen, Epoch: spec.inc.epoch, Seq: k, Lease: lease,
-		})
+		b, err := EncodeRuntimeRow(l.store.prefix, next)
 		if err != nil {
 			return beads.GuardedItem{}, beads.Bead{}, err
 		}
 		create := b
 		return beads.GuardedItem{Create: &create}, b, nil
 	}
-	if rt.row.Closed {
-		return beads.GuardedItem{}, beads.Bead{}, fmt.Errorf("%w: conversation %s: the runtime row is closed and does not reopen", ErrIllegalTransition, conv)
-	}
-	next := rt.row
-	next.Seq += k
-	next.Lease = lease
-	next.Generation, next.Epoch = spec.inc.gen, spec.inc.epoch
 	opts, err := RuntimeRowPatch(rt.bead, next)
 	if err != nil {
 		return beads.GuardedItem{}, beads.Bead{}, err

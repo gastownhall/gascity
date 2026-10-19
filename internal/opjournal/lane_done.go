@@ -696,28 +696,11 @@ func releasedBy(cur, next Op) bool {
 	return last.Status == want.Status && last.By == want.By && cur.Attempt == next.Attempt
 }
 
-// writeCloses writes rule closes, and the runtime row's close when closeRow
-// is set, in batches of at most beads.MaxGuardedItems items. done is false
-// when a write was refused or ended unknown: the pass re-reads and re-plans.
+// writeCloses writes rule closes, each with the end it gives its occurrence
+// (closeBatch), and the runtime row's close when closeRow is set, in batches
+// of at most beads.MaxGuardedItems items. done is false when a write was
+// refused or ended unknown: the pass re-reads and re-plans.
 func (l *ConversationLane) writeCloses(ctx context.Context, closes []ruleClose, closeRow bool, rt runtimeSnap, res *PassResult) (bool, error) {
-	var items []beads.GuardedItem
-	var batchCloses [][]ruleClose
-	var cur []ruleClose
-	for _, c := range closes {
-		item, err := opUpdateItem(c.cur, c.next)
-		if err != nil {
-			return false, err
-		}
-		if len(cur) == beads.MaxGuardedItems {
-			batchCloses = append(batchCloses, cur)
-			cur = nil
-		}
-		cur = append(cur, c)
-		items = append(items, item)
-	}
-	if len(cur) > 0 {
-		batchCloses = append(batchCloses, cur)
-	}
 	var rowItem *beads.GuardedItem
 	if closeRow {
 		row := rt.row
@@ -730,11 +713,14 @@ func (l *ConversationLane) writeCloses(ctx context.Context, closes []ruleClose, 
 		rev := rt.bead.Revision
 		rowItem = &beads.GuardedItem{Update: &beads.GuardedUpdate{ID: rt.bead.ID, Opts: opts, ExpectedRevision: &rev}}
 	}
-	offset := 0
-	for bi, bc := range batchCloses {
-		batch := slices.Clone(items[offset : offset+len(bc)])
-		offset += len(bc)
-		if bi == len(batchCloses)-1 && rowItem != nil && len(batch) < beads.MaxGuardedItems {
+	for len(closes) > 0 {
+		batch, n, err := l.closeBatch(closes)
+		if err != nil {
+			return false, err
+		}
+		bc := closes[:n]
+		closes = closes[n:]
+		if len(closes) == 0 && rowItem != nil && len(batch) < beads.MaxGuardedItems {
 			batch = append(batch, *rowItem)
 			rowItem = nil
 		}
@@ -754,6 +740,36 @@ func (l *ConversationLane) writeCloses(ctx context.Context, closes []ruleClose, 
 		}
 	}
 	return true, nil
+}
+
+// closeBatch is the next close batch from the head of closes: each close and
+// the end it gives its occurrence (Store.endItem), with room left for every
+// close's end; n says how many closes it takes. An end is decided with the
+// batch's closes so far as closing: of two answers to one occurrence closing
+// in the batch the later gives the end, and an end withheld for an answer
+// closing in a later batch is re-checked once its batch lands
+// (endClosedOccurrences).
+func (l *ConversationLane) closeBatch(closes []ruleClose) (items []beads.GuardedItem, n int, err error) {
+	closing := map[string]bool{}
+	ends := map[string]bool{}
+	for ; n < len(closes) && len(items)+2 <= beads.MaxGuardedItems; n++ {
+		c := closes[n]
+		item, err := opUpdateItem(c.cur, c.next)
+		if err != nil {
+			return nil, 0, err
+		}
+		items = append(items, item)
+		closing[c.cur.ID] = true
+		end, ok, err := l.store.endItem(c.next, closing, l.now())
+		if err != nil {
+			return nil, 0, err
+		}
+		if ok && !ends[end.Create.ID] {
+			ends[end.Create.ID] = true
+			items = append(items, end)
+		}
+	}
+	return items, n, nil
 }
 
 // applyCloses applies one close batch: ok when it landed, false when it must

@@ -160,6 +160,12 @@ func interactionFact(kind FactKind, conv string, gen int64, occ string) Fact {
 // RecordRaising again at request time is not idempotent: once the first
 // attempt has resolved the raising, it records the next one, and a retry
 // would answer a later, identical prompt.
+//
+// Raisings are told apart only by what a look observes: a raising ends when
+// a look shows its prompt gone, or an answer to it closes. A prompt answered
+// at the terminal and raised again identically while no look saw it gone
+// (the lane looks only at a conversation with an op to take) is still one
+// raising, so an answer keyed to it reaches the second prompt.
 func RespondKey(raised Fact) (string, error) {
 	if raised.Kind != FactInteractionRaised {
 		return "", invalidf("respond key: %s is not an interaction.raised fact", raised.Kind)
@@ -333,14 +339,31 @@ func (s *Store) endRaising(f Fact) error {
 	return nil
 }
 
+// Raising reads occurrence occ, <request id>#<n>, of generation gen of conv:
+// its interaction.raised fact, and whether an interaction.resolved records
+// its end; found is false when it was never raised. An executor re-reads it
+// just before it answers, so an end any writer recorded since the lane
+// planned the answer stops it.
+func (s *Store) Raising(conv string, gen int64, occ string) (r InteractionRaising, found bool, err error) {
+	if _, _, err := ParseInteractionOccurrence(occ); err != nil {
+		return InteractionRaising{}, false, err
+	}
+	raised, found, err := s.readFact(interactionFact(FactInteractionRaised, conv, gen, occ))
+	if err != nil || !found {
+		return InteractionRaising{}, false, err
+	}
+	_, resolved, err := s.readFact(interactionFact(FactInteractionResolved, conv, gen, occ))
+	if err != nil {
+		return InteractionRaising{}, false, err
+	}
+	return InteractionRaising{Raised: raised, Resolved: resolved}, true, nil
+}
+
 // raisingOf reads occurrence occ of generation gen of conv: whether it was
 // raised, and whether it is resolved.
 func (s *Store) raisingOf(conv string, gen int64, occ string) (raised, resolved bool, err error) {
-	if _, raised, err = s.readFact(interactionFact(FactInteractionRaised, conv, gen, occ)); err != nil || !raised {
-		return false, false, err
-	}
-	_, resolved, err = s.readFact(interactionFact(FactInteractionResolved, conv, gen, occ))
-	return raised, resolved, err
+	r, raised, err := s.Raising(conv, gen, occ)
+	return raised, r.Resolved, err
 }
 
 // readFact reads the fact of f's occurrence at its pinned id; found is false

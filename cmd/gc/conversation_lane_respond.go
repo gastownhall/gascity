@@ -29,7 +29,12 @@ const laneRespondRefusedAction = opjournal.RefusedReasonPrefix + "action"
 // legacy Manager.Respond holds over its own: otherwise both could pass the
 // runtime's pre-verify of one prompt and type two keys, the second landing
 // in whatever shows next. A lock held past ctx, or a re-check that outlasts
-// it, sends nothing, and the op retries.
+// it, sends nothing, and the op retries. The re-check reads the occurrence
+// too: the prompt showing may be a later raising of the call's request id (a
+// content hash), so an end another writer recorded since the lane planned
+// the answer sends nothing. The probe resolves a RuntimeHandle (it saw the
+// runtime running as the row's incarnation), whose Respond takes no session
+// lock; a SessionHandle's would wait on the lock held here.
 func (e *conversationLaneExec) Respond(ctx context.Context, c opjournal.RespondCall) opjournal.ControlResult {
 	h := e.live
 	if h == nil {
@@ -57,6 +62,9 @@ func (e *conversationLaneExec) respondLocked(ctx context.Context, h worker.Handl
 	case pending == nil || pending.RequestID != c.RequestID:
 		return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
 	}
+	if res := e.respondOccurrence(c); res != nil {
+		return res
+	}
 	// The re-check need not honor ctx, so it can spend the call's budget:
 	// an answer begun now would fail before its key, so none is sent.
 	if err := ctx.Err(); err != nil {
@@ -71,6 +79,28 @@ func (e *conversationLaneExec) respondLocked(ctx context.Context, h worker.Handl
 		Fence:     fence,
 	})
 	return laneRespondResult(ctx, err, fence.IsZero())
+}
+
+// errLaneNoOpStore is a Respond with no op store to re-read its occurrence
+// from. The lane host always passes one, so it is a bug; nothing is sent.
+var errLaneNoOpStore = errors.New("conversation lane: respond without an op store to read its occurrence")
+
+// respondOccurrence re-reads the occurrence c answers: nil while it is raised
+// and unresolved, else the result that ends the call with nothing sent,
+// skipped{stale} for an occurrence that has ended and a transient miss for a
+// read that failed.
+func (e *conversationLaneExec) respondOccurrence(c opjournal.RespondCall) opjournal.ControlResult {
+	if e.deps.lane == nil {
+		return opjournal.NotDelivered{Transient: true, Cause: errLaneNoOpStore}
+	}
+	r, found, err := e.deps.lane.Raising(c.Op.Conversation, c.Op.Scope.Generation, c.Interaction)
+	switch {
+	case err != nil:
+		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("re-reading interaction %s before answering it: %w", c.Interaction, err)}
+	case !found || r.Resolved:
+		return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
+	}
+	return nil
 }
 
 // respondFence is the runtime fence an answer under f carries: f's

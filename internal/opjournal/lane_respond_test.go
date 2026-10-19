@@ -459,11 +459,12 @@ func TestLaneRespondWithNothingSentEndsTheOccurrence(t *testing.T) {
 	}
 }
 
-// The end of an occurrence is written before the close of its op: when the
-// fact cannot be written, nothing closes, and the next pass closes the op on
-// the recorded fact. Written after, a crash would leave the occurrence open
-// with its answers spent.
-func TestLaneRespondEndIsWrittenBeforeTheClose(t *testing.T) {
+// The end of an occurrence lands in the batch that closes its op: when the
+// occurrence cannot be read, nothing closes, and the next pass closes the op
+// with its end. Written after the close, a crash between would leave the
+// occurrence open with its answers spent; written before, the end would
+// stand for a close that lost its batch.
+func TestLaneRespondEndLandsWithTheClose(t *testing.T) {
 	h, fs := newLaneHarnessFlaky(t)
 	raised := h.raise(t, "tmux-abc")
 	op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
@@ -473,7 +474,7 @@ func TestLaneRespondEndIsWrittenBeforeTheClose(t *testing.T) {
 	exec := respondExec(h, "tmux-abc")
 	l := h.lane(t, "ctl")
 	if _, err := l.Pass(context.Background(), view(), exec); !errors.Is(err, errFlakyRead) {
-		t.Fatalf("pass = %v, want the fact write's read error", err)
+		t.Fatalf("pass = %v, want the occurrence's read error", err)
 	}
 	if got := h.get(t, op.ID); got.Status == StatusClosed {
 		t.Fatalf("the op closed %+v before its occurrence ended", got.Outcome)
@@ -485,6 +486,9 @@ func TestLaneRespondEndIsWrittenBeforeTheClose(t *testing.T) {
 	}
 	if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered {
 		t.Fatalf("occurrence ended %v %+v", ok, f)
+	}
+	if !slices.ContainsFunc(h.batcher.batches(), func(b beads.GuardedBatch) bool { return closesOp(b, op.ID) && createsRow(b, resolvedID) }) {
+		t.Fatal("no batch carries both the close and the occurrence's end")
 	}
 }
 
@@ -1002,10 +1006,10 @@ func TestCancelOfARespondClosedOutsideTheLaneEndsItsOccurrence(t *testing.T) {
 	})
 }
 
-// Cancel writes a lane respond's end before its close (finding #3 of the
-// second review): when the end cannot be written the op stays open and
-// Cancel fails, so a retry, or the lane, closes it on a recorded end.
-func TestCancelRespondEndsTheOccurrenceBeforeTheClose(t *testing.T) {
+// Cancel writes a lane respond's end in the batch that closes it: when the
+// occurrence cannot be read the op stays open and Cancel fails, so a retry,
+// or the lane, closes it with its end.
+func TestCancelRespondEndsTheOccurrenceWithTheClose(t *testing.T) {
 	h, fs := newLaneHarnessFlaky(t)
 	raised := h.raise(t, "tmux-abc")
 	op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
@@ -1020,8 +1024,12 @@ func TestCancelRespondEndsTheOccurrenceBeforeTheClose(t *testing.T) {
 	if res, _, err := h.store.Cancel(op.ID, "operator", ""); err != nil || res != CancelClosed {
 		t.Fatalf("retried Cancel = %s, %v", res, err)
 	}
-	if f, ok := resolvedFact(t, h, raised.Interaction); !ok || f.Reason != ResolvedUnanswered {
+	f, ok := resolvedFact(t, h, raised.Interaction)
+	if !ok || f.Reason != ResolvedUnanswered {
 		t.Fatalf("occurrence ended %v %+v", ok, f)
+	}
+	if !slices.ContainsFunc(h.batcher.batches(), func(b beads.GuardedBatch) bool { return closesOp(b, op.ID) && createsRow(b, f.ID) }) {
+		t.Fatal("no batch carries both the cancel's close and the occurrence's end")
 	}
 	// The same principal's corrected answer is the next occurrence's.
 	again := h.raise(t, "tmux-abc")
@@ -1170,5 +1178,254 @@ func TestLaneCorruptRaisingSeenGoneDoesNotStall(t *testing.T) {
 	}
 	if got := h.get(t, msg.ID); got.Status != StatusClosed {
 		t.Fatalf("the unrelated message op stays %s", got.Status)
+	}
+}
+
+// createsRow reports whether batch creates row id.
+func createsRow(batch beads.GuardedBatch, id string) bool {
+	return slices.ContainsFunc(batch.Items, func(it beads.GuardedItem) bool { return it.Create != nil && it.Create.ID == id })
+}
+
+// takesOp reports whether batch takes op id: moves it to executing.
+func takesOp(batch beads.GuardedBatch, id string) bool {
+	return slices.ContainsFunc(batch.Items, func(it beads.GuardedItem) bool {
+		u := it.Update
+		return u != nil && u.ID == id && u.Opts.Metadata[keyStatus] == string(StatusExecuting)
+	})
+}
+
+// Cancel decides on a respond as submitted, and the lane's Take lands before
+// Cancel's write (finding #1 of the third OJ-16 review). The cancel then only
+// records its request, and no end lands for the close that lost: the lane
+// answers the occurrence still open, its end is the answer's, and a producer
+// recording the prompt while the answer is in flight is handed that
+// occurrence, not the next.
+func TestCancelLosingItsWriteToTheTakeEndsNothing(t *testing.T) {
+	h := newLaneHarness(t)
+	raised := h.raise(t, "tmux-abc")
+	op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	exec := respondExec(h, "tmux-abc")
+	var during InteractionRaising
+	exec.onEffect = func() {
+		var err error
+		if during, _, err = h.store.RecordRaising("gc-1", 1, "tmux-abc", FactBasisObserved, h.clk.Now()); err != nil {
+			t.Errorf("RecordRaising while the answer is in flight: %v", err)
+		}
+	}
+	// landTake applies the lane's Take, held at the batcher, just before
+	// Cancel's write lands: its fenced update, or the batch that carries it.
+	var take *beads.GuardedBatch
+	landTake := func() {
+		if take == nil {
+			return
+		}
+		b := *take
+		take = nil
+		if _, err := h.mem.ApplyGuarded(context.Background(), b); err != nil {
+			t.Errorf("landing the Take: %v", err)
+		}
+	}
+	h.store.writer = &raceWriter{ConditionalWriter: h.store.writer, id: op.ID, race: landTake}
+	var canceled CancelResult
+	var cancelErr error
+	fired := false
+	h.batcher.setFault(func(_ int, b beads.GuardedBatch) (bool, error) {
+		switch {
+		case !fired && takesOp(b, op.ID):
+			fired = true
+			take = &b
+			canceled, _, cancelErr = h.store.Cancel(op.ID, "operator", "")
+			// The Take landed inside Cancel: the lane reads its batch as
+			// unknown and resolves it by re-reading the lease.
+			return false, errLinkDropped
+		case take != nil && closesOp(b, op.ID):
+			landTake()
+		}
+		return false, nil
+	})
+	res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+	if cancelErr != nil || canceled != CancelRequested {
+		t.Fatalf("Cancel racing the Take = %s, %v; want requested", canceled, cancelErr)
+	}
+	if res.Done != DoneAccepted || len(exec.responds) != 1 {
+		t.Fatalf("pass %+v after %d responds; want the answer sent once", res, len(exec.responds))
+	}
+	if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded {
+		t.Fatalf("op %s %+v; want the answer's close", got.Status, got.Outcome)
+	}
+	f, ended := resolvedFact(t, h, raised.Interaction)
+	if !ended || f.Reason != "" || f.Basis != FactBasisLane || !slices.Equal(f.CauseOps, []string{op.ID}) {
+		t.Fatalf("occurrence ended %v %+v; want the answer's end", ended, f)
+	}
+	if during.Raised.Interaction != raised.Interaction || during.Resolved {
+		t.Fatalf("a producer recording the prompt during the answer was handed %+v; want the open %s", during, raised.Interaction)
+	}
+}
+
+// A lane's close of a respond loses its batch to another host's Take of it:
+// the end that close gives lands with it or not at all, so the other host
+// answers the occurrence still open, and its end is the answer's.
+func TestLaneCloseLosingItsBatchToATakeEndsNothing(t *testing.T) {
+	h := newLaneHarness(t)
+	raised := h.raise(t, "tmux-abc")
+	op := h.propose(t, laneRespond(t, raised, "operator", RespondPayload{Action: "approve"}))
+	// ctl's runtime says it takes no responses, so ctl closes the respond
+	// failed{unsupported}; cli's shows the prompt and answers it.
+	ctlExec := respondExec(h, "tmux-abc")
+	ctlExec.probe.Caps.Respond = false
+	cliExec := respondExec(h, "tmux-abc")
+	cli := h.lane(t, "cli")
+	fired := false
+	h.batcher.setFault(func(_ int, b beads.GuardedBatch) (bool, error) {
+		if !fired && closesOp(b, op.ID) {
+			fired = true
+			if res, err := cli.Pass(context.Background(), view(), cliExec); err != nil || res.Done != DoneAccepted {
+				t.Errorf("cli's pass under ctl's close = %+v, %v; want the answer accepted", res, err)
+			}
+		}
+		return false, nil
+	})
+	mustPass(t, h.lane(t, "ctl"), view(), ctlExec)
+	if len(cliExec.responds) != 1 || len(ctlExec.responds) != 0 {
+		t.Fatalf("cli sent %d responds, ctl %d; want cli's answer only", len(cliExec.responds), len(ctlExec.responds))
+	}
+	if got := h.get(t, op.ID); got.Outcome.Arm != ArmSucceeded {
+		t.Fatalf("op %s %+v; want the answer's close", got.Status, got.Outcome)
+	}
+	if f, ended := resolvedFact(t, h, raised.Interaction); !ended || f.Reason != "" || !slices.Equal(f.CauseOps, []string{op.ID}) {
+		t.Fatalf("occurrence ended %v %+v; want the answer's end", ended, f)
+	}
+}
+
+// A raising the lane saw ends once a later definitive look shows its prompt
+// gone, even while no respond names it (finding #2 of the third OJ-16
+// review): the requester shown the prompt answers after think time, keyed
+// to that raising, as RespondKey prescribes. The identical prompt raised
+// again is the next occurrence, and the late answer closes skipped{stale}
+// instead of reaching it.
+func TestLaneRaisingSeenGoneEndsWithNoRespondOpen(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// gone makes the probe show the prompt gone.
+		gone func(p *Probe)
+		// taken: a Take stamped the runtime row before the prompt showed.
+		taken bool
+	}{
+		{"prompt gone", func(p *Probe) { p.Pending = "" }, false},
+		{"another prompt", func(p *Probe) { p.Pending = "tmux-def" }, false},
+		{"an unrecordable prompt", func(p *Probe) { p.Pending = "tmux-\x01def" }, false},
+		{"runtime stopped", func(p *Probe) { p.Pending, p.Running = "", false }, false},
+		{"prompt gone after a Take", func(p *Probe) { p.Pending = "" }, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			l := h.lane(t, "ctl")
+			exec := respondExec(h, "")
+			if tc.taken {
+				h.propose(t, laneMsg("first", RoleNotice, "earlier"))
+				if res := mustPass(t, l, view(), exec); res.Took != TakeContent {
+					t.Fatalf("first pass %+v", res)
+				}
+			}
+			// A message waiting on a busy runtime keeps the lane looking.
+			msg := h.propose(t, laneMsg("m", RolePrompt, "hello"))
+			shows := func(pending string) Probe {
+				p := respondExec(h, pending).probe
+				p.Boundary = TriNo
+				return p
+			}
+			exec.probe = shows("tmux-abc")
+			mustPass(t, l, view(), exec)
+			first, found, err := h.store.LatestRaising("gc-1", 1, "tmux-abc")
+			if err != nil || !found || first.Raised.Interaction != "tmux-abc#1" || first.Resolved {
+				t.Fatalf("LatestRaising = %+v, found %v, %v", first, found, err)
+			}
+			// The prompt clears while the requester thinks.
+			tc.gone(&exec.probe)
+			mustPass(t, l, view(), exec)
+			f, ended := resolvedFact(t, h, first.Raised.Interaction)
+			if !ended || f.Reason != ResolvedCleared || f.Basis != FactBasisObserved {
+				t.Fatalf("occurrence %s ended %v %+v; want cleared", first.Raised.Interaction, ended, f)
+			}
+			// The late answer to the first raising arrives as the
+			// identical prompt shows again.
+			late := h.propose(t, laneRespond(t, first.Raised, "operator", RespondPayload{Action: "approve"}))
+			exec.probe = shows("tmux-abc")
+			mustPass(t, l, view(), exec)
+			if len(exec.responds) != 0 {
+				t.Fatalf("the late answer to %s reached the re-raised prompt: %+v", first.Raised.Interaction, exec.responds)
+			}
+			if got := h.get(t, late.ID); got.Outcome.Arm != ArmSkipped || got.Outcome.Reason != ReasonStale {
+				t.Fatalf("late answer %s %+v; want skipped{stale}", got.Status, got.Outcome)
+			}
+			latest, found, err := h.store.LatestRaising("gc-1", 1, "tmux-abc")
+			if err != nil || !found || latest.Raised.Interaction != "tmux-abc#2" || latest.Resolved {
+				t.Fatalf("the re-raised prompt is %+v, found %v, %v; want the open tmux-abc#2", latest, found, err)
+			}
+			if got := h.get(t, msg.ID); got.Status == StatusClosed {
+				t.Fatalf("the message closed %+v while the runtime was busy", got.Outcome)
+			}
+		})
+	}
+}
+
+// The lane keeps the occurrence its last definitive look saw pending in the
+// runtime row's pending cell, and writes the row only when that changes: a
+// look at the same prompt writes nothing, and a Take after a look that wrote
+// the row guards on the row as written, so the pass probes once. A look that
+// is not definitive (an unknown request, another incarnation, an unreachable
+// runtime, no live control, no respond capability) leaves the cell and the
+// raising as they are.
+func TestLanePendingCellChangesOnlyOnADefinitiveLook(t *testing.T) {
+	h := newLaneHarness(t)
+	l := h.lane(t, "ctl")
+	msg := h.propose(t, laneMsg("m", RolePrompt, "hello"))
+	exec := respondExec(h, "tmux-abc")
+	mustPass(t, l, view(), exec)
+	if rt := h.runtime(t); rt.Pending != "tmux-abc#1" || rt.PendingGen != 1 {
+		t.Fatalf("pending cell %q of generation %d; want tmux-abc#1 of 1", rt.Pending, rt.PendingGen)
+	}
+	_, rev, _, err := h.store.Runtime("gc-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustPass(t, l, view(), exec)
+	if _, again, _, _ := h.store.Runtime("gc-1"); again != rev {
+		t.Fatal("a look at the same prompt rewrote the runtime row")
+	}
+	for _, mod := range []func(*Probe){
+		func(p *Probe) { p.Pending = PendingUnknown },
+		func(p *Probe) { p.Pending, p.Fence = "", Fence{Conversation: "gc-1", Generation: 2, Epoch: 1} },
+		func(p *Probe) { p.Pending, p.Available = "", false },
+		func(p *Probe) { p.Pending, p.Caps.Live = "", false },
+		func(p *Probe) { p.Pending, p.Caps.Respond = "", false },
+	} {
+		// A busy runtime holds the message wherever nothing is pending.
+		e := respondExec(h, "tmux-abc")
+		e.probe.Boundary = TriNo
+		mod(&e.probe)
+		mustPass(t, l, view(), e)
+		if f, ok := resolvedFact(t, h, "tmux-abc#1"); ok {
+			t.Fatalf("probe %+v ended the raising: %+v", e.probe, f)
+		}
+		if rt := h.runtime(t); rt.Pending != "tmux-abc#1" {
+			t.Fatalf("probe %+v moved the pending cell to %q", e.probe, rt.Pending)
+		}
+	}
+	// The prompt clears: the look ends its raising and clears the cell, and
+	// the message goes in the same pass.
+	exec.probe.Pending = ""
+	probes := exec.probes
+	if res := mustPass(t, l, view(), exec); res.Done != DoneAccepted || !slices.Equal(res.Taken, []string{msg.ID}) {
+		t.Fatalf("pass after the prompt cleared %+v", res)
+	}
+	if n := exec.probes - probes; n != 1 {
+		t.Fatalf("the pass probed %d times; the Take after the look's write was re-planned", n)
+	}
+	if rt := h.runtime(t); rt.Pending != "" || rt.PendingGen != 0 {
+		t.Fatalf("pending cell %q of generation %d after a look that saw none", rt.Pending, rt.PendingGen)
+	}
+	if f, ok := resolvedFact(t, h, "tmux-abc#1"); !ok || f.Reason != ResolvedCleared {
+		t.Fatalf("raising ended %v %+v; want cleared", ok, f)
 	}
 }

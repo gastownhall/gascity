@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -42,6 +43,15 @@ func (f *laneFixture) respond(t *testing.T, st *opjournal.Store, p opjournal.Res
 		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator}, Payload: payload,
 		Scope: opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1, Interaction: r.Raised.Interaction},
 	}), r.Raised
+}
+
+// respondCall records the raising of laneTestRequest, proposes the
+// operator's answer to it and returns the call a pass over v makes for it.
+func (f *laneFixture) respondCall(t *testing.T, st *opjournal.Store, v opjournal.ConversationView) opjournal.RespondCall {
+	t.Helper()
+	answer := opjournal.RespondPayload{Action: "approve"}
+	op, raised := f.respond(t, st, answer)
+	return opjournal.RespondCall{Fence: laneFence(v), Op: op, Interaction: raised.Interaction, RequestID: laneTestRequest, Response: answer}
 }
 
 // responses are the answers the fake runtime received.
@@ -253,14 +263,35 @@ func TestLaneExecRespondWaitsOnAnotherIncarnation(t *testing.T) {
 	}
 }
 
+// errLaneTestRead is a store read that failed.
+var errLaneTestRead = errors.New("store read failed")
+
+// laneFailingGets fails Get of the ids fail names; every other call reaches
+// the wrapped store, which also serves the op store's conditional writes and
+// id prefix.
+type laneFailingGets struct {
+	beads.Store
+	fail func(id string) bool
+}
+
+func (s laneFailingGets) Get(id string) (beads.Bead, error) {
+	if s.fail(id) {
+		return beads.Bead{}, errLaneTestRead
+	}
+	return s.Store.Get(id)
+}
+
+func (s laneFailingGets) ConditionalWritesResolveTarget() beads.Store { return s.Store }
+
 // TestLaneExecRespondRefusesWithoutAnAnswer proves the executor's own checks
 // before the answer: no handle from the probe, a pending look that fails, a
-// session that takes no responses, each sending nothing.
+// session that takes no responses, an occurrence that cannot be read or no
+// op store to read it from, each sending nothing.
 func TestLaneExecRespondRefusesWithoutAnAnswer(t *testing.T) {
 	f := newLaneFixture(t)
 	st := f.laneStore(t)
 	v, info := f.view(t)
-	call := opjournal.RespondCall{Fence: laneFence(v), Interaction: "tmux-abc#1", RequestID: "tmux-abc", Response: opjournal.RespondPayload{Action: "approve"}}
+	call := f.respondCall(t, st, v)
 	e := newConversationLaneExec(f.deps(st), info)
 	if got, ok := e.Respond(context.Background(), call).(opjournal.NotDelivered); !ok || !got.Transient || !errors.Is(got.Cause, errLaneNoProbedHandle) {
 		t.Fatalf("Respond without a probe = %#v, want a transient NotDelivered", got)
@@ -276,6 +307,35 @@ func TestLaneExecRespondRefusesWithoutAnAnswer(t *testing.T) {
 	f.sp.PendingErrors[f.name] = runtime.ErrInteractionUnsupported
 	if got := e.Respond(context.Background(), call); got != (opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}) {
 		t.Fatalf("Respond to a session that takes no responses = %#v", got)
+	}
+	delete(f.sp.PendingErrors, f.name)
+	resolved, err := opjournal.FactID(st.Prefix(), opjournal.Fact{
+		Kind: opjournal.FactInteractionResolved, Conversation: f.id, Generation: 1, Interaction: call.Interaction,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unreadable, err := opjournal.NewStore(beads.SessionStore{Store: laneFailingGets{Store: f.store, fail: func(id string) bool { return id == resolved }}}, f.clk)
+	if err != nil {
+		t.Fatalf("NewStore: %v", err)
+	}
+	for _, tc := range []struct {
+		name  string
+		lane  *opjournal.Store
+		cause error
+	}{
+		{"occurrence unreadable", unreadable, errLaneTestRead},
+		{"no op store", nil, errLaneNoOpStore},
+	} {
+		deps := f.deps(st)
+		deps.lane = tc.lane
+		e := newConversationLaneExec(deps, info)
+		if _, err := e.Probe(context.Background(), v); err != nil {
+			t.Fatalf("%s: Probe: %v", tc.name, err)
+		}
+		if got, ok := e.Respond(context.Background(), call).(opjournal.NotDelivered); !ok || !got.Transient || !errors.Is(got.Cause, tc.cause) {
+			t.Fatalf("%s: Respond = %#v, want a transient NotDelivered for %v", tc.name, got, tc.cause)
+		}
 	}
 	if n := len(f.responses()); n != 0 {
 		t.Fatalf("%d answers reached the runtime", n)
@@ -438,7 +498,7 @@ func TestLaneExecRespondHoldsTheSessionMutationLock(t *testing.T) {
 	f := newLaneFixture(t)
 	st := f.laneStore(t)
 	v, info := f.view(t)
-	call := opjournal.RespondCall{Fence: laneFence(v), Interaction: "tmux-abc#1", RequestID: "tmux-abc", Response: opjournal.RespondPayload{Action: "approve"}}
+	call := f.respondCall(t, st, v)
 	e := newConversationLaneExec(f.deps(st), info)
 	f.prompt("tmux-abc")
 	if _, err := e.Probe(context.Background(), v); err != nil {
@@ -494,7 +554,7 @@ func TestLaneExecRespondDeadlineAfterTheRecheckSendsNothing(t *testing.T) {
 	f := newLaneFixture(t)
 	st := f.laneStore(t)
 	v, info := f.view(t)
-	call := opjournal.RespondCall{Fence: laneFence(v), Interaction: "tmux-abc#1", RequestID: "tmux-abc", Response: opjournal.RespondPayload{Action: "approve"}}
+	call := f.respondCall(t, st, v)
 	deps := f.deps(st)
 	hook := &pendingHook{Fake: f.sp}
 	deps.sp = hook
@@ -534,5 +594,37 @@ func TestLaneExecRespondCapsFromTheHandle(t *testing.T) {
 	p, err := newConversationLaneExec(deps, info).Probe(context.Background(), v)
 	if err != nil || p.Caps.Respond || !p.Caps.Live {
 		t.Fatalf("Probe = caps %+v, %v; want live with no respond", p.Caps, err)
+	}
+}
+
+// TestLaneExecRespondRefusesAnEndedOccurrence proves the executor re-reads
+// the occurrence it answers under the session mutation lock: an end another
+// writer recorded since the plan (another answer, a cancel, a look that saw
+// the prompt gone) stops the key, though the runtime still shows the request
+// id, which a later identical prompt shares.
+func TestLaneExecRespondRefusesAnEndedOccurrence(t *testing.T) {
+	f := newLaneFixture(t)
+	st := f.laneStore(t)
+	f.prompt(laneTestRequest)
+	op, raised := f.respond(t, st, opjournal.RespondPayload{Action: "approve"})
+	res, err := f.pass(context.Background(), t, f.lane(t, st), st, func(e *conversationLaneExec) opjournal.Executor {
+		return promptSwapExec{conversationLaneExec: e, swap: func() {
+			end := opjournal.Fact{
+				Kind: opjournal.FactInteractionResolved, Conversation: f.id, Generation: 1, Interaction: raised.Interaction,
+				Reason: opjournal.ResolvedCleared, Basis: opjournal.FactBasisObserved, At: f.clk.Now(),
+			}
+			if _, err := st.RecordFact(end); err != nil {
+				t.Errorf("ending %s: %v", raised.Interaction, err)
+			}
+		}}
+	})
+	if err != nil || res.Done != opjournal.DoneRejected {
+		t.Fatalf("Pass = %+v, %v; want the respond rejected", res, err)
+	}
+	if n := len(f.responses()); n != 0 {
+		t.Fatalf("%d answers reached the runtime for an ended occurrence", n)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSkipped || got.Outcome.Reason != opjournal.ReasonStale {
+		t.Fatalf("op outcome %+v; want skipped{stale}", got.Outcome)
 	}
 }
