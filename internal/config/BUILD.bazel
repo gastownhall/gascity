@@ -197,6 +197,7 @@ go_test(
         "workquery_ephemeral_blocked_test.go",
         "workquery_ephemeral_inprogress_hold_test.go",
         "workquery_ephemeral_scan_reuse_test.go",
+        "workquery_exclude_claimants_test.go",
         "workquery_fails_loudly_test.go",
         "workquery_federation_test.go",
         "workquery_graph_anchor_test.go",

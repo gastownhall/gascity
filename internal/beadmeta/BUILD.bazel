@@ -5,6 +5,7 @@ go_library(
     srcs = [
         "attempt.go",
         "control_close.go",
+        "exclude_claimants.go",
         "hold_labels.go",
         "human_wait.go",
         "keys.go",
@@ -24,6 +25,7 @@ go_test(
     srcs = [
         "attempt_test.go",
         "control_close_test.go",
+        "exclude_claimants_test.go",
         "guard_test.go",
         "hold_labels_test.go",
         "human_wait_test.go",
