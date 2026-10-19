@@ -18,10 +18,15 @@ import (
 const startDeferralHoldCeiling = 60 * time.Minute
 
 // startDeferralMemo remembers which never-started pending creates the last
-// start-executor run deferred at a start gate (the per-tick wake budget or the
-// async start limiter). A create waiting only on such a gate has not been
-// refused anything, so the 10-minute never-started lease must not roll it back
-// while the pool drains at max_wakes_per_tick. The memo is process-local and
+// start-executor run deferred at a start gate. A site is a start gate, and
+// records here, only when it declines a ready candidate for a reason
+// independent of that candidate's own state, refuses it nothing (it is
+// re-offered next pass), and writes nothing to any bead. A gate with its own
+// hold, such as endpoint capacity, does not record. The classification of
+// every start-op outcome is pinned in start_gate_classification_test.go.
+// A create waiting only on such a gate has not been refused anything, so the
+// 10-minute never-started lease must not roll it back while the pool drains
+// at max_wakes_per_tick. The memo is process-local and
 // in-memory by design: it holds no bead state, and a restart forgets it, which
 // restores the lease's ordinary rollback.
 //

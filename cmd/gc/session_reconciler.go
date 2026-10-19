@@ -1566,8 +1566,9 @@ func pendingCreateLeaseActive(i sessionpkg.Info, inFlight, neverStartedExpired, 
 // creating-state cleanup, while never-started creates need enough time to sit
 // behind a busy pool start queue.
 //
-// A never-started create waiting only on a start gate (the per-tick wake budget
-// or the async start limiter) is kept past this lease by startDeferralMemo, up
+// A never-started create waiting only on a start gate (a site that declines a
+// ready candidate independent of its own state, refuses it nothing and writes
+// no bead; see startDeferralMemo) is kept past this lease by startDeferralMemo, up
 // to startDeferralHoldCeiling. The memo is in-memory and read by the
 // reconciler and the reaper; a reader that sees only the bead (gc session wake)
 // still judges the row by this lease alone, and a restart forgets the memo.
@@ -3215,8 +3216,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						})
 					}
 				} else if now := clk.Now(); deferralMemo.Holds(infoPostZombie, now) {
-					// The create waits only on a start gate (the per-tick wake
-					// budget or the async start limiter): nothing refused it, so
+					// The create waits only on a start gate (see
+					// startDeferralMemo for the criterion): nothing refused it, so
 					// the lease does not roll it back while the pool drains.
 					expired = false
 					capacityHeld = true
