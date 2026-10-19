@@ -1487,6 +1487,7 @@ go_test(
         "hook_non_turn_boundary_test.go",
         "hook_output_test.go",
         "hook_store_federated_scope_test.go",
+        "hook_work_started_e2e_test.go",
         "hook_work_started_test.go",
         "hooks_test.go",
         "hosted_beads_gateway_test.go",

@@ -12,6 +12,12 @@ import (
 	"github.com/gastownhall/gascity/internal/session"
 )
 
+// startedE2EWorkQuery is collapsedIdentityWorkQuery guarded so it finds no
+// work when GC_INSTANCE_TOKEN reaches the work query's env: the fix must read
+// the fence from the process env, not leak the secret into the child.
+var startedE2EWorkQuery = strings.Replace(collapsedIdentityWorkQuery, "sh -c '",
+	`sh -c 'if [ -n "$GC_INSTANCE_TOKEN" ]; then printf "[]"; exit 0; fi; `, 1)
+
 // startedE2ECity is the collapsed-olivia city with the conditional writes the
 // started write's CAS needs, and an active seat row of generation 1 holding
 // token, its process env set the way a session start publishes it.
@@ -21,14 +27,17 @@ func startedE2ECity(t *testing.T, token, epoch string) (cityDir, sessionID strin
 	disableManagedDoltRecoveryForTest(t)
 	t.Setenv("GC_BEADS", "file")
 	cityDir = writeCollapsedIdentityCity(t)
-	f, err := os.OpenFile(filepath.Join(cityDir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0)
+	tomlPath := filepath.Join(cityDir, "city.toml")
+	raw, err := os.ReadFile(tomlPath)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := f.WriteString("\n[beads]\nconditional_writes = \"require\"\n"); err != nil {
-		t.Fatal(err)
+	cityToml := strings.Replace(string(raw), collapsedIdentityWorkQuery, startedE2EWorkQuery, 1)
+	if cityToml == string(raw) {
+		t.Fatal("city.toml does not carry collapsedIdentityWorkQuery")
 	}
-	if err := f.Close(); err != nil {
+	cityToml += "\n[beads]\nconditional_writes = \"require\"\n"
+	if err := os.WriteFile(tomlPath, []byte(cityToml), 0o644); err != nil {
 		t.Fatal(err)
 	}
 	sessionID = newOliviaSessionBead(t, cityDir, map[string]string{
