@@ -383,8 +383,10 @@ func TestLaneSocketVerbPokes(t *testing.T) {
 	hh.h.wg.Wait()
 	st := f.laneStore(t)
 	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
-	if got := laneSocketConn(t, f.dir, laneSocketPrefix+f.id+":"+op.ID); got != "ok" {
-		t.Fatalf("lane: reply = %q, want ok", got)
+	// The fixture's sessions store has no controller cache to install the
+	// named op in, so the op waits for the doorbell's retry (refreshRow).
+	if got := laneSocketConn(t, f.dir, laneSocketPrefix+f.id+":"+op.ID); got != laneReplyOK+", rows waiting for a retry: 1" {
+		t.Fatalf("lane: reply = %q, want the poke with the op waiting", got)
 	}
 	if p := hh.nextPass(t); p.conv != f.id || p.out.res.Done != opjournal.DoneAccepted {
 		t.Fatalf("pass = %+v, want the verb's delivery", p)

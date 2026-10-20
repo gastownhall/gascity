@@ -412,11 +412,13 @@ func hookLanePokeLeg(now time.Time) time.Duration {
 // rows (deferJournalRings; nil when its store does not ring), whether or not
 // it recorded a Done: each such ring refreshes the rows and pokes their
 // conversation. After a Done it also rings the lane host for conv, unless a
-// row ring already poked it. The drain calls it last, after its own output,
-// acks and stamps, so the doorbells never spend the time those need.
+// row ring's doorbell answered that it poked conv: a ring no controller
+// answered, or one it refused, is followed by the plain doorbell. The drain
+// calls it last, after its own output, acks and stamps, so the doorbells
+// never spend the time those need.
 func hookLaneRing(cityPath, conv string, out hookLaneOutcome, rows *journalRingQueue) {
-	rung := rows.ring(cityPath)
-	if !out.done || conv == "" || rung[conv] {
+	poked := rows.ring(cityPath)
+	if !out.done || conv == "" || poked[conv] {
 		return
 	}
 	if leg := hookLanePokeLeg(time.Now()); leg > 0 {

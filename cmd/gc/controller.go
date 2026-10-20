@@ -182,8 +182,9 @@ func startControllerSocket(
 // commands routed to event loop), "v2-pass" (the v2 planner's last pass,
 // for doctor), "ledger-feed" (the journal feeds' status, for doctor),
 // "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
-// doorbell naming the journal rows to refresh, replying ok, no-host or
-// refused <reason>), and "lane-status" (the conversation-lane
+// doorbell naming the journal rows to refresh, replying ok, "ok, rows
+// waiting for a retry: <n>", no-host or refused <reason>; laneReplyPoked
+// reads the reply), and "lane-status" (the conversation-lane
 // host's status, for doctor).
 func handleControllerConn(
 	conn net.Conn,

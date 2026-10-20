@@ -266,10 +266,12 @@ Any other kind, or any kind while no host runs, is refused 409
 `kind-not-enabled`; a message whose `when` the lane does not lower
 (`opjournal.When.LaneLowered`: `now`, `interrupt`) is refused 409
 `when-not-supported`. Every refusal, the request's own validation included
-(`opjournal.Store.Preview`), comes before the session is resolved, so a
-refused request writes nothing and materializes no named session, and no
-proposal is ever silently shadowed or parked. A replay answers 200 with the
-same body as the first answer's 201; both are declared. The op id, not
+(`opjournal.Store.Preview`), and the read of the event cursor the answer
+carries come before the session is resolved, so a refused request, or one
+whose cursor cannot be read, writes nothing and materializes no named
+session, and no proposal is ever silently shadowed or parked. A replay
+answers 200 with the same body as the first answer's 201; both are
+declared. The op id, not
 the `Idempotency-Key` LRU, is the idempotency: it derives from the session,
 the asserted principal (`operator` or `t3:<environment id>`) and the client
 key, so a retry across restarts returns the stored op and a different
@@ -286,14 +288,23 @@ emitter (`cmd/gc/class_store_emit_oprows.go`) rings the controller's lane
 doorbell with the row ids, `lane:<conversation>:<id>[,<id>...]`, whose
 handler refreshes each row through the controller's sessions cache, so the
 same bridge derives the event, for a close of a row the cache did not hold
-too. The in-band hook pass rings once, at the end of the drain, after its
-output and bookkeeping. A write no controller answers is announced only
-partly: a running controller's next reconcile announces a row it finds open
-and changed, but not a close of a row it did not hold, and a controller
-started later primes silently; the row stays authoritative, so a consumer
-that reconnects reads it. A row deleted out of process that the cache held
-open is announced closed (`failed{closed_externally}` for an op), as the
-next reconcile would announce it. No writer may author either event: `POST /v0/events`
+too. A refresh a local write of the cache holds off (a graph apply holds its
+fence for seconds), or that fails, the lane host retries off the socket
+handler until the row is installed, for up to a minute; one a quiescent
+city skips waits until a retry reads it, the quiescence not counted against
+the minute. lane-status counts the rows waiting and those it gave up, and
+the doorbell's answer counts the rows waiting. The in-band hook pass rings
+once, at the end of the drain, after its output and bookkeeping, and adds
+the plain doorbell after a Done only when no row ring's answer says it
+poked the conversation; a ring the hook's deadline leaves no time for is
+warned of. A row a CLI's write could not read back is known by its pinned id
+(`opjournal.IsPinnedID`) and journals nothing either. A write no controller
+answers is announced only partly: a running controller's next reconcile
+announces a row it finds open and changed, but not a close of a row it did
+not hold, and a controller started later primes silently; the row stays
+authoritative, so a consumer that reconnects reads it. A row deleted out of
+process that the cache held open is announced closed
+(`failed{closed_externally}` for an op), as the next reconcile would announce it. No writer may author either event: `POST /v0/events`
 and `gc event emit` refuse them (`events.IsJournalDerived`). Both payloads are pure functions of the row
 (`OpChangedPayloadFor`, `FactRecordedPayloadFor`) and never carry the op's
 payload text. The fields `conversationOpRecord` adds to `ConversationOp` are

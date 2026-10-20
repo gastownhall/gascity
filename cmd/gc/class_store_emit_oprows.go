@@ -1,6 +1,8 @@
 package main
 
 import (
+	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -21,38 +23,59 @@ import (
 // named row through the controller's sessions cache: the cache installs the
 // row and announces the change, a close of a row it did not hold included,
 // and the bridge derives the event, exactly as for a write the controller
-// made itself. A write whose ring no controller answers is announced only
-// partly, later: a running controller's next reconcile announces a row it
-// finds open and changed, but no close of a row it did not hold (until a
-// later ring names the row), and a controller that starts afterwards primes
-// its cache silently. The row stays authoritative: a consumer reads it.
-// The in-band hook pass defers its rings to the end of the drain
-// (deferJournalRings).
+// made itself. A refresh that a local write of the cache holds off, or that
+// fails, the controller retries for up to a minute (refreshRow), and one a
+// quiescent city skips until it resumes, so a ring needs no retry of its
+// own. A write whose ring no controller answers is
+// announced only partly, later: a running controller's next reconcile
+// announces a row it finds open and changed, but no close of a row it did
+// not hold (until a later ring names the row), and a controller that starts
+// afterwards primes its cache silently. The row stays authoritative: a
+// consumer reads it. The in-band hook pass defers its rings to the end of
+// the drain (deferJournalRings).
 
 // classStoreJournalRing rings the controller of cityPath to refresh the
-// journal rows ids of conversation conv; a seam so tests can record it.
+// journal rows ids of conversation conv, and reports whether the doorbell
+// poked conv; a seam so tests can record it.
 var classStoreJournalRing = ringJournalRows
 
 // ringJournalRows rings the lane doorbell for conv's rows ids, best effort,
 // with the doorbell's leg (hookLanePokeLeg: inside a hook, cut to the time
-// the hook has left, and skipped when it has too little).
-func ringJournalRows(cityPath, conv string, ids []string) {
+// the hook has left, and skipped when it has too little). It reports whether
+// a doorbell answered that it poked conv (laneReplyPoked). A ring the hook's
+// deadline leaves no leg for, and one a controller takes but does not answer,
+// is a missed ring, warned of once per process; a controller that is not
+// running is not warned of.
+func ringJournalRows(cityPath, conv string, ids []string) bool {
 	leg := hookLanePokeLeg(time.Now())
 	if leg <= 0 {
-		return
+		warnClassStoreEmit(fmt.Errorf("not ringing the controller for the journal rows of conversation %s: the hook's deadline leaves the doorbell too little time, or does not parse", conv))
+		return false
 	}
+	poked := false
 	for start := 0; start < len(ids); start += laneSocketMaxRows {
 		chunk := ids[start:min(start+laneSocketMaxRows, len(ids))]
-		_, _ = sendControllerCommandWithTimeouts(cityPath, laneSocketPrefix+conv+":"+strings.Join(chunk, ","), leg, leg, leg)
+		reply, err := sendControllerCommandWithTimeouts(cityPath, laneSocketPrefix+conv+":"+strings.Join(chunk, ","), leg, leg, leg)
+		switch {
+		case err == nil:
+			poked = poked || laneReplyPoked(string(reply))
+		case !errors.Is(err, errControllerUnavailable):
+			warnClassStoreEmit(fmt.Errorf("ringing the controller for the journal rows of conversation %s: %w", conv, err))
+		}
 	}
+	return poked
 }
 
 // ringJournalEmissions takes the journal rows out of emissions, rings the
 // controller for them once per conversation (or, when the store defers its
 // rings, queues them for its caller to ring: deferJournalRings), and returns
-// the rest. A journal row that names no conversation is dropped without a
-// ring: it is a row the lane does not read (a DES-BX event-fact or projector
-// row).
+// the rest. A journal row is a bead of the journal's type, or one with a
+// pinned id (opjournal.IsPinnedID): the row a write's read-miss fallback
+// carries has its id alone. A journal row that names no conversation is
+// dropped without a ring: it is a row the lane does not read (a DES-BX
+// event-fact or projector row). One known by its id alone is dropped with a
+// warning: its conversation could not be read, and the controller hears of
+// the write only from its cache's next reconcile.
 func (s *emittingClassStore) ringJournalEmissions(emissions []classStoreEmission) []classStoreEmission {
 	rest := emissions[:0:0]
 	q := s.deferredRings
@@ -60,11 +83,14 @@ func (s *emittingClassStore) ringJournalEmissions(emissions []classStoreEmission
 		q = &journalRingQueue{}
 	}
 	for _, e := range emissions {
-		if e.bead.Type != opjournal.BeadType {
+		switch {
+		case e.bead.Type == opjournal.BeadType:
+			q.add(journalRowConversation(e.bead.Labels), e.bead.ID)
+		case opjournal.IsPinnedID(e.bead.ID):
+			warnClassStoreEmit(fmt.Errorf("%s of journal row %s neither journaled nor rung: the row could not be read after the write", e.eventType, e.bead.ID))
+		default:
 			rest = append(rest, e)
-			continue
 		}
-		q.add(journalRowConversation(e.bead.Labels), e.bead.ID)
 	}
 	if s.deferredRings == nil {
 		q.ring(s.cityPath)
@@ -106,7 +132,7 @@ func (q *journalRingQueue) add(conv, id string) {
 
 // ring rings the controller of cityPath once per queued conversation
 // (classStoreJournalRing), empties the queue, and returns the conversations
-// it rang. A nil queue rings nothing.
+// whose doorbell answered that it poked them. A nil queue rings nothing.
 func (q *journalRingQueue) ring(cityPath string) map[string]bool {
 	if q == nil {
 		return nil
@@ -115,12 +141,13 @@ func (q *journalRingQueue) ring(cityPath string) map[string]bool {
 	convs, rows := q.convs, q.rows
 	q.convs, q.rows, q.seen = nil, nil, nil
 	q.mu.Unlock()
-	rung := make(map[string]bool, len(convs))
+	poked := make(map[string]bool, len(convs))
 	for _, conv := range convs {
-		classStoreJournalRing(cityPath, conv, rows[conv])
-		rung[conv] = true
+		if classStoreJournalRing(cityPath, conv, rows[conv]) {
+			poked[conv] = true
+		}
 	}
-	return rung
+	return poked
 }
 
 // deferJournalRings makes the CLI emitter under store, when there is one,

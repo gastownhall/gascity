@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/api/genclient"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
 
@@ -501,18 +502,27 @@ func TestProposeGatesOnTheRunningLaneHost(t *testing.T) {
 }
 
 // A proposal to a configured named session with no row that is refused (a
-// payload over the limit, an invalid policy or key, an unlowered when)
-// materializes no session row; an accepted one does.
+// payload over the limit, an invalid policy or key, an unlowered when), or
+// whose event cursor cannot be read, materializes no session row; an
+// accepted one does.
 func TestProposeRefusalMaterializesNoNamedSession(t *testing.T) {
-	for _, tc := range []struct{ name, body, code string }{
-		{"payload too large", `{"kind":"message","client_key":"k","payload":"` + strings.Repeat("x", opjournal.MaxInlinePayload+1) + `"}`, "payload-too-large"},
-		{"policy of another kind", `{"kind":"message","client_key":"k","payload":"x","policy":{"interrupt":{"on_failure":"fail"}}}`, "validation"},
-		{"invalid key", `{"kind":"message","client_key":"` + strings.Repeat("k", 513) + `","payload":"x"}`, "invalid-idempotency-key"},
-		{"unlowered when", `{"kind":"message","client_key":"k","payload":"x","policy":{"message":{"when":"now"}}}`, "when-not-supported"},
+	for _, tc := range []struct {
+		name, body, code string
+		// eventsDown breaks the city's event log, so the cursor read fails.
+		eventsDown bool
+	}{
+		{name: "payload too large", body: `{"kind":"message","client_key":"k","payload":"` + strings.Repeat("x", opjournal.MaxInlinePayload+1) + `"}`, code: "payload-too-large"},
+		{name: "policy of another kind", body: `{"kind":"message","client_key":"k","payload":"x","policy":{"interrupt":{"on_failure":"fail"}}}`, code: "validation"},
+		{name: "invalid key", body: `{"kind":"message","client_key":"` + strings.Repeat("k", 513) + `","payload":"x"}`, code: "invalid-idempotency-key"},
+		{name: "unlowered when", body: `{"kind":"message","client_key":"k","payload":"x","policy":{"message":{"when":"now"}}}`, code: "when-not-supported"},
+		{name: "cursor unreadable", body: `{"kind":"message","client_key":"k","payload":"x"}`, code: "service-unavailable", eventsDown: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e, _ := newLaneOpsEnv(t, "message")
 			rowsBefore, _ := e.sessionRowsAndStarts(t)
+			if tc.eventsDown {
+				e.fs.eventProv = events.NewFailFake()
+			}
 			rec := e.post(t, "/session/"+url.PathEscape("myrig/worker")+"/ops", "", tc.body)
 			if rec.Code < 400 || !strings.Contains(rec.Body.String(), tc.code) {
 				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())

@@ -19,21 +19,24 @@ import (
 )
 
 // recordJournalRings swaps the CLI emitter's controller doorbell for one
-// that records each ring and then runs answer, when set.
-func recordJournalRings(t *testing.T, answer func(cityPath, conv string, ids []string)) func() []string {
+// that records each ring and then runs answer, when set, whose result is
+// whether the doorbell poked the conversation; with no answer every ring
+// pokes it.
+func recordJournalRings(t *testing.T, answer func(cityPath, conv string, ids []string) bool) func() []string {
 	t.Helper()
 	var (
 		mu    sync.Mutex
 		rings []string
 	)
 	prev := classStoreJournalRing
-	classStoreJournalRing = func(cityPath, conv string, ids []string) {
+	classStoreJournalRing = func(cityPath, conv string, ids []string) bool {
 		mu.Lock()
 		rings = append(rings, conv+":"+strings.Join(ids, ","))
 		mu.Unlock()
 		if answer != nil {
-			answer(cityPath, conv, ids)
+			return answer(cityPath, conv, ids)
 		}
+		return true
 	}
 	t.Cleanup(func() { classStoreJournalRing = prev })
 	return func() []string {
@@ -125,8 +128,10 @@ func TestCLIJournalRowWritesReachOpChangedThroughTheDoorbell(t *testing.T) {
 	h.state, h.reason = laneHostStateOff, "test: no lane runs"
 	registerLaneHost(ctx, f.dir, h)
 	var replies []string
-	recordJournalRings(t, func(cityPath, conv string, ids []string) {
-		replies = append(replies, laneSocketReply(cityPath, conv+":"+strings.Join(ids, ",")))
+	recordJournalRings(t, func(cityPath, conv string, ids []string) bool {
+		reply := laneSocketReply(cityPath, conv+":"+strings.Join(ids, ","))
+		replies = append(replies, reply)
+		return laneReplyPoked(reply)
 	})
 
 	cli := &emittingClassStore{Store: leaf, cityPath: f.dir}
@@ -172,37 +177,174 @@ func TestCLIJournalRowWritesReachOpChangedThroughTheDoorbell(t *testing.T) {
 	}
 }
 
-// doorbellHarness is a controller cache over leaf with a registered lane host
-// that runs no lane, and a CLI emitter over the same leaf whose rings reach
-// the controller's doorbell handler when answer says so (n counts the rings
-// from 1).
-func doorbellHarness(t *testing.T, leaf beads.Store, answer func(n int) bool) (*opjournal.Store, *events.Fake, string) {
+// doorbellRig is a controller cache with a registered lane host that runs no
+// lane, and a CLI emitter whose rings reach the controller's doorbell
+// handler.
+type doorbellRig struct {
+	st    *opjournal.Store // the CLI's op store, over its emitter
+	ep    *events.Fake     // the controller's recorded events
+	f     *laneFixture
+	cache *beads.CachingStore
+	cs    *controllerState // the controller state the host runs over
+	h     *conversationLaneHost
+
+	mu      sync.Mutex
+	replies []string
+}
+
+// newDoorbellRig builds a doorbellRig whose controller cache is over backing
+// (leaf, or a store over it) while the CLI writes leaf itself. A ring reaches
+// the doorbell when answer(n) says so, n counting the rings from 1.
+func newDoorbellRig(t *testing.T, leaf, backing beads.Store, answer func(n int) bool) *doorbellRig {
 	t.Helper()
-	ep := events.NewFake()
+	r := &doorbellRig{ep: events.NewFake()}
 	ctx, cancel := context.WithCancel(context.Background())
-	t.Cleanup(cancel)
-	cache, ok := wrapWithCachingStore(context.Background(), leaf, ep, true).(*beads.CachingStore)
+	cache, ok := wrapWithCachingStore(context.Background(), backing, r.ep, true).(*beads.CachingStore)
 	if !ok {
 		t.Fatal("no cache")
 	}
-	f := newLaneFixtureOver(t, cache)
-	cs := &controllerState{cityBeadStore: cache, cfg: f.cfg, sp: f.sp, cityPath: f.dir, beadsQuiescent: new(atomic.Bool)}
-	h := newConversationLaneHost(cs, nil)
-	h.state, h.reason = laneHostStateOff, "test: no lane runs"
-	registerLaneHost(ctx, f.dir, h)
-	n := 0
-	recordJournalRings(t, func(cityPath, conv string, ids []string) {
-		n++
-		if answer(n) {
-			laneSocketReply(cityPath, conv+":"+strings.Join(ids, ","))
-		}
+	r.cache = cache
+	r.f = newLaneFixtureOver(t, cache)
+	r.cs = &controllerState{cityBeadStore: cache, cfg: r.f.cfg, sp: r.f.sp, cityPath: r.f.dir, beadsQuiescent: new(atomic.Bool)}
+	r.h = newConversationLaneHost(r.cs, nil)
+	r.h.ctx = ctx
+	r.h.state, r.h.reason = laneHostStateOff, "test: no lane runs"
+	registerLaneHost(ctx, r.f.dir, r.h)
+	t.Cleanup(func() {
+		cancel()
+		r.h.wg.Wait()
 	})
-	cli := &emittingClassStore{Store: leaf, cityPath: f.dir}
+	n := 0
+	recordJournalRings(t, func(cityPath, conv string, ids []string) bool {
+		n++
+		if !answer(n) {
+			return false
+		}
+		reply := laneSocketReply(cityPath, conv+":"+strings.Join(ids, ","))
+		r.mu.Lock()
+		r.replies = append(r.replies, reply)
+		r.mu.Unlock()
+		return laneReplyPoked(reply)
+	})
+	cli := &emittingClassStore{Store: leaf, cityPath: r.f.dir}
 	st, err := opjournal.NewStore(beads.SessionStore{Store: cli}, clock.Real{}, opjournal.WithIDPrefix("gc"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	return st, ep, f.id
+	r.st = st
+	return r
+}
+
+// doorbellHarness is newDoorbellRig over leaf alone: its CLI op store, the
+// controller's events and the conversation.
+func doorbellHarness(t *testing.T, leaf beads.Store, answer func(n int) bool) (*opjournal.Store, *events.Fake, string) {
+	t.Helper()
+	r := newDoorbellRig(t, leaf, leaf, answer)
+	return r.st, r.ep, r.f.id
+}
+
+// doorbellReplies is the doorbell's answers to the rig's rings so far.
+func (r *doorbellRig) doorbellReplies() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.replies...)
+}
+
+// driveRowRetry makes the rig's host a running one with no worker slot (a
+// poke queues its conversation), on the fixture's clock, its retry timers
+// handed to the test, and the rows still waiting after each retry round
+// reported.
+func (r *doorbellRig) driveRowRetry() (timers <-chan laneTimer, rounds <-chan int) {
+	tc := make(chan laneTimer, 64)
+	rc := make(chan int, 64)
+	r.h.mu.Lock()
+	defer r.h.mu.Unlock()
+	r.h.state, r.h.reason, r.h.maxWorkers = laneHostStateRunning, "", 0
+	r.h.clk = r.f.clk
+	r.h.newTimer = func(d time.Duration) (<-chan time.Time, func()) {
+		tm := laneTimer{d: d, c: make(chan time.Time, 1), stopped: make(chan struct{})}
+		tc <- tm
+		var once sync.Once
+		return tm.c, func() { once.Do(func() { close(tm.stopped) }) }
+	}
+	r.h.onRowRetry = func(waiting int) { rc <- waiting }
+	return tc, rc
+}
+
+// heldCreates is a backing store whose next Create, once armed, waits in its
+// backing call until lift: a create of the cache over it stays in flight,
+// which fences every row the cache does not hold.
+type heldCreates struct {
+	laneTestStore
+	armed   *atomic.Bool
+	entered chan struct{}
+	release chan struct{}
+	// lift releases the held create; it may be called more than once.
+	lift func()
+}
+
+func newHeldCreates(leaf laneTestStore) heldCreates {
+	release := make(chan struct{})
+	var once sync.Once
+	return heldCreates{
+		laneTestStore: leaf, armed: new(atomic.Bool), entered: make(chan struct{}), release: release,
+		lift: func() { once.Do(func() { close(release) }) },
+	}
+}
+
+func (s heldCreates) Create(b beads.Bead) (beads.Bead, error) {
+	if s.armed.CompareAndSwap(true, false) {
+		close(s.entered)
+		<-s.release
+	}
+	return s.laneTestStore.Create(b)
+}
+
+// holdCreate starts a create through cache and returns once its backing call
+// is in flight, held there until held.lift; the returned channel closes when
+// the create has returned. Cleanup lifts a create still held.
+func holdCreate(t *testing.T, cache *beads.CachingStore, held heldCreates) <-chan struct{} {
+	t.Helper()
+	held.armed.Store(true)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		if _, err := cache.Create(beads.Bead{Title: "a write in flight"}); err != nil {
+			t.Errorf("the held create: %v", err)
+		}
+	}()
+	t.Cleanup(func() {
+		held.lift()
+		<-done
+	})
+	select {
+	case <-held.entered:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the create never reached its backing call")
+	}
+	return done
+}
+
+func nextRetryTimer(t *testing.T, timers <-chan laneTimer) laneTimer {
+	t.Helper()
+	select {
+	case tm := <-timers:
+		return tm
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the row retry set no timer")
+		return laneTimer{}
+	}
+}
+
+func nextRetryRound(t *testing.T, rounds <-chan int) int {
+	t.Helper()
+	select {
+	case waiting := <-rounds:
+		return waiting
+	case <-time.After(laneWaitBudget):
+		t.Fatal("no row retry round ran")
+		return 0
+	}
 }
 
 // eventsOf is the payloads of ep's events of type typ for subject.
@@ -278,6 +420,238 @@ func TestCLIFactIsAnnouncedThroughTheDoorbell(t *testing.T) {
 	}
 }
 
+// recordTestFact records a turn-started fact of conv through st, the CLI's
+// op store, and returns its row id.
+func recordTestFact(t *testing.T, st *opjournal.Store, conv string) string {
+	t.Helper()
+	fact := opjournal.Fact{Kind: opjournal.FactTurnStarted, Conversation: conv, Generation: 2, Turn: "turn-1", Basis: opjournal.FactBasisRuntime, At: laneT0}
+	if _, err := st.RecordFact(fact); err != nil {
+		t.Fatalf("RecordFact: %v", err)
+	}
+	id, err := opjournal.FactID(st.Prefix(), fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
+// rowRetryRunning reports whether h's row retry runs.
+func rowRetryRunning(h *conversationLaneHost) bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.retryingRows
+}
+
+// wantRowsWaiting fails unless the rig's doorbell answered every ring with
+// the poke and one row waiting for the retry.
+func (r *doorbellRig) wantRowsWaiting(t *testing.T) {
+	t.Helper()
+	replies := r.doorbellReplies()
+	if len(replies) == 0 {
+		t.Fatal("the CLI rang no doorbell")
+	}
+	for _, reply := range replies {
+		if reply != laneReplyOK+", rows waiting for a retry: 1" || !laneReplyPoked(reply) {
+			t.Fatalf("doorbell replies = %q, want the poke with the row waiting", replies)
+		}
+	}
+}
+
+// A doorbell whose refresh a local write of the controller's cache holds off
+// leaves the row to the lane host's retry, off the socket handler, and says
+// so. A fact a CLI records while a create of the cache is in flight is not
+// announced while the create holds the fence, however many rounds that
+// takes, and is announced once, by the round after the create returns; a
+// later ring of the row announces it no more.
+func TestDoorbellRetriesARowALocalWriteFenced(t *testing.T) {
+	leaf := newLaneTestStore()
+	held := newHeldCreates(leaf)
+	r := newDoorbellRig(t, leaf, held, func(int) bool { return true })
+	timers, rounds := r.driveRowRetry()
+	created := holdCreate(t, r.cache, held)
+
+	factID := recordTestFact(t, r.st, r.f.id)
+	r.wantRowsWaiting(t)
+	if got := eventsOf(r.ep, events.FactRecorded, ""); len(got) != 0 {
+		t.Fatalf("fact.recorded = %d events while the create holds the fence", len(got))
+	}
+	if st := r.h.status(r.f.clk.Now()); st.RowRetries != 1 || st.RowsGivenUp != 0 {
+		t.Fatalf("lane status = %+v, want the row waiting", st)
+	}
+
+	first := nextRetryTimer(t, timers)
+	if first.d != laneRowRetryFirst {
+		t.Fatalf("first retry after %s, want %s", first.d, laneRowRetryFirst)
+	}
+	first.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 1 {
+		t.Fatalf("rows waiting after a round under the fence = %d, want 1", waiting)
+	}
+	second := nextRetryTimer(t, timers)
+	if second.d != 2*laneRowRetryFirst {
+		t.Fatalf("second retry after %s, want %s", second.d, 2*laneRowRetryFirst)
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, ""); len(got) != 0 {
+		t.Fatalf("fact.recorded = %d events while the create holds the fence", len(got))
+	}
+
+	held.lift()
+	<-created
+	second.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 0 || rowRetryRunning(r.h) {
+		t.Fatalf("rows waiting after the fence lifted = %d (retry running %t), want none and the retry ended", waiting, rowRetryRunning(r.h))
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, factID); len(got) != 1 {
+		t.Fatalf("fact.recorded = %d events, want one (events %v)", len(got), journalEventLog(r.ep))
+	}
+	if reply := laneSocketReply(r.f.dir, r.f.id+":"+factID); reply != laneReplyOK {
+		t.Fatalf("a later ring's reply = %q, want %s", reply, laneReplyOK)
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, factID); len(got) != 1 {
+		t.Fatalf("a later ring announced the fact again: %d events", len(got))
+	}
+	if st := r.h.status(r.f.clk.Now()); st.RowRetries != 0 || st.RowsGivenUp != 0 || st.Errors != 0 {
+		t.Fatalf("lane status = %+v, want no row waiting or given up, and no error", st)
+	}
+}
+
+// A fence that outlasts laneRowRetryLimit from the row's first failure gives
+// the row up: the last round inside the limit keeps it, the first one past it
+// counts it given up in lane-status with an error naming it, and the retry
+// ends with no row waiting and nothing announced.
+func TestDoorbellRetryGivesUpAFenceThatOutlastsItsLimit(t *testing.T) {
+	leaf := newLaneTestStore()
+	held := newHeldCreates(leaf)
+	r := newDoorbellRig(t, leaf, held, func(int) bool { return true })
+	timers, rounds := r.driveRowRetry()
+	holdCreate(t, r.cache, held)
+
+	factID := recordTestFact(t, r.st, r.f.id)
+	first := nextRetryTimer(t, timers)
+	r.f.clk.Advance(laneRowRetryLimit - time.Millisecond)
+	first.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 1 {
+		t.Fatalf("rows waiting inside the limit = %d, want 1", waiting)
+	}
+	second := nextRetryTimer(t, timers)
+	r.f.clk.Advance(time.Millisecond)
+	second.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 0 || rowRetryRunning(r.h) {
+		t.Fatalf("rows waiting past the limit = %d (retry running %t), want none and the retry ended", waiting, rowRetryRunning(r.h))
+	}
+	st := r.h.status(r.f.clk.Now())
+	if st.RowRetries != 0 || st.RowsGivenUp != 1 || st.Errors != 1 || !strings.Contains(st.LastError, factID) {
+		t.Fatalf("lane status = %+v, want %s given up and its error", st, factID)
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, ""); len(got) != 0 {
+		t.Fatalf("fact.recorded = %d events for a row given up under the fence", len(got))
+	}
+}
+
+// A doorbell the quiescent city answers reads nothing, so it does not answer
+// a bare ok: the row waits for the retry however long the city stays
+// quiescent, none of which counts against laneRowRetryLimit. Once the city
+// resumes, the row's count starts from its last skipped read: a round a
+// local write fences keeps it, and the round after the write returns
+// installs it and announces it once.
+func TestDoorbellRowWaitsOutAQuiescentCity(t *testing.T) {
+	leaf := newLaneTestStore()
+	held := newHeldCreates(leaf)
+	r := newDoorbellRig(t, leaf, held, func(int) bool { return true })
+	timers, rounds := r.driveRowRetry()
+	r.cs.setBeadsQuiescent(true)
+
+	factID := recordTestFact(t, r.st, r.f.id)
+	r.wantRowsWaiting(t)
+	// A quiescence twice the limit long: each round in it reads nothing and
+	// keeps the row.
+	for range 2 {
+		tm := nextRetryTimer(t, timers)
+		r.f.clk.Advance(laneRowRetryLimit)
+		tm.c <- r.f.clk.Now()
+		if waiting := nextRetryRound(t, rounds); waiting != 1 {
+			t.Fatalf("rows waiting after a quiescent round = %d, want 1", waiting)
+		}
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, ""); len(got) != 0 {
+		t.Fatalf("fact.recorded = %d events while the city is quiescent", len(got))
+	}
+	if st := r.h.status(r.f.clk.Now()); st.RowRetries != 1 || st.RowsGivenUp != 0 || st.Errors != 0 {
+		t.Fatalf("lane status = %+v, want the row waiting, nothing given up and no error", st)
+	}
+
+	r.cs.setBeadsQuiescent(false)
+	created := holdCreate(t, r.cache, held)
+	fenced := nextRetryTimer(t, timers)
+	fenced.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 1 {
+		t.Fatalf("rows waiting after a fenced round past the quiescence = %d, want 1", waiting)
+	}
+	held.lift()
+	<-created
+	last := nextRetryTimer(t, timers)
+	last.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 0 || rowRetryRunning(r.h) {
+		t.Fatalf("rows waiting after the city resumed = %d (retry running %t), want none and the retry ended", waiting, rowRetryRunning(r.h))
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, factID); len(got) != 1 {
+		t.Fatalf("fact.recorded = %d events, want one (events %v)", len(got), journalEventLog(r.ep))
+	}
+	if reply := laneSocketReply(r.f.dir, r.f.id+":"+factID); reply != laneReplyOK {
+		t.Fatalf("a later ring's reply = %q, want %s", reply, laneReplyOK)
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, factID); len(got) != 1 {
+		t.Fatalf("a later ring announced the fact again: %d events", len(got))
+	}
+	if st := r.h.status(r.f.clk.Now()); st.RowRetries != 0 || st.RowsGivenUp != 0 || st.Errors != 0 {
+		t.Fatalf("lane status = %+v, want no row waiting or given up, and no error", st)
+	}
+}
+
+// A doorbell over a sessions store the controller does not cache has no
+// cache to install the row in, so it does not answer a bare ok either: the
+// row waits for the retry, which installs nothing either, and is given up
+// at the limit, counted in lane-status with an error naming the row and why.
+func TestDoorbellGivesUpARowWithNoCacheToInstallItIn(t *testing.T) {
+	leaf := newLaneTestStore()
+	r := newDoorbellRig(t, leaf, leaf, func(int) bool { return true })
+	r.cs.cityBeadStore = leaf
+	timers, rounds := r.driveRowRetry()
+
+	factID := recordTestFact(t, r.st, r.f.id)
+	r.wantRowsWaiting(t)
+	first := nextRetryTimer(t, timers)
+	r.f.clk.Advance(laneRowRetryLimit)
+	first.c <- r.f.clk.Now()
+	if waiting := nextRetryRound(t, rounds); waiting != 0 || rowRetryRunning(r.h) {
+		t.Fatalf("rows waiting past the limit = %d (retry running %t), want none and the retry ended", waiting, rowRetryRunning(r.h))
+	}
+	st := r.h.status(r.f.clk.Now())
+	if st.RowRetries != 0 || st.RowsGivenUp != 1 || st.Errors != 1 || !strings.Contains(st.LastError, factID) || !strings.Contains(st.LastError, errLaneRowUncached.Error()) {
+		t.Fatalf("lane status = %+v, want %s given up for want of a cache", st, factID)
+	}
+	if got := eventsOf(r.ep, events.FactRecorded, ""); len(got) != 0 {
+		t.Fatalf("fact.recorded = %d events with no cache", len(got))
+	}
+}
+
+// laneReplyPoked reads the doorbell's answers: ok, alone or naming the rows
+// waiting for a retry, poked the conversation; no-host and a refusal did not.
+func TestLaneReplyPoked(t *testing.T) {
+	for reply, want := range map[string]bool{
+		laneReplyOK: true,
+		laneReplyOK + ", rows waiting for a retry: 2": true,
+		"no-host":                           false,
+		"refused the lane host is stopping": false,
+		"okay":                              false,
+		"":                                  false,
+	} {
+		if got := laneReplyPoked(reply); got != want {
+			t.Errorf("laneReplyPoked(%q) = %t, want %t", reply, got, want)
+		}
+	}
+}
+
 // One emission batch rings each conversation once, naming each of its rows
 // once however often the batch wrote it.
 func TestCLIEmitterRingsEachRowOncePerBatch(t *testing.T) {
@@ -320,6 +694,48 @@ func TestCLIEmitterDropsJournalRowsOfNoConversation(t *testing.T) {
 	}
 }
 
+// A journal row a CLI write could not read back reaches the emitter by its
+// pinned id alone (the read-miss fallbacks of the update, close and delete
+// paths): it journals no bead.* event either, rings nothing, since the
+// conversation it would ring is unknown, and is warned of. A bead of any
+// other id still journals through the same fallback.
+func TestCLIEmitterDropsAJournalRowItCouldNotReadBack(t *testing.T) {
+	cityPath := t.TempDir()
+	rings := recordJournalRings(t, nil)
+	var warned []string
+	restore := classStoreEmitWarn
+	classStoreEmitWarn = func(err error) { warned = append(warned, err.Error()) }
+	t.Cleanup(func() { classStoreEmitWarn = restore })
+	leaf := &readMissAfterWriteStore{MemStore: &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+	cli := &emittingClassStore{Store: leaf, cityPath: cityPath}
+	row, err := opjournal.EncodeRuntimeRow("gc", opjournal.RuntimeRow{Conversation: "gc-1", Generation: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := leaf.Create(row); err != nil {
+		t.Fatal(err)
+	}
+	task, err := leaf.Create(beads.Bead{Title: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf.missing = true
+	for _, id := range []string{row.ID, task.ID} {
+		if err := cli.Close(id); err != nil {
+			t.Fatalf("close %s: %v", id, err)
+		}
+	}
+	if j := readCityJournal(t, cityPath); len(j) != 1 || j[0].Subject != task.ID || j[0].Type != events.BeadClosed {
+		t.Fatalf("journal = %+v, want the task's bead.closed alone", j)
+	}
+	if got := rings(); len(got) != 0 {
+		t.Fatalf("rings = %v, want none", got)
+	}
+	if len(warned) != 1 || !strings.Contains(warned[0], row.ID) {
+		t.Fatalf("warnings = %q, want one naming %s", warned, row.ID)
+	}
+}
+
 // ringJournalRows sends at most laneSocketMaxRows ids per verb, so a write
 // of more rows than one verb takes rings in chunks the controller accepts.
 func TestRingJournalRowsChunksToTheVerbCap(t *testing.T) {
@@ -339,7 +755,9 @@ func TestRingJournalRowsChunksToTheVerbCap(t *testing.T) {
 	for i := range ids {
 		ids[i] = fmt.Sprintf("gc-%d", i)
 	}
-	ringJournalRows(cityPath, "gc-1", ids)
+	if !ringJournalRows(cityPath, "gc-1", ids) {
+		t.Fatal("ringJournalRows = false, want the ok answers read as a poke")
+	}
 	mu.Lock()
 	defer mu.Unlock()
 	if len(lines) != 2 {

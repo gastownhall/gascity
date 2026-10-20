@@ -273,11 +273,14 @@ type conversationLaneHost struct {
 	// observerName is the observers' gc.rt.observer stamp.
 	observerName string
 	logf         func(format string, args ...any)
-	// onPass, onReprobe and onWorkerExit are test seams: each pass's
-	// outcome, each re-probe, and each worker's exit. Nil in production.
+	// onPass, onReprobe, onWorkerExit and onRowRetry are test seams: each
+	// pass's outcome, each re-probe, each worker's exit, and the rows still
+	// waiting after each round of the doorbell's row retry. Nil in
+	// production.
 	onPass       func(conv string, out lanePassOutcome)
 	onReprobe    func(conv string, stillBusy bool)
 	onWorkerExit func(conv string)
+	onRowRetry   func(waiting int)
 
 	ctx context.Context
 	wg  sync.WaitGroup
@@ -314,6 +317,13 @@ type conversationLaneHost struct {
 	lastErr      string
 	quarantined  map[string][]string
 	waits        map[string]laneConversationWaits
+	// rowRetries holds each journal row a doorbell named whose refresh
+	// installed nothing, by the time of its first failure, until the retry's
+	// next round takes it; retryingRows reports that retryRows runs, and
+	// rowsGivenUp counts the rows the retry gave up (refreshRow).
+	rowRetries   map[string]time.Time
+	retryingRows bool
+	rowsGivenUp  int64
 	// noticeFailures tallies, per planner notice action (an attempt's
 	// proposal or a reminder's read, plannerNoticeTallyKey), its failures in
 	// a row; nil until the first. An entry is deleted when its action
@@ -989,6 +999,11 @@ type conversationLaneStatus struct {
 	// could not decode; QuarantinedIDs lists the first few.
 	Quarantined    int      `json:"quarantined"`
 	QuarantinedIDs []string `json:"quarantined_ids,omitempty"`
+	// RowRetries counts the journal rows a doorbell named that wait for the
+	// next round of the host's retry of their refresh; RowsGivenUp those the
+	// retry gave up (refreshRow), each also counted in Errors.
+	RowRetries  int   `json:"row_retries"`
+	RowsGivenUp int64 `json:"rows_given_up"`
 	// Waiting lists, for the first few conversations in id order, why
 	// their ops wait after their last pass.
 	Waiting []laneConversationWaits `json:"waiting,omitempty"`
@@ -1004,7 +1019,8 @@ func (h *conversationLaneHost) status(now time.Time) conversationLaneStatus {
 		State: h.state, Reason: h.reason, Kinds: append([]string(nil), h.kinds...),
 		Workers: len(h.workers), Queued: len(h.queued), Parked: len(h.parked), Passes: h.passes, Reprobes: h.reprobes,
 		LastPassFailed: h.lastFailed, Errors: h.passErrors, ErrorsSinceSuccess: h.sinceSuccess, LastError: h.lastErr,
-		Turns: h.turnStats.status(),
+		Turns:      h.turnStats.status(),
+		RowRetries: len(h.rowRetries), RowsGivenUp: h.rowsGivenUp,
 	}
 	if !h.lastPass.IsZero() {
 		st.LastPassAt = h.lastPass.UTC().Format(time.RFC3339Nano)
@@ -1073,12 +1089,18 @@ var laneSocketIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 // laneSocketMaxRows bounds the row ids one lane: verb names.
 const laneSocketMaxRows = 64
 
+// laneReplyOK starts the doorbell's answer when it poked the conversation.
+const laneReplyOK = "ok"
+
 // laneSocketReply answers lane:<conversation>[:<row id>[,<row id>...]]: it
 // validates the ids, refreshes each named journal row (an op, fact or
 // runtime row a one-shot CLI wrote) in the sessions cache, and pokes the
 // conversation. The refresh runs whatever the host's state, so a row written
 // out of process reaches the controller's readers, and its op.changed or
-// fact.recorded, even while no lane runs. The reply is ok, no-host, or
+// fact.recorded, even while no lane runs. A row the refresh did not install
+// waits for the host's retry (refreshRow). The reply is ok when every named
+// row is installed and the conversation was poked, "ok, rows waiting for a
+// retry: <n>" when it was poked and n rows wait, no-host, or
 // refused <reason>.
 func laneSocketReply(cityPath, payload string) string {
 	conv, rows, hasRows := strings.Cut(payload, ":")
@@ -1101,8 +1123,11 @@ func laneSocketReply(cityPath, payload string) string {
 	if h == nil {
 		return "no-host"
 	}
+	waiting := 0
 	for _, id := range ids {
-		h.refreshRow(id)
+		if h.refreshRow(id) {
+			waiting++
+		}
 	}
 	if state, reason := h.stateReason(); state != laneHostStateRunning {
 		if reason == "" {
@@ -1113,7 +1138,16 @@ func laneSocketReply(cityPath, payload string) string {
 	if !h.Poke(conv) {
 		return "refused the lane host is stopping"
 	}
-	return "ok"
+	if waiting > 0 {
+		return fmt.Sprintf("%s, rows waiting for a retry: %d", laneReplyOK, waiting)
+	}
+	return laneReplyOK
+}
+
+// laneReplyPoked reports whether reply, a doorbell's answer, says it poked
+// the conversation.
+func laneReplyPoked(reply string) bool {
+	return reply == laneReplyOK || strings.HasPrefix(reply, laneReplyOK+",")
 }
 
 // stateReason reads the host's state and its reason.
@@ -1123,12 +1157,29 @@ func (h *conversationLaneHost) stateReason() (string, string) {
 	return h.state, h.reason
 }
 
-// laneRowRefreshTries bounds the refreshes refreshRow makes of one row a
-// local write fences, laneRowRefreshRetryDelay apart.
+// The doorbell's row retry (refreshRow): the host retries the journal rows
+// whose doorbell refresh installed nothing laneRowRetryFirst after the first
+// of them, then at a wait doubling up to laneRowRetryMax while rows wait, and
+// one row for laneRowRetryLimit from its first failure at most: the ledger
+// feed's yield limit, since a graph apply holds the fence a local write of
+// the cache sets for seconds, and a fence past the limit is a write that does
+// not return, or one write after another. A quiescent city is not charged:
+// a read it skips restarts the row's count (retryWaitingRows).
+// laneRowRetryCap bounds the rows waiting.
 const (
-	laneRowRefreshTries      = 5
-	laneRowRefreshRetryDelay = 20 * time.Millisecond
+	laneRowRetryFirst = 20 * time.Millisecond
+	laneRowRetryMax   = time.Second
+	laneRowRetryLimit = ledgerFeedYieldLimit
+	laneRowRetryCap   = 4096
 )
+
+// errLaneRowQuiescent is a row refresh the quiescent city skipped: its stores
+// take no read until it resumes, so the row waits for a round that reads it.
+var errLaneRowQuiescent = errors.New("the city is quiescent; its stores take no read until it resumes")
+
+// errLaneRowUncached is a row refresh with no sessions cache to install the
+// row in and announce it from.
+var errLaneRowUncached = errors.New("the controller does not cache the sessions store")
 
 // refreshRow re-reads journal row id into the sessions cache, so a
 // producer's write from another process is visible to the controller's
@@ -1137,34 +1188,157 @@ const (
 // just now, so the refresh announces the close of a row the cache did not
 // hold too (RowRefreshOptions.AnnounceUnheldClose): a fact, created closed,
 // and an op closed after a ring the controller missed. It yields to a local
-// write of the cache that may touch the row, which announces the row
-// itself, and retries a yielded or fenced refresh up to laneRowRefreshTries
-// times; a row still fenced after them is noted and left to the write that
-// owns it. A quiescent city is not read. A row that is gone is evicted: one
-// the cache held open is announced closed, as the cache's next reconcile
-// would announce it (op.changed failed{closed_externally} for an op).
-func (h *conversationLaneHost) refreshRow(id string) {
+// write of the cache that may touch the row, which announces the row itself.
+// A refresh that yielded, that a newer write fenced, that failed, or that
+// read nothing (a quiescent city, a store the controller does not cache) is
+// left to the host's retry (keepRowLocked), off the socket handler; the
+// retry stops once the row is installed, and gives the row up, counted in
+// lane-status and noted, after laneRowRetryLimit. refreshRow reports whether
+// the row waits for the retry. A row that is gone is evicted: one the cache
+// held open is announced closed, as the cache's next reconcile would announce
+// it (op.changed failed{closed_externally} for an op).
+func (h *conversationLaneHost) refreshRow(id string) bool {
+	err := h.refreshRowOnce(id)
+	if err == nil {
+		return false
+	}
+	h.mu.Lock()
+	kept := h.keepRowLocked(id, h.clk.Now())
+	h.mu.Unlock()
+	if !kept {
+		h.giveUpRow(id, fmt.Errorf("no retry can wait: %w", err))
+	}
+	return kept
+}
+
+// refreshRowOnce refreshes journal row id once, as store work, through the
+// sessions cache (refreshRow). A quiescent city is not read
+// (errLaneRowQuiescent), and a store the controller does not cache has no
+// cache to install the row in (errLaneRowUncached). A row that is gone
+// leaves nothing to install.
+func (h *conversationLaneHost) refreshRowOnce(id string) error {
 	defer h.env.beginStoreWork()()
 	if h.env.storesQuiescent() {
-		return
+		return errLaneRowQuiescent
 	}
 	cache := laneSessionsCache(h.env.SessionsBeadStore().Store)
 	if cache == nil {
-		return
+		return errLaneRowUncached
 	}
-	opts := beads.RowRefreshOptions{AnnounceUnheldClose: true, YieldToLocalWrites: true}
-	var err error
-	for try := range laneRowRefreshTries {
-		if try > 0 {
-			time.Sleep(laneRowRefreshRetryDelay)
+	_, err := cache.RefreshRowReport(id, beads.RowRefreshOptions{AnnounceUnheldClose: true, YieldToLocalWrites: true})
+	if errors.Is(err, beads.ErrNotFound) {
+		return nil
+	}
+	return err
+}
+
+// keepRowLocked keeps journal row id for the host's retry, its count from
+// since (its first failed refresh, or the last read the quiescent city
+// skipped: retryWaitingRows), starting retryRows when it does not run. A row
+// already waiting keeps its earlier count. It reports false when the
+// row cannot wait: laneRowRetryCap rows wait already, or the host ended. The
+// caller holds h.mu.
+func (h *conversationLaneHost) keepRowLocked(id string, since time.Time) bool {
+	if first, ok := h.rowRetries[id]; ok {
+		if since.Before(first) {
+			h.rowRetries[id] = since
 		}
-		if _, err = cache.RefreshRowReport(id, opts); !errors.Is(err, beads.ErrRowRefreshFenced) {
-			break
+		return true
+	}
+	if len(h.rowRetries) >= laneRowRetryCap || h.ctx == nil || h.ctx.Err() != nil {
+		return false
+	}
+	if h.rowRetries == nil {
+		h.rowRetries = map[string]time.Time{}
+	}
+	h.rowRetries[id] = since
+	if !h.retryingRows {
+		h.retryingRows = true
+		h.wg.Add(1)
+		go h.retryRows()
+	}
+	return true
+}
+
+// retryRows retries the waiting journal rows, laneRowRetryFirst after it
+// starts and then at a wait doubling up to laneRowRetryMax, until no row
+// waits or the host ends.
+func (h *conversationLaneHost) retryRows() {
+	defer h.wg.Done()
+	wait := laneRowRetryFirst
+	for {
+		fire, stop := h.newTimer(wait)
+		select {
+		case <-h.ctx.Done():
+			stop()
+			h.mu.Lock()
+			h.rowRetries, h.retryingRows = nil, false
+			h.mu.Unlock()
+			return
+		case <-fire:
+		}
+		stop()
+		if !h.retryWaitingRows() {
+			return
+		}
+		wait = min(2*wait, laneRowRetryMax)
+	}
+}
+
+// retryWaitingRows refreshes each waiting row once: a row installed is done,
+// one whose refresh still installs nothing waits again until
+// laneRowRetryLimit from its first failure, and is given up after it. A read
+// the quiescent city skipped restarts the row's count instead: the row waits
+// until a round reads it, and a quiescence of any length is charged against
+// the limit for at most one wait between rounds. It reports whether rows
+// still wait; when none does, retryRows ends, decided in the same hold of
+// h.mu in which a doorbell would find it running.
+func (h *conversationLaneHost) retryWaitingRows() bool {
+	h.mu.Lock()
+	rows := h.rowRetries
+	h.rowRetries = nil
+	h.mu.Unlock()
+	for _, id := range slices.Sorted(maps.Keys(rows)) {
+		err := h.refreshRowOnce(id)
+		if err == nil {
+			continue
+		}
+		since := rows[id]
+		switch {
+		case errors.Is(err, errLaneRowQuiescent):
+			since = h.clk.Now()
+		case h.clk.Now().Sub(since) >= laneRowRetryLimit:
+			h.giveUpRow(id, fmt.Errorf("still not refreshed after %s: %w", laneRowRetryLimit, err))
+			continue
+		}
+		h.mu.Lock()
+		kept := h.keepRowLocked(id, since)
+		h.mu.Unlock()
+		if !kept {
+			h.giveUpRow(id, fmt.Errorf("no retry can wait: %w", err))
 		}
 	}
-	if err != nil && !errors.Is(err, beads.ErrNotFound) {
-		h.noteError("refresh", fmt.Errorf("refreshing journal row %s: %w", id, err))
+	h.mu.Lock()
+	waiting := len(h.rowRetries)
+	if waiting == 0 {
+		h.retryingRows = false
 	}
+	h.mu.Unlock()
+	if h.onRowRetry != nil {
+		h.onRowRetry(waiting)
+	}
+	return waiting > 0
+}
+
+// giveUpRow counts journal row id given up by the doorbell's retry, and
+// notes why. The row's change reaches the controller only partly: its cache's
+// next reconcile announces a row it finds open and changed, but not the close
+// of a row it did not hold.
+func (h *conversationLaneHost) giveUpRow(id string, err error) {
+	h.mu.Lock()
+	h.rowsGivenUp++
+	h.mu.Unlock()
+	h.noteError("refresh", fmt.Errorf("giving up the refresh of journal row %s: %w", id, err))
 }
 
 // laneSessionsCache is the controller's cache over the sessions store, nil

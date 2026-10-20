@@ -132,6 +132,16 @@ func PinnedID(prefix, family, tag string, fields ...string) (string, error) {
 	return prefix + "-" + family + "-" + hash16(tag, fields...), nil
 }
 
+// pinnedIDRe is the shape of every pinned id: <prefix>-<family>-<hash16>.
+var pinnedIDRe = regexp.MustCompile(`^[^\s,"@#]+-[a-z][a-z0-9]{0,15}-[a-z2-7]{26}$`)
+
+// IsPinnedID reports whether id has the pinned id shape every journal row
+// shares (PinnedID): an op's, a fact's or a runtime row's (DeriveID, FactID,
+// RuntimeRowID), or one another package mints with PinnedID. A writer that
+// knows a row by its id alone, its read having failed, tells a journal row by
+// it.
+func IsPinnedID(id string) bool { return pinnedIDRe.MatchString(id) }
+
 // ValidateClientKey refuses a client key Propose would refuse: empty, longer
 // than 512 bytes, not UTF-8, with a control character, or with leading or
 // trailing space. Producers check a supplied key with it before proposing.

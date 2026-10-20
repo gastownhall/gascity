@@ -184,9 +184,10 @@ func proposeError(err error) error {
 }
 
 // humaHandleConversationOpPropose is the Huma-typed handler for POST
-// /v0/city/{cityName}/session/{id}/ops (Propose). Every refusal comes before
-// the session is resolved, so a refused request materializes no named
-// session and writes nothing.
+// /v0/city/{cityName}/session/{id}/ops (Propose). Every refusal, and the read
+// of the event cursor the answer carries, comes before the session is
+// resolved, so a refused request, or one whose cursor cannot be read,
+// materializes no named session and writes nothing.
 func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *ConversationOpProposeInput) (*ConversationOpProposeOutput, error) {
 	body := input.Body
 	if !slices.Contains(s.conversationLaneKinds(), body.Kind) {
@@ -222,13 +223,13 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	if spec, err := opjournal.Lookup(preview.Kind); err == nil && spec.Class == opjournal.ClassContent && !preview.Policy.Message.When.LaneLowered() {
 		return nil, apierr.WhenNotSupported.Msgf("when_not_supported: this build's conversation lane does not deliver a %q message; this request wrote nothing", preview.Policy.Message.When)
 	}
-	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions.Store, input.ID)
-	if err != nil {
-		return nil, humaResolveError(err)
-	}
 	cursor, err := s.currentCityEventCursor()
 	if err != nil {
 		return nil, apierr.ServiceUnavailable.Msg(err.Error())
+	}
+	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions.Store, input.ID)
+	if err != nil {
+		return nil, humaResolveError(err)
 	}
 	op, created, err := st.Propose(proposeRequest(conv, key, minted, producer, body))
 	if err != nil {
