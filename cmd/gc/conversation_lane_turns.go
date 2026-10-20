@@ -826,10 +826,12 @@ func (o *laneTurnObserver) sawRunning(prev opjournal.TurnCells) bool {
 		o.cells.Generation == prev.Generation && o.cells.ID == prev.ID
 }
 
-// laneInfersIdleEnds reports whether the fold infers, at the idle boundary,
-// the end of a running turn the source shows neither current nor in Recent
-// (opjournal.TurnObservation.InferIdleEnds): a protocol source whose End is
-// inferred, as T3 V1, which keeps no record of the ends it clears. A
+// laneInfersIdleEnds is the capability half of the fold's idle-end
+// inference (opjournal.TurnObservation.InferIdleEnds): it reports whether
+// the source's capabilities let a running turn it shows neither current nor
+// in Recent at the idle boundary be read as a normal end, which holds for a
+// protocol source whose End is inferred, as T3 V1, which keeps no record of
+// the ends it clears. The fold infers only when sawRunning also holds. A
 // transcript source's inferred ends reach Recent through the worker's idle
 // overlay, so a turn missing there is a gap.
 func laneInfersIdleEnds(caps worker.TurnCapabilities) bool {

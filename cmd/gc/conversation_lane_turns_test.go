@@ -2260,8 +2260,9 @@ func TestLaneTurnObserverV1InferredEndCreditsInterrupt(t *testing.T) {
 // such as ACP), a transcript whose ends are inferred by the worker's idle
 // overlay (tmux Claude), and a V1 session downgraded to boundary, whether
 // the same observer or a successor reads the idle snapshot, still end a
-// running turn that idles out of Recent unobserved. The successor knows of
-// the downgrade only from the row's stamp.
+// running turn that idles out of Recent unobserved. The successor sees the
+// turn run itself before the idle read, so only the row's end=boundary stamp
+// keeps that end unobserved.
 func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 	recordedProtocol := laneObsV1Caps
 	recordedProtocol.End, recordedProtocol.Fence, recordedProtocol.Link, recordedProtocol.Lossless = runtime.TurnEndRecorded, runtime.TurnFenceAtomic, runtime.TurnLinkExact, true
@@ -2292,6 +2293,7 @@ func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 					t.Fatalf("caps = %q, want the downgrade stamped before the restart", f.row().Turn.Caps)
 				}
 				f.restart()
+				f.see(laneRunning("t1"))
 			}
 			f.see(laneIdle())
 			f.wantFacts("turn.started:t1", "turn.ended:t1:unobserved")
@@ -2309,7 +2311,9 @@ func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 // first reads idle with the running turn missing from Recent ends it
 // unobserved and counts a gap (X11 §8), crediting no interrupt, whether the
 // observer was told of one or an op row names it; once that watch sees a
-// turn run, its idle end is inferred again.
+// turn run, its idle end is inferred again. (An update the previous watch
+// kept for retry is that watch's read: a next watch that folds it before
+// the idle read infers, as the same watch would have.)
 func TestLaneTurnObserverV1InfersOnlyWhatItsWatchSawRun(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -2342,6 +2346,44 @@ func TestLaneTurnObserverV1InfersOnlyWhatItsWatchSawRun(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestLaneTurnObserverV1OpRowCreditUnreadForAnUnseenEnd pins that a
+// successor told of no interrupt, with only an op row naming the turn it
+// never saw run, ends that turn unobserved without reading op rows: the
+// credit candidates are gated the same way the inference is.
+func TestLaneTurnObserverV1OpRowCreditUnreadForAnUnseenEnd(t *testing.T) {
+	f := newLaneObsV1Fixture(t)
+	f.start()
+	f.see(laneRunning("t1"))
+	f.restart()
+	f.credits = []opjournal.InterruptRef{{Op: laneObsInterruptOp, Turn: "t1"}}
+	f.see(laneIdle())
+	f.wantFacts("turn.started:t1", "turn.ended:t1:unobserved")
+	if f.creditReads != 0 {
+		t.Fatalf("credit reads = %d, want none for an unobserved end", f.creditReads)
+	}
+	if st := f.stats.status(); st.Gaps != 1 {
+		t.Fatalf("gaps = %d, want 1", st.Gaps)
+	}
+}
+
+// TestLaneTurnObserverV1AnotherWritersRunningTurnIsAGap pins that a watch
+// infers only the running turn it last left running: when another observer
+// over the same row moves it to t2 behind this watch, this watch never saw
+// t2 run, so t2's idle end is unobserved, a gap.
+func TestLaneTurnObserverV1AnotherWritersRunningTurnIsAGap(t *testing.T) {
+	f := newLaneObsV1Fixture(t)
+	f.start()
+	f.see(laneRunning("t1"))
+	other := f.observer()
+	other.start(context.Background())
+	hist := laneRunning("t2")
+	hist.ObservedAt = f.clk.Now()
+	other.observe(context.Background(), worker.TurnUpdate{History: hist})
+	f.clk.Advance(time.Second)
+	f.see(laneIdle())
+	f.wantFacts("turn.started:t1", "turn.ended:t1:unobserved", "turn.started:t2", "turn.ended:t2:unobserved")
 }
 
 // TestLaneTurnObserverV1InfersWhatItsWatchSawRunAfterARestart pins the other
