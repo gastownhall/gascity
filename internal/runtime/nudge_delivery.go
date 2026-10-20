@@ -50,11 +50,20 @@ var ErrDeliveryNotFound = errors.New("runtime holds no delivery under the key")
 // returns the runtime's receipt of the delivery, zero whenever the error is
 // not nil.
 //
+// NudgeKeyed must deliver without waiting for the session to go idle: it
+// also serves immediate delivery. [NudgeWithReceipt] sends a keyed immediate
+// nudge through NudgeKeyed rather than [ImmediateNudgeProvider.NudgeNow],
+// which takes no key, so a runtime whose keyed send waited for idle would
+// turn every keyed immediate send into a wait-for-idle send.
+//
 // LookupDelivery reports, sending nothing, whether the runtime holds the
 // delivery a send under key to session name made: its receipt when it does;
 // an error wrapping [ErrDeliveryNotFound] when it holds none;
 // [ErrSessionNotFound] when no session is named name; an error wrapping
-// [ErrRuntimeUnavailable] when it cannot tell.
+// [ErrInteractionUnsupported] when the backend serving name keeps no keyed
+// deliveries (a composite routing name to an unkeyed leaf); an error wrapping
+// [ErrRuntimeUnavailable] when it cannot tell, including when the runtime's
+// answer is too incomplete to prove the delivery absent.
 type KeyedNudgeProvider interface {
 	NudgeKeyed(name string, content []ContentBlock, key string) (DeliveryReceipt, error)
 	LookupDelivery(ctx context.Context, name, key string) (DeliveryReceipt, error)

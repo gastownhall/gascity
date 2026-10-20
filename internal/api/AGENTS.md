@@ -169,5 +169,6 @@ under the runtime delivery key `gc:<op id>:1`
 adoption asks the runtime first (`MessageRequest.Redelivery`). When the
 runtime already holds the delivery, the op closes `succeeded{legacy.delivered}`
 with nothing sent: no turn sighting, no interrupt and no send (DES-T3I §14
-item 8). A lookup that cannot tell fails the execution with nothing sent
-(`TestSessionContentOpsAdoptedInterruptNowThatLandedSendsNothing`).
+item 8; `TestSessionContentOpsAdoptedInterruptNowThatLandedSendsNothing`). A
+lookup that cannot tell fails the execution with nothing sent
+(`TestSessionContentOpsAdoptionLookupFailureSendsNothing`).

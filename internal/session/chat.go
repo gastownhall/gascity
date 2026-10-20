@@ -1351,8 +1351,10 @@ func (m *Manager) nudgeSession(ctx context.Context, sessName, message string, im
 
 // nudgeContent delivers content, passing the delivery key ctx carries (see
 // runtime.WithNudgeDeliveryKey) to a provider that deduplicates keyed
-// deliveries. Immediate delivery through an ImmediateNudgeProvider goes out
-// unkeyed: NudgeNow takes no key.
+// deliveries, immediate delivery included: such a provider's keyed send
+// starts the turn without an idle wait (runtime.NudgeWithReceipt). Only an
+// unkeyed immediate delivery, or one to a provider that keeps no keyed
+// deliveries, goes out through NudgeNow, which takes no key.
 //
 // Under an input fence in ctx (runtime.WithInputFence) the runtime delivers
 // only to the incarnation it names, or refuses.

@@ -27,6 +27,11 @@ const (
 	// laneViaReplayed is the via of a redelivery the runtime already held:
 	// nothing was sent now (OJ-7).
 	laneViaReplayed = "replayed"
+	// laneDeliveryKeyPrefix scopes a lane delivery key in the runtime's key
+	// space. It is opjournal.RuntimeDeliveryKeyPrefix, so the key Deliver
+	// hands the runtime is opjournal.RuntimeDeliveryKey of the journal key,
+	// the one an API op's delivery carries.
+	laneDeliveryKeyPrefix = opjournal.RuntimeDeliveryKeyPrefix
 	// laneDegradationTurnStartUnobserved marks a delivery the runtime
 	// accepted without seeing the turn it should start
 	// (runtime.ErrNudgeDeliveredUnobserved).
@@ -372,9 +377,11 @@ func (e *conversationLaneExec) caps(conv opjournal.ConversationView) (opjournal.
 
 // laneSteerCap is Caps.Steer for caps whose session row and runtime steer
 // mode allow a steer (steerable): only a live runtime steers, and never one
-// that deduplicates by delivery key (Caps.Dedup). A steer goes out through
-// the immediate nudge, which no runtime keys yet (runtime.SteerProtocol), so
-// a re-taken steer would be applied again while the plan, trusting Dedup,
+// that deduplicates by delivery key (Caps.Dedup). To such a runtime a keyed
+// immediate nudge goes out through its keyed send, a deduplicated turn start
+// that is not its steer (runtime.NudgeWithReceipt); its steer, NudgeNow,
+// takes no key (runtime.SteerProtocol). Steering it would either not steer
+// or, unkeyed, apply a re-taken steer again while the plan, trusting Dedup,
 // leaves out the D-NOTE repeat line.
 func laneSteerCap(caps opjournal.Caps, steerable bool) bool {
 	return caps.Live && !caps.Dedup && steerable
@@ -444,7 +451,7 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		Text:          d.Text,
 		Delivery:      delivery,
 		Wake:          worker.NudgeWakeLiveOnly,
-		DeliveryKey:   opjournal.RuntimeDeliveryKey(d.Key),
+		DeliveryKey:   laneDeliveryKeyPrefix + d.Key,
 		Fence:         fence,
 		AllowUnfenced: true,
 		Redelivery:    d.Redelivery,
@@ -469,7 +476,11 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 // §7.2). unfencedReq says the request carried no fence, because the row
 // names no token; steer says it was a steer, recorded via steer. A delivery
 // records the runtime's receipt (its message id, stamp and turn); a replay
-// of one the runtime already held is recorded via replayed. A submit
+// of one the runtime already held is recorded via replayed. A replayed
+// record's At is this redelivery's clock, not the held delivery's: unlike
+// DES-O1 §4.1's delivered_at it is no lower bound on the turn that delivery
+// started, which may have begun earlier. The held delivery's own time is its
+// MessageAt, the stamp the runtime stored. A submit
 // the runtime could not confirm may have delivered, so it is Unknown; a
 // nudge refused on a pending interaction, whichever runtime refused it, or
 // one the runtime reports never sent, is a transient miss. Any other error

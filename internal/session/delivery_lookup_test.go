@@ -7,6 +7,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/runtime/auto"
 )
 
 // lookupSession is a manager over fake profiled as profile, with one
@@ -68,5 +69,32 @@ func TestManagerLookupDeliveryNotKeptAndClosed(t *testing.T) {
 	}
 	if _, _, err := mgr.LookupDelivery(context.Background(), info.ID, "gc:op:1"); !errors.Is(err, ErrSessionClosed) {
 		t.Fatalf("LookupDelivery on a closed row = %v, want ErrSessionClosed", err)
+	}
+}
+
+// The lookup reads the session's ACP route as its sends do: an ACP session
+// behind the auto composite is looked up on the ACP backend, and the
+// default backend is not asked.
+func TestManagerLookupDeliveryFollowsTheACPRoute(t *testing.T) {
+	plain := runtime.NewFake()
+	keyed := runtime.NewFake()
+	sp := auto.New(plain, runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: keyed}))
+	mgr := newTestManager(t, beads.NewMemStore(), sp)
+	info, err := mgr.CreateSession(context.Background(), CreateOptions{Template: "helper", Command: "codex", WorkDir: t.TempDir(), Provider: "codex", Transport: "acp", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	held := runtime.DeliveryReceipt{MessageID: "m-acp"}
+	keyed.KeyedDeliveries = map[string]map[string]runtime.DeliveryReceipt{info.SessionName: {"gc:op:1": held}}
+
+	r, found, err := mgr.LookupDelivery(context.Background(), info.ID, "gc:op:1")
+	if err != nil || !found || r != held {
+		t.Fatalf("LookupDelivery on an ACP session = %+v, %v, %v; want %+v from the ACP backend", r, found, err, held)
+	}
+	if n := keyed.CountCalls("LookupDelivery", info.SessionName); n != 1 {
+		t.Fatalf("ACP backend lookups = %d, want 1", n)
+	}
+	if n := plain.CountCalls("LookupDelivery", info.SessionName); n != 0 {
+		t.Fatalf("default backend lookups = %d, want none", n)
 	}
 }

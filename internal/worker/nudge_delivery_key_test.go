@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 
@@ -166,37 +167,108 @@ func TestRuntimeHandleNudgeReportsTheReceipt(t *testing.T) {
 	}
 }
 
+// unfencedKeyed is a keyed provider that fences no input: it forwards only
+// Provider and KeyedNudgeProvider, so InputFencingFor reads it as none.
+type unfencedKeyed struct {
+	runtime.Provider
+	keyed runtime.KeyedNudgeProvider
+}
+
+func (u unfencedKeyed) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
+	return u.keyed.NudgeKeyed(name, content, key)
+}
+
+func (u unfencedKeyed) LookupDelivery(ctx context.Context, name, key string) (runtime.DeliveryReceipt, error) {
+	return u.keyed.LookupDelivery(ctx, name, key)
+}
+
+// keyedHandles are a runtime handle and a session handle on a
+// t3bridge-profiled fake, fencing as the profile does or (unfenced) not at
+// all, each with the fence a request to its session names.
+func keyedHandles(unfenced bool) map[string]func(*testing.T) (Handle, runtime.InputFence, string, *runtime.Fake) {
+	wrap := func(sp runtime.Provider) runtime.Provider {
+		if !unfenced {
+			return sp
+		}
+		return unfencedKeyed{Provider: sp, keyed: sp.(runtime.KeyedNudgeProvider)}
+	}
+	return map[string]func(*testing.T) (Handle, runtime.InputFence, string, *runtime.Fake){
+		"runtime handle": func(t *testing.T) (Handle, runtime.InputFence, string, *runtime.Fake) {
+			h, fake := keyedRuntimeHandle(t)
+			h.provider = wrap(h.provider)
+			return h, keyedFence, "keyed-worker", fake
+		},
+		"session handle": func(t *testing.T) (Handle, runtime.InputFence, string, *runtime.Fake) {
+			fake := runtime.NewFake()
+			s := newTurnSession(t, wrap(runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: fake})), "codex", "")
+			fake.Calls = nil
+			fence, _ := sessionpkg.InputFenceFor(s.info)
+			return s.handle, fence, s.info.SessionName, fake
+		},
+	}
+}
+
 // Kills a redelivery that is not looked up (M22) or reports Unfenced on a
 // replay (M23): a held delivery is replayed with its receipt and nothing is
-// sent, on either handle.
+// sent, on either handle. Under a runtime that fences no input, a fenced
+// request that allows unfenced delivery is Unfenced when it is sent; a
+// replay sent nothing, so it is not.
 func TestNudgeRedeliveryHeldSendsNothing(t *testing.T) {
-	t.Run("runtime handle", func(t *testing.T) {
-		h, fake := keyedRuntimeHandle(t)
-		held := seedHeld(fake, "keyed-worker", "gc:op:1")
-		res, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{
-			Text: "hello", Wake: NudgeWakeLiveOnly, DeliveryKey: "gc:op:1", Redelivery: true, Fence: keyedFence, AllowUnfenced: true,
+	for _, unfenced := range []bool{false, true} {
+		for label, newHandle := range keyedHandles(unfenced) {
+			t.Run(fmt.Sprintf("unfenced=%v/%s", unfenced, label), func(t *testing.T) {
+				h, fence, name, fake := newHandle(t)
+				held := seedHeld(fake, name, "gc:op:1")
+				res, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{
+					Text: "hello", Wake: NudgeWakeLiveOnly, DeliveryKey: "gc:op:1", Redelivery: true, Fence: fence, AllowUnfenced: true,
+				})
+				if err != nil || !res.Delivered || !res.Replayed || res.Unfenced || res.Receipt != held {
+					t.Fatalf("Nudge = %+v, %v; want a replay of %+v", res, err, held)
+				}
+				if got := sentCalls(fake); len(got) != 0 {
+					t.Fatalf("sent %+v, want nothing", got)
+				}
+			})
+		}
+	}
+}
+
+// The unfenced arm of TestNudgeRedeliveryHeldSendsNothing is live: the same
+// request, not held, goes out and is reported Unfenced.
+func TestNudgeRedeliveryNotHeldUnfencedIsUnfenced(t *testing.T) {
+	for label, newHandle := range keyedHandles(true) {
+		t.Run(label, func(t *testing.T) {
+			h, fence, _, _ := newHandle(t)
+			res, err := h.Nudge(context.Background(), handleActor(t, h, sessionpkg.ActorAgent), NudgeRequest{
+				Text: "hello", Wake: NudgeWakeLiveOnly, DeliveryKey: "gc:op:1", Redelivery: true, Fence: fence, AllowUnfenced: true,
+			})
+			if err != nil || !res.Delivered || res.Replayed || !res.Unfenced {
+				t.Fatalf("Nudge = %+v, %v; want delivered now, unfenced", res, err)
+			}
 		})
-		if err != nil || !res.Delivered || !res.Replayed || res.Unfenced || res.Receipt != held {
-			t.Fatalf("Nudge = %+v, %v; want a replay of %+v", res, err, held)
-		}
-		if got := sentCalls(fake); len(got) != 0 {
-			t.Fatalf("sent %+v, want nothing", got)
-		}
-	})
-	t.Run("session handle", func(t *testing.T) {
-		s, fake := keyedSessionHandle(t, false)
-		held := seedHeld(fake, s.info.SessionName, "gc:op:1")
-		fence, _ := sessionpkg.InputFenceFor(s.info)
-		res, err := s.handle.Nudge(context.Background(), handleActor(t, s.handle, sessionpkg.ActorAgent), NudgeRequest{
-			Text: "hello", Wake: NudgeWakeLiveOnly, DeliveryKey: "gc:op:1", Redelivery: true, Fence: fence, AllowUnfenced: true,
-		})
-		if err != nil || !res.Delivered || !res.Replayed || res.Unfenced || res.Receipt != held {
-			t.Fatalf("Nudge = %+v, %v; want a replay of %+v", res, err, held)
-		}
-		if got := sentCalls(fake); len(got) != 0 {
-			t.Fatalf("sent %+v, want nothing", got)
-		}
-	})
+	}
+}
+
+// Kills a runtime-handle message that checks the session is running before
+// it looks a redelivery up: a delivery the runtime already holds is replayed
+// even when the session has since stopped, instead of reported inactive.
+func TestRuntimeHandleMessageLooksUpBeforeTheRunningCheck(t *testing.T) {
+	h, fake := keyedRuntimeHandle(t)
+	held := seedHeld(fake, "keyed-worker", "gc:op:7")
+	if err := h.provider.Stop("keyed-worker"); err != nil {
+		t.Fatalf("Stop: %v", err)
+	}
+	if h.provider.IsRunning("keyed-worker") {
+		t.Fatal("session still running after Stop")
+	}
+	fake.Calls = nil
+	res, err := h.Message(context.Background(), handleActor(t, h, sessionpkg.ActorOperator), MessageRequest{Text: "hello", DeliveryKey: "gc:op:7", Redelivery: true})
+	if err != nil || !res.Replayed {
+		t.Fatalf("Message to a stopped session holding %+v = %+v, %v; want a replay", held, res, err)
+	}
+	if got := sentCalls(fake); len(got) != 0 {
+		t.Fatalf("replay sent %+v", got)
+	}
 }
 
 // A redelivery the runtime does not hold goes out once, under the same key.

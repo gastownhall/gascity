@@ -3328,22 +3328,49 @@ func (e *opsEnv) seedOpWith(t *testing.T, conv, key, text string, intent session
 
 // Kills an adoption without Redelivery (M36) or under another key (M19 at
 // the API): the re-execution looks the first execution's delivery up under
-// gc:<op id>:1 and, finding none, delivers once under the same key.
+// gc:<op id>:1 and, finding none, delivers once under the same key, on
+// either content path.
 func TestSessionContentOpsAdoptionReusesTheDeliveryKey(t *testing.T) {
+	for _, path := range []string{"/submit", "/messages"} {
+		t.Run(path, func(t *testing.T) {
+			e, info := newT3OpsEnv(t, "auto")
+			orphan := e.seedOp(t, info.ID, "key-o", "deliver me", legacyop.ExecutorAPI)
+			acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+path, "key-o", `{"message":"deliver me"}`).Body)
+			if acc.RequestID != orphan.ID || acc.Op == nil || acc.Op.Attempt != 1 {
+				t.Fatalf("adoption = %+v", acc)
+			}
+			if op := e.waitClosed(t, orphan.ID); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != legacyop.ViaLegacyDelivered {
+				t.Fatalf("adopted op = %+v", op.Outcome)
+			}
+			looks := callsOf(e.fs.sp, info.SessionName, "LookupDelivery")
+			if len(looks) != 1 || looks[0].DeliveryKey != opDeliveryKey(orphan.ID) {
+				t.Fatalf("lookups = %+v, want one under %s", looks, opDeliveryKey(orphan.ID))
+			}
+			assertOneKeyedDelivery(t, e, info, opDeliveryKey(orphan.ID), "deliver me", orphan.ID, "key-o")
+		})
+	}
+}
+
+// K3 on /messages: an adopted message whose first execution T3 already
+// holds closes succeeded{legacy.delivered} after one lookup, with nothing
+// sent.
+func TestSessionContentOpsAdoptedMessageThatLandedSendsNothing(t *testing.T) {
 	e, info := newT3OpsEnv(t, "auto")
-	orphan := e.seedOp(t, info.ID, "key-o", "deliver me", legacyop.ExecutorAPI)
-	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-o", `{"message":"deliver me"}`).Body)
+	orphan := e.seedOp(t, info.ID, "key-m", "deliver me", legacyop.ExecutorAPI)
+	e.fs.sp.KeyedDeliveries = map[string]map[string]runtime.DeliveryReceipt{info.SessionName: {opDeliveryKey(orphan.ID): {MessageID: "t3-message-1"}}}
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/messages", "key-m", `{"message":"deliver me"}`).Body)
 	if acc.RequestID != orphan.ID || acc.Op == nil || acc.Op.Attempt != 1 {
 		t.Fatalf("adoption = %+v", acc)
 	}
 	if op := e.waitClosed(t, orphan.ID); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != legacyop.ViaLegacyDelivered {
-		t.Fatalf("adopted op = %+v", op.Outcome)
+		t.Fatalf("op = %+v, want succeeded via legacy.delivered", op.Outcome)
 	}
-	looks := callsOf(e.fs.sp, info.SessionName, "LookupDelivery")
-	if len(looks) != 1 || looks[0].DeliveryKey != opDeliveryKey(orphan.ID) {
-		t.Fatalf("lookups = %+v, want one under %s", looks, opDeliveryKey(orphan.ID))
+	if looks := callsOf(e.fs.sp, info.SessionName, "LookupDelivery"); len(looks) != 1 {
+		t.Fatalf("lookups = %+v, want exactly one", looks)
 	}
-	assertOneKeyedDelivery(t, e, info, opDeliveryKey(orphan.ID), "deliver me", orphan.ID, "key-o")
+	if got := callsOf(e.fs.sp, info.SessionName, "ObserveTurn", "InterruptTurn", "Interrupt", "Nudge", "NudgeNow"); len(got) != 0 {
+		t.Fatalf("calls = %+v, want none", got)
+	}
 }
 
 // K3, DES-T3I §14 item 8 (M27, M36 at the API): an adopted interrupt_now
