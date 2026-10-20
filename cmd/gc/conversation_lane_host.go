@@ -20,7 +20,8 @@ package main
 //
 // Each worker also hosts its conversation's turn observer
 // (conversation_lane_turns.go), which folds the session's turn updates while
-// the worker waits and stops when the worker exits.
+// the worker waits, keeps the worker serving while observations are
+// pending, and stops when the worker exits.
 //
 // A worker holds its slot only while no other conversation waits for one and
 // its next pass is at most laneParkAfter away; otherwise it parks the
@@ -269,7 +270,9 @@ type conversationLaneHost struct {
 	turnHandle func(conv string) (worker.TurnHandle, error)
 	// turnStats counts the turn observers' work.
 	turnStats laneTurnStats
-	logf      func(format string, args ...any)
+	// observerName is the observers' gc.rt.observer stamp.
+	observerName string
+	logf         func(format string, args ...any)
 	// onPass, onReprobe and onWorkerExit are test seams: each pass's
 	// outcome, each re-probe, and each worker's exit. Nil in production.
 	onPass       func(conv string, out lanePassOutcome)
@@ -349,13 +352,14 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 		newExec: func(deps laneExecDeps, info session.Info) opjournal.Executor {
 			return newConversationLaneExec(deps, info)
 		},
-		logf:        log.Printf,
-		workers:     map[string]*laneWorker{},
-		inQueue:     map[string]bool{},
-		parked:      map[string]*laneParked{},
-		logged:      map[string]time.Time{},
-		quarantined: map[string][]string{},
-		waits:       map[string]laneConversationWaits{},
+		logf:         log.Printf,
+		observerName: laneObserverName(),
+		workers:      map[string]*laneWorker{},
+		inQueue:      map[string]bool{},
+		parked:       map[string]*laneParked{},
+		logged:       map[string]time.Time{},
+		quarantined:  map[string][]string{},
+		waits:        map[string]laneConversationWaits{},
 	}
 }
 
@@ -653,20 +657,28 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 	}
 	turns := h.newTurnObserver(conv)
 	defer turns.stop()
+	// A worker parked with observations pending hands its successor the
+	// watch, whatever the successor's first pass finds.
+	resumeTurns := state.turns
 	cw := &conversationLaneWorker{
 		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
 			pass: func() lanePassOutcome {
 				out := h.pass(conv)
-				if !out.skipped {
+				if laneTurnsWatchAfter(out, len(h.kinds) > 0 || resumeTurns) {
 					h.watchTurns(conv, turns)
+				}
+				if out.err == nil && out.res.Took != opjournal.TakeNone {
+					turns.expect(h.clk.Now())
 				}
 				return out
 			},
-			turns:   turns.updates,
-			onTurn:  func(u worker.TurnUpdate, ok bool) { h.observeTurn(conv, turns, u, ok) },
-			yield:   h.yield,
-			release: func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
+			turns:        turns.updates,
+			onTurn:       func(u worker.TurnUpdate, ok bool) { h.observeTurn(conv, turns, u, ok) },
+			turnsPending: func() (time.Duration, bool) { return turns.pending(h.clk.Now()) },
+			onTurnTimer:  func() { h.retryTurns(conv, turns) },
+			yield:        h.yield,
+			release:      func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
 			onPass: func(out lanePassOutcome) {
 				if h.onPass != nil {
 					h.onPass(conv, out)
@@ -860,7 +872,6 @@ func (h *conversationLaneHost) noteError(stage string, err error) {
 // noteFailure records a failure in the status, and logs it at most once per
 // laneErrorLogInterval per stage.
 func (h *conversationLaneHost) noteFailure(stage string, err error, pass bool) {
-	now := h.clk.Now()
 	h.mu.Lock()
 	h.passErrors++
 	h.sinceSuccess++
@@ -868,6 +879,16 @@ func (h *conversationLaneHost) noteFailure(stage string, err error, pass bool) {
 	if pass {
 		h.lastFailed = true
 	}
+	h.mu.Unlock()
+	h.logFailure(stage, err)
+}
+
+// logFailure logs a failure at most once per laneErrorLogInterval per stage,
+// counting it nowhere: the turn observers count their own (laneTurnStats),
+// so they never read as lane failures.
+func (h *conversationLaneHost) logFailure(stage string, err error) {
+	now := h.clk.Now()
+	h.mu.Lock()
 	due := true
 	if last, seen := h.logged[stage]; seen && now.Before(last.Add(laneErrorLogInterval)) {
 		due = false

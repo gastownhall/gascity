@@ -39,6 +39,10 @@ type laneWorkerState struct {
 	// waits on anything but the woken session's start, or startFor passing
 	// clears it.
 	wokeAt time.Time
+	// turns says the worker parked with observations pending, so the next
+	// worker watches the conversation's turns again whatever its first pass
+	// finds.
+	turns bool
 }
 
 // lanePark is how a worker that yields its slot parks its conversation: the
@@ -66,9 +70,16 @@ type laneWorkerHooks struct {
 	onReprobe func(stillBusy bool)
 	// turns is the conversation's turn updates while its observer watches
 	// (TI-3), nil otherwise; the worker hands each to onTurn while it waits,
-	// with ok false when the channel closed.
+	// and every queued one before it releases its slot, with ok false when
+	// the channel closed.
 	turns  func() <-chan worker.TurnUpdate
 	onTurn func(u worker.TurnUpdate, ok bool)
+	// turnsPending reports whether the observer has observations pending,
+	// and how long the worker waits for them before it looks again; while
+	// it does, the worker serves the conversation even with no op work
+	// (DES-O1 §7.1). onTurnTimer runs when that wait ends on its timer.
+	turnsPending func() (time.Duration, bool)
+	onTurnTimer  func()
 }
 
 // conversationLaneWorker serves one conversation until nothing it can see
@@ -92,44 +103,107 @@ const (
 	laneWaitFired laneWaitEnd = iota
 	laneWaitPoked
 	laneWaitEnded
+	// laneWaitSettled: a turn update changed what the observer waits for:
+	// nothing is pending any more, or it wants to look sooner.
+	laneWaitSettled
 )
 
-// run passes over the conversation until it is idle or yields its slot, then
-// releases the slot. Between passes it waits; a wait that ends on its timer
-// after a busy pass re-probes, and only a change runs the next full pass.
+// run passes over the conversation until it is idle, with no observation
+// pending, or yields its slot, then releases the slot.
 func (w *conversationLaneWorker) run() {
 	for {
 		out := w.hooks.pass()
 		if w.hooks.onPass != nil {
 			w.hooks.onPass(out)
 		}
-		for {
-			delay, idle := w.nextDelay(out)
-			if idle || w.hooks.yield(delay) {
-				var park *lanePark
-				if !idle {
-					park = &lanePark{after: delay, state: w.state}
-				}
-				if !w.hooks.release(false, park) {
-					break // a poke arrived since the pass: pass again
-				}
-				return
+		if !w.await(out) {
+			return
+		}
+	}
+}
+
+// await waits after the pass that gave out until the next full pass is due,
+// reporting true, or until the worker released its slot, reporting false.
+// Between passes it waits for the earlier of the ops' next change and the
+// observer's next look; a wait that ends on the ops' timer after a busy pass
+// re-probes, and only a change runs the next full pass. A worker with no op
+// work stays while observations are pending.
+func (w *conversationLaneWorker) await(out lanePassOutcome) bool {
+	delay, idle := w.nextDelay(out)
+	due := w.clk.Now().Add(delay)
+	for {
+		hold, observing := w.turnsPending()
+		if idle && !observing {
+			w.drainTurns()
+			hold, observing = w.turnsPending()
+		}
+		d, forTurns := delay, false
+		if observing && (idle || hold < delay) {
+			d, forTurns = hold, true
+		}
+		if (idle && !observing) || w.hooks.yield(d) {
+			var park *lanePark
+			if !idle || observing {
+				state := w.state
+				state.turns = observing
+				park = &lanePark{after: d, state: state}
 			}
-			end := w.wait(delay)
-			if end == laneWaitEnded {
-				w.hooks.release(true, nil)
-				return
+			// A poke that arrived since the pass keeps the slot: pass again.
+			return !w.hooks.release(false, park)
+		}
+		switch w.wait(d, idle && forTurns) {
+		case laneWaitEnded:
+			w.hooks.release(true, nil)
+			return false
+		case laneWaitPoked:
+			return true
+		case laneWaitFired:
+			if forTurns && w.hooks.onTurnTimer != nil {
+				w.hooks.onTurnTimer()
 			}
-			if end == laneWaitPoked || delay <= 0 || !w.reprobeDue(out) {
+			if forTurns && (idle || w.clk.Now().Before(due)) {
 				break
+			}
+			if delay <= 0 || !w.reprobeDue(out) {
+				return true
 			}
 			still := out.reprobe()
 			if w.hooks.onReprobe != nil {
 				w.hooks.onReprobe(still)
 			}
 			if !still {
-				break
+				return true
 			}
+			delay, idle = w.nextDelay(out)
+			due = w.clk.Now().Add(delay)
+			continue
+		}
+		if !idle {
+			delay = max(due.Sub(w.clk.Now()), 0)
+		}
+	}
+}
+
+// turnsPending is the observer's answer, false without one.
+func (w *conversationLaneWorker) turnsPending() (time.Duration, bool) {
+	if w.hooks.turnsPending == nil {
+		return 0, false
+	}
+	return w.hooks.turnsPending()
+}
+
+// drainTurns hands every turn update already queued to the observer, so a
+// worker that releases its slot leaves none unfolded.
+func (w *conversationLaneWorker) drainTurns() {
+	for {
+		select {
+		case u, ok := <-w.turnUpdates():
+			w.hooks.onTurn(u, ok)
+			if !ok {
+				return
+			}
+		default:
+			return
 		}
 	}
 }
@@ -147,14 +221,17 @@ func (w *conversationLaneWorker) reprobeDue(out lanePassOutcome) bool {
 
 // wait sleeps for d, or until a poke or the host's end. A turn update that
 // arrives meanwhile is handed to the observer and the wait goes on, on the
-// same timer.
-func (w *conversationLaneWorker) wait(d time.Duration) laneWaitEnd {
+// same timer, unless the observer now wants to look sooner (a retry), or,
+// with settle set, no observation is pending any more: the wait then ends
+// settled, for the worker to plan again.
+func (w *conversationLaneWorker) wait(d time.Duration, settle bool) laneWaitEnd {
 	if d <= 0 {
 		if w.ctx.Err() != nil {
 			return laneWaitEnded
 		}
 		return laneWaitFired
 	}
+	deadline := w.clk.Now().Add(d)
 	fire, stop := w.newTimer(d)
 	defer stop()
 	for {
@@ -167,6 +244,10 @@ func (w *conversationLaneWorker) wait(d time.Duration) laneWaitEnd {
 			return laneWaitFired
 		case u, ok := <-w.turnUpdates():
 			w.hooks.onTurn(u, ok)
+			hold, pending := w.turnsPending()
+			if (settle && !pending) || (pending && hold < deadline.Sub(w.clk.Now())) {
+				return laneWaitSettled
+			}
 		}
 	}
 }

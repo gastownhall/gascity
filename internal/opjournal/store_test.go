@@ -57,7 +57,8 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 		legacyKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyStatus] == string(StatusSubmitted)
 		laneScanKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyExecutor] == string(ExecutorLane) && q.Metadata[keyStatus] != ""
 		openLaneKeyed := q.Label == "" && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
-		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed {
+		interruptsKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 1 && q.Metadata[keyKind] == string(KindInterrupt) && q.Limit > 0
+		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed && !interruptsKeyed {
 			t.Errorf("unkeyed list %+v from %v", q, op.Caller)
 		}
 		for _, req := range beads.NativeListPlan(op.Query) {
