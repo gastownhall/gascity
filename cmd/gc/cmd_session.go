@@ -2854,9 +2854,13 @@ type sessionSubmitOp struct {
 // op id locally: absent, it delivers (legacy:cli); closed, it reports that
 // outcome; open under the API, it reports the API accepted the message and
 // exits 0. The gate is read from the city config before the API call, which
-// that config load does not report on: the local path loads it again, as it
-// always has.
+// that config load reports only as the warning that its [ops] gates were not
+// read: the local path loads it again, as it always has, from the
+// invocation's config memo. Under require the local path checks that the op
+// journal can record before it resolves the target, which may materialize a
+// named session's row.
 func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, jsonOutput bool, stdout, stderr io.Writer) int {
+	defer beginInvocationConfigMemo()()
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -2877,7 +2881,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	op := newCLIOp(gateCfg, nil, cliOpRequest{
 		verb: "gc session submit", kind: opjournal.KindMessage, key: key,
 		payload: message, policy: api.MessageOpPolicy(intent),
-		asOperator: true, acceptsAPIOp: true,
+		asOperator: true, acceptsAPIOp: true, cfgErr: gateErr,
 		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
 	})
 	if op.recording() && key == "" {
@@ -2929,6 +2933,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 	// worker handle), so route the whole flow through the session coordination-class
 	// store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	op.sessStore = sessStore
+	if !op.preflight() {
+		return 1
+	}
 
 	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, target)
 	if err != nil {
@@ -2936,7 +2944,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		return 1
 	}
 
-	op.sessStore, op.req.conversation = sessStore, sessionID
+	op.req.conversation = sessionID
 	switch op.start() {
 	case cliOpRefused:
 		return 1
@@ -2964,7 +2972,7 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
 	})
-	op.finishMessage(outcome.Queued, err)
+	op.finishMessageInterrupted(outcome.Queued, err, outcome.Interrupt)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -3044,7 +3052,8 @@ type sessionNudgeJSON struct {
 // cmdSessionNudge is the CLI entry point for "gc session nudge", recorded
 // under the op key key (empty mints one). A worker site refuses before it
 // resolves the target or writes anything
-// (errWorkerSiteDeliveryNeedsController).
+// (errWorkerSiteDeliveryNeedsController), and so does a require gate whose op
+// journal cannot record (resolveMessageOpTarget).
 func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
@@ -3058,7 +3067,10 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, json
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	targetInfo, err := resolveNudgeTarget(target)
+	targetInfo, err := resolveMessageOpTarget(target, sessionNudgeOpRequest(message, delivery, key, jsonOutput, stdout, stderr))
+	if errors.Is(err, errMessageOpRefused) {
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

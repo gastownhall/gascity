@@ -920,7 +920,7 @@ calls = 4
 [[count]]
 path = "cmd/gc/op_record_content_test.go"
 resource = "http_test_server"
-calls = 2
+calls = 3
 
 [[count]]
 path = "cmd/gc/op_record_verbs_matrix_test.go"

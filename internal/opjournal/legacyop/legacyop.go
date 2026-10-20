@@ -139,6 +139,12 @@ type Admission struct {
 	Cached any
 	// Entry is the in-flight entry this request holds, or nil.
 	Entry *Entry
+	// Unrecordable is the journal's refusal of a request auto runs
+	// unrecorded because the journal rejects the request itself (its key,
+	// or its payload: too large, not valid UTF-8, or empty), so the caller
+	// can say why; nil otherwise, a store failure included (Degraded hears
+	// of that).
+	Unrecordable error
 
 	rec   *Recorder
 	store *opjournal.Store
@@ -384,7 +390,7 @@ func (r *Recorder) unrecordable(req Request, key string, minted bool, err error)
 		return nil, err
 	}
 	r.count(req.Kind, StageAdmit, ResultUnrecorded, reason)
-	return &Admission{Decision: Execute, Key: key, Minted: minted, rec: r}, nil
+	return &Admission{Decision: Execute, Key: key, Minted: minted, Unrecordable: err, rec: r}, nil
 }
 
 // cannotRecord answers a request the store cannot record: degrade, then run

@@ -701,11 +701,19 @@ func messageRequestID(adm *legacyop.Admission) (string, error) {
 	return newRequestID()
 }
 
-// messageOpResult is the op result of a message delivery's legacy result. A
-// delivery whose interrupt the runtime accepted unfenced records that
-// degradation.
+// messageOpResult is the op result of a message delivery's legacy result
+// under the API's sentinels (MessageOpResult).
 func messageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
-	res := messageSentinels.MessageResult(queued, err)
+	return MessageOpResult(messageSentinels, queued, err, interrupt)
+}
+
+// MessageOpResult is the op result of a message delivery's legacy result,
+// its error mapped by sentinels: a delivery whose interrupt the runtime
+// accepted unfenced records that degradation. The API and the CLI's submit
+// fallback both close a message op through it, so one op id closes alike on
+// either path.
+func MessageOpResult(sentinels legacyop.Sentinels, queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
+	res := sentinels.MessageResult(queued, err)
 	if err == nil && interrupt != nil && interrupt.Degradation != "" {
 		res.Outcome.Degradation = interrupt.Degradation
 	}

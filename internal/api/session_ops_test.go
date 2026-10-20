@@ -2664,13 +2664,14 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 		wantErr string
 		queued  bool
 		replay  string
+		opID    string
 	}{
 		{name: "no key", answer: map[string]any{"status": "accepted", "request_id": "req-1", "event_cursor": "3"}, stream: true},
-		{name: "keyed, live", key: "key-1", answer: map[string]any{
+		{name: "keyed, live", key: "key-1", opID: "gc-op-a", answer: map[string]any{
 			"status": "accepted", "request_id": "gc-op-a", "event_cursor": "3",
 			"idempotency_key": "key-1", "op": map[string]any{"id": "gc-op-a", "conversation": "sess-1", "kind": "message", "status": "submitted"},
 		}, stream: true},
-		{name: "keyed, replayed success", key: "key-2", queued: true, replay: "replayed: operation gc-op-b already closed succeeded; " + replayOptionsNote, answer: map[string]any{
+		{name: "keyed, replayed success", key: "key-2", queued: true, opID: "gc-op-b", replay: "replayed: operation gc-op-b already closed succeeded; " + replayOptionsNote, answer: map[string]any{
 			"status": "accepted", "request_id": "gc-op-b", "event_cursor": "3",
 			"replayed": true, "op": map[string]any{
 				"id": "gc-op-b", "conversation": "sess-1", "kind": "message", "status": "closed",
@@ -2737,6 +2738,9 @@ func TestClientSubmitSessionWithKeyAndReplays(t *testing.T) {
 			}
 			if resp.Replayed != (tc.replay != "") || resp.Message != tc.replay {
 				t.Fatalf("resp replayed %v with message %q, want %q", resp.Replayed, resp.Message, tc.replay)
+			}
+			if resp.OpID != tc.opID {
+				t.Fatalf("resp op id = %q, want %q", resp.OpID, tc.opID)
 			}
 		})
 	}

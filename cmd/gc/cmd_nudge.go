@@ -1277,11 +1277,8 @@ func deliverSessionNudgeKeyed(target nudgeTarget, store beads.Store, sp runtime.
 // backs. A nudge with no store, or to a target with no session bead, cannot
 // be recorded: auto runs it unrecorded, require refuses it.
 func startSessionNudgeOp(target nudgeTarget, store beads.Store, message string, mode nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) (*cliOp, cliOpStart) {
-	req := cliOpRequest{
-		verb: "gc session nudge", kind: opjournal.KindMessage, key: key,
-		conversation: target.sessionID, payload: message, policy: sessionNudgeOpPolicy(mode),
-		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
-	}
+	req := sessionNudgeOpRequest(message, mode, key, jsonOutput, stdout, stderr)
+	req.conversation = target.sessionID
 	switch {
 	case store == nil:
 		req.unrecordable = legacyop.ReasonStoreUnavailable
@@ -1289,6 +1286,15 @@ func startSessionNudgeOp(target nudgeTarget, store beads.Store, message string, 
 		req.unrecordable = legacyop.ReasonUnmaterializedTarget
 	}
 	return startCLIOp(target.cfg, cliSessionStore(store, target.cfg, target.cityPath), req)
+}
+
+// sessionNudgeOpRequest is a nudge's op request before its target resolves.
+func sessionNudgeOpRequest(message string, mode nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) cliOpRequest {
+	return cliOpRequest{
+		verb: "gc session nudge", kind: opjournal.KindMessage, key: key,
+		payload: message, policy: sessionNudgeOpPolicy(mode),
+		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
+	}
 }
 
 // sessionNudgeOpPolicy is a nudge's message policy (DES-O0API §3.1): an
@@ -1861,11 +1867,11 @@ func sendMailNotifyWithOp(target nudgeTarget, store beads.Store, sp runtime.Prov
 		}
 		return "", nil
 	}
-	msg := fmt.Sprintf("You have mail from %s", sender)
+	msg := mailNotifyText(sender)
 	op, start := startMailNotifyOp(target, store, msg, messageID)
 	switch start {
 	case cliOpRefused:
-		return "", fmt.Errorf("the op journal refused the notice for %s, so it was not sent", messageID)
+		return "", mailNotifyRefusedError(messageID)
 	case cliOpReplayed:
 		id, _, _ := op.jsonFields()
 		return id, nil
@@ -1883,24 +1889,45 @@ func sendMailNotifyWithOp(target nudgeTarget, store beads.Store, sp runtime.Prov
 // auto runs it unrecorded, require refuses it. Its lines go to
 // nudgeWarningWriter.
 func startMailNotifyOp(target nudgeTarget, store beads.Store, msg, messageID string) (*cliOp, cliOpStart) {
+	req := mailNotifyOpRequest(msg, messageID)
+	req.conversation = target.sessionID
+	switch {
+	case store == nil:
+		req.unrecordable = legacyop.ReasonStoreUnavailable
+	case req.unrecordable == "" && target.sessionID == "":
+		req.unrecordable = legacyop.ReasonUnmaterializedTarget
+	}
+	return startCLIOp(target.cfg, cliSessionStore(store, target.cfg, target.cityPath), req)
+}
+
+// mailNotifyOpRequest is a mail notify's op request before its target
+// resolves: a notice with no message to key it by cannot be recorded. Its
+// lines go to nudgeWarningWriter.
+func mailNotifyOpRequest(msg, messageID string) cliOpRequest {
 	warn := nudgeWarningWriter
 	if warn == nil {
 		warn = io.Discard
 	}
 	req := cliOpRequest{
 		verb: "gc mail notify", kind: opjournal.KindMessage, presetKey: mailNotifyOpKey(messageID),
-		conversation: target.sessionID, payload: msg, causation: messageID, policy: mailNotifyOpPolicy,
+		payload: msg, causation: messageID, policy: mailNotifyOpPolicy,
 		stdout: io.Discard, stderr: warn,
 	}
-	switch {
-	case store == nil:
-		req.unrecordable = legacyop.ReasonStoreUnavailable
-	case messageID == "":
+	if messageID == "" {
 		req.unrecordable = legacyop.ReasonInvalidRequest
-	case target.sessionID == "":
-		req.unrecordable = legacyop.ReasonUnmaterializedTarget
 	}
-	return startCLIOp(target.cfg, cliSessionStore(store, target.cfg, target.cityPath), req)
+	return req
+}
+
+// mailNotifyText is the notice a mail recipient receives from sender.
+func mailNotifyText(sender string) string {
+	return fmt.Sprintf("You have mail from %s", sender)
+}
+
+// mailNotifyRefusedError is a mail notify the op journal refused under
+// require: the notice for messageID was not sent.
+func mailNotifyRefusedError(messageID string) error {
+	return fmt.Errorf("the op journal refused the notice for %s, so it was not sent", messageID)
 }
 
 // deliverMailNotifyLegacy delivers a mail notice msg live to a running
@@ -1991,6 +2018,14 @@ func resolveNudgeTarget(identifier string, warningWriter ...io.Writer) (nudgeTar
 // resolves to now — a successor holding the alias. When GC_SESSION_ID is unset
 // or stale, identifier resolves exactly as resolveNudgeTarget resolves it.
 func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdentity bool, warningWriter ...io.Writer) (nudgeTarget, error) {
+	return resolveNudgeTargetAfter(identifier, preferHookIdentity, nil, warningWriter...)
+}
+
+// resolveNudgeTargetAfter is resolveNudgeTargetPreferringHookIdentity with
+// before, when set, run over the loaded config and the opened nudges store
+// ahead of the resolution, which may write (it materializes a configured
+// named session's row): an error from before is returned unresolved.
+func resolveNudgeTargetAfter(identifier string, preferHookIdentity bool, before func(cityPath string, cfg *config.City, store beads.NudgesStore) error, warningWriter ...io.Writer) (nudgeTarget, error) {
 	cityPath, err := resolveCity()
 	if err != nil {
 		return nudgeTarget{}, err
@@ -2002,7 +2037,40 @@ func resolveNudgeTargetPreferringHookIdentity(identifier string, preferHookIdent
 	// The load ran the builtin readiness pass the routing read needs; resolve
 	// the routes alongside the store open (prewarmCLIStorageRoutes).
 	defer prewarmCLIStorageRoutes(cityPath)()
-	return resolveNudgeTargetInStore(cityPath, cfg, openNudgeBeadStore(cityPath), identifier, preferHookIdentity)
+	store := openNudgeBeadStore(cityPath)
+	if before != nil {
+		if err := before(cityPath, cfg, store); err != nil {
+			return nudgeTarget{}, err
+		}
+	}
+	return resolveNudgeTargetInStore(cityPath, cfg, store, identifier, preferHookIdentity)
+}
+
+// errMessageOpRefused is a message verb's require refusal that its preflight
+// (resolveMessageOpTarget) has already reported.
+var errMessageOpRefused = errors.New("the op journal refused the request before resolving its target")
+
+// resolveMessageOpTarget is resolveNudgeTarget for a message verb recorded
+// as req: under require it first checks that the op journal can record req
+// (cliOp.preflight), since the resolution may materialize a configured named
+// session's row, and answers errMessageOpRefused, the refusal reported, when
+// it cannot. With the gate off it checks nothing and opens no op store.
+func resolveMessageOpTarget(identifier string, req cliOpRequest, warningWriter ...io.Writer) (nudgeTarget, error) {
+	return resolveNudgeTargetAfter(identifier, false, func(cityPath string, cfg *config.City, store beads.NudgesStore) error {
+		// The op the verb starts once its target resolves prints the gate's
+		// warnings; this one only refuses.
+		stderr := req.stderr
+		req.stderr = io.Discard
+		if store.Store == nil {
+			req.unrecordable = legacyop.ReasonStoreUnavailable
+		}
+		op := newCLIOp(cfg, cliSessionStore(store.Store, cfg, cityPath), req)
+		op.req.stderr = stderr
+		if !op.preflight() {
+			return errMessageOpRefused
+		}
+		return nil
+	}, warningWriter...)
 }
 
 // resolveNudgeTargetInStore is resolveNudgeTargetPreferringHookIdentity over a

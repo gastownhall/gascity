@@ -69,6 +69,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
@@ -301,10 +302,16 @@ func cliCityConfig(cityPath string, cityErr error, warn io.Writer) (*config.City
 // raise, such as a journal write that fails, still comes after that write
 // (admitWake). The refusal goes through the recorder, which counts (and
 // degrades) it as it does at admission; preflight reports false after
-// reporting the refusal. Other modes check nothing here.
+// reporting the refusal. A request already known to be unrecordable
+// (cliOpRequest.unrecordable) is refused here too, as start would refuse it.
+// Other modes check nothing here.
 func (o *cliOp) preflight() bool {
 	if o.rec.Mode != rollout.Require {
 		return true
+	}
+	if o.req.unrecordable != "" {
+		o.refuseUnrecordable()
+		return false
 	}
 	_, err := o.rec.Open()
 	if err == nil {
@@ -329,13 +336,19 @@ func (o *cliOp) unavailableMessage(cause any) string {
 	return fmt.Sprintf("op journal cannot record this request (%v); the %s did not run", cause, o.req.kind)
 }
 
+// refuseUnrecordable counts and reports the require refusal of a request
+// known to be unrecordable (cliOpRequest.unrecordable).
+func (o *cliOp) refuseUnrecordable() {
+	o.rec.Refused(o.req.kind, o.req.unrecordable)
+	o.refuse(cliOpCodeUnavailable, o.unavailableMessage(o.req.unrecordableCause()), "", o.requestKey())
+}
+
 // start records the op. It reports every refusal itself.
 func (o *cliOp) start() cliOpStart {
 	req := o.req
 	rec := o.rec
 	if req.unrecordable != "" && rec.Mode == rollout.Require {
-		rec.Refused(req.kind, req.unrecordable)
-		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(req.unrecordableCause()), "", o.requestKey())
+		o.refuseUnrecordable()
 		return cliOpRefused
 	}
 	if req.unrecordable != "" {
@@ -367,11 +380,7 @@ func (o *cliOp) start() cliOpStart {
 	}
 	o.adm = adm
 	if adm.Decision != legacyop.Replay {
-		if !adm.Recorded && req.key != "" && rec.Mode == rollout.Auto {
-			if kerr := opjournal.ValidateClientKey(req.key); kerr != nil {
-				fmt.Fprintf(req.stderr, "%s: warning: invalid --key (%v); running unrecorded, so a rerun acts again\n", req.verb, kerr) //nolint:errcheck // best-effort stderr
-			}
-		}
+		o.warnUnrecordedKey(adm)
 		return cliOpExecute
 	}
 	if cliOpReplaysAsSuccess(adm.Op.Kind, adm.Op.Outcome) {
@@ -382,10 +391,33 @@ func (o *cliOp) start() cliOpStart {
 		fmt.Fprintf(req.stderr, "%s: %s\n", req.verb, note) //nolint:errcheck // best-effort stderr
 		return cliOpReplayed
 	}
+	rerun := "rerun to act again"
+	if req.key != "" {
+		rerun = "rerun without --key to act again"
+	}
 	o.refuse(cliOpCodeAlreadyFailed,
-		fmt.Sprintf("op %s closed %s%s; rerun without --key to act again", adm.Op.ID, cliOpOutcomeText(adm.Op.Outcome), o.restartNote()),
+		fmt.Sprintf("op %s closed %s%s; %s", adm.Op.ID, cliOpOutcomeText(adm.Op.Outcome), o.restartNote(), rerun),
 		adm.Op.ID, adm.Key)
 	return cliOpRefused
+}
+
+// warnUnrecordedKey warns, in auto, that a run under a client --key the
+// journal declined to record (an invalid key, or a request it rejects: a
+// payload too large, not valid UTF-8, or empty) is not recorded, so a
+// same-key rerun acts again. A store failure was reported by warnDegrade.
+func (o *cliOp) warnUnrecordedKey(adm *legacyop.Admission) {
+	req := o.req
+	if adm.Recorded || req.key == "" || o.rec.Mode != rollout.Auto {
+		return
+	}
+	if kerr := opjournal.ValidateClientKey(req.key); kerr != nil {
+		fmt.Fprintf(req.stderr, "%s: warning: invalid --key (%v); running unrecorded, so a rerun acts again\n", req.verb, kerr) //nolint:errcheck // best-effort stderr
+		return
+	}
+	if adm.Unrecordable == nil {
+		return
+	}
+	fmt.Fprintf(req.stderr, "%s: warning: --key not recorded (%v); running unrecorded, so a rerun acts again\n", req.verb, adm.Unrecordable) //nolint:errcheck // best-effort stderr
 }
 
 // principal is the request's principal and actor: the operator for an
@@ -611,7 +643,11 @@ func (o *cliOp) refuseAdmit(err error) {
 	var busy *legacyop.BusyError
 	switch {
 	case errors.As(err, &busy):
-		o.refuse(cliOpCodeInProgress, fmt.Sprintf("%v%s; rerun later or without --key", busy, o.restartNote()), busy.ID, o.requestKey())
+		rerun := "rerun later"
+		if o.req.key != "" {
+			rerun = "rerun later or without --key"
+		}
+		o.refuse(cliOpCodeInProgress, fmt.Sprintf("%v%s; %s", busy, o.restartNote(), rerun), busy.ID, o.requestKey())
 	case errors.Is(err, opjournal.ErrKeyReuse):
 		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), cliOpReusedID(err), o.requestKey())
 	case errors.Is(err, legacyop.ErrUnavailable):
@@ -806,14 +842,27 @@ func (e *cliMessageRefusal) Unwrap() error { return e.err }
 // finishMessage closes a message op from its legacy result: delivered,
 // queued, refused (cliMessageRefusal) or another error's outcome.
 func (o *cliOp) finishMessage(queued bool, err error) {
+	o.finishMessageInterrupted(queued, err, nil)
+}
+
+// finishMessageInterrupted is finishMessage for a delivery a turn fence ran
+// for: interrupt is its report (nil when none ran), and an interrupt the
+// runtime accepted unfenced is recorded as the API records it.
+func (o *cliOp) finishMessageInterrupted(queued bool, err error, interrupt *session.TurnInterruptReport) {
 	if o == nil {
 		return
 	}
+	o.finish(cliMessageOpResult(queued, err, interrupt))
+}
+
+// cliMessageOpResult is the op result of a CLI message path's legacy result:
+// a refusal (cliMessageRefusal) closes failed{refused:<why>}, anything else
+// as api.MessageOpResult maps it under cliMessageSentinels.
+func cliMessageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
 	if refusal := (*cliMessageRefusal)(nil); errors.As(err, &refusal) {
-		o.finishOutcome(cliOpRefusedOutcome(refusal.why))
-		return
+		return legacyop.Result{Outcome: cliOpRefusedOutcome(refusal.why)}
 	}
-	o.finish(cliMessageSentinels.MessageResult(queued, err))
+	return api.MessageOpResult(cliMessageSentinels, queued, err, interrupt)
 }
 
 // cliOpRefusedOutcome is failed{refused:<why>}.

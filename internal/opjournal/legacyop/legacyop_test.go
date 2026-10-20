@@ -154,6 +154,9 @@ type want struct {
 	recorded bool
 	adopted  bool
 	degraded string // the Degrade stage reported, or ""
+	// rejected is the journal's rejection an unrecorded admission carries
+	// (Admission.Unrecordable), or nil.
+	rejected error
 }
 
 // TestAdmitMatrix runs every store state under auto and require, for the
@@ -161,6 +164,7 @@ type want struct {
 func TestAdmitMatrix(t *testing.T) {
 	execRec := want{decision: Execute, recorded: true}
 	execUnrec := func(stage string) want { return want{decision: Execute, degraded: stage} }
+	rejected := func(err error) want { return want{decision: Execute, rejected: err} }
 	unavailable := func(stage string) want { return want{err: ErrUnavailable, degraded: stage} }
 	busy := want{err: ErrBusy}
 	replay := want{decision: Replay, recorded: true}
@@ -219,10 +223,10 @@ func TestAdmitMatrix(t *testing.T) {
 		}, [2]want{{err: opjournal.ErrKeyReuse}, {err: opjournal.ErrKeyReuse}}, [2]want{{err: opjournal.ErrKeyReuse}, {err: opjournal.ErrKeyReuse}}},
 		{"payload too large", func(*testing.T, *env, *Recorder) Request {
 			return msg("k1", strings.Repeat("x", opjournal.MaxInlinePayload+1))
-		}, [2]want{execUnrec(""), execUnrec("")}, [2]want{{err: opjournal.ErrPayloadTooLarge}, {err: opjournal.ErrPayloadTooLarge}}},
+		}, [2]want{rejected(opjournal.ErrPayloadTooLarge), rejected(opjournal.ErrPayloadTooLarge)}, [2]want{{err: opjournal.ErrPayloadTooLarge}, {err: opjournal.ErrPayloadTooLarge}}},
 		{
 			"invalid key", func(*testing.T, *env, *Recorder) Request { return msg(" k1", "hello") },
-			[2]want{execUnrec(""), execUnrec("")},
+			[2]want{rejected(opjournal.ErrInvalidRequest), rejected(opjournal.ErrInvalidRequest)},
 			[2]want{{err: opjournal.ErrInvalidRequest}, {err: opjournal.ErrInvalidRequest}},
 		},
 		{"closed replay", func(t *testing.T, e *env, r *Recorder) Request {
@@ -287,6 +291,9 @@ func TestAdmitMatrix(t *testing.T) {
 						}
 						if adm.Decision != w.decision || adm.Recorded != w.recorded || adm.Adopted != w.adopted {
 							t.Fatalf("Admit = decision %d recorded %t adopted %t; want %+v", adm.Decision, adm.Recorded, adm.Adopted, w)
+						}
+						if (w.rejected == nil) != (adm.Unrecordable == nil) || (w.rejected != nil && !errors.Is(adm.Unrecordable, w.rejected)) {
+							t.Fatalf("Admit unrecordable = %v, want %v", adm.Unrecordable, w.rejected)
 						}
 						if adm.Key == "" || (req.Key == "") != adm.Minted {
 							t.Fatalf("key %q minted %t for supplied %q", adm.Key, adm.Minted, req.Key)

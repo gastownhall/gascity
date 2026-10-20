@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -55,8 +57,17 @@ type contentOpCity struct {
 }
 
 // newContentOpCity builds the city with the ops.content gate at mode (""
-// leaves it off).
+// leaves it off), its session on the codex provider, which takes no live
+// wait-idle delivery: a wait-idle delivery queues.
 func newContentOpCity(t *testing.T, mode string) *contentOpCity {
+	t.Helper()
+	return newContentOpCityOn(t, mode, "codex")
+}
+
+// newContentOpCityOn is newContentOpCity with its session on provider. On
+// claude the fake is set to report an idle boundary, so a wait-idle delivery
+// (a mail notice included) is delivered live.
+func newContentOpCityOn(t *testing.T, mode, provider string) *contentOpCity {
 	t.Helper()
 	t.Setenv("GC_BEADS", "file")
 	env := map[string]string{}
@@ -69,9 +80,12 @@ func newContentOpCity(t *testing.T, mode string) *contentOpCity {
 	store := openNudgeBeadStore(dir)
 	fake := runtime.NewFake()
 	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
-	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: provider, WorkDir: dir, Provider: provider, ExtraMeta: map[string]string{"session_origin": "manual"}})
 	if err != nil {
 		t.Fatalf("CreateSession: %v", err)
+	}
+	if provider == "claude" {
+		fake.WaitForIdleErrors[info.SessionName] = nil
 	}
 	prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
 	nudgeCityUsesManagedReconciler = func(string) bool { return false }
@@ -86,12 +100,12 @@ func newContentOpCity(t *testing.T, mode string) *contentOpCity {
 		dir: dir, store: store, fake: fake, h: h,
 		target: nudgeTarget{
 			cityPath:    dir,
-			cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "codex"}}},
+			cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: provider}}},
 			sessionID:   info.ID,
 			sessionName: info.SessionName,
 			identity:    "worker",
-			agent:       config.Agent{Name: "worker", Provider: "codex"},
-			resolved:    &config.ResolvedProvider{Name: "codex"},
+			agent:       config.Agent{Name: "worker", Provider: provider},
+			resolved:    &config.ResolvedProvider{Name: provider},
 		},
 	}
 }
@@ -174,7 +188,7 @@ func TestSessionNudgeOpRecordsTheDelivery(t *testing.T) {
 		outcome string
 	}{
 		{nudgeDeliveryImmediate, opjournal.WhenSteer, legacyop.ViaLegacyDelivered, "delivered"},
-		// The fake reports no idle boundary, so a wait-idle nudge queues.
+		// Codex takes no live wait-idle delivery, so a wait-idle nudge queues.
 		{nudgeDeliveryWaitIdle, opjournal.WhenBoundary, legacyop.ViaLegacyQueued, "queued"},
 		{nudgeDeliveryQueue, opjournal.WhenBoundary, legacyop.ViaLegacyQueued, "queued"},
 	} {
@@ -323,13 +337,24 @@ func TestSessionNudgeOpOffAndRequire(t *testing.T) {
 // I11: the text a session receives is the off text, byte for byte, in every
 // ops.content mode, and no op id or key reaches the runtime.
 func TestSessionNudgeAndMailNotifyDeliveredTextIsUnchangedByTheGate(t *testing.T) {
+	for _, provider := range []string{"codex", "claude"} {
+		t.Run(provider, func(t *testing.T) {
+			deliveredTextIsUnchangedByTheGate(t, provider)
+		})
+	}
+}
+
+// deliveredTextIsUnchangedByTheGate is I11 on a session on provider: on
+// codex the wait-idle nudge and the mail notice queue, on claude they are
+// delivered live.
+func deliveredTextIsUnchangedByTheGate(t *testing.T, provider string) {
 	type run struct {
 		calls  []runtime.Call
 		queued []string
 		ids    []string
 	}
 	runAll := func(mode string) run {
-		c := newContentOpCity(t, mode)
+		c := newContentOpCityOn(t, mode, provider)
 		if code, _, stderr := c.nudge(nudgeDeliveryImmediate, "k-text", false); code != 0 {
 			t.Fatalf("%s nudge = %d; stderr=%s", mode, code, stderr)
 		}
@@ -348,6 +373,9 @@ func TestSessionNudgeAndMailNotifyDeliveredTextIsUnchangedByTheGate(t *testing.T
 	off := runAll("")
 	if len(off.calls)+len(off.queued) != 3 {
 		t.Fatalf("off deliveries = %+v, queued = %v; want 3 between them", off.calls, off.queued)
+	}
+	if wantLive := map[string]int{"codex": 1, "claude": 3}[provider]; len(off.calls) != wantLive {
+		t.Fatalf("off live deliveries = %+v, want %d on %s", off.calls, wantLive, provider)
 	}
 	for _, mode := range []string{"auto", "require"} {
 		got := runAll(mode)
@@ -370,14 +398,19 @@ func TestSessionNudgeAndMailNotifyDeliveredTextIsUnchangedByTheGate(t *testing.T
 // A mail notify is cause-keyed: key mail:<message id>, causation the message
 // id; a notify the op already closed is not delivered again.
 func TestMailNotifyOpIsCauseKeyed(t *testing.T) {
-	c := newContentOpCity(t, "auto")
+	// On claude the notice is delivered live, so a replay that delivered
+	// again would show as a second delivery (the file queue would fold a
+	// second queued notice for the same message into the first).
+	c := newContentOpCityOn(t, "auto", "claude")
 	id, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-1")
 	if err != nil {
 		t.Fatalf("notify: %v", err)
 	}
 	op := cliOpOnly(t, c.h.opStore)
-	// The fake reports no idle boundary, so the wait-idle notice queues.
-	cliOpWantOutcome(t, op, opjournal.ArmSucceeded, "", legacyop.ViaLegacyQueued)
+	cliOpWantOutcome(t, op, opjournal.ArmSucceeded, "", legacyop.ViaLegacyDelivered)
+	if n := len(c.delivered()); n != 1 {
+		t.Fatalf("live deliveries = %d, want the notice delivered once", n)
+	}
 	if id != op.ID || op.ClientKey != "mail:gc-mail-1" || op.Causation != "gc-mail-1" || op.Payload != "You have mail from mayor" {
 		t.Fatalf("op = %+v (returned id %q), want key mail:gc-mail-1, causation gc-mail-1, the notice text", op, id)
 	}
@@ -388,8 +421,38 @@ func TestMailNotifyOpIsCauseKeyed(t *testing.T) {
 	if err != nil || again != op.ID {
 		t.Fatalf("second notify = %q, %v; want the replayed op %s", again, err, op.ID)
 	}
-	if n := len(c.delivered()) + c.queued(t); n != 1 {
-		t.Fatalf("deliveries and queued notices = %d, want 1: the same message notifies once", n)
+	if n, q := len(c.delivered()), c.queued(t); n != 1 || q != 0 {
+		t.Fatalf("deliveries = %d, queued notices = %d; want 1 and 0: the same message notifies once", n, q)
+	}
+}
+
+// A queued notice's op closes succeeded{via: legacy.queued} at enqueue, and
+// its replay queues nothing more.
+func TestMailNotifyOpQueuedNoticeReplays(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	if _, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-q"); err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	cliOpWantOutcome(t, cliOpOnly(t, c.h.opStore), opjournal.ArmSucceeded, "", legacyop.ViaLegacyQueued)
+	if _, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-q"); err != nil {
+		t.Fatalf("second notify: %v", err)
+	}
+	if n, q := len(c.delivered()), c.queued(t); n != 0 || q != 1 {
+		t.Fatalf("deliveries = %d, queued = %d; want 0 and 1", n, q)
+	}
+}
+
+// Under require a notice the journal cannot record is an error, and nothing
+// is delivered or queued.
+func TestMailNotifyOpRequireRefusalIsAnError(t *testing.T) {
+	c := newContentOpCityOn(t, "require", "claude")
+	c.h.opStore = cliOpIncapableStore{c.h.opStore}
+	id, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-r")
+	if err == nil || !strings.Contains(err.Error(), "refused the notice for gc-mail-r") || id != "" {
+		t.Fatalf("notify = %q, %v; want the refusal as an error", id, err)
+	}
+	if n, q := len(c.delivered()), c.queued(t); n != 0 || q != 0 {
+		t.Fatalf("deliveries = %d, queued = %d; want no effect", n, q)
 	}
 }
 
@@ -681,4 +744,281 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 			t.Fatalf("Idempotency-Key = %q, opens = %d, stderr = %q; want no key, no op store, no key on stderr", got, h.opens, stderr.String())
 		}
 	})
+}
+
+// D12, §8.2: under require, a store that cannot record refuses before the
+// target resolves, so a configured named session with no row gets none.
+func TestMessageVerbsRequireRefuseBeforeMaterializing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		run  func(t *testing.T) (code int, stdout, stderr string)
+	}{
+		{"submit", func(*testing.T) (int, string, string) {
+			t.Setenv("GC_NO_API", "1")
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionSubmit([]string{killPokeSessionIdentity, "hello"}, session.SubmitIntentDefault, "", true, &stdout, &stderr)
+			return code, stdout.String(), stderr.String()
+		}},
+		{"nudge", func(*testing.T) (int, string, string) {
+			var stdout, stderr bytes.Buffer
+			code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryImmediate, "", true, &stdout, &stderr)
+			return code, stdout.String(), stderr.String()
+		}},
+		{"mail notify", func(t *testing.T) (int, string, string) {
+			var warn bytes.Buffer
+			prev := nudgeWarningWriter
+			nudgeWarningWriter = &warn
+			t.Cleanup(func() { nudgeWarningWriter = prev })
+			_, err := newMailNudgeFunc("human")(killPokeSessionIdentity, "gc-mail-1")
+			if err == nil || !strings.Contains(err.Error(), "refused the notice for gc-mail-1") {
+				t.Fatalf("notify err = %v, want the refusal", err)
+			}
+			return 1, "", warn.String()
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newCLIOpHarness(t, map[string]string{"GC_OPS_CONTENT": "require"})
+			dir := newCLIOpNamedCityWithoutRow(t)
+			h.opStore = cliOpIncapableStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+			code, stdout, stderr := tc.run(t)
+			if code != 1 || !strings.Contains(stderr, "op journal cannot record this request") {
+				t.Fatalf("code = %d, stderr = %q; want 1 and the require refusal", code, stderr)
+			}
+			if stdout != "" {
+				if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeUnavailable {
+					t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+				}
+			}
+			if n := cliOpSessionRows(t, dir); n != 0 {
+				t.Fatalf("session rows = %d, want none: require refused, so nothing may be created", n)
+			}
+		})
+	}
+}
+
+// The local submit records the unfenced_interrupt degradation of an
+// interrupt_now the runtime accepted unfenced, as the API path records it on
+// the same op id (TestSessionContentOpsUnfencedInterruptReachesTheOp).
+func TestSessionSubmitLocalRecordsUnfencedInterrupt(t *testing.T) {
+	h, c := submitOpCity(t, "auto", nil)
+	c.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+	c.sp.TurnScripts = map[string][]string{c.name: {"t1", "t1", ""}}
+	prev := buildSessionProviderByName
+	buildSessionProviderByName = func(*config.City, string, config.SessionConfig, string, string) (runtime.Provider, error) {
+		return runtime.FullFake{Fake: c.sp}, nil
+	}
+	t.Cleanup(func() { buildSessionProviderByName = prev })
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSubmit([]string{c.bead.ID, "now"}, session.SubmitIntentInterruptNow, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+	}
+	sent := false
+	for _, call := range c.sp.Calls {
+		sent = sent || (call.Method == "InterruptTurn" && call.Value == "sent")
+	}
+	if !sent {
+		t.Fatalf("no unfenced InterruptTurn was sent; calls=%+v", c.sp.Calls)
+	}
+	op := cliOpOnly(t, h.opStore)
+	if op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Degradation != session.DegradationUnfencedInterrupt {
+		t.Fatalf("op outcome = %+v, want succeeded with degradation %s", op.Outcome, session.DegradationUnfencedInterrupt)
+	}
+}
+
+// A local submit the session queues closes its op succeeded{via:
+// legacy.queued}, and reports the queue.
+func TestSessionSubmitLocalQueuedClosesQueued(t *testing.T) {
+	h, c := submitOpCity(t, "auto", nil)
+	// A session still being created, with no runtime yet, queues the
+	// message for its first start.
+	if err := c.store.SetMetadata(c.bead.ID, "state", string(session.StateCreating)); err != nil {
+		t.Fatalf("marking the session creating: %v", err)
+	}
+	if err := c.sp.Stop(c.name); err != nil {
+		t.Fatalf("stopping the fake runtime: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+	}
+	if got := cliOpJSON(t, stdout.Bytes()); got["queued"] != true {
+		t.Fatalf("JSON = %v, want a queued submit", got)
+	}
+	cliOpWantOutcome(t, cliOpOnly(t, h.opStore), opjournal.ArmSucceeded, "", legacyop.ViaLegacyQueued)
+}
+
+// D5: submit is an operator verb on both paths, so inside an agent session
+// (GC_SESSION_ID set) the fallback still finds the op the API recorded under
+// the operator, and does not deliver again.
+func TestSessionSubmitFallbackInsideAnAgentSessionDedupes(t *testing.T) {
+	var h *cliOpHarness
+	var c *cliOpCity
+	srv := lostAnswerServer(t, func(key string) {
+		proposeAsAPI(t, h, c.bead.ID, key, testSubmitText, session.SubmitIntentDefault, nil)
+	})
+	h, c = submitOpCity(t, "auto", srv)
+	h.env["GC_SESSION_ID"] = "gc-agent-1"
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+	}
+	if n := submitDeliveries(c.sp); n != 0 {
+		t.Fatalf("deliveries = %d, want none: the API accepted the message under the operator", n)
+	}
+	if !strings.Contains(stdout.String(), "Accepted by the controller") {
+		t.Fatalf("stdout = %q, want the API's op reported as accepted", stdout.String())
+	}
+}
+
+// In auto, a run under --key whose request the journal rejects (a payload it
+// cannot hold) runs unrecorded and says so: a same-key rerun acts again.
+func TestSessionNudgeKeyNotRecordedWarns(t *testing.T) {
+	for _, tc := range []struct {
+		name, message, reason string
+	}{
+		{"oversized", strings.Repeat("x", opjournal.MaxInlinePayload+1), "too large"},
+		{"invalid UTF-8", "bad \xff text", "UTF-8"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newContentOpCity(t, "auto")
+			for i := 0; i < 2; i++ {
+				var stdout, stderr bytes.Buffer
+				if code := deliverSessionNudgeKeyed(c.target, c.store, c.fake, tc.message, nudgeDeliveryImmediate, "k-big", false, &stdout, &stderr); code != 0 {
+					t.Fatalf("nudge %d = %d; stderr=%s", i, code, stderr.String())
+				}
+				if got := stderr.String(); !strings.Contains(got, "warning: --key not recorded") || !strings.Contains(got, tc.reason) || !strings.Contains(got, "a rerun acts again") {
+					t.Fatalf("nudge %d stderr = %q, want the unrecorded --key warning naming %q", i, got, tc.reason)
+				}
+			}
+			if n := len(cliOpRows(t, c.h.opStore)); n != 0 {
+				t.Fatalf("op rows = %d, want none", n)
+			}
+			var stdout, stderr bytes.Buffer
+			if code := deliverSessionNudgeKeyed(c.target, c.store, c.fake, tc.message, nudgeDeliveryImmediate, "", false, &stdout, &stderr); code != 0 || strings.Contains(stderr.String(), "--key") {
+				t.Fatalf("nudge without --key = %d, stderr %q; want no --key warning", code, stderr.String())
+			}
+		})
+	}
+}
+
+// An immediate nudge to an ACP session this process does not own closes
+// failed{refused:acp_connection_not_owned}.
+func TestSessionNudgeOpACPNotOwnedRefusal(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	c.target.transport = "acp"
+	c.fake.NudgeErrors = map[string]error{c.target.sessionName: runtime.ErrSessionNotFound}
+	code, _, stderr := c.nudge(nudgeDeliveryImmediate, "", false)
+	if code != 1 || !strings.Contains(stderr, "does not own the ACP connection") {
+		t.Fatalf("nudge = %d, stderr = %q; want the ACP refusal", code, stderr)
+	}
+	cliOpWantOutcome(t, cliOpOnly(t, c.h.opStore), opjournal.ArmFailed, opjournal.RefusedReasonPrefix+cliOpRefusedACPNotOwned, "")
+}
+
+// cliMessageOpResult maps every CLI message path's legacy result.
+func TestCLIMessageOpResult(t *testing.T) {
+	unfenced := &session.TurnInterruptReport{Degradation: session.DegradationUnfencedInterrupt}
+	for _, tc := range []struct {
+		name        string
+		queued      bool
+		err         error
+		interrupt   *session.TurnInterruptReport
+		arm         opjournal.Arm
+		reason, via string
+		degradation string
+	}{
+		{name: "delivered", arm: opjournal.ArmSucceeded, via: legacyop.ViaLegacyDelivered},
+		{name: "queued", queued: true, arm: opjournal.ArmSucceeded, via: legacyop.ViaLegacyQueued},
+		{name: "unfenced interrupt", interrupt: unfenced, arm: opjournal.ArmSucceeded, via: legacyop.ViaLegacyDelivered, degradation: session.DegradationUnfencedInterrupt},
+		{name: "failed interrupt records no degradation", err: errors.New("x"), interrupt: unfenced, arm: opjournal.ArmFailed, reason: opjournal.ReasonOther},
+		{name: "refusal", err: &cliMessageRefusal{why: cliOpRefusedPendingInteraction, err: errors.New("prompt")}, arm: opjournal.ArmFailed, reason: opjournal.RefusedReasonPrefix + cliOpRefusedPendingInteraction},
+		{name: "unsupported", err: session.ErrTurnInterruptUnsupported, arm: opjournal.ArmFailed, reason: opjournal.ReasonUnsupported},
+		{name: "closed", err: session.ErrSessionClosed, arm: opjournal.ArmSkipped, reason: opjournal.ReasonConversationClosed},
+		{name: "session not found", err: session.ErrSessionNotFound, arm: opjournal.ArmFailed, reason: opjournal.ReasonSessionGone},
+		{name: "runtime session not found", err: fmt.Errorf("nudging: %w", runtime.ErrSessionNotFound), arm: opjournal.ArmFailed, reason: opjournal.ReasonSessionGone},
+		{name: "provider unavailable", err: runtime.ErrRuntimeUnavailable, arm: opjournal.ArmFailed, reason: opjournal.ReasonProviderUnavailable},
+		{name: "timeout", err: context.DeadlineExceeded, arm: opjournal.ArmFailed, reason: opjournal.ReasonDeadlineInFlight},
+		{name: "other", err: errors.New("boom"), arm: opjournal.ArmFailed, reason: opjournal.ReasonOther},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := cliMessageOpResult(tc.queued, tc.err, tc.interrupt).Outcome
+			if got.Arm != tc.arm || got.Reason != tc.reason || got.Result.Via != tc.via || got.Degradation != tc.degradation {
+				t.Fatalf("outcome = %+v, want %s{%s} via %q degradation %q", got, tc.arm, tc.reason, tc.via, tc.degradation)
+			}
+		})
+	}
+}
+
+// gc mail reply --json names the notice's op.
+func TestMailReplyJSONNamesTheNotifyOp(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	mp := beadmail.New(beads.NewMemStore())
+	if _, err := mp.Send("alice", "bob", "Hello", "first"); err != nil {
+		t.Fatalf("send: %v", err)
+	}
+	nf := func(_, messageID string) (string, error) {
+		return sendMailNotifyWithOp(c.target, c.store, c.fake, "bob", messageID)
+	}
+	var stdout, stderr bytes.Buffer
+	if code := doMailReplyJSON(mp, events.Discard, "gc-1", "bob", "RE: Hello", "reply body", nf, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("reply = %d; stderr=%s", code, stderr.String())
+	}
+	contentOpValidate(t, "schemas/mail/reply/result.schema.json", stdout.String())
+	var got mailActionResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("decoding %q: %v", stdout.String(), err)
+	}
+	op := cliOpOnly(t, c.h.opStore)
+	if len(got.NotifyOpIDs) != 1 || got.NotifyOpIDs[0] != op.ID || op.ClientKey != "mail:"+got.ID {
+		t.Fatalf("notify_op_ids = %v, op = %+v; want the reply's notice op", got.NotifyOpIDs, op)
+	}
+}
+
+// A submit the API records and runs live (not a replay) reports the API's op
+// and the key under --json, with no replayed field.
+func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/submit"):
+			key := r.Header.Get("Idempotency-Key")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]any{ //nolint:errcheck // test server
+				"status": "accepted", "request_id": "gc-op-live", "event_cursor": "0", "idempotency_key": key,
+				"op": map[string]any{"id": "gc-op-live", "conversation": "gc-1", "kind": "message", "status": "submitted"},
+			})
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events/stream"):
+			raw, err := json.Marshal(map[string]any{
+				"type":    events.RequestResultSessionSubmit,
+				"payload": api.SessionSubmitSucceededPayload{RequestID: "gc-op-live", SessionID: "gc-1", Intent: string(session.SubmitIntentDefault)},
+			})
+			if err != nil {
+				t.Errorf("encoding the event: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: %s\n\n", raw) //nolint:errcheck // test server
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	h, c := submitOpCity(t, "auto", srv)
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "k-live", true, &stdout, &stderr); code != 0 {
+		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+	}
+	contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+	got := cliOpJSON(t, stdout.Bytes())
+	if got["op_id"] != "gc-op-live" || got["key"] != "k-live" || got["outcome"] != "submitted" {
+		t.Fatalf("JSON = %v, want the API's live op gc-op-live under k-live", got)
+	}
+	if _, ok := got["replayed"]; ok || strings.Contains(stderr.String(), "replayed") {
+		t.Fatalf("JSON = %v, stderr = %q; want no replay", got, stderr.String())
+	}
+	if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
+		t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+	}
 }

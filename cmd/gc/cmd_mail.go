@@ -130,10 +130,15 @@ func appendNotifyOp(ids []string, opID string) []string {
 }
 
 // newMailNudgeFunc notifies a mail recipient from sender, passing the mail
-// message id as the notice's cause (sendMailNotify).
+// message id as the notice's cause (sendMailNotify). Under require a notice
+// the op journal cannot record is refused before the recipient resolves, so
+// it materializes no configured named session's row.
 func newMailNudgeFunc(sender string) nudgeFunc {
 	return func(recipient, messageID string) (string, error) {
-		target, err := resolveNudgeTarget(recipient, io.Discard)
+		target, err := resolveMessageOpTarget(recipient, mailNotifyOpRequest(mailNotifyText(sender), messageID), io.Discard)
+		if errors.Is(err, errMessageOpRefused) {
+			return "", mailNotifyRefusedError(messageID)
+		}
 		if err != nil {
 			return "", err
 		}
