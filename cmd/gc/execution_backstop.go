@@ -396,8 +396,8 @@ func (p poolExecutionBackstop) holdExecuting(s *beads.Bead, sessName, beadID str
 	p.observeHold(p.store, s, executionHoldExecuting, p.stdout)
 	if entering && holdIs(*s, executionHoldExecuting) {
 		fmt.Fprintf(p.stdout, //nolint:errcheck // best-effort
-			"%s: %s holds started %s after %d/%d nudge attempts; holding as executing (no drain while work_ladder is off)\n",
-			executionClaimNudgeLabel, sessName, beadID, attempts, idleClaimNudgeMaxAttempts)
+			"execution-claim-nudge: %s holds started %s after %d/%d nudge attempts; holding as executing (no drain while work_ladder is off)\n",
+			sessName, beadID, attempts, idleClaimNudgeMaxAttempts)
 	}
 }
 
