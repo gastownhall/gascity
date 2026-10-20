@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -34,13 +35,22 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 		gen     string // the row's generation
 		cell    func(bead string) string
 		started bool
+		// notGraph strips the claim's graph-step stamps, so it is no
+		// lifecycle candidate and no step_started of it could ever exist.
+		notGraph bool
 	}{
 		{name: "an entry at the row's generation", gen: "2", cell: func(b string) string { return cell(storeRef, b, 2) }, started: true},
 		{name: "an entry the hook could not resolve a store for", gen: "2", cell: func(b string) string { return cell("", b, 2) }, started: true},
 		{name: "an entry behind another claim at the row's generation", gen: "2", started: true, cell: func(b string) string {
 			return fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":"ga-other","gen":2,"at":%q,"via":"claim"},{"store":%q,"bead":%q,"gen":2,"at":%q,"via":"adopt"}]}`, storeRef, at, storeRef, b, at)
 		}},
+		{name: "an entry for a claim no step_started could name", gen: "2", cell: func(b string) string { return cell(storeRef, b, 2) }, started: true, notGraph: true},
 		{name: "an entry from an older generation", gen: "2", cell: func(b string) string { return cell(storeRef, b, 1) }},
+		// The claim and the row's generation each appear, but in different
+		// entries: no one entry proves this incarnation started this claim.
+		{name: "an older entry for the claim behind a current one for another", gen: "2", cell: func(b string) string {
+			return fmt.Sprintf(`{"v":1,"claims":[{"store":%q,"bead":"ga-other","gen":2,"at":%q,"via":"claim"},{"store":%q,"bead":%q,"gen":1,"at":%q,"via":"claim"}]}`, storeRef, at, storeRef, b, at)
+		}},
 		{name: "an entry in another store", gen: "2", cell: func(b string) string { return cell("rig:other", b, 2) }},
 		{name: "an entry for another bead", gen: "2", cell: func(string) string { return cell(storeRef, "ga-other", 2) }},
 		{name: "an undecodable cell", gen: "2", cell: func(string) string { return `{"v":1,"claims":[` }},
@@ -52,6 +62,14 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 			f := newExecutionBackstopFixture(t)
 			f.cfg.Agents[0].Nudge = "" // the maintainer-city pool templates, verbatim
 			f.workStoreRef = "gascity" // AssignedWorkStoreRefs' bare rig name
+			if tc.notGraph {
+				if err := f.store.SetMetadataBatch(f.work.ID, map[string]string{
+					beadmeta.RootBeadIDMetadataKey: "", beadmeta.StepIDMetadataKey: "",
+					beadmeta.SessionIDMetadataKey: "", beadmeta.SessionNameMetadataKey: "",
+				}); err != nil {
+					t.Fatalf("stripping the claim's graph-step stamps: %v", err)
+				}
+			}
 			f.setSessionMeta(t, map[string]string{
 				"instance_token": token,
 				"generation":     tc.gen,
@@ -97,6 +115,12 @@ func TestExecutionBackstopReadsTheWorkStartedCell(t *testing.T) {
 			}
 			if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, executionHoldExecuting) {
 				t.Fatalf("hold breadcrumb = %q, want %s", got, executionHoldExecuting)
+			}
+			// The hold is logged once as it is entered, not on every pass.
+			line := fmt.Sprintf("execution-claim-nudge: %s holds started %s after %d/%d nudge attempts; holding as executing (no drain while work_ladder is off)\n",
+				f.sessName, f.work.ID, idleClaimNudgeMaxAttempts, idleClaimNudgeMaxAttempts)
+			if got := strings.Count(f.stdout.String(), line); got != 1 {
+				t.Fatalf("executing-hold log lines = %d, want 1; stdout=%s", got, f.stdout.String())
 			}
 		})
 	}

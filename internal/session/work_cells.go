@@ -52,8 +52,10 @@ type WorkStarted struct {
 
 // DecodeWorkStarted reads a work_started cell. An absent cell is an empty one.
 // A cell it cannot read (bad JSON, or a version it does not know) is an error,
-// which a reader takes as "every claim is started" and a writer as a reason
-// not to write.
+// which a release reader takes as "every claim is started" and a writer as a
+// reason not to write. The legacy execution backstop's drain veto is the
+// fail-closed exception (cmd/gc workStartedAtGen): there an unreadable cell is
+// no evidence.
 func DecodeWorkStarted(raw string) (WorkStarted, error) {
 	if strings.TrimSpace(raw) == "" {
 		return WorkStarted{V: workCellVersion}, nil

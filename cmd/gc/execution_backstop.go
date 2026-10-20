@@ -233,10 +233,10 @@ type executionClaim struct {
 // executionLifecycleCandidate reports whether claim can carry a step_started
 // from session s: the hook's own gate (hookClaimLifecycleCandidate), read off
 // the snapshot's metadata. A rooted graph step, stamped with this seat's
-// session, not a control bead. Only such a claim is ever stamped, so only
-// such a claim reads the event tail (mc-muv2x review): a v1 molecule step,
-// a control kind, or a claim made outside the hook would re-read it every
-// pass, forever.
+// session, not a control bead. Only such a claim reads the event tail
+// (mc-muv2x review): a v1 molecule step, a control kind, or a claim made
+// outside the hook would re-read it every pass, forever. Any claim can still
+// be stamped from the row's work_started cell (workStartedAtGen).
 func executionLifecycleCandidate(claim executionClaim, s beads.Bead) bool {
 	if claim.RootID == "" || claim.StepID == "" || beadmeta.IsControlKind(claim.Kind) ||
 		claim.SessionID == "" || claim.SessionID != strings.TrimSpace(s.ID) {
@@ -352,15 +352,14 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 		return backstopTarget{}, backstopResolutionHold
 	}
 	claim := claims[0]
-	// Persist execution evidence while the event is still in the tail,
-	// busy or quiet (mc-muv2x): until this incarnation's claim is stamped,
-	// each pass reads the tail, and the first sighting stamps the row. Only
-	// a claim that can carry a step_started (executionLifecycleCandidate) is
-	// ever stamped, so any other reads no tail, never pays for a read that
-	// cannot answer, and keeps the activity clock alone, as before the veto.
-	// The seat's own work_started entry (workStartedAtGen) is the same
-	// evidence for any claim, read off the row with no tail, so it is
-	// consulted first and stamps the same way.
+	// Persist execution evidence, busy or quiet (mc-muv2x): until this
+	// incarnation's claim is stamped, each pass looks for it, and the first
+	// sighting stamps the row. The seat's own work_started entry
+	// (workStartedAtGen) is read off the row for any claim, so it is
+	// consulted first. Only a claim that can carry a step_started
+	// (executionLifecycleCandidate) then reads the event tail, so any other
+	// never pays for a read that cannot answer; with no cell entry either, it
+	// keeps the activity clock alone, as before the veto.
 	started := p.markedStarted(s, claim.BeadID)
 	if !started && (workStartedAtGen(s, claim) ||
 		executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID)) {
@@ -381,10 +380,31 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	// a seat that started its step is not drained, but a seat whose turn
 	// ended while it still holds the claim is nudged like any other.
 	if same, attempts, last := p.state(s, target); same && started && p.escalatesNext(s, attempts, last) {
-		p.observeHold(p.store, &s, executionHoldExecuting, p.stdout)
+		p.holdExecuting(&s, sessName, claim.BeadID, attempts)
 		return backstopTarget{}, backstopResolutionHold
 	}
 	return target, backstopResolutionOutstanding
+}
+
+// holdExecuting records the executing hold on s, the escalation of its
+// started claim beadID vetoed, and logs the hold once as it is entered: the
+// breadcrumb is written only when the reason changes, so a standing hold
+// logs nothing more. A seat that reads busy in between (not_quiet) logs
+// again when it re-enters the hold.
+func (p poolExecutionBackstop) holdExecuting(s *beads.Bead, sessName, beadID string, attempts int) {
+	entering := !holdIs(*s, executionHoldExecuting)
+	p.observeHold(p.store, s, executionHoldExecuting, p.stdout)
+	if entering && holdIs(*s, executionHoldExecuting) {
+		fmt.Fprintf(p.stdout, //nolint:errcheck // best-effort
+			"%s: %s holds started %s after %d/%d nudge attempts; holding as executing (no drain while work_ladder is off)\n",
+			executionClaimNudgeLabel, sessName, beadID, attempts, idleClaimNudgeMaxAttempts)
+	}
+}
+
+// holdIs reports whether s's hold breadcrumb names reason.
+func holdIs(s beads.Bead, reason string) bool {
+	cur := strings.TrimSpace(s.Metadata[executionClaimHoldKey])
+	return cur == reason || strings.HasPrefix(cur, reason+" ")
 }
 
 // escalatesNext reports whether the engine's next action on s, given its
@@ -582,8 +602,8 @@ func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bo
 // unreadable row generation, or an entry from another generation is no
 // evidence, and the activity clock decides, as before W1.
 func workStartedAtGen(s beads.Bead, claim executionClaim) bool {
-	gen, err := strconv.ParseInt(strings.TrimSpace(s.Metadata["generation"]), 10, 64)
-	if err != nil || gen < 1 {
+	gen := rowGeneration(s.Metadata)
+	if gen < 1 {
 		return false
 	}
 	cell, err := sessionpkg.DecodeWorkStarted(s.Metadata[sessionpkg.WorkStartedKey])
@@ -646,7 +666,7 @@ func (p poolExecutionBackstop) observeHold(store beads.Store, s *beads.Bead, rea
 		p.clearHold(store, s, stdout)
 		return
 	}
-	if cur := strings.TrimSpace(s.Metadata[executionClaimHoldKey]); cur == reason || strings.HasPrefix(cur, reason+" ") {
+	if holdIs(*s, reason) {
 		return
 	}
 	writeSessionMetadata(store, s, map[string]string{
