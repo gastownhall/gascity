@@ -74,7 +74,8 @@ func TestManagerLookupDeliveryNotKeptAndClosed(t *testing.T) {
 
 // The lookup reads the session's ACP route as its sends do: an ACP session
 // behind the auto composite is looked up on the ACP backend, and the
-// default backend is not asked.
+// default backend is not asked, even in a process that has not routed the
+// session's name yet.
 func TestManagerLookupDeliveryFollowsTheACPRoute(t *testing.T) {
 	plain := runtime.NewFake()
 	keyed := runtime.NewFake()
@@ -86,6 +87,9 @@ func TestManagerLookupDeliveryFollowsTheACPRoute(t *testing.T) {
 	}
 	held := runtime.DeliveryReceipt{MessageID: "m-acp"}
 	keyed.KeyedDeliveries = map[string]map[string]runtime.DeliveryReceipt{info.SessionName: {"gc:op:1": held}}
+	// A fresh process has not routed the name yet: CreateSession's route
+	// must not be what carries the lookup to the ACP backend.
+	sp.Unroute(info.SessionName)
 
 	r, found, err := mgr.LookupDelivery(context.Background(), info.ID, "gc:op:1")
 	if err != nil || !found || r != held {
