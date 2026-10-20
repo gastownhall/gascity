@@ -93,3 +93,20 @@ func TestLaneInterruptTwoClicksAreOneOpOnlyForAResolvedTurn(t *testing.T) {
 		t.Fatalf("interrupt effects = %d, want 3 (one per op)", n)
 	}
 }
+
+// A rejection names the turn its effect ran on: a session-scoped interrupt
+// whose turn was not seen to end closes failed{no_boundary} with that turn
+// in its result, so the turn's end can still be credited to the op.
+func TestLaneInterruptRejectionRecordsItsTurn(t *testing.T) {
+	h := newLaneHarness(t)
+	op := h.propose(t, laneInterrupt("click", ""))
+	exec := newFakeExec(h.clk)
+	exec.interrupt = func(InterruptCall) ControlResult {
+		return Rejected{Arm: ArmFailed, Reason: ReasonNoBoundary, Turn: "t7"}
+	}
+	mustPass(t, h.lane(t, "ctl"), view(), exec)
+	got := h.get(t, op.ID)
+	if got.Status != StatusClosed || got.Outcome.Arm != ArmFailed || got.Outcome.Reason != ReasonNoBoundary || got.Outcome.Result.Turn != "t7" {
+		t.Fatalf("op %s %+v, want closed failed{no_boundary} on turn t7", got.Status, got.Outcome)
+	}
+}

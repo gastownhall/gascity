@@ -250,6 +250,13 @@ func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.
 		if (r.Arm != ArmFailed && r.Arm != ArmSkipped) || validateOutcome(o, Cancel{}) != nil || r.Reason == ReasonCoalescedInto {
 			return unknownResult(fmt.Errorf("executor rejected with %s{%s}; want failed or skipped with a reason token", r.Arm, r.Reason)), Outcome{}
 		}
+		if r.Turn != "" {
+			if err := validateOptionalText("result turn", r.Turn); err != nil {
+				er.contractErr = fmt.Errorf("executor control rejection: %w", err)
+			} else if spec.kind == TakeControl {
+				o.Result.Turn = r.Turn
+			}
+		}
 		return er, o
 	}
 	return er, Outcome{}

@@ -114,7 +114,7 @@ func (l laneTurnLook) boundary() opjournal.Tri {
 // keystroke-mode one, whose boundary is the quiescence rule, no turn source
 // for this executor, noted.
 func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
-	e.turnHandle, e.traits, e.turnCaps = nil, laneTurnTraits{}, worker.TurnCapabilities{}
+	e.turnHandle, e.traits, e.turnCaps, e.turnCapsUnread = nil, laneTurnTraits{}, worker.TurnCapabilities{}, false
 	h, err := e.turns()
 	if err == nil {
 		var caps worker.TurnCapabilities
@@ -131,6 +131,7 @@ func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
 		return fmt.Errorf("%w: %w", errLaneTurnsUnavailable, err)
 	case errors.Is(err, runtime.ErrRuntimeUnavailable):
 		e.note("turns", fmt.Errorf("session %s's turn capabilities unreadable; linking its deliveries none: %w", e.info.ID, err))
+		e.turnCapsUnread = true
 		return nil
 	default:
 		return err

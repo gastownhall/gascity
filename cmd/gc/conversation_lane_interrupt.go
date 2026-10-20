@@ -27,21 +27,30 @@ const laneInterruptReadBudget = 10 * time.Second
 // Interrupt implements opjournal.Executor. The turn it targets is the op's
 // scope turn, or, for a session-scoped op on a session whose turns carry a
 // turn-scoped interrupt (worker.TurnCapabilities.InterruptsTurns), the turn
-// a fresh read finds running: none running closes the op skipped{stale},
-// and a read that fails runs it session-scoped. The incarnation's input
-// fence goes with it wherever the runtime fences input, except on a turn
-// interrupt by protocol, which takes none (the worker refuses a fenced one).
-// Its outcome is marked unfenced_interrupt unless the turn fence is atomic,
-// and restarted_after_failed_interrupt when the op's on_failure restart
-// replaced the runtime. While it runs, the conversation's InterruptRef is
-// recorded for the turn observer.
+// a fresh read finds running: none running closes the op skipped{stale}.
+// A session-scoped op never runs without that fresh read (X11 §5.4): a read
+// that fails, or turn capabilities the probe could not read, release it,
+// nothing sent. The incarnation's input fence goes with every request whose
+// row names a token, with AllowUnfenced, so the worker decides where it
+// cannot be carried (a protocol turn interrupt, a runtime that cannot fence)
+// and reports it. The outcome is marked restarted_after_failed_interrupt
+// when the op's on_failure restart replaced the runtime, else
+// unfenced_interrupt unless the interrupt was confined to its turn by an
+// atomic turn fence and to its incarnation by the input fence (X11 D4, the
+// 2026-10-19 ruling); the restart takes precedence, as the one slot holds
+// one mark. The conversation's InterruptRef is recorded for the turn
+// observer before the effect and left for it to fold (laneInterrupts),
+// unless the effect sent nothing.
 func (e *conversationLaneExec) Interrupt(ctx context.Context, c opjournal.InterruptCall) opjournal.ControlResult {
 	turn := c.Turn
+	if turn == "" && e.turnCapsUnread {
+		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("session %s's turn capabilities were unreadable; not interrupting it without a fresh read of its turns", e.info.ID)}
+	}
 	if turn == "" && e.turnHandle != nil && e.turnCaps.InterruptsTurns() {
 		hist, err := e.interruptRead(ctx)
 		switch {
 		case err != nil:
-			e.note("interrupt", fmt.Errorf("reading session %s's turns before interrupting it; interrupting it session-scoped: %w", e.info.ID, err))
+			return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("reading session %s's turns before interrupting it: %w", e.info.ID, err)}
 		case !hist.Current.Active():
 			return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
 		default:
@@ -50,20 +59,37 @@ func (e *conversationLaneExec) Interrupt(ctx context.Context, c opjournal.Interr
 	}
 	h, err := e.interruptHandle()
 	if err != nil {
-		return laneInterruptResult(worker.InterruptResult{}, fmt.Errorf("resolving session %s's handle: %w", e.info.ID, err), turn, false)
+		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("resolving session %s's handle, nothing sent: %w", e.info.ID, err)}
 	}
 	req := worker.InterruptRequest{Turn: turn}
 	if c.Op.Policy.Interrupt.OnFailure == opjournal.OnFailureRestart {
 		req.OnFailure = worker.InterruptOnFailureRestart
 	}
-	protocolTurn := turn != "" && e.turnCaps.Source == worker.TurnSourceProtocol
-	if c.Fence.Token != "" && e.lastCaps.Input != opjournal.FenceNone && !protocolTurn {
+	if c.Fence.Token != "" {
 		req.Fence = runtime.InputFence{Generation: c.Fence.Generation, Epoch: c.Fence.Epoch, Token: c.Fence.Token}
+		req.AllowUnfenced = true
 	}
-	exact := turn != "" && e.turnCaps.Fence == runtime.TurnFenceAtomic
-	defer e.deps.interrupts.begin(c.Fence.Conversation, opjournal.InterruptRef{Op: c.Op.ID, Turn: turn})()
+	ref := opjournal.InterruptRef{Op: c.Op.ID, Turn: turn}
+	e.deps.interrupts.record(c.Fence.Conversation, ref)
 	res, err := h.InterruptAs(ctx, sessionActor(session.ActorController, e.deps.cityPath), req)
-	return laneInterruptResult(res, err, turn, exact)
+	exact := turn != "" && e.turnCaps.Fence == runtime.TurnFenceAtomic && !req.Fence.IsZero() && !res.Unfenced
+	out := laneInterruptResult(res, err, turn, exact)
+	if !laneInterruptMayHaveRun(out) {
+		e.deps.interrupts.clear(c.Fence.Conversation, ref)
+	}
+	return out
+}
+
+// laneInterruptMayHaveRun reports whether an interrupt whose result is out
+// may have reached the runtime: settled, unknown, or failed{no_boundary}.
+func laneInterruptMayHaveRun(out opjournal.ControlResult) bool {
+	switch r := out.(type) {
+	case opjournal.Settled, opjournal.Unknown:
+		return true
+	case opjournal.Rejected:
+		return r.Arm == opjournal.ArmFailed && r.Reason == opjournal.ReasonNoBoundary
+	}
+	return false
 }
 
 // interruptRead is the interrupt's fresh read of the session's turns, given
@@ -81,13 +107,19 @@ func laneInterruptReadKey(cityPath, sessionID string) string {
 }
 
 // laneInterruptResult maps one interrupt's answer to the lane's result (X11
-// §5.4). turn is the turn it targeted, "" for session scope; exact says the
-// turn fence confined it to that turn (atomic). A turn not seen to end is
-// failed{no_boundary}; a turn not current, or a session gone, skipped{stale};
-// a session or handle that cannot carry it failed{unsupported}; an
-// unavailable runtime or an incarnation miss that sent nothing a transient
-// release; a miss that sent part of the sequence, and any other error, may
-// have reached the agent and is Unknown.
+// §5.4). turn is the turn it targeted, "" for session scope; exact says it
+// was confined to that turn and incarnation (an atomic turn fence and the
+// input fence). An interrupt the runtime did not settle, or a turn not seen
+// to end, is failed{no_boundary}, naming turn; a replacement whose
+// preparation failed after its turn settled may have reached the agent and
+// is Unknown; a turn not current, or a session gone, skipped{stale}; a
+// session or handle that cannot carry it failed{unsupported}; an
+// unavailable runtime, a session the controller is stopping, an interrupt
+// that failed before anything was sent, or an incarnation miss that sent
+// nothing a transient release; a miss that sent part of the sequence, and
+// any other error, may have reached the agent and is Unknown. A success is
+// marked restarted_after_failed_interrupt when its restart replaced the
+// runtime, which takes precedence, else unfenced_interrupt unless exact.
 func laneInterruptResult(res worker.InterruptResult, err error, turn string, exact bool) opjournal.ControlResult {
 	var miss *runtime.FenceMismatchError
 	switch {
@@ -100,8 +132,10 @@ func laneInterruptResult(res worker.InterruptResult, err error, turn string, exa
 			degradation = opjournal.DegradationUnfencedInterrupt
 		}
 		return opjournal.Settled{Turn: turn, Via: laneViaLive, Degradation: degradation}
-	case errors.Is(err, runtime.ErrTurnNotEnded):
-		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonNoBoundary}
+	case errors.Is(err, runtime.ErrInterruptNotSettled), errors.Is(err, runtime.ErrTurnNotEnded):
+		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonNoBoundary, Turn: turn}
+	case errors.Is(err, session.ErrReplacementNotPrepared):
+		return opjournal.Unknown{Cause: err}
 	case errors.Is(err, runtime.ErrTurnNotCurrent):
 		return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
 	case errors.Is(err, runtime.ErrTurnIdentityUnsupported), errors.Is(err, session.ErrTurnInterruptUnsupported),
@@ -109,57 +143,70 @@ func laneInterruptResult(res worker.InterruptResult, err error, turn string, exa
 		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 	case errors.As(err, &miss) && miss.Partial:
 		return opjournal.Unknown{Cause: err}
-	case errors.As(err, &miss), errors.Is(err, runtime.ErrRuntimeUnavailable):
+	case errors.As(err, &miss), errors.Is(err, runtime.ErrRuntimeUnavailable), errors.Is(err, session.ErrSessionStopping):
 		return opjournal.NotDelivered{Transient: true, Cause: err}
 	case errors.Is(err, runtime.ErrSessionNotFound), errors.Is(err, session.ErrSessionNotFound):
 		return opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
+	case errors.Is(err, worker.ErrInterruptNotSent):
+		return opjournal.NotDelivered{Transient: true, Cause: err}
 	default:
 		return opjournal.Unknown{Cause: err}
 	}
 }
 
 // laneInterrupts is the lane host's record of the interrupt each
-// conversation's executor is running (X11 §5.4, DES-O1 §10.1): the executor
-// hands its InterruptRef in for the effect's duration, and the conversation's
-// turn observer (TI-3) reads it, so its fold credits the turn's end to the
-// op (opjournal.FoldTurn's interrupting). One effect runs at a time per
-// conversation (D-1EFF), so each conversation holds at most one ref. A nil
-// record records nothing.
+// conversation's executor ran last (X11 §5.4, D5, D8, DES-O1 §10.1): the
+// executor records its InterruptRef before the effect, and the
+// conversation's turn observer (TI-3) reads it, so its fold credits the
+// turn's end to the op (opjournal.FoldTurn's interrupting). The observer
+// folds turn updates between passes, after the effect returned, so the ref
+// outlives the effect: the executor takes it back only when the effect sent
+// nothing, and otherwise the observer clears it once it folded that turn's
+// end; a newer ref replaces it. The op row carries the same credit
+// (Result.Turn, also on failed{no_boundary}) for an observer that started
+// after the record was lost. One effect runs at a time per conversation
+// (D-1EFF), so each conversation holds at most one ref. A nil record
+// records nothing.
 type laneInterrupts struct {
-	mu      sync.Mutex
-	running map[string]opjournal.InterruptRef
+	mu   sync.Mutex
+	last map[string]opjournal.InterruptRef
 }
 
 // newLaneInterrupts returns an empty record.
 func newLaneInterrupts() *laneInterrupts {
-	return &laneInterrupts{running: map[string]opjournal.InterruptRef{}}
+	return &laneInterrupts{last: map[string]opjournal.InterruptRef{}}
 }
 
-// begin records ref as conv's running interrupt until end is called. A ref
-// with no op or no turn names nothing for a fold to credit and is not
-// recorded.
-func (r *laneInterrupts) begin(conv string, ref opjournal.InterruptRef) (end func()) {
+// record makes ref conv's interrupt, replacing any before it. A ref with no
+// op or no turn names nothing for a fold to credit and is not recorded.
+func (r *laneInterrupts) record(conv string, ref opjournal.InterruptRef) {
 	if r == nil || ref.Op == "" || ref.Turn == "" {
-		return func() {}
+		return
 	}
 	r.mu.Lock()
-	r.running[conv] = ref
-	r.mu.Unlock()
-	return func() {
-		r.mu.Lock()
-		defer r.mu.Unlock()
-		if r.running[conv] == ref {
-			delete(r.running, conv)
-		}
+	defer r.mu.Unlock()
+	r.last[conv] = ref
+}
+
+// clear drops ref as conv's interrupt, if it still is: the executor's when
+// its effect sent nothing, the observer's once it folded ref's turn end.
+func (r *laneInterrupts) clear(conv string, ref opjournal.InterruptRef) {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.last[conv] == ref {
+		delete(r.last, conv)
 	}
 }
 
-// current is conv's running interrupt, the zero ref when none runs.
+// current is conv's interrupt, the zero ref when none is recorded.
 func (r *laneInterrupts) current(conv string) opjournal.InterruptRef {
 	if r == nil {
 		return opjournal.InterruptRef{}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.running[conv]
+	return r.last[conv]
 }

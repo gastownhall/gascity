@@ -116,6 +116,9 @@ type conversationLaneExec struct {
 	// turnCaps are the session's turn capabilities as the first Probe read
 	// them, the zero value when none were read; the interrupt's tier.
 	turnCaps worker.TurnCapabilities
+	// turnCapsUnread says the first Probe could not read them (noted): a
+	// session-scoped interrupt then has no fresh read to run on.
+	turnCapsUnread bool
 	// interruptHandle resolves the handle an interrupt goes through: the
 	// session's own by its row's bead id, which can read its transcript,
 	// else the runtime's.

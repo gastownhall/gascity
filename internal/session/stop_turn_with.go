@@ -33,8 +33,8 @@ type StopTurnOptions struct {
 	// turn where the family needs that (Gemini's reset), and on a keystroke
 	// runtime clears the input box for the message where the family leaves
 	// input in it (Claude, Gemini). Without it a stop only clears a draft
-	// Claude restores, best effort. A failed preparation is an error, the
-	// interrupt already settled.
+	// Claude restores, best effort. A failed preparation is an error
+	// wrapping ErrReplacementNotPrepared, the interrupt already settled.
 	ForReplacement bool
 	// Restart, when set, replaces the runtime when the interrupt was sent
 	// and its turn was not seen to end: an interrupt op's on_failure:
@@ -42,6 +42,12 @@ type StopTurnOptions struct {
 	// (DES-O1 §10.1). It applies to a keystroke runtime only: a protocol
 	// runtime's stop may leave it running, so a restart would interrupt
 	// nothing, and its stop returns the not-ended error as without Restart.
+	// A row whose drain-ack stop is pending refuses it, nothing sent, with
+	// ErrSessionStopping. A caller whose ctx ended by the time the turn was
+	// not seen to end gets no restart, the runtime left as it is, but an
+	// error wrapping runtime.ErrRuntimeUnavailable and not ErrTurnNotEnded;
+	// a restart once decided runs apart from ctx, within
+	// stopTurnRestartBound.
 	Restart *StopTurnRestart
 }
 
@@ -68,7 +74,11 @@ type StopTurnReport struct {
 // it refuses an actor that may not start the runtime before anything else,
 // and takes the runtime lease under the session mutation lock before it
 // sends anything: a lease it cannot take is an error wrapping
-// runtime.ErrRuntimeUnavailable, nothing sent. A restart that fails is an
+// runtime.ErrRuntimeUnavailable, nothing sent. A ctx with a deadline, or a
+// Still check, bounds the wait for the session mutation lock by ctx: a lock
+// still held when ctx ends is an error wrapping
+// runtime.ErrRuntimeUnavailable and ErrSessionMutationBusy, nothing sent. A
+// restart that fails is an
 // error wrapping runtime.ErrTurnNotEnded and no other sentinel, its cause in
 // its text: the interrupt was sent and the turn was not seen to end.
 func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOptions) (StopTurnReport, error) {
@@ -79,7 +89,7 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 	}
 	still := opts.Still
 	lock := withSessionMutationLock
-	if still != nil {
+	if _, bounded := ctx.Deadline(); still != nil || bounded {
 		lock = func(id string, fn func() error) error {
 			err := WithSessionMutationLockContext(ctx, id, fn)
 			if errors.Is(err, ErrSessionMutationBusy) {
@@ -93,6 +103,11 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
+		}
+		if opts.Restart != nil && drainAckStopPendingMetadata(b.Metadata) {
+			// The row belongs to the controller's stop: no interrupt keys,
+			// no restart's stop, as interrupt_now refuses it.
+			return fmt.Errorf("stopping the turn of %s, restarting it on failure: %w", id, ErrSessionStopping)
 		}
 		_, fenced := runtime.InputFenceFrom(ctx)
 		if fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
@@ -149,7 +164,18 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 			if !restart || !errors.Is(waitErr, runtime.ErrTurnNotEnded) {
 				return waitErr
 			}
-			if err := m.restartAfterFailedInterruptLocked(ctx, by, id, b, sessName, opts.Restart); err != nil {
+			if cerr := ctx.Err(); cerr != nil {
+				// The caller gave up (a city stop, its lease budget): its
+				// end reads as a turn not seen to end, which is no reason
+				// to stop the runtime. Nothing more is sent.
+				return fmt.Errorf("stopping the turn of %s: the caller's context ended before its interrupted turn was seen to end, not restarting it: %w: %w (%s)", id, runtime.ErrRuntimeUnavailable, cerr, waitErr.Error())
+			}
+			// A restart once decided runs to the end under its own bound: a
+			// caller that gives up between the stop and the start would
+			// leave the runtime stopped.
+			rctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), stopTurnRestartBound)
+			defer cancel()
+			if err := m.restartAfterFailedInterruptLocked(rctx, by, id, b, sessName, opts.Restart); err != nil {
 				return TurnNotEndedError(fmt.Sprintf("restarting session %s after its interrupted turn was not seen to end", id), err)
 			}
 			report.Restarted = true
@@ -205,14 +231,28 @@ func (m *Manager) restartAfterFailedInterruptLocked(ctx context.Context, by Acto
 // prepareReplacementLocked is StopTurnOptions.ForReplacement's preparation,
 // the steps interruptAndSubmitLocked runs between a settled interrupt and its
 // message.
+// A failure is an error wrapping ErrReplacementNotPrepared: the interrupt
+// was sent and its turn settled.
 func (m *Manager) prepareReplacementLocked(ctx context.Context, b beads.Bead, id, sessName string, mode runtime.TurnInterruptMode) error {
 	if err := m.resetInterruptedTurnLocked(ctx, b, sessName); err != nil {
-		return fmt.Errorf("preparing session %s to replace its interrupted turn: %w", id, err)
+		return fmt.Errorf("session %s: %w: %w", id, ErrReplacementNotPrepared, err)
 	}
 	if shouldClearInterruptedInputBeforeSubmit(b) && mode == runtime.TurnInterruptKeystroke {
 		if err := m.clearInterruptedInputLocked(ctx, b, sessName); err != nil {
-			return fmt.Errorf("preparing session %s to replace its interrupted turn: %w", id, err)
+			return fmt.Errorf("session %s: %w: %w", id, ErrReplacementNotPrepared, err)
 		}
 	}
 	return nil
 }
+
+// ErrReplacementNotPrepared reports a stop for a replacement
+// (StopTurnOptions.ForReplacement) whose interrupt was sent and whose turn
+// settled, but whose preparation for the replacing message failed. Whatever
+// else the error wraps (a fence miss on the input clear, say) is the
+// preparation's, not the interrupt's: the interrupt was not "nothing sent".
+var ErrReplacementNotPrepared = errors.New("the interrupted turn settled but the session could not be prepared for its replacement")
+
+// stopTurnRestartBound bounds a restart after a failed interrupt
+// (StopTurnOptions.Restart) once it is decided; it runs apart from the
+// caller's context.
+const stopTurnRestartBound = 2 * time.Minute

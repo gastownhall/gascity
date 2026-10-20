@@ -227,7 +227,7 @@ type InterruptRequest struct {
 	// predecessor's transcript. On a transcript source every key goes under
 	// the fence, after the turn check; a protocol source's runtime takes no
 	// input fence on its turn interrupt, so a fenced one is refused with
-	// runtime.ErrInputFenceUnsupported, nothing sent.
+	// runtime.ErrInputFenceUnsupported, nothing sent, unless AllowUnfenced.
 	Fence runtime.InputFence `json:"-"`
 	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
 	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
@@ -266,7 +266,10 @@ type InterruptRequest struct {
 	// runtime's stop may leave it running, so its not-ended error is
 	// returned as with fail, and a RuntimeHandle, which has no session row
 	// to restart from, refuses it, nothing sent, with
-	// ErrInterruptRestartUnsupported.
+	// ErrInterruptRestartUnsupported. So does a turn-scoped interrupt on a
+	// protocol turn source whose runtime interrupts by keystroke (ACP):
+	// that path never restarts, and a restart policy is not dropped
+	// silently.
 	OnFailure InterruptOnFailure `json:"on_failure,omitempty"`
 	// ForReplacement says a message replaces the interrupted turn
 	// (deliver-now's interrupt step, X11 D11): once the turn settled, the
@@ -276,8 +279,16 @@ type InterruptRequest struct {
 	// error wrapping session.ErrTurnInterruptUnsupported, where the
 	// session's turn is replaced otherwise or not at all
 	// (TurnCapabilities.Replace restart or none), which is always so on a
-	// RuntimeHandle.
+	// RuntimeHandle. A preparation that fails is an error wrapping
+	// session.ErrReplacementNotPrepared: the interrupt was sent and its
+	// turn settled.
 	ForReplacement bool `json:"for_replacement,omitempty"`
+	// AllowUnfenced lets a fenced request (Fence) go out without its fence
+	// where it cannot carry it, instead of being refused with
+	// runtime.ErrInputFenceUnsupported: a protocol source's turn interrupt,
+	// whose runtime reads no input fence, and a runtime that cannot fence
+	// the session. The result then reports Unfenced.
+	AllowUnfenced bool `json:"allow_unfenced,omitempty"`
 }
 
 // InterruptOnFailure is what an interrupt does when its turn is not seen to
@@ -296,11 +307,20 @@ const (
 // restart on a handle that cannot restart the runtime: nothing is sent.
 var ErrInterruptRestartUnsupported = errors.New("worker: the handle cannot restart the runtime after a failed interrupt")
 
+// ErrInterruptNotSent reports an interrupt that failed before anything was
+// sent: its policy's preparation (the restart's start command, the
+// replacement's or the turn's plan, the session's input fencing) could not
+// be read. The caller may retry it as it is.
+var ErrInterruptNotSent = errors.New("worker: the interrupt failed before anything was sent")
+
 // InterruptResult reports what one interrupt did beyond its error.
 type InterruptResult struct {
 	// Restarted says the interrupt was sent, its turn was not seen to end,
 	// and OnFailure restart replaced the runtime.
 	Restarted bool
+	// Unfenced says a fenced request (InterruptRequest.Fence) went without
+	// its fence, as AllowUnfenced permits where the fence cannot be carried.
+	Unfenced bool
 }
 
 // validate checks req's policy for by (nil for none) before anything is sent: a known

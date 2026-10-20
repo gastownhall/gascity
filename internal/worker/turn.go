@@ -765,6 +765,15 @@ func (h *SessionHandle) interruptTurn(ctx context.Context, by *sessionpkg.Actor,
 	}
 	switch plan.caps.Source {
 	case TurnSourceProtocol:
+		if req.OnFailure == InterruptOnFailureRestart && plan.caps.Interrupt == runtime.TurnInterruptKeystroke {
+			// This path never restarts; a keystroke runtime (ACP) is one a
+			// restart would replace, so the policy is refused, not dropped.
+			return InterruptResult{}, fmt.Errorf("interrupting turn %q of %s, which reads its turns by protocol: %w", turn, name, ErrInterruptRestartUnsupported)
+		}
+		var result InterruptResult
+		if !req.Fence.IsZero() && req.AllowUnfenced {
+			req.Fence, result.Unfenced = runtime.InputFence{}, true
+		}
 		if err := protocolTurnInterruptFenceRefusal(req.Fence, name, turn); err != nil {
 			return InterruptResult{}, err
 		}
@@ -774,14 +783,23 @@ func (h *SessionHandle) interruptTurn(ctx context.Context, by *sessionpkg.Actor,
 		// protocol runtime is not restarted on failure (its stop may leave
 		// it running), and a replacement needs nothing more of it.
 		_, err := h.manager.InterruptTurn(ctx, plan.info.ID, turn)
-		return InterruptResult{}, turnInterruptResult(plan.info.ID, err)
+		return result, turnInterruptResult(plan.info.ID, err)
 	case TurnSourceTranscript:
+		req, unfenced, err := h.unfenceable(plan.info.ID, req)
+		if err != nil {
+			return InterruptResult{}, err
+		}
 		opts, err := h.stopTurnOptions(ctx, by, plan.info.ID, InterruptRequest{OnFailure: req.OnFailure})
 		if err != nil {
 			return InterruptResult{}, err
 		}
 		opts.ForReplacement = req.ForReplacement
-		return h.checkedTurnInterrupt(ctx, plan.info, turn, req.Fence, opts)
+		if unfenced {
+			ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
+		}
+		result, err := h.checkedTurnInterrupt(ctx, plan.info, turn, req.Fence, opts)
+		result.Unfenced = unfenced
+		return result, err
 	}
 	return InterruptResult{}, h.noTurnSource(plan)
 }
@@ -869,7 +887,9 @@ func turnInterruptResult(id string, err error) error {
 		errors.Is(err, runtime.ErrTurnNotCurrent), errors.Is(err, runtime.ErrTurnNotEnded),
 		errors.Is(err, runtime.ErrRuntimeUnavailable), errors.Is(err, runtime.ErrSessionNotFound),
 		errors.Is(err, runtime.ErrTurnIdentityUnsupported), errors.Is(err, sessionpkg.ErrTurnInterruptUnsupported),
-		errors.Is(err, runtime.ErrFenceMismatch), errors.Is(err, runtime.ErrInputFenceUnsupported):
+		errors.Is(err, runtime.ErrFenceMismatch), errors.Is(err, runtime.ErrInputFenceUnsupported),
+		errors.Is(err, sessionpkg.ErrReplacementNotPrepared), errors.Is(err, sessionpkg.ErrSessionStopping),
+		errors.Is(err, ErrInterruptNotSent), errors.Is(err, ErrInterruptRestartUnsupported):
 		return err
 	}
 	return turnRowError(id, err)

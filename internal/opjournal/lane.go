@@ -340,6 +340,10 @@ type Rejected struct {
 	Arm         Arm
 	Reason      string
 	KeyRejected bool
+	// Turn, on a control op's rejection, is the turn its effect ran on,
+	// recorded as the outcome's Result.Turn: an interrupt whose turn was
+	// not seen to end (failed{no_boundary}) names the turn it sent into.
+	Turn string
 }
 
 // Unknown says the effect may have happened.

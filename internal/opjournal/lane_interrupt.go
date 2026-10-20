@@ -11,7 +11,10 @@ const (
 	DegradationUnfencedInterrupt = "unfenced_interrupt"
 	// DegradationRestartedAfterFailedInterrupt marks an interrupt whose turn
 	// was not seen to end and whose on_failure restart replaced the runtime
-	// in its place (O1's inline restart).
+	// in its place (O1's inline restart). An outcome holds one degradation,
+	// and this one takes precedence over DegradationUnfencedInterrupt: the
+	// restart ended whatever ran, so which turn the interrupt reached no
+	// longer decides what was stopped.
 	DegradationRestartedAfterFailedInterrupt = "restarted_after_failed_interrupt"
 )
 

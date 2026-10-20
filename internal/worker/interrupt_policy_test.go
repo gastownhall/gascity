@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -176,5 +177,196 @@ func TestRuntimeHandleRefusesARestartOnFailure(t *testing.T) {
 	}
 	if _, err := rh.InterruptAs(context.Background(), by, InterruptRequest{Fence: f, OnFailure: InterruptOnFailureFail}); err != nil {
 		t.Fatalf("RuntimeHandle.InterruptAs(fail) = %v, want nil", err)
+	}
+}
+
+// AllowUnfenced lets a fenced interrupt go out where it cannot carry the
+// fence, reporting Unfenced; without it the same request is refused,
+// nothing sent. A path that carries the fence reports nothing.
+func TestInterruptAllowUnfenced(t *testing.T) {
+	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	t.Run("protocol turn interrupt on a session handle", func(t *testing.T) {
+		fake := runtime.NewFake()
+		s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1", ""}}
+		fake.Calls = nil
+		res, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+			InterruptRequest{Turn: "acp-1", Fence: f, AllowUnfenced: true})
+		if err != nil || !res.Unfenced {
+			t.Fatalf("InterruptAs(turn, fence, allow unfenced) = %+v, %v; want sent unfenced", res, err)
+		}
+		if got := sentInputs(fake, s.info.SessionName); !slices.Contains(got, "InterruptTurn(acp-1):sent") {
+			t.Fatalf("sent %v, want the turn interrupt", got)
+		}
+	})
+	t.Run("protocol turn interrupt on a runtime handle", func(t *testing.T) {
+		fake := runtime.NewFake()
+		h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake}))
+		fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {fullTurnCaps}}
+		fake.TurnScripts = map[string][]string{"turn-worker": {"acp-1", ""}}
+		fake.Calls = nil
+		res, err := h.InterruptAs(context.Background(), sessionpkg.Actor{Kind: sessionpkg.ActorController},
+			InterruptRequest{Turn: "acp-1", Fence: f, AllowUnfenced: true})
+		if err != nil || !res.Unfenced {
+			t.Fatalf("InterruptAs(turn, fence, allow unfenced) = %+v, %v; want sent unfenced", res, err)
+		}
+	})
+	t.Run("unfenceable runtime on a session handle", func(t *testing.T) {
+		h, sp, name, sf := fencedSessionHandle(t)
+		sp.InputFencingValue = runtime.InputFencingNone
+		res, err := h.InterruptAs(context.Background(), handleActor(t, h, sessionpkg.ActorController), InterruptRequest{Fence: sf, AllowUnfenced: true})
+		if err != nil || !res.Unfenced {
+			t.Fatalf("InterruptAs(unfenceable, allow unfenced) = %+v, %v; want sent unfenced", res, err)
+		}
+		for _, c := range sp.SnapshotCalls() {
+			if c.Name == name && !c.Fence.IsZero() {
+				t.Fatalf("%s carries %v on an unfenceable runtime", c.Method, c.Fence)
+			}
+		}
+		if !slices.Contains(callMethodsOf(sp, name), "Interrupt") {
+			t.Fatalf("calls = %v, want the interrupt", callMethodsOf(sp, name))
+		}
+	})
+	t.Run("unfenceable runtime on a runtime handle", func(t *testing.T) {
+		rh, sp, rf := fencedRuntimeHandle(t)
+		sp.InputFencingValue = runtime.InputFencingNone
+		res, err := rh.InterruptAs(context.Background(), sessionpkg.Actor{Kind: sessionpkg.ActorController}, InterruptRequest{Fence: rf, AllowUnfenced: true})
+		if err != nil || !res.Unfenced {
+			t.Fatalf("InterruptAs(unfenceable, allow unfenced) = %+v, %v; want sent unfenced", res, err)
+		}
+	})
+	t.Run("a fenceable runtime keeps the fence", func(t *testing.T) {
+		h, sp, name, sf := fencedSessionHandle(t)
+		res, err := h.InterruptAs(context.Background(), handleActor(t, h, sessionpkg.ActorController), InterruptRequest{Fence: sf, AllowUnfenced: true})
+		if err != nil || res.Unfenced {
+			t.Fatalf("InterruptAs(fenceable, allow unfenced) = %+v, %v; want sent fenced", res, err)
+		}
+		for _, c := range sp.SnapshotCalls() {
+			if c.Name == name && inputMethods[c.Method] && c.Fence != sf {
+				t.Fatalf("%s carries %v, want the fence", c.Method, c.Fence)
+			}
+		}
+	})
+}
+
+// A session-scoped restart or replacement carries the fence on every input
+// up to the restart's stop.
+func TestSessionInterruptPolicyFencesEveryInput(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		req  func(runtime.InputFence) InterruptRequest
+		busy bool
+	}{
+		{"restart", func(f runtime.InputFence) InterruptRequest {
+			return InterruptRequest{Fence: f, OnFailure: InterruptOnFailureRestart}
+		}, true},
+		{"replacement", func(f runtime.InputFence) InterruptRequest { return InterruptRequest{Fence: f, ForReplacement: true} }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, sp, name, f := fencedSessionHandle(t)
+			if tc.busy {
+				sp.WaitForIdleErrors[name] = errors.New("still busy")
+			}
+			if _, err := h.InterruptAs(context.Background(), handleActor(t, h, sessionpkg.ActorController), tc.req(f)); err != nil {
+				t.Fatalf("InterruptAs(%s): %v", tc.name, err)
+			}
+			var sent int
+			for _, c := range sp.SnapshotCalls() {
+				if c.Name != name {
+					continue
+				}
+				if c.Method == "Stop" {
+					break
+				}
+				if inputMethods[c.Method] {
+					sent++
+					if c.Fence != f {
+						t.Errorf("%s(%s) carries %v, want the fence", c.Method, c.Message, c.Fence)
+					}
+				}
+			}
+			if sent == 0 {
+				t.Fatal("no input sent")
+			}
+		})
+	}
+}
+
+// A turn-scoped replacement on a checked transcript source prepares the
+// session: a clear that fails is the replacement's error, where a plain
+// stop only logs it.
+func TestTurnInterruptForReplacementPreparesTheSession(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		replacement bool
+	}{{"replacement", true}, {"plain", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			idle := newIdleScript(idleAnswer{idle: false}, idleAnswer{idle: true}, idleAnswer{idle: true})
+			fake := idle.Fake
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+			timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+			s.handle.turns.timing = timing
+			path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+			ageTranscript(t, path, clock.now().Add(-time.Minute))
+			fake.ClearInputErrors[s.info.SessionName] = errors.New("input box will not clear")
+			fake.Calls = nil
+			err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1, ForReplacement: tc.replacement})
+			if tc.replacement != errors.Is(err, sessionpkg.ErrReplacementNotPrepared) {
+				t.Fatalf("Interrupt(%s, replacement %v) = %v, want ErrReplacementNotPrepared exactly for a replacement", claudeTurn1, tc.replacement, err)
+			}
+			if !tc.replacement && err != nil {
+				t.Fatalf("Interrupt(%s) = %v, want nil", claudeTurn1, err)
+			}
+		})
+	}
+}
+
+// ACP interrupts by keystroke but reads its turns by protocol: a turn-scoped
+// interrupt with on_failure restart there is refused, nothing sent, rather
+// than run without its restart.
+func TestProtocolTurnInterruptRefusesARestartOnAKeystrokeRuntime(t *testing.T) {
+	fake := runtime.NewFake()
+	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+	fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+	fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1", ""}}
+	fake.TurnInterruptModeValue = runtime.TurnInterruptKeystroke
+	fake.Calls = nil
+	_, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+		InterruptRequest{Turn: "acp-1", OnFailure: InterruptOnFailureRestart})
+	if !errors.Is(err, ErrInterruptRestartUnsupported) {
+		t.Fatalf("InterruptAs(protocol turn, keystroke, restart) = %v, want ErrInterruptRestartUnsupported", err)
+	}
+	if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+		t.Fatalf("a refused interrupt sent %v", got)
+	}
+}
+
+// An interrupt that fails before anything is sent says so: the error wraps
+// ErrInterruptNotSent (here the restart's start command, whose row read
+// fails).
+func TestInterruptPreSendFailureIsNotSent(t *testing.T) {
+	sp := runtime.NewFake()
+	store := beads.NewMemStore()
+	manager := sessionpkg.NewManagerWithOptions(store, sp, sessionpkg.WithCityPath(t.TempDir()))
+	h, err := NewSessionHandle(SessionHandleConfig{
+		Manager: manager,
+		Session: SessionSpec{Template: "probe", Title: "Probe", Command: "claude", WorkDir: t.TempDir(), Provider: "claude"},
+	})
+	if err != nil {
+		t.Fatalf("NewSessionHandle: %v", err)
+	}
+	if err := h.Start(context.Background(), handleActor(t, h, sessionpkg.ActorAgent)); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	by := handleActor(t, h, sessionpkg.ActorController)
+	h.manager = sessionpkg.NewManagerWithOptions(failingGetStore{Store: store, err: errors.New("store boom")}, sp, sessionpkg.WithCityPath(t.TempDir()))
+	sp.Calls = nil
+	_, err = h.InterruptAs(context.Background(), by, InterruptRequest{OnFailure: InterruptOnFailureRestart})
+	if !errors.Is(err, ErrInterruptNotSent) {
+		t.Fatalf("InterruptAs(row read fails) = %v, want ErrInterruptNotSent", err)
+	}
+	if got := sp.SnapshotCalls(); len(got) != 0 {
+		t.Fatalf("an interrupt that failed before sending made calls %+v", got)
 	}
 }

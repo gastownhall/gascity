@@ -333,12 +333,18 @@ func (h *RuntimeHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req
 		err = replacementRefusal(TurnReplaceNone, h.sessionName)
 		return InterruptResult{}, err
 	case req.Turn != "":
+		if !req.Fence.IsZero() && req.AllowUnfenced && h.turnCapabilities().Source == TurnSourceProtocol {
+			req.Fence, result.Unfenced = runtime.InputFence{}, true
+		}
 		err = h.interruptTurn(ctx, req.Turn, req.Fence)
-		return InterruptResult{}, err
+		return result, err
 	}
 	if !req.Fence.IsZero() && runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
-		err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
-		return InterruptResult{}, err
+		if !req.AllowUnfenced {
+			err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
+			return InterruptResult{}, err
+		}
+		req.Fence, result.Unfenced = runtime.InputFence{}, true
 	}
 	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
 		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
@@ -346,10 +352,10 @@ func (h *RuntimeHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req
 	}
 	if !req.Fence.IsZero() {
 		err = runtime.InterruptWithContext(runtime.WithInputFence(ctx, req.Fence), h.provider, h.sessionName)
-		return InterruptResult{}, err
+		return result, err
 	}
 	err = h.provider.Interrupt(h.sessionName)
-	return InterruptResult{}, err
+	return result, err
 }
 
 // interruptTurn is the turn-scoped interrupt from the provider alone: its
