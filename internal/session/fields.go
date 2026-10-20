@@ -391,7 +391,7 @@ var registry = slices.Concat([]Field{
 	// conversation lane reads, live, at each pass.
 	{
 		Key: ContentHoldKey, Class: ClassConversation, NewKey: true,
-		Writers: sites(op("internal/session/content_hold.go", "Store.SetContentHold"), op("internal/session/content_hold.go", "ContentHoldItem")),
+		Writers: sites(op("internal/session/content_hold.go", "Store.SetContentHold"), op("internal/session/content_hold.go", "Store.ContentHoldItem")),
 		Readers: sites(op("cmd/gc/conversation_lane_view.go", "conversationLaneView")),
 		Clears:  sites(op("internal/session/content_hold.go", "Store.ClearContentHold")),
 	},

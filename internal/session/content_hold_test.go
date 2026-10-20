@@ -45,21 +45,26 @@ func holdBead(t *testing.T, mem *beads.MemStore, id string) beads.Bead {
 }
 
 // TestContentHoldEncodesAndParses pins the cell's form: the principal, "@",
-// the time in UTC to the second; a reader splits at the last "@".
+// the time in UTC to the nanosecond (RFC 3339 with fractional seconds); a
+// reader splits at the last "@".
 func TestContentHoldEncodesAndParses(t *testing.T) {
 	east := time.FixedZone("east", 2*60*60)
 	h := mustHold(t, "t3:e/user:a@b.c", time.Date(2026, 10, 20, 14, 0, 0, 999_000_000, east))
-	if got, want := h.String(), "t3:e/user:a@b.c@2026-10-20T12:00:00Z"; got != want {
+	if got, want := h.String(), "t3:e/user:a@b.c@2026-10-20T12:00:00.999Z"; got != want {
 		t.Fatalf("String() = %q, want %q", got, want)
 	}
 	back, err := ParseContentHold(h.String())
 	if err != nil || back != h {
 		t.Fatalf("Parse(%q) = %+v, %v; want %+v", h.String(), back, err, h)
 	}
+	if got, want := mustHold(t, "operator", holdAt).String(), "operator@2026-10-20T12:00:00Z"; got != want {
+		t.Fatalf("String() of a whole second = %q, want %q", got, want)
+	}
 	for raw, want := range map[string]ContentHold{
 		"  operator@2026-10-20T12:00:00Z  ":                    {By: "operator", At: holdAt},
 		"operator@2026-10-20T14:00:00+02:00":                   {By: "operator", At: holdAt},
-		"operator@2026-10-20T12:00:00.75Z":                     {By: "operator", At: holdAt},
+		"operator@2026-10-20T12:00:00.75Z":                     {By: "operator", At: holdAt.Add(750 * time.Millisecond)},
+		"operator@2026-10-20T12:00:00.000000001Z":              {By: "operator", At: holdAt.Add(time.Nanosecond)},
 		"a@b@c@2026-10-20T12:00:00Z":                           {By: "a@b@c", At: holdAt},
 		"t3:env-1/user:alice@example.com@2026-10-20T12:00:00Z": {By: "t3:env-1/user:alice@example.com", At: holdAt},
 	} {
@@ -74,7 +79,7 @@ func TestContentHoldEncodesAndParses(t *testing.T) {
 		}
 	}
 	raw := ContentHold{By: "operator", At: time.Date(2026, 10, 20, 14, 0, 0, 999_000_000, east)}
-	if got, want := raw.String(), "operator@2026-10-20T12:00:00Z"; got != want {
+	if got, want := raw.String(), "operator@2026-10-20T12:00:00.999Z"; got != want {
 		t.Fatalf("String() of an unnormalized hold = %q, want %q", got, want)
 	}
 	if h.IsZero() || !(ContentHold{}).IsZero() {
@@ -120,8 +125,8 @@ func TestContentHeldInfoIsFailSafe(t *testing.T) {
 	}
 }
 
-// TestSetContentHold: the writer stamps the row, re-stamps a standing hold,
-// writes nothing for the same stamp, and refuses what it cannot hold.
+// TestSetContentHold: the writer stamps the row, re-stamps a standing hold
+// on every Stop, and refuses what it cannot hold.
 func TestSetContentHold(t *testing.T) {
 	mem := beads.NewMemStore()
 	s, id := holdRow(t, mem, nil)
@@ -143,8 +148,8 @@ func TestSetContentHold(t *testing.T) {
 	if err := s.SetContentHold(id, second); err != nil {
 		t.Fatal(err)
 	}
-	if got := holdBead(t, mem, id).Revision; got != rev {
-		t.Fatalf("the same stamp again moved the revision %d -> %d; want no write", rev, got)
+	if got := holdBead(t, mem, id).Revision; got == rev {
+		t.Fatal("the same stamp again wrote nothing; a Stop always writes, never trusting a cached read")
 	}
 	if err := s.SetContentHold(id, ContentHold{}); !errors.Is(err, ErrInvalidContentHold) {
 		t.Errorf("zero hold = %v, want ErrInvalidContentHold", err)
@@ -172,6 +177,29 @@ func TestSetContentHold(t *testing.T) {
 	}
 	if got := holdBead(t, mem, closedID).Metadata[ContentHoldKey]; got != "" {
 		t.Errorf("the closed row was held: %q", got)
+	}
+}
+
+// TestContentHoldSubSecondStopsKeepTheNewerHold: two Stops by one principal
+// in the same second stamp distinct holds, so a resume that read the first
+// cannot clear the second (D4).
+func TestContentHoldSubSecondStopsKeepTheNewerHold(t *testing.T) {
+	mem := beads.NewMemStore()
+	s, id := holdRow(t, mem, nil)
+	if err := s.SetContentHold(id, mustHold(t, "operator", holdAt.Add(100*time.Millisecond))); err != nil {
+		t.Fatal(err)
+	}
+	seen := holdBead(t, mem, id).Metadata[ContentHoldKey]
+	second := mustHold(t, "operator", holdAt.Add(600*time.Millisecond))
+	if err := s.SetContentHold(id, second); err != nil {
+		t.Fatal(err)
+	}
+	cleared, standing, err := s.ClearContentHold(id, seen)
+	if err != nil || cleared || standing != second.String() {
+		t.Fatalf("stale resume = (%v, %q, %v), want (false, %q, nil)", cleared, standing, err, second.String())
+	}
+	if got := holdBead(t, mem, id).Metadata[ContentHoldKey]; got != second.String() {
+		t.Fatalf("cell = %q, want the newer hold %q", got, second.String())
 	}
 }
 
@@ -240,12 +268,12 @@ func TestClearContentHold(t *testing.T) {
 }
 
 // TestContentHoldItem: the batch item is an unguarded update of exactly the
-// one cell.
+// one cell, refused for every row SetContentHold refuses.
 func TestContentHoldItem(t *testing.T) {
 	mem := beads.NewMemStore()
-	_, id := holdRow(t, mem, nil)
+	s, id := holdRow(t, mem, nil)
 	h := mustHold(t, "operator", holdAt)
-	item, err := ContentHoldItem(id, h)
+	item, err := s.ContentHoldItem(id, h)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -261,11 +289,26 @@ func TestContentHoldItem(t *testing.T) {
 	if got := holdBead(t, mem, id).Metadata[ContentHoldKey]; got != h.String() {
 		t.Fatalf("cell after the batch = %q", got)
 	}
-	if _, err := ContentHoldItem(" ", h); !errors.Is(err, ErrInvalidContentHold) {
-		t.Errorf("blank id = %v, want ErrInvalidContentHold", err)
-	}
-	if _, err := ContentHoldItem(id, ContentHold{By: "operator"}); !errors.Is(err, ErrInvalidContentHold) {
+	if _, err := s.ContentHoldItem(id, ContentHold{By: "operator"}); !errors.Is(err, ErrInvalidContentHold) {
 		t.Errorf("invalid hold = %v, want ErrInvalidContentHold", err)
+	}
+	other, err := mem.Create(beads.Bead{Type: "task"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, closedID := holdRow(t, mem, nil)
+	if err := mem.Close(closedID); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		id   string
+		want error
+	}{{" ", nil}, {"gc-missing", beads.ErrNotFound}, {other.ID, ErrSessionNotFound}, {closedID, ErrSessionClosed}} {
+		item, itemErr := s.ContentHoldItem(tc.id, h)
+		setErr := s.SetContentHold(tc.id, h)
+		if itemErr == nil || setErr == nil || (tc.want != nil && (!errors.Is(itemErr, tc.want) || !errors.Is(setErr, tc.want))) {
+			t.Errorf("row %q: item %+v, %v; SetContentHold %v; want both refused (%v)", tc.id, item, itemErr, setErr, tc.want)
+		}
 	}
 }
 
@@ -283,7 +326,7 @@ func TestContentHoldIsAConversationCellOutsideThePremise(t *testing.T) {
 		}
 		return out
 	}
-	if got := strings.Join(names(f.Writers), ","); got != "internal/session/content_hold.go:Store.SetContentHold,internal/session/content_hold.go:ContentHoldItem" {
+	if got := strings.Join(names(f.Writers), ","); got != "internal/session/content_hold.go:Store.SetContentHold,internal/session/content_hold.go:Store.ContentHoldItem" {
 		t.Errorf("writers = %s", got)
 	}
 	if got := strings.Join(names(f.Clears), ","); got != "internal/session/content_hold.go:Store.ClearContentHold" {

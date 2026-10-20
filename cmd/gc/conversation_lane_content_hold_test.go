@@ -128,20 +128,25 @@ func TestLaneStopWithHoldRunsTheInterruptAndHoldsTheQueue(t *testing.T) {
 	queued := c.f.propose(t, c.st, c.f.msg("queued", opjournal.RolePrompt, "next"))
 	front := sessionFrontDoor(c.f.store)
 	hold := laneHold(t)
-	item, err := session.ContentHoldItem(c.f.id, hold)
+	item, err := front.ContentHoldItem(c.f.id, hold)
 	if err != nil {
 		t.Fatal(err)
 	}
+	soloWrites := 0
 	stop := opjournal.Request{
 		Conversation: c.f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "stop",
 		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
 		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
 	}
 	op, created, err := c.st.ProposeWith(context.Background(), stop, opjournal.Companion{
-		Item: item, Write: func() error { return front.SetContentHold(c.f.id, hold) },
+		Tag: session.ContentHoldKey, Item: item,
+		Write: func() error { soloWrites++; return front.SetContentHold(c.f.id, hold) },
 	})
 	if err != nil || !created {
 		t.Fatalf("ProposeWith = created %v, %v", created, err)
+	}
+	if soloWrites != 0 {
+		t.Fatalf("the hold was written on its own %d times; want it in the interrupt's batch", soloWrites)
 	}
 	if _, info := c.f.view(t); info.ContentHoldRaw != hold.String() {
 		t.Fatalf("hold = %q, want %q beside the interrupt", info.ContentHoldRaw, hold.String())
@@ -149,8 +154,8 @@ func TestLaneStopWithHoldRunsTheInterruptAndHoldsTheQueue(t *testing.T) {
 	if res := c.pass(t); res.Took != opjournal.TakeControl || len(c.requests()) != 1 {
 		t.Fatalf("pass 1 = %+v, %d interrupts; want the interrupt run first", res, len(c.requests()))
 	}
-	if got := c.f.get(t, c.st, op.ID); got.Status != opjournal.StatusClosed {
-		t.Fatalf("interrupt = %s, want closed", got.Status)
+	if got := c.f.get(t, c.st, op.ID); got.Status != opjournal.StatusClosed || got.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("interrupt = %s %+v, want closed succeeded", got.Status, got.Outcome)
 	}
 	if res := c.pass(t); res.Took != opjournal.TakeNone || laneWaitOf(res, queued.ID) != opjournal.WaitContentHold || len(c.f.nudges()) != 0 {
 		t.Fatalf("pass 2 = %+v, %d nudges; want the prompt held", res, len(c.f.nudges()))

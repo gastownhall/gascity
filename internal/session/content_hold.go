@@ -12,7 +12,7 @@ import (
 )
 
 // ContentHoldKey is a conversation row's content hold (DES-O1 D21, §10.5):
-// "<principal>@<RFC3339>" while its normal-precedence content is held. Only
+// "<principal>@<RFC3339 with fractional seconds>" while its normal-precedence content is held. Only
 // the conversation lane reads it; Stop sets it and resume clears it, and no
 // lifecycle transition touches it (it is conversation-scoped).
 const ContentHoldKey = "content_hold"
@@ -29,11 +29,12 @@ var ErrInvalidContentHold = errors.New("invalid content hold")
 // queue and when. The zero value is no hold.
 type ContentHold struct {
 	By string    // the principal, as opjournal's principal grammar spells it
-	At time.Time // UTC, whole seconds
+	At time.Time // UTC, to the nanosecond
 }
 
-// NewContentHold returns the hold principal by takes at at, normalized to UTC
-// whole seconds. It refuses a principal opjournal would refuse and a zero
+// NewContentHold returns the hold principal by takes at at, in UTC. It keeps
+// sub-second precision, so two Stops in one second stamp two holds and a
+// resume that read the first cannot clear the second. It refuses a principal opjournal would refuse and a zero
 // time, wrapping ErrInvalidContentHold.
 func NewContentHold(by string, at time.Time) (ContentHold, error) {
 	if err := validContentHoldBy(by); err != nil {
@@ -42,7 +43,7 @@ func NewContentHold(by string, at time.Time) (ContentHold, error) {
 	if at.IsZero() {
 		return ContentHold{}, fmt.Errorf("%w: the hold has no time", ErrInvalidContentHold)
 	}
-	return ContentHold{By: by, At: at.UTC().Truncate(time.Second)}, nil
+	return ContentHold{By: by, At: at.UTC()}, nil
 }
 
 // validContentHoldBy mirrors opjournal's principal rule (session cannot
@@ -64,10 +65,11 @@ func validContentHoldBy(by string) error {
 	return nil
 }
 
-// String is the cell's value: the principal, "@", and the hold's UTC time to
-// the second in RFC 3339. It does not validate; the writers do.
+// String is the cell's value: the principal, "@", and the hold's UTC time in
+// RFC 3339 with fractional seconds (time.RFC3339Nano, trailing zeros
+// dropped). It does not validate; the writers do.
 func (h ContentHold) String() string {
-	return h.By + "@" + h.At.UTC().Format(time.RFC3339)
+	return h.By + "@" + h.At.UTC().Format(time.RFC3339Nano)
 }
 
 // IsZero reports whether h is no hold.
@@ -76,7 +78,7 @@ func (h ContentHold) IsZero() bool { return h.By == "" && h.At.IsZero() }
 // ParseContentHold reads a content_hold cell. A blank cell is no hold. The
 // cell splits at its last "@", since a principal may hold one (an email
 // subject); the time may carry an offset or fractional seconds and comes back
-// in UTC whole seconds. Anything else wraps ErrInvalidContentHold, and a
+// in UTC. Anything else wraps ErrInvalidContentHold, and a
 // reader still takes such a cell as held (ContentHeldInfo).
 func ParseContentHold(raw string) (ContentHold, error) {
 	raw = strings.TrimSpace(raw)
@@ -104,7 +106,7 @@ func ParseContentHold(raw string) (ContentHold, error) {
 func ContentHeldInfo(info Info) bool { return strings.TrimSpace(info.ContentHoldRaw) != "" }
 
 // validContentHold checks a hold a writer is about to write, as
-// NewContentHold does. String writes its time in UTC whole seconds.
+// NewContentHold does. String writes its time in UTC.
 func validContentHold(h ContentHold) error {
 	_, err := NewContentHold(h.By, h.At)
 	return err
@@ -113,44 +115,55 @@ func validContentHold(h ContentHold) error {
 // ContentHoldItem is SetContentHold's write as one guarded-batch item: an
 // unguarded update of row id that sets exactly the content_hold cell. A
 // producer that must not make an op durable without its hold (a Stop's
-// interrupt) writes it in the op's batch (opjournal.Store.ProposeWith).
-func ContentHoldItem(id string, h ContentHold) (beads.GuardedItem, error) {
-	if strings.TrimSpace(id) == "" {
-		return beads.GuardedItem{}, fmt.Errorf("%w: the hold names no session", ErrInvalidContentHold)
-	}
-	if err := validContentHold(h); err != nil {
-		return beads.GuardedItem{}, fmt.Errorf("holding content of session %q: %w", id, err)
+// interrupt) writes it in the op's batch (opjournal.Store.ProposeWith). It
+// reads and refuses the rows SetContentHold refuses, so both forms of the
+// write hold the same rows; like SetContentHold's write, the item does not
+// guard against a close that lands between the read and the batch.
+func (s *Store) ContentHoldItem(id string, h ContentHold) (beads.GuardedItem, error) {
+	stamp, b, err := s.holdableRow(id, h)
+	if err != nil {
+		return beads.GuardedItem{}, err
 	}
 	return beads.GuardedItem{Update: &beads.GuardedUpdate{
-		ID:   id,
-		Opts: beads.UpdateOpts{Metadata: map[string]string{ContentHoldKey: h.String()}},
+		ID:   b.ID,
+		Opts: beads.UpdateOpts{Metadata: map[string]string{ContentHoldKey: stamp}},
 	}}, nil
 }
 
 // SetContentHold holds session id's normal-precedence content under h: one
 // single-key write on the row, which re-stamps any hold that stands, so the
 // last Stop names the hold and a resume that read an older one cannot clear
-// it. The same stamp again writes nothing. It refuses a malformed hold, a
-// missing or non-session row, and a closed row (ErrSessionClosed).
+// it. It writes even when the row already reads h, since that read may be
+// stale. It refuses a malformed hold, a missing or non-session row, and a
+// closed row (ErrSessionClosed).
 func (s *Store) SetContentHold(id string, h ContentHold) error {
-	if err := validContentHold(h); err != nil {
-		return fmt.Errorf("holding content of session %q: %w", id, err)
-	}
-	b, err := s.validatedBead(id)
+	stamp, b, err := s.holdableRow(id, h)
 	if err != nil {
-		return fmt.Errorf("holding content of session %q: %w", id, err)
-	}
-	if b.Status == "closed" {
-		return fmt.Errorf("holding content of session %q: %w", id, ErrSessionClosed)
-	}
-	stamp := h.String()
-	if b.Metadata[ContentHoldKey] == stamp {
-		return nil
+		return err
 	}
 	if err := s.setMetadataValue(b.ID, ContentHoldKey, stamp); err != nil {
 		return fmt.Errorf("holding content of session %q: %w", id, err)
 	}
 	return nil
+}
+
+// holdableRow checks a hold write: h well formed and id an open session row.
+// It returns the cell's value and the row.
+func (s *Store) holdableRow(id string, h ContentHold) (string, beads.Bead, error) {
+	if strings.TrimSpace(id) == "" {
+		return "", beads.Bead{}, fmt.Errorf("%w: the hold names no session", ErrInvalidContentHold)
+	}
+	if err := validContentHold(h); err != nil {
+		return "", beads.Bead{}, fmt.Errorf("holding content of session %q: %w", id, err)
+	}
+	b, err := s.validatedBead(id)
+	if err != nil {
+		return "", beads.Bead{}, fmt.Errorf("holding content of session %q: %w", id, err)
+	}
+	if b.Status == "closed" {
+		return "", beads.Bead{}, fmt.Errorf("holding content of session %q: %w", id, ErrSessionClosed)
+	}
+	return h.String(), b, nil
 }
 
 // ClearContentHold releases session id's content hold, but only the hold the
