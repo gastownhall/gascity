@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"runtime/debug"
 	"slices"
 	"strconv"
 	"sync"
@@ -249,6 +250,13 @@ func (o *laneTurnObserver) stop() {
 	if o.state == laneTurnWatching {
 		o.state = laneTurnDone
 	}
+}
+
+// closed handles the watch's channel closing: the watch ended, and the next
+// start begins another.
+func (o *laneTurnObserver) closed() {
+	o.stop()
+	o.state = laneTurnUnwatched
 }
 
 // setInterrupting names the interrupt gc runs on a turn, so the fold
@@ -656,4 +664,83 @@ func laneTurnCapsFromStamp(stamp opjournal.TurnCapsStamp) runtime.TurnCapabiliti
 		}
 	}
 	return caps.Normalized()
+}
+
+// newTurnObserver returns conversation conv's observer over the host's
+// stores and runtime, as of each call: a store the controller replaces is
+// the one the next write uses.
+func (h *conversationLaneHost) newTurnObserver(conv string) *laneTurnObserver {
+	return newLaneTurnObserver(conv, laneTurnDeps{
+		handle: func() (worker.TurnHandle, error) {
+			if h.turnHandle != nil {
+				return h.turnHandle(conv)
+			}
+			return workerHandleForSessionWithConfig(h.env.CityPath(), h.env.SessionsBeadStore().Store, h.env.SessionProvider(), h.env.Config(), conv)
+		},
+		generation: func() (int64, bool, error) {
+			live := sessionFrontDoor(laneLiveSessions{Store: h.env.SessionsBeadStore().Store})
+			info, err := live.Get(conv)
+			switch {
+			case laneSessionGone(err), errors.Is(err, beads.ErrNotFound):
+				return 0, false, nil
+			case err != nil:
+				return 0, false, err
+			}
+			view := conversationLaneView(info)
+			return view.Generation, !view.Closed, nil
+		},
+		rows: func() (laneTurnRows, error) {
+			st, _, err := h.store()
+			if err != nil {
+				return laneTurnRows{}, err
+			}
+			rows := laneLiveSessions{Store: h.env.SessionsBeadStore().Store}
+			batcher, ok := beads.GuardedBatcherFor(rows)
+			if !ok || batcher == nil {
+				return laneTurnRows{}, beads.ErrGuardedBatchUnsupported
+			}
+			return laneTurnRows{store: rows, batcher: batcher, prefix: st.Prefix()}, nil
+		},
+		now:   h.clk.Now,
+		note:  h.noteError,
+		stats: &h.turnStats,
+	})
+}
+
+// watchTurns starts conv's turn watch after a pass, as store work: a
+// quiescent city starts none, and a panic is recovered and noted.
+func (h *conversationLaneHost) watchTurns(conv string, o *laneTurnObserver) {
+	if o.state != laneTurnUnwatched {
+		return
+	}
+	defer h.env.beginStoreWork()()
+	defer h.recoverTurns(conv)
+	if h.env.storesQuiescent() {
+		return
+	}
+	o.start(h.ctx)
+}
+
+// observeTurn folds one of conv's turn updates as store work. An update that
+// arrives while the city is quiescent is dropped: the next one carries the
+// source's window, which the fold recovers from (X11 §5.3).
+func (h *conversationLaneHost) observeTurn(conv string, o *laneTurnObserver, u worker.TurnUpdate, ok bool) {
+	if !ok {
+		o.closed()
+		return
+	}
+	defer h.env.beginStoreWork()()
+	defer h.recoverTurns(conv)
+	if h.env.storesQuiescent() {
+		return
+	}
+	o.observe(h.ctx, u)
+}
+
+// recoverTurns recovers a panic of conv's observer, logging it.
+func (h *conversationLaneHost) recoverTurns(conv string) {
+	if r := recover(); r != nil {
+		h.logf("conversation-lanes: turn observer of %s panicked: %v\n%s", conv, r, debug.Stack())
+		h.turnStats.errors.Add(1)
+	}
 }

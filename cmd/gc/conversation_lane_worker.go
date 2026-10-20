@@ -13,6 +13,7 @@ import (
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 // lanePassOutcome is one worker pass.
@@ -63,6 +64,11 @@ type laneWorkerHooks struct {
 	// onPass and onReprobe observe each full pass and each re-probe.
 	onPass    func(lanePassOutcome)
 	onReprobe func(stillBusy bool)
+	// turns is the conversation's turn updates while its observer watches
+	// (TI-3), nil otherwise; the worker hands each to onTurn while it waits,
+	// with ok false when the channel closed.
+	turns  func() <-chan worker.TurnUpdate
+	onTurn func(u worker.TurnUpdate, ok bool)
 }
 
 // conversationLaneWorker serves one conversation until nothing it can see
@@ -139,7 +145,9 @@ func (w *conversationLaneWorker) reprobeDue(out lanePassOutcome) bool {
 	return next.IsZero() || w.clk.Now().Before(next)
 }
 
-// wait sleeps for d, or until a poke or the host's end.
+// wait sleeps for d, or until a poke or the host's end. A turn update that
+// arrives meanwhile is handed to the observer and the wait goes on, on the
+// same timer.
 func (w *conversationLaneWorker) wait(d time.Duration) laneWaitEnd {
 	if d <= 0 {
 		if w.ctx.Err() != nil {
@@ -149,14 +157,26 @@ func (w *conversationLaneWorker) wait(d time.Duration) laneWaitEnd {
 	}
 	fire, stop := w.newTimer(d)
 	defer stop()
-	select {
-	case <-w.ctx.Done():
-		return laneWaitEnded
-	case <-w.poke:
-		return laneWaitPoked
-	case <-fire:
-		return laneWaitFired
+	for {
+		select {
+		case <-w.ctx.Done():
+			return laneWaitEnded
+		case <-w.poke:
+			return laneWaitPoked
+		case <-fire:
+			return laneWaitFired
+		case u, ok := <-w.turnUpdates():
+			w.hooks.onTurn(u, ok)
+		}
 	}
+}
+
+// turnUpdates is the observer's channel, nil (never ready) without one.
+func (w *conversationLaneWorker) turnUpdates() <-chan worker.TurnUpdate {
+	if w.hooks.turns == nil || w.hooks.onTurn == nil {
+		return nil
+	}
+	return w.hooks.turns()
 }
 
 // nextDelay is how long the worker waits after out, or idle when nothing it

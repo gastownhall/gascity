@@ -503,3 +503,90 @@ func TestLaneTurnCapsStampRoundTrips(t *testing.T) {
 		t.Fatalf("min = %+v, want %+v", low, want)
 	}
 }
+
+// TestLaneHostObservesTurnsOnTheWorker pins the hosting (DES-O1 §7.1): a
+// conversation's worker starts its observer after a pass, folds the turn
+// updates that arrive while it waits, and stops the watch when it exits.
+func TestLaneHostObservesTurnsOnTheWorker(t *testing.T) {
+	store := laneSignalStore{laneTestStore: newLaneTestStore(), turnBatches: make(chan struct{}, 8)}
+	f := newLaneFixtureOver(t, store)
+	st := f.laneStore(t)
+	f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "later", func(r *opjournal.Request) {
+		r.NotBefore = laneT0.Add(30 * time.Second)
+	}))
+	hh := newLaneHostHarness(t, f)
+	turns := &laneFakeTurns{caps: laneObsCaps, ch: make(chan worker.TurnUpdate, 1)}
+	watchCtx := make(chan context.Context, 1)
+	hh.h.turnHandle = func(conv string) (worker.TurnHandle, error) {
+		if conv != f.id {
+			return nil, fmt.Errorf("turn handle for %s", conv)
+		}
+		return laneCtxTurns{laneFakeTurns: turns, ctxs: watchCtx}, nil
+	}
+	hh.start()
+	if p := hh.nextPass(t); p.out.res.Took != opjournal.TakeNone {
+		t.Fatalf("first pass = %+v, want a not_before wait", p.out.res)
+	}
+	var ctx context.Context
+	select {
+	case ctx = <-watchCtx:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the worker started no turn watch")
+	}
+	tm := hh.nextTimer(t)
+	turns.ch <- worker.TurnUpdate{History: runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t1"}, ObservedAt: f.clk.Now()}}
+	select {
+	case <-store.turnBatches:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the observer wrote no turn batch while the worker waited")
+	}
+	if row, _, found, err := st.Runtime(f.id); err != nil || !found || row.Turn.ID != "t1" {
+		t.Fatalf("runtime row = %+v (found %v, %v), want t1 running", row.Turn, found, err)
+	}
+	f.clk.Advance(30 * time.Second)
+	tm.c <- f.clk.Now()
+	if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass after the timer = %+v, want accepted", p.out.res)
+	}
+	if hh.nextExit(t) != f.id {
+		t.Fatal("the idle worker did not exit")
+	}
+	select {
+	case <-ctx.Done():
+	default:
+		t.Fatal("the watch outlived its worker")
+	}
+	if turns.watches != 1 {
+		t.Fatalf("watches = %d, want one per worker", turns.watches)
+	}
+	if s := hh.h.status(f.clk.Now()); s.Turns == nil || s.Turns.Writes != 1 || s.Turns.Watching != 0 {
+		t.Fatalf("status turns = %+v, want one write and no watch", s.Turns)
+	}
+}
+
+// laneSignalStore is a lane test store that signals each turn observer
+// batch it applied.
+type laneSignalStore struct {
+	laneTestStore
+	turnBatches chan struct{}
+}
+
+func (s laneSignalStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
+	res, err := s.MemStore.ApplyGuarded(ctx, b)
+	if err == nil && b.Reason == laneTurnBatchReason {
+		s.turnBatches <- struct{}{}
+	}
+	return res, err
+}
+
+// laneCtxTurns reports each watch's context.
+type laneCtxTurns struct {
+	*laneFakeTurns
+	ctxs chan context.Context
+}
+
+func (l laneCtxTurns) WatchTurns(ctx context.Context) (<-chan worker.TurnUpdate, error) {
+	ch, err := l.laneFakeTurns.WatchTurns(ctx)
+	l.ctxs <- ctx
+	return ch, err
+}

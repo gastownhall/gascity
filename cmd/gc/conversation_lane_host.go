@@ -18,6 +18,10 @@ package main
 // rollback still drain once whatever gate they wait on clears (DES-O1 §7.1,
 // §12). The list is latched at controller start.
 //
+// Each worker also hosts its conversation's turn observer
+// (conversation_lane_turns.go), which folds the session's turn updates while
+// the worker waits and stops when the worker exits.
+//
 // A worker holds its slot only while no other conversation waits for one and
 // its next pass is at most laneParkAfter away; otherwise it parks the
 // conversation on a timer, so neither long waits nor busy runtimes starve the
@@ -63,6 +67,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -258,7 +263,13 @@ type conversationLaneHost struct {
 	newTicker func(time.Duration) (<-chan time.Time, func())
 	// newExec builds a pass's executor; production is the live executor.
 	newExec func(laneExecDeps, session.Info) opjournal.Executor
-	logf    func(format string, args ...any)
+	// turnHandle resolves a conversation's turn handle for its observer
+	// (conversation_lane_turns.go); production builds the session's worker
+	// handle.
+	turnHandle func(conv string) (worker.TurnHandle, error)
+	// turnStats counts the turn observers' work.
+	turnStats laneTurnStats
+	logf      func(format string, args ...any)
 	// onPass, onReprobe and onWorkerExit are test seams: each pass's
 	// outcome, each re-probe, and each worker's exit. Nil in production.
 	onPass       func(conv string, out lanePassOutcome)
@@ -640,10 +651,20 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 	if h.onWorkerExit != nil {
 		defer h.onWorkerExit(conv)
 	}
+	turns := h.newTurnObserver(conv)
+	defer turns.stop()
 	cw := &conversationLaneWorker{
 		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
-			pass:    func() lanePassOutcome { return h.pass(conv) },
+			pass: func() lanePassOutcome {
+				out := h.pass(conv)
+				if !out.skipped {
+					h.watchTurns(conv, turns)
+				}
+				return out
+			},
+			turns:   turns.updates,
+			onTurn:  func(u worker.TurnUpdate, ok bool) { h.observeTurn(conv, turns, u, ok) },
 			yield:   h.yield,
 			release: func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
 			onPass: func(out lanePassOutcome) {
@@ -937,6 +958,8 @@ type conversationLaneStatus struct {
 	// Waiting lists, for the first few conversations in id order, why
 	// their ops wait after their last pass.
 	Waiting []laneConversationWaits `json:"waiting,omitempty"`
+	// Turns counts the turn observers' work; omitted before any watched.
+	Turns *laneTurnStatus `json:"turns,omitempty"`
 }
 
 // status reads the host's status at now.
@@ -947,6 +970,7 @@ func (h *conversationLaneHost) status(now time.Time) conversationLaneStatus {
 		State: h.state, Reason: h.reason, Kinds: append([]string(nil), h.kinds...),
 		Workers: len(h.workers), Queued: len(h.queued), Parked: len(h.parked), Passes: h.passes, Reprobes: h.reprobes,
 		LastPassFailed: h.lastFailed, Errors: h.passErrors, ErrorsSinceSuccess: h.sinceSuccess, LastError: h.lastErr,
+		Turns: h.turnStats.status(),
 	}
 	if !h.lastPass.IsZero() {
 		st.LastPassAt = h.lastPass.UTC().Format(time.RFC3339Nano)
