@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"slices"
 	"strings"
@@ -148,6 +149,38 @@ type ScannedTurn struct {
 	// Status is how the turn ended; empty while it is open or when only a
 	// newer turn closed it.
 	Status TurnStatus
+	// Failure is the provider error a failed turn ended on, as the source
+	// recorded it; zero for a turn that did not fail, and for a family whose
+	// transcript records no such error.
+	Failure TurnFailure
+}
+
+// MaxTurnFailureMessage bounds TurnFailure.Message, in bytes.
+const MaxTurnFailureMessage = 512
+
+// claudeRateLimitClass is the class Claude Code gives an API error that a
+// rate limit refused.
+const claudeRateLimitClass = "rate_limit"
+
+// TurnFailure is the provider error a turn ended on, as the transcript's
+// source classified it when it wrote the error.
+type TurnFailure struct {
+	// Code is the source's own class for the error, verbatim (Claude Code:
+	// "rate_limit", "server_error", ...); empty when it recorded none.
+	Code string
+	// Status is the HTTP status the source recorded; 0 when it recorded
+	// none.
+	Status int
+	// Message is the error's text, cut on a rune boundary to at most
+	// MaxTurnFailureMessage bytes. It is for people: nothing classifies it.
+	Message string
+}
+
+// RateLimited reports whether the provider refused the turn with a rate
+// limit: HTTP 429, or the source's rate-limit class. It never reads the
+// message.
+func (f TurnFailure) RateLimited() bool {
+	return f.Status == http.StatusTooManyRequests || f.Code == claudeRateLimitClass
 }
 
 // TurnScan is one read of a transcript's current and recent turns.
@@ -348,12 +381,18 @@ func (l *turnLedger) noteTime(ok bool) {
 
 // close ends the open turn, if any.
 func (l *turnLedger) close(at time.Time, status TurnStatus) {
+	l.closeFailed(at, status, TurnFailure{})
+}
+
+// closeFailed ends the open turn, if any, with the error it failed on.
+func (l *turnLedger) closeFailed(at time.Time, status TurnStatus, failure TurnFailure) {
 	if !l.open {
 		return
 	}
 	t := l.current
 	t.EndedAt = at
 	t.Status = status
+	t.Failure = failure
 	l.open = false
 	l.current = ScannedTurn{}
 	l.pushEnded(t)

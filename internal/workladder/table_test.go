@@ -42,6 +42,14 @@ func TestDecisionTable(t *testing.T) {
 		{"claim/started, >= 6, recycles 0 < R", ent(KindClaim, RungStarted, 6, nil)},
 		{"claim/started, >= 6, recycles 1 = R", ent(KindClaim, RungStarted, 6, func(e *Entry) { e.Recycles = 1 })},
 		{"claim/escalated", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated = 1, true })},
+		{"claim/escalated, recycled fresh long ago", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.FreshRecycled = 1, true, true })},
+		{"claim/escalated, recycled fresh just now", ent(KindClaim, RungEscalated, 9, func(e *Entry) {
+			e.Recycles, e.Escalated, e.FreshRecycled, e.RecycleAt = 1, true, true, now.Add(-5*time.Minute)
+		})},
+		{"claim/escalated, recycled fresh just now, served since", ent(KindClaim, RungEscalated, 9, func(e *Entry) {
+			e.Recycles, e.Escalated, e.FreshRecycled, e.FreshServed, e.RecycleAt = 1, true, true, true, now.Add(-5*time.Minute)
+		})},
+		{"claim/escalated, rate limit alerted", ent(KindClaim, RungEscalated, 9, func(e *Entry) { e.Recycles, e.Escalated, e.RateLimitAlerted = 1, true, true })},
 	}
 	type col struct {
 		name string
@@ -53,6 +61,10 @@ func TestDecisionTable(t *testing.T) {
 		{"gate held", func(o *Observation) { o.Gate.Held = true }},
 		{"not quiet", func(o *Observation) { o.Quiet.State = NotQuiet }},
 		{"runtime dead", func(o *Observation) { o.Runtime = TriFalse }},
+		{"quiet, nudge refused 2x", func(o *Observation) { o.RateLimited, o.RateLimitedAt = 2, o.Now }},
+		{"quiet, nudge refused 2x, fresh queued", func(o *Observation) { o.RateLimited, o.RateLimitedAt, o.FreshHold = 2, o.Now, FreshHoldQueued }},
+		{"quiet, nudge refused 2x, fresh standing", func(o *Observation) { o.RateLimited, o.RateLimitedAt, o.FreshHold = 2, o.Now, FreshHoldStanding }},
+		{"quiet, degraded, nudge refused 2x", func(o *Observation) { o.Provider.Degraded, o.RateLimited, o.RateLimitedAt = true, 2, o.Now }},
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "# workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)\n\n")
@@ -108,7 +120,10 @@ func render(a Action) string {
 		}
 		return fmt.Sprintf("nudge %d", a.Attempt)
 	case Recycle:
-		if a.KeepClaim {
+		switch {
+		case a.Fresh:
+			return "fresh recycle (keep claim)"
+		case a.KeepClaim:
 			return "recycle (keep claim)"
 		}
 		return "recycle"

@@ -11,14 +11,17 @@ type WorkLadderPayload struct {
 	SessionID   string `json:"session_id"`
 	SessionName string `json:"session_name,omitempty"`
 	Template    string `json:"template,omitempty"`
-	BeadID      string `json:"bead_id"`
-	StoreRef    string `json:"store_ref,omitempty"`
-	Generation  int64  `json:"generation"`
-	Kind        string `json:"kind,omitempty"`
-	Rung        string `json:"rung,omitempty"`
-	Attempt     int    `json:"attempt,omitempty"`
-	Paused      bool   `json:"paused,omitempty"`
-	Reason      string `json:"reason,omitempty"`
+	// Provider is the seat's provider: the one to reroute the lane from when
+	// a rate-limit alert says its pool is refusing every seat.
+	Provider   string `json:"provider,omitempty"`
+	BeadID     string `json:"bead_id"`
+	StoreRef   string `json:"store_ref,omitempty"`
+	Generation int64  `json:"generation"`
+	Kind       string `json:"kind,omitempty"`
+	Rung       string `json:"rung,omitempty"`
+	Attempt    int    `json:"attempt,omitempty"`
+	Paused     bool   `json:"paused,omitempty"`
+	Reason     string `json:"reason,omitempty"`
 }
 
 // IsEventPayload marks WorkLadderPayload as an events.Payload variant.

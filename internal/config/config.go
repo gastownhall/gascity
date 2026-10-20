@@ -2843,9 +2843,19 @@ type DaemonConfig struct {
 	// seats. "on" (default) runs the work-progress ladder: nudges back off from
 	// 3 to 60 minutes and never stop, a started claim is recycled at most once
 	// and then escalated, and an unstarted claim is released after its third
-	// unanswered nudge. "off" runs the three backstops it replaced (idle-claim,
-	// continuation, execution) instead: the rollback. Read on every pass, so a
-	// config reload applies. Legacy ignores it.
+	// unanswered nudge. A seat whose provider refused its answer to the
+	// ladder's nudge with a rate limit (HTTP 429, as its own transcript records
+	// it; two refusals in a row) has that one recycle at once, to a fresh
+	// conversation, one seat per provider at a time (refused claims waiting
+	// their turn are paced as on a degraded provider); if the fresh seat is
+	// refused too, an alert names the provider and its refused seats wait an
+	// hour, doubling per refusal in a row up to a day, or until it serves a
+	// turn. An attached seat is never restarted fresh. A claim whose metadata
+	// gc.awaiting_human names its seat (the seat asked a person and waits on
+	// their decision) is not nudged, recycled or released. "off" runs the
+	// three backstops it replaced (idle-claim, continuation, execution)
+	// instead: the rollback. Read on every pass, so a config reload applies.
+	// Legacy ignores it.
 	WorkLadder string `toml:"work_ladder,omitempty" jsonschema:"default=on,enum=on,enum=off"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or

@@ -20,6 +20,7 @@ go_test(
         "decide_test.go",
         "property_test.go",
         "purity_test.go",
+        "ratelimit_test.go",
         "table_test.go",
         "testenv_import_test.go",
     ],

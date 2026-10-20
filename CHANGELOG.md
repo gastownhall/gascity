@@ -282,6 +282,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **The work ladder recycles a seat its provider keeps refusing with a rate
+  limit, and leaves a step alone while its seat waits on a person.** With
+  `[daemon] work_ladder` on (the default), when the provider refuses a pool
+  seat's answer to the ladder's own nudge with HTTP 429 (two refusals in a
+  row, as the agent CLI classified them in its own transcript), and the seat
+  holds a started claim, the ladder restarts the seat at once to a fresh
+  conversation (`gc session reset` semantics: the same seat, its claims
+  kept) instead of after six unanswered nudges. That is the one recycle a
+  started claim gets. Refusals already in a transcript when the ladder first
+  sees it recycle nothing. Only one seat per provider is recycled fresh at a
+  time (the canary); if that fresh conversation is refused too, the
+  provider's pool is refusing: one `work.escalated` event with reason
+  `provider_rate_limited` names the provider and says until when its other
+  refused seats keep their conversations: an hour, doubling with each
+  refused canary in a row up to a day, or until it serves a turn. A refused
+  started claim waiting its turn is paced as on a degraded provider (nudged
+  every 10 minutes, counting toward nothing), so it is never drained back
+  into the conversation that refuses it; everything else on the seat, and
+  every seat on the provider that is not refused, is paced as usual. A seat
+  that a person is attached to, or that also holds a claim waiting on a
+  person, is never restarted fresh, and is paced as usual, so its silence
+  still reaches the drain and the alerts. If a claim's one recycle already
+  went to a drain that
+  resumed the same conversation, `rate_limited_unrecycled` says so instead. A claim refused again long (more
+  than an hour) after its fresh recycle, or after the provider served its
+  fresh conversation, gets `rate_limited_again`, which
+  says nothing about the pool and holds no other seat. Only a completed turn
+  counts as the provider serving a seat; a failed read of a refused seat's
+  turns has its claims wait up to 10 minutes rather than count a nudge.
+  Every `work.*` payload now carries the seat's `provider`. A claimed step
+  whose metadata `gc.awaiting_human` names the seat holding it (the seat
+  asked a person and waits on their decision, such as an approval asked by
+  mail) gets no nudge, recycle or release until the seat clears it; a step
+  re-claimed by another seat is paced as usual. The rate-limit rule never
+  acts while the provider-health gate reports the provider degraded: that
+  gate alerts on the outage itself. Failed Claude turns now record the
+  provider error they ended on (class, HTTP status and text).
+
 - **A suspended rig or city is left cold.** gc no longer touches the bead
   store of a suspended rig, or of any scope of a suspended city. That covers
   cache scans, demand, order-tracking sweeps, the completions sweep,

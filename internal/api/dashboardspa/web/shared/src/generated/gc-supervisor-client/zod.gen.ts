@@ -3560,6 +3560,7 @@ export const zWorkLadderPayload = z.object({
     generation: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }),
     kind: z.string().optional(),
     paused: z.boolean().optional(),
+    provider: z.string().optional(),
     reason: z.string().optional(),
     rung: z.string().optional(),
     session_id: z.string(),

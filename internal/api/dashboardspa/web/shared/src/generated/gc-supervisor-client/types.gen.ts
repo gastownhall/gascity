@@ -10845,6 +10845,7 @@ export type WorkLadderPayload = {
     generation: number;
     kind?: string;
     paused?: boolean;
+    provider?: string;
     reason?: string;
     rung?: string;
     session_id: string;

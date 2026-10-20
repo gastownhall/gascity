@@ -7,8 +7,10 @@ import (
 	"path/filepath"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 const (
@@ -105,7 +107,7 @@ func TestScanTurnsClaudeFixtures(t *testing.T) {
 			return TurnScan{
 				Recent: []ScannedTurn{
 					{ID: claudeP2, StartedAt: turnTime(t, "2026-10-13T05:01:00.459Z"), EndedAt: turnTime(t, "2026-10-13T05:01:01.500Z"), Status: TurnStatusCompleted},
-					{EndedAt: turnTime(t, "2026-10-13T05:00:05.025Z"), Status: TurnStatusFailed},
+					{EndedAt: turnTime(t, "2026-10-13T05:00:05.025Z"), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}},
 				},
 				MissingIDs: true,
 			}
@@ -160,7 +162,7 @@ func TestScanTurnsClaudeContinuedSessionOpensMidTurn(t *testing.T) {
 	lines := strings.SplitAfter(strings.TrimSuffix(string(data), "\n"), "\n")
 	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
 	running := TurnScan{Open: true, MissingIDs: true}
-	failed := ScannedTurn{EndedAt: turnTime(t, ts("00:05.025")), Status: TurnStatusFailed}
+	failed := ScannedTurn{EndedAt: turnTime(t, ts("00:05.025")), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}}
 	tests := []struct {
 		lines int
 		want  TurnScan
@@ -288,7 +290,11 @@ func TestScanTurnsClaudeEndBeforeFirstStart(t *testing.T) {
 		return `{"type":"system","subtype":"turn_duration","timestamp":"` + ts(clock) + `"}`
 	}
 	ended := func(id, clock string, status TurnStatus) []ScannedTurn {
-		return []ScannedTurn{{ID: id, EndedAt: turnTime(t, ts(clock)), Status: status}}
+		var failure TurnFailure
+		if status == TurnStatusFailed {
+			failure.Message = "API Error"
+		}
+		return []ScannedTurn{{ID: id, EndedAt: turnTime(t, ts(clock)), Status: status, Failure: failure}}
 	}
 	tests := []struct {
 		name string
@@ -467,12 +473,12 @@ func TestScanTurnsClaudeAPIErrorThenTurnEnd(t *testing.T) {
 		Open:    true,
 		Current: ScannedTurn{ID: "p6", StartedAt: turnTime(t, ts("00:15.100"))},
 		Recent: []ScannedTurn{
-			{ID: "p5", StartedAt: turnTime(t, ts("00:13.100")), EndedAt: turnTime(t, ts("00:14.000")), Status: TurnStatusFailed},
+			{ID: "p5", StartedAt: turnTime(t, ts("00:13.100")), EndedAt: turnTime(t, ts("00:14.000")), Status: TurnStatusFailed, Failure: TurnFailure{Message: "API Error"}},
 			{ID: "p7", StartedAt: turnTime(t, ts("00:12.100")), EndedAt: turnTime(t, ts("00:12.900")), Status: TurnStatusCompleted},
-			{ID: "p4", StartedAt: turnTime(t, ts("00:10.100")), EndedAt: turnTime(t, ts("00:12.000")), Status: TurnStatusFailed},
+			{ID: "p4", StartedAt: turnTime(t, ts("00:10.100")), EndedAt: turnTime(t, ts("00:12.000")), Status: TurnStatusFailed, Failure: TurnFailure{Message: "API Error"}},
 			{ID: "p3", StartedAt: turnTime(t, ts("00:06.100")), EndedAt: turnTime(t, ts("00:09.000")), Status: TurnStatusCompleted},
 			{ID: "p2", StartedAt: turnTime(t, ts("00:02.100")), EndedAt: turnTime(t, ts("00:05.000")), Status: TurnStatusCompleted},
-			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusFailed},
+			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusFailed, Failure: TurnFailure{Message: "API Error"}},
 		},
 	})
 }
@@ -514,7 +520,7 @@ func TestScanTurnsClaudeUnpromptedEntryContinuesOpenTurn(t *testing.T) {
 		Current: ScannedTurn{ID: "p4", StartedAt: turnTime(t, ts("00:05.000"))},
 		Recent: []ScannedTurn{
 			{ID: "p3", StartedAt: turnTime(t, ts("00:03.050")), EndedAt: turnTime(t, ts("00:04.000")), Status: TurnStatusCompleted},
-			{ID: "p2", StartedAt: turnTime(t, ts("00:01.100")), EndedAt: turnTime(t, ts("00:02.000")), Status: TurnStatusFailed},
+			{ID: "p2", StartedAt: turnTime(t, ts("00:01.100")), EndedAt: turnTime(t, ts("00:02.000")), Status: TurnStatusFailed, Failure: TurnFailure{Message: "API Error"}},
 			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.010")), Status: TurnStatusCompleted},
 		},
 	})
@@ -628,5 +634,68 @@ func BenchmarkScanTurnsClaudeLongTurn(b *testing.B) {
 		if _, err := ScanTurns("claude", path); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+// TestScanTurnsClaudeFailedTurnKeepsItsError: a turn that ends failed keeps
+// the API error it ended on, as Claude Code classified it: the entry's error
+// class, its HTTP status and its text. The last error pending when the turn
+// ended is the one kept; a turn that recovered keeps none. RateLimited reads
+// the class or the status, never the text (the 2026-10-19 GLM pool cooldown:
+// "Request rejected (429) · pool cooling for another 3d 16h").
+func TestScanTurnsClaudeFailedTurnKeepsItsError(t *testing.T) {
+	user := func(ts, id string) string {
+		return `{"type":"user","timestamp":"2026-10-13T05:` + ts + `Z","promptId":"` + id + `","promptSource":"typed","message":{"role":"user","content":"prompt"}}`
+	}
+	apiErr := func(ts, extra, text string) string {
+		return `{"type":"assistant","timestamp":"2026-10-13T05:` + ts + `Z","isApiErrorMessage":true` + extra + `,"message":{"role":"assistant","content":[{"type":"text","text":` + strconv.Quote(text) + `}]}}`
+	}
+	reply := func(ts string) string {
+		return `{"type":"assistant","timestamp":"2026-10-13T05:` + ts + `Z","message":{"role":"assistant","content":[{"type":"text","text":"reply"}]}}`
+	}
+	end := func(ts string) string {
+		return `{"type":"system","subtype":"turn_duration","timestamp":"2026-10-13T05:` + ts + `Z"}`
+	}
+	const cooling = "API Error: Request rejected (429) · pool cooling for another 3d 16h; every account is in a rate-limit cool-down, so retrying before then cannot succeed"
+	long := strings.Repeat("é", MaxTurnFailureMessage) // two bytes a rune: cut on a rune boundary
+	path := writeTurnLines(t, "claude.jsonl",
+		user("00:00.100", "p1"), apiErr("00:01.000", `,"error":"server_error"`, "API Error: Connection lost mid-response."), apiErr("00:01.500", `,"error":"rate_limit","apiErrorStatus":429`, cooling), end("00:01.510"),
+		user("00:02.100", "p2"), apiErr("00:03.000", `,"error":"server_error","apiErrorStatus":503`, "API Error: 503 status code (no body)"), end("00:03.010"),
+		user("00:04.100", "p3"), apiErr("00:05.000", `,"error":"rate_limit","apiErrorStatus":429`, cooling), reply("00:06.000"), end("00:07.000"),
+		user("00:08.100", "p4"), apiErr("00:09.000", `,"apiErrorStatus":429`, "API Error: 429"), user("00:10.100", "p5"),
+		apiErr("00:11.000", `,"error":{"type":"rate_limit_error"},"apiErrorStatus":"429"`, long), end("00:11.010"),
+	)
+	got, err := ScanTurns("claude", path)
+	if err != nil {
+		t.Fatalf("ScanTurns: %v", err)
+	}
+	ts := func(clock string) string { return "2026-10-13T05:" + clock + "Z" }
+	cut := long[:MaxTurnFailureMessage]
+	assertTurnScan(t, got, TurnScan{
+		Recent: []ScannedTurn{
+			{ID: "p5", StartedAt: turnTime(t, ts("00:10.100")), EndedAt: turnTime(t, ts("00:11.010")), Status: TurnStatusFailed, Failure: TurnFailure{Message: cut}},
+			{ID: "p4", StartedAt: turnTime(t, ts("00:08.100")), EndedAt: turnTime(t, ts("00:09.000")), Status: TurnStatusFailed, Failure: TurnFailure{Status: 429, Message: "API Error: 429"}},
+			{ID: "p3", StartedAt: turnTime(t, ts("00:04.100")), EndedAt: turnTime(t, ts("00:07.000")), Status: TurnStatusCompleted},
+			{ID: "p2", StartedAt: turnTime(t, ts("00:02.100")), EndedAt: turnTime(t, ts("00:03.010")), Status: TurnStatusFailed, Failure: TurnFailure{Code: "server_error", Status: 503, Message: "API Error: 503 status code (no body)"}},
+			{ID: "p1", StartedAt: turnTime(t, ts("00:00.100")), EndedAt: turnTime(t, ts("00:01.510")), Status: TurnStatusFailed, Failure: TurnFailure{Code: "rate_limit", Status: 429, Message: cooling}},
+		},
+	})
+	for _, tc := range []struct {
+		f    TurnFailure
+		want bool
+	}{
+		{TurnFailure{Code: "rate_limit", Status: 429}, true},
+		{TurnFailure{Code: "rate_limit"}, true},
+		{TurnFailure{Status: 429}, true},
+		{TurnFailure{Code: "server_error", Status: 503}, false},
+		{TurnFailure{Message: "API Error: Request rejected (429)"}, false}, // the text is never parsed
+		{TurnFailure{}, false},
+	} {
+		if got := tc.f.RateLimited(); got != tc.want {
+			t.Errorf("%+v.RateLimited() = %v, want %v", tc.f, got, tc.want)
+		}
+	}
+	if !utf8.ValidString(got.Recent[0].Failure.Message) {
+		t.Errorf("message cut mid-rune: %q", got.Recent[0].Failure.Message)
 	}
 }

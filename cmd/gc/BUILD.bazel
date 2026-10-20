@@ -639,6 +639,7 @@ go_library(
         "wisp_step_inject.go",
         "work_assignment.go",
         "work_ladder_lane.go",
+        "work_ladder_turns.go",
         "work_location.go",
         "work_query_failure.go",
         "work_query_probe.go",

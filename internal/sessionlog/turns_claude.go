@@ -7,6 +7,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 )
 
 // Claude Code transcripts (X11 §2.2). Every main-chain user entry of a turn
@@ -92,6 +93,8 @@ type claudeTurnRecord struct {
 	// prompted marks a user entry carrying a prompt's origin or
 	// promptSource.
 	prompted bool
+	// failure is an API error entry's error.
+	failure TurnFailure
 }
 
 // claudeTurnLine is the subset of a Claude transcript entry the scan reads.
@@ -106,6 +109,11 @@ type claudeTurnLine struct {
 	PromptSource     string          `json:"promptSource"`
 	Timestamp        string          `json:"timestamp"`
 	Message          json.RawMessage `json:"message"`
+	// ErrorClass and ErrorStatus are an API error entry's class and HTTP
+	// status, as Claude Code wrote them. Raw, so a shape it changes leaves
+	// the record a turn record, only without them.
+	ErrorClass  json.RawMessage `json:"error"`
+	ErrorStatus json.RawMessage `json:"apiErrorStatus"`
 }
 
 // prompted reports whether the entry carries the origin or promptSource of a
@@ -152,12 +160,62 @@ func parseClaudeTurnRecord(line []byte) (claudeTurnRecord, bool) {
 		rec.kind = claudeRecordTurnEnd
 	case e.Type == "assistant" && e.IsAPIError:
 		rec.kind = claudeRecordAPIError
+		rec.failure = claudeTurnFailure(e)
 	case e.Type == "assistant":
 		rec.kind = claudeRecordReply
 	default:
 		return claudeTurnRecord{}, false
 	}
 	return rec, true
+}
+
+// claudeTurnFailure is an API error entry's error: its class and status as
+// Claude Code recorded them, and its text, cut to MaxTurnFailureMessage.
+func claudeTurnFailure(e claudeTurnLine) TurnFailure {
+	status, _ := jsonIntValue(e.ErrorStatus)
+	return TurnFailure{Code: jsonStringValue(e.ErrorClass), Status: status, Message: cutTurnFailureMessage(claudeMessageText(e.Message))}
+}
+
+// claudeMessageText is the text of a message: its string content, or its
+// text blocks joined by newlines. A message it cannot read has none.
+func claudeMessageText(message json.RawMessage) string {
+	var msg struct {
+		Content json.RawMessage `json:"content"`
+	}
+	if json.Unmarshal(unwrapJSONString(message), &msg) != nil || len(msg.Content) == 0 {
+		return ""
+	}
+	var text string
+	if json.Unmarshal(msg.Content, &text) == nil {
+		return text
+	}
+	var blocks []struct {
+		Type string `json:"type"`
+		Text string `json:"text"`
+	}
+	if json.Unmarshal(msg.Content, &blocks) != nil {
+		return ""
+	}
+	var parts []string
+	for _, b := range blocks {
+		if b.Type == "text" && b.Text != "" {
+			parts = append(parts, b.Text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+// cutTurnFailureMessage is s cut on a rune boundary to at most
+// MaxTurnFailureMessage bytes.
+func cutTurnFailureMessage(s string) string {
+	if len(s) <= MaxTurnFailureMessage {
+		return s
+	}
+	n := MaxTurnFailureMessage
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n]
 }
 
 // claudeInterruptEntry reports whether a user message holds nothing but
@@ -271,9 +329,11 @@ type claudeTurnFold struct {
 	provisionalID string
 	// failed is set while an API error of the open turn, or of the turn the
 	// fold begins inside, is pending: no reply, tool result or prompt of the
-	// turn has followed it yet. failedAt is the error's time.
+	// turn has followed it yet. failedAt is the error's time, and failure the
+	// error, the latest when several are pending.
 	failedAt time.Time
 	failed   bool
+	failure  TurnFailure
 }
 
 func (f *claudeTurnFold) add(line []byte) {
@@ -303,7 +363,7 @@ func (f *claudeTurnFold) addRecord(rec claudeTurnRecord) {
 		f.end(rec.at, status)
 	case claudeRecordAPIError:
 		if f.ledger.open || !f.bounded {
-			f.failed, f.failedAt = true, rec.at
+			f.failed, f.failedAt, f.failure = true, rec.at, rec.failure
 		}
 	case claudeRecordReply:
 		f.failed = false
@@ -350,7 +410,7 @@ func (f *claudeTurnFold) addUser(rec claudeTurnRecord) {
 		return
 	}
 	if f.failed {
-		l.close(f.failedAt, TurnStatusFailed)
+		l.closeFailed(f.failedAt, TurnStatusFailed, f.failure)
 		f.failed = false
 	}
 	at := rec.at
@@ -379,12 +439,16 @@ func (f *claudeTurnFold) disownProvisional() {
 }
 
 func (f *claudeTurnFold) end(at time.Time, status TurnStatus) {
+	var failure TurnFailure
+	if status == TurnStatusFailed {
+		failure = f.failure
+	}
 	if f.bounded {
-		f.ledger.close(at, status)
+		f.ledger.closeFailed(at, status, failure)
 	} else {
 		// The fold begins inside the turn this record ends, and holds
 		// neither its start nor its id.
-		f.ledger.pushEnded(ScannedTurn{EndedAt: at, Status: status})
+		f.ledger.pushEnded(ScannedTurn{EndedAt: at, Status: status, Failure: failure})
 		f.ledger.missingIDs = true
 	}
 	f.startUnseen, f.bounded = false, true

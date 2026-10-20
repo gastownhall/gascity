@@ -181,6 +181,28 @@ func TestTurnHistoryFromScan(t *testing.T) {
 			t.Fatalf("recent = %+v", got.Recent)
 		}
 	})
+	t.Run("a failed turn keeps the error its source recorded", func(t *testing.T) {
+		cooling := sessionlog.TurnFailure{Code: "rate_limit", Status: 429, Message: "API Error: Request rejected (429) · pool cooling for another 3d 16h"}
+		overloaded := sessionlog.TurnFailure{Code: "server_error", Status: 529, Message: "API Error: overloaded"}
+		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{
+			{ID: "refused", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: cooling},
+			{ID: "overloaded", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusFailed, Failure: overloaded},
+			{ID: "done", StartedAt: at, EndedAt: at, Status: sessionlog.TurnStatusCompleted},
+		}}, observed)
+		if err != nil {
+			t.Fatalf("turnHistoryFromScan: %v", err)
+		}
+		want := []runtime.TurnFailure{
+			{Code: "rate_limit", HTTPStatus: 429, RateLimited: true, Message: cooling.Message},
+			{Code: "server_error", HTTPStatus: 529, Message: overloaded.Message},
+			{},
+		}
+		for i, w := range want {
+			if got.Recent[i].Failure != w {
+				t.Errorf("recent[%d].Failure = %+v, want %+v", i, got.Recent[i].Failure, w)
+			}
+		}
+	})
 	t.Run("turns recorded without ids are not identity, even with none open", func(t *testing.T) {
 		got, err := turnHistoryFromScan(sessionlog.TurnScan{Recent: []sessionlog.ScannedTurn{{EndedAt: at}, {ID: "kept", StartedAt: at, EndedAt: at}}, MissingIDs: true}, observed)
 		if !errors.Is(err, runtime.ErrTurnIdentityUnsupported) || len(got.Recent) != 0 {

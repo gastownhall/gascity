@@ -124,7 +124,46 @@ type Observation struct {
 	LastActivity time.Time
 	Gate         Gate
 	Provider     ProviderState
+	// RateLimited is how many of the seat's latest turns, newest first, its
+	// provider refused with a rate limit (as the agent's own transcript
+	// classifies them: HTTP 429), counted up to the first it did not refuse,
+	// in the seat's current conversation, and RateLimitedAt when the newest
+	// of them ended. A seat refused like that cannot answer a nudge (the
+	// rate-limit rule); the rule acts only on a refusal that ended after the
+	// ladder's own last nudge, so refusals already in a transcript when the
+	// ladder first sees it recycle nothing (WL8).
+	RateLimited   int
+	RateLimitedAt time.Time
+	// ServedAt is when the seat's newest completed turn ended: the provider
+	// answered it, positive evidence of service. Zero when its newest ended
+	// turn did not complete, or its turns were not read.
+	ServedAt time.Time
+	// FreshHold holds the rate-limit rule's fresh recycle back, by the
+	// caller's evidence, and says how the claims it holds are paced.
+	FreshHold FreshHold
 }
+
+// FreshHold is why the rate-limit rule's fresh recycle of a seat must wait.
+type FreshHold uint8
+
+// The fresh holds.
+const (
+	// FreshHoldNone: the fresh recycle may go ahead.
+	FreshHoldNone FreshHold = iota
+	// FreshHoldQueued: the seat waits its turn, a wait that ends on its own
+	// (another seat is the provider's fresh-recycle canary, or the provider
+	// refused a canary's fresh conversation, for a bounded time). Meanwhile
+	// each started claim the rule would recycle is paced as on a degraded
+	// provider, counting nothing, so it keeps its one recycle for the fresh
+	// conversation rather than spend it on a drain that resumes the refused
+	// one.
+	FreshHoldQueued
+	// FreshHoldStanding: the seat must not be restarted fresh, by a hold with
+	// no end of its own (a person is, or may be, attached; it waits on a
+	// person for another claim). Its claims are paced as ever, so its silence
+	// still reaches the drain and the alerts.
+	FreshHoldStanding
+)
 
 // Policy is the ladder's pacing. DefaultPolicy is OD7's.
 type Policy struct {
@@ -136,6 +175,10 @@ type Policy struct {
 	RecycleRepost time.Duration // a trigger's recycle request is reposted no sooner
 	Threshold     map[Kind]map[Rung]int
 	MaxRecycles   int // R: recycles of a started claim per seat
+	// RateLimitThreshold is the turns in a row the seat's provider refuses
+	// with a rate limit before its started claims are recycled to a fresh
+	// conversation (within MaxRecycles), or, past it, alerted on.
+	RateLimitThreshold int
 }
 
 // Action is one effect Decide asks the caller for.
@@ -153,10 +196,14 @@ type Nudge struct {
 }
 
 // Recycle asks for the seat to be recycled through the planner's inbox.
-// KeepClaim keeps a started claim on the seat across the restart.
+// KeepClaim keeps a started claim on the seat across the restart. Fresh
+// restarts the seat in place with fresh provider conversation state (gc
+// session reset): the seat, its claims and its pins are kept, the
+// conversation is not.
 type Recycle struct {
 	Key       ClaimKey
 	KeepClaim bool
+	Fresh     bool
 }
 
 // Release asks the caller to release an unstarted claim, after re-proving by
@@ -183,6 +230,24 @@ const (
 	AlertReleaseUnfinished      = "release_unfinished"
 	AlertReleaseRacedStart      = "release_raced_start"
 	AlertNudgeRefused           = "nudge_refused"
+	// AlertRateLimitedRecycled: the seat's provider refused its latest turns
+	// with a rate limit, so the claim's seat was recycled to a fresh
+	// conversation.
+	AlertRateLimitedRecycled = "rate_limited_recycled"
+	// AlertProviderRateLimited: the provider refused the claim's fresh seat
+	// too. The pool itself is refusing, and a human must reroute the lane.
+	AlertProviderRateLimited = "provider_rate_limited"
+	// AlertRateLimitedUnrecycled: the provider refuses the claim's seat with
+	// a rate limit, and the claim's one recycle already went to a drain that
+	// resumed the same conversation. A human must reset the seat or reroute
+	// the lane.
+	AlertRateLimitedUnrecycled = "rate_limited_unrecycled"
+	// AlertRateLimitedAgain: the provider refuses the claim's seat with a
+	// rate limit again after its one recycle gave it a fresh conversation
+	// the provider served, or long (more than Cap) after that recycle: no
+	// evidence about the provider's pool, only that this claim is stuck
+	// again. A human must reset the seat or reroute.
+	AlertRateLimitedAgain = "rate_limited_again"
 )
 
 // Decision is Decide's answer: the cell to CAS (no write when !Changed) and
@@ -230,6 +295,17 @@ type Entry struct {
 	// permission prompt, a runtime unavailable): while it is above zero the
 	// entry is nudged no more often than PausedCap.
 	Refused int
+	// RateLimitAlerted: a rate-limit alert (provider_rate_limited or
+	// rate_limited_unrecycled) was raised for the entry; one is raised in
+	// the entry's life.
+	RateLimitAlerted bool
+	// FreshRecycled: the entry's last recycle restarted its seat to a fresh
+	// conversation (the rate-limit rule's), not a drain that resumes it.
+	FreshRecycled bool
+	// FreshServed: the provider served that fresh conversation (a turn of
+	// the seat completed after the recycle). A refusal of it afterwards says
+	// nothing about the provider refusing fresh conversations.
+	FreshServed bool
 }
 
 // ReleaseMark is a release of an unstarted claim in flight. While it names a

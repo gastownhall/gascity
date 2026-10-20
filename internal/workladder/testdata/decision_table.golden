@@ -1,17 +1,21 @@
 # workladder decision table (DefaultPolicy; a due entry; next = when the entry is next due)
 
-| state | quiet | quiet, degraded | gate held | not quiet | runtime dead |
-|---|---|---|---|---|---|
-| trigger/assigned, attempts < 3 | nudge 3; next 12m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| trigger/assigned, attempts >= 3 | recycle + nudge 4; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| trigger/assigned, >= 3, recycled 10m ago | nudge 5; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| continuation/assigned, attempts < 6 | nudge 6; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| continuation/assigned, attempts >= 6 | alert continuation_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| continuation/assigned, >= 6, alerted | nudge 8; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/claimed, attempts < 3 | nudge 3; next 12m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/claimed, attempts >= 3 | release; next - | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/claimed, release did not finish | release + alert release_unfinished + nudge 4; next - | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/started, attempts < 6 | nudge 6; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/started, >= 6, recycles 0 < R | recycle (keep claim) + alert started_recycled; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/started, >= 6, recycles 1 = R | alert started_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
-| claim/escalated | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now |
+| state | quiet | quiet, degraded | gate held | not quiet | runtime dead | quiet, nudge refused 2x | quiet, nudge refused 2x, fresh queued | quiet, nudge refused 2x, fresh standing | quiet, degraded, nudge refused 2x |
+|---|---|---|---|---|---|---|---|---|---|
+| trigger/assigned, attempts < 3 | nudge 3; next 12m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | nudge 3; next 12m0s | nudge 3; next 12m0s | nudge 3; next 12m0s | paused nudge; next 10m0s |
+| trigger/assigned, attempts >= 3 | recycle + nudge 4; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | recycle + nudge 4; next 1h0m0s | recycle + nudge 4; next 1h0m0s | recycle + nudge 4; next 1h0m0s | paused nudge; next 10m0s |
+| trigger/assigned, >= 3, recycled 10m ago | nudge 5; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | nudge 5; next 1h0m0s | nudge 5; next 1h0m0s | nudge 5; next 1h0m0s | paused nudge; next 10m0s |
+| continuation/assigned, attempts < 6 | nudge 6; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | nudge 6; next 1h0m0s | nudge 6; next 1h0m0s | nudge 6; next 1h0m0s | paused nudge; next 10m0s |
+| continuation/assigned, attempts >= 6 | alert continuation_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | alert continuation_unanswered + nudge 7; next 1h0m0s | alert continuation_unanswered + nudge 7; next 1h0m0s | alert continuation_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s |
+| continuation/assigned, >= 6, alerted | nudge 8; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | nudge 8; next 1h0m0s | nudge 8; next 1h0m0s | nudge 8; next 1h0m0s | paused nudge; next 10m0s |
+| claim/claimed, attempts < 3 | nudge 3; next 12m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | nudge 3; next 12m0s | nudge 3; next 12m0s | nudge 3; next 12m0s | paused nudge; next 10m0s |
+| claim/claimed, attempts >= 3 | release; next - | paused nudge; next 10m0s | -; next now | -; next now | -; next now | release; next - | release; next - | release; next - | paused nudge; next 10m0s |
+| claim/claimed, release did not finish | release + alert release_unfinished + nudge 4; next - | paused nudge; next 10m0s | -; next now | -; next now | -; next now | release + alert release_unfinished + nudge 4; next - | release + alert release_unfinished + nudge 4; next - | release + alert release_unfinished + nudge 4; next - | paused nudge; next 10m0s |
+| claim/started, attempts < 6 | nudge 6; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | fresh recycle (keep claim) + alert rate_limited_recycled; next 48m0s | paused nudge; next 48m0s | nudge 6; next 1h0m0s | paused nudge; next 10m0s |
+| claim/started, >= 6, recycles 0 < R | recycle (keep claim) + alert started_recycled; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | fresh recycle (keep claim) + alert rate_limited_recycled; next 1h0m0s | paused nudge; next 1h0m0s | recycle (keep claim) + alert started_recycled; next 1h0m0s | paused nudge; next 10m0s |
+| claim/started, >= 6, recycles 1 = R | alert started_unanswered + nudge 7; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | alert rate_limited_unrecycled + nudge 7; next 1h0m0s | alert rate_limited_unrecycled + nudge 7; next 1h0m0s | alert rate_limited_unrecycled + nudge 7; next 1h0m0s | paused nudge; next 10m0s |
+| claim/escalated | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | alert rate_limited_unrecycled + nudge 10; next 1h0m0s | alert rate_limited_unrecycled + nudge 10; next 1h0m0s | alert rate_limited_unrecycled + nudge 10; next 1h0m0s | paused nudge; next 10m0s |
+| claim/escalated, recycled fresh long ago | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | alert rate_limited_again + nudge 10; next 1h0m0s | alert rate_limited_again + nudge 10; next 1h0m0s | alert rate_limited_again + nudge 10; next 1h0m0s | paused nudge; next 10m0s |
+| claim/escalated, recycled fresh just now | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | alert provider_rate_limited + nudge 10; next 1h0m0s | alert provider_rate_limited + nudge 10; next 1h0m0s | alert provider_rate_limited + nudge 10; next 1h0m0s | paused nudge; next 10m0s |
+| claim/escalated, recycled fresh just now, served since | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | alert rate_limited_again + nudge 10; next 1h0m0s | alert rate_limited_again + nudge 10; next 1h0m0s | alert rate_limited_again + nudge 10; next 1h0m0s | paused nudge; next 10m0s |
+| claim/escalated, rate limit alerted | nudge 10; next 1h0m0s | paused nudge; next 10m0s | -; next now | -; next now | -; next now | nudge 10; next 1h0m0s | nudge 10; next 1h0m0s | nudge 10; next 1h0m0s | paused nudge; next 10m0s |

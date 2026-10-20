@@ -10,12 +10,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 // The session field registry at run time (F1c): what the census proves from
@@ -234,6 +236,40 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			lane, _ := newPoolStepsTestLane(env, func() *allocSummary {
 				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
 			}, nil)
+			rec.reset()
+			lane.workLadder(context.Background(), env)
+		}},
+		{"v2 work-ladder step, fresh recycle of a rate-limited seat", "continuation_reset_pending restart_requested work_ladder", []string{"cmd/gc/work_ladder_lane.go:ladderPass.commit"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			env, _ := nudgeStepsFixture(t)
+			sess := idleClaimPoolSession()
+			sess.Labels = []string{sessionBeadLabel}
+			row, err := rec.MemStore.Create(sess)
+			must(t, err)
+			work := beads.NewMemStore()
+			claim, err := work.Create(beads.Bead{Title: "claimed step", Type: "task"})
+			must(t, err)
+			inProgress := "in_progress"
+			must(t, work.Update(claim.ID, beads.UpdateOpts{Status: &inProgress, Assignee: &row.ID}))
+			claim, err = work.Get(claim.ID)
+			must(t, err)
+			b, err := rec.Get(row.ID)
+			must(t, err)
+			nudged := stepsTestNow.Add(-2 * time.Minute) // the ladder nudged the started claim; its answer was refused
+			cell := workladder.EncodeLadder(workladder.Record{V: 1, Entries: []workladder.Entry{{
+				Key: workladder.ClaimKey{Store: "city", Bead: claim.ID}, Kind: workladder.KindClaim, Rung: workladder.RungStarted, Since: nudged.Add(-time.Hour), Attempts: 1, Last: nudged,
+			}}})
+			must(t, rec.MemStore.UpdateIfMatch(row.ID, b.Revision, beads.UpdateOpts{Metadata: map[string]string{beadmeta.CurrentClaimBeadIDMetadataKey: claim.ID, "work_ladder": cell}}))
+			env.CityStore = rec
+			env.SP.(*runtime.Fake).SetActivity("session-a", stepsTestNow.Add(-time.Hour))
+			lane, _ := newPoolStepsTestLane(env, func() *allocSummary {
+				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{claim}, AssignedStores: []beads.Store{work}, AssignedStoreRefs: []string{""}}
+			}, nil)
+			refused := runtime.EndedTurn{TurnID: "t", Status: runtime.TurnStatusFailed, EndedAt: stepsTestNow.Add(-time.Minute), Failure: runtime.TurnFailure{Code: "rate_limit", HTTPStatus: 429, RateLimited: true}}
+			lane.turnReaderFor = func(externalReadsEnv) ladderTurnReader {
+				return func(context.Context, beads.Bead) (runtime.TurnHistory, error) {
+					return runtime.TurnHistory{Recent: []runtime.EndedTurn{refused, refused}}, nil
+				}
+			}
 			rec.reset()
 			lane.workLadder(context.Background(), env)
 		}},

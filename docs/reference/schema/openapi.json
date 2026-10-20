@@ -28672,6 +28672,9 @@
           "paused": {
             "type": "boolean"
           },
+          "provider": {
+            "type": "string"
+          },
           "reason": {
             "type": "string"
           },

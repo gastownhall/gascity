@@ -379,6 +379,13 @@ type externalReadsLane struct {
 	stranded *strandedClaimAlerts
 	// deadAssigneeKeeps dedupes the orphan-release step's keep log.
 	deadAssigneeKeeps deadAssigneeKeepLog
+	// turnReaderFor is the work ladder's turn source for a pass over env
+	// (its rate-limit rule); nil reads no turns, and the rule stays inert.
+	// rateLimits caches what it read, per seat.
+	turnReaderFor func(env externalReadsEnv) ladderTurnReader
+	rateLimits    ladderRateLimits
+	// canaries is the rate-limit rule's per-provider fresh-recycle canary.
+	canaries ladderCanaries
 }
 
 // sourceRead is one read in flight.

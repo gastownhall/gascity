@@ -17,10 +17,18 @@ const (
 	DefaultContinuationThreshold = 6 // continuation/assigned: then alert (keep nudging at Cap)
 	DefaultClaimedThreshold      = 3 // claim/claimed: then release
 	DefaultStartedThreshold      = 6 // claim/started: then recycle, or escalate
+
+	// DefaultRateLimitThreshold is two turns in a row refused with a rate
+	// limit: the agent's own failed turn and the answer to the ladder's
+	// first nudge. Audit 4 (2026-10-19): the refusal sticks to the seat's
+	// conversation; fresh seats on the same provider were served.
+	DefaultRateLimitThreshold = 2
 )
 
 // DefaultPolicy is OD7's: grace 90s, base 3m doubling to a 60m cap and then
-// hourly forever, a 10m cap while the provider is degraded, R = 1.
+// hourly forever, a 10m cap while the provider is degraded, R = 1; and a
+// seat its provider refuses twice in a row with a rate limit is recycled to
+// a fresh conversation at once, within R.
 func DefaultPolicy() Policy {
 	return Policy{
 		Grace:         DefaultGrace,
@@ -34,7 +42,8 @@ func DefaultPolicy() Policy {
 			KindContinuation: {RungAssigned: DefaultContinuationThreshold},
 			KindClaim:        {RungClaimed: DefaultClaimedThreshold, RungStarted: DefaultStartedThreshold},
 		},
-		MaxRecycles: DefaultMaxRecycles,
+		MaxRecycles:        DefaultMaxRecycles,
+		RateLimitThreshold: DefaultRateLimitThreshold,
 	}
 }
 
@@ -64,6 +73,9 @@ func (p Policy) withDefaults() Policy {
 	}
 	if p.MaxRecycles < 0 {
 		p.MaxRecycles = 0
+	}
+	if p.RateLimitThreshold <= 0 {
+		p.RateLimitThreshold = d.RateLimitThreshold
 	}
 	return p
 }

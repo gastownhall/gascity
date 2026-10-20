@@ -10172,6 +10172,7 @@ type WorkLadderPayload struct {
 	Generation  int64   `json:"generation"`
 	Kind        *string `json:"kind,omitempty"`
 	Paused      *bool   `json:"paused,omitempty"`
+	Provider    *string `json:"provider,omitempty"`
 	Reason      *string `json:"reason,omitempty"`
 	Rung        *string `json:"rung,omitempty"`
 	SessionId   string  `json:"session_id"`

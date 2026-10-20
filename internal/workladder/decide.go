@@ -12,8 +12,11 @@ import (
 // rise; a rise resets the count); reset counts on a new generation, and on
 // progress the seat made since its last nudge, whether or not the ladder saw
 // it; settle a pending release; then, only with the gate open, the runtime
-// alive and the seat quiet, act on the due entries, earliest first: at most
-// one Nudge per pass, and none within Base of the seat's last (WL3). An entry
+// alive and the seat quiet: apply the rate-limit rule (a seat whose provider
+// refused its latest turns with a rate limit has its started claims
+// recycled to a fresh conversation, or, past the recycle budget, alerted
+// on), and otherwise act on the due entries, earliest first: at most one
+// Nudge per pass, and none within Base of the seat's last (WL3). An entry
 // whose live read could not tell (obs.Hold) waits, kept as it is.
 func Decide(prev Record, obs Observation, p Policy) Decision {
 	p = p.withDefaults()
@@ -53,6 +56,9 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 		}
 		e = p.progressReset(e, obs)
+		if e.FreshRecycled && !e.FreshServed && obs.ServedAt.After(e.RecycleAt) {
+			e.FreshServed = true // its fresh conversation was served
+		}
 		entries = append(entries, e)
 	}
 	next := Record{V: Version, Gen: obs.Gen, Entries: entries, LastNudge: minTime(prev.LastNudge, now), RecycledGen: prev.RecycledGen}
@@ -81,19 +87,35 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		return p.settle(d, prev)
 	}
 
-	// 7-8. Quiet: act on the due entries, earliest first.
+	// 7. The rate-limit rule. Never while the provider is degraded (WL4):
+	// the provider's health gate owns that outage and alerts on it.
 	degraded := obs.Provider.Degraded
+	var queued map[ClaimKey]bool
+	if !degraded && obs.RateLimited >= p.RateLimitThreshold {
+		var recycled bool
+		if recycled, queued = p.rateLimited(&d, obs); recycled {
+			return p.settle(d, prev) // the seat is being restarted: nothing else this pass
+		}
+	}
+	// paused: an entry paced as on a degraded provider (WL4): the provider
+	// is degraded, or the entry is a started claim queued for its fresh
+	// recycle (FreshHoldQueued). Its nudges are delivered, never counted, and
+	// it never escalates or recycles.
+	paused := func(e Entry) bool { return degraded || queued[e.Key] }
+
+	// 8. Quiet: act on the due entries, earliest first.
 	order := make([]int, 0, len(d.Next.Entries))
 	for i, e := range d.Next.Entries {
 		if obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
 			continue // a read that could not tell, or being released
 		}
-		if !p.dueAt(e, degraded).After(now) {
+		if !p.dueAt(e, paused(e)).After(now) {
 			order = append(order, i)
 		}
 	}
 	slices.SortStableFunc(order, func(a, b int) int {
-		return p.dueAt(d.Next.Entries[a], degraded).Compare(p.dueAt(d.Next.Entries[b], degraded))
+		ea, eb := d.Next.Entries[a], d.Next.Entries[b]
+		return p.dueAt(ea, paused(ea)).Compare(p.dueAt(eb, paused(eb)))
 	})
 	// The seat's nudge slot: one per pass, and none within Base of its last.
 	nudged := !d.Next.LastNudge.IsZero() && now.Sub(d.Next.LastNudge) < p.Base
@@ -111,7 +133,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		}
 		t := p.threshold(e.Kind, e.Rung)
 		switch {
-		case degraded: // WL4: deliver, never count, never escalate
+		case paused(*e): // WL4: deliver, never count, never escalate
 			if !nudged {
 				nudge(true)
 			}
@@ -168,7 +190,7 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 			}
 			nudge(false)
 		case e.Recycles < p.MaxRecycles:
-			e.Recycles++
+			e.Recycles, e.FreshRecycled, e.FreshServed = e.Recycles+1, false, false
 			e.RecycleAt, e.Last, d.Next.RecycledGen = now, now, obs.Gen
 			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true}, Alert{Key: e.Key, Reason: AlertStartedRecycled})
 		default:
@@ -181,6 +203,68 @@ func Decide(prev Record, obs Observation, p Policy) Decision {
 		}
 	}
 	return p.settle(d, prev)
+}
+
+// rateLimited applies the rate-limit rule to d's started claims and reports
+// whether it recycled the seat. A seat whose provider refuses its turns with
+// a rate limit is not ignoring its nudges: it cannot answer them, and the
+// refusal may stick to its conversation. The rule acts on a claim only once
+// a refusal answered the ladder's own nudge (the claim was nudged in this
+// generation, and the newest refusal ended after that nudge): refusals that
+// were in the transcript before the ladder nudged it recycle nothing (WL8),
+// and a stale one gets a nudge first. Then a started claim within its
+// recycle budget (the one an unanswered started claim spends, WL3) recycles
+// the seat at once to a fresh conversation, keeping its claims, unless the
+// caller holds fresh recycles back (obs.FreshHold): a queued claim is
+// returned in queued, to be paced as degraded until its turn comes; a claim
+// under a standing hold is paced as ever. A claim past its budget
+// is alerted on once, a generation after the ladder's last recycle, and paced
+// at Cap from then on: if its recycle was fresh and within Cap, the fresh
+// seat was refused too, so the provider's pool is refusing every seat; if it
+// was fresh but long ago, or a drain that resumed the same conversation, the
+// claim is stuck again, and a human must reset the seat or reroute. A
+// claim whose live read could not tell, or that is being released, waits.
+func (p Policy) rateLimited(d *Decision, obs Observation) (recycled bool, queued map[ClaimKey]bool) {
+	for i := range d.Next.Entries {
+		e := &d.Next.Entries[i]
+		if e.Kind != KindClaim || e.Rung < RungStarted || obs.Hold[e.Key] || (d.Next.Release != nil && d.Next.Release.Key == e.Key) {
+			continue
+		}
+		if e.Attempts+e.Paused == 0 || !obs.RateLimitedAt.After(e.Last) {
+			continue // no refusal has answered the ladder's nudge yet
+		}
+		switch {
+		case e.Recycles < p.MaxRecycles:
+			switch obs.FreshHold {
+			case FreshHoldQueued:
+				if queued == nil {
+					queued = make(map[ClaimKey]bool)
+				}
+				queued[e.Key] = true
+				continue
+			case FreshHoldStanding:
+				continue // paced as ever: its silence reaches the drain and the alerts
+			}
+			e.Recycles, e.FreshRecycled, e.FreshServed = e.Recycles+1, true, false
+			e.RecycleAt, e.Last, d.Next.RecycledGen = obs.Now, obs.Now, obs.Gen
+			recycled = true
+			d.Actions = append(d.Actions, Recycle{Key: e.Key, KeepClaim: true, Fresh: true}, Alert{Key: e.Key, Reason: AlertRateLimitedRecycled})
+		case !e.RateLimitAlerted && d.Next.RecycledGen != obs.Gen:
+			// Only a fresh conversation refused soon after its restart, and
+			// never served, says the provider's pool refuses fresh
+			// conversations.
+			reason := AlertProviderRateLimited
+			switch {
+			case !e.FreshRecycled:
+				reason = AlertRateLimitedUnrecycled
+			case e.FreshServed || obs.Now.Sub(e.RecycleAt) > p.Cap:
+				reason = AlertRateLimitedAgain
+			}
+			e.RateLimitAlerted, e.Rung, e.Escalated = true, RungEscalated, true
+			d.Actions = append(d.Actions, Alert{Key: e.Key, Reason: reason})
+		}
+	}
+	return recycled, queued
 }
 
 // progressReset restarts e's count when the seat made progress at least
@@ -259,7 +343,8 @@ func sameRecord(a, b Record) bool {
 		y := b.Entries[i]
 		if x.Key != y.Key || x.Kind != y.Kind || x.Rung != y.Rung || x.Attempts != y.Attempts || x.Paused != y.Paused ||
 			x.Recycles != y.Recycles || x.Escalated != y.Escalated || x.Seed != y.Seed || x.Unreleased != y.Unreleased ||
-			x.Refused != y.Refused || !x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
+			x.Refused != y.Refused || x.RateLimitAlerted != y.RateLimitAlerted || x.FreshRecycled != y.FreshRecycled || x.FreshServed != y.FreshServed ||
+			!x.Since.Equal(y.Since) || !x.Last.Equal(y.Last) || !x.Next.Equal(y.Next) || !x.RecycleAt.Equal(y.RecycleAt) {
 			return false
 		}
 	}

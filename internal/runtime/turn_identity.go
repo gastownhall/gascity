@@ -153,6 +153,27 @@ type EndedTurn struct {
 	// DeliveryKeys are the delivery keys whose messages the runtime itself
 	// reports as this turn's input. They are never parsed from delivered text.
 	DeliveryKeys []string
+	// Failure is the provider error a failed turn ended on, as its source
+	// classified it; the zero value for a turn that did not fail, or whose
+	// source records no error.
+	Failure TurnFailure
+}
+
+// TurnFailure is the provider error a turn ended on, as the turn's source
+// classified it when it recorded the error. Nothing in it is read out of
+// the error's text.
+type TurnFailure struct {
+	// Code is the source's own class for the error, verbatim; empty when it
+	// recorded none.
+	Code string
+	// HTTPStatus is the HTTP status the source recorded; 0 when none.
+	HTTPStatus int
+	// RateLimited reports that the provider refused the turn with a rate
+	// limit (HTTP 429, or the source's rate-limit class).
+	RateLimited bool
+	// Message is the error's text, bounded by its source: for people, never
+	// for a decision.
+	Message string
 }
 
 // TurnHistory is one read of a session's current and recent turns.

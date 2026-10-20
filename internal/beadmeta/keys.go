@@ -43,8 +43,17 @@ const Namespace = "gc."
 // cmd/. Keep this block sorted by identifier; the Go compiler rejects duplicate
 // identifiers, giving us a free compile-time uniqueness guarantee.
 const (
-	AttemptLogMetadataKey     = "gc.attempt_log"
-	AttemptMetadataKey        = "gc.attempt"
+	AttemptLogMetadataKey = "gc.attempt_log"
+	AttemptMetadataKey    = "gc.attempt"
+	// AwaitingHumanMetadataKey, on a claimed work bead, names the session
+	// (its ID) whose claim asked a person and is waiting on their decision:
+	// an approval asked by mail. The work ladder leaves that claim alone (no
+	// nudge, recycle or release) while the key names the seat holding it
+	// (AwaitsHuman). The asking agent writes it with its request and clears
+	// it when it works the step again. It names its seat, not the step: a
+	// claim released and taken by another seat is that seat's work, whatever
+	// the key still says, and no dispatch path reads it.
+	AwaitingHumanMetadataKey  = "gc.awaiting_human"
 	BondMetadataKey           = "gc.bond"
 	BondVarsMetadataKey       = "gc.bond_vars"
 	BoundStepIDMetadataKey    = "gc.bound_step_id"
@@ -511,6 +520,7 @@ const OptionMetadataPrefix = "opt_"
 var KnownMetadataKeys = []string{
 	AttemptLogMetadataKey,
 	AttemptMetadataKey,
+	AwaitingHumanMetadataKey,
 	BondMetadataKey,
 	BondVarsMetadataKey,
 	BoundStepIDMetadataKey,
