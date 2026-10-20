@@ -620,6 +620,14 @@ func inferIdle(o TurnObservation) TurnObservation {
 	return o
 }
 
+// afterInferredR is c once R's end was inferred at idle: R is the turn
+// journaled last, and Seen, which an inferred end never moves, does not name
+// it.
+func afterInferredR(c TurnCells) TurnCells {
+	c.LastID, c.LastEnd, c.LastAt = "R", TurnEndEnded, ts(4)
+	return c
+}
+
 // Kills a fold that reads a source's normal unrecorded end (T3 V1 clears
 // latestTurn at most turn ends: running T, then idle with T missing from
 // Recent) as a gap, or that reads a real gap on such a source as an end.
@@ -656,6 +664,30 @@ func TestFoldTurnInfersIdleEnds(t *testing.T) {
 				LastID: "T", LastEnd: TurnEndEnded, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
 			},
 			facts: []Fact{endedFact("T", TurnEndEnded, FactBasisObserved, ts(100))},
+		},
+		{
+			name: "running T, idle, T absent, the inferred R restored after T ran: an inferred end, the cells left on T",
+			prev: afterInferredR(running(3, "T", ts(5))),
+			obs:  inferIdle(obsAt(3, "", time.Time{}, olderR)),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "T", LastEnd: TurnEndEnded, LastAt: ts(100), Seen: "R", ObservedAt: ts(100),
+			},
+			facts: []Fact{endedFact("T", TurnEndEnded, FactBasisObserved, ts(100))},
+		},
+		{
+			name: "running T, idle, T absent, a later turn past the inferred R in Recent: still a gap",
+			prev: afterInferredR(running(3, "T", ts(5))),
+			obs:  inferIdle(obsAt(3, "", time.Time{}, ObservedTurnEnd{ID: "U", StartedAt: ts(9), EndedAt: ts(12), Status: TurnSourceCompleted}, olderR)),
+			next: TurnCells{
+				Generation: 3, Caps: foldCaps, State: TurnStateEnded, At: ts(100),
+				LastID: "U", LastEnd: TurnEndCompleted, LastAt: ts(100), Seen: "U", ObservedAt: ts(100),
+			},
+			facts: []Fact{
+				endedFact("T", TurnEndUnobserved, FactBasisObserved, ts(100)),
+				started(3, "U", ts(9)),
+				endedFact("U", TurnEndCompleted, FactBasisRuntime, ts(12)),
+			},
 		},
 		{
 			name:         "running T, idle, T absent, gc interrupting T: interrupted",
@@ -740,6 +772,7 @@ func TestFoldTurnInfersIdleEnds(t *testing.T) {
 // running turn exactly when the fold infers that turn's end at idle.
 func TestInferredIdleEndMatchesTheFold(t *testing.T) {
 	later := ObservedTurnEnd{ID: "U", StartedAt: ts(9), EndedAt: ts(12), Status: TurnSourceCompleted}
+	restoredR := ObservedTurnEnd{ID: "R", StartedAt: ts(2), EndedAt: ts(4), Status: TurnSourceCompleted}
 	cases := []struct {
 		name string
 		prev TurnCells
@@ -747,6 +780,8 @@ func TestInferredIdleEndMatchesTheFold(t *testing.T) {
 		want string
 	}{
 		{"idle, T absent", running(3, "T", ts(5)), inferIdle(obsAt(3, "", time.Time{})), "T"},
+		{"the inferred R restored to Recent", afterInferredR(running(3, "T", ts(5))), inferIdle(obsAt(3, "", time.Time{}, restoredR)), "T"},
+		{"a later turn past the restored R", afterInferredR(running(3, "T", ts(5))), inferIdle(obsAt(3, "", time.Time{}, later, restoredR)), ""},
 		{"the source records every end", running(3, "T", ts(5)), obsAt(3, "", time.Time{}), ""},
 		{"T current", running(3, "T", ts(5)), inferIdle(obsAt(3, "T", ts(5))), ""},
 		{"another turn current", running(3, "T", ts(5)), inferIdle(obsAt(3, "U", ts(9))), ""},

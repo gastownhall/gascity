@@ -2255,6 +2255,36 @@ func TestLaneTurnObserverV1InferredEndCreditsInterrupt(t *testing.T) {
 	f.wantTurnEndedBasis("t2", opjournal.FactBasisObserved)
 }
 
+// TestLaneTurnObserverV1RestoredTurnIsNoLaterTurn pins that V1 restoring a
+// turn whose end was inferred only after the next turn ran (its diff
+// completing late in a git workspace) shows no later turn: the next turn's
+// idle end, with only the restored turn in Recent, is still inferred, and
+// credited to a gc interrupt an op row names. No gap is counted, and the
+// restore moves the cells back to no earlier turn.
+func TestLaneTurnObserverV1RestoredTurnIsNoLaterTurn(t *testing.T) {
+	f := newLaneObsV1Fixture(t)
+	f.start()
+	f.see(laneRunning("t1"))
+	f.see(laneIdle())
+	f.see(laneRunning("t2"))
+	f.credits = []opjournal.InterruptRef{{Op: laneObsInterruptOp, Turn: "t2"}}
+	f.see(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
+	f.wantFacts("turn.started:t1", "turn.ended:t1:ended", "turn.started:t2", "turn.ended:t2:interrupted:"+laneObsInterruptOp)
+	if row := f.row(); row.Turn.State != opjournal.TurnStateEnded || row.Turn.LastID != "t2" || row.Turn.LastEnd != opjournal.TurnEndInterrupted {
+		t.Fatalf("cells = %+v, want ended on t2's credited end", row.Turn)
+	}
+	f.see(laneRunning("t3"))
+	f.see(laneIdle(laneEnded("t2", runtime.TurnStatusCompleted)))
+	f.wantFacts("turn.started:t1", "turn.ended:t1:ended", "turn.started:t2", "turn.ended:t2:interrupted:"+laneObsInterruptOp,
+		"turn.started:t3", "turn.ended:t3:ended")
+	if row := f.row(); row.Turn.State != opjournal.TurnStateEnded || row.Turn.LastID != "t3" || row.Turn.LastEnd != opjournal.TurnEndEnded {
+		t.Fatalf("cells = %+v, want ended on t3's inferred end", row.Turn)
+	}
+	if st := f.stats.status(); st.Gaps != 0 {
+		t.Fatalf("gaps = %d, want 0 with each restore landing after the next turn ran", st.Gaps)
+	}
+}
+
 // TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere pins that the
 // ruling is V1's alone: a source that records every end (a protocol one
 // such as ACP), a transcript whose ends are inferred by the worker's idle
