@@ -10,8 +10,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	goruntime "runtime"
+	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -755,6 +757,357 @@ func TestSessionControlOpsNamedStopSuccessorKeyReplays(t *testing.T) {
 	}
 }
 
+// A named stop answered from its turn's target-key op, the first click on the
+// turn or a second one, leaves a row under its own Idempotency-Key that
+// coalesced into that op, so the key finds the stop after a restart: a retry
+// that names another turn is 422 idempotency_mismatch, and one with no turn
+// replays the stop rather than stopping the turn running now. Neither sends
+// anything.
+func TestSessionControlOpsNamedStopKeyFindsItsStopAfterARestart(t *testing.T) {
+	e, info := protocolStopEnv(t)
+	e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1", ""}
+	first := decodeCommandAnswer(t, e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-1"}`))
+	second := decodeCommandAnswer(t, e.post(t, "/session/"+info.ID+"/stop", "click-2", `{"turn":"t-1"}`))
+	if first.Op == nil || second.Op == nil || second.Op.ID != first.Op.ID || !second.Replayed {
+		t.Fatalf("clicks = %+v, %+v; want the second answered from the first's op", first, second)
+	}
+	// t-2 runs now.
+	e.fs.sp.TurnHistoryScripts[info.SessionName] = []runtime.TurnHistory{{Current: runtime.TurnState{TurnID: "t-2"}}}
+	e.fs.sp.TurnScripts[info.SessionName] = []string{"t-2"}
+	for _, key := range []string{"click-1", "click-2"} {
+		e.restart(t)
+		other := e.post(t, "/session/"+info.ID+"/stop", key, `{"turn":"t-2"}`)
+		if other.Code != http.StatusUnprocessableEntity || !strings.Contains(other.Body.String(), "idempotency_mismatch") {
+			t.Fatalf("%s naming t-2: %d %s, want 422 idempotency_mismatch", key, other.Code, other.Body.String())
+		}
+		rec := e.post(t, "/session/"+info.ID+"/stop", key, "")
+		wantStatus(t, key+" with no turn", rec, http.StatusOK)
+		if a := decodeCommandAnswer(t, rec); !a.Replayed || a.Op == nil || a.Op.ID != first.Op.ID || a.IdempotencyKey != first.IdempotencyKey {
+			t.Fatalf("%s with no turn = %+v, want stop %+v replayed", key, a, first)
+		}
+	}
+	for _, c := range e.fs.sp.SnapshotCalls() {
+		if c.Method == "InterruptTurn" && c.Key == "t-2" {
+			t.Fatalf("a retry interrupted the later turn t-2: %+v", c)
+		}
+	}
+	if unfenced, sent := interruptsSent(e.fs.sp, info.SessionName); unfenced != 0 || sent != 1 {
+		t.Fatalf("sent %d session-scoped and %d turn-scoped interrupts, want the first stop's only", unfenced, sent)
+	}
+}
+
+// panickingTurnInterruptProvider panics, once armed, after a turn-scoped
+// interrupt it sent: the API died before it closed the stop's op.
+type panickingTurnInterruptProvider struct {
+	runtime.FullFake
+	armed atomic.Bool
+}
+
+func (p *panickingTurnInterruptProvider) InterruptTurn(ctx context.Context, name, turnID string) (runtime.TurnInterrupt, error) {
+	ack, err := p.FullFake.InterruptTurn(ctx, name, turnID)
+	if err == nil && p.armed.CompareAndSwap(true, false) {
+		panic("injected panic after the turn interrupt")
+	}
+	return ack, err
+}
+
+// A named stop that does not succeed binds its Idempotency-Key to its turn's
+// target-key op all the same, before it sends anything. After a retryable
+// failure, a turn_not_current refusal, or an API that died after the
+// interrupt, a same-key retry after a restart is that stop again, with no
+// turn or naming the same one: it adopts the op left open, or replays the
+// closed one, and never stops the turn running then. One naming another turn
+// is 422 idempotency_mismatch.
+func TestSessionControlOpsFailedNamedStopKeyFindsItsStop(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// fail runs the first stop, of t-1 under click-1, so that it fails,
+		// and returns its status.
+		fail func(t *testing.T, e *opsEnv, info session.Info) int
+		// adopted says the first stop left its op open for the retry to
+		// adopt; otherwise it closed it.
+		adopted bool
+	}{
+		{name: "retryable failure", adopted: true, fail: func(t *testing.T, e *opsEnv, info session.Info) int {
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1"}
+			e.fs.sp.InterruptTurnErrors = map[string]error{info.SessionName: runtime.ErrRuntimeUnavailable}
+			return e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-1"}`).Code
+		}},
+		{name: "turn not current", fail: func(t *testing.T, e *opsEnv, info session.Info) int {
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-0"}
+			return e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-1"}`).Code
+		}},
+		{name: "API died after the interrupt", adopted: true, fail: func(t *testing.T, e *opsEnv, info session.Info) int {
+			panicking := &panickingTurnInterruptProvider{FullFake: runtime.FullFake{Fake: e.fs.sp}}
+			panicking.armed.Store(true)
+			e.fs.sessionProvider = panicking
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1"}
+			code := http.StatusInternalServerError
+			func() {
+				defer func() { _ = recover() }()
+				code = e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-1"}`).Code
+			}()
+			if _, sent := interruptsSent(e.fs.sp, info.SessionName); sent != 1 {
+				t.Fatalf("turn-scoped interrupts sent before the panic = %d, want 1", sent)
+			}
+			return code
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, info := protocolStopEnv(t)
+			if code := tc.fail(t, e, info); code == http.StatusOK {
+				t.Fatal("the first stop answered 200")
+			}
+			targetKey, err := opjournal.InterruptKey(generationOf(t, e.store, info.ID), "t-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetID, err := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, targetKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if first, err := e.opStore(t).Get(targetID); err != nil || first.Attempt != 0 || (first.Status == opjournal.StatusClosed) == tc.adopted {
+				t.Fatalf("the first stop's op = %+v, %v; want attempt 0, left open %v", first, err, tc.adopted)
+			}
+
+			// t-2 runs now.
+			e.fs.sp.InterruptTurnErrors = nil
+			e.fs.sp.TurnHistoryScripts[info.SessionName] = []runtime.TurnHistory{{Current: runtime.TurnState{TurnID: "t-2"}}}
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-2"}
+			e.restart(t)
+			rec := e.post(t, "/session/"+info.ID+"/stop", "click-1", "")
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), turnNotCurrentCode) {
+				t.Fatalf("same-key retry with no turn: %d %s, want 409 turn_not_current", rec.Code, rec.Body.String())
+			}
+			if !tc.adopted && !strings.Contains(rec.Body.String(), "replayed op "+targetID) {
+				t.Fatalf("same-key retry with no turn: %s, want op %s replayed", rec.Body.String(), targetID)
+			}
+			wantAttempt := 0
+			if tc.adopted {
+				wantAttempt = 1
+			}
+			if got, err := e.opStore(t).Get(targetID); err != nil || got.Status != opjournal.StatusClosed || got.Attempt != wantAttempt ||
+				got.Outcome.Arm != opjournal.ArmSkipped || got.Outcome.Reason != opjournal.ReasonStale {
+				t.Fatalf("the first stop's op after the retry = %+v, %v; want attempt %d closed skipped{stale}", got, err, wantAttempt)
+			}
+
+			same := e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-1"}`)
+			if same.Code != http.StatusConflict || !strings.Contains(same.Body.String(), "replayed op "+targetID) {
+				t.Fatalf("same-key retry naming t-1: %d %s, want op %s's turn_not_current replayed", same.Code, same.Body.String(), targetID)
+			}
+			other := e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-2"}`)
+			if other.Code != http.StatusUnprocessableEntity || !strings.Contains(other.Body.String(), "idempotency_mismatch") {
+				t.Fatalf("same-key retry naming t-2: %d %s, want 422 idempotency_mismatch", other.Code, other.Body.String())
+			}
+
+			for _, c := range e.fs.sp.SnapshotCalls() {
+				if (c.Method == "InterruptTurn" && c.Key == "t-2") || c.Method == "Interrupt" {
+					t.Fatalf("a retry stopped the turn running then: %+v", c)
+				}
+			}
+			keyID, err := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "click-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			keyed, err := e.opStore(t).Get(keyID)
+			if err != nil || keyed.Status != opjournal.StatusClosed || keyed.Outcome.Reason != opjournal.ReasonCoalescedInto || keyed.Outcome.Result.CoalescedInto != targetID {
+				t.Fatalf("click-1's op = %+v, %v; want closed skipped{coalesced_into: %s}", keyed, err, targetID)
+			}
+			if n := len(e.opRows(t)); n != 2 {
+				t.Fatalf("op rows = %d, want the target-key op and click-1's row", n)
+			}
+		})
+	}
+}
+
+// failOpCreatesAfterTheNext lets the next op-row create commit and fails
+// every one after it: a named stop's turn op records, its key row does not.
+func failOpCreatesAfterTheNext(e *opsEnv) {
+	e.store.set(func(s *opsTestStore) {
+		s.onOpCreate = func() {
+			e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: store down") })
+		}
+	})
+}
+
+// A named stop whose row under its own Idempotency-Key does not record never
+// leaves that key unbound behind a stop in require: a stop that runs its
+// turn's target-key op is 503 op_journal_unavailable before it sends
+// anything, the op left open, and one that op answers from its outcome is
+// 503 rather than a success. The client's retry then binds the key, so a
+// same-key retry with no turn, after a restart, replays the stop and never
+// stops the turn running then.
+func TestSessionControlOpsRequireNamedStopRefusesAKeyRowThatDoesNotRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// answered says another click's stop of t-1 succeeded first, so the
+		// target-key op answers click-1's stop from its outcome.
+		answered bool
+	}{
+		{name: "stop that runs the op"},
+		{name: "stop the op answers", answered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, info := protocolStopEnvMode(t, "require")
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1", ""}
+			stop := "/session/" + info.ID + "/stop"
+			targetKey, err := opjournal.InterruptKey(generationOf(t, e.store, info.ID), "t-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			targetID, err := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, targetKey)
+			if err != nil {
+				t.Fatal(err)
+			}
+			keyID, err := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "click-1")
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantSent := 0
+			if tc.answered {
+				wantStatus(t, "the other click's stop", e.post(t, stop, "click-0", `{"turn":"t-1"}`), http.StatusOK)
+				wantSent = 1
+				e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: store down") })
+			} else {
+				failOpCreatesAfterTheNext(e)
+			}
+
+			rec := e.post(t, stop, "click-1", `{"turn":"t-1"}`)
+			if rec.Code != http.StatusServiceUnavailable || !strings.Contains(rec.Body.String(), "op_journal_unavailable") {
+				t.Fatalf("stop whose key row does not record: %d %s, want 503 op_journal_unavailable", rec.Code, rec.Body.String())
+			}
+			if unfenced, sent := interruptsSent(e.fs.sp, info.SessionName); unfenced != 0 || sent != wantSent {
+				t.Fatalf("sent %d session-scoped and %d turn-scoped interrupts, want 0 and %d", unfenced, sent, wantSent)
+			}
+			target, err := e.opStore(t).Get(targetID)
+			if err != nil || target.Attempt != 0 || (target.Status == opjournal.StatusClosed) != tc.answered {
+				t.Fatalf("the target-key op = %+v, %v; want attempt 0, closed %v", target, err, tc.answered)
+			}
+			if keyed, err := e.opStore(t).Get(keyID); err == nil {
+				t.Fatalf("click-1 names op %+v, want none", keyed)
+			}
+
+			e.store.set(func(s *opsTestStore) { s.createErr = nil })
+			retry := e.post(t, stop, "click-1", `{"turn":"t-1"}`)
+			wantStatus(t, "the client's retry", retry, http.StatusOK)
+			if a := decodeCommandAnswer(t, retry); a.Op == nil || a.Op.ID != targetID || a.Replayed != tc.answered {
+				t.Fatalf("the client's retry = %+v, want op %s, replayed %v", a, targetID, tc.answered)
+			}
+			keyed, err := e.opStore(t).Get(keyID)
+			if err != nil || keyed.Status != opjournal.StatusClosed || keyed.Outcome.Reason != opjournal.ReasonCoalescedInto || keyed.Outcome.Result.CoalescedInto != targetID {
+				t.Fatalf("click-1's op = %+v, %v; want closed skipped{coalesced_into: %s}", keyed, err, targetID)
+			}
+
+			// t-2 runs now.
+			e.fs.sp.TurnHistoryScripts[info.SessionName] = []runtime.TurnHistory{{Current: runtime.TurnState{TurnID: "t-2"}}}
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-2"}
+			e.restart(t)
+			later := e.post(t, stop, "click-1", "")
+			wantStatus(t, "a later retry with no turn", later, http.StatusOK)
+			if a := decodeCommandAnswer(t, later); !a.Replayed || a.Op == nil || a.Op.ID != targetID {
+				t.Fatalf("a later retry with no turn = %+v, want op %s replayed", a, targetID)
+			}
+			for _, c := range e.fs.sp.SnapshotCalls() {
+				if (c.Method == "InterruptTurn" && c.Key == "t-2") || c.Method == "Interrupt" {
+					t.Fatalf("a retry stopped the turn running then: %+v", c)
+				}
+			}
+			if _, sent := interruptsSent(e.fs.sp, info.SessionName); sent != 1 {
+				t.Fatalf("turn-scoped interrupts sent = %d, want the one stop of t-1", sent)
+			}
+		})
+	}
+}
+
+// I8 for a named stop's key row: in auto, a key row the op store does not
+// record is logged and the stop goes on, its key naming nothing, as an
+// unrecorded request's.
+func TestSessionControlOpsAutoNamedStopRunsWhenItsKeyRowDoesNotRecord(t *testing.T) {
+	e, info := protocolStopEnv(t)
+	e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1", ""}
+	var mu sync.Mutex
+	var lines []string
+	e.server(t).ops.logf = func(format string, args ...any) {
+		mu.Lock()
+		defer mu.Unlock()
+		lines = append(lines, fmt.Sprintf(format, args...))
+	}
+	failOpCreatesAfterTheNext(e)
+
+	rec := e.post(t, "/session/"+info.ID+"/stop", "click-1", `{"turn":"t-1"}`)
+	wantStatus(t, "stop", rec, http.StatusOK)
+	op := opOf(t, e, decodeCommandAnswer(t, rec))
+	if op.Status != opjournal.StatusClosed || op.Outcome.Arm != opjournal.ArmSucceeded || op.Scope.Turn != "t-1" {
+		t.Fatalf("the stop's op = %+v, want its stop of t-1 closed succeeded", op)
+	}
+	if unfenced, sent := interruptsSent(e.fs.sp, info.SessionName); unfenced != 0 || sent != 1 {
+		t.Fatalf("sent %d session-scoped and %d turn-scoped interrupts, want 0 and 1", unfenced, sent)
+	}
+	keyID, err := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "click-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if keyed, err := e.opStore(t).Get(keyID); err == nil {
+		t.Fatalf("click-1 names op %+v, want none", keyed)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.ContainsFunc(lines, func(l string) bool { return strings.Contains(l, op.ID) && strings.Contains(l, "names nothing") }) {
+		t.Fatalf("log = %q, want a line saying the key names nothing for op %s", lines, op.ID)
+	}
+}
+
+// A named stop that succeeded replays to a same-key retry after a restart,
+// with no turn or naming the same one, although its session's turns no
+// longer read: the session closed, or a read of its turn source fails. The
+// key names the stop, so the retry answers from its op, and nothing is sent.
+func TestSessionControlOpsNamedStopReplaysWhenItsTurnsDoNotRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// unread makes the session's turns not read, after the stop.
+		unread func(t *testing.T, e *opsEnv, info session.Info)
+	}{
+		{name: "session closed", unread: func(t *testing.T, e *opsEnv, info session.Info) {
+			if err := e.store.Close(info.ID); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "turn source unreadable", unread: func(_ *testing.T, e *opsEnv, info session.Info) {
+			failing := &frameFailingStore{opsTestStore: e.store, id: info.ID, frame: "worker.(*SessionHandle).turnSession", err: fmt.Errorf("transport: %w", runtime.ErrRuntimeUnavailable)}
+			failing.fails.Store(1)
+			e.fs.cityBeadStore = failing
+		}},
+	} {
+		for _, retry := range []struct{ name, body string }{
+			{name: "no turn"},
+			{name: "same turn", body: `{"turn":"t-1"}`},
+		} {
+			t.Run(tc.name+", retry with "+retry.name, func(t *testing.T) {
+				e, info := protocolStopEnv(t)
+				e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1", ""}
+				stop := "/session/" + info.ID + "/stop"
+				first := e.post(t, stop, "click-1", `{"turn":"t-1"}`)
+				wantStatus(t, "the stop", first, http.StatusOK)
+				a := decodeCommandAnswer(t, first)
+				if a.Op == nil {
+					t.Fatalf("the stop = %+v, want its op", a)
+				}
+
+				tc.unread(t, e, info)
+				e.restart(t)
+				rec := e.post(t, stop, "click-1", retry.body)
+				wantStatus(t, "the retry", rec, http.StatusOK)
+				if r := decodeCommandAnswer(t, rec); !r.Replayed || r.Op == nil || r.Op.ID != a.Op.ID || r.IdempotencyKey != a.IdempotencyKey {
+					t.Fatalf("the retry = %+v, want stop %+v replayed", r, a)
+				}
+				if unfenced, sent := interruptsSent(e.fs.sp, info.SessionName); unfenced != 0 || sent != 1 {
+					t.Fatalf("sent %d session-scoped and %d turn-scoped interrupts, want the stop's one", unfenced, sent)
+				}
+			})
+		}
+	}
+}
+
 // I8: in auto, a /stop the op store failed to record runs exactly as in off:
 // the session-scoped legacy stop, whatever its runtime's turn source reads.
 func TestSessionControlOpsAutoUnrecordedStopRunsAsOff(t *testing.T) {
@@ -896,8 +1249,9 @@ func (s *deleteFailingStore) Delete(id string) error {
 
 // close?delete=true closes its op only after the delete: a delete that fails
 // answers 500 and leaves a client-keyed op open, so the same-key retry
-// adopts it and deletes the bead, as off's retry does; a minted-key op closes
-// failed.
+// adopts it and deletes the bead, as off's retry does; a recorded plain close
+// under that key meanwhile is another request, 422, and leaves the op to its
+// retry. A minted-key op closes failed.
 func TestSessionControlOpsCloseDeleteFailureIsRetried(t *testing.T) {
 	for _, mode := range []string{"off", "auto"} {
 		t.Run(mode, func(t *testing.T) {
@@ -916,6 +1270,12 @@ func TestSessionControlOpsCloseDeleteFailureIsRetried(t *testing.T) {
 				}
 			}
 			failing.failDelete.Store(false)
+			if mode == "auto" {
+				flipped := e.post(t, "/session/"+info.ID+"/close", "c-1", "")
+				if flipped.Code != http.StatusUnprocessableEntity || !strings.Contains(flipped.Body.String(), "idempotency_mismatch") {
+					t.Fatalf("plain close under the open close?delete=true op's key: %d %s, want 422 idempotency_mismatch", flipped.Code, flipped.Body.String())
+				}
+			}
 			retry := e.post(t, "/session/"+info.ID+"/close?delete=true", "c-1", "")
 			wantStatus(t, "retry", retry, http.StatusOK)
 			if a := decodeCommandAnswer(t, retry); a.Replayed {
@@ -1233,6 +1593,164 @@ func TestSessionControlOpsRespondRetryWithoutRequestIDReplays(t *testing.T) {
 	}
 }
 
+// respondedTo is the request ids of the Respond calls session name got.
+func respondedTo(sp *runtime.Fake, name string) []string {
+	var ids []string
+	for _, c := range sp.SnapshotCalls() {
+		if c.Name == name && c.Method == "Respond" {
+			ids = append(ids, c.RequestID)
+		}
+	}
+	return ids
+}
+
+// failingRespondProvider fails Respond, answering nothing, while fail is set,
+// as a tmux approval whose prompt did not clear in time does.
+type failingRespondProvider struct {
+	*runtime.Fake
+	fail atomic.Bool
+}
+
+func (p *failingRespondProvider) Respond(name string, response runtime.InteractionResponse) error {
+	if p.fail.Load() {
+		return errors.New("transport: the approval prompt did not clear")
+	}
+	return p.Fake.Respond(name, response)
+}
+
+// A recorded /respond that names no request_id answers only the interaction
+// its op names: the same-key retry that adopts a respond left open at req-1,
+// after the agent raised req-2, answers nothing and closes skipped{stale},
+// 409, rather than approving req-2.
+func TestSessionControlOpsAdoptedRespondAnswersOnlyItsInteraction(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "off")
+	failing := &failingRespondProvider{Fake: e.fs.sp}
+	e.fs.sessionProvider = failing
+	info := e.session(t, "Respond adopted")
+	e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "ok?"})
+	failing.fail.Store(true)
+	if rec := e.post(t, "/session/"+info.ID+"/respond", "r-1", `{"action":"approve"}`); rec.Code == http.StatusAccepted {
+		t.Fatalf("failing respond answered 202: %s", rec.Body.String())
+	}
+	id, _ := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "r-1")
+	if op, err := e.opStore(t).Get(id); err != nil || op.Status == opjournal.StatusClosed || op.Scope.Interaction != "req-1" {
+		t.Fatalf("respond op after the failed attempt = %+v, %v; want open, scoped to req-1", op, err)
+	}
+
+	failing.fail.Store(false)
+	e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-2", Kind: "approval", Prompt: "again?"})
+	e.restart(t)
+	rec := e.post(t, "/session/"+info.ID+"/respond", "r-1", `{"action":"approve"}`)
+	if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), "invalid_interaction") {
+		t.Fatalf("adopted retry: %d %s, want 409 invalid_interaction", rec.Code, rec.Body.String())
+	}
+	op, err := e.opStore(t).Get(id)
+	if err != nil || op.Attempt != 1 || op.Status != opjournal.StatusClosed || op.Outcome.Arm != opjournal.ArmSkipped || op.Outcome.Reason != opjournal.ReasonStale {
+		t.Fatalf("adopted respond op = %+v, %v; want attempt 1 closed skipped{stale}", op, err)
+	}
+	if got := respondedTo(e.fs.sp, info.SessionName); len(got) != 0 {
+		t.Fatalf("Respond answered %v, want nothing", got)
+	}
+}
+
+// landedRespondProvider answers the interaction and then fails Respond while
+// fail is set, as a tmux approval whose keystroke landed but whose prompt
+// did not clear in time does.
+type landedRespondProvider struct {
+	*runtime.Fake
+	fail atomic.Bool
+}
+
+func (p *landedRespondProvider) Respond(name string, response runtime.InteractionResponse) error {
+	if err := p.Fake.Respond(name, response); err != nil || !p.fail.Load() {
+		return err
+	}
+	return errors.New("transport: the approval prompt did not clear")
+}
+
+// The limit of answering only the op's interaction: a runtime that derives
+// request IDs from the prompt's content (tmux hashes the tool and its input)
+// gives an identical prompt raised again the first one's ID, so the op
+// cannot tell the two apart. A same-key retry adopted after the first answer
+// landed and the agent raised the same prompt again answers that one too,
+// until OJ-16 keys respond ops by the interaction occurrence.
+func TestSessionControlOpsAdoptedRespondAnswersAnIdenticalPromptRaisedAgain(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "off")
+	landing := &landedRespondProvider{Fake: e.fs.sp}
+	e.fs.sessionProvider = landing
+	info := e.session(t, "Respond identical")
+	prompt := &runtime.PendingInteraction{RequestID: "tmux-5f0c2a9e41b7d3c8", Kind: "approval", Prompt: "Run npm test?"}
+	e.fs.sp.SetPendingInteraction(info.SessionName, prompt)
+	landing.fail.Store(true)
+	if rec := e.post(t, "/session/"+info.ID+"/respond", "r-1", `{"action":"approve"}`); rec.Code == http.StatusAccepted {
+		t.Fatalf("failing respond answered 202: %s", rec.Body.String())
+	}
+
+	landing.fail.Store(false)
+	e.fs.sp.SetPendingInteraction(info.SessionName, prompt)
+	e.restart(t)
+	wantStatus(t, "adopted retry", e.post(t, "/session/"+info.ID+"/respond", "r-1", `{"action":"approve"}`), http.StatusAccepted)
+	if got := respondedTo(e.fs.sp, info.SessionName); !slices.Equal(got, []string{prompt.RequestID, prompt.RequestID}) {
+		t.Fatalf("Respond answered %v, want the prompt and the identical one raised again", got)
+	}
+}
+
+// raisingRespondProvider holds the first Respond until release; once it
+// lands, the agent raises next.
+type raisingRespondProvider struct {
+	*runtime.Fake
+	enterOnce sync.Once
+	entered   chan struct{}
+	release   chan struct{}
+	next      atomic.Pointer[runtime.PendingInteraction]
+}
+
+func (p *raisingRespondProvider) Respond(name string, response runtime.InteractionResponse) error {
+	p.enterOnce.Do(func() { close(p.entered) })
+	<-p.release
+	err := p.Fake.Respond(name, response)
+	if next := p.next.Swap(nil); err == nil && next != nil {
+		p.SetPendingInteraction(name, next)
+	}
+	return err
+}
+
+// Two clicks on one prompt under two keys: the second reads req-1 pending
+// while the first holds the session, so its op names req-1. When it runs, the
+// first has answered req-1 and the agent raised req-2: the second answers
+// nothing and closes skipped{stale}, 409, rather than approving req-2.
+func TestSessionControlOpsConcurrentRespondsAnswerOnlyTheirInteraction(t *testing.T) {
+	e := newControlOpsEnv(t, "auto", "off")
+	blocking := &raisingRespondProvider{Fake: e.fs.sp, entered: make(chan struct{}), release: make(chan struct{})}
+	blocking.next.Store(&runtime.PendingInteraction{RequestID: "req-2", Kind: "approval", Prompt: "again?"})
+	e.fs.sessionProvider = blocking
+	info := e.session(t, "Double click")
+	e.fs.sp.SetPendingInteraction(info.SessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "ok?"})
+
+	firstDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { firstDone <- e.post(t, "/session/"+info.ID+"/respond", "click-1", `{"action":"approve"}`) }()
+	<-blocking.entered
+	recorded := make(chan struct{})
+	e.store.set(func(s *opsTestStore) { s.onOpCreate = func() { close(recorded) } })
+	secondDone := make(chan *httptest.ResponseRecorder, 1)
+	go func() { secondDone <- e.post(t, "/session/"+info.ID+"/respond", "click-2", `{"action":"approve"}`) }()
+	<-recorded
+	close(blocking.release)
+
+	wantStatus(t, "click-1", <-firstDone, http.StatusAccepted)
+	second := <-secondDone
+	if second.Code != http.StatusConflict || !strings.Contains(second.Body.String(), "invalid_interaction") {
+		t.Fatalf("click-2: %d %s, want 409 invalid_interaction", second.Code, second.Body.String())
+	}
+	id2, _ := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "click-2")
+	if op, err := e.opStore(t).Get(id2); err != nil || op.Scope.Interaction != "req-1" || op.Outcome.Arm != opjournal.ArmSkipped || op.Outcome.Reason != opjournal.ReasonStale {
+		t.Fatalf("click-2 op = %+v, %v; want skipped{stale}, scoped to req-1", op, err)
+	}
+	if got := respondedTo(e.fs.sp, info.SessionName); !slices.Equal(got, []string{"req-1"}) {
+		t.Fatalf("Respond answered %v, want [req-1] only", got)
+	}
+}
+
 // syncEndpoint is one recorded session command, as the per-endpoint tests
 // drive it.
 type syncEndpoint struct {
@@ -1379,6 +1897,116 @@ func TestSessionControlOpsAdoptedKillOfAMovedSessionIsRefused(t *testing.T) {
 	}
 }
 
+// reopenAtFenceStore reopens closed session id, and starts a new run of it, at
+// the kill fence's first read of the row: a reopen and a start that land
+// between a recorded kill's generation check and its fence. The start takes
+// the session's runtime lease, as every start does; startErr is the lease's
+// answer, and a start the lease refuses does nothing.
+type reopenAtFenceStore struct {
+	*opsTestStore
+	id, city, name string
+	sp             *runtime.Fake
+	fired          atomic.Bool
+	startErr       error
+}
+
+func (s *reopenAtFenceStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && callStackHas("session.(*Manager).KillFencedReport") && s.fired.CompareAndSwap(false, true) {
+		s.startErr = s.reopenAndStart()
+	}
+	return s.opsTestStore.Get(id)
+}
+
+func (s *reopenAtFenceStore) reopenAndStart() error {
+	if err := s.Reopen(s.id); err != nil {
+		return err
+	}
+	front := session.NewStore(beads.SessionStore{Store: s.opsTestStore})
+	lease, err := session.TryRuntimeLease(front, session.RuntimeLeaseRequest{City: s.city, Name: s.name, ID: s.id, TTL: session.RuntimeLeaseTTLFor(nil)})
+	if err != nil {
+		return err
+	}
+	defer lease.Release()
+	scope, why, err := sessionOpScope(s.opsTestStore, s.id)
+	if why != "" {
+		return fmt.Errorf("reading the generation: %s %w", why, err)
+	}
+	return errors.Join(
+		s.SetMetadata(s.id, "generation", strconv.FormatInt(scope.Generation+1, 10)),
+		s.sp.Start(context.Background(), s.name, runtime.Config{}))
+}
+
+// A recorded kill of a closed row holds the session's runtime lease from its
+// generation check through the fence, as on an open row: a reopen and a start
+// that land in between find the lease held, so the start waits out the kill
+// instead of making a run the kill then stops.
+func TestSessionControlOpsKillOfAClosedRowHoldsTheLease(t *testing.T) {
+	e := newControlOpsEnv(t, "off", "auto")
+	e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
+	info := e.session(t, "Kill closed")
+	if err := e.fs.sp.Stop(info.SessionName); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.store.Close(info.ID); err != nil {
+		t.Fatal(err)
+	}
+	reopening := &reopenAtFenceStore{opsTestStore: e.store, id: info.ID, city: e.fs.cityPath, name: info.SessionName, sp: e.fs.sp}
+	e.fs.cityBeadStore = reopening
+	e.restart(t)
+	starts := e.fs.sp.CountCalls("Start", info.SessionName)
+	rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
+	wantStatus(t, "kill", rec, http.StatusOK)
+	if !reopening.fired.Load() {
+		t.Fatal("the fence never read the row")
+	}
+	if !errors.Is(reopening.startErr, session.ErrRuntimeLeaseBusy) {
+		t.Fatalf("the start between the generation check and the fence: %v; want the runtime lease busy, held by the kill", reopening.startErr)
+	}
+	if got := e.fs.sp.CountCalls("Start", info.SessionName); got != starts || e.fs.sp.IsRunning(info.SessionName) {
+		t.Fatalf("a run started under the kill: %d Start calls, running %v", got-starts, e.fs.sp.IsRunning(info.SessionName))
+	}
+}
+
+// A recorded kill whose row does not read, for its runtime lease or under it,
+// kills nothing: the read error is retryable, so the client-keyed op stays
+// open, and the same-key retry adopts it and kills.
+func TestSessionControlOpsKillOfAnUnreadableRowIsRetried(t *testing.T) {
+	for _, read := range []struct{ name, frame string }{
+		{name: "lease read", frame: "api.(*Server).recordedKillLease"},
+		{name: "scope read", frame: "api.killScopeMoved"},
+	} {
+		t.Run(read.name, func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", "auto")
+			info := e.session(t, "Kill unreadable")
+			failing := &frameFailingStore{opsTestStore: e.store, id: info.ID, frame: read.frame, err: errors.New("transport: read failed")}
+			failing.fails.Store(1)
+			e.fs.cityBeadStore = failing
+			e.restart(t)
+			if rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", ""); rec.Code == http.StatusOK {
+				t.Fatalf("kill over an unreadable row answered 200: %s", rec.Body.String())
+			}
+			if failing.fails.Load() != 0 {
+				t.Fatalf("the %s never ran", read.name)
+			}
+			if got := e.fs.sp.CountCalls("Stop", info.SessionName); got != 0 {
+				t.Fatalf("Stop calls = %d, want 0", got)
+			}
+			id, _ := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "kill-1")
+			if op, err := e.opStore(t).Get(id); err != nil || op.Status == opjournal.StatusClosed {
+				t.Fatalf("kill op after the failed read = %+v, %v; want open", op, err)
+			}
+			retry := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
+			wantStatus(t, "retry", retry, http.StatusOK)
+			if a := decodeCommandAnswer(t, retry); a.Op == nil || a.Op.ID != id || a.Op.Attempt != 1 || a.Op.Outcome == nil || a.Op.Outcome.Arm != string(opjournal.ArmSucceeded) {
+				t.Fatalf("retry = %+v (op %+v), want the op adopted and succeeded", a, a.Op)
+			}
+			if got := e.fs.sp.CountCalls("Stop", info.SessionName); got != 1 {
+				t.Fatalf("Stop calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
 // A /stop body may carry fields the endpoint does not know, in every mode:
 // they are ignored, as before the endpoint declared a body.
 func TestSessionControlOpsStopIgnoresUnknownBodyFields(t *testing.T) {
@@ -1514,12 +2142,12 @@ func TestSessionControlOpsUnreadableTurnSourceRefusesTheStop(t *testing.T) {
 	}
 }
 
-// A plain close and a close?delete=true are different requests: in the
-// process that answered the first, reusing its Idempotency-Key for the other
-// is 422 idempotency_mismatch, nothing deleted. A close op records no
-// delete, so after a restart the same-key close?delete=true replays the
-// close and deletes the bead it left closed; one reopened since is refused,
-// nothing deleted.
+// A plain close and a close?delete=true are different requests: reusing one's
+// Idempotency-Key for the other is 422 idempotency_mismatch, nothing deleted,
+// in the process that answered the first (the in-memory cache) and after a
+// restart (the close op: a close that deleted its bead closes
+// succeeded{via: legacy.deleted}). A replay never deletes, so the bead a
+// later close left closed after a reopen stays.
 func TestSessionControlOpsCloseAndCloseDeleteUnderOneKey(t *testing.T) {
 	for _, mode := range []string{"off", "auto"} {
 		t.Run(mode+" one process", func(t *testing.T) {
@@ -1535,33 +2163,121 @@ func TestSessionControlOpsCloseAndCloseDeleteUnderOneKey(t *testing.T) {
 			}
 		})
 	}
-	for _, reopened := range []bool{false, true} {
-		t.Run(fmt.Sprintf("auto restart reopened=%v", reopened), func(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		between func(t *testing.T, e *opsEnv, id string)
+		status  string
+	}{
+		{name: "closed since", between: func(*testing.T, *opsEnv, string) {}, status: "closed"},
+		{name: "reopened", between: func(t *testing.T, e *opsEnv, id string) {
+			if err := e.store.Reopen(id); err != nil {
+				t.Fatal(err)
+			}
+		}, status: "open"},
+		{name: "reopened and closed again", between: func(t *testing.T, e *opsEnv, id string) {
+			if err := e.store.Reopen(id); err != nil {
+				t.Fatal(err)
+			}
+			wantStatus(t, "the later close", e.post(t, "/session/"+id+"/close", "c-2", ""), http.StatusOK)
+		}, status: "closed"},
+	} {
+		t.Run("auto restart "+tc.name, func(t *testing.T) {
 			e := newControlOpsEnv(t, "off", "auto")
 			info := e.session(t, "Close twice")
 			wantStatus(t, "plain close", e.post(t, "/session/"+info.ID+"/close", "c-1", ""), http.StatusOK)
-			if reopened {
-				if err := e.store.Reopen(info.ID); err != nil {
-					t.Fatal(err)
-				}
-			}
+			tc.between(t, e, info.ID)
 			e.restart(t)
 			rec := e.post(t, "/session/"+info.ID+"/close?delete=true", "c-1", "")
-			_, getErr := e.store.Get(info.ID)
-			if reopened {
-				if rec.Code != http.StatusConflict || getErr != nil {
-					t.Fatalf("replayed close of a reopened session: %d %s, bead %v; want 409 and the bead kept", rec.Code, rec.Body.String(), getErr)
-				}
-				return
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "idempotency_mismatch") {
+				t.Fatalf("close?delete=true under the plain close's key after a restart: %d %s, want 422 idempotency_mismatch", rec.Code, rec.Body.String())
 			}
-			wantStatus(t, "replayed close?delete=true", rec, http.StatusOK)
-			if a := decodeCommandAnswer(t, rec); !a.Replayed {
-				t.Fatalf("answer %+v, want the plain close replayed", a)
-			}
-			if !errors.Is(getErr, beads.ErrNotFound) {
-				t.Fatalf("session bead after the replayed close?delete=true: %v, want deleted", getErr)
+			if b, err := e.store.Get(info.ID); err != nil || b.Status != tc.status {
+				t.Fatalf("session bead after the mismatch = %+v, %v; want it kept, %s", b, err, tc.status)
 			}
 		})
+	}
+	t.Run("auto restart deleted", func(t *testing.T) {
+		e := newControlOpsEnv(t, "off", "auto")
+		info := e.session(t, "Close deleted")
+		first := e.post(t, "/session/"+info.ID+"/close?delete=true", "c-1", "")
+		wantStatus(t, "close?delete=true", first, http.StatusOK)
+		if op := opOf(t, e, decodeCommandAnswer(t, first)); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != legacyop.ViaLegacyDeleted {
+			t.Fatalf("close?delete=true op outcome = %+v, want succeeded{via: %s}", op.Outcome, legacyop.ViaLegacyDeleted)
+		}
+		e.restart(t)
+		// The bead is gone, so its id resolves to no session: the retry is
+		// 404 before any op is read, and nothing runs.
+		rec := e.post(t, "/session/"+info.ID+"/close?delete=true", "c-1", "")
+		wantStatus(t, "retry of the completed delete", rec, http.StatusNotFound)
+	})
+	t.Run("auto op recorded without the delete payload", func(t *testing.T) {
+		// A close?delete=true op recorded before close ops carried their
+		// delete has no payload, as a plain close's: a plain close under its
+		// key matches its digest and replays it, and its via refuses that.
+		e := newControlOpsEnv(t, "off", "auto")
+		info := e.session(t, "Close old row")
+		op := e.seedSyncOp(t, info.ID, opjournal.KindClose, "c-1", opjournal.Scope{}, opjournal.Policy{}, "", legacyop.ExecutorAPI, time.Now())
+		deleted := opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyDeleted}}
+		if _, err := e.opStore(t).CloseKnown(op, deleted, string(legacyop.ExecutorAPI)); err != nil {
+			t.Fatal(err)
+		}
+		rec := e.post(t, "/session/"+info.ID+"/close", "c-1", "")
+		if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "recorded a close with delete=true") {
+			t.Fatalf("plain close under the old close?delete=true op's key: %d %s, want 422 naming the delete", rec.Code, rec.Body.String())
+		}
+		if b, err := e.store.Get(info.ID); err != nil || b.Status != "open" {
+			t.Fatalf("session bead after the mismatch = %+v, %v; want it kept open", b, err)
+		}
+	})
+}
+
+// A close op carries its delete, so a same-key retry that changes it is 422
+// idempotency_mismatch at admission even while the key's op is open, left by
+// a retryable failure for a same-key retry to adopt: nothing closes, nothing
+// is deleted, and the op stays as the failure left it. In the process that
+// answered the failure (its in-memory cache released the key) and after a
+// restart, in both directions.
+func TestSessionControlOpsCloseRetryThatChangesDeleteIsRefused(t *testing.T) {
+	for _, tc := range []struct{ name, first, retry string }{
+		{name: "close then close?delete=true", first: "/close", retry: "/close?delete=true"},
+		{name: "close?delete=true then close", first: "/close?delete=true", retry: "/close"},
+	} {
+		for _, restart := range []bool{false, true} {
+			name := tc.name + ", one process"
+			if restart {
+				name = tc.name + ", after a restart"
+			}
+			t.Run(name, func(t *testing.T) {
+				e := newControlOpsEnv(t, "off", "auto")
+				info := e.session(t, "Close changed")
+				e.fs.sp.StopErrors[info.SessionName] = errors.New("transport: reset")
+				if rec := e.post(t, "/session/"+info.ID+tc.first, "c-1", ""); rec.Code == http.StatusOK {
+					t.Fatalf("failing close answered 200: %s", rec.Body.String())
+				}
+				delete(e.fs.sp.StopErrors, info.SessionName)
+				id, _ := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "c-1")
+				open, err := e.opStore(t).Get(id)
+				if err != nil || open.Status == opjournal.StatusClosed {
+					t.Fatalf("close op after the failed close = %+v, %v; want open", open, err)
+				}
+				if restart {
+					e.restart(t)
+				}
+				rec := e.post(t, "/session/"+info.ID+tc.retry, "c-1", "")
+				if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "idempotency_mismatch") {
+					t.Fatalf("%s under the open op's key: %d %s, want 422 idempotency_mismatch", tc.retry, rec.Code, rec.Body.String())
+				}
+				if got := e.fs.sp.CountCalls("Stop", info.SessionName); got != 1 {
+					t.Fatalf("Stop calls = %d, want only the failed close's", got)
+				}
+				if b, err := e.store.Get(info.ID); err != nil || b.Status != "open" {
+					t.Fatalf("session bead after the mismatch = %+v, %v; want it kept open", b, err)
+				}
+				if op, err := e.opStore(t).Get(id); err != nil || op.Status != open.Status || op.Attempt != open.Attempt {
+					t.Fatalf("close op after the mismatch = %+v, %v; want it as the failed close left it", op, err)
+				}
+			})
+		}
 	}
 }
 

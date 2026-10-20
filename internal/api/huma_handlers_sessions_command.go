@@ -1125,9 +1125,9 @@ func (s *Server) killSession(target, key string) (syncAnswer, error) {
 	// Under the kill fence, as `gc session kill`: without it the controller
 	// reads the kill as a crash (heal, accrual, a same-pass restart). A
 	// recorded kill stops only the generation its op is scoped to: the check
-	// runs under the runtime lease, taken first and lent to the fence, and
-	// before the fence does anything, so a refused kill leaves the row as it
-	// found it.
+	// runs under the runtime lease (a closed row's included), taken first and
+	// lent to the fence, and before the fence does anything, so a refused kill
+	// leaves the row as it found it.
 	mgr := s.sessionManager(store.Store)
 	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
 		ctx := context.Background()
@@ -1143,7 +1143,10 @@ func (s *Server) killSession(target, key string) (syncAnswer, error) {
 			by.Lease = lease
 		}
 		if err := killScopeMoved(store.Store, id, adm); err != nil {
-			return killOpResult(err, adm.Minted), apierr.SessionConflict.Msg(err.Error())
+			if errors.Is(err, errKillTargetMoved) {
+				return killOpResult(err, adm.Minted), apierr.SessionConflict.Msg(err.Error())
+			}
+			return killOpResult(err, adm.Minted), humaSessionManagerError(err)
 		}
 		err = mgr.KillFenced(ctx, by, id, func(ctx context.Context, by session.Actor) error {
 			return mgr.Kill(ctx, by, id)
@@ -1290,10 +1293,12 @@ func (s *Server) suspendSession(ctx context.Context, target, key string) (syncAn
 
 // --- Session Close ---
 
-// sessionCloseRequest is a close's request as the in-memory idempotency cache
-// fingerprints it: a plain close and a close?delete=true are different
-// requests, so reusing one Idempotency-Key across them in one process is 422
-// idempotency_mismatch, not a cached answer that skips the delete.
+// sessionCloseRequest is a close's request, as the in-memory idempotency
+// cache fingerprints it and a close?delete=true op carries it
+// (closeOpRequest): a plain close and a close?delete=true are different
+// requests, so reusing one Idempotency-Key across them is 422
+// idempotency_mismatch, never a cached answer that skips the delete or an
+// adopted op that runs a delete the key's first request did not ask for.
 type sessionCloseRequest struct {
 	Delete bool `json:"delete,omitempty"`
 }
@@ -1313,10 +1318,16 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 
 // closeSession closes target, as a close op under ops.lifecycle, deleting
 // its bead after when del is set, and returns the answer. The always-on
-// named session refusal comes first, as a front-door refusal: no op. The
-// nudge withdrawal and the delete are part of the op's run, so the op closes
-// only after them: a delete that fails is a retryable error, which leaves a
-// client-keyed op open for a same-key retry to adopt and delete again.
+// named session refusal comes first, as a front-door refusal: no op. The op
+// carries del (closeOpRequest), so a same-key retry that changes it is
+// idempotency_mismatch at admission, nothing run, whether the key's op is
+// still open or closed. The nudge withdrawal and the delete are part of the
+// op's run, so the op closes only after them: a delete that fails is a
+// retryable error, which leaves a client-keyed op open for a same-key retry
+// to adopt and delete again. A close that deleted closes its op
+// succeeded{via: legacy.deleted}, and a replay never deletes: a replayed op
+// whose via differs from del, which only an op recorded before close ops
+// carried del can reach, is idempotency_mismatch as well.
 func (s *Server) closeSession(ctx context.Context, target, key string, del bool) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -1338,7 +1349,10 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)
 	}
-	req := syncOpRequest{kind: opjournal.KindClose, conv: id, key: key}
+	req, err := closeOpRequest(id, key, del)
+	if err != nil {
+		return syncAnswer{}, err
+	}
 	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
 		closeResult, err := handle.CloseDetailed(ctx, s.actor(session.ActorOperator))
 		if err != nil {
@@ -1350,50 +1364,30 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 			log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 		}
 		// Optional: permanently delete the bead after closing.
+		res := syncOpResult(opjournal.KindClose, nil, adm.Minted)
 		if del {
 			if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
 				log.Printf("gc api: deleting bead after close %s: %v", id, err)
 				return syncOpResult(opjournal.KindClose, err, adm.Minted), apierr.Internal.Msg("closed but delete failed: " + err.Error())
 			}
+			res.Outcome.Result.Via = legacyop.ViaLegacyDeleted
 		}
-		return syncOpResult(opjournal.KindClose, nil, adm.Minted), nil
+		return res, nil
 	})
 	if err != nil {
 		return syncAnswer{}, err
 	}
-	if del && fields.Replayed {
-		if err := deleteReplayedCloseBead(store.Store, id, fields.Op); err != nil {
-			return syncAnswer{}, err
-		}
+	// The digest refused a changed del at admission; an op recorded without
+	// the payload still says by its via whether it deleted.
+	if fields.Replayed && closeOpDeleted(fields.Op) != del {
+		return syncAnswer{}, apierr.IdempotencyMismatch.Msg(fmt.Sprintf("idempotency_mismatch: Idempotency-Key reused with a different request: op %s recorded a close with delete=%t, so nothing was done", fields.Op.ID, !del))
 	}
 	return syncAnswer{ID: id, syncOpFields: fields}, nil
 }
 
-// deleteReplayedCloseBead is the delete of a close?delete=true whose close
-// replays a same-key close that already succeeded. A close op records no
-// payload, so the replay cannot tell whether the first request deleted; the
-// delete is idempotent, so it runs again: a bead already gone is done, a
-// closed one is deleted, and one reopened since the close is refused, nothing
-// deleted.
-func deleteReplayedCloseBead(store beads.Store, id string, op *ConversationOp) error {
-	b, err := store.Get(id)
-	switch {
-	case errors.Is(err, beads.ErrNotFound):
-		return nil
-	case err != nil:
-		return humaStoreError(err)
-	case b.Status != "closed":
-		opID := ""
-		if op != nil {
-			opID = op.ID
-		}
-		return apierr.SessionConflict.Msg(fmt.Sprintf("session %s was reopened after op %s closed it, so it was not deleted; resend with a new Idempotency-Key to close and delete it", id, opID))
-	}
-	if err := deleteSessionBeadAfterClose(store, id); err != nil {
-		log.Printf("gc api: deleting bead after the replayed close %s: %v", id, err)
-		return apierr.Internal.Msg("closed but delete failed: " + err.Error())
-	}
-	return nil
+// closeOpDeleted reports whether close op op deleted its session's bead.
+func closeOpDeleted(op *ConversationOp) bool {
+	return op != nil && op.Outcome != nil && op.Outcome.Via == legacyop.ViaLegacyDeleted
 }
 
 // --- Session Wake ---

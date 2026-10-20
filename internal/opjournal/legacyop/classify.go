@@ -13,6 +13,8 @@ const (
 	ViaLegacyDelivered = "legacy.delivered"
 	ViaLegacyQueued    = "legacy.queued"
 	ViaLegacyRollback  = "legacy.rollback"
+	// ViaLegacyDeleted is a close that also deleted its session's bead.
+	ViaLegacyDeleted = "legacy.deleted"
 )
 
 // Refusal reasons the classifiers write after refused:.

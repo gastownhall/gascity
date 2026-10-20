@@ -169,26 +169,43 @@ The synchronous session commands record ops through `runSyncOp`
 `ops.control`, `/wake`, `/suspend`, `/kill`, `/close` and `/reset` under
 `ops.lifecycle`. The op is admitted after the front-door checks (target
 resolution, the always-on named close refusal, a named stop turn's turn
-identity) and before the command's effect, and closed from the command's
-result, every step of it (a `/close?delete=true` closes its op after the
-delete), before the answer. A sync command caches no in-flight answer, so a
+identity, unless the request's key already names a stop of that turn) and
+before the command's effect, and closed from the command's result, every
+step of it (a `/close?delete=true` closes its op after the delete), before
+the answer. A sync command caches no in-flight answer, so a
 same-key request while one runs is 409 `in_flight`; a retryable error leaves
 a client-keyed op open for a same-key retry to adopt. A retry that reuses a
 key on a session-scoped command (stop, kill, respond) reuses the first
 request's scope (`priorSessionScope`), so a session that moved to another
 generation or turn since replays the first request instead of refusing the
-key as another request. A recorded kill takes the runtime lease first
-(`recordedKillLease`), checks its op's generation under it, and only then
-lends the lease to `KillFenced`, as `gc session kill` does: a kill whose
-generation is gone refuses `refused:target_moved` before the fence, the stop
-or the asleep sync touches anything. A close op carries no payload, so
-`delete` is fingerprinted by the in-memory cache only (reusing a key across
-`/close` and `/close?delete=true` is 422 in one process); after a restart a
-same-key `/close?delete=true` that replays a successful close deletes the
-bead if it is still closed and refuses 409 if it was reopened. With the gates
-off nothing is read or written beyond the legacy path, except that a `/stop`
-that names a turn is stopped turn-scoped through the worker in every mode. A
-request `auto` could not record runs exactly as in off (I8).
+key as another request. A recorded `/respond` answers only the interaction
+its op names, even when the request names none, so a respond adopted after
+the agent raised another prompt, or a second click that read the same prompt
+pending, closes `skipped{stale}` rather than approving a prompt nobody saw.
+That holds only as far as request IDs tell prompts apart: where the runtime
+derives them from the prompt's content (tmux hashes the tool and its input),
+an identical prompt raised again carries the first one's ID and is answered
+too, until OJ-16 keys respond ops by the interaction occurrence. A
+recorded kill takes the runtime lease first (`recordedKillLease`; on a
+closed row, which keeps no lease record, the runtime name's flock alone),
+checks its op's generation under it, and only then lends the lease to
+`KillFenced`: a kill whose generation is gone refuses
+`refused:target_moved` before the fence, the stop or the asleep sync touches
+anything, and a row that does not read is a retryable error, nothing killed.
+Unlike the API, `gc session kill` takes no lease on a closed row. A
+`/close?delete=true` op carries `{"delete":true}` as its payload
+(`closeOpRequest`; a plain close carries none, as `gc session close`'s op
+does), so the op's digest covers the delete: reusing a key across `/close`
+and `/close?delete=true` is 422 `idempotency_mismatch` at admission, nothing
+run, whether the key's op is still open after a retryable failure or closed,
+in one process and after a restart. A close that also deleted its bead
+closes its op `succeeded{via: legacy.deleted}`, and a replay never deletes. A
+same-key close retry finds its op by the session ID only: by an alias or
+session_name after a restart, or after a completed delete, the target no
+longer resolves and the answer is 404. With the gates off nothing is read or
+written beyond the legacy path, except that a `/stop` that names a turn is
+stopped turn-scoped through the worker in every mode. A request `auto` could
+not record runs exactly as in off (I8).
 
 While `ops.control` records, `/stop` reads the session's turn live
 (`resolveStopTurn`) only when its turns come from its runtime's protocol
@@ -203,4 +220,23 @@ ends before the interrupt lands is `skipped{not_needed}`, 200; only a named
 turn is refused `turn_not_current`. A turn's target key
 (`stop:<gen>:<turn>`) replays only a stop that succeeded or found nothing to
 do; one whose op failed hands the request to its own key (minted when it has
-none), so a failed stop never uses up its turn.
+none), so a failed stop never uses up its turn. A named stop that the target
+key's op answers leaves a row under its own Idempotency-Key, closed
+`skipped{coalesced_into}` that op (`recordStopUnderKey`), so the key still
+names the stop once the in-memory cache is gone. A stop that runs the op
+writes the row before it sends anything, so the key names the stop however
+it ends: failed, refused `turn_not_current`, or cut short by its API dying.
+The row is admitted as the request would be under its key, and its refusal
+is the stop's answer: in `require` a row the journal cannot record is 503
+`op_journal_unavailable`, nothing sent and the target-key op left open, and
+a stop answered from that op answers the 503 instead of its success, so the
+client's retry binds the key. The exception is `auto`: a row its op store
+does not record is logged and the stop goes on, its key naming nothing, as
+an unrecorded request's (I8), so a later retry under the key with no turn
+stops the turn running then. A retry under the key, with no turn or naming
+the same one, follows the row back to the target key as a stop of the turn
+the first request named: it adopts the op while it is open and replays it
+once closed, and never stops the turn running then. Its reads of the
+session's turns refuse only an adopted op, which runs, so a closed stop
+replays after its session closed or its runtime stopped answering too. One
+naming another turn is 422 `idempotency_mismatch`.

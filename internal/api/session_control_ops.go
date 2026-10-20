@@ -31,11 +31,24 @@ package api
 // resolved turn when the request carries no Idempotency-Key. A target key
 // replays only a stop that succeeded or found nothing to do: one whose op
 // failed is retried under the request's own key (minted when it has none),
-// so a failed stop never uses up its turn. A request that carries a key
-// otherwise keeps it, and a retry under it reuses its first request's scope,
-// so the retry replays that stop instead of interrupting a later turn. A
-// turn the request did not name that ends before the interrupt lands was
-// nothing to stop; only a named one is refused turn_not_current.
+// so a failed stop never uses up its turn. A named stop that the target
+// key's op answers leaves a row under its own Idempotency-Key that coalesced
+// into that op, before it sends anything, so a retry under the key follows
+// the row back to that op, as a stop of the turn it named, however the stop
+// ended; a refusal of the row is the stop's answer, nothing sent, except that
+// in auto a row its store does not record leaves the key naming nothing and
+// the stop goes on. A request that carries a key otherwise keeps it, and a
+// retry under a key that names a stop reuses its first request's scope, so
+// the retry adopts or replays that stop instead of interrupting a later turn
+// (a retry that names another turn is idempotency_mismatch). A retry's reads
+// of the session's turns refuse only an adopted stop, which runs: a closed
+// one replays whatever they read now. A turn the request did not name that
+// ends before the interrupt lands was nothing to stop; only a named one is
+// refused turn_not_current.
+//
+// A recorded /respond answers only the interaction its op names: the
+// request's request_id, or the interaction it read pending, or its first
+// request's on a same-key retry.
 
 import (
 	"context"
@@ -260,7 +273,7 @@ func (s *Server) runSyncOp(req syncOpRequest, mapErr func(error) error, run func
 		}
 	}
 	if adm.Decision == legacyop.Replay {
-		return syncReplay(adm, mapErr)
+		return s.syncReplay(adm, mapErr)
 	}
 	handedOff := false
 	defer releaseOnPanic(adm, &handedOff)
@@ -301,17 +314,43 @@ func syncOpReplaysAsSuccess(op opjournal.Op) bool {
 // command's success with replayed and the stored op, or the error the
 // original produced, rebuilt from the op's reason and mapped through mapErr
 // with its message naming the op; one the reason cannot rebuild is 409
-// op_already_failed.
-func syncReplay(adm *legacyop.Admission, mapErr func(error) error) (syncOpFields, error) {
+// op_already_failed. An op that coalesced into another (the row a named stop
+// leaves under its own key) replays that op under that op's key, as the
+// first request's answer carried them.
+func (s *Server) syncReplay(adm *legacyop.Admission, mapErr func(error) error) (syncOpFields, error) {
 	if adm.Cached != nil || adm.Op.Status != opjournal.StatusClosed {
 		// A sync command caches no in-flight answer; a held op is busy.
 		return syncOpFields{}, requestInFlight()
 	}
-	op := adm.Op
+	op, key := adm.Op, adm.Key
+	if into := op.Outcome.Result.CoalescedInto; into != "" {
+		target, err := s.coalescedOp(op.Kind, into)
+		if err != nil {
+			return syncOpFields{}, err
+		}
+		if target.Status != opjournal.StatusClosed {
+			return syncOpFields{}, requestInFlight()
+		}
+		op, key = target, target.ClientKey
+	}
 	if syncOpReplaysAsSuccess(op) {
-		return syncOpFields{IdempotencyKey: adm.Key, Replayed: true, Op: conversationOpWire(op)}, nil
+		return syncOpFields{IdempotencyKey: key, Replayed: true, Op: conversationOpWire(op)}, nil
 	}
 	return syncOpFields{}, replayedSyncError(op, mapErr)
+}
+
+// coalescedOp reads op id, the op a replayed op of kind coalesced into; a
+// read that fails is 503 op_journal_unavailable, nothing done.
+func (s *Server) coalescedOp(kind opjournal.Kind, id string) (opjournal.Op, error) {
+	rec, _ := s.ops.recorderFor(kind)
+	st, err := rec.Open()
+	if err == nil {
+		var op opjournal.Op
+		if op, err = st.Get(id); err == nil {
+			return op, nil
+		}
+	}
+	return opjournal.Op{}, apierr.OpJournalUnavailable.Msg(fmt.Sprintf("op_journal_unavailable: reading op %s, which the replayed op coalesced into, so nothing was done: %v", id, err))
 }
 
 // replayedSyncError rebuilds the error a closed, unsuccessful op answered
@@ -443,11 +482,17 @@ func (s *Server) keyedOp(kind opjournal.Kind, conv, key string) (opjournal.Op, b
 // same-key retry reuses it, so it finds its first request again although the
 // session moved to another generation or turn since. ok is false otherwise.
 func (s *Server) priorSessionScope(kind opjournal.Kind, conv, key string) (opjournal.Scope, bool) {
+	prior, ok := s.priorSessionOp(kind, conv, key)
+	return prior.Scope, ok
+}
+
+// priorSessionOp is the op whose scope priorSessionScope reuses.
+func (s *Server) priorSessionOp(kind opjournal.Kind, conv, key string) (opjournal.Op, bool) {
 	prior, found := s.keyedOp(kind, conv, key)
 	if !found || prior.Kind != kind || prior.Scope.Kind != opjournal.ScopeSession {
-		return opjournal.Scope{}, false
+		return opjournal.Op{}, false
 	}
-	return prior.Scope, true
+	return prior, true
 }
 
 // --- /stop ---
@@ -498,11 +543,12 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 	if err != nil {
 		return syncAnswer{}, humaResolveError(err)
 	}
-	var plan stopPlan
-	if named != "" {
-		if plan, err = s.namedStopPlan(ctx, store.Store, id, named); err != nil {
-			return syncAnswer{}, err
-		}
+	// A key that already names a stop (its own op, or the row a stop of a
+	// turn's target key left under it) makes this request its retry.
+	prior, retry := s.priorSessionOp(opjournal.KindInterrupt, id, key)
+	plan, err := s.frontDoorStopPlan(ctx, store.Store, id, named, prior, retry)
+	if err != nil {
+		return syncAnswer{}, err
 	}
 	req := syncOpRequest{kind: opjournal.KindInterrupt, conv: id, key: key, policy: interruptOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
@@ -511,20 +557,101 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 		if err := s.checkBeforeEffect(opjournal.KindInterrupt, key); err != nil {
 			return syncAnswer{}, err
 		}
-		req, plan = s.stopOpRequest(ctx, store.Store, req, plan)
+		if req, plan, err = s.stopOpRequest(ctx, store.Store, req, plan, prior, retry); err != nil {
+			return syncAnswer{}, err
+		}
 	}
 	fields, err := s.runSyncOp(req, humaStopError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		run := plan
-		if !adm.Recorded && !run.named {
-			// I8: a stop auto could not record runs as it does in off.
-			run = stopPlan{}
-		}
-		return s.executeStop(store.Store, id, run, adm.Minted)
+		return s.runStop(store.Store, id, req, plan, adm)
 	})
 	if err != nil {
 		return syncAnswer{}, err
 	}
+	if fields.Replayed && fields.Op != nil {
+		if err := s.recordStopUnderKey(req, fields.IdempotencyKey, fields.Op.ID); err != nil {
+			return syncAnswer{}, err
+		}
+	}
 	return syncAnswer{ID: id, syncOpFields: fields}, nil
+}
+
+// runStop runs a /stop admitted as adm on session id: a recorded stop first
+// writes the row under its own key (recordStopUnderKey) and sends nothing
+// when that is refused, leaving the op open, as a retryable error does, for
+// the next stop of its turn; one auto could not record runs as in off (I8),
+// unless it names its turn.
+func (s *Server) runStop(store beads.Store, id string, req syncOpRequest, plan stopPlan, adm *legacyop.Admission) (legacyop.Result, error) {
+	if !adm.Recorded {
+		if !plan.named {
+			plan = stopPlan{}
+		}
+		return s.executeStop(store, id, plan, adm.Minted)
+	}
+	if err := s.recordStopUnderKey(req, adm.Key, adm.Op.ID); err != nil {
+		return syncOpResult(opjournal.KindInterrupt, err, adm.Minted), err
+	}
+	return s.executeStop(store, id, plan, adm.Minted)
+}
+
+// recordStopUnderKey records, under a stop's own Idempotency-Key, that its
+// turn's target-key op answers it (op target, admitted under answeredKey,
+// req's target key): an interrupt op of the same scope, closed
+// skipped{coalesced_into: that op}. A stop that runs the op records it before
+// it sends anything, so the key names the stop however the stop ends
+// (succeeded, failed, refused turn_not_current, or its API died); one
+// answered from the op's outcome records it after. A later request under the
+// key then finds the stop once the Idempotency-Key cache is gone:
+// stopOpRequest follows the row back to the target key, so a retry with no
+// turn, or naming the same one, adopts the op while it is open and replays it
+// once closed instead of stopping the turn running then, and one that names
+// another turn is idempotency_mismatch. It records nothing for a request
+// without a key of its own, one its own key's op answers, or one whose key
+// already names an op (a retry that followed its row). The row is admitted
+// as the request would be under its key, and a refusal (require's
+// op_journal_unavailable, in_flight, idempotency_mismatch) is returned for
+// the stop to answer with: a stop that runs the op then sends nothing, and
+// one answered from it answers no success. In auto a row the op store does
+// not record is logged and the stop goes on, its key naming nothing, as an
+// unrecorded request's (I8).
+func (s *Server) recordStopUnderKey(req syncOpRequest, answeredKey, target string) error {
+	if !req.turnKeyed || req.successorKey == "" || answeredKey != req.key {
+		return nil
+	}
+	req.key, req.turnKeyed, req.successorKey = req.successorKey, false, ""
+	adm, err := s.admitSyncOp(req)
+	switch {
+	case err != nil:
+		return err
+	case !adm.Recorded:
+		s.ops.logf("api: stop of session %s: its Idempotency-Key was not recorded for op %s, so it names nothing; auto stops all the same", req.conv, target)
+		return nil
+	case adm.Decision == legacyop.Replay:
+		return nil
+	case adm.Adopted:
+		// Another request recorded an op under the key meanwhile: leave it to
+		// its own request.
+		adm.Finish(legacyop.Result{LeaveOpen: true})
+		return nil
+	}
+	adm.Finish(legacyop.Result{Outcome: opjournal.Outcome{
+		Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonCoalescedInto, Result: opjournal.Result{CoalescedInto: target},
+	}})
+	return nil
+}
+
+// frontDoorStopPlan is a /stop's plan at the front door: none for a request
+// that names no turn, and for a named turn namedStopPlan's checks, unless
+// the request's key already names a stop of that turn (prior, retry): the
+// retry replays or adopts that stop, so it takes keyedStopPlan, which
+// refuses nothing.
+func (s *Server) frontDoorStopPlan(ctx context.Context, store beads.Store, id, named string, prior opjournal.Op, retry bool) (stopPlan, error) {
+	switch {
+	case named == "":
+		return stopPlan{}, nil
+	case retry && prior.Scope.Turn == named:
+		return s.keyedStopPlan(ctx, store, id, named), nil
+	}
+	return s.namedStopPlan(ctx, store, id, named)
 }
 
 // namedStopPlan checks a turn the request names at the front door (X11
@@ -549,36 +676,51 @@ func (s *Server) namedStopPlan(ctx context.Context, store beads.Store, id, turn 
 }
 
 // stopOpRequest completes a recorded /stop's op request and plan (X11 D10,
-// DES-O0API §3.2): the session(generation) scope; a named turn in it, keyed
-// stop:<generation>:<turn>; else, under a client key that already names a
-// stop, that stop's scope; else the turn a live read of a protocol turn
-// source finds running, keyed by it when the request carries no key. A
-// target key's successor is the request's own key. A request that cannot be
-// recorded resolves nothing: it runs as in off.
-func (s *Server) stopOpRequest(ctx context.Context, store beads.Store, req syncOpRequest, plan stopPlan) (syncOpRequest, stopPlan) {
+// DES-O0API §3.2): the session(generation) scope; when the client key already
+// names a stop (prior, retry), that stop's scope (a named turn must be that
+// stop's, or the request is idempotency_mismatch), under the key, or, when
+// the key names the row a stop of a turn's target key left under it, under
+// that target key as a stop of the turn it names; else a named turn in the
+// scope, keyed stop:<generation>:<turn>; else the turn a live read of a
+// protocol turn source finds running, keyed by it when the request carries
+// no key. A target key's successor is the request's own key. A request that
+// cannot be recorded resolves nothing: it runs as in off.
+func (s *Server) stopOpRequest(ctx context.Context, store beads.Store, req syncOpRequest, plan stopPlan, prior opjournal.Op, retry bool) (syncOpRequest, stopPlan, error) {
 	scope, why, whyErr := sessionOpScope(store, req.conv)
 	if why != "" {
 		req.unrecordable, req.unrecordableErr = why, whyErr
-		return req, plan
+		return req, plan, nil
 	}
 	clientKey := req.key
 	switch {
+	case retry && plan.named && prior.Scope.Turn != plan.turn:
+		return req, plan, apierr.IdempotencyMismatch.Msg(fmt.Sprintf("idempotency_mismatch: Idempotency-Key reused with a different request: it names a stop of turn %q, not turn %q", prior.Scope.Turn, plan.turn))
+	case retry && prior.Outcome.Result.CoalescedInto != "":
+		// The row is a named stop's (recordStopUnderKey): the retry is that
+		// stop again, of the turn it named, under that turn's target key,
+		// whose op it adopts while open and replays once closed, whether
+		// the retry names the turn or not.
+		if !plan.named {
+			plan = s.keyedStopPlan(ctx, store, req.conv, prior.Scope.Turn)
+		}
+		scope = prior.Scope
+		req.key = stopTargetKey(scope.Generation, scope.Turn, req.key)
+	case retry && plan.named:
+		scope = prior.Scope
+	case retry:
+		// The scope must be the first request's for the retry to find its
+		// op; a session-scoped one's turn is read again, so an adopted stop
+		// is fenced as a fresh one is.
+		scope = prior.Scope
+		if scope.Turn != "" {
+			plan = s.priorStopPlan(ctx, store, req.conv, scope.Turn)
+		} else {
+			plan = s.resolveStopTurn(ctx, store, req.conv)
+		}
 	case plan.named:
 		scope.Turn = plan.turn
 		req.key = stopTargetKey(scope.Generation, plan.turn, req.key)
 	default:
-		if prior, ok := s.priorSessionScope(opjournal.KindInterrupt, req.conv, req.key); ok {
-			// The scope must be the first request's for the retry to find
-			// its op; a session-scoped one's turn is read again, so an
-			// adopted stop is fenced as a fresh one is.
-			scope = prior
-			if prior.Turn != "" {
-				plan = s.priorStopPlan(ctx, store, req.conv, prior.Turn)
-			} else {
-				plan = s.resolveStopTurn(ctx, store, req.conv)
-			}
-			break
-		}
 		plan = s.resolveStopTurn(ctx, store, req.conv)
 		if plan.turn != "" {
 			scope.Turn = plan.turn
@@ -591,7 +733,7 @@ func (s *Server) stopOpRequest(ctx context.Context, store beads.Store, req syncO
 		req.turnKeyed, req.successorKey = true, clientKey
 	}
 	req.scope = scope
-	return req, plan
+	return req, plan, nil
 }
 
 // stopTargetKey is the target key of a stop of turn in generation gen,
@@ -622,6 +764,18 @@ func (s *Server) priorStopPlan(ctx context.Context, store beads.Store, id, turn 
 		return plan
 	}
 	plan.handle, plan.caps = handle, caps
+	return plan
+}
+
+// keyedStopPlan is the plan of a retry whose Idempotency-Key already names a
+// stop of turn, as a stop of a named turn: priorStopPlan's, named. Its read
+// of the turn source refuses nothing here: one that does not read refuses
+// only an adopted op, which runs, nothing sent, so a closed stop the key
+// names replays whatever the session's turns read now (closed, or a runtime
+// that does not answer).
+func (s *Server) keyedStopPlan(ctx context.Context, store beads.Store, id, turn string) stopPlan {
+	plan := s.priorStopPlan(ctx, store, id, turn)
+	plan.named = true
 	return plan
 }
 
@@ -729,7 +883,18 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 		}
 	}
 	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
-		err := mgr.Respond(id, resp)
+		run := resp
+		if adm.Recorded && run.RequestID == "" {
+			// A recorded respond answers only the interaction its op names:
+			// one adopted after the agent raised another prompt, or a second
+			// click that read the same prompt pending, answers nothing
+			// (skipped{stale}) rather than the prompt pending now. A runtime
+			// that derives request IDs from content (tmux) gives an identical
+			// prompt raised again the same ID, so that one is answered, until
+			// OJ-16 keys respond ops by the interaction occurrence.
+			run.RequestID = adm.Op.Scope.Interaction
+		}
+		err := mgr.Respond(id, run)
 		if err != nil {
 			return syncOpResult(opjournal.KindRespond, err, adm.Minted), humaSessionManagerError(err)
 		}
@@ -745,9 +910,10 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 // payload and the session(generation) scope with the interaction it answers.
 // The interaction is the request's request_id, else, under a client key that
 // already names a respond of that interaction, that respond's scope, else
-// the pending interaction read now. A respond with no interaction to name
-// cannot be recorded: auto runs it unrecorded, and require refuses it at the
-// front door with the answer the legacy respond gives (no_pending, or
+// the pending interaction read now; the respond then answers that
+// interaction only. A respond with no interaction to name cannot be
+// recorded: auto runs it unrecorded, and require refuses it at the front
+// door with the answer the legacy respond gives (no_pending, or
 // unsupported), nothing sent.
 func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req syncOpRequest, resp runtime.InteractionResponse) (syncOpRequest, error) {
 	payload := respondOpPayload{Action: resp.Action, Text: resp.Text}
@@ -805,6 +971,25 @@ func (s *Server) lifecycleOp(kind opjournal.Kind, id, key string, policy opjourn
 	})
 }
 
+// closeOpRequest is a close's op request on session id. A close that deletes
+// its bead carries its sessionCloseRequest as the payload, canonical JSON
+// (DES-O0API §3.1), so the op's digest covers the delete: a same-key request
+// that changes it is another request to the op, refused before anything
+// runs. A plain close carries no payload, as gc session close's op does, so
+// the two surfaces record one close alike.
+func closeOpRequest(id, key string, del bool) (syncOpRequest, error) {
+	req := syncOpRequest{kind: opjournal.KindClose, conv: id, key: key}
+	if !del {
+		return req, nil
+	}
+	raw, err := json.Marshal(sessionCloseRequest{Delete: del})
+	if err != nil {
+		return req, apierr.Internal.Msg("encoding the close op payload: " + err.Error())
+	}
+	req.payload = string(raw)
+	return req, nil
+}
+
 // killOpRequest is a kill's op request on session id: scoped to the session
 // generation its row names, or, under a client key that already names a kill
 // of this session, to that kill's scope, so a same-key retry after the
@@ -834,16 +1019,19 @@ var errKillTargetMoved = errors.New("the kill's target moved")
 // runtime lease, against the generation its op is scoped to (adm.Op.Scope):
 // a same-key retry that adopts an op left open, after the session restarted,
 // or a start that ran while the kill waited for the lease, would otherwise
-// stop a run the op does not name. It returns an error wrapping
-// errKillTargetMoved naming both generations, as gc session kill refuses
-// (refused:target_moved). A kill that is not recorded, or a row that does not
-// read with a generation, passes: the kill's own read then decides.
+// stop a run the op does not name. A row at another generation, or at none,
+// is an error wrapping errKillTargetMoved naming both generations
+// (refused:target_moved); a row that does not read is a retryable error,
+// nothing killed. A kill that is not recorded passes.
 func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error {
 	if !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession {
 		return nil
 	}
-	now, why, _ := sessionOpScope(store, id)
-	if why != "" || now.Generation == adm.Op.Scope.Generation {
+	now, why, err := sessionOpScope(store, id)
+	switch {
+	case why == legacyop.ReasonUnreadableTarget:
+		return fmt.Errorf("reading session %s under the kill's runtime lease, so nothing was killed: %w", id, err)
+	case now.Generation == adm.Op.Scope.Generation:
 		return nil
 	}
 	return fmt.Errorf("%s: session %s is at generation %d, not generation %d, which op %s was recorded for, so nothing was killed; resend with a new Idempotency-Key to kill the new run: %w",
@@ -851,28 +1039,34 @@ func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error
 }
 
 // recordedKillLease takes the runtime lease a recorded kill checks its scope
-// under, as gc session kill does: the lease is held from before the
-// generation check through the fence's stop and asleep sync (I-LEASE), so a
-// start cannot slip a new run in between. A busy lease is ErrSessionStarting
-// (retryable); any other lease failure takes the name's flock alone rather
-// than hold the kill hostage. It returns nil, taking none, for a kill that is
-// not recorded at the session's generation, or a row that does not read open
-// with a runtime name: the fence then takes its own lease and decides on its
-// own read.
+// under: the lease is held from before the generation check through the
+// fence's stop and asleep sync (I-LEASE), so a start cannot slip a new run in
+// between. A closed row keeps no lease record, so its kill takes the runtime
+// name's flock alone, which holds off a reopened row's start all the same. A
+// busy lease is ErrSessionStarting (retryable); any other failure to take an
+// open row's lease takes the name's flock alone rather than hold the kill
+// hostage. A row that does not read is a retryable error, nothing killed. It
+// returns nil, taking none, for a kill that is not recorded at the session's
+// generation, or an actor with no city.
 func (s *Server) recordedKillLease(ctx context.Context, store beads.Store, id string, by session.Actor, adm *legacyop.Admission) (*session.RuntimeLease, error) {
 	if !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession || by.City.IsZero() {
 		return nil, nil
 	}
 	front := session.NewStore(beads.SessionStore{Store: store})
 	info, err := front.Get(id)
-	if err != nil || info.Closed || info.SessionName == "" {
-		return nil, nil
+	if err != nil {
+		return nil, fmt.Errorf("reading session %s before taking its runtime lease, so nothing was killed: %w", id, err)
 	}
-	req := session.RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName, ID: id, TTL: session.RuntimeLeaseTTLFor(s.state.Config())}
+	flock := session.RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName}
+	if info.Closed {
+		return session.WaitOperatorRuntimeLease(ctx, nil, flock)
+	}
+	req := flock
+	req.ID, req.TTL = id, session.RuntimeLeaseTTLFor(s.state.Config())
 	lease, err := session.WaitOperatorRuntimeLease(ctx, front, req)
 	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
 		log.Printf("gc api: session kill: stopping %s under the name's flock alone: %v", info.SessionName, err)
-		lease, err = session.WaitOperatorRuntimeLease(ctx, nil, session.RuntimeLeaseRequest{City: req.City, Name: req.Name})
+		lease, err = session.WaitOperatorRuntimeLease(ctx, nil, flock)
 	}
 	return lease, err
 }

@@ -153,12 +153,16 @@ var registry = []Spec{
 	func() Spec {
 		s := lifecycleSpec(KindClose, Policy{})
 		s.OnConversationClose = CloseRuleSucceed
+		// A close may carry its request's options (the API's
+		// {"delete":true}), so the digest tells a close that deletes its row
+		// from one that does not.
+		s.PayloadAllowed = true
 		return s
 	}(),
 }
 
-// lifecycleSpec is the shared shape of the payload-free conversation-scoped
-// lifecycle kinds.
+// lifecycleSpec is the shared shape of the conversation-scoped lifecycle
+// kinds, payload-free unless the kind's row says otherwise.
 func lifecycleSpec(k Kind, defaults Policy) Spec {
 	return Spec{
 		Kind: k, Class: ClassLifecycle, Lane: LaneLifecycle,
