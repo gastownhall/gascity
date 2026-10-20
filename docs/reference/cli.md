@@ -4519,13 +4519,17 @@ Accepts a session ID or session alias. Multi-word messages are
 joined automatically.
 
 When [ops] authoritative lists message, a nudge to a session a conversation
-lane can type into is recorded as a lane op instead: wait-idle and immediate
-deliver it as a prompt at once when the session is at an idle boundary, with
-or without a running controller, and otherwise report it queued for the
-controller's lane host, which delivers it at the next boundary; queue
-delivers it as a notice at the next boundary and never wakes the session.
-The [ops] content gate does not govern such a nudge, and one whose op cannot
-be written is refused.
+lane can type into is recorded as a lane op instead. wait-idle delivers it
+as a prompt at an idle boundary only, never into a running turn. immediate
+delivers it as a prompt at an idle boundary or, when the session's runtime
+can steer, into its running turn; a busy session whose runtime cannot steer
+gets it at the next boundary. queue delivers it as a notice at the next
+boundary and never wakes the session. When this process can type into the
+session, wait-idle and immediate deliver at once what their mode allows
+now, with or without a running controller; otherwise the nudge is reported
+queued, and the lane host serving the session delivers it as its mode
+says. The [ops] content gate does not govern such a nudge, and one whose op
+cannot be written is refused.
 
 ```
 gc session nudge <id-or-alias> <message...> [flags]
@@ -4535,7 +4539,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 |------|------|---------|-------------|
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 | `--json` | bool |  | JSON output |
-| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of acting again; ignored otherwise (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of acting again, except across a change to whether [ops] authoritative lists message, which refuses the rerun as a different request; ignored otherwise (default: a new key each run) |
 
 ## gc session peek
 

@@ -14,8 +14,9 @@ import (
 )
 
 // dedupFake is a runtime that deduplicates by delivery key, as T3's command
-// receipts do: a send under a key it already applied is acked and not
-// applied again. applied lists the texts it applied, sends every send.
+// receipts do: a send under a key it already applied is acked with the
+// receipt held for the key's first delivery and not applied again. applied
+// lists the texts it applied, sends every send.
 type dedupFake struct {
 	runtime.FullFake
 	mu      sync.Mutex
@@ -28,34 +29,54 @@ func newDedupFake(f *runtime.Fake) *dedupFake {
 	return &dedupFake{FullFake: runtime.FullFake{Fake: f}, seen: map[string]bool{}}
 }
 
-// once records a send and reports whether it is the key's first.
-func (d *dedupFake) once(key, text string) bool {
+// sent records a send and reports whether a send under its key already
+// applied.
+func (d *dedupFake) sent(key, text string) (repeat bool) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.sends = append(d.sends, runtime.Call{Message: text, DeliveryKey: key})
-	if key != "" && d.seen[key] {
-		return false
-	}
+	return key != "" && d.seen[key]
+}
+
+// apply records text applied under key.
+func (d *dedupFake) apply(key, text string) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
 	d.seen[key] = true
 	d.applied = append(d.applied, text)
-	return true
 }
 
 // NudgeKeyed implements runtime.KeyedNudgeProvider, applying a key once; a
 // repeated key answers with the receipt held for its first delivery.
 func (d *dedupFake) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
-	if !d.once(key, runtime.FlattenText(content)) {
+	text := runtime.FlattenText(content)
+	if d.sent(key, text) {
 		return d.LookupDelivery(context.Background(), name, key)
 	}
-	return d.FullFake.NudgeKeyed(name, content, key)
+	r, err := d.FullFake.NudgeKeyed(name, content, key)
+	if err == nil {
+		d.apply(key, text)
+	}
+	return r, err
 }
 
-// NudgeFenced implements runtime.FencedInputProvider, applying a key once.
+// NudgeFenced implements runtime.FencedInputProvider as NudgeKeyed applies a
+// key: a first send is held and its receipt fills n.Receipt
+// (FullFake.NudgeFenced), and a repeated key answers with the held receipt.
 func (d *dedupFake) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
-	if !d.once(n.DeliveryKey, runtime.FlattenText(content)) {
-		return nil
+	text := runtime.FlattenText(content)
+	if d.sent(n.DeliveryKey, text) {
+		r, err := d.LookupDelivery(ctx, name, n.DeliveryKey)
+		if err == nil && n.Receipt != nil {
+			*n.Receipt = r
+		}
+		return err
 	}
-	return d.Fake.NudgeFenced(ctx, name, content, n)
+	if err := d.FullFake.NudgeFenced(ctx, name, content, n); err != nil {
+		return err
+	}
+	d.apply(n.DeliveryKey, text)
+	return nil
 }
 
 // x2Exec is the live executor host runs for f's conversation over sp: the
@@ -107,13 +128,47 @@ func x2LeaseTTL(host string) time.Duration {
 	return opjournal.DefaultLeaseTTL
 }
 
+// x2CheckDedupRecovery checks the deduplicating runtime's side of a
+// recovery from a crash at stage. The recovery looks the delivery up under
+// the batch's key once: after the effect the runtime holds it, so the
+// recovery sends nothing and records the held receipt via replayed; after
+// the Take it holds none, so the recovery sends once and records the
+// receipt that send was held under. Either way the text is applied once,
+// with no repeat line.
+func x2CheckDedupRecovery(t *testing.T, f *laneFixture, dd *dedupFake, got opjournal.Op, stage opjournal.LaneStage) {
+	t.Helper()
+	key := opjournal.RuntimeDeliveryKey(got.DeliveryKey)
+	lookups := 0
+	for _, c := range f.sp.SnapshotCalls() {
+		if c.Method == "LookupDelivery" && c.DeliveryKey == key {
+			lookups++
+		}
+	}
+	via := laneViaLive
+	if stage == opjournal.LaneStageEffected {
+		via = laneViaReplayed
+	}
+	held, ok := f.sp.KeyedDeliveries[f.name][key]
+	r := got.Outcome.Result
+	switch {
+	case lookups != 1:
+		t.Fatalf("lookups under %q = %d, want the recovery's one", key, lookups)
+	case !ok || r.Via != via || r.Delivery.MessageID != held.MessageID || !r.Delivery.MessageAt.Equal(held.MessageAt):
+		t.Fatalf("result %+v, held receipt %+v (held %v); want via %s with the held receipt", r, held, ok, via)
+	case len(dd.sends) != 1 || dd.sends[0].DeliveryKey != key:
+		t.Fatalf("sends %+v, want one send, under %q", dd.sends, key)
+	case len(dd.applied) != 1 || strings.Contains(dd.applied[0], opjournal.RedeliveryNote):
+		t.Fatalf("applied %q, want the text once with no repeat line", dd.applied)
+	}
+}
+
 // TestLaneX2DedupColumn is X2's deduplicating-runtime column, in process: a
 // lane host (ctl or cli) crashes after its Take or after its effect, and a
 // fresh controller lane over the same store recovers the op once the lease
-// lapses. On a runtime that deduplicates by delivery key the text is applied
-// once and every send under the key is byte-identical, with no repeat line;
-// on a plain runtime the repeat is applied again with the line. The op
-// records the repeat either way.
+// lapses. On a runtime that deduplicates by delivery key the recovery looks
+// the delivery up first and replays the receipt the runtime holds
+// (x2CheckDedupRecovery); on a plain runtime the repeat is applied again
+// with the repeat line. The op records the repeat either way.
 func TestLaneX2DedupColumn(t *testing.T) {
 	stores := map[string]func(t *testing.T) beads.Store{
 		"mem": func(*testing.T) beads.Store { return newLaneTestStore() },
@@ -151,25 +206,18 @@ func TestLaneX2DedupColumn(t *testing.T) {
 						if got.Outcome.Arm != opjournal.ArmSucceeded || got.Attempt != 2 || got.MaybeDelivered != 1 {
 							t.Fatalf("op %+v, want succeeded on attempt 2 with maybe_delivered 1", got)
 						}
-						var texts []string
 						if dedup {
-							texts = dd.applied
-							for _, s := range dd.sends {
-								if s.Message != dd.sends[0].Message || s.DeliveryKey != dd.sends[0].DeliveryKey {
-									t.Fatalf("sends under the key differ: %+v", dd.sends)
-								}
-							}
-						} else {
-							for _, n := range f.nudges() {
-								texts = append(texts, n.Message)
-							}
+							x2CheckDedupRecovery(t, f, dd, got, stage)
+							return
+						}
+						var texts []string
+						for _, n := range f.nudges() {
+							texts = append(texts, n.Message)
 						}
 						switch {
-						case dedup && (len(texts) != 1 || strings.Contains(texts[0], opjournal.RedeliveryNote)):
-							t.Fatalf("applied %q, want the text once with no repeat line", texts)
-						case !dedup && stage == opjournal.LaneStageTaken && (len(texts) != 1 || !strings.Contains(texts[0], opjournal.RedeliveryNote)):
+						case stage == opjournal.LaneStageTaken && (len(texts) != 1 || !strings.Contains(texts[0], opjournal.RedeliveryNote)):
 							t.Fatalf("applied %q, want the one redelivery with its repeat line", texts)
-						case !dedup && stage == opjournal.LaneStageEffected && (len(texts) != 2 || strings.Contains(texts[0], opjournal.RedeliveryNote) || !strings.Contains(texts[1], opjournal.RedeliveryNote)):
+						case stage == opjournal.LaneStageEffected && (len(texts) != 2 || strings.Contains(texts[0], opjournal.RedeliveryNote) || !strings.Contains(texts[1], opjournal.RedeliveryNote)):
 							t.Fatalf("applied %q, want two, the second with the repeat line", texts)
 						}
 					})

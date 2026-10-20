@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/opjournal"
@@ -512,25 +513,28 @@ func TestSessionNudgeLaneKeyReplays(t *testing.T) {
 			t.Fatalf("replay = %d, %q", code, stderr)
 		}
 	})
+	// gc session submit records its op, legacy:cli under the operator,
+	// with the policy a wait-idle lane nudge's request has, so the key it
+	// used names that op.
 	t.Run("a legacy op is never taken by the lane", func(t *testing.T) {
 		c := newCLILaneCity(t)
 		st := c.laneStore(t)
 		legacy, _, err := st.Propose(opjournal.Request{
 			Conversation: c.id, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLegacyCLI, ClientKey: "k-r5",
 			Producer: opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
-			Payload:  cliLaneTestMessage, Policy: cliLaneNudgePolicy(nudgeDeliveryQueue),
+			Payload:  cliLaneTestMessage, Policy: api.MessageOpPolicy(session.SubmitIntentDefault),
 		})
 		if err != nil {
 			t.Fatalf("Propose: %v", err)
 		}
-		code, _, stderr := c.nudge(nudgeDeliveryQueue, "k-r5", false, cliLaneTestMessage)
+		code, _, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-r5", false, cliLaneTestMessage)
 		if code != 1 || !strings.Contains(stderr, "in progress under its legacy path") {
 			t.Fatalf("open legacy = %d, %q", code, stderr)
 		}
 		if _, err := st.Close(legacy.ID, opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyQueued}}, "legacy:cli"); err != nil {
 			t.Fatalf("closing: %v", err)
 		}
-		code, stdout, stderr := c.nudge(nudgeDeliveryQueue, "k-r5", false, cliLaneTestMessage)
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-r5", false, cliLaneTestMessage)
 		if code != 0 || !strings.HasPrefix(stdout, "Queued nudge for ") || !strings.Contains(stderr, "replayed op "+legacy.ID) {
 			t.Fatalf("closed legacy = %d, %q, %q", code, stdout, stderr)
 		}
@@ -1001,4 +1005,82 @@ func TestSessionNudgeLaneHeldOpAttribution(t *testing.T) {
 			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
 		}
 	})
+}
+
+// contractBreakingFake acks a fenced nudge with a receipt whose message id
+// is longer than the journal stores.
+type contractBreakingFake struct{ runtime.FullFake }
+
+func (f contractBreakingFake) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	if err := f.FullFake.NudgeFenced(ctx, name, content, n); err != nil {
+		return err
+	}
+	if n.Receipt != nil {
+		n.Receipt.MessageID = strings.Repeat("m", 300)
+	}
+	return nil
+}
+
+// A Done that landed with the runtime's answer out of contract reports the
+// delivery and warns of the breach: the op closed succeeded with the message
+// id dropped, so the breach is neither dropped nor blamed on recording the
+// delivery.
+func TestSessionNudgeLaneContractBreachIsWarned(t *testing.T) {
+	c := newCLILaneCity(t)
+	var stdout, stderr bytes.Buffer
+	sp := contractBreakingFake{runtime.FullFake{Fake: c.sp}}
+	code := deliverSessionNudgeKeyed(c.target, c.store, sp, cliLaneTestMessage, nudgeDeliveryWaitIdle, "k-contract", false, &stdout, &stderr)
+	if code != 0 || stdout.String() != "Nudged "+c.target.agentKey()+"\n" || len(c.nudges()) != 1 {
+		t.Fatalf("nudge = %d, stdout %q, %d deliveries; stderr %q; want delivered once", code, stdout.String(), len(c.nudges()), stderr.String())
+	}
+	op := c.only(t)
+	if op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Degradation != opjournal.DegradationExecutorContract || op.Outcome.Result.Delivery.MessageID != "" {
+		t.Fatalf("op outcome %+v, want succeeded{executor_contract} with the message id dropped", op.Outcome)
+	}
+	want := "warning: the runtime's answer to the delivery of op " + op.ID + " broke the executor contract"
+	if got := stderr.String(); !strings.Contains(got, want) || !strings.Contains(got, "delivery message id") || strings.Contains(got, "recording the delivery") {
+		t.Fatalf("stderr %q, want %q naming the message id", got, want)
+	}
+	// --key's rerun reports the first run's outcome, the breach included.
+	t.Run("a same-key rerun repeats the warning", func(t *testing.T) {
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-contract", false, cliLaneTestMessage)
+		if code != 0 || stdout != "Nudged "+c.target.agentKey()+"\n" || len(c.nudges()) != 1 {
+			t.Fatalf("rerun = %d, stdout %q, %d deliveries; stderr %q; want the delivery replayed", code, stdout, len(c.nudges()), stderr)
+		}
+		if !strings.Contains(stderr, "replayed op "+op.ID) || !strings.Contains(stderr, want+" (the op records degradation executor_contract)") {
+			t.Fatalf("stderr %q, want the replay and %q", stderr, want)
+		}
+	})
+}
+
+// An inline delivery the runtime could not confirm may have reached the
+// session: the Done releases the op for a redelivery marked as a possible
+// repeat, and the nudge, reported queued, warns of it. A delivery the
+// runtime reports it never sent is released too, but nothing may repeat.
+func TestSessionNudgeLaneUnconfirmedDeliveryIsWarned(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		warns bool
+	}{
+		{name: "unconfirmed", err: fmt.Errorf("%w: submit Enter not confirmed", runtime.ErrNudgeDeliveryUnconfirmed), warns: true},
+		{name: "not sent", err: fmt.Errorf("%w: pane gone", runtime.ErrNudgeNotSent)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newCLILaneCity(t)
+			c.sp.NudgeErrors = map[string]error{c.name: tc.err}
+			code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+			if code != 0 || stdout != "Queued nudge for "+c.target.agentKey()+" in the conversation lane\n" || len(c.nudges()) != 1 {
+				t.Fatalf("nudge = %d, stdout %q, %d deliveries; stderr %q; want one attempt, queued", code, stdout, len(c.nudges()), stderr)
+			}
+			op := c.only(t)
+			if op.Status != opjournal.StatusAccepted || op.Attempt != 1 {
+				t.Fatalf("op %s attempt %d, want released after attempt 1", op.Status, op.Attempt)
+			}
+			warned := strings.Contains(stderr, "warning: the delivery of op "+op.ID+" may have reached the session but was not confirmed ("+op.LastError+"); the controller delivers it again after its retry backoff, marked as a possible repeat")
+			if maybe := op.MaybeDelivered == op.Attempt; warned != tc.warns || maybe != tc.warns {
+				t.Fatalf("warned %v, maybe delivered %v (last error %q), want %v; stderr %q", warned, maybe, op.LastError, tc.warns, stderr)
+			}
+		})
+	}
 }

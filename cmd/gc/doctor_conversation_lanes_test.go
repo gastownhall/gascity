@@ -47,6 +47,7 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 		name     string
 		kinds    []string
 		store    beads.Store
+		openErr  error
 		st       conversationLaneStatus
 		queryErr error
 		status   doctor.CheckStatus
@@ -63,6 +64,8 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 			name: "incapable store", kinds: []string{"message"}, store: bd, status: doctor.StatusError,
 			want: "conversation lanes need guarded batches; this city's sessions class is bound to the bd CLI (BdStore)", opens: 1,
 		},
+		{name: "store does not open", kinds: []string{"message"}, openErr: errors.New("dolt: connection refused"), st: running, status: doctor.StatusWarning, want: "opening the city store failed: dolt: connection refused", opens: 1},
+		{name: "no sessions store", kinds: []string{"message"}, st: running, status: doctor.StatusWarning, want: "the city store has no sessions store", opens: 1},
 		{name: "no reply", kinds: []string{"message"}, store: mem, queryErr: errors.New("dial: no such file"), status: doctor.StatusWarning, want: "no lane-status reply", opens: 1},
 		{name: "no host", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusError, want: "runs no lane host for this city, so the listed kinds go unserved", opens: 1},
 		{name: "refused", kinds: []string{"message"}, store: mem, st: conversationLaneStatus{State: laneHostStateRefused, Reason: "conversation lanes need guarded batches"}, status: doctor.StatusError, want: "refused to start the lane host", opens: 1},
@@ -75,6 +78,12 @@ func TestConversationLanesDoctorStates(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c, opened := newConversationLanesCheckForTest(tc.kinds, tc.store, tc.st, tc.queryErr)
+			if tc.openErr != nil {
+				c.open = func() (beads.Store, error) {
+					*opened++
+					return nil, tc.openErr
+				}
+			}
 			r := c.Run(&doctor.CheckContext{CityPath: "/city"})
 			if r.Status != tc.status || !strings.Contains(r.Message, tc.want) {
 				t.Fatalf("Run = %v %q, want %v containing %q", r.Status, r.Message, tc.status, tc.want)

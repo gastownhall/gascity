@@ -135,98 +135,139 @@ func boolText(b bool) string {
 
 // do carries out op and returns its stdout and exit code.
 func (s state) do(op, name string, rest []string, stdin io.Reader) (string, int, error) {
-	box := s.path("box", name)
 	switch op {
 	case "start":
-		cfg, err := io.ReadAll(stdin)
-		if err != nil {
-			return "", 0, err
-		}
-		if exists(box) {
-			return "", 0, fmt.Errorf("session %s already exists", name)
-		}
-		if err := os.WriteFile(s.path("config", name, "json"), cfg, 0o644); err != nil {
-			return "", 0, err
-		}
-		return "", 0, os.WriteFile(box, nil, 0o644)
+		return "", 0, s.start(name, stdin)
 	case "stop":
-		metas, _ := filepath.Glob(s.path("meta", name, "*"))
-		for _, m := range append(metas, box) {
-			if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
-				return "", 0, err
-			}
-		}
-		return "", 0, nil
+		return "", 0, s.stop(name)
 	case "is-running":
-		return boolText(exists(box)), 0, nil
+		return boolText(exists(s.path("box", name))), 0, nil
 	case "process-alive":
 		_, _ = io.Copy(io.Discard, stdin)
-		return boolText(exists(box)), 0, nil
+		return boolText(exists(s.path("box", name))), 0, nil
 	case "list-running":
-		boxes, _ := filepath.Glob(s.path("box", "*"))
-		var b strings.Builder
-		prefix := s.path("box", name)
-		for _, p := range boxes {
-			if strings.HasPrefix(p, prefix) {
-				b.WriteString(strings.TrimPrefix(filepath.Base(p), "box."))
-				b.WriteString("\n")
-			}
-		}
-		return b.String(), 0, nil
+		return s.listRunning(name), 0, nil
 	case "set-meta", "get-meta", "remove-meta":
-		if len(rest) < 2 {
-			return "", 0, fmt.Errorf("%s needs a key", op)
-		}
-		meta := s.path("meta", name, rest[1])
-		switch op {
-		case "set-meta":
-			v, err := io.ReadAll(stdin)
-			if err != nil {
-				return "", 0, err
-			}
-			return "", 0, os.WriteFile(meta, v, 0o644)
-		case "get-meta":
-			v, err := os.ReadFile(meta)
-			if os.IsNotExist(err) {
-				return "", 0, nil
-			}
-			return string(v), 0, err
-		default:
-			if err := os.Remove(meta); err != nil && !os.IsNotExist(err) {
-				return "", 0, err
-			}
-			return "", 0, nil
-		}
+		out, err := s.meta(op, name, rest, stdin)
+		return out, 0, err
 	case "get-last-activity":
-		mode, _ := os.ReadFile(s.path("activity-mode"))
-		if strings.TrimSpace(string(mode)) != "last-nudge" {
-			return "", 0, nil
-		}
-		at, err := os.ReadFile(s.path("activity", name))
-		if os.IsNotExist(err) {
-			return "", 0, nil
-		}
-		return strings.TrimSpace(string(at)) + "\n", 0, err
+		out, err := s.lastActivity(name)
+		return out, 0, err
 	case "nudge":
-		text, err := io.ReadAll(stdin)
-		if err != nil {
-			return "", 0, err
-		}
-		at := now()
-		err = s.appendLocked("deliveries", nil, func(lines int) any {
-			return Delivery{Seq: lines + 1, At: at, Session: name, Text: string(text)}
-		})
-		if err != nil {
-			return "", 0, err
-		}
-		mode, _ := os.ReadFile(s.path("activity-mode"))
-		if strings.TrimSpace(string(mode)) == "last-nudge" {
-			return "", 0, os.WriteFile(s.path("activity", name), []byte(at), 0o644)
-		}
-		return "", 0, nil
+		return "", 0, s.nudge(name, stdin)
 	case "interrupt", "send-keys", "clear-scrollback", "peek":
 		return "", 0, nil
 	default:
 		return "", exitUnknownOp, nil
 	}
+}
+
+// start creates session name's box, keeping the config on stdin.
+func (s state) start(name string, stdin io.Reader) error {
+	cfg, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	box := s.path("box", name)
+	if exists(box) {
+		return fmt.Errorf("session %s already exists", name)
+	}
+	if err := os.WriteFile(s.path("config", name, "json"), cfg, 0o644); err != nil {
+		return err
+	}
+	return os.WriteFile(box, nil, 0o644)
+}
+
+// stop removes session name's box and metadata.
+func (s state) stop(name string) error {
+	metas, _ := filepath.Glob(s.path("meta", name, "*"))
+	for _, m := range append(metas, s.path("box", name)) {
+		if err := os.Remove(m); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+// listRunning lists the running sessions whose names start with prefix, one
+// per line.
+func (s state) listRunning(prefix string) string {
+	boxes, _ := filepath.Glob(s.path("box", "*"))
+	var b strings.Builder
+	want := s.path("box", prefix)
+	for _, p := range boxes {
+		if strings.HasPrefix(p, want) {
+			b.WriteString(strings.TrimPrefix(filepath.Base(p), "box."))
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// meta carries out set-meta, get-meta or remove-meta on session name's key
+// rest[1]; set-meta stores stdin.
+func (s state) meta(op, name string, rest []string, stdin io.Reader) (string, error) {
+	if len(rest) < 2 {
+		return "", fmt.Errorf("%s needs a key", op)
+	}
+	meta := s.path("meta", name, rest[1])
+	switch op {
+	case "set-meta":
+		v, err := io.ReadAll(stdin)
+		if err != nil {
+			return "", err
+		}
+		return "", os.WriteFile(meta, v, 0o644)
+	case "get-meta":
+		v, err := os.ReadFile(meta)
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return string(v), err
+	default:
+		if err := os.Remove(meta); err != nil && !os.IsNotExist(err) {
+			return "", err
+		}
+		return "", nil
+	}
+}
+
+// lastNudgeActivity reports whether the activity mode is last-nudge.
+func (s state) lastNudgeActivity() bool {
+	mode, _ := os.ReadFile(s.path("activity-mode"))
+	return strings.TrimSpace(string(mode)) == "last-nudge"
+}
+
+// lastActivity is session name's last activity line: none unless the
+// activity mode is last-nudge.
+func (s state) lastActivity(name string) (string, error) {
+	if !s.lastNudgeActivity() {
+		return "", nil
+	}
+	at, err := os.ReadFile(s.path("activity", name))
+	if os.IsNotExist(err) {
+		return "", nil
+	}
+	return strings.TrimSpace(string(at)) + "\n", err
+}
+
+// nudge appends the text on stdin to deliveries.jsonl and, under the
+// last-nudge activity mode, stamps the nudge's time as session name's
+// activity.
+func (s state) nudge(name string, stdin io.Reader) error {
+	text, err := io.ReadAll(stdin)
+	if err != nil {
+		return err
+	}
+	at := now()
+	err = s.appendLocked("deliveries", nil, func(lines int) any {
+		return Delivery{Seq: lines + 1, At: at, Session: name, Text: string(text)}
+	})
+	if err != nil {
+		return err
+	}
+	if s.lastNudgeActivity() {
+		return os.WriteFile(s.path("activity", name), []byte(at), 0o644)
+	}
+	return nil
 }

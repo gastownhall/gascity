@@ -14,13 +14,14 @@ package main
 // In its live delivery modes (wait-idle, immediate) the nudge then runs one
 // ConversationLane pass over its conversation with the live executor, under
 // lane host cli and a 30 s lease: a session at a boundary takes the nudge at
-// once, with or without a running controller. The pass never waits for a
-// boundary; a busy session leaves the op to the controller's lane host. It
-// is a full pass: it may close any op of the conversation by rule, run
-// control before content, and carry other producers' notices in its batch.
-// The CLI hosts no observer and writes no turn fact; it never requests a
-// wake itself (the lane host's pass does, after the ring). Queue mode runs no
-// pass and makes no runtime call.
+// once, with or without a running controller, and so does a busy one whose
+// runtime an immediate nudge can steer (Caps.Steer). The pass never waits
+// for a boundary; a busy session it cannot deliver to leaves the op to the
+// controller's lane host. It is a full pass: it may close any op of the
+// conversation by rule, run control before content, and carry other
+// producers' notices in its batch. The CLI hosts no observer and writes no
+// turn fact; it never requests a wake itself (the lane host's pass does,
+// after the ring). Queue mode runs no pass and makes no runtime call.
 //
 // After it reports, a lane-routed nudge rings the controller's lane host
 // (lane:<conversation>:<op id>) once, best effort, so the host refreshes the
@@ -34,7 +35,6 @@ import (
 	"slices"
 	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
@@ -92,25 +92,18 @@ func cliLaneNudgePolicy(mode nudgeDeliveryMode) opjournal.Policy {
 
 // cliLaneCheckRequest is the journal's refusal of a lane nudge's key and
 // payload, known before the target resolves: its code and message, or ok.
-// It mirrors Propose's own checks, which stay the authority.
+// It runs the journal's own key and payload checks; Propose stays the
+// authority.
 func cliLaneCheckRequest(key, payload string) (code, message string, ok bool) {
 	if key != "" {
 		if err := opjournal.ValidateClientKey(key); err != nil {
 			return cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), false
 		}
 	}
-	var reason string
-	switch {
-	case payload == "":
-		reason = "message ops require a payload"
-	case !utf8.ValidString(payload):
-		reason = "payload is not valid UTF-8"
-	case len(payload) > opjournal.MaxInlinePayload:
-		reason = fmt.Sprintf("%v: %d bytes, max %d", opjournal.ErrPayloadTooLarge, len(payload), opjournal.MaxInlinePayload)
-	default:
-		return "", "", true
+	if err := opjournal.ValidatePayload(opjournal.KindMessage, payload); err != nil {
+		return cliOpCodeUnavailable, cliLaneUnavailable(err), false
 	}
-	return cliOpCodeUnavailable, cliLaneUnavailable(reason), false
+	return "", "", true
 }
 
 // cliLaneUnavailable is the refusal of a lane nudge whose op cannot be
@@ -278,10 +271,13 @@ func (n *cliLaneNudge) run() int {
 	return code
 }
 
-// replay answers a key that names an existing op: a closed op replays its outcome and runs nothing, an open legacy
-// op is in progress under its own path, and an open lane op goes on as a
-// created one would (done false). The lane path never takes, closes or
-// rewrites a legacy op.
+// replay answers a key that names an existing op: a closed op replays its
+// outcome and runs nothing, an open legacy op is in progress under its own
+// path, and an open lane op goes on as a created one would (done false). A
+// legacy op answers the key gc session submit used, whose op a wait-idle lane
+// nudge's request matches (api.MessageOpPolicy). The lane path never takes,
+// closes or rewrites a legacy op. A delivery whose runtime answer broke the
+// executor contract replays with the contract warning.
 func (n *cliLaneNudge) replay(op opjournal.Op) (code int, done bool) {
 	switch {
 	case op.Executor != opjournal.ExecutorLane && op.Status != opjournal.StatusClosed:
@@ -297,6 +293,9 @@ func (n *cliLaneNudge) replay(op opjournal.Op) (code int, done bool) {
 	fmt.Fprintf(n.stderr, "gc session nudge: replayed op %s\n", op.ID) //nolint:errcheck // best-effort stderr
 	if op.Executor != opjournal.ExecutorLane && op.Outcome.Result.Via == legacyop.ViaLegacyQueued {
 		return n.writeQueued(op.ID, true, " in "+openNudgeQueue(n.target.cityPath, beads.NudgesStore{}).Location), true
+	}
+	if op.Outcome.Degradation == opjournal.DegradationExecutorContract {
+		n.warnContractBreach(op.ID, "the op records degradation "+op.Outcome.Degradation)
 	}
 	return n.writeDelivered(op.ID, true), true
 }
@@ -328,23 +327,22 @@ func (n *cliLaneNudge) pass(ctx context.Context) (opjournal.PassResult, error) {
 }
 
 // report prints the op's state after this run, read from its row, and
-// returns the exit code. A pass error is a warning: the op is accepted.
+// returns the exit code. A pass error is a warning: the op is accepted. So
+// is a delivery this pass took whose outcome the runtime could not confirm:
+// the Done released the op with the attempt maybe delivered, and the lane
+// host delivers it again, marked as a possible repeat.
 func (n *cliLaneNudge) report(id string, replayed bool, res opjournal.PassResult, passErr error) int {
 	op, err := n.st.Get(id)
 	if err != nil {
 		n.warnf("reading op %s after the inline delivery failed (%v); it waits for the controller", id, err)
 		return n.writeQueued(id, replayed, " in the conversation lane")
 	}
+	taken := slices.Contains(res.Taken, id)
 	if passErr != nil {
-		switch {
-		case op.Status == opjournal.StatusClosed:
-		case slices.Contains(res.Taken, id):
-			n.warnf("recording the delivery of op %s failed (%v); the controller takes it again after its lease lapses, and it may repeat (recorded on the op)", id, passErr)
-		case op.Status == opjournal.StatusExecuting:
-			n.warnf("the inline delivery did not run (%v); another lane host holds it, and op %s is taken again if that delivery does not finish", passErr, id)
-		default:
-			n.warnf("the inline delivery did not run (%v); op %s waits for the controller", passErr, id)
-		}
+		n.warnPassError(op, taken, res.Done, passErr)
+	}
+	if taken && res.Done == opjournal.DoneReleased && op.Status != opjournal.StatusClosed && op.MaybeDelivered == op.Attempt {
+		n.warnf("the delivery of op %s may have reached the session but was not confirmed (%s); the controller delivers it again after its retry backoff, marked as a possible repeat", id, op.LastError)
 	}
 	switch {
 	case op.Status != opjournal.StatusClosed:
@@ -355,6 +353,31 @@ func (n *cliLaneNudge) report(id string, replayed bool, res opjournal.PassResult
 		n.refusal().refuse(cliOpCodeFailed, fmt.Sprintf("op %s closed %s", id, cliOpOutcomeText(op.Outcome)), id, n.key)
 		return 1
 	}
+}
+
+// warnPassError warns of the inline pass's error, given op as read after it,
+// whether the pass took op and how its Done ended.
+func (n *cliLaneNudge) warnPassError(op opjournal.Op, taken bool, done opjournal.DoneArm, passErr error) {
+	switch {
+	case taken && done != "":
+		// The Done landed, so the error is the executor's answer breaking
+		// its contract.
+		n.warnContractBreach(op.ID, passErr)
+	case op.Status == opjournal.StatusClosed:
+	case taken:
+		n.warnf("recording the delivery of op %s failed (%v); the controller takes it again after its lease lapses, and it may repeat (recorded on the op)", op.ID, passErr)
+	case op.Status == opjournal.StatusExecuting:
+		n.warnf("the inline delivery did not run (%v); another lane host holds it, and op %s is taken again if that delivery does not finish", passErr, op.ID)
+	default:
+		n.warnf("the inline delivery did not run (%v); op %s waits for the controller", passErr, op.ID)
+	}
+}
+
+// warnContractBreach warns that the runtime's answer to the delivery of op
+// id broke the executor contract; why is the breach, or on a replay the op's
+// record of it.
+func (n *cliLaneNudge) warnContractBreach(id string, why any) {
+	n.warnf("the runtime's answer to the delivery of op %s broke the executor contract (%v)", id, why)
 }
 
 // ring rings the lane host for op id once, after the result is written, and
