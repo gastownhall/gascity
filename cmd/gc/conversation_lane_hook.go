@@ -464,7 +464,7 @@ func (e *hookLaneExec) Probe(_ context.Context, conv opjournal.ConversationView)
 		TurnLive:  opjournal.TriUnknown,
 		Caps:      hookLaneCaps(e.pass.leaseTTL, e.pass.room),
 	}
-	p.ContentBlock = session.ContentGate(e.info, true, e.pass.clk.Now())
+	p.ContentBlock = session.ContentGate(e.info, true, e.pass.clk.Now(), session.GateContentAny)
 	if p.ContentBlock == "" && !hookLaneFenceMatches(e.pass.fence, conv) {
 		p.ContentBlock = laneContentBlockIncarnation
 	}
