@@ -79,13 +79,15 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-// messageSentinels maps the message path's legacy errors onto op outcomes
-// (DES-O0API §6.3). The delivery timeouts of /messages and of a recorded
-// /submit are reported as context.DeadlineExceeded.
+// messageSentinels maps the message paths' legacy errors onto op outcomes
+// (DES-O0API §6.3), the API's and the CLI's alike (MessageOpResult). A
+// session whose row or runtime is gone is session_gone. The delivery
+// timeouts of /messages and of a recorded /submit are reported as
+// context.DeadlineExceeded.
 var messageSentinels = legacyop.Sentinels{
 	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
 	ConversationClosed:  []error{session.ErrSessionClosed},
-	SessionGone:         []error{session.ErrSessionNotFound},
+	SessionGone:         []error{session.ErrSessionNotFound, runtime.ErrSessionNotFound},
 	ProviderUnavailable: []error{runtime.ErrRuntimeUnavailable},
 	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
 }
@@ -701,19 +703,13 @@ func messageRequestID(adm *legacyop.Admission) (string, error) {
 	return newRequestID()
 }
 
-// messageOpResult is the op result of a message delivery's legacy result
-// under the API's sentinels (MessageOpResult).
-func messageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
-	return MessageOpResult(messageSentinels, queued, err, interrupt)
-}
-
 // MessageOpResult is the op result of a message delivery's legacy result,
-// its error mapped by sentinels: a delivery whose interrupt the runtime
-// accepted unfenced records that degradation. The API and the CLI's submit
-// fallback both close a message op through it, so one op id closes alike on
-// either path.
-func MessageOpResult(sentinels legacyop.Sentinels, queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
-	res := sentinels.MessageResult(queued, err)
+// its error mapped by messageSentinels: a delivery whose interrupt the runtime
+// accepted unfenced records that degradation. The API and the CLI's message
+// paths all close a message op through it, so one op id closes alike on
+// either surface.
+func MessageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
+	res := messageSentinels.MessageResult(queued, err)
 	if err == nil && interrupt != nil && interrupt.Degradation != "" {
 		res.Outcome.Degradation = interrupt.Degradation
 	}

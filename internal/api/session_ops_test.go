@@ -1782,12 +1782,13 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 		{"interrupt unsupported", false, fmt.Errorf("x: %w", session.ErrTurnInterruptUnsupported), opjournal.ArmFailed, opjournal.ReasonUnsupported, "", turnInterruptUnsupportedCode, turnInterruptUnsupportedCode},
 		{"closed", false, fmt.Errorf("x: %w", session.ErrSessionClosed), opjournal.ArmSkipped, opjournal.ReasonConversationClosed, "", "resolve_failed", "resolve_failed"},
 		{"gone", false, fmt.Errorf("x: %w", session.ErrSessionNotFound), opjournal.ArmFailed, opjournal.ReasonSessionGone, "", "resolve_failed", "resolve_failed"},
+		{"runtime gone", false, fmt.Errorf("x: %w", runtime.ErrSessionNotFound), opjournal.ArmFailed, opjournal.ReasonSessionGone, "", "resolve_failed", "resolve_failed"},
 		{"runtime unavailable", false, fmt.Errorf("x: %w", runtime.ErrRuntimeUnavailable), opjournal.ArmFailed, opjournal.ReasonProviderUnavailable, "", "submit_failed", "message_failed"},
 		{"timeout", false, messageTimeoutError{}, opjournal.ArmFailed, opjournal.ReasonDeadlineInFlight, "", "timeout", "timeout"},
 		{"other", false, errors.New("boom"), opjournal.ArmFailed, opjournal.ReasonOther, "", "submit_failed", "message_failed"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			res := messageOpResult(tc.queued, tc.err, nil)
+			res := MessageOpResult(tc.queued, tc.err, nil)
 			if res.Outcome.Arm != tc.arm || res.Outcome.Reason != tc.reason || res.Outcome.Result.Via != tc.via || res.LeaveOpen {
 				t.Fatalf("result = %+v", res)
 			}
@@ -1836,10 +1837,10 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 		})
 	}
 	unfenced := &session.TurnInterruptReport{Outcome: session.TurnInterruptSettled, Degradation: session.DegradationUnfencedInterrupt}
-	if res := messageOpResult(false, nil, unfenced); res.Outcome.Degradation != session.DegradationUnfencedInterrupt {
+	if res := MessageOpResult(false, nil, unfenced); res.Outcome.Degradation != session.DegradationUnfencedInterrupt {
 		t.Fatalf("unfenced interrupt outcome = %+v", res.Outcome)
 	}
-	if res := messageOpResult(false, errors.New("x"), unfenced); res.Outcome.Degradation != "" {
+	if res := MessageOpResult(false, errors.New("x"), unfenced); res.Outcome.Degradation != "" {
 		t.Fatalf("a failed delivery carries a degradation: %+v", res.Outcome)
 	}
 }

@@ -26,15 +26,17 @@ package main
 // the legacy path's in every mode (I11).
 //
 // Output (DES-O0API §8.3): stdout stays the command's own; JSON results gain
-// op_id, key and replayed when an op backs the run. The key, minted when
-// --key is absent, is printed only in JSON and on failures, never on a
-// successful plain-text run. A replayed success prints the command's success
-// output rebuilt from the op, so what only the first run saw is absent from
-// its JSON (close's and wake's wait_nudges_withdrawn, suspend's mode), and
-// names the op on stderr, with any execution option it was given that the
-// op's digest leaves out (kill's --force) noted as not reapplied; a refusal,
-// and a recorded run that fails, names the op and the key on stderr and,
-// under --json, in the failure envelope.
+// op_id, key and replayed when an op backs the run. The key, minted when --key
+// is absent, is printed only in JSON and on failures, never on a successful
+// plain-text run, except submit's report that the API accepted the message,
+// which names the key a rerun reports its outcome under. A replayed success
+// prints the command's success output rebuilt from the op, so what only the
+// first run saw is absent from its JSON (close's and wake's
+// wait_nudges_withdrawn, suspend's mode), and names the op on stderr, with any
+// execution option it was given that the op's digest leaves out (kill's
+// --force) noted as not reapplied; a refusal, and a recorded run that fails,
+// names the op and the key on stderr and, under --json, in the failure
+// envelope.
 //
 // A replay finds its op only once the target resolves to the row the op
 // names. A closed session's alias no longer resolves to it, so a same-key
@@ -60,7 +62,6 @@ package main
 // would kill the replacement.
 
 import (
-	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -198,8 +199,9 @@ type cliOpRequest struct {
 	presetKey string
 	// acceptsAPIOp answers an open legacy:api op under the key as the API
 	// having accepted the request (cliOpAcceptedByAPI) instead of
-	// op_in_progress: submit's local fallback after an API call whose answer
-	// was lost.
+	// op_in_progress, and admits again, which replays it, one the API closed
+	// after admission read it open: submit's local fallback after an API call
+	// whose answer was lost.
 	acceptsAPIOp bool
 	asJSON       bool
 	stdout       io.Writer
@@ -295,10 +297,11 @@ func cliCityConfig(cityPath string, cityErr error, warn io.Writer) (*config.City
 	return loadCityConfig(cityPath, warn)
 }
 
-// preflight opens the op store and checks --key and the payload ahead of a
-// verb's resolution, which may itself write (wake materializes a named
+// preflight opens the op store and checks the request's key and payload ahead
+// of a verb's resolution, which may itself write (wake materializes a named
 // session's row): under require a store that cannot record, and then an
-// invalid key or a payload over opjournal.MaxInlinePayload, refuse before
+// invalid key or a payload the journal refuses whatever the conversation (too
+// large, not valid UTF-8, or empty: legacyop.Recorder.Check), refuse before
 // anything is written. A refusal only proposing the op can
 // raise, such as a journal write that fails, still comes after that write
 // (admitWake). The refusal goes through the recorder, which counts (and
@@ -315,14 +318,14 @@ func (o *cliOp) preflight() bool {
 		return false
 	}
 	if _, err := o.rec.Open(); err != nil {
-		_, aerr := o.rec.Admit(legacyop.Request{Key: o.req.key, Kind: o.req.kind})
+		_, aerr := o.rec.Admit(legacyop.Request{Key: o.requestKey(), Kind: o.req.kind})
 		if !errors.Is(aerr, legacyop.ErrUnavailable) {
 			aerr = err
 		}
 		o.refuseAdmit(aerr)
 		return false
 	}
-	if err := o.rec.Check(legacyop.Request{Key: o.req.key, Payload: o.req.payload, Kind: o.req.kind}); err != nil {
+	if err := o.rec.Check(legacyop.Request{Key: o.requestKey(), Payload: o.req.payload, Kind: o.req.kind}); err != nil {
 		o.refuseAdmit(err)
 		return false
 	}
@@ -359,7 +362,7 @@ func (o *cliOp) start() cliOpStart {
 	}
 	principal, actor := o.principal()
 	o.rescopeRestartedKill(principal)
-	adm, err := rec.Admit(legacyop.Request{
+	areq := legacyop.Request{
 		Conversation: req.conversation,
 		Principal:    principal,
 		Actor:        actor,
@@ -369,11 +372,18 @@ func (o *cliOp) start() cliOpStart {
 		Kind:         req.kind,
 		Policy:       req.policy,
 		Scope:        o.req.scope,
-	})
+	}
+	adm, err := rec.Admit(areq)
 	if err != nil {
-		if o.acceptedByAPI(err) {
+		switch o.apiOpState(err) {
+		case cliAPIOpOpen:
 			return cliOpAcceptedByAPI
+		case cliAPIOpClosed:
+			// A closed op does not reopen, so admitting again replays it.
+			adm, err = rec.Admit(areq)
 		}
+	}
+	if err != nil {
 		o.refuseAdmit(err)
 		return cliOpRefused
 	}
@@ -437,25 +447,42 @@ func (o *cliOp) requestKey() string {
 	return o.req.presetKey
 }
 
-// acceptedByAPI reports whether err is a busy refusal of an open op the API
-// executes, for a request that accepts one (acceptsAPIOp), and keeps that op
-// as apiOp. An op that does not read, or that another executor holds, is the
-// busy refusal it is.
-func (o *cliOp) acceptedByAPI(err error) bool {
+// cliAPIOp is what the op behind a busy refusal is to a request that accepts
+// an open legacy:api op (acceptsAPIOp).
+type cliAPIOp int
+
+const (
+	// cliAPIOpNone leaves the refusal as it is: it is not busy, the request
+	// accepts no API op, or the op does not read or another executor holds
+	// it.
+	cliAPIOpNone cliAPIOp = iota
+	// cliAPIOpOpen is the API's acceptance of the request: it runs the op.
+	cliAPIOpOpen
+	// cliAPIOpClosed is an op the API closed after Admit read it open.
+	cliAPIOpClosed
+)
+
+// apiOpState reads the op behind err, a busy refusal, for a request that
+// accepts an open legacy:api op (acceptsAPIOp), and keeps it as apiOp when
+// the API holds it open.
+func (o *cliOp) apiOpState(err error) cliAPIOp {
 	var busy *legacyop.BusyError
 	if !o.req.acceptsAPIOp || !errors.As(err, &busy) {
-		return false
+		return cliAPIOpNone
 	}
 	st, oerr := o.rec.Open()
 	if oerr != nil {
-		return false
+		return cliAPIOpNone
 	}
 	op, gerr := st.Get(busy.ID)
-	if gerr != nil || op.Executor != opjournal.ExecutorLegacyAPI || op.Status == opjournal.StatusClosed {
-		return false
+	switch {
+	case gerr != nil || op.Executor != opjournal.ExecutorLegacyAPI:
+		return cliAPIOpNone
+	case op.Status == opjournal.StatusClosed:
+		return cliAPIOpClosed
 	}
 	o.apiOp = op
-	return true
+	return cliAPIOpOpen
 }
 
 // rescopeRestartedKill scopes a kill under a client key to the earlier kill
@@ -805,16 +832,6 @@ func (o *cliOp) replayedQueued() bool {
 	return o.outcome().Result.Via == legacyop.ViaLegacyQueued
 }
 
-// cliMessageSentinels maps the CLI message paths' legacy errors onto op
-// outcomes (DES-O0API §6.3). Message ops always close.
-var cliMessageSentinels = legacyop.Sentinels{
-	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
-	ConversationClosed:  []error{session.ErrSessionClosed},
-	SessionGone:         []error{session.ErrSessionNotFound, runtime.ErrSessionNotFound},
-	ProviderUnavailable: []error{runtime.ErrRuntimeUnavailable},
-	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
-}
-
 // Refusal reasons the message verbs close an op with, after refused:.
 const (
 	// cliOpRefusedPendingInteraction is an immediate nudge refused because
@@ -856,12 +873,12 @@ func (o *cliOp) finishMessageInterrupted(queued bool, err error, interrupt *sess
 
 // cliMessageOpResult is the op result of a CLI message path's legacy result:
 // a refusal (cliMessageRefusal) closes failed{refused:<why>}, anything else
-// as api.MessageOpResult maps it under cliMessageSentinels.
+// as api.MessageOpResult maps it for the API too. Message ops always close.
 func cliMessageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
 	if refusal := (*cliMessageRefusal)(nil); errors.As(err, &refusal) {
 		return legacyop.Result{Outcome: cliOpRefusedOutcome(refusal.why)}
 	}
-	return api.MessageOpResult(cliMessageSentinels, queued, err, interrupt)
+	return api.MessageOpResult(queued, err, interrupt)
 }
 
 // cliOpRefusedOutcome is failed{refused:<why>}.

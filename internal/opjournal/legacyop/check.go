@@ -1,15 +1,17 @@
 package legacyop
 
 import (
-	"fmt"
+	"errors"
 
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/rollout/gate"
 )
 
 // Check runs, in require, the refusals Admit makes before it reads the
-// request's conversation: an invalid client key, a payload over
-// opjournal.MaxInlinePayload and an op store that does not open. A producer
+// request's conversation: an invalid client key, a payload the journal
+// refuses whatever the conversation (over opjournal.MaxInlinePayload, not
+// valid UTF-8, or empty for a kind that requires one: see
+// opjournal.ValidatePayload) and an op store that does not open. A producer
 // that must do something visible before it knows the conversation (the API
 // materializing a configured named session, DES-O0API §6.4) checks first, so
 // a request require refuses for these reasons has no effect at all. It
@@ -28,9 +30,13 @@ func (r *Recorder) Check(req Request) error {
 			return err
 		}
 	}
-	if len(req.Payload) > opjournal.MaxInlinePayload {
-		r.count(req.Kind, StageAdmit, ResultRefused, ReasonPayloadTooLarge)
-		return fmt.Errorf("%w: %d bytes, max %d", opjournal.ErrPayloadTooLarge, len(req.Payload), opjournal.MaxInlinePayload)
+	if err := opjournal.ValidatePayload(req.Kind, req.Payload); err != nil {
+		reason := ReasonInvalidRequest
+		if errors.Is(err, opjournal.ErrPayloadTooLarge) {
+			reason = ReasonPayloadTooLarge
+		}
+		r.count(req.Kind, StageAdmit, ResultRefused, reason)
+		return err
 	}
 	if _, err := r.Open(); err != nil {
 		_, refused := r.cannotRecord(req.Kind, req.Key, false, StageOpen, openReason(err), err)

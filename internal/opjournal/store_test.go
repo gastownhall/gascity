@@ -320,6 +320,34 @@ func TestProposePayloadCap(t *testing.T) {
 	}
 }
 
+// TestValidatePayload pins the exported payload check's verdicts: it refuses
+// what Propose refuses of a payload whatever the op's conversation, a payload
+// over the cap as ErrPayloadTooLarge, one a kind cannot carry as
+// ErrInvalidRequest, and an unknown kind as ErrUnknownKind. It is
+// validatePayload, the check Propose applies, so the two cannot drift.
+func TestValidatePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		kind    Kind
+		payload string
+		want    error
+	}{
+		{"message", KindMessage, "hello", nil},
+		{"message at the cap", KindMessage, strings.Repeat("a", MaxInlinePayload), nil},
+		{"message over the cap", KindMessage, strings.Repeat("a", MaxInlinePayload+1), ErrPayloadTooLarge},
+		{"message not UTF-8", KindMessage, "bad \xff text", ErrInvalidRequest},
+		{"message empty", KindMessage, "", ErrInvalidRequest},
+		{"wake without payload", KindWake, "", nil},
+		{"wake with payload", KindWake, "x", ErrInvalidRequest},
+		{"unknown kind", "teleport", "x", ErrUnknownKind},
+	} {
+		err := ValidatePayload(tc.kind, tc.payload)
+		if (tc.want == nil) != (err == nil) || tc.want != nil && !errors.Is(err, tc.want) {
+			t.Errorf("%s: ValidatePayload = %v, want %v", tc.name, err, tc.want)
+		}
+	}
+}
+
 func TestProposeValidation(t *testing.T) {
 	h := newHarness(t)
 	withKind := func(k Kind, f func(*Request)) Request {

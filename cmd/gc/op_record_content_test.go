@@ -534,8 +534,19 @@ func submitDeliveries(sp *runtime.Fake) int {
 }
 
 // proposeAsAPI records the submit as the API's admitMessageOp records it, on
-// the op store h opens.
+// the op store h opens, and closes it with outcome when one is given.
 func proposeAsAPI(t *testing.T, h *cliOpHarness, conv, key, text string, intent session.SubmitIntent, outcome *opjournal.Outcome) opjournal.Op {
+	t.Helper()
+	adm := admitAsAPI(t, h, conv, key, text, intent)
+	if outcome == nil {
+		return adm.Op
+	}
+	return adm.Finish(legacyop.Result{Outcome: *outcome}).Op
+}
+
+// admitAsAPI admits the submit as the API's admitMessageOp admits it, on the
+// op store h opens, and returns the admission of its open op.
+func admitAsAPI(t *testing.T, h *cliOpHarness, conv, key, text string, intent session.SubmitIntent) *legacyop.Admission {
 	t.Helper()
 	st, err := opjournal.NewStore(beads.SessionStore{Store: h.opStore}, &clock.Fake{Time: cliOpT0}, opjournal.WithIDPrefix("gc"))
 	if err != nil {
@@ -549,10 +560,30 @@ func proposeAsAPI(t *testing.T, h *cliOpHarness, conv, key, text string, intent 
 	if err != nil || !adm.Recorded {
 		t.Fatalf("API admit: recorded=%v err=%v", adm != nil && adm.Recorded, err)
 	}
-	if outcome == nil {
-		return adm.Op
+	return adm
+}
+
+// closingOnReadStore is an op store that runs beforeRead once, just before it
+// serves the nth read of op id: a writer that lands between two reads.
+type closingOnReadStore struct {
+	*beads.MemStore
+	id         string
+	nth        int
+	reads      int
+	beforeRead func()
+}
+
+// Get serves a read, first running beforeRead at the nth read of id.
+func (s *closingOnReadStore) Get(id string) (beads.Bead, error) {
+	if id == s.id {
+		s.reads++
+		if s.reads == s.nth && s.beforeRead != nil {
+			before := s.beforeRead
+			s.beforeRead = nil
+			before()
+		}
 	}
-	return adm.Finish(legacyop.Result{Outcome: *outcome}).Op
+	return s.MemStore.Get(id)
 }
 
 // lostAnswerServer accepts a submit, records it as the API would through
@@ -644,6 +675,38 @@ func TestSessionSubmitFallbackDedupe(t *testing.T) {
 		}
 		if n := submitDeliveries(c.sp); n != 0 {
 			t.Fatalf("deliveries = %d, want none", n)
+		}
+	})
+	t.Run("api closed its op between the fallback's two reads: replays the outcome", func(t *testing.T) {
+		var h *cliOpHarness
+		var c *cliOpCity
+		var store *closingOnReadStore
+		closed := false
+		srv := lostAnswerServer(t, func(key string) {
+			adm := admitAsAPI(t, h, c.bead.ID, key, text, session.SubmitIntentDefault)
+			// Admit reads the op open; the API closes it before the
+			// fallback reads it again to report it accepted.
+			store.id, store.nth = adm.Op.ID, 2
+			store.beforeRead = func() {
+				adm.Finish(legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyDelivered}}})
+				closed = true
+			}
+		})
+		h, c = submitOpCity(t, "auto", srv)
+		store = &closingOnReadStore{MemStore: h.opStore.(*beads.MemStore)}
+		h.opStore = store
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+		}
+		if !closed {
+			t.Fatalf("the API's op was read %d times after its admission, so it never closed between the fallback's reads", store.reads)
+		}
+		if n := submitDeliveries(c.sp); n != 0 {
+			t.Fatalf("deliveries = %d, want none: the API delivered it", n)
+		}
+		if !strings.Contains(stdout.String(), "Submitted to "+c.bead.ID) || !strings.Contains(stderr.String(), "replayed op") {
+			t.Fatalf("stdout = %q, stderr = %q; want the replayed outcome", stdout.String(), stderr.String())
 		}
 	})
 	t.Run("api accepted and closed, answer lost: replays the outcome", func(t *testing.T) {
@@ -746,10 +809,13 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 	})
 }
 
-// D12, §8.2: under require, a store that cannot record refuses before the
-// target resolves, so a configured named session with no row gets none.
+// D12, §8.2: under require, a store that cannot record, and a request the
+// journal refuses whatever its conversation (an invalid key, or a payload too
+// large, not valid UTF-8 or empty), refuse before the target resolves, so a
+// configured named session with no row gets none.
 func TestMessageVerbsRequireRefuseBeforeMaterializing(t *testing.T) {
 	oversized := strings.Repeat("x", opjournal.MaxInlinePayload+1)
+	invalidUTF8 := "bad \xff text"
 	invalidKey := strings.Repeat("k", 513)
 	submit := func(text, key string) func(*testing.T) (int, string, string) {
 		return func(t *testing.T) (int, string, string) {
@@ -777,9 +843,13 @@ func TestMessageVerbsRequireRefuseBeforeMaterializing(t *testing.T) {
 	}{
 		{"submit store", true, submit("hello", ""), cliOpCodeUnavailable, "op journal cannot record this request"},
 		{"submit oversized", false, submit(oversized, ""), cliOpCodeUnavailable, "payload too large"},
+		{"submit invalid UTF-8", false, submit(invalidUTF8, ""), cliOpCodeUnavailable, "not valid UTF-8"},
+		{"submit empty", false, submit("", ""), cliOpCodeUnavailable, "require a payload"},
 		{"submit invalid key", false, submit("hello", invalidKey), cliOpCodeInvalidKey, "invalid --key"},
 		{"nudge store", true, nudge("hello", ""), cliOpCodeUnavailable, "op journal cannot record this request"},
 		{"nudge oversized", false, nudge(oversized, ""), cliOpCodeUnavailable, "payload too large"},
+		{"nudge invalid UTF-8", false, nudge(invalidUTF8, ""), cliOpCodeUnavailable, "not valid UTF-8"},
+		{"nudge empty", false, nudge("", ""), cliOpCodeUnavailable, "require a payload"},
 		{"nudge invalid key", false, nudge("hello", invalidKey), cliOpCodeInvalidKey, "invalid --key"},
 		{"mail notify store", true, func(t *testing.T) (int, string, string) {
 			var warn bytes.Buffer
