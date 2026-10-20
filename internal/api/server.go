@@ -132,6 +132,11 @@ type Server struct {
 	storeHealthComputer func(ctx context.Context) (*StatusStoreHealth, error)
 	storeHealthFlight   singleflight.Group
 
+	// listBuilds shares one build between identical /agents and /sessions
+	// requests, and keeps each list's last answer for when the bead store is
+	// slow. See boundedListBuild.
+	listBuilds listBuilds
+
 	// componentVersions caches the dolt engine and bd CLI versions the
 	// supervisor drives for /v0/status. Binary versions are immutable for
 	// the process lifetime, so they are resolved once on first read.

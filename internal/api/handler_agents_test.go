@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -35,14 +36,19 @@ func (p partialAgentSessionLister) ListRunning(prefix string) ([]string, error) 
 	return filtered, p.err
 }
 
+// activeBeadQueryStore records every in_progress List, so a test can count
+// how many store reads the active-bead lookup cost.
 type activeBeadQueryStore struct {
 	beads.Store
+	mu      sync.Mutex
 	queries []beads.ListQuery
 }
 
 func (s *activeBeadQueryStore) List(query beads.ListQuery) ([]beads.Bead, error) {
-	if query.Status == "in_progress" && (query.Assignee != "" || len(query.Assignees) > 0) {
+	if query.Status == "in_progress" {
+		s.mu.Lock()
 		s.queries = append(s.queries, query)
+		s.mu.Unlock()
 	}
 	return s.Store.List(query)
 }
@@ -860,6 +866,82 @@ func TestAgentGetActiveBeadUsesSessionIDOwnership(t *testing.T) {
 	}
 }
 
+// A dashboard links an agent row to its live session with session.id. Before
+// this field it had to wait on the sessions list, which can take a minute on
+// a busy city. Decode into a wire-shaped struct, not agentResponse, so a
+// renamed JSON tag fails here.
+func TestAgentListAndGetCarrySessionID(t *testing.T) {
+	type wireAgent struct {
+		Name    string `json:"name"`
+		Session *struct {
+			ID   *string `json:"id"`
+			Name string  `json:"name"`
+		} `json:"session"`
+	}
+	get := func(t *testing.T, state *fakeState, path string, out any) {
+		t.Helper()
+		h := newTestCityHandlerWith(t, state, New(state))
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, httptest.NewRequest("GET", cityURL(state, path), nil))
+		if rec.Code != http.StatusOK {
+			t.Fatalf("GET %s: status = %d: %s", path, rec.Code, rec.Body.String())
+		}
+		if err := json.NewDecoder(rec.Body).Decode(out); err != nil {
+			t.Fatalf("GET %s: decode: %v", path, err)
+		}
+	}
+	start := func(t *testing.T, state *fakeState, sessionID string) {
+		t.Helper()
+		if err := state.sp.Start(context.Background(), "myrig--worker", runtime.Config{}); err != nil {
+			t.Fatalf("Start: %v", err)
+		}
+		if sessionID == "" {
+			return
+		}
+		if err := state.sp.SetMeta("myrig--worker", "GC_SESSION_ID", sessionID); err != nil {
+			t.Fatalf("SetMeta(GC_SESSION_ID): %v", err)
+		}
+	}
+
+	t.Run("running session with an id", func(t *testing.T) {
+		state := newFakeState(t)
+		start(t, state, " mc-session \n")
+
+		var list struct {
+			Items []wireAgent `json:"items"`
+		}
+		get(t, state, "/agents", &list)
+		if len(list.Items) != 1 || list.Items[0].Session == nil || list.Items[0].Session.ID == nil {
+			t.Fatalf("list: want one agent with session.id, got %+v", list.Items)
+		}
+		if got := *list.Items[0].Session.ID; got != "mc-session" {
+			t.Errorf("list: session.id = %q, want %q (trimmed GC_SESSION_ID)", got, "mc-session")
+		}
+
+		var one wireAgent
+		get(t, state, "/agent/myrig/worker", &one)
+		if one.Session == nil || one.Session.ID == nil || *one.Session.ID != "mc-session" {
+			t.Errorf("get: session = %+v, want session.id %q", one.Session, "mc-session")
+		}
+	})
+
+	t.Run("running session with no id omits the field", func(t *testing.T) {
+		state := newFakeState(t)
+		start(t, state, "")
+
+		var list struct {
+			Items []wireAgent `json:"items"`
+		}
+		get(t, state, "/agents", &list)
+		if len(list.Items) != 1 || list.Items[0].Session == nil {
+			t.Fatalf("list: want one agent with a session, got %+v", list.Items)
+		}
+		if list.Items[0].Session.ID != nil {
+			t.Errorf("list: session.id = %q, want the field left out", *list.Items[0].Session.ID)
+		}
+	})
+}
+
 func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
 	state := newFakeState(t)
 	sessionName := "myrig--worker"
@@ -910,6 +992,149 @@ func TestAgentListActiveBeadUsesCachedLookup(t *testing.T) {
 	}
 	if store.queries[0].Live {
 		t.Fatal("agent list active-bead lookup should stay cached")
+	}
+}
+
+// TestAgentListReadsEachStoreOnceForActiveBeads: the list used to run one
+// store query per assignee per agent, and a city with 419 pool slots took 8
+// minutes to answer. Now a whole list costs one
+// in_progress read per store, however many agents there are, and each agent
+// still gets the same bead the old newest-first Limit 1 query returned.
+func TestAgentListReadsEachStoreOnceForActiveBeads(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{{
+		Name:              "polecat",
+		Dir:               "myrig",
+		MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(40), ScaleCheck: "echo 40",
+	}}
+	store := &activeBeadQueryStore{Store: beads.NewMemStore()}
+	state.stores["myrig"] = store
+
+	status := "in_progress"
+	holdBead := func(assignee, title string) {
+		t.Helper()
+		b, err := store.Store.Create(beads.Bead{Title: title})
+		if err != nil {
+			t.Fatalf("Create(%s): %v", title, err)
+		}
+		if err := store.Store.Update(b.ID, beads.UpdateOpts{Status: &status, Assignee: &assignee}); err != nil {
+			t.Fatalf("Update(%s): %v", title, err)
+		}
+	}
+	// polecat-2 holds two beads, so the pick between them matters.
+	// polecat-7 is not running and still reports the bead it holds.
+	holdBead("myrig/polecat-2", "older work")
+	holdBead("myrig/polecat-2", "newer work")
+	holdBead("myrig/polecat-7", "stranded work")
+	holdBead("somebody-else", "not an agent")
+
+	want := map[string]string{}
+	for _, name := range []string{"myrig/polecat-2", "myrig/polecat-7"} {
+		got, err := store.Store.List(beads.ListQuery{
+			Assignee: name, Status: "in_progress", Limit: 1, Sort: beads.SortCreatedDesc,
+		})
+		if err != nil || len(got) != 1 {
+			t.Fatalf("old-style lookup for %s = %v, %v", name, got, err)
+		}
+		want[name] = got[0].ID
+	}
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+		Total int             `json:"total"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if resp.Total != 40 {
+		t.Fatalf("Total = %d, want 40", resp.Total)
+	}
+	for i, item := range resp.Items {
+		if wantName := fmt.Sprintf("myrig/polecat-%d", i+1); item.Name != wantName {
+			t.Fatalf("Items[%d].Name = %q, want %q (rows must keep config order)", i, item.Name, wantName)
+		}
+		if got := item.ActiveBead; got != want[item.Name] {
+			t.Errorf("%s active_bead = %q, want %q", item.Name, got, want[item.Name])
+		}
+	}
+	if len(store.queries) != 1 {
+		t.Fatalf("in_progress store reads = %d, want 1 for the whole list", len(store.queries))
+	}
+}
+
+// TestAgentListRuntimeCallsScaleWithRunningSessions: on tmux every runtime
+// call is an exec and the tmux server takes them one at a time, so the list must not pay one per configured slot:
+// unlimited pools share ONE session listing, and a stopped slot gets no
+// meta reads at all. A running slot still reports its suspended meta.
+func TestAgentListRuntimeCallsScaleWithRunningSessions(t *testing.T) {
+	state := newFakeState(t)
+	state.cfg.Agents = []config.Agent{
+		{Name: "dog", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
+		{Name: "cat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
+		{Name: "owl", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(-1)},
+		{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(1), MaxActiveSessions: intPtr(20), ScaleCheck: "echo 20"},
+	}
+	for _, name := range []string{"myrig--dog-1", "myrig--cat-1", "myrig--polecat-3"} {
+		if err := state.sp.Start(context.Background(), name, runtime.Config{}); err != nil {
+			t.Fatalf("Start(%s): %v", name, err)
+		}
+	}
+	if err := state.sp.SetMeta("myrig--polecat-3", "suspended", "true"); err != nil {
+		t.Fatalf("SetMeta: %v", err)
+	}
+	callsBefore := len(state.sp.Calls)
+
+	srv := New(state)
+	h := newTestCityHandlerWith(t, state, srv)
+	req := httptest.NewRequest("GET", cityURL(state, "/agents"), nil)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d: %s", rec.Code, http.StatusOK, rec.Body.String())
+	}
+	var resp struct {
+		Items []agentResponse `json:"items"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	// 1 dog + 1 cat + 20 polecat slots, plus owl's configured row: an
+	// on-demand pool with no live session is still listed under its name.
+	if len(resp.Items) != 23 {
+		t.Fatalf("items = %d, want 23", len(resp.Items))
+	}
+	for _, item := range resp.Items {
+		if want := item.Name == "myrig/polecat-3"; item.Suspended != want {
+			t.Errorf("%s suspended = %v, want %v", item.Name, item.Suspended, want)
+		}
+	}
+
+	listings := 0
+	metaReadsOnStopped := map[string]int{}
+	running := map[string]bool{"myrig--dog-1": true, "myrig--cat-1": true, "myrig--polecat-3": true}
+	for _, call := range state.sp.Calls[callsBefore:] {
+		switch call.Method {
+		case "ListRunning":
+			listings++
+		case "GetMeta":
+			if !running[call.Name] {
+				metaReadsOnStopped[call.Name]++
+			}
+		}
+	}
+	if listings != 1 {
+		t.Errorf("ListRunning calls = %d, want 1 shared by all 3 unlimited pools", listings)
+	}
+	if len(metaReadsOnStopped) != 0 {
+		t.Errorf("GetMeta on stopped sessions = %v, want none", metaReadsOnStopped)
 	}
 }
 

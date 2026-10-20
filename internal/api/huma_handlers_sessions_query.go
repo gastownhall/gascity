@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/api/apierr"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
@@ -20,7 +22,108 @@ import (
 // agent-get). Split out of huma_handlers_sessions.go to isolate read-side
 // logic from mutations and streaming.
 
+// humaHandleSessionList serves GET /sessions. It answers through
+// boundedListBuild: a full build reads every session bead and each rig's
+// in-progress beads from the bead store, and on a busy Dolt-backed city that
+// took 17 to 27s whenever the agent pool was full. Overlapping identical requests
+// share one build, since dashboards ask again on every session or bead event.
 func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInput) (*ListOutput[sessionResponse], error) {
+	return boundedListBuild(&s.listBuilds, cacheKeyFor("sessions", input),
+		func() (*ListOutput[sessionResponse], error) { return s.buildSessionList(input) },
+		func() *ListOutput[sessionResponse] { return s.sessionListFromRuntime(input) })
+}
+
+// sessionListFromRuntime is GET /sessions built from the runtime alone: one
+// row per live session, with the template and alias config gives that
+// session's name. It never reads the bead store, so it is what
+// boundedListBuild answers while the store is slow. A row has no id and no
+// created_at, because both live on the session bead. The state and template
+// filters and the limit apply; there is no next_cursor.
+func (s *Server) sessionListFromRuntime(input *SessionListInput) *ListOutput[sessionResponse] {
+	cfg := s.state.Config()
+	body := ListBody[sessionResponse]{Items: []sessionResponse{}}
+	live := &runningSessionsOnce{sp: s.state.SessionProvider()}
+	names, err := live.ListRunning("")
+	if err != nil {
+		body.Partial = true
+		body.PartialErrors = []string{fmt.Sprintf("runtime: listing live sessions: %v", err)}
+	}
+	if !liveSessionMatchesState(input.State) {
+		names = nil
+	}
+	configured := configuredSessionsByName(cfg, s.state.CityName(), live)
+	slices.Sort(names)
+	for _, name := range names {
+		info := session.Info{SessionName: name, State: session.StateActive}
+		if c, ok := configured[name]; ok {
+			info.Template, info.Alias, info.Provider = c.template, c.alias, c.provider
+		}
+		if input.Template != "" && info.Template != input.Template {
+			continue
+		}
+		row := sessionToResponse(info, cfg)
+		row.CreatedAt = ""
+		row.Running = true
+		body.Items = append(body.Items, row)
+	}
+	body.Total = len(body.Items)
+	limit := defaultPaginationLimit
+	if input.Limit > 0 {
+		limit = min(input.Limit, maxPaginationLimit)
+	}
+	if len(body.Items) > limit {
+		body.Items = body.Items[:limit]
+	}
+	return &ListOutput[sessionResponse]{Index: s.latestIndex(), Body: body}
+}
+
+// liveSessionMatchesState reports whether a live session passes a GET
+// /sessions state filter. A live session is open and active, and never
+// closed. It follows the same filter words as the full list.
+func liveSessionMatchesState(stateFilter string) bool {
+	if stateFilter == "" || stateFilter == "all" {
+		return true
+	}
+	for _, sf := range strings.Split(stateFilter, ",") {
+		if sf == "open" || sf == string(session.StateActive) {
+			return true
+		}
+	}
+	return false
+}
+
+// configuredSession is what a session bead would say about a configured
+// agent's session: its template, its alias and its provider.
+type configuredSession struct {
+	template string
+	alias    string
+	provider string
+}
+
+// configuredSessionsByName maps the session name of every configured agent,
+// pool slots included, to what its session bead would carry. live answers the
+// unlimited pools, so pass the listing you already made.
+func configuredSessionsByName(cfg *config.City, cityName string, live sessionLister) map[string]configuredSession {
+	out := make(map[string]configuredSession)
+	if cfg == nil {
+		return out
+	}
+	sessTmpl := cfg.Workspace.SessionTemplate
+	for _, a := range cfg.Agents {
+		for _, ea := range expandAgent(a, cityName, sessTmpl, live, cfg.NamedSessions) {
+			out[agentSessionName(cityName, ea.qualifiedName, sessTmpl)] = configuredSession{
+				template: a.QualifiedName(),
+				alias:    ea.qualifiedName,
+				provider: a.Provider,
+			}
+		}
+	}
+	return out
+}
+
+// buildSessionList does the work of one full GET /sessions request. It reads
+// the bead store, so call it through boundedListBuild.
+func (s *Server) buildSessionList(input *SessionListInput) (*ListOutput[sessionResponse], error) {
 	index := s.latestIndex()
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -82,9 +185,10 @@ func (s *Server) humaHandleSessionList(_ context.Context, input *SessionListInpu
 	}
 	keyedTranscriptPaths := session.ResolveKeyedTranscriptPaths(sessionTranscriptLookupCandidates(pageSessions), s.sessionLogPaths(), sessionTranscriptProviderFallback(cfg))
 	page := make([]sessionResponse, len(pageSessions))
+	activeBeads := s.newActiveBeadIndex()
 	for j, sess := range pageSessions {
 		page[j] = sessionResponseWithReason(sess, responseByID[sess.ID], cfg, s.state.SessionProvider(), hasDeferredQueue)
-		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, false, false, 0, keyedTranscriptPaths)
+		s.enrichSessionResponseWithKeyedPaths(&page[j], sess, cfg, s.runtimeSessionResponseHandle(sess), wantPeek, activeBeads, false, 0, keyedTranscriptPaths)
 	}
 	return &ListOutput[sessionResponse]{
 		Index:     index,

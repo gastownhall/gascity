@@ -4849,6 +4849,7 @@ type SessionDrainAckedWithAssignedWorkPayload struct {
 // SessionInfo defines model for SessionInfo.
 type SessionInfo struct {
 	Attached     bool       `json:"attached"`
+	Id           *string    `json:"id,omitempty"`
 	LastActivity *time.Time `json:"last_activity,omitempty"`
 	Name         string     `json:"name"`
 }

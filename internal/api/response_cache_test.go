@@ -530,14 +530,20 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 		t.Fatalf("first agents = %d, want 200", rec.Code)
 	}
 
+	reads := func() int { return store.listCalls + store.listByAssigneeCalls }
+	afterFirst := reads()
+	if afterFirst == 0 {
+		t.Fatal("first agents request read no store; the test no longer measures the build")
+	}
+
 	rec = httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("second agents = %d, want 200", rec.Code)
 	}
 
-	if store.listByAssigneeCalls != 2 {
-		t.Fatalf("ListByAssignee calls after cached repeat = %d, want 2", store.listByAssigneeCalls)
+	if got := reads(); got != afterFirst {
+		t.Fatalf("store reads after cached repeat = %d, want %d", got, afterFirst)
 	}
 
 	state.eventProv.Record(events.Event{Type: events.SessionWoke, Actor: "gc"})
@@ -546,8 +552,8 @@ func TestHandleAgentListCachesUntilIndexChanges(t *testing.T) {
 	if rec.Code != http.StatusOK {
 		t.Fatalf("third agents = %d, want 200", rec.Code)
 	}
-	if store.listByAssigneeCalls != 4 {
-		t.Fatalf("ListByAssignee calls after index change = %d, want 4", store.listByAssigneeCalls)
+	if got := reads(); got != 2*afterFirst {
+		t.Fatalf("store reads after index change = %d, want %d", got, 2*afterFirst)
 	}
 }
 

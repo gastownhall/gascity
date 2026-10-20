@@ -2016,6 +2016,7 @@ export const zSessionDrainAckedWithAssignedWorkPayload = z.object({
 
 export const zSessionInfo = z.object({
     attached: z.boolean(),
+    id: z.string().optional(),
     last_activity: z.iso.datetime().optional(),
     name: z.string()
 });
