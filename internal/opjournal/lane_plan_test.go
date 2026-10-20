@@ -580,6 +580,66 @@ func TestPlanTakeContentBlocks(t *testing.T) {
 	}
 }
 
+// TestPlanTakeContentAdmitPassesOnlyItsClass pins a host's narrow I7
+// exemption: under a content block, only content of an admitted class
+// (role, when and principal, all three) is taken; every neighbor waits on
+// the block, and the admitted class still waits on a pending interaction.
+func TestPlanTakeContentAdmitPassesOnlyItsClass(t *testing.T) {
+	p := newPlanner(t)
+	const admitted = "gc:planner/drain-reminder"
+	from := func(principal string) func(*Request) {
+		return func(r *Request) { r.Producer.Principal = principal }
+	}
+	notice := p.op(laneMsg("notice", RoleNotice, "x", withWhen(WhenBoundary), from(admitted)))
+	probe := idleProbe()
+	probe.ContentBlock = "draining"
+	probe.ContentAdmit = []ContentClass{{Role: RoleNotice, When: WhenBoundary, Principal: admitted}}
+	if tp := takeFor(t, []Op{notice}, probe); !slices.Equal(takenOf(tp), []string{notice.ID}) {
+		t.Fatalf("admitted notice: taken %v, waits %+v", takenOf(tp), tp.waits)
+	}
+	for name, op := range map[string]Op{
+		"other principal": p.op(laneMsg("other", RoleNotice, "x", withWhen(WhenBoundary), from("gc:planner/idle-claim-nudge"))),
+		"prompt":          p.op(laneMsg("prompt", RolePrompt, "x", withWhen(WhenBoundary), from(admitted))),
+		"steer":           p.op(laneMsg("steer", RoleNotice, "x", withWhen(WhenSteer), from(admitted))),
+	} {
+		t.Run(name, func(t *testing.T) {
+			tp := takeFor(t, []Op{op}, probe)
+			if tp.take != nil || len(tp.waits) != 1 || tp.waits[0].Reason != WaitContentBlock || tp.waits[0].Detail != "draining" {
+				t.Fatalf("taken %v, waits %+v; want a content_block wait", takenOf(tp), tp.waits)
+			}
+			tp = takeFor(t, []Op{op, notice}, probe)
+			if got := takenOf(tp); !slices.Equal(got, []string{notice.ID}) {
+				t.Fatalf("beside the admitted notice: taken %v, want only it", got)
+			}
+		})
+	}
+	t.Run("pending interaction", func(t *testing.T) {
+		pending := probe
+		pending.Pending = "?"
+		tp := takeFor(t, []Op{notice}, pending)
+		if tp.take != nil || len(tp.waits) != 1 || tp.waits[0].Reason != WaitPendingInteraction {
+			t.Fatalf("taken %v, waits %+v; want a pending_interaction wait", takenOf(tp), tp.waits)
+		}
+	})
+	t.Run("admitted op raises no wake", func(t *testing.T) {
+		stopped := probe
+		stopped.Running = false
+		wake := p.op(laneMsg("wake", RoleNotice, "x", withWhen(WhenBoundary), from(admitted)))
+		tp := takeFor(t, []Op{wake}, stopped)
+		if tp.take != nil || tp.wake || len(tp.waits) != 1 || tp.waits[0].Reason != WaitNotRunning {
+			t.Fatalf("taken %v, wake %v, waits %+v; want a not_running wait and no wake past the block", takenOf(tp), tp.wake, tp.waits)
+		}
+	})
+	t.Run("no block", func(t *testing.T) {
+		open := idleProbe()
+		open.ContentAdmit = probe.ContentAdmit
+		other := p.op(laneMsg("free", RoleNotice, "x", withWhen(WhenBoundary)))
+		if tp := takeFor(t, []Op{other}, open); tp.take == nil {
+			t.Fatalf("an admit list without a block held content: waits %+v", tp.waits)
+		}
+	})
+}
+
 func TestPlanTakeWake(t *testing.T) {
 	p := newPlanner(t)
 	need := p.op(laneMsg("a", RoleNotice, "x"))
@@ -629,6 +689,78 @@ func TestPlanTakeLimits(t *testing.T) {
 		tp := takeFor(t, ops, idleProbe())
 		if n := len(takenOf(tp)); n != 4 || !tp.more {
 			t.Fatalf("took %d ops of 15 KiB", n)
+		}
+	})
+}
+
+// inBandProbe is an in-band executor's probe whose text may run to maxText
+// bytes.
+func inBandProbe(maxText int) Probe {
+	p := idleProbe()
+	p.Caps = Caps{InBand: true, Input: FenceNone, MaxText: maxText}
+	return p
+}
+
+// renderedLen is the length of ops' delivery text in the reminder style.
+func renderedLen(t *testing.T, note bool, ops ...Op) int {
+	t.Helper()
+	text, err := RenderDelivery(ops, TextReminder, note)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return len(text)
+}
+
+// TestPlanTakeTextBudget pins Caps.MaxText: a batch takes notices only while
+// its rendered text fits, to the byte; the rest wait batch_full for the next
+// pass; and a head whose text alone does not fit, the redelivery note
+// counted, waits text_too_long and holds the content behind it.
+func TestPlanTakeTextBudget(t *testing.T) {
+	p := newPlanner(t)
+	a := p.op(laneMsg("a", RoleNotice, strings.Repeat("a", 300)))
+	b := p.op(laneMsg("b", RoleNotice, strings.Repeat("b", 300)))
+	c := p.op(laneMsg("c", RoleNotice, strings.Repeat("c", 300)))
+	two := renderedLen(t, false, a, b)
+	t.Run("a backlog goes out in batches that fit", func(t *testing.T) {
+		tp := takeFor(t, []Op{a, b, c}, inBandProbe(two))
+		if got := takenOf(tp); !slices.Equal(got, []string{a.ID, b.ID}) || !tp.more {
+			t.Fatalf("taken %v more %v, want the two notices that fit and another pass", got, tp.more)
+		}
+		if len(tp.take.text) != two {
+			t.Fatalf("text is %d bytes, want the %d of the two notices", len(tp.take.text), two)
+		}
+		if w := waitsOf(tp.waits)[c.ID]; w != WaitBatchFull {
+			t.Fatalf("third notice wait %q, want %q", w, WaitBatchFull)
+		}
+	})
+	t.Run("a byte short of two takes one", func(t *testing.T) {
+		tp := takeFor(t, []Op{a, b, c}, inBandProbe(two-1))
+		if got := takenOf(tp); !slices.Equal(got, []string{a.ID}) || !tp.more {
+			t.Fatalf("taken %v more %v, want the first notice alone", got, tp.more)
+		}
+	})
+	t.Run("a head too long alone holds the rest", func(t *testing.T) {
+		tp := takeFor(t, []Op{a, b}, inBandProbe(renderedLen(t, false, a)-1))
+		if tp.take != nil {
+			t.Fatalf("took %v, want nothing", takenOf(tp))
+		}
+		if w := waitsOf(tp.waits); w[a.ID] != WaitTextTooLong || w[b.ID] != WaitBlocked {
+			t.Fatalf("waits %v, want the head %q and the notice behind it %q", w, WaitTextTooLong, WaitBlocked)
+		}
+		if tp.more {
+			t.Fatal("more set with nothing taken")
+		}
+	})
+	t.Run("a replay counts the redelivery note", func(t *testing.T) {
+		replay := p.op(laneMsg("r", RoleNotice, strings.Repeat("r", 300)), func(op *Op) {
+			op.Status, op.Attempt, op.MaybeDelivered, op.DeliveryKey = StatusAccepted, 1, 1, op.ID+":1"
+		})
+		if tp := takeFor(t, []Op{replay}, inBandProbe(renderedLen(t, true, replay))); !slices.Equal(takenOf(tp), []string{replay.ID}) || !tp.take.redelivery {
+			t.Fatalf("taken %v, want the replay within a budget that fits its note", takenOf(tp))
+		}
+		tp := takeFor(t, []Op{replay}, inBandProbe(renderedLen(t, true, replay)-1))
+		if tp.take != nil || waitsOf(tp.waits)[replay.ID] != WaitTextTooLong {
+			t.Fatalf("taken %v waits %v, want the replay to wait %q: its note does not fit", takenOf(tp), waitsOf(tp.waits), WaitTextTooLong)
 		}
 	})
 }
@@ -743,6 +875,7 @@ func TestPlanTakeRefusesBadCaps(t *testing.T) {
 		"fence":     {Live: true, Input: "maybe"},
 		"text":      {Live: true, Input: FenceAtomic, Text: "html"},
 		"short ttl": {Live: true, Input: FenceAtomic, LeaseTTL: time.Second},
+		"max text":  {Live: true, Input: FenceAtomic, MaxText: -1},
 	} {
 		probe := idleProbe()
 		probe.Caps = c

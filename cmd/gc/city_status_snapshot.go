@@ -126,10 +126,14 @@ func cityStatusStorePresent(cityPath string) bool {
 // read the latest gc.store.maintenance.{done,failed} event for the
 // StoreHealth block. Tests replace this with a fake provider; the
 // default opens the city's JSONL event log directly (nil on failure so
-// the block still reports size/row data).
+// the block still reports size/row data, and nil on a worker site,
+// whose log holds only what the box wrote).
 var openStoreHealthEvents = defaultOpenStoreHealthEvents
 
 func defaultOpenStoreHealthEvents(cityPath string, stderr io.Writer) events.Provider {
+	if onWorkerSite(cityPath) {
+		return nil
+	}
 	eventsPath := filepath.Join(cityPath, ".gc", "events.jsonl")
 	providerName := os.Getenv("GC_EVENTS")
 	if providerName == "" {

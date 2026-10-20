@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -31,7 +32,7 @@ type StateHandle interface {
 // LifecycleHandle exposes worker lifecycle control operations.
 type LifecycleHandle interface {
 	Start(context.Context, sessionpkg.Actor) error
-	StartResolved(context.Context, sessionpkg.Actor, string, runtime.Config) error
+	StartResolved(context.Context, sessionpkg.Actor, sessionpkg.Incarnation, string, runtime.Config) error
 	Attach(context.Context, sessionpkg.Actor) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error
@@ -110,6 +111,7 @@ type Handle interface {
 	InteractionHandle
 	PeekHandle
 	LiveObservationHandle
+	TurnHandle
 }
 
 // Phase captures the worker-level lifecycle state surfaced by [Handle.State].
@@ -160,6 +162,19 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	// DeliveryKey is the caller's stable identity for this one delivery, as
+	// NudgeRequest.DeliveryKey. It reaches a runtime that deduplicates keyed
+	// deliveries on every intent that sends now, deliver-now and immediate
+	// defaults included. A message the session queues (a follow-up, a
+	// dormant row, a deliver-now that waits for the turn boundary) is later
+	// delivered by the queue under the queue's own key.
+	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Redelivery says DeliveryKey's delivery may already have reached the
+	// session, as NudgeRequest.Redelivery. The lookup runs before anything
+	// else the submit does: when the runtime holds the delivery there is no
+	// turn sighting, interrupt, start or send, and the result is Replayed.
+	// Ignored without a DeliveryKey.
+	Redelivery bool `json:"redelivery,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
@@ -167,6 +182,12 @@ type MessageResult struct {
 	Queued bool `json:"queued"`
 	// Deferred: the actor queued it (session.SubmitOutcome.Deferred).
 	Deferred bool `json:"-"`
+	// Interrupt is what an interrupt_now did about the running turn
+	// (session.SubmitOutcome.Interrupt); nil when no turn fence ran.
+	Interrupt *sessionpkg.TurnInterruptReport `json:"-"`
+	// Replayed: a redelivery the runtime already held. Nothing was done;
+	// Queued is false and Interrupt nil.
+	Replayed bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -186,15 +207,48 @@ type InterruptRequest struct {
 	// session refuses with runtime.ErrInputFenceUnsupported before sending
 	// anything; a miss is a *runtime.FenceMismatchError, and a session that
 	// is not running, or has no session row, is one finding it absent (both
-	// handles). Past that the handles differ. A SessionHandle maps the
-	// liveness it reads before the stop as session.Manager.StopTurnFenced
-	// documents: an exited agent is a miss finding it dead, and a read that
-	// cannot answer is runtime.ErrRuntimeUnavailable. A RuntimeHandle
-	// takes no liveness read and leaves the verdict to the runtime's guard;
-	// tmux's checks the agent pane, not the agent process, so an interrupt
-	// into an exited agent whose pane lives on can return nil. It is a
-	// capability and never serialized.
+	// handles; a turn-scoped interrupt on a SessionHandle with no session
+	// created yet is refused first, as Turn documents). Past that the
+	// handles differ. A SessionHandle maps the liveness it reads before the
+	// stop as session.Manager.StopTurnFenced documents: an exited agent is a
+	// miss finding it dead, and a read that cannot answer is
+	// runtime.ErrRuntimeUnavailable. A RuntimeHandle takes no liveness read
+	// and leaves the verdict to the runtime's guard; tmux's checks the agent
+	// pane, not the agent process, so an interrupt into an exited agent
+	// whose pane lives on can return nil. It is a capability and never
+	// serialized. A turn-scoped interrupt takes it too, as a separate axis
+	// from the turn (X11 §3.1): a turn names what to interrupt, not which
+	// incarnation hosts it, since a resumed incarnation can carry on its
+	// predecessor's transcript. On a transcript source every key goes under
+	// the fence, after the turn check; a protocol source's runtime takes no
+	// input fence on its turn interrupt, so a fenced one is refused with
+	// runtime.ErrInputFenceUnsupported, nothing sent.
 	Fence runtime.InputFence `json:"-"`
+	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
+	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
+	// Empty interrupts whatever runs (session scope). A turn-scoped
+	// interrupt is refused, with nothing sent, unless the session's turn
+	// capabilities record starts, fence at least checked and see ends at
+	// least inferred: runtime.ErrTurnIdentityUnsupported, or
+	// session.ErrTurnInterruptUnsupported when the runtime cannot interrupt
+	// at all, and runtime.ErrTurnIdentityUnsupported too when a
+	// SessionHandle has no session created yet, fenced or not. A closed
+	// session row, or one closed by the time the stop or the interrupt holds
+	// the session mutation lock, is an error wrapping
+	// runtime.ErrSessionNotFound, nothing sent; a row that will not load is
+	// runtime.ErrRuntimeUnavailable, nothing sent. It returns nil only once
+	// a read of the session's turns shows the turn no longer current (or
+	// the session gone) within 15 s of the check; a
+	// *runtime.TurnNotCurrentError when the turn was not current, or the
+	// runtime not running by a fresh liveness read, nothing sent; an error
+	// wrapping runtime.ErrTurnNotEnded when it was interrupted but not seen
+	// to end, which wraps no other sentinel (the last failure is in its text
+	// only), so "sent" is never misread as unknown; and an error wrapping
+	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
+	// sent, or when the turn could not be checked before ctx ended or its
+	// idle state could not be read (nothing sent then). ctx bounds the wait
+	// for the session mutation lock and the check before the keys.
+	Turn string `json:"turn,omitempty"`
 }
 
 // NudgeDelivery controls how a nudge should be delivered.
@@ -220,10 +274,18 @@ type NudgeRequest struct {
 	// passes the same key, so a runtime that deduplicates keyed deliveries
 	// ([runtime.KeyedNudgeProvider]) replays the first delivery instead of
 	// delivering twice. Distinct content needs a distinct key. Empty
-	// delivers unkeyed. Only default delivery is sure to carry the key:
-	// immediate and wait-idle delivery can go out unkeyed, as through
-	// [runtime.ImmediateNudgeProvider], whose NudgeNow takes no key.
+	// delivers unkeyed. Default and immediate delivery carry the key to a
+	// runtime that deduplicates keyed deliveries; wait-idle delivery goes
+	// out unkeyed.
 	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Redelivery says DeliveryKey's delivery may already have reached the
+	// session: an earlier attempt under the key timed out, lost its answer
+	// or crashed. A runtime that keeps keyed deliveries is asked first; one
+	// it holds is not sent again, and the result is Delivered and Replayed
+	// with its receipt. A failed lookup is the nudge's error, wrapping
+	// runtime.ErrNudgeNotSent; nothing is sent. Ignored without a
+	// DeliveryKey.
+	Redelivery bool `json:"redelivery,omitempty"`
 	// Fence, when set, delivers only to the incarnation it names (see
 	// runtime.InputFence): a miss is a *runtime.FenceMismatchError, and a
 	// runtime that cannot fence the session refuses with
@@ -315,8 +377,17 @@ type NudgeResult struct {
 	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
 	// Unfenced reports a fenced request (NudgeRequest.Fence) delivered
 	// without its fence, as AllowUnfenced permits for a runtime that cannot
-	// fence the session. Set only when Delivered.
+	// fence the session. Set only when Delivered, and never when Replayed.
 	Unfenced bool `json:"unfenced,omitempty"`
+	// Replayed reports a redelivery (NudgeRequest.Redelivery) the runtime
+	// already held: nothing was sent; Delivered is true.
+	Replayed bool `json:"replayed,omitempty"`
+	// Receipt is the runtime's receipt of the delivery, from a runtime that
+	// deduplicates keyed deliveries: for a delivery a RuntimeHandle made
+	// now, or one a redelivery's lookup found (either handle). A
+	// SessionHandle's live delivery goes through the session manager and
+	// reports none. Zero otherwise; never text.
+	Receipt runtime.DeliveryReceipt `json:"-"`
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not
@@ -430,12 +501,21 @@ type SessionHandleConfig struct {
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+	// ResolveBead reads one work bead by id, wherever it lives. Usage
+	// attribution uses it to find the formula the session's acting bead was
+	// compiled from. Nil leaves facts unattributed.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to. Nil is
+	// valid and resolves on every batch.
+	FormulaMemo *FormulaNameMemo
 }
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
 	mu             sync.Mutex
 	manager        *sessionpkg.Manager
+	resolveBead    func(id string) (beads.Bead, error)
+	formulaMemo    *FormulaNameMemo
 	adapter        SessionLogAdapter
 	recorder       events.Recorder
 	usageSink      usage.Sink
@@ -459,6 +539,8 @@ type SessionHandle struct {
 	sidecarRetryID        string
 	sidecarRetryAttempts  int
 	sidecarRetryScheduled bool
+	// turns is the turn-observation state (turn.go).
+	turns turnObservation
 }
 
 var (
@@ -470,6 +552,8 @@ var (
 	_ InteractionHandle     = (*SessionHandle)(nil)
 	_ PeekHandle            = (*SessionHandle)(nil)
 	_ LiveObservationHandle = (*SessionHandle)(nil)
+	_ TurnHandle            = (*SessionHandle)(nil)
+	_ TurnHandle            = (*RuntimeHandle)(nil)
 )
 
 type historyGeneration struct {

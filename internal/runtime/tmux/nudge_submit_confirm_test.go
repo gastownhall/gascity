@@ -9,6 +9,8 @@ import (
 	"testing"
 	"testing/synctest"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/runtime"
 )
 
 // noSleep is a sleep stub so the confirm loop runs instantly under test.
@@ -309,6 +311,31 @@ func TestSubmitEnterAndConfirmReturnsSendError(t *testing.T) {
 	}
 	if enters != submitEnterMaxSends {
 		t.Fatalf("enters = %d, want %d", enters, submitEnterMaxSends)
+	}
+}
+
+// TestSubmitEnterAndConfirmFailedReSendIsUnconfirmed proves a re-send that
+// fails after an earlier send reached the pane reports the submit
+// unconfirmed, not failed: the first send may already have submitted the
+// message, so a caller that must not deliver twice may not retry it.
+func TestSubmitEnterAndConfirmFailedReSendIsUnconfirmed(t *testing.T) {
+	sendErr := errors.New("server exited")
+	var enters int
+	sendEnter := func() error {
+		enters++
+		if enters == 1 {
+			return nil
+		}
+		return sendErr
+	}
+	busy := func() (bool, error) { return false, nil }
+
+	confirmed, _, err := submitEnterAndConfirm(sendEnter, func() {}, busy, noSleep)
+	if confirmed {
+		t.Fatal("confirmed = true, want false")
+	}
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) || !errors.Is(err, sendErr) {
+		t.Fatalf("err = %v, want ErrNudgeSubmitUnconfirmed wrapping sendErr", err)
 	}
 }
 
@@ -1001,5 +1028,25 @@ func TestSnapshotPaneIdleWithPrefixHourSpinner(t *testing.T) {
 				t.Errorf("snapshotPaneIdleWithPrefix idle = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestNudgeSessionLockTimeoutIsNotSent proves a nudge that times out waiting
+// for the session's nudge lock reports that nothing was sent: it fails before
+// its first key, so a retry cannot deliver the message twice.
+func TestNudgeSessionLockTimeoutIsNotSent(t *testing.T) {
+	tm := NewTmuxWithConfig(Config{SocketName: "gc-test-lock-timeout-unused", NudgeLockTimeout: time.Millisecond})
+	const session = "gc-test-lock-timeout"
+	if !acquireNudgeLock(session, time.Second) {
+		t.Fatal("could not acquire the nudge lock for setup")
+	}
+	defer releaseNudgeLock(session)
+
+	err := tm.NudgeSession(session, "hello")
+	if !errors.Is(err, runtime.ErrNudgeNotSent) {
+		t.Fatalf("NudgeSession = %v, want ErrNudgeNotSent", err)
+	}
+	if errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("NudgeSession = %v, a lock timeout is not unconfirmed", err)
 	}
 }

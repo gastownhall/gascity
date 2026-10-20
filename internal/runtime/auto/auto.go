@@ -450,12 +450,23 @@ func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
 }
 
 // NudgeKeyed delegates to the routed backend with its delivery key when that
-// backend deduplicates keyed deliveries, and to its Nudge otherwise.
-func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+// backend deduplicates keyed deliveries, returning its receipt, and to its
+// Nudge otherwise, with no receipt.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
 		return kp.NudgeKeyed(name, content, key)
 	}
-	return p.route(name).Nudge(name, content)
+	return runtime.DeliveryReceipt{}, p.route(name).Nudge(name, content)
+}
+
+// LookupDelivery delegates to the routed backend when it deduplicates keyed
+// deliveries; another backend keeps none, so it is answered
+// ErrInteractionUnsupported without a call.
+func (p *Provider) LookupDelivery(ctx context.Context, name, key string) (runtime.DeliveryReceipt, error) {
+	if kp, ok := p.route(name).(runtime.KeyedNudgeProvider); ok {
+		return kp.LookupDelivery(ctx, name, key)
+	}
+	return runtime.DeliveryReceipt{}, fmt.Errorf("%w: %q's backend keeps no keyed deliveries", runtime.ErrInteractionUnsupported, name)
 }
 
 // WaitForIdle delegates to the routed backend when it supports explicit

@@ -196,6 +196,7 @@ go_test(
         "//scripts/testdata/test-go-test-shard/no_extra_env:pkg_files",
         "//test:BUILD.bazel",
         "//test/acceptance:BUILD.bazel",
+        "//test/conversationlane:BUILD.bazel",
         "//test/integration:BUILD.bazel",
         "//tools/bazel/rules:go_repository_tools.bzl",
         "//tools/bazel/rules:go_test_run.sh",

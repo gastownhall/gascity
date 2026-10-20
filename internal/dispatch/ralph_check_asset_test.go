@@ -11,6 +11,8 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/convergence"
 	"github.com/gastownhall/gascity/internal/formula"
+	"github.com/gastownhall/gascity/internal/formulatest"
+	"github.com/gastownhall/gascity/internal/molecule"
 )
 
 // End-to-end for the ../assets check-path feature: a formula authored with the
@@ -152,6 +154,111 @@ func TestRunRalphCheckAcceptsMaterializedCheckAfterPackPinUpgrade(t *testing.T) 
 	})
 	if err != nil {
 		t.Fatalf("materialized historical check should remain trusted: %v", err)
+	}
+	if result.Outcome != convergence.GatePass {
+		t.Fatalf("outcome = %q, want %q; stderr=%q", result.Outcome, convergence.GatePass, result.Stderr)
+	}
+}
+
+// Same pack-pin upgrade as above, but the workflow is cooked from an
+// extends-based formula whose ralph check is inherited from the parent. The
+// cooked root must carry the provenance the historical-trust lookup verifies
+// (gc.formula_source plus the hash of that file); without gc.formula_hash the
+// lookup is inert and the check "escapes trusted roots" once the pin moves.
+func TestRunRalphCheckAcceptsExtendsFormulaCheckAfterPackPinUpgrade(t *testing.T) {
+	formulatest.EnableV2ForTest(t)
+	tmp := t.TempDir()
+	gcHome := filepath.Join(tmp, "gc-home")
+	t.Setenv("GC_HOME", gcHome)
+	cacheRoot := filepath.Join(gcHome, "cache", "repos")
+	historicalEntry := filepath.Join(cacheRoot, strings.Repeat("c", 64))
+	activeEntry := filepath.Join(cacheRoot, strings.Repeat("d", 64))
+	historicalFormulas := filepath.Join(historicalEntry, "formulas")
+	historicalChecks := filepath.Join(historicalEntry, "assets", "scripts", "checks")
+	cityPath := filepath.Join(tmp, "city")
+	storePath := filepath.Join(tmp, "store")
+	for _, dir := range []string{historicalFormulas, historicalChecks, filepath.Join(activeEntry, "formulas"), cityPath, storePath} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	parentText := `formula = "pin-base"
+version = 2
+contract = "graph.v2"
+
+[[steps]]
+id = "gate"
+title = "Gate"
+
+[steps.ralph]
+max_attempts = 2
+
+[steps.ralph.check]
+mode = "exec"
+path = "../assets/scripts/checks/unit-fast.sh"
+timeout = "30s"
+`
+	childText := `formula = "pin-child"
+version = 2
+contract = "graph.v2"
+extends = ["pin-base"]
+
+[[steps]]
+id = "ship"
+title = "Ship"
+needs = ["gate"]
+`
+	if err := os.WriteFile(filepath.Join(historicalFormulas, "pin-base.toml"), []byte(parentText), 0o644); err != nil {
+		t.Fatalf("write parent formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(historicalFormulas, "pin-child.toml"), []byte(childText), 0o644); err != nil {
+		t.Fatalf("write child formula: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(historicalChecks, "unit-fast.sh"), []byte("#!/bin/sh\nexit 0\n"), 0o755); err != nil {
+		t.Fatalf("write check: %v", err)
+	}
+
+	store := beads.NewMemStore()
+	cooked, err := molecule.Cook(context.Background(), store, "pin-child", []string{historicalFormulas}, molecule.Options{})
+	if err != nil {
+		t.Fatalf("Cook(pin-child): %v", err)
+	}
+	root, err := store.Get(cooked.RootID)
+	if err != nil {
+		t.Fatalf("get root: %v", err)
+	}
+	if got, want := root.Metadata[beadmeta.FormulaHashMetadataKey], formula.ContentHash([]byte(childText)); got != want {
+		t.Fatalf("root %s = %q, want child file hash %q", beadmeta.FormulaHashMetadataKey, got, want)
+	}
+
+	open, err := store.ListOpen()
+	if err != nil {
+		t.Fatalf("list open: %v", err)
+	}
+	var control beads.Bead
+	for _, b := range open {
+		if b.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindRalph {
+			control = b
+			break
+		}
+	}
+	if control.ID == "" {
+		t.Fatal("cooked molecule has no ralph control bead")
+	}
+	if got := control.Metadata[beadmeta.RootBeadIDMetadataKey]; got != cooked.RootID {
+		t.Fatalf("control %s = %q, want root %q", beadmeta.RootBeadIDMetadataKey, got, cooked.RootID)
+	}
+
+	// The pin has moved: only the new cache entry is a current formula layer,
+	// and city/store are unrelated to the check's location, so the historical
+	// provenance on the root is the only thing that can admit the check.
+	result, err := runRalphCheck(store, control, beads.Bead{ID: "run-extends-previous-pin", Type: "task"}, 1, ProcessOptions{
+		CityPath:           cityPath,
+		StorePath:          storePath,
+		FormulaSearchPaths: []string{filepath.Join(activeEntry, "formulas")},
+	})
+	if err != nil {
+		t.Fatalf("inherited check from the previous pin should remain trusted: %v", err)
 	}
 	if result.Outcome != convergence.GatePass {
 		t.Fatalf("outcome = %q, want %q; stderr=%q", result.Outcome, convergence.GatePass, result.Stderr)

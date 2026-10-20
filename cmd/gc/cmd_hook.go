@@ -270,6 +270,11 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	if opts.Inject {
 		return 0
 	}
+	// One composed city config for the whole invocation. The front door loads
+	// it, and the claim's helpers and the drain-ack load it again on their own;
+	// each composition walks city.toml and every pack include, ~0.15-0.2 s on
+	// maintainer-city (see beginInvocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// Accepted for compatibility with installed hook commands; non-inject
 	// gc hook output ignores provider-specific formatting.
 	_ = opts.HookFormat
@@ -300,7 +305,10 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		return 1
 	}
 
-	cityPath, err := resolveCity()
+	// The rig context `gc hook` resolves agents against is its own
+	// (currentRigContext), so the city resolution skips the full config load a
+	// rig name costs.
+	cityPath, err := resolveCityPathOnly()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc hook: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -315,6 +323,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	// Other CLI entry points (cmd_sling, cmd_start, cmd_rig, cmd_supervisor)
 	// do the same immediately after loadCityConfig.
 	resolveRigPaths(cityPath, cfg.Rigs)
+	city := newHookCity(cityPath, cfg)
 
 	// Fence a stale/superseded/unregistered runtime session BEFORE the
 	// city-suspension, agent-resolution, and agent-suspension early returns
@@ -346,7 +355,7 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 		if marker := hookClaimNonTurnMarker(os.Environ()); marker != "" {
 			return writeHookClaimNonTurnDrain(marker, hookClaimOptions{JSON: opts.JSON}, stdout, stderr)
 		}
-		code, handled, info := fenceHookClaimSession(cityPath, cfg, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
+		code, handled, info := fenceHookClaimSession(city, strings.TrimSpace(os.Getenv("GC_SESSION_ID")), opts, stdout, stderr)
 		if handled {
 			return code
 		}
@@ -472,15 +481,19 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 	queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
 	failureTemplate, emitFailureEvent := hookWorkQueryFailureTemplate(len(args) > 0, sessionTemplateContext, a.QualifiedName())
 
-	stores := hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
 	// On a split city the ready tiers of workQuery are already city-wide, so
 	// running the whole query once per store re-asks the same question R+1 times
-	// and re-opens every leg each time. Pin the city-wide read to the primary
-	// entry and leave the extras on the single-store command they ran before the
-	// swap, which still covers the per-store crash-recovery and ephemeral tiers
-	// `gc ready` does not answer. No-op on a single-store city and for a custom
-	// work_query, where both forms are the same string.
-	stores = scopeFederatedHookStores(stores, workQuery, singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr))
+	// and re-opens every leg each time: the read is pinned to the primary entry
+	// (scopeFederatedHookStores). Only that entry is built then, because every
+	// other leg's environment is a managed-Dolt projection (~0.25 s each on
+	// maintainer-city) the claim would discard. No-op on a single-store city and
+	// for a custom work_query, where both forms are the same string.
+	var stores []hookStore
+	if singleStore := singleStoreHookWorkQuery(cityPath, cityName, cfg, &a, topo, stderr); hookStoresScopeToPrimary(workQuery, singleStore) {
+		stores = []hookStore{hookWorkQueryPrimaryStore(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)}
+	} else {
+		stores = hookWorkQueryStores(cityPath, cfg, &a, agentForQuery, workDir, queryEnv, overrides)
+	}
 
 	// emitQueryFailure surfaces a killed/timed-out work query on the event bus
 	// so the reconciler can escalate instead of silently treating the strand as
@@ -544,17 +557,15 @@ func cmdHookWithOptions(args []string, opts hookCommandOptions, stdout, stderr i
 			JSON:               opts.JSON,
 			StrictDrainAck:     drainAckStrictConfig(cfg),
 			RuntimeActor:       strings.TrimSpace(os.Getenv("BEADS_ACTOR")),
+			// The process env, as the pre-claim fence reads the token:
+			// queryEnv has GC_INSTANCE_TOKEN filtered out.
+			StartedFence: hookStartedFenceOf(os.Environ()),
 		}
-		return claimHookWork(cityPath, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
+		return claimHookWork(city, workQuery, workDir, queryEnv, stores, claimOpts, emitQueryFailure, stdout, stderr)
 	}
 	// The discovery door is fenced too: a draining seat must not be handed its
 	// preassigned continuation sibling by the packs' post-close `gc hook`.
-	return doHookDiscovery(workQuery, workDir, false, hookClaimOptions{
-		Env:            queryEnv,
-		DrainAck:       opts.DrainAck,
-		JSON:           opts.JSON,
-		StrictDrainAck: drainAckStrictConfig(cfg),
-	}, hookClaimOps{}, runner, stdout, stderr, hookVisibility{
+	return hookDiscover(workQuery, workDir, false, hookDiscoveryOptions(assignee, identityCandidates, queryEnv, opts, drainAckStrictConfig(cfg)), city.claimOps(), runner, stdout, stderr, hookVisibility{
 		Identities:   identityCandidates,
 		RouteTargets: routeTargets,
 	})
@@ -595,7 +606,7 @@ const (
 // transient session-store fault all return handled=false so the normal claim
 // path runs — the fence never turns an infrastructure hiccup or an
 // in-progress start into a false refusal.
-func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
+func fenceHookClaimSession(city *hookCity, sessionID string, opts hookCommandOptions, stdout, stderr io.Writer) (int, bool, *session.Info) {
 	if sessionID == "" {
 		// GC_TEMPLATE is the pool-membership signal (set only alongside
 		// GC_SESSION_ID by RuntimeEnvWithSessionContext, the single front door
@@ -622,7 +633,7 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 	if instanceToken == "" {
 		return 0, false, nil
 	}
-	verdict, reason, info := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
+	verdict, reason, info := classifyHookClaimSessionVia(city.sessionFront, sessionID, instanceToken)
 	switch verdict {
 	case hookClaimSessionStale:
 		fmt.Fprintf(stderr, "gc hook --claim: refusing stale session %s: %s\n", sessionID, reason) //nolint:errcheck
@@ -646,6 +657,9 @@ func fenceHookClaimSession(cityPath string, cfg *config.City, sessionID string, 
 // hookClaimSessionStoreUnavailable (transient, fails open), so an infrastructure
 // hiccup is not mislabeled as staleness AND a vanished session is not laundered
 // into an infrastructure hiccup that lets a stale runtime reach the claim path.
+//
+// It and classifyHookClaimSessionInfo are test-only: `gc hook`'s fence calls
+// classifyHookClaimSessionVia with the invocation's session front door.
 func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string) {
 	verdict, reason, _ := classifyHookClaimSessionInfo(cityPath, cfg, sessionID, instanceToken)
 	return verdict, reason
@@ -655,13 +669,20 @@ func classifyHookClaimSession(cityPath string, cfg *config.City, sessionID, inst
 // session Info it read when the verdict is eligible (nil otherwise), so the
 // claim can act on the session bead's persisted identity without a second read.
 func classifyHookClaimSessionInfo(cityPath string, cfg *config.City, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
-	// cfg is the config this one-shot `gc hook` invocation loaded; reuse it
-	// rather than reloading the whole city config inside the open.
-	store, err := openCityStoreAtWithConfig(cityPath, cfg)
+	// cfg is the caller's loaded city config; reuse it rather than reloading
+	// the whole city config inside the open.
+	return classifyHookClaimSessionVia(newHookCity(cityPath, cfg).sessionFront, sessionID, instanceToken)
+}
+
+// classifyHookClaimSessionVia is classifyHookClaimSessionInfo reading the
+// session through front: in `gc hook`, the invocation's one session front door,
+// which the claim's later session reads and writes reuse.
+func classifyHookClaimSessionVia(front sessionFrontGetter, sessionID, instanceToken string) (hookClaimSessionVerdict, string, *session.Info) {
+	sessFront, err := front()
 	if err != nil {
 		return hookClaimSessionStoreUnavailable, fmt.Sprintf("opening session store: %v", err), nil
 	}
-	info, err := cliSessionFrontDoor(store, cfg, cityPath).Get(sessionID)
+	info, err := sessFront.Get(sessionID)
 	if err != nil {
 		verdict, reason := classifyHookClaimSessionLookupError(err)
 		return verdict, reason, nil
@@ -774,19 +795,22 @@ func hookClaimSessionEligibility(info session.Info, instanceToken string) (hookC
 // one, so the binding is reached through the ops rather than through a leg. On a
 // city that relocates nothing the route is nil and the ops value is the one this
 // function has always passed.
-func claimHookWork(cityPath, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
+func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string, stores []hookStore, claimOpts hookClaimOptions, emitFailure func(command string, err error), stdout, stderr io.Writer) int {
 	// The city relocates a class and its front door could not be projected.
 	// Claiming through the work store anyway would write ownership into a
 	// ledger that does not hold the bead, which is the wrong-answer lane this
 	// routing exists to close — so every failure but one is fatal here. The
 	// exception, a binding with no claim CAS, degrades to unrouted claiming;
 	// see hookClaimRouteVerdict.
-	opened, err := hookClaimClassRouteForCity(cityPath)
+	opened, err := hookClaimClassRouteForCity(city.path)
 	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
 	if !proceed {
 		return 1
 	}
-	ops := classRoutedHookClaimOps(hookClaimOps{}, route)
+	if route != nil {
+		route.recorder = city.recorder
+	}
+	ops := classRoutedHookClaimOps(city.claimOps(), route)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, shellWorkQueryWithEnv, emitFailure, stdout, stderr)
 }
 
@@ -987,10 +1011,10 @@ func hookClaimPrimaryRouteTarget(a *config.Agent) string {
 }
 
 // singleStoreHookWorkQuery returns the agent's work query built for the SAME
-// city with the federated reader turned off — the command the hook ran against
-// every store before the reader was swapped. It is the command
-// scopeFederatedHookStores gives the federated extras, so their cost and
-// coverage stay exactly what they were.
+// city with the federated reader turned off. Nothing runs it: the hook compares
+// it with the federated form (hookStoresScopeToPrimary), and where the two
+// differ the claim reads only the primary store, for the reasons
+// scopeFederatedHookStores gives.
 //
 // It returns "" on a city that federates nothing, so the caller's scoping is a
 // no-op there rather than a second build of the identical string.
@@ -1328,6 +1352,25 @@ func classifyWorkQueryStoreUnavailable(err error) error {
 	return err
 }
 
+// hookDiscoveryOptions are plain `gc hook`'s options for the drain fences it
+// shares with --claim. The drain-ack fence matches a started claim's assignee
+// against the seat's identities, on this door as on --claim, so they travel
+// here too.
+func hookDiscoveryOptions(assignee string, identities, env []string, opts hookCommandOptions, strict bool) hookClaimOptions {
+	return hookClaimOptions{
+		Assignee:           assignee,
+		IdentityCandidates: identities,
+		Env:                env,
+		DrainAck:           opts.DrainAck,
+		JSON:               opts.JSON,
+		StrictDrainAck:     strict,
+	}
+}
+
+// hookDiscover is doHookDiscovery, a seam for tests of what plain `gc hook`
+// hands it. Tests that swap it MUST NOT call t.Parallel().
+var hookDiscover = doHookDiscovery
+
 // doHookDiscovery is the drain-fenced entry point for plain `gc hook`, the
 // DISCOVERY door. doHook itself stays a pure query-and-print function; this
 // wrapper is where the F-D fence lives for the non-claim path.
@@ -1361,7 +1404,7 @@ func doHookDiscovery(workQuery, dir string, inject bool, opts hookClaimOptions, 
 			fmt.Fprintf(stderr, "gc hook: drain-pending probe unavailable for %s: %v; proceeding to discovery\n", sessionID, err) //nolint:errcheck
 			hookEmitDrainFenceUnavailable(stderr, sessionID, hookClaimEnvValue(opts.Env, "GC_TEMPLATE"), err)
 		case pending:
-			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, stdout, stderr)
+			return writeHookClaimDrainPending(hookDiscoveryLabel, sessionID, opts, ops, dir, stdout, stderr)
 		}
 	}
 	return doHook(workQuery, dir, inject, runner, stdout, stderr, visibility)

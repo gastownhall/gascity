@@ -224,7 +224,7 @@ func TestDrainAckRowWithoutConditionalWriter(t *testing.T) {
 // preE3DoRuntimeDrainAck is doRuntimeDrainAck as it was before E3, frozen as
 // the legacy oracle.
 func preE3DoRuntimeDrainAck(dops drainOps, cityPath, targetName, sn, sessionID string, jsonOutput bool, stdout, stderr io.Writer) int {
-	drainAckReleaseHeldClaims(cityPath, sn, stderr)
+	drainAckReleaseHeldClaims(cityPath, sn, drainAckCaller{}, stderr)
 	if err := dops.setDrainAck(sn); err != nil {
 		fmt.Fprintf(stderr, "gc runtime drain-ack: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
@@ -322,8 +322,9 @@ func runDrainAck(t *testing.T, store beads.Store, id string, ack func(drainOps, 
 	originalRelease, originalPoke := drainAckReleaseHeldClaims, drainAckPokeController
 	t.Cleanup(func() { drainAckReleaseHeldClaims, drainAckPokeController = originalRelease, originalPoke })
 	var run drainAckRun
-	drainAckReleaseHeldClaims = func(cityPath, sessionName string, _ io.Writer) {
+	drainAckReleaseHeldClaims = func(cityPath, sessionName string, _ drainAckCaller, _ io.Writer) string {
 		run.releases = append(run.releases, cityPath+"|"+sessionName+"|"+rowAck(t, store, id))
+		return ""
 	}
 	drainAckPokeController = func(string, reconcilekey.Key) error { run.pokes++; return nil }
 	sp := runtime.NewFake()
@@ -523,18 +524,22 @@ func (d orderSpyDrainOps) setDrainAck(sn string) error {
 // TestRuntimeDrainAckV2EffectOrder pins CONTRACT v5.7 D5's order with one
 // effect log across the release seam, the row store, the env ack and the
 // poke: check (no writes) → release → row CAS → env ack → poke. A refused
-// check logs nothing. (A CAS that loses after the release is
+// check logs nothing, and a release pass that refuses (the seat holds
+// started work, PHASE1-2 §6.5) stops the ack there: no row CAS, no env ack,
+// no poke. (A CAS that loses after the release is
 // TestRuntimeDrainAckV2StoreOutcomes.) Kills: E3 as merged (row CAS before
-// the release), and a release before the check.
+// the release), a release before the check, and an ack past a refusal.
 func TestRuntimeDrainAckV2EffectOrder(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		envToken string
+		refusal  string
 		wantCode int
 		want     []string
 	}{
 		{name: "match", envToken: "tok-a", want: []string{"release worker", "cas", "env", "poke"}},
 		{name: "refused check", envToken: "tok-old", wantCode: drainAckRefused, want: nil},
+		{name: "release pass refuses", envToken: "tok-a", refusal: "this session holds g-1", wantCode: drainAckRefused, want: []string{"release worker"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			cityPath, _, _ := drainAckCity(t, "v2")
@@ -546,7 +551,10 @@ func TestRuntimeDrainAckV2EffectOrder(t *testing.T) {
 				drainAckOpenSessionRow, drainAckReleaseHeldClaims, drainAckPokeController = originalOpen, originalRelease, originalPoke
 			})
 			drainAckOpenSessionRow = func(string, *config.City, string, string) (beads.Store, string, error) { return store, row.ID, nil }
-			drainAckReleaseHeldClaims = func(_, sessionName string, _ io.Writer) { log = append(log, "release "+sessionName) }
+			drainAckReleaseHeldClaims = func(_, sessionName string, _ drainAckCaller, _ io.Writer) string {
+				log = append(log, "release "+sessionName)
+				return tc.refusal
+			}
 			drainAckPokeController = func(string, reconcilekey.Key) error { log = append(log, "poke"); return nil }
 
 			dops := orderSpyDrainOps{drainOps: newDrainOps(runtime.NewFake()), log: &log}
@@ -842,7 +850,7 @@ func TestHookDrainAckToleranceCallSites(t *testing.T) {
 	}
 	pending := func(strict bool) drainFn {
 		return func(ack hookDrainAckFunc, stdout, stderr io.Writer) int {
-			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: strict}, hookClaimOps{DrainAck: ack}, stdout, stderr)
+			return writeHookClaimDrainPending(hookClaimLabel, "gc-7", hookClaimOptions{DrainAck: true, JSON: true, StrictDrainAck: strict}, hookClaimOps{DrainAck: ack}, "", stdout, stderr)
 		}
 	}
 	// claimsErrored reaches the same writeHookClaimDrain call as an idle store

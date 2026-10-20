@@ -38,7 +38,15 @@ type Fake struct {
 	Activity         map[string]time.Time // session → last activity time
 	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
 	// session name.
-	Bindings                map[string]SessionBinding
+	Bindings map[string]SessionBinding
+	// KeyedDeliveries are the deliveries a [FullFake] holds, by session name
+	// then delivery key: the first keyed delivery under a key stays, and
+	// LookupDelivery finds it. A test may seed it; it is created on first
+	// use.
+	KeyedDeliveries map[string]map[string]DeliveryReceipt
+	// LookupDeliveryErrors fail a [FullFake]'s LookupDelivery by session
+	// name.
+	LookupDeliveryErrors    map[string]error
 	StartErrors             map[string]error // per-session Start errors for testing
 	StopErrors              map[string]error // per-session Stop errors for testing
 	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
@@ -48,6 +56,7 @@ type Fake struct {
 	SleepCapabilityValue    SessionSleepCapability
 	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
 	InputFencingValue       InputFencing      // reported by InputFencing; empty reads as atomic
+	SteerModeValue          SteerMode         // reported by SteerMode; empty reads as keystroke
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
@@ -915,6 +924,18 @@ func (f *Fake) TurnInterruptMode(string) TurnInterruptMode {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.TurnInterruptModeValue
+}
+
+// SteerMode returns the configured steer mode, keystroke when unset: the
+// fake types NudgeNow as tmux does. It records no call: like
+// TurnInterruptMode it reports a fixed trait of the runtime.
+func (f *Fake) SteerMode(string) SteerMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SteerModeValue == "" {
+		return SteerKeystroke
+	}
+	return f.SteerModeValue
 }
 
 // LastStartConfig returns the Config used in the most recent Start call for

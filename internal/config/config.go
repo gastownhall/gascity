@@ -259,6 +259,10 @@ type City struct {
 	Storage *StorageConfig `toml:"storage,omitempty"`
 	// Beads configures the bead store backend.
 	Beads BeadsConfig `toml:"beads,omitempty"`
+	// Ops holds the operation-journal rollout gates (ops.content,
+	// ops.control, ops.lifecycle) and the conversation lane's switch
+	// (ops.authoritative).
+	Ops OpsConfig `toml:"ops,omitempty"`
 	// Session configures the session provider backend.
 	Session SessionConfig `toml:"session,omitempty"`
 	// Mail configures the mail provider backend.
@@ -1478,6 +1482,18 @@ type BeadsConfig struct {
 	// GC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for
 	// "off" that overrides every city's value for one release.
 	NativeTransport string `toml:"native_transport,omitempty" jsonschema:"default=auto,enum=auto,enum=off"`
+	// LedgerFeed selects whether the controller tails each bead scope's
+	// durable mutation journal to bring writes made outside gc (agents running
+	// bd, humans) into its caches within about a second instead of at the
+	// next re-scan: "off" (default) or "auto" (tail the scopes whose native or
+	// proxied store has the journal active; gc never turns the journal on).
+	// Any other value fails config load. Scopes that cannot be tailed stay on
+	// the re-scan, and gc doctor reports which. The stores of a non-work
+	// [storage] binding, and rigs that share the city's legacy file store,
+	// are never tailed: they stay on the re-scan, and gc doctor does not list
+	// them. A reload that changes ledger_feed rebuilds the controller's
+	// stores.
+	LedgerFeed string `toml:"ledger_feed,omitempty" jsonschema:"default=off,enum=off,enum=auto"`
 	// Policies defines per-bead-use storage and garbage-collection defaults.
 	// Policy names are interpreted by higher-level systems; unknown names are
 	// preserved so packs can stage future policy classes without breaking load.
@@ -1536,6 +1552,26 @@ func (b BeadsConfig) NormalizedGuardedRelease() string {
 		return "off"
 	}
 	return b.GuardedRelease
+}
+
+// The beads.ledger_feed values.
+const (
+	// BeadsLedgerFeedOff keeps every scope on the controller's re-scan.
+	BeadsLedgerFeedOff = "off"
+	// BeadsLedgerFeedAuto tails every scope whose journal is active.
+	BeadsLedgerFeedAuto = "auto"
+)
+
+// NormalizedLedgerFeed returns the configured ledger-feed value, trimmed and
+// lowercased, with the empty string mapped to the default "off". An unknown
+// value passes through and is rejected on load by validateLedgerFeed; every
+// consumer compares this, never the raw field.
+func (b BeadsConfig) NormalizedLedgerFeed() string {
+	raw := strings.ToLower(strings.TrimSpace(b.LedgerFeed))
+	if raw == "" {
+		return BeadsLedgerFeedOff
+	}
+	return raw
 }
 
 // NormalizedNativeTransport returns the configured native-transport value,
@@ -2803,6 +2839,14 @@ type DaemonConfig struct {
 	// deprecated aliases for "legacy". Boot-latched: a change applies at the next
 	// controller restart. Leave it unset.
 	SessionReconciler string `toml:"session_reconciler,omitempty" jsonschema:"default=legacy,enum=legacy,enum=v2,enum=off,enum=auto,enum=require"`
+	// WorkLadder selects how the v2 reconciler paces outstanding work on pool
+	// seats. "on" (default) runs the work-progress ladder: nudges back off from
+	// 3 to 60 minutes and never stop, a started claim is recycled at most once
+	// and then escalated, and an unstarted claim is released after its third
+	// unanswered nudge. "off" runs the three backstops it replaced (idle-claim,
+	// continuation, execution) instead: the rollback. Read on every pass, so a
+	// config reload applies. Legacy ignores it.
+	WorkLadder string `toml:"work_ladder,omitempty" jsonschema:"default=on,enum=on,enum=off"`
 	// AutoRestartOnDrift controls whether `gc start` automatically restarts
 	// the supervisor when it detects the running supervisor's binary or
 	// pack snapshot has drifted from on-disk state. Nil (unset) defaults
@@ -3010,6 +3054,27 @@ func (d *DaemonConfig) NudgeDispatcherMode() string {
 	default:
 		return "legacy"
 	}
+}
+
+// WorkLadderEnabled reports whether the v2 reconciler runs the work-progress
+// ladder ([daemon] work_ladder): every value but "off" does. An unknown value
+// keeps the ladder on, with a load warning (workLadderWarnings).
+func (d DaemonConfig) WorkLadderEnabled() bool {
+	return !strings.EqualFold(strings.TrimSpace(d.WorkLadder), "off")
+}
+
+// workLadderWarnings returns the load warning for one config layer's
+// [daemon] work_ladder when its value is neither "on" nor "off": "false" or
+// "disabled" would otherwise read as on without a word.
+func workLadderWarnings(cfg *City, source string) []string {
+	if cfg == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(cfg.Daemon.WorkLadder)) {
+	case "", "on", "off":
+		return nil
+	}
+	return []string{fmt.Sprintf(`%s: [daemon] work_ladder = %q is not a known value; the work ladder stays on (use "off" to run the backstops instead)`, source, cfg.Daemon.WorkLadder)}
 }
 
 // Session reconciler modes returned by SessionReconcilerMode.
@@ -4960,6 +5025,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateBeadsModes(cfg.Beads); err != nil {
 		return nil, err
 	}
+	if err := validateOpsModes(cfg.Ops); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -4970,7 +5038,7 @@ func Parse(data []byte) (*City, error) {
 }
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field
-// (conditional_writes, guarded_release, native_transport). Parse runs it on
+// (conditional_writes, guarded_release, native_transport, ledger_feed). Parse runs it on
 // its single layer and LoadWithIncludesOptions runs it again on the composed
 // root, because a fragment may supply any of these fields; one shared list
 // keeps the two load paths from drifting when a field is added.
@@ -4981,7 +5049,10 @@ func validateBeadsModes(b BeadsConfig) error {
 	if err := validateGuardedRelease(b.GuardedRelease); err != nil {
 		return err
 	}
-	return validateNativeTransport(b.NativeTransport)
+	if err := validateNativeTransport(b.NativeTransport); err != nil {
+		return err
+	}
+	return validateLedgerFeed(b.LedgerFeed)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes
@@ -5036,6 +5107,21 @@ func validateNativeTransport(raw string) error {
 	mode, err := gate.ParseMode(raw)
 	if err != nil || mode == gate.Require {
 		return fmt.Errorf("beads.native_transport: invalid mode %q: want one of off, auto", raw)
+	}
+	return nil
+}
+
+// validateLedgerFeed rejects an out-of-enum beads.ledger_feed value at load
+// time, as validateNativeTransport does for its two-valued switch: a typo
+// must not silently pick a mode, and gate.ParseMode's "require" does not
+// belong to this field. The empty string (unset) is valid and means off.
+func validateLedgerFeed(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	mode, err := gate.ParseMode(raw)
+	if err != nil || mode == gate.Require {
+		return fmt.Errorf("beads.ledger_feed: invalid mode %q: want one of off, auto", raw)
 	}
 	return nil
 }

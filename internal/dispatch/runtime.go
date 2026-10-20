@@ -447,7 +447,7 @@ func processScopeCheck(store beads.Store, bead beads.Bead, opts ProcessOptions) 
 	opts.tracef("scope-check bead=%s begin root=%s scope=%s", bead.ID, rootID, scopeRef)
 
 	subjectID, err := tracePhase(opts, bead.ID, "resolve-subject-id", func() (string, error) {
-		return resolveBlockingSubjectID(store, bead.ID)
+		return resolveScopeCheckSubjectID(store, bead.ID)
 	})
 	if err != nil {
 		return ControlResult{}, fmt.Errorf("%s: resolving subject: %w", bead.ID, err)
@@ -1716,6 +1716,41 @@ func resolveBlockingSubjectID(store beads.Store, beadID string) (string, error) 
 		}
 	}
 	return "", fmt.Errorf("no blocking dependency")
+}
+
+// resolveScopeCheckSubjectID returns the step a scope-check finalizes. A
+// scope-check for an on_complete source blocks on both the source and its
+// <source>-fanout control; the fanout edge is a readiness gate only, so the
+// subject is the first blocker that is not a fanout control, independent of
+// dependency order.
+func resolveScopeCheckSubjectID(store beads.Store, beadID string) (string, error) {
+	deps, err := store.DepList(beadID, "down")
+	if err != nil {
+		return "", err
+	}
+	var blockers []string
+	for _, dep := range deps {
+		if dep.Type == "blocks" {
+			blockers = append(blockers, dep.DependsOnID)
+		}
+	}
+	switch len(blockers) {
+	case 0:
+		return "", fmt.Errorf("no blocking dependency")
+	case 1:
+		return blockers[0], nil
+	}
+	for _, id := range blockers {
+		blocker, err := store.Get(id)
+		if err != nil {
+			return "", fmt.Errorf("loading blocker %s: %w", id, err)
+		}
+		if blocker.Metadata[beadmeta.KindMetadataKey] == beadmeta.KindFanout {
+			continue
+		}
+		return id, nil
+	}
+	return "", fmt.Errorf("no non-fanout blocking dependency among %v", blockers)
 }
 
 func resolveScopeBody(store beads.Store, rootID, scopeRef, traceID string, opts ProcessOptions) (beads.Bead, error) {

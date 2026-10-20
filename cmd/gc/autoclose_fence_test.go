@@ -39,8 +39,8 @@ func stampedMemStore(t *testing.T, store beads.Store) {
 	}
 }
 
-// zeroRevisionStore reads every row back with no revision, as a backend
-// without the revision layout does.
+// zeroRevisionStore reads every row back at revision 0 while the store holds a
+// real one.
 type zeroRevisionStore struct{ beads.Store }
 
 func (s zeroRevisionStore) Get(id string) (beads.Bead, error) {
@@ -86,11 +86,13 @@ func TestAutocloseCloseIfStill(t *testing.T) {
 			stampedMemStore(t, m)
 			return m
 		}, still: open, wantClosed: true, wantReason: true},
-		// A row read back without a revision cannot be CASed; the re-check
-		// is the guard.
+		// A re-read at revision 0 is CASed at 0 like any revision, never
+		// closed blind: over a row whose real revision is not 0 the CAS
+		// refuses.
 		{
-			name: "CAS store, row without a revision", store: func(t *testing.T) beads.Store { return stamped(t) },
-			wrap: func(inner beads.Store, _ string) beads.Store { return zeroRevisionStore{inner} }, still: open, wantClosed: true,
+			name: "CAS store, row read back at 0", store: func(t *testing.T) beads.Store { return stamped(t) },
+			wrap: func(inner beads.Store, _ string) beads.Store { return zeroRevisionStore{inner} }, still: open,
+			wantErr: func(err error) bool { return errors.Is(err, errAutocloseRefused) },
 		},
 		{
 			name: "re-read fails", store: func(*testing.T) beads.Store { return beads.NewMemStore() },
@@ -139,6 +141,48 @@ func TestAutocloseCloseIfStill(t *testing.T) {
 				t.Fatal("a conditional store took the unconditional close")
 			}
 		})
+	}
+}
+
+// legacyRowStore is a stamped MemStore holding one row at revision 0, the
+// default a legacy native row (row_lock backfilled by migration 0054) keeps
+// until its first write.
+func legacyRowStore(t *testing.T) (*beads.MemStore, string) {
+	t.Helper()
+	m := beads.NewMemStoreFrom(1, []beads.Bead{{ID: "gc-1", Title: "legacy", Status: "open", Type: "task"}}, nil)
+	stampedMemStore(t, m)
+	return m, "gc-1"
+}
+
+// Kills the revision-0 blind close: a legacy row re-read at its real revision
+// 0 is closed by a CAS at 0, so a write landing between the re-read and the
+// close refuses it rather than being closed over.
+func TestAutocloseCloseIfStillFencesALegacyRow(t *testing.T) {
+	open := func(b beads.Bead) bool { return b.Status == "open" }
+	for _, interleave := range []bool{false, true} {
+		inner, id := legacyRowStore(t)
+		store := &interleavedStore{Store: inner, id: id}
+		if interleave {
+			store.between = func() { _ = inner.SetMetadata(id, "touched", "yes") }
+		}
+		unconditional := 0
+		closed, err := autocloseCloseIfStill(store, id, "legacy-reason", open, func() error {
+			unconditional++
+			return inner.Close(id)
+		})
+		got, _ := inner.Get(id)
+		if unconditional != 0 {
+			t.Fatalf("interleave=%v: a legacy row at revision 0 took the unconditional close", interleave)
+		}
+		if interleave {
+			if !errors.Is(err, errAutocloseRefused) || closed || got.Status == "closed" {
+				t.Fatalf("interleave: (closed %v, err %v, status %q), want the CAS at 0 refused and the row open", closed, err, got.Status)
+			}
+			continue
+		}
+		if err != nil || !closed || got.Status != "closed" || got.Metadata["close_reason"] != "legacy-reason" {
+			t.Fatalf("(closed %v, err %v, row %+v), want the legacy row closed by the CAS at 0 with its reason", closed, err, got)
+		}
 	}
 }
 

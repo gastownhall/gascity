@@ -76,6 +76,11 @@ type sessionResponse struct {
 
 	// Metadata exposes real_world_app_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// Turn is the turn the session's conversation-lane observer last
+	// recorded (X11 §5.3). Set on GET /session/{id} only, and only while
+	// the city's lane host runs with a kind to execute.
+	Turn *SessionTurn `json:"turn,omitempty" doc:"The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."`
 }
 
 type sessionResponseHandle interface {
@@ -204,7 +209,7 @@ func sessionResponseWithReason(info session.Info, pr session.PersistedResponse, 
 	}
 	r.Reason = session.LifecycleDisplayReasonWithLiveness(pr.Status, pr.Metadata, time.Now().UTC(), info.SessionName, isRunning)
 	r.ConfiguredNamedSession = strings.TrimSpace(pr.Metadata[apiNamedSessionMetadataKey]) == "true"
-	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(pr.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName))
+	r.SubmissionCapabilities = session.SubmissionCapabilitiesForRuntime(pr.Metadata, hasDeferredQueue, runtime.TurnInterruptModeFor(sp, info.SessionName), runtime.SteerModeFor(sp, info.SessionName))
 	// Expose only real_world_app_* prefixed metadata keys to API consumers.
 	// Internal fields (session_key, command, work_dir, etc.) are redacted.
 	r.Metadata = filterMetadata(pr.Metadata)
@@ -412,9 +417,9 @@ func (s *Server) handleSessionClose(w http.ResponseWriter, r *http.Request) {
 		writeSessionManagerError(w, err)
 		return
 	}
-	// Nudge withdrawal reads the nudges class, so it sources the typed
-	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), closeResult.WaitNudgeIDs); err != nil {
+	// The city's nudge queue withdraws the nudges and closes their shadows in
+	// the nudges class.
+	if err := s.withdrawQueuedWaitNudges(closeResult.WaitNudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
 	}
 
@@ -506,9 +511,9 @@ func (s *Server) handleSessionWake(w http.ResponseWriter, r *http.Request) {
 		writeStoreError(w, err)
 		return
 	}
-	// Nudge withdrawal reads the nudges class, so it sources the typed
-	// NudgesBeadStore (identity to the work store until that class relocates).
-	if err := withdrawQueuedWaitNudges(s.state.NudgesBeadStore(), s.state.CityPath(), res.NudgeIDs); err != nil {
+	// The city's nudge queue withdraws the nudges and closes their shadows in
+	// the nudges class.
+	if err := s.withdrawQueuedWaitNudges(res.NudgeIDs); err != nil {
 		log.Printf("gc api: withdrawing queued wait nudges after wake %s: %v", id, err)
 	}
 	// Clear in-memory crash tracker so the reconciler doesn't immediately

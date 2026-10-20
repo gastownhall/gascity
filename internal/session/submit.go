@@ -51,6 +51,20 @@ const (
 type SubmissionCapabilities struct {
 	SupportsFollowUp     bool `json:"supports_follow_up"`
 	SupportsInterruptNow bool `json:"supports_interrupt_now"`
+	// SupportsSteer reports that a steer reaches the session's running turn
+	// ([SupportsSteerForInfo]): the runtime's steer mode combined with the
+	// session's provider family, whichever host delivers the steer. No
+	// submit intent steers yet: the capability is read by conversation-lane
+	// producers, whose steers only the conversation lane delivers. The
+	// lane's Caps.Steer is this capability only while the lane runs the
+	// conversation live; it is false while another host serves the
+	// conversation or the runtime cancels turns by protocol and its own
+	// protocol does not report its turns, starts included, which the lane
+	// does not run live, and there a steer waits not_live whatever its
+	// on_unsupported policy. On a live lane, a steer the session cannot take
+	// follows that policy: boundary waits for the turn's boundary, fail
+	// closes the op failed{unsupported}.
+	SupportsSteer bool `json:"supports_steer"`
 }
 
 // SubmitOutcome reports whether a submit was delivered now or queued.
@@ -68,7 +82,8 @@ type SubmitOutcome struct {
 }
 
 // SubmissionCapabilitiesForMetadata derives runtime submit affordances from
-// persisted session metadata and whether deferred queueing is available.
+// persisted session metadata and whether deferred queueing is available. It
+// knows no runtime, so it never reports SupportsSteer.
 func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQueue bool) SubmissionCapabilities {
 	transport := transportFromMetadata(beads.Bead{Metadata: metadata})
 	return SubmissionCapabilities{
@@ -79,13 +94,16 @@ func SubmissionCapabilitiesForMetadata(metadata map[string]string, hasDeferredQu
 
 // SubmissionCapabilitiesForRuntime is [SubmissionCapabilitiesForMetadata] for
 // a session whose runtime cancels turns in mode, the session's
-// [runtime.TurnInterruptModeFor]: a runtime that cannot interrupt the
-// session's turn withdraws interrupt_now.
-func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode) SubmissionCapabilities {
+// [runtime.TurnInterruptModeFor], and steers in steer, its
+// [runtime.SteerModeFor]: a runtime that cannot interrupt the session's turn
+// withdraws interrupt_now, and steer is the runtime's mode combined with the
+// session's provider family ([SupportsSteerForInfo]).
+func SubmissionCapabilitiesForRuntime(metadata map[string]string, hasDeferredQueue bool, mode runtime.TurnInterruptMode, steer runtime.SteerMode) SubmissionCapabilities {
 	caps := SubmissionCapabilitiesForMetadata(metadata, hasDeferredQueue)
 	if refusesTurnInterrupt(beads.Bead{Metadata: metadata}, mode) {
 		caps.SupportsInterruptNow = false
 	}
+	caps.SupportsSteer = supportsSteerForMetadata(metadata, steer)
 	return caps
 }
 
@@ -95,13 +113,15 @@ func supportsInterruptNowForMetadata(metadata map[string]string) bool {
 
 // SubmissionCapabilities reports which semantic submit intents the session can
 // currently support. A runtime that cannot interrupt the session's turn
-// withdraws interrupt_now.
+// withdraws interrupt_now; steer is the runtime's steer mode combined with the
+// session's provider family.
 func (m *Manager) SubmissionCapabilities(id string) (SubmissionCapabilities, error) {
 	b, sessName, err := m.loadSessionBead(id, true)
 	if err != nil {
 		return SubmissionCapabilities{}, err
 	}
-	return SubmissionCapabilitiesForRuntime(b.Metadata, strings.TrimSpace(m.cityPath) != "", runtime.TurnInterruptModeFor(m.sp, sessName)), nil
+	return SubmissionCapabilitiesForRuntime(b.Metadata, m.deferredQueue() != nil,
+		runtime.TurnInterruptModeFor(m.sp, sessName), runtime.SteerModeFor(m.sp, sessName)), nil
 }
 
 // refusesTurnInterrupt reports whether a runtime with mode cannot replace the
@@ -220,7 +240,7 @@ func pendingConversationRestart(b beads.Bead) bool {
 func (m *Manager) supportsFollowUpLocked(b beads.Bead) bool {
 	return SubmissionCapabilitiesForMetadata(
 		b.Metadata,
-		strings.TrimSpace(m.cityPath) != "",
+		m.deferredQueue() != nil,
 	).SupportsFollowUp
 }
 
@@ -280,7 +300,7 @@ func (m *Manager) interruptAndSubmitLocked(ctx context.Context, by Actor, id str
 	if err := m.stopTurnLocked(ctx, b, sessName, mode); err != nil {
 		return false, err
 	}
-	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode); err != nil {
+	if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, nil); err != nil {
 		if mode == runtime.TurnInterruptProtocol {
 			// A protocol runtime's Stop may leave it running, so a restart
 			// would interrupt nothing and nudge the message into the turn.
@@ -360,31 +380,48 @@ func (m *Manager) waitUntilRunningLocked(ctx context.Context, id, sessName strin
 // fresh read decides the miss, as it may have stopped since its caller read
 // it running.
 func (m *Manager) stopTurnLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
-	if none, err := m.stopFindsNoTurn(ctx, b, sessName); none {
-		return err
+	_, err := m.sendTurnInterruptLocked(ctx, b, sessName, mode, false)
+	return err
+}
+
+// sendTurnInterruptLocked is stopTurnLocked, also reporting none when it
+// found no turn to interrupt and sent nothing. fresh decides whether the
+// runtime runs from a fresh liveness read, as stopFindsNoTurn documents.
+func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, fresh bool) (none bool, err error) {
+	if none, err := m.stopFindsNoTurn(ctx, b, sessName, fresh); none {
+		return true, err
 	}
 	switch mode {
 	case runtime.TurnInterruptProtocol:
 		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-			return fmt.Errorf("interrupting session: %w", err)
+			return false, fmt.Errorf("interrupting session: %w", err)
 		}
-		return nil
+		return false, nil
 	case runtime.TurnInterruptUnsupported:
-		return fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
+		return false, fmt.Errorf("%w: %s", ErrTurnInterruptUnsupported, sessName)
 	}
 	if usesSoftEscapeInterrupt(b) {
 		if err := runtime.SendKeysWithContext(ctx, m.sp, sessName, "Escape"); err != nil {
-			return fmt.Errorf("interrupting session: %w", err)
+			return false, fmt.Errorf("interrupting session: %w", err)
 		}
-		return nil
+		return false, nil
 	}
 	if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-		return fmt.Errorf("interrupting session: %w", err)
+		return false, fmt.Errorf("interrupting session: %w", err)
 	}
-	return nil
+	return false, nil
 }
 
-func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode) error {
+// waitForInterruptIdleLocked waits for a family that settles to an idle
+// prompt after its interrupt to read idle, sending the keystroke sequence's
+// follow-up interrupt on the way: a soft-escape family's Ctrl-C fallback once
+// the Escape has not settled it within softInterruptFallbackWait, or
+// Gemini's immediate confirm. The follow-up interrupts whatever turn runs
+// when it lands, so a checked stop (StopTurnIf) passes its check as still:
+// the follow-up goes only once still passes again, and a refusal sends
+// nothing more and fails the wait, the refusal in its text only, since the
+// first key was sent.
+func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, still func() error) error {
 	if !waitsForIdleAfterInterrupt(b) {
 		return nil
 	}
@@ -399,18 +436,29 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 		}
 		return err
 	}
+	followUp := func(what string) error {
+		if still != nil {
+			if err := still(); err != nil {
+				return fmt.Errorf("%s: not sent, the turn check refused it (%s)", what, err.Error())
+			}
+		}
+		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
+			return fmt.Errorf("%s: %w", what, err)
+		}
+		return nil
+	}
 	if usesSoftEscapeInterrupt(b) && mode == runtime.TurnInterruptKeystroke {
 		if requiresImmediateInterruptConfirm(b) {
-			if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-				return fmt.Errorf("confirming interrupt after soft escape: %w", err)
+			if err := followUp("confirming interrupt after soft escape"); err != nil {
+				return err
 			}
 			return waitForIdle(15 * time.Second)
 		}
 		if err := waitForIdle(softInterruptFallbackWait); err == nil {
 			return nil
 		}
-		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {
-			return fmt.Errorf("interrupting session with control-c fallback: %w", err)
+		if err := followUp("interrupting session with control-c fallback"); err != nil {
+			return err
 		}
 	}
 	return waitForIdle(15 * time.Second)
@@ -727,7 +775,8 @@ func needsDeferredStartupDialogVerification(b beads.Bead) bool {
 }
 
 func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message string) error {
-	if strings.TrimSpace(m.cityPath) == "" {
+	queue := m.deferredQueue()
+	if queue == nil {
 		return errors.New("deferred submit is unavailable without a city path")
 	}
 	now := time.Now().UTC()
@@ -742,11 +791,7 @@ func (m *Manager) enqueueDeferredSubmitLocked(b beads.Bead, sessName, message st
 		DeliverAfter:      now,
 		ExpiresAt:         now.Add(defaultQueuedSubmitTTL),
 	}
-	if err := nudgequeue.WithState(m.cityPath, func(state *nudgequeue.State) error {
-		state.Pending = append(state.Pending, item)
-		nudgequeue.SortState(state)
-		return nil
-	}); err != nil {
+	if err := queue.EnqueueDeferred(item); err != nil {
 		return fmt.Errorf("queueing deferred submit: %w", err)
 	}
 	if m.supportsFollowUpLocked(b) {

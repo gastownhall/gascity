@@ -406,6 +406,17 @@ type Info struct {
 	// (beadmeta.CurrentClaimBeadIDMetadataKey): the work the session claimed
 	// for itself (SetCurrentClaim), which CurrentClaimBeadID reads live.
 	CurrentClaimBeadID string // current_claim_bead_id (raw)
+	// WorkStartedRaw and WorkLadderRaw are the RAW work cells (WorkStartedKey,
+	// WorkLadderKey; work_cells.go), so a fenced write's decide sees both:
+	// the hook's started write refuses a claim the ladder is releasing, and
+	// the ladder's release refuses one the hook recorded.
+	WorkStartedRaw string // work_started (raw JSON)
+	WorkLadderRaw  string // work_ladder (raw JSON)
+	// ExecutionClaimStarted is the RAW execution_claim_started stamp
+	// ("<instance_token>|<bead>") the execution backstop writes once a claim's
+	// step started: with the work_started cell, the started records a release
+	// keeps a seat's claims by, read off the Info as off the bead.
+	ExecutionClaimStarted string // execution_claim_started (raw)
 	// CoreHashBreakdown is the RAW core_hash_breakdown metadata (a JSON blob). The
 	// config-drift path feeds it verbatim to runtime.CoreFingerprintDriftFieldsFromJSON
 	// / LogCoreFingerprintDrift for the drift trace payload; the mirror keeps the
@@ -413,9 +424,10 @@ type Info struct {
 	CoreHashBreakdown string // core_hash_breakdown (raw)
 	// StartedProvisionHash / StartedLaunchHash / StartedLiveHash are the RAW
 	// provision/launch/live sub-fingerprints captured at start. The launch-only-
-	// drift decision compares StartedProvisionHash against the recomputed provision
-	// fingerprint and StartedLaunchHash against the launch fingerprint (both exact
-	// string compares, both gated on != ""); the live-hash drift path compares
+	// drift decision matches StartedProvisionHash against the recomputed provision
+	// fingerprint via runtime.ProvisionHashMatches (this binary's hash or the
+	// pre-policy v6 one) and StartedLaunchHash against the launch fingerprint
+	// via runtime.LaunchHashMatches, both gated on != ""; the live-hash drift path compares
 	// StartedLiveHash. Mirrors keep the raw values.
 	StartedProvisionHash string // started_provision_hash (raw)
 	StartedLaunchHash    string // started_launch_hash (raw)
@@ -622,7 +634,8 @@ type Manager struct {
 	transportResolver       func(template, provider string) transportResolution
 	clk                     clock.Clock
 	staleKeyDetectionWaiter StaleKeyDetectionWaiter
-	leaseTTL                time.Duration // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	leaseTTL                time.Duration       // the runtime lease records' TTL (WithRuntimeLeaseTTL)
+	deferredSubmits         DeferredSubmitQueue // injected deferred-submit queue (WithDeferredSubmitQueue)
 }
 
 // PruneResult reports which sessions were pruned and which queued wait nudges
@@ -941,7 +954,9 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			sessionKey = generatedKey
 		}
 
-		// Create the bead first to get the ID.
+		// Create the bead first to get the ID. The create is the mint of the
+		// row's first incarnation (generation 1, a fresh token).
+		token := NewInstanceToken()
 		meta := map[string]string{
 			"template":           template,
 			"state":              string(StateActive),
@@ -954,7 +969,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			"session_id_flag":    resume.SessionIDFlag,
 			"generation":         fmt.Sprintf("%d", DefaultGeneration),
 			"continuation_epoch": fmt.Sprintf("%d", DefaultContinuationEpoch),
-			"instance_token":     NewInstanceToken(),
+			"instance_token":     token,
 		}
 		// provider_kind may be injected via extraMeta when the caller has
 		// resolved the canonical builtin kind for a custom provider alias.
@@ -990,6 +1005,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("creating session bead: %w", createErr)
 		}
 		b := createdBead
+		inc := createdIncarnation(b.ID, token, ActorOperator, m.now())
 
 		sessName := explicitName
 		if sessName == "" {
@@ -1032,6 +1048,44 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return nil
 		}
 
+		// The first start runs under the runtime lease on the new row's name,
+		// taken before any provider call: the name's flock excludes another
+		// starter or stopper of the same runtime name on this host, and the
+		// row's record those on other hosts. A held lease is busy
+		// (ErrSessionStarting). Lock order: the process's identifier
+		// reservation locks (held here), then the lease; the session mutation
+		// lock is not taken, and the lease is tried, never waited for, so no
+		// holder of the lease can be waiting on a reservation lock held here.
+		lease, leaseErr := m.leaseCreatedRuntime(b.ID, sessName)
+		if leaseErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(leaseErr, rbErr)
+			}
+			return leaseErr
+		}
+		defer lease.Release()
+		ctx, cancel, watchErr := lease.Watch(ctx, runtimeLeaseWatchEvery)
+		if watchErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(watchErr, rbErr)
+			}
+			return watchErr
+		}
+		defer cancel()
+		// Under the lease the first start reads the runtime fresh, as a
+		// Manager start does before its mint (leasedLiveness), and a read
+		// that cannot answer refuses the create (fail closed). The create is
+		// already the row's mint, so a runtime up under the new row's name is
+		// left to the Start: it reports the name taken (ErrSessionNameExists
+		// below), reuses it under the created incarnation as t3bridge's
+		// reuses the name's thread, or replaces one whose agent died.
+		if _, readErr := m.leasedLiveness(b.ID, sessName, hints.ProcessNames); readErr != nil {
+			if rbErr := rollbackFailedCreate(); rbErr != nil {
+				return errors.Join(readErr, rbErr)
+			}
+			return readErr
+		}
+
 		// If the provider supports Generate & Pass, inject --session-id into command.
 		startCommand := command
 		if resume.SessionIDFlag != "" && sessionKey != "" {
@@ -1042,13 +1096,7 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 		cfg := hints
 		cfg.Command = startCommand
 		cfg.WorkDir = workDir
-		runtimeInfo := m.infoFromBead(b)
-		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), RuntimeEnvWithSessionContext(
-			runtimeInfo,
-			DefaultGeneration,
-			DefaultContinuationEpoch,
-			meta["instance_token"],
-		))
+		cfg.Env = mergeEnv(mergeEnv(cfg.Env, env), startEnv(m.infoFromBead(b), inc))
 		if gcProvider := ProviderFamilyFromMetadata(meta, provider); gcProvider != "" {
 			cfg.Env = mergeEnv(cfg.Env, map[string]string{"GC_PROVIDER": gcProvider})
 		}
@@ -1065,8 +1113,8 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			return fmt.Errorf("pre-start orphan cleanup: %w", orphanErr)
 		}
 		if err := m.sp.Start(ctx, sessName, cfg); err != nil {
-			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, meta["instance_token"]) {
-				if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
+			if runtimeSessionMatchesBead(m.sp, sessName, b.ID, inc.token) {
+				if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
 					return metaErr
 				}
 				info = m.infoFromBead(b)
@@ -1083,7 +1131,12 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 			}
 			return fmt.Errorf("starting session: %w", err)
 		}
-		if metaErr := m.confirmStartedRuntimeMetadata(b.ID, sessName, &b); metaErr != nil {
+		if metaErr := m.confirmStartedRuntimeMetadata(inc, sessName, &b); metaErr != nil {
+			if errors.Is(metaErr, ErrMintSuperseded) {
+				// The row records a newer incarnation: the runtime is its
+				// owner's to keep or reap, never stopped by name here.
+				return metaErr
+			}
 			if stopErr := m.sp.Stop(sessName); stopErr != nil {
 				metaErr = errors.Join(metaErr, fmt.Errorf("stopping runtime after metadata failure: %w", stopErr))
 			}
@@ -1102,11 +1155,18 @@ func (m *Manager) createStarted(ctx context.Context, spec CreateOptions) (Info, 
 	return info, nil
 }
 
-func (m *Manager) confirmStartedRuntimeMetadata(id, sessName string, b *beads.Bead) error {
+// confirmStartedRuntimeMetadata confirms the first start of a created row,
+// only while the row still records inc, the incarnation it was created with
+// (ConfirmIncarnation).
+func (m *Manager) confirmStartedRuntimeMetadata(inc Incarnation, sessName string, b *beads.Bead) error {
 	metadata := ConfirmStartedPatch(time.Now().UTC())
 	maps.Copy(metadata, m.startedRuntimeBindingPatch(sessName))
-	if err := m.store.SetMetadataBatch(id, metadata); err != nil {
+	landed, err := m.PersistedStore().ConfirmIncarnation(inc, metadata)
+	switch {
+	case err != nil:
 		return fmt.Errorf("storing started runtime metadata: %w", err)
+	case !landed:
+		return fmt.Errorf("%w: storing started runtime metadata: session %s no longer records %s: %w", ErrStateSync, inc.ID, inc, ErrMintSuperseded)
 	}
 	if b != nil {
 		if b.Metadata == nil {
@@ -1130,6 +1190,22 @@ func (m *Manager) startedRuntimeBindingPatch(sessName string) MetadataPatch {
 		log.Printf("session: %q started; not recording its runtime binding: %v", sessName, err)
 	}
 	return patch
+}
+
+// leaseCreatedRuntime takes the runtime lease on created row id's runtime
+// sessName for its first start, without waiting: the flock and the row's
+// record (TryRuntimeLease). A Manager with no city refuses
+// (ErrRuntimeLeaseNoCity), and a busy lease is ErrSessionStarting.
+func (m *Manager) leaseCreatedRuntime(id, sessName string) (*RuntimeLease, error) {
+	city, err := m.CityDir()
+	if err != nil {
+		return nil, RefuseWithoutCity(m.cityPath, fmt.Sprintf("session %q", id))
+	}
+	ttl := m.leaseTTL
+	if ttl <= 0 {
+		ttl = RuntimeLeaseTTLFor(nil)
+	}
+	return operatorRuntimeLease(TryRuntimeLease(m.PersistedStore(), RuntimeLeaseRequest{City: city.Path(), Name: sessName, ID: id, TTL: ttl}))
 }
 
 func runtimeSessionMatchesBead(sp runtime.Provider, sessionName, beadID, instanceToken string) bool {
@@ -1458,14 +1534,20 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			return err
 		}
 
+		// Every intent clears last_woke_at before the runtime goes: a tick
+		// that sees the dead runtime would otherwise classify this deliberate
+		// stop as a rapid crash or churn of that wake and discard the
+		// conversation the next wake resumes.
+
 		// An operator's suspend is the disposition's Suspend cell, fenced,
 		// and written BEFORE the runtime goes: the user hold keeps legacy's
 		// assigned-work wake and its heartbeat crash recovery from undoing it,
 		// so a tick between the write and the stop drains the row instead of
-		// restarting it. It supersedes any pending wake request (D7). A failed
-		// stop restores the row.
+		// restarting it. It supersedes any pending wake request (D7) and
+		// clears the wake stamp in the same write. A failed stop restores the
+		// row, the stamp with it.
 		if intent == suspendIntentOperator {
-			suspended, err := m.PersistedStore().OperatorSuspend(id, m.now())
+			suspended, err := m.PersistedStore().operatorSuspend(id, m.now(), operatorSuspendStopLife)
 			if err != nil {
 				return fmt.Errorf("updating suspension state: %w", err)
 			}
@@ -1485,7 +1567,17 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 			return nil
 		}
 
+		// The soft and sweep suspends write their state after the stop, so
+		// the stamp is cleared first, whatever stamp the row carries by then.
+		// A failed stop restores the stamp it cleared.
+		cleared, err := m.clearWakeStamp(id)
+		if err != nil {
+			return fmt.Errorf("clearing wake stamp for suspend: %w", err)
+		}
 		if err := m.tearDownRuntimeForSuspend(sessName); err != nil {
+			if rbErr := m.restoreWakeStamp(id, cleared); rbErr != nil {
+				return fmt.Errorf("%w (restoring wake stamp: %w)", err, rbErr)
+			}
 			return err
 		}
 
@@ -1507,6 +1599,52 @@ func (m *Manager) Suspend(ctx context.Context, by Actor, id string, soft bool) e
 		patch = CellInto(id, b.Metadata, by.Kind, DispEvent{Kind: EvSuspendSoft}, m.now(), patch)
 		return m.stampSoftSuspend(id, patch)
 	})
+}
+
+// clearWakeStamp clears last_woke_at, fenced on a fresh read, and returns
+// the stamp it cleared ("" when the row carried none). A stamp written since
+// the caller's read is the one cleared, so the stop that follows never runs
+// with a wake stamp set. Every attempt lost to a concurrent writer returns an
+// error and clears nothing: the caller must not stop the runtime.
+func (m *Manager) clearWakeStamp(id string) (string, error) {
+	cleared := ""
+	err := m.updateWakeStamp(id, func(current string) (string, bool) {
+		cleared = current
+		return "", current != ""
+	})
+	return cleared, err
+}
+
+// restoreWakeStamp puts back the stamp clearWakeStamp cleared, fenced on a
+// fresh read, only while the row still carries none: a stamp written since
+// (a new wake) stands.
+func (m *Manager) restoreWakeStamp(id, stamp string) error {
+	err := m.updateWakeStamp(id, func(current string) (string, bool) {
+		return stamp, stamp != "" && current == ""
+	})
+	return err
+}
+
+// updateWakeStamp writes the last_woke_at next decides from the row's current
+// stamp, fenced on a fresh read. next returning false writes nothing. Every
+// attempt lost to a concurrent writer is an error.
+func (m *Manager) updateWakeStamp(id string, next func(current string) (string, bool)) error {
+	decided := false
+	wrote, err := m.PersistedStore().UpdateMetadataFenced(id, operatorSuspendAttempts, func(_ Info, p PersistedResponse) MetadataPatch {
+		to, write := next(p.Metadata["last_woke_at"])
+		decided = !write
+		if !write {
+			return nil
+		}
+		return MetadataPatch{"last_woke_at": to}
+	})
+	if err != nil {
+		return err
+	}
+	if !wrote && !decided {
+		return fmt.Errorf("session %q: wake stamp lost to concurrent writes; retry", id)
+	}
+	return nil
 }
 
 // tearDownRuntimeForSuspend kills the runtime session for a suspend. Stop is

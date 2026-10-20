@@ -90,10 +90,18 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"writeAt":             true, // compared as mergeEndState.writeAtIDs
 		"readyProjectionLost": true, // compared as mergeEndState.readyLost
 		"retainedAt":          true, // compared as mergeEndState.retainedIDs
+		"announcedCloses":     true, // compared as mergeEndState.announcedCloseIDs
+		"silentCloses":        true, // compared as mergeEndState.silentCloseIDs
 		"fenceFloor":          true, // compared; only a pruned retention raises it
 		"lastFreshAt":         true, "mutationSeq": true, "primePartialErr": true,
 		"syncFailures": true, "circuitTripped": true,
 		"stats": true, // stats compared field-wise below
+		// announcedClosesPruneNext is set by the merge's prune and compared as
+		// mergeEndState.announcedPruneNext.
+		"announcedClosesPruneNext": true,
+		// announcedClosesPrunedAt is set by the merge's prune to the pass
+		// clock and compared as mergeEndState.announcedPrunedAt.
+		"announcedClosesPrunedAt": true,
 	}
 	excludedStore := map[string]bool{
 		// observationRevision is a process-local publication fence, orthogonal to
@@ -145,6 +153,15 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		// ownEmits records what onChange emitted, to recognize its echoes in
 		// applyEvent; the merge neither reads nor writes it.
 		"ownEmitMu": true, "ownEmits": true, "ownEmitsSweptAt": true,
+		// reconcileRequested and reconcileKick schedule the reconcile loop
+		// (RequestReconcile); the merge neither reads nor writes them.
+		"reconcileRequested": true, "reconcileKick": true,
+		// localWrites counts local writes in flight for a yielding
+		// RefreshRowReport; only the writers and that refresh touch it.
+		"localWrites": true,
+		// lastScanAt is set by Prime and PrimeActive, never by the merge
+		// seam; it dates the backstop only until the first reconcile.
+		"lastScanAt": true,
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CachingStore{}), comparedStore, excludedStore)
 
@@ -158,6 +175,7 @@ func TestMergeOracleFieldCoverage(t *testing.T) {
 		"SyncFailures": true, "ProblemCount": true, "LastProblemAt": true,
 		"LastProblem": true, "State": true, "StaggerOffsetMs": true,
 		"CurrentReconcileInterval": true, "LatencyP95Ms": true, "CadenceDriver": true,
+		"ReconcileRequests": true, // counts RequestReconcile calls, not merge outcome
 	}
 	assertFieldsClassified(t, reflect.TypeOf(CacheStats{}), comparedStats, excludedStats)
 }

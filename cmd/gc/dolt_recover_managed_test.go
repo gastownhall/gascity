@@ -234,6 +234,7 @@ func TestManagedDoltRecoverFields(t *testing.T) {
 		"had_pid\ttrue",
 		"forced\tfalse",
 		"ready\ttrue",
+		"ready_inconclusive\tfalse",
 		"pid\t9876",
 		"port\t3311",
 		"healthy\ttrue",

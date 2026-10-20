@@ -198,12 +198,13 @@ func TestRelaunchResultStep(t *testing.T) {
 // Kills a relaunch past its gates (SESS-556/560, legacy's
 // relaunchAgentForLaunchDrift), or through a provider other than the leaf
 // its section fenced (C8.7): a launch-only drift relaunches in the warm box,
-// on the fenced leaf, never through the composite; a leaf that cannot
+// on the fenced leaf, never through the composite, its box hash this
+// binary's or the v6 one's (pool sizing inside); a leaf that cannot
 // relaunch, a prepared config no longer launch-only (skew), a preparation
 // that would mint a speculative resume key, and a refused Relaunch each fail
 // into the fallback, the last two after preparing.
 func TestRelaunchCall(t *testing.T) {
-	tp := TemplateParams{TemplateName: "worker", Command: "run"}
+	tp := TemplateParams{TemplateName: "worker", Command: "run", FPExtra: map[string]string{"pool.max": "2"}}
 	probe, _ := baselineCase(t, livenessAlive, desireKeep, nil, "state", "active")
 	cfg := sessionCoreConfigForHashInfo(tp, probe.w.Census.Rows[probe.k].Info)
 	stale := runtime.FingerprintVersion + ":stale"
@@ -216,6 +217,7 @@ func TestRelaunchCall(t *testing.T) {
 		relaunch bool // the fenced leaf's Relaunch ran and landed
 	}{
 		{name: "launch-only", meta: append([]string{"session_key", "k-1"}, launchOnly...), relaunch: true},
+		{name: "a v6 launch-only drift", meta: []string{"session_key", "k-1", "started_config_hash", "v6:stale", "started_provision_hash", runtime.PrePolicyProvisionFingerprint(cfg), "started_launch_hash", "v6:old-launch"}, relaunch: true},
 		{name: "a leaf that cannot relaunch", meta: append([]string{"session_key", "k-1"}, launchOnly...), leaf: func(f *runtime.Fake) runtime.Provider { return struct{ runtime.Provider }{f} }},
 		{name: "skew", meta: []string{"session_key", "k-1", "started_config_hash", stale, "started_provision_hash", runtime.FingerprintVersion + ":other-box", "started_launch_hash", runtime.FingerprintVersion + ":old-launch"}},
 		{name: "a speculative key", meta: launchOnly, minting: true},

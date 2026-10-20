@@ -4,6 +4,7 @@ go_library(
     name = "nudgequeue",
     srcs = [
         "state.go",
+        "state_file_queue.go",
         "store.go",
         "waits.go",
     ],
@@ -20,6 +21,7 @@ go_library(
 go_test(
     name = "nudgequeue_test",
     srcs = [
+        "state_file_queue_test.go",
         "state_test.go",
         "store_test.go",
         "testenv_import_test.go",

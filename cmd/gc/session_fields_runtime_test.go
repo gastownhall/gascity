@@ -224,7 +224,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			cb.RecordRestart("worker", now)
 			must(t, persistSessionCircuitBreakerMetadata(front, id, cb, "worker", now))
 		}},
-		{"v2 nudges step", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.nudges"}, func(t *testing.T, rec *sessionKeyRecorder) {
+		{"v2 work-ladder step", "work_ladder", []string{"cmd/gc/work_ladder_lane.go:ladderPass.commit"}, func(t *testing.T, rec *sessionKeyRecorder) {
 			env, _ := nudgeStepsFixture(t)
 			sess := idleClaimPoolSession()
 			sess.Labels = []string{sessionBeadLabel}
@@ -235,7 +235,21 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
 			}, nil)
 			rec.reset()
-			lane.nudges(context.Background(), env)
+			lane.workLadder(context.Background(), env)
+		}},
+		{"v2 work-ladder step, rolled back", "idle_claim_nudge_at idle_claim_nudge_count idle_claim_nudge_token idle_claim_nudge_trigger", []string{"cmd/gc/reconcile_steps_nudges.go:externalReadsLane.legacyBackstops"}, func(t *testing.T, rec *sessionKeyRecorder) {
+			env, _ := nudgeStepsFixture(t)
+			env.Cfg.Daemon.WorkLadder = "off"
+			sess := idleClaimPoolSession()
+			sess.Labels = []string{sessionBeadLabel}
+			_, err := rec.MemStore.Create(sess)
+			must(t, err)
+			env.CityStore = rec
+			lane, _ := newPoolStepsTestLane(env, func() *allocSummary {
+				return &allocSummary{At: stepsTestNow, AssignedWork: []beads.Bead{{ID: "work-a", Status: "open"}}}
+			}, nil)
+			rec.reset()
+			lane.workLadder(context.Background(), env)
 		}},
 	}
 	// The operator's verbs, in an order each accepts, on one row.
@@ -259,7 +273,7 @@ func TestSessionFieldsFlowsWriteTheirKeys(t *testing.T) {
 			must(t, err)
 		}},
 		{"operator fresh restart", "continuation_reset_pending restart_requested", []string{"internal/session/manager.go:Manager.RequestFreshRestart"}, func(t *testing.T, _ *sessionKeyRecorder) { must(t, m.RequestFreshRestart(id)) }},
-		{"operator suspend", "held_until runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.Suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) {
+		{"operator suspend", "held_until last_woke_at runtime_lease_epoch runtime_lease_expires_at runtime_lease_flock runtime_lease_holder runtime_lease_ttl sleep_intent sleep_reason slept_at state suspended_at wake_request wake_requested_at", []string{"internal/session/manager.go:Manager.Suspend", "internal/session/runtime_lease.go:RuntimeLease.acquireRecord"}, func(t *testing.T, _ *sessionKeyRecorder) {
 			must(t, m.Suspend(context.Background(), testActorIn(t, session.ActorOperator, opCity), id, false))
 		}},
 		{"operator kill fence", "held_until last_woke_at pending_create_claim pending_create_started_at sleep_intent sleep_reason slept_at state state_reason suspended_at synced_at wake_request wake_requested_at", []string{"internal/session/kill_fence.go:KillPendingPatch", "internal/session/kill_fence.go:WriteKillFence"}, func(t *testing.T, rec *sessionKeyRecorder) {
@@ -383,6 +397,36 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 			patchSite(func(session.Info) session.MetadataPatch { // a fresh wake, which clears the baseline too
 				return session.PreWakePatch(session.PreWakePatchInput{Generation: 4, InstanceToken: "tok-4", Now: now, FreshWake: true})
 			}),
+		},
+		"cmd/gc/reconcile_effect_launch.go:preWakeStep": { // the row as the launch's Start sees it: the PreWake landed, the commit not yet
+			[]string{"wake_request", "explicit", "wake_requested_at", ago(time.Minute), "continuation_reset_pending", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				k, leaf := launchKit(t, "asleep", meta...)
+				var atStart map[string]string
+				leaf.onStart = func(context.Context) {
+					b, err := k.backing.Get(k.it.Key.ID)
+					if err != nil {
+						t.Fatal(err)
+					}
+					atStart = maps.Clone(b.Metadata)
+				}
+				if s := k.runKind(); s.Outcome != settledLanded || atStart == nil {
+					t.Fatalf("launch settled %+v, want landed with a Start", s)
+				}
+				return atStart
+			},
+		},
+		"internal/session/incarnation.go:Store.MintIncarnation": { // a fresh context consumes the reset
+			[]string{"continuation_reset_pending", "true"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				req := session.MintRequest{Expect: fieldInfo(t, m, id), By: session.ActorOperator, Now: now, FreshContext: func(session.Info) bool { return true }}
+				if _, err := sessionFrontDoor(m).MintIncarnation(context.Background(), nil, req); err != nil {
+					t.Fatal(err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
 		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {
 			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},

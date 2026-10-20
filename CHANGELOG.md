@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
+  `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
+  bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
+  >= 1.3.0)`. bd 1.3.0 is the first tested release with `bd update
+  --if-assignee/--if-status`, which `ReleaseIfCurrent` (the orphan-sweep
+  release of a stale work assignment) requires. A 1.2.x version is not enough:
+  bd 1.2.0 and 1.2.1 were accidental, untested releases, and bd 1.2.2
+  re-released the 1.1.2 code without the flags. The raw-SQL fallback (`bd sql`,
+  and the `dolt sql` CLI on embedded Dolt) that served older bd is deleted, so
+  gc no longer bypasses bd with direct SQL for old-bd compatibility. A bd
+  without the flags now gets a typed "conditional assignment release
+  unsupported" error, and gc releases no stale assignment through it: the
+  fenced fallback cannot guard its write on that bd either, so it refuses,
+  and orphaned work stays assigned to its dead session until bd is upgraded.
+  The default `beads.bd_compatibility` (`bd-1.0.4` semantics) is unchanged.
+  Upgrade with `brew upgrade beads` or from
+  https://github.com/gastownhall/beads/releases.
+
 - **The generic bead API no longer writes session rows, startup-health
   episodes or convergence roots.** `POST /beads`, `PATCH /bead/{id}`,
   `POST /bead/{id}/update`, `/close`, `/reopen`, `/assign`, `DELETE
@@ -351,6 +369,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **A config reload no longer creates or rebinds a city's bead store.** When a
+  city's `.beads/metadata.json` went missing (for example, a `git` checkout
+  deleted a file an older commit had tracked), the next reload fell back to
+  the default `hq` database, created it with `bd init`, and rebound the live
+  city to that empty store. Reload, including a plain `gc reload` with no
+  config change, now holds the city to the store binding it booted on. If
+  metadata.json is missing or unusable, or names a different store, the
+  reload fails and keeps the old config. The error says whether to restore
+  the file (do not restart first: boot treats a missing binding as a new
+  city) or to restart to adopt a deliberate rebinding. Switching a city from
+  a non-bd beads provider (such as `file`) to bd now also takes a restart; a
+  reload refuses it. Rig scopes and boot are unchanged.
+
+- **Codex structured history keeps every turn's model and token usage.**
+  Usage was read only from the rollout tail, so older turns (and older
+  history pages) lost it once the session grew (thanks @csells).
+
+- **Stopping a Claude turn that is waiting on a permission prompt now cancels
+  the prompt.** The tmux interrupt sent Ctrl-C, which leaves Claude's prompt
+  up; it now sends Escape (the prompt's own cancel key) when a prompt is on
+  screen, never a numbered option. When it cannot read the pane it logs a
+  warning and sends Ctrl-C as before. (thanks @csells)
+
+- **A Claude API failure now shows as a provider error in structured session
+  history, not as an assistant reply.** Entries Claude flags with
+  `isApiErrorMessage` carry a `provider_error` system event (with Claude's
+  error code) and are projected as system messages; refusals and text that
+  merely quotes an API error stay replies. (thanks @csells)
+
+- **A Claude turn interrupted while a tool was running now reads as idle.**
+  Claude writes `[Request interrupted by user for tool use]` for that case,
+  which the transcript activity check did not recognize, so the session kept
+  reporting `in-turn`. The marker counts only as the whole message, not inside
+  ordinary prose. (thanks @csells)
+
+- **Claude transcripts are found again for work directories with underscores,
+  spaces or other punctuation.** Current Claude Code names a project
+  directory by replacing every UTF-16 code unit outside `[A-Za-z0-9]` with
+  `-`; Gas City only replaced `/` and `.`, so history, resume-key probes and activity missed
+  the transcript. Both spellings are now searched. (thanks @csells)
+
 - **The Dolt compactor docs no longer claim it only rewrites history this
   city grew.** The `gc-compact-base` watermark is a position, not an author:
   a database several cities write to is flattened for all of them when the
@@ -653,6 +712,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reach either. A rig whose `.beads/config.yaml` cannot be read is skipped
   too, with a warning naming the file. Rigs that inherit the city endpoint are
   compacted as before (#7994).
+
+- **Suspending a session shortly after it woke keeps its conversation.** An
+  operator, idle or `gc stop` suspend no longer counts as a rapid crash or
+  churn that cleared `session_key`, so the next wake resumes. (thanks @csells)
 
 ## [1.5.0] - 2026-10-05
 

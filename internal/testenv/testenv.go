@@ -61,6 +61,27 @@
 // store traced back to test clients reaching the local server on port 3307
 // (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
 // (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
+//
+// Hermetic git template: in go-test mode init() also points GIT_TEMPLATE_DIR
+// at a template directory holding a config with maintenance.auto=false, an
+// empty hooks/ and an empty info/exclude, replacing any ambient
+// GIT_TEMPLATE_DIR (which beats init.templateDir) that is not already that
+// template. Every repo this binary or a child it spawns makes with git init or
+// git clone then starts with git's detached auto-maintenance off. Git 2.55
+// starts that daemon after commit, merge, am, fetch and pull, and it races
+// t.TempDir's RemoveAll ("directory not empty", ga-zoe1wr). The template lives
+// in $TEST_TMPDIR when Bazel sets it, else os.TempDir(), named for the owner's
+// uid and a digest of its contents. Git copies a template's hooks/ into every
+// repo it makes, so an existing template is verified against what init()
+// writes (entry by entry, content byte for byte, and on unix owner and mode)
+// before it is used, and one that differs makes init() panic naming the
+// directory to remove. A test binary that another one re-execs inherits
+// GIT_TEMPLATE_DIR and keeps it when it is an absolute path that passes the
+// same verification, so a child started with a TMPDIR of its own creates
+// nothing there. Testscript subcommand mode is left alone, as above. Code that
+// builds a child env from scratch must carry GIT_TEMPLATE_DIR into it, or the
+// repos that child makes lose the guard, and a child that is a test binary
+// installs a template of its own in its temp dir.
 package testenv
 
 import (
@@ -151,6 +172,14 @@ var LeakVectorVars = []string{
 	"GC_DOLT_PORT",
 	"GC_DOLT_USER",
 	"GC_HOME",
+	// GC_LANE_FAILPOINT makes a test-hooks gc kill itself at a lane stage
+	// (cmd/gc/conversation_lane_failpoint.go). A leaked shell value would make
+	// a gc child a test starts, or a unit test that enables the stamp, kill
+	// itself, so the scrub owns it; tests that want it set it on the child.
+	"GC_LANE_FAILPOINT",
+	"GC_OPS_CONTENT",
+	"GC_OPS_CONTROL",
+	"GC_OPS_LIFECYCLE",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_TMUX_SESSION",
@@ -349,4 +378,5 @@ func init() {
 			_ = os.Unsetenv(name)
 		}
 	}
+	seedGitTemplate()
 }

@@ -29,10 +29,11 @@ func (h *SessionHandle) Start(ctx context.Context, by sessionpkg.Actor) (err err
 }
 
 // StartResolved starts or resumes the worker using a caller-supplied runtime
-// command and hints. This is a migration bridge for higher layers that already
+// command and hints, under inc, the incarnation the caller minted under
+// by.Lease. This is a migration bridge for higher layers that already
 // materialize provider-specific runtime config but should still delegate the
 // provider-specific runtime bring-up through the worker boundary.
-func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, hints runtime.Config) (err error) {
+func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, inc sessionpkg.Incarnation, startCommand string, hints runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -51,7 +52,7 @@ func (h *SessionHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, 
 	if strings.TrimSpace(startHints.Command) == "" {
 		startHints = h.runtimeHints()
 	}
-	err = h.manager.StartRuntimeOnly(ctx, by, id, command, startHints)
+	err = h.manager.StartRuntimeOnly(ctx, by, id, inc, command, startHints)
 	return err
 }
 
@@ -361,23 +362,41 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 	if err != nil {
 		return MessageResult{}, err
 	}
+	if _, held, lookErr := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery(id)); lookErr != nil || held {
+		err = lookErr
+		result = MessageResult{Replayed: held}
+		return result, err
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return MessageResult{}, err
+	}
+	if req.DeliveryKey != "" {
+		ctx = runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 	}
 	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
 	if err != nil {
 		return MessageResult{}, err
 	}
-	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred}
+	result = MessageResult{Queued: outcome.Queued, Deferred: outcome.Deferred, Interrupt: outcome.Interrupt}
 	return result, nil
 }
 
-// Interrupt soft-stops any in-flight worker turn.
+// Interrupt soft-stops the in-flight worker turn: the one req.Turn names, or
+// with no Turn whatever runs.
 func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if req.Turn != "" {
+		if !req.Fence.IsZero() {
+			if err = req.Fence.Validate(); err != nil {
+				return err
+			}
+		}
+		err = h.interruptTurn(ctx, req.Turn, req.Fence)
+		return err
+	}
 	id := h.currentSessionID()
 	if !req.Fence.IsZero() {
 		if err = req.Fence.Validate(); err != nil {
@@ -426,7 +445,15 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	if err != nil {
 		return NudgeResult{}, err
 	}
-	defer func() { result.Unfenced = unfenced && result.Delivered }()
+	defer func() { result.Unfenced = unfenced && result.Delivered && !result.Replayed }()
+	receipt, held, err := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery(id))
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	if held {
+		result = NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}
+		return result, nil
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return NudgeResult{}, err
@@ -484,6 +511,13 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	default:
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
+	}
+}
+
+// lookupDelivery is session id's delivery lookup for heldDelivery.
+func (h *SessionHandle) lookupDelivery(id string) func(context.Context, string) (runtime.DeliveryReceipt, bool, error) {
+	return func(ctx context.Context, key string) (runtime.DeliveryReceipt, bool, error) {
+		return h.manager.LookupDelivery(ctx, id, key)
 	}
 }
 

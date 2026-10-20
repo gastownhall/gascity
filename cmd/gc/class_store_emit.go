@@ -196,6 +196,9 @@ func storeEngine(store beads.Store) beads.Store {
 type emittingClassStore struct {
 	beads.Store
 	cityPath string
+	// deferredRings, when set, queues the controller doorbells for
+	// journal-row writes for the caller to ring (deferJournalRings).
+	deferredRings *journalRingQueue
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +209,10 @@ type emittingClassStore struct {
 type classStoreEmission struct {
 	eventType string
 	bead      beads.Bead
+	// synthesized marks a row built from the write itself after a read miss
+	// rather than re-read from the store. It is not the row's whole state,
+	// so its empty metadata must not be written as an explicit {}.
+	synthesized bool
 }
 
 // emit appends one row per emission to the city's journal through a single
@@ -217,7 +224,11 @@ type classStoreEmission struct {
 // running it here would race that recorder mid-rotation. It does not make the open free — NewFileRecorder reads
 // the log directory either way, to continue the sequence past the archives —
 // only unraced.
+//
+// An operation-journal row journals nothing: the controller is rung to
+// announce it (ringJournalEmissions).
 func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
+	emissions = s.ringJournalEmissions(emissions)
 	if len(emissions) == 0 {
 		return
 	}
@@ -238,6 +249,9 @@ func (s *emittingClassStore) emit(emissions ...classStoreEmission) {
 			continue
 		}
 		payload = withExplicitEdges(payload, emission.bead)
+		if !emission.synthesized && emission.eventType != events.BeadDeleted {
+			payload = withExplicitMetadata(payload, emission.bead)
+		}
 		stepID := emission.bead.Metadata[beadmeta.StepIDMetadataKey]
 		rec.Record(events.Event{
 			Type:             emission.eventType,
@@ -297,6 +311,28 @@ func withExplicitEdges(payload []byte, bead beads.Bead) []byte {
 		return payload
 	}
 	fields["dependencies"] = json.RawMessage("[]")
+	out, err := json.Marshal(fields)
+	if err != nil {
+		return payload
+	}
+	return out
+}
+
+// withExplicitMetadata adds "metadata":{} to the payload of a row that holds no
+// metadata, which the Bead encoding would otherwise omit. emit applies it only
+// to a re-read row (not a synthesized one, and not a delete), so the payload is a
+// fresh snapshot, so an empty map is the row's real state: without the key, a
+// peer cache reads the event as "metadata not reported" and keeps a key the
+// write just removed (an unset of the row's last key).
+func withExplicitMetadata(payload []byte, bead beads.Bead) []byte {
+	if len(bead.Metadata) > 0 {
+		return payload
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(payload, &fields); err != nil {
+		return payload
+	}
+	fields["metadata"] = json.RawMessage("{}")
 	out, err := json.Marshal(fields)
 	if err != nil {
 		return payload
@@ -365,7 +401,7 @@ func (s *emittingClassStore) afterUpdateEmission(id string, opts beads.UpdateOpt
 	if !wasClosed && beadStatusIsClosed(bead.Status) {
 		eventType = events.BeadClosed
 	}
-	return classStoreEmission{eventType: eventType, bead: bead}, true
+	return classStoreEmission{eventType: eventType, bead: bead, synthesized: !ok}, true
 }
 
 // emitClosed records bead.closed for a close this store proved committed.
@@ -379,7 +415,7 @@ func (s *emittingClassStore) emitClosed(id string) {
 		bead = beads.Bead{ID: id}
 	}
 	bead.Status = beadStatusClosed
-	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead})
+	s.emit(classStoreEmission{eventType: events.BeadClosed, bead: bead, synthesized: !ok})
 }
 
 // emitClosedBead records bead.closed from the committed row an atomic fenced
@@ -789,6 +825,14 @@ func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep,
 		return nil, beads.ErrDepListBatchUnsupported
 	}
 	return batch.DepListBatch(ids)
+}
+
+// ReadyOrdered forwards a bounded ordered ready read (beads.OrderedReadyReader).
+// It emits nothing because it writes nothing, and it exists for the reason
+// DepListBatch does: a silent wrapper would send every bounded ready read of a
+// class binding down the whole-set path.
+func (s *emittingClassStore) ReadyOrdered(query beads.ReadyQuery, order beads.ReadyOrder) ([]beads.Bead, bool, error) {
+	return beads.ReadyOrdered(s.Store, query, order)
 }
 
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {

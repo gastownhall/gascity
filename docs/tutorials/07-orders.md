@@ -422,6 +422,33 @@ consumes it yet, and it changes nothing about gate, suspension, or single-flight
 semantics — a reserved order is still skipped when its city or rig is suspended,
 still subject to the open-work gate, and still single-flighted.
 
+## Backend-specific orders
+
+Some orders only make sense against one kind of bead store: the dolt pack's
+health, sync, compaction and backup orders all manage a Dolt server. Such an
+order declares the backends it needs:
+
+```toml
+[order]
+exec = "gc dolt health --json | gc dolt health-check"
+trigger = "cooldown"
+interval = "30s"
+requires_backend = ["dolt"]
+```
+
+The values are `dolt`, `doltlite`, `postgres` and `http`; any other value, or an
+empty list, fails validation. Omit the key and the order runs on every backend.
+For a scope whose store uses a backend the order does not name, gc never
+dispatches it. It records one `order.inapplicable` event per controller boot,
+and `gc order list` and `gc doctor` show the order as
+`inapplicable (backend http)`. `gc order check` shows it as inapplicable and
+never due, a webhook that targets it is rejected, and `gc order run` refuses it
+unless you pass `--force`. The HTTP API's order check
+(`GET /v0/city/{cityName}/orders/check`) does not apply this gate yet: it still
+evaluates the order's trigger and can report the order as due, though gc never
+dispatches it. An inapplicable order is not a failure and is never counted as a
+stale order.
+
 ## Rig-scoped orders
 
 When a pack is applied to a rig, that pack's orders come along and run scoped to

@@ -1,6 +1,6 @@
 # GENERATED FILE - DO NOT EDIT BY HAND.
 # Per-file counts for the P0.4 source resource census (owner: ga-cp3hwi).
-# Regenerate: go test ./internal/testpolicy/resourcecensus -run TestRepositoryLedgerMatchesCensusAndDocumentation -update
+# Regenerate: GC_TEST_REPO_ROOT="$PWD" bazel run //internal/testpolicy/resourcecensus:resourcecensus_test -- -test.run='^TestRepositoryLedgerMatchesCensusAndDocumentation$' -update
 version = 1
 
 [[count]]
@@ -918,6 +918,16 @@ resource = "listener_helper"
 calls = 4
 
 [[count]]
+path = "cmd/gc/op_record_content_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
+path = "cmd/gc/op_record_verbs_matrix_test.go"
+resource = "net_listen"
+calls = 1
+
+[[count]]
 path = "cmd/gc/order_dispatch_close_race_test.go"
 resource = "fixed_sleep"
 calls = 1
@@ -1056,6 +1066,11 @@ calls = 1
 [[count]]
 path = "cmd/gc/provider_store_resolution_test.go"
 resource = "cwd"
+calls = 2
+
+[[count]]
+path = "cmd/gc/ready_work_api_test.go"
+resource = "http_test_server"
 calls = 2
 
 [[count]]
@@ -1346,6 +1361,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "examples/bd/dolt/stale_db_close_reason_real_bd_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "examples/bd/dolt/stale_db_formula_test.go"
 resource = "subprocess"
 calls = 11
@@ -1599,7 +1620,7 @@ calls = 10
 [[count]]
 path = "internal/api/handler_sessions_test.go"
 resource = "fixed_sleep"
-calls = 9
+calls = 8
 
 [[count]]
 path = "internal/api/handler_sessions_test.go"
@@ -1625,6 +1646,11 @@ calls = 1
 path = "internal/api/huma_handlers_supervisor_test.go"
 resource = "fixed_sleep"
 calls = 2
+
+[[count]]
+path = "internal/api/huma_handlers_work_test.go"
+resource = "http_test_server"
+calls = 1
 
 [[count]]
 path = "internal/api/idempotency_test.go"
@@ -1670,6 +1696,16 @@ calls = 16
 path = "internal/api/rig_rollback_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "internal/api/session_ops_test.go"
+resource = "fixed_sleep"
+calls = 7
+
+[[count]]
+path = "internal/api/session_ops_test.go"
+resource = "http_test_server"
+calls = 4
 
 [[count]]
 path = "internal/api/session_stream_capability_test.go"
@@ -2096,9 +2132,42 @@ calls = 2
 tagged = true
 
 [[count]]
+path = "internal/runtime/acp/fence_test.go"
+resource = "fixed_sleep"
+calls = 6
+
+[[count]]
+path = "internal/runtime/acp/fence_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
+path = "internal/runtime/acp/interrupt_test.go"
+resource = "subprocess"
+calls = 1
+
+[[count]]
 path = "internal/runtime/dialog_test.go"
 resource = "fixed_sleep"
 calls = 1
+
+[[count]]
+path = "internal/runtime/exec/carrier_fence_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "internal/runtime/exec/carrier_fence_integration_test.go"
+resource = "subprocess"
+calls = 1
+tagged = true
+
+[[count]]
+path = "internal/runtime/exec/exec_fence_integration_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
 
 [[count]]
 path = "internal/runtime/fake_test.go"
@@ -2235,6 +2304,16 @@ path = "internal/runtime/ssh/ssh_localhost_integration_test.go"
 resource = "subprocess"
 calls = 1
 tagged = true
+
+[[count]]
+path = "internal/runtime/subprocess/fence_test.go"
+resource = "fixed_sleep"
+calls = 2
+
+[[count]]
+path = "internal/runtime/subprocess/fence_test.go"
+resource = "subprocess"
+calls = 1
 
 [[count]]
 path = "internal/runtime/subprocess/seams_test.go"
@@ -2926,6 +3005,36 @@ tagged = true
 path = "test/containerhost/docker_session_test.go"
 resource = "subprocess"
 calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x2_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x6_test.go"
+resource = "fixed_sleep"
+calls = 1
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x8_test.go"
+resource = "fixed_sleep"
+calls = 2
 tagged = true
 
 [[count]]

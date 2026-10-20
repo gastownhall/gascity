@@ -312,6 +312,27 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		}
 		if eventType != "bead.closed" || !verifiedClosedFromBacking {
 			b = mergeCacheEventPatch(current, patch, fields)
+			// The merge keeps the cached revision, since an event carries
+			// none. A verified event was checked against a backing read, and
+			// when the merged row reproduces that read it is that row, so it
+			// is installed as the read, whole: its revision, and the stamp,
+			// fence and tier fields the merge never takes and beadChanged
+			// does not compare. A CAS at the stale revision would otherwise
+			// be refused once for nothing. A merge that differs from the read
+			// keeps the merged row, and the guard is what keeps it safe: the
+			// difference may be a field the event's own write has no event
+			// for yet (pairing the read's revision with it is the mc-03lk4
+			// hazard), a local write that landed after the read (installing
+			// the read would roll this process's own write back), or edges
+			// the event carries and a point read omits (installing the read
+			// would wipe a live blocker). The readiness projection is not
+			// stored state, and a point read carries none, so the cached one
+			// is kept and not compared.
+			read := verifiedFresh
+			read.IsBlocked = b.IsBlocked
+			if verifiedRecentLocal && !beadChanged(b, read, false) {
+				b = read
+			}
 		}
 	}
 
@@ -1100,6 +1121,12 @@ func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bea
 }
 
 func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead) {
+	if eventType == "bead.closed" {
+		// Recorded before the announcement reaches onChange, so a refresh
+		// that reads this close meanwhile does not announce it again
+		// (announcedCloses).
+		c.recordAnnouncedClose(b)
+	}
 	if c.onChange == nil {
 		return
 	}

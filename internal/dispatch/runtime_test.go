@@ -445,6 +445,110 @@ func TestProcessScopeCheckAbortsScopeOnFailure(t *testing.T) {
 	}
 }
 
+// TestProcessScopeCheckSubjectSkipsFanoutBlocker pins that a scoped on_complete
+// source's scope-check, which blocks on both the source and its
+// <source>-fanout control, resolves the source as its subject even when the
+// fanout edge is listed first. The fanout edge is a readiness gate only: scope
+// output and the pass/fail decision come from the source.
+func TestProcessScopeCheckSubjectSkipsFanoutBlocker(t *testing.T) {
+	t.Parallel()
+
+	for _, tc := range []struct {
+		name          string
+		sourceOutcome string
+		wantAction    string
+	}{
+		{name: "pass", sourceOutcome: "pass", wantAction: "scope-pass"},
+		{name: "fail", sourceOutcome: "fail", wantAction: "scope-fail"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			store := beads.NewMemStore()
+			body := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "body",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope",
+					"gc.scope_role":   "body",
+					"gc.root_bead_id": "wf-1",
+					"gc.step_ref":     "demo.body",
+				},
+			})
+			source := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "member",
+					"gc.outcome":      tc.sourceOutcome,
+					"gc.output_json":  `{"from":"source"}`,
+				},
+			})
+			fanout := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title:  "Expand fanout for A",
+				Type:   "task",
+				Status: "closed",
+				Metadata: map[string]string{
+					"gc.kind":         "fanout",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+					"gc.outcome":      "pass",
+					"gc.output_json":  `{"from":"fanout"}`,
+				},
+			})
+			control := mustCreateWorkflowBead(t, store, beads.Bead{
+				Title: "Finalize scope for A",
+				Type:  "task",
+				Metadata: map[string]string{
+					"gc.kind":         "scope-check",
+					"gc.root_bead_id": "wf-1",
+					"gc.scope_ref":    "body",
+					"gc.scope_role":   "control",
+				},
+			})
+
+			// The fanout edge goes in first so a first-blocker lookup would
+			// pick the fanout control.
+			mustDepAdd(t, store, control.ID, fanout.ID, "blocks")
+			mustDepAdd(t, store, control.ID, source.ID, "blocks")
+			mustDepAdd(t, store, body.ID, control.ID, "blocks")
+
+			subjectID, err := resolveScopeCheckSubjectID(store, control.ID)
+			if err != nil {
+				t.Fatalf("resolveScopeCheckSubjectID: %v", err)
+			}
+			if subjectID != source.ID {
+				t.Fatalf("subject = %s, want source %s (fanout is %s)", subjectID, source.ID, fanout.ID)
+			}
+
+			result, err := ProcessControl(store, mustGetBead(t, store, control.ID), ProcessOptions{})
+			if err != nil {
+				t.Fatalf("ProcessControl(scope-check): %v", err)
+			}
+			if !result.Processed || result.Action != tc.wantAction {
+				t.Fatalf("scope result = %+v, want processed %s", result, tc.wantAction)
+			}
+
+			bodyAfter := mustGetBead(t, store, body.ID)
+			if bodyAfter.Status != "closed" {
+				t.Fatalf("body status = %q, want closed", bodyAfter.Status)
+			}
+			if got := bodyAfter.Metadata["gc.outcome"]; got != tc.sourceOutcome {
+				t.Fatalf("body outcome = %q, want %q", got, tc.sourceOutcome)
+			}
+			if tc.sourceOutcome == "pass" {
+				if got := bodyAfter.Metadata["gc.output_json"]; got != `{"from":"source"}` {
+					t.Fatalf("body output_json = %q, want the source's output", got)
+				}
+			}
+		})
+	}
+}
+
 // TestProcessScopeCheckAbortSkipsMemberBlockedOnInFlightControl covers the shape
 // that TestProcessScopeCheckAbortsScopeOnFailure deliberately omits: a scope
 // member whose only blocker is the scope-check currently aborting the scope.

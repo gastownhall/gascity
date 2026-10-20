@@ -18,9 +18,12 @@ import (
 // through to the backing store and update the cache on success.
 //
 // Writes that emit no gc event (agents running bd directly, humans, raw SQL)
-// reach the cache only when the background reconciler's scan notices them,
-// collapsed to the latest state; the bd hook -> gc event emit path that once
-// delivered them is gone (cmd/gc/hooks.go). ApplyEvent installs bead events
+// reach the cache when the background reconciler's scan notices them,
+// collapsed to the latest state, or sooner when a consumer that tails the
+// scope's durable mutation journal refreshes the rows it names (RefreshRow,
+// RefreshRowReport) and asks for a re-scan on a gap (RequestReconcile); the
+// bd hook -> gc event emit path that once delivered them is gone
+// (cmd/gc/hooks.go). ApplyEvent installs bead events
 // from the event bus, which carries gc's own writes. The cache is therefore
 // always potentially stale: a caller whose decision leads to a write must
 // fence that write at the store, never trust the cached row.
@@ -60,6 +63,11 @@ type CachingStore struct {
 	retainedAt  map[string]time.Time
 	state       cacheState
 	lastFreshAt time.Time
+	// lastScanAt is when a Prime or PrimeActive last merged its listing of
+	// the scope. Until the first reconcile it, not lastFreshAt, dates the
+	// reconcile backstop, so writes, events and refreshes that keep the
+	// cache fresh do not postpone the first re-scan.
+	lastScanAt  time.Time
 	mutationSeq uint64
 	// fenceFloor is the highest fence the cache dropped: the mutationSeq at
 	// the last full Prime replace, which drops beadSeq and deletedSeq, or a
@@ -119,11 +127,54 @@ type CachingStore struct {
 	// new generation, so a close after it is announced again. CloseAll
 	// registers no intent: its backing reports a count, not which ids it
 	// closed, so it announces only the closes of rows the cache held, and the
-	// close of a bead the cache never held goes unannounced, even when a read
-	// caches the closed row while the write is in flight.
+	// close of a bead the cache never held is not announced by the write, even
+	// when a read caches the closed row while the write is in flight. The
+	// closed row it installs for such a bead is marked silently installed
+	// (silentCloses), so a refresh with evidence of a recent close (the
+	// ledger feed's) announces it once.
 	closeIntents map[string]*closeIntent
+	// announcedCloses holds the closes this cache announced (announcedClose):
+	// every bead.closed emitChange sends, and the closes a reconcile announces
+	// as it evicts a row the cache held open, recorded under the lock before
+	// the notification goes out. A RefreshRowReport that then reads the same
+	// version of the row closed does not announce that close again
+	// (announcedCloseCoversLocked). A row installed not closed drops its entry,
+	// and entries older than recentWriteVerifyWindow are pruned at each
+	// reconcile merge and, once the record holds announcedClosesPruneAt
+	// entries and announcedClosesPruneNext, as each announcement is recorded.
+	announcedCloses map[string]announcedClose
+	// silentCloses names the rows the cache holds closed that were installed
+	// over no cached row by a path that announced no close (a write that only
+	// refreshed the row, a conditional write's refetch, an applied event, a
+	// list read): nothing told the bus they closed. A RefreshRowReport with
+	// evidence of a recent close treats such a row as unheld
+	// (announcesCloseLocked). An install that announces the close or leaves
+	// the row open drops the mark, as does an eviction; each reconcile merge
+	// drops the marks of rows it does not hold closed.
+	silentCloses map[string]struct{}
+	// announcedClosesPruneNext is twice the entries the last prune of
+	// announcedCloses kept: recording a close prunes again only once the
+	// record has grown to it, so between prunes the record grows to at most
+	// twice what the last one kept (or announcedClosesPruneAt), and a burst
+	// of closes whose prunes free nothing scans it a logarithmic number of
+	// times.
+	announcedClosesPruneNext int
+	// announcedClosesPrunedAt is when announcedCloses was last pruned: a
+	// record a window past it is pruned at the next announcement, whatever
+	// announcedClosesPruneNext says.
+	announcedClosesPrunedAt time.Time
+	// localWrites tracks the local writes between their start and their
+	// return, so a yielding RefreshRowReport does not announce a write's row
+	// before the write absorbs it (localWritesInFlight).
+	localWrites localWritesInFlight
 
-	reconciling    atomic.Bool
+	reconciling atomic.Bool
+	// reconcileRequested is set by RequestReconcile, cleared when a
+	// reconcile run starts, and set again when that run discards its merge;
+	// while set the cache is due (nextReconcileDelay).
+	reconcileRequested atomic.Bool
+	// reconcileKick wakes the reconcile loop on a request (capacity 1).
+	reconcileKick  chan struct{}
 	syncFailures   int
 	circuitTripped bool
 	stats          CacheStats
@@ -219,7 +270,11 @@ func (o CacheObservation) CacheRev() CacheRevision {
 //   - an unconditional write that another local write or deletion of the row
 //     overlapped, or that a full Prime replace overlapped: its own change,
 //     laid over its refresh read or patched into the cached row, could roll
-//     the other write back, so it installs nothing;
+//     the other write back, so it installs nothing. Every write reaches the
+//     backing (none is skipped on a cached match), so a same-value write the
+//     backing commits nothing for still counts here: overlapping a real
+//     write, it fences that write's install and marks the row dirty, and a
+//     strict CachedList declines until a backing read settles it;
 //   - a conditional write's refetch that failed, did not reflect the write,
 //     or was superseded by a newer write racing it;
 //   - an idempotent conditional write whose evicted row was not clean at the
@@ -392,6 +447,8 @@ type CacheStats struct {
 	// "latency" (P95 above the high-water mark), or "both" (bead count
 	// and latency both push to MEDIUM).
 	CadenceDriver string
+	// ReconcileRequests counts RequestReconcile calls.
+	ReconcileRequests int64
 }
 
 const (
@@ -647,6 +704,7 @@ func newCachingStore(backing Store, idPrefix string, onChange func(source Change
 		},
 		primeRetryDelay: defaultCachePrimeRetryDelay,
 		stopCh:          make(chan struct{}),
+		reconcileKick:   make(chan struct{}, 1),
 	}
 }
 
@@ -672,6 +730,12 @@ func (c *CachingStore) IDPrefix() string {
 
 func normalizeIDPrefix(prefix string) string {
 	return strings.Trim(strings.ToLower(strings.TrimSpace(prefix)), "-")
+}
+
+// OwnsBeadID reports whether id is in a namespace this cache holds rows for:
+// the filter ApplyEvent applies to bead events, and RefreshRow to its ids.
+func (c *CachingStore) OwnsBeadID(id string) bool {
+	return c.ownsBeadID(id)
 }
 
 func (c *CachingStore) ownsBeadID(id string) bool {
@@ -880,6 +944,16 @@ type absorbOpts struct {
 	// an event already on the bus. Every other absorb that closes a cached row
 	// queues the close for the next notification (see unannouncedCloses).
 	closeAnnounced bool
+	// closeClaimed says the caller is a closing write of this cache that
+	// claimed, or declined because it was announced elsewhere, the
+	// bead.closed of the row it installs (claimCloseLocked): unlike
+	// closeAnnounced it leaves a close a read queued since in the queue, and
+	// it does not mark the row silently installed (silentCloses).
+	closeClaimed bool
+	// evicted is the row a write evicted just before this install, which
+	// stands in for the cached row when none is held: the close tracking
+	// compares the installed row with it (trackCloseTransitionLocked).
+	evicted *Bead
 }
 
 // absorbFreshLocked installs a fresh row for id per opts. It is the only code
@@ -894,9 +968,12 @@ func (c *CachingStore) absorbFreshLocked(id string, bead Bead, now time.Time, op
 	}
 	c.advanceObservationLocked()
 	previous, hadPrevious := c.beads[id]
+	if !hadPrevious && opts.evicted != nil {
+		previous, hadPrevious = *opts.evicted, true
+	}
 	bead = c.absorbReadyProjectionLocked(id, bead, opts)
 	c.beads[id] = cloneBead(bead)
-	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced)
+	c.trackCloseTransitionLocked(id, previous, hadPrevious, bead, opts.closeAnnounced, opts.closeClaimed)
 	switch opts.depsMode {
 	case depsExplicit:
 		c.deps[id] = cloneDeps(opts.deps)
@@ -1070,6 +1147,7 @@ func (c *CachingStore) readyProjectionUnknownLocked(id string) bool {
 func (c *CachingStore) evictLocked(id string) {
 	c.advanceObservationLocked()
 	delete(c.beads, id)
+	delete(c.silentCloses, id)
 	delete(c.deps, id)
 	delete(c.dirty, id)
 	delete(c.beadSeq, id)
@@ -1439,6 +1517,7 @@ func (c *CachingStore) PrimeActive() error {
 	c.primePartialErr = partialErr
 	c.advanceObservationLocked()
 	c.markFreshLocked(now)
+	c.lastScanAt = now
 	c.updateStatsLocked()
 	return nil
 }
@@ -1635,6 +1714,7 @@ func (c *CachingStore) prime(ctx context.Context) error {
 	c.primePartialErr = partialErr
 	c.advanceObservationLocked()
 	c.markFreshLocked(now)
+	c.lastScanAt = now
 	c.updateStatsLocked()
 	return nil
 }
@@ -1835,6 +1915,14 @@ func (c *CachingStore) StopReconciler() {
 		cancel()
 	}
 	c.lifecycleWG.Wait()
+}
+
+// Stopped returns a channel closed when StopReconciler is first called, as
+// it begins stopping the cache's background work and before it waits for
+// that work to finish. A consumer that runs alongside the cache (the
+// controller's journal feed) ends with it.
+func (c *CachingStore) Stopped() <-chan struct{} {
+	return c.stopCh
 }
 
 // Stats returns current cache statistics.

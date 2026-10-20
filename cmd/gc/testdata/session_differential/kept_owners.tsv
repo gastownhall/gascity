@@ -54,7 +54,7 @@ A4 + D3 stop verb, D4 finalizePatch; **v5.7 (CONTRACT §12.2 #10):** another row
 A4 + D3 stop verb, D4 finalizePatch (v5.7, A9: D4 names the close-gate form, read live; A21 keeps the plain form)	DRAIN-050
 S5 start recycle covers it; session.reset_stalled not emitted (§12.2 row 10)	SESS-590,SESS-591,SESS-592
 F4 fresh L4 / AL1 stage 6b	SESS-650,SESS-651
-AL1; custom scale_check refused at the latch (PAR-SC), K1 source wired	POOL-005
+AL1; custom scale_check from the K1 source, admitted by PAR-SC	POOL-005
 gather: K1 recording for bd/PG legs (R4)	POOL-013,POOL-014,POOL-062
 K1 demand-repairs step	POOL-019,POOL-020
 C1 create	POOL-051,GUAR-042,INC-018

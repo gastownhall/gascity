@@ -1,11 +1,16 @@
 package subprocess
 
-import "github.com/gastownhall/gascity/internal/runtime"
+import (
+	"context"
+
+	"github.com/gastownhall/gascity/internal/runtime"
+)
 
 // seamBackedProvider serves the legacy [runtime.Provider] entirely through the
 // de-conflated seams (via [runtime.NewProviderFromSeams]), passing the non-seam
 // extensions (ProcessTableScanner, SleepCapability, LivenessObserverWithError,
-// ListingAttestation) through to the underlying *Provider. It is the early CUT-OVER for the
+// ListingAttestation, FencedInputProvider) through to the underlying
+// *Provider. It is the early CUT-OVER for the
 // subprocess provider: real callers exercise the seams end-to-end, validated by
 // TestSubprocessSeamConformance (the full Provider conformance suite, run
 // against this composition).
@@ -25,6 +30,7 @@ var (
 	_ runtime.ProcessTableScanner       = (*seamBackedProvider)(nil)
 	_ runtime.LivenessObserverWithError = (*seamBackedProvider)(nil)
 	_ runtime.ListingAttestation        = (*seamBackedProvider)(nil)
+	_ runtime.FencedInputProvider       = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider   = (*seamBackedProvider)(nil)
 	_ runtime.IdentitySidecarProvider   = (*Provider)(nil)
 )
@@ -76,4 +82,24 @@ func (s *seamBackedProvider) ObserveLivenessWithError(name string, processNames 
 // through; the seams route ListRunning to the same raw listing.
 func (s *seamBackedProvider) ListRunningComplete() bool {
 	return s.raw.ListRunningComplete()
+}
+
+// InputFencing passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) InputFencing(name string) runtime.InputFencing {
+	return s.raw.InputFencing(name)
+}
+
+// NudgeFenced passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
+	return s.raw.NudgeFenced(ctx, name, content, n)
+}
+
+// SendKeysFenced passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) SendKeysFenced(ctx context.Context, name string, fence runtime.InputFence, keys ...string) error {
+	return s.raw.SendKeysFenced(ctx, name, fence, keys...)
+}
+
+// InterruptFenced passes through to the underlying provider (non-seam).
+func (s *seamBackedProvider) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	return s.raw.InterruptFenced(ctx, name, fence)
 }

@@ -85,24 +85,37 @@ func RenderDelivery(ops []Op, style TextStyle, note bool) (string, error) {
 	if style != TextReminder && style != TextPlain {
 		return "", fmt.Errorf("rendering a delivery: unknown text style %q", style)
 	}
-	var notices []Op
-	prompt, havePrompt := "", false
+	havePrompt := false
 	for _, op := range ops {
 		if op.Kind != KindMessage {
 			return "", fmt.Errorf("rendering a delivery: op %s is a %s, not a message", op.ID, op.Kind)
 		}
 		if op.Policy.Message.Role != RolePrompt {
-			notices = append(notices, op)
 			continue
 		}
 		if havePrompt {
 			return "", fmt.Errorf("rendering a delivery: op %s is a second prompt", op.ID)
 		}
+		havePrompt = true
+	}
+	return renderDelivery(ops, style, note), nil
+}
+
+// renderDelivery is RenderDelivery's text for a batch it accepts: messages in
+// a known style, at most one of them a prompt.
+func renderDelivery(ops []Op, style TextStyle, note bool) string {
+	var notices []Op
+	prompt, havePrompt := "", false
+	for _, op := range ops {
+		if op.Policy.Message.Role != RolePrompt {
+			notices = append(notices, op)
+			continue
+		}
 		prompt, havePrompt = op.Payload, true
 	}
 	block := renderNotices(notices, style, note && !havePrompt)
 	if !havePrompt {
-		return block, nil
+		return block
 	}
 	text := prompt
 	if block != "" {
@@ -114,7 +127,7 @@ func RenderDelivery(ops []Op, style TextStyle, note bool) (string, error) {
 		}
 		text += "\n" + RedeliveryNote
 	}
-	return text, nil
+	return text
 }
 
 // renderNotices renders the notice block, "" for no notices. note puts the

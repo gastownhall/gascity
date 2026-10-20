@@ -284,7 +284,7 @@ func assertNativeIDDefaultAbsent(t *testing.T, db *sql.DB, table string) {
 
 // startTestDoltServer launches a throwaway server for tests that need the raw
 // SQL accessor exposed by upstream's server-mode Dolt store.
-func startTestDoltServer(t *testing.T) int {
+func startTestDoltServer(t testing.TB) int {
 	t.Helper()
 	doltBin, err := exec.LookPath("dolt")
 	if err != nil {

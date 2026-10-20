@@ -121,6 +121,21 @@ var ErrSessionNotFound = errors.New("session not found")
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
+// ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
+// session but the provider could not confirm it took: the message may have
+// been delivered, or may still sit unsubmitted in the session's input.
+// Callers that retry may count it as a failed attempt; callers that must not
+// deliver twice treat the nudge as possibly delivered. Providers wrap their
+// own unconfirmed submits with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
+
+// ErrNudgeNotSent reports that a nudge failed before any of its input
+// reached the session: nothing was delivered, so a retry cannot deliver the
+// message twice. Providers wrap their own pre-send failures with this
+// sentinel so callers can dispatch with errors.Is.
+var ErrNudgeNotSent = errors.New("nudge not sent")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
@@ -1289,10 +1304,10 @@ type Config struct {
 	// transported into the session environment.
 	CopyFiles []CopyEntry
 
-	// FingerprintExtra carries additional config data that should
-	// participate in fingerprint comparison but isn't part of the session
-	// startup command (e.g. pool config). Nil means no
-	// extra data — the fingerprint covers only Command + Env.
+	// FingerprintExtra carries additional config data that isn't part of
+	// the session startup command (pool sizing, skill and MCP hashes, ...).
+	// Each key has a ChangePolicy (FingerprintExtraChangePolicy); only
+	// Restart keys participate in fingerprint comparison.
 	FingerprintExtra map[string]string
 
 	// PromptSuffix is the shell-quoted prompt text appended to Command

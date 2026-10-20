@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -127,6 +128,13 @@ type Caps struct {
 	// LeaseTTL is a Take's lease; 0 means DefaultLeaseTTL, and a value below
 	// MinLeaseTTL is refused.
 	LeaseTTL time.Duration
+	// MaxText, when positive, caps the bytes of one content Take's text
+	// (Delivery.Text), for a runtime that keeps only so much text whole (a
+	// hook's context, which its provider cuts to a preview past a cap): the
+	// batch takes ops only while their text fits, and a notice whose text
+	// alone does not waits text_too_long, holding the content behind it, for
+	// a runtime with room. 0 means no cap; a negative value is refused.
+	MaxText int
 }
 
 // leaseTTL is the lease a Take under c holds.
@@ -152,6 +160,9 @@ func (c Caps) validate() error {
 	if c.LinkWait < 0 {
 		return fmt.Errorf("probe caps: link wait %s is negative", c.LinkWait)
 	}
+	if c.MaxText < 0 {
+		return fmt.Errorf("probe caps: max text %d is negative", c.MaxText)
+	}
 	return nil
 }
 
@@ -168,15 +179,38 @@ type Probe struct {
 	TurnLive Tri
 	// KnownTurns are the turn ids the probe's read returned.
 	KnownTurns []string
-	// Pending is a pending interaction's request id; "?" when the look
-	// failed.
+	// Pending is a pending interaction's request id; "?" for one the
+	// runtime names no id for. A failed look is a Probe error, not Pending.
 	Pending string
 	// ContentBlock is why content may not start now (I7), or "".
 	ContentBlock string
+	// ContentAdmit names the content ContentBlock does not hold: a host's
+	// narrow exemption from its own block, which the host has already
+	// gated by every other reason. Empty admits nothing; it means nothing
+	// without a ContentBlock. An admitted op never asks for a wake: the
+	// block, not the op, decides whether the row may start.
+	ContentAdmit []ContentClass
 	// Fence is the incarnation the executor will guard on. A non-zero fence
 	// must match the view's generation and epoch.
 	Fence Fence
 	Caps  Caps
+}
+
+// ContentClass is a class of content ops: those of role Role and when
+// When from principal Principal. An op is of the class only when all three
+// match.
+type ContentClass struct {
+	Role      Role
+	When      When
+	Principal string
+}
+
+// admits reports whether op is of a class p.ContentAdmit names.
+func (p Probe) admits(op Op) bool {
+	m := op.Policy.Message
+	return slices.ContainsFunc(p.ContentAdmit, func(c ContentClass) bool {
+		return c.Role == m.Role && c.When == m.When && c.Principal == op.Producer.Principal
+	})
 }
 
 // Executor runs a conversation's effects. Hosts implement it over their
@@ -248,6 +282,13 @@ type Delivered struct {
 	Evidence    TurnEvidence
 	Via         string
 	Degradation string
+	// SettleBy, when set, is the last instant on the lane's clock the lane
+	// may record the delivery, set by an executor whose delivery is kept only
+	// if its process outlives the record (a hook's output, which its runner
+	// discards on a timeout). The Done's context ends at SettleBy: a Done that
+	// has not landed by then leaves the batch executing, and a pass takes it
+	// again, as maybe delivered, once its lease lapses.
+	SettleBy time.Time
 }
 
 // Settled is a control effect that took place.
@@ -262,6 +303,13 @@ type Settled struct {
 type NotDelivered struct {
 	Transient bool
 	Cause     error
+	// SettleBy, when set, is the last instant on the lane's clock the lane
+	// may record the release, set by an executor whose process ends then (a
+	// hook its runner kills at a deadline). As for Delivered, the Done's
+	// context ends at SettleBy: a release that has not landed by then leaves
+	// the batch executing, and a pass takes it again, as maybe delivered, once
+	// its lease lapses.
+	SettleBy time.Time
 }
 
 // Rejected is a definitive answer: the op closes Arm{Reason} (Arm is failed
@@ -341,6 +389,10 @@ const (
 	WaitSettling           WaitReason = "settling"
 	WaitBlocked            WaitReason = "blocked"
 	WaitBatchFull          WaitReason = "batch_full"
+	// WaitTextTooLong is a notice whose text alone is over the runtime's
+	// Caps.MaxText: it waits for a runtime with room and, as a blocking
+	// waiter, holds the content behind it.
+	WaitTextTooLong WaitReason = "text_too_long"
 	// WaitUnsupported is a respond the runtime cannot perform now, one
 	// attempt of which may already have reached it: closing it
 	// failed{unsupported} would record that it never ran.
@@ -462,7 +514,7 @@ func sleepCtx(ctx context.Context, d time.Duration) error {
 	defer t.Stop()
 	select {
 	case <-ctx.Done():
-		return ctx.Err()
+		return context.Cause(ctx)
 	case <-t.C:
 		return nil
 	}

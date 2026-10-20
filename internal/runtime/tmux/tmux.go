@@ -224,8 +224,11 @@ var (
 	// ack the item, so it requeues after the normal retry delay and consumes
 	// one of its bounded attempts, exactly like any other delivery failure.
 	// ga-bwm proved that treating an unconfirmed submit as a clean success is
-	// exactly what lets a stalled nudge go undetected for many minutes.
-	ErrNudgeSubmitUnconfirmed = errors.New("nudge: submit Enter delivered to tmux but not confirmed (busy state never observed)")
+	// exactly what lets a stalled nudge go undetected for many minutes. It
+	// wraps runtime.ErrNudgeDeliveryUnconfirmed: the message may also have
+	// been delivered, so a caller that must not deliver twice treats it as
+	// possibly delivered.
+	ErrNudgeSubmitUnconfirmed = fmt.Errorf("%w: submit Enter delivered to tmux but not confirmed (busy state never observed)", runtime.ErrNudgeDeliveryUnconfirmed)
 	// errPartialPasteDelivery means one or more chunks reached the provider
 	// before a later chunk failed. Startup callers must discard that session so
 	// reconciliation cannot accept an agent with a truncated role prompt.
@@ -1515,33 +1518,61 @@ func (t *Tmux) listSessionNames() ([]string, error) {
 
 // runtimeInventoryFormat is the per-pane line listRuntimeInventory reads:
 // session name, session id, creation time, attached client count,
-// window.pane index, pane_dead, pane pid, the pane's window activity and the
-// restart marker's option mirror (empty when unset).
-const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{" + restartRequestedOption + "}"
+// window.pane index, pane_dead, pane pid, the pane's window activity,
+// whether the restart marker's option mirror is set (1, or 0 when unset) and
+// runtimeInventoryEnd. The marker is read as a comparison, never its value:
+// tmux prints a user option raw, so a tab or newline in it could forge
+// fields or another session's line.
+const runtimeInventoryFormat = "#{session_name}\t#{session_id}\t#{session_created}\t#{session_attached}\t#{window_index}.#{pane_index}\t#{pane_dead}\t#{pane_pid}\t#{window_activity}\t#{!=:#{" + restartRequestedOption + "},}\t" + runtimeInventoryEnd
+
+// runtimeInventoryEnd ends every runtimeInventoryFormat line, so the
+// executor's trim cannot drop an empty last field (#7871) and a line cut
+// short or split by an unescaped tab is visibly malformed. A line split by an
+// unescaped newline need not be: a piece of it can be well-formed (see
+// parseRuntimeInventory). tmux prints the terminator verbatim. It stays a
+// tab-separated field: tmux 3.4 and 3.5 print a raw \x1f in a format as the
+// text \037. Of the values read here, tmux escapes only the session name
+// (3.2+); the rest are numbers, ids or 0/1.
+const runtimeInventoryEnd = "gc-eol"
+
+// runtimeInventoryFields is the field count of a runtimeInventoryFormat line.
+const runtimeInventoryFields = 10
+
+// inventoryFaults is what parseRuntimeInventory could not read.
+type inventoryFaults struct {
+	lines    []string // the malformed lines
+	sessions []string // the sessions omitted for them, sorted
+}
 
 // listRuntimeInventory reads every pane on the server with one untargeted
 // list-panes -a and folds the panes into one entry per session. A live server
 // holding no sessions answers "no current target", which is an empty
 // inventory, as in [tmuxFetcher.FetchState]; an unreachable server
-// (ErrNoServer) is an error. A malformed line is an error rather than a
-// dropped pane: dropping the only live pane would report a live session as
-// all-dead.
-func (t *Tmux) listRuntimeInventory(ctx context.Context) (map[string]runtime.InventoryEntry, error) {
+// (ErrNoServer) is an error. A malformed line costs only its session, which
+// is omitted (see parseRuntimeInventory) and reported in faults; output that
+// leaves no session is an error.
+func (t *Tmux) listRuntimeInventory(ctx context.Context) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, err error) {
 	out, err := t.runCtx(ctx, "list-panes", "-a", "-F", runtimeInventoryFormat)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
-			return map[string]runtime.InventoryEntry{}, nil
+			return map[string]runtime.InventoryEntry{}, faults, nil
 		}
-		return nil, err
+		return nil, faults, err
 	}
-	entries, err := parseRuntimeInventory(out)
+	entries, faults, wellFormed := parseRuntimeInventory(out)
+	if len(entries) == 0 && len(faults.lines) > 0 {
+		if wellFormed == 0 {
+			return nil, faults, fmt.Errorf("tmux list-panes: no well-formed inventory line; first malformed line %q", faults.lines[0])
+		}
+		return nil, faults, fmt.Errorf("tmux list-panes: every session omitted for a malformed inventory line: %q", faults.sessions)
+	}
 	for name, e := range entries {
 		if e.ActivityKnown { // the poke discount GetLastActivity applies
 			e.LastActivity = t.discountedActivity(name, e.LastActivity)
 			entries[name] = e
 		}
 	}
-	return entries, err
+	return entries, faults, nil
 }
 
 // inventoryFirstPane tracks a session's lowest window.pane index while
@@ -1550,31 +1581,47 @@ type inventoryFirstPane struct {
 	window, pane int
 }
 
-func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error) {
-	entries := make(map[string]runtime.InventoryEntry)
+// parseRuntimeInventory parses each line on its own, and reports the lines
+// it could not parse and how many it could. A malformed line omits its
+// session (its first field, when it has one), every line of it: a session
+// folded from only the panes that parsed could read all-dead when its live
+// pane is the malformed one. An omitted name is unread, not gone
+// ([runtime.InventoryProvider]); the rest of the inventory stands, with one
+// gap. tmux before 3.2 prints a session name unescaped, so a newline in a
+// name splits its line, and the piece after the newline can be a well-formed
+// line under the rest of the name: it reads as a session of its own, or folds
+// into a real session of that name, whose liveness and other facts can then
+// read wrong.
+func parseRuntimeInventory(out string) (entries map[string]runtime.InventoryEntry, faults inventoryFaults, wellFormed int) {
+	entries = make(map[string]runtime.InventoryEntry)
 	first := make(map[string]inventoryFirstPane)
+	omitted := make(map[string]bool)
 	for _, line := range strings.Split(out, "\n") {
 		if line == "" {
 			continue
 		}
 		fields := strings.Split(line, "\t")
-		if len(fields) == 8 {
-			// The marker is the last field and usually empty, and the
-			// executor trims its output: the last line's empty marker
-			// arrives with its tab gone (#7871). It is unset, not a short
-			// line; a line short in any other field is still malformed.
-			fields = append(fields, "")
+		name := fields[0]
+		var window, pane int
+		ok := len(fields) == runtimeInventoryFields && fields[runtimeInventoryFields-1] == runtimeInventoryEnd && name != "" &&
+			(fields[8] == "0" || fields[8] == "1")
+		if ok {
+			windowText, paneText, _ := strings.Cut(fields[4], ".")
+			var wErr, pErr error
+			window, wErr = strconv.Atoi(windowText)
+			pane, pErr = strconv.Atoi(paneText)
+			ok = wErr == nil && pErr == nil
 		}
-		if len(fields) != 9 || fields[0] == "" {
-			return nil, fmt.Errorf("tmux list-panes: malformed inventory line %q", line)
+		if !ok {
+			faults.lines = append(faults.lines, line)
+			if name != "" && !omitted[name] {
+				omitted[name] = true
+				faults.sessions = append(faults.sessions, name)
+			}
+			continue
 		}
-		name, sessionID, created, attached, index, paneDead, panePID := fields[0], fields[1], fields[2], fields[3], fields[4], fields[5], fields[6]
-		windowText, paneText, _ := strings.Cut(index, ".")
-		window, wErr := strconv.Atoi(windowText)
-		pane, pErr := strconv.Atoi(paneText)
-		if wErr != nil || pErr != nil {
-			return nil, fmt.Errorf("tmux list-panes: malformed pane index in inventory line %q", line)
-		}
+		wellFormed++
+		sessionID, created, attached, paneDead, panePID := fields[1], fields[2], fields[3], fields[5], fields[6]
 
 		entry, seen := entries[name]
 		if !seen {
@@ -1582,7 +1629,7 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 			entry.AttachedKnown = err == nil && clients >= 0
 			entry.Attached = entry.AttachedKnown && clients > 0
 			entry.DeadKnown, entry.AllPanesDead = true, true
-			entry.RestartRequested = strings.TrimSpace(fields[8]) != "" // a session option: every pane line carries it
+			entry.RestartRequested = fields[8] == "1" // a session option: every pane line carries it
 		}
 		switch paneDead {
 		case "0":
@@ -1613,7 +1660,11 @@ func parseRuntimeInventory(out string) (map[string]runtime.InventoryEntry, error
 		}
 		entries[name] = entry
 	}
-	return entries, nil
+	for _, name := range faults.sessions {
+		delete(entries, name)
+	}
+	sort.Strings(faults.sessions)
+	return entries, faults, wellFormed
 }
 
 // ListSessions returns all session names. An unreachable tmux server is
@@ -1856,7 +1907,7 @@ func (t *Tmux) sendKeysDebouncedTo(session, target, keys string, debounceMs int)
 	// agent that never actually responds. See discountPokeActivity.
 	t.recordPoke(session)
 	// Send text using literal mode (-l) to handle special chars
-	if _, err := t.run("send-keys", "-t", target, "-l", keys); err != nil {
+	if _, err := t.run(append([]string{"send-keys", "-t", target, "-l"}, runtime.TmuxLiteralArgs(keys)...)...); err != nil {
 		return err
 	}
 	// Wait for paste to be processed
@@ -2485,7 +2536,7 @@ func (t *Tmux) sendLiteralText(ctx context.Context, target, text string) error {
 	if len(text) > maxSendKeysLiteralLen {
 		return t.pasteLiteralText(ctx, target, text)
 	}
-	_, err := t.runCtx(ctx, "send-keys", "-t", paneTarget(target), "-l", text)
+	_, err := t.runCtx(ctx, append([]string{"send-keys", "-t", paneTarget(target), "-l"}, runtime.TmuxLiteralArgs(text)...)...)
 	if isCommandTooLongError(err) {
 		return t.pasteLiteralText(ctx, target, text)
 	}
@@ -2682,9 +2733,11 @@ const (
 //     window, and its busy proves nothing about this submit.
 //   - err: the last submit attempted failed at the tmux layer, or a look
 //     refused a submit (isLookRefusal), which ends the call with no further
-//     sends. A nil error with confirmed false means the submit reached tmux
-//     but no idle->busy transition was observed within the budget; the
-//     caller judges delivery from the pane itself (see nudgeSession).
+//     sends. A failed re-send after an earlier send succeeded wraps
+//     ErrNudgeSubmitUnconfirmed: the earlier send may have submitted. A nil
+//     error with confirmed false means the submit reached tmux but no
+//     idle->busy transition was observed within the budget; the caller
+//     judges delivery from the pane itself (see nudgeSession).
 //
 // All side effects are injected so the decision logic is unit-testable without
 // a live tmux server.
@@ -2696,6 +2749,7 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 	watch.observe()
 
 	var lastErr error
+	sent := false
 	for send := 0; send < submitEnterMaxSends; send++ {
 		resend := true
 		if send > 0 {
@@ -2716,9 +2770,15 @@ func submitEnterAndConfirm(sendSubmit func() error, wake func(), busy func() (bo
 					return false, watch.seenIdle, err
 				}
 				lastErr = err
+				if sent {
+					// An earlier send reached the pane and may have
+					// submitted: a failed re-send leaves delivery in doubt.
+					lastErr = fmt.Errorf("%w: re-send failed: %w", ErrNudgeSubmitUnconfirmed, err)
+				}
 				continue
 			}
 			lastErr = nil // a later send succeeded; don't surface an earlier transient failure
+			sent = true
 			wake()
 		}
 		for poll := 0; poll < submitConfirmPollsPerSend; poll++ {
@@ -3170,7 +3230,7 @@ func (t *Tmux) nudgeSession(
 	// Serialize nudges to this session to prevent interleaving.
 	// Use a timed lock to avoid permanent blocking if a previous nudge hung.
 	if !acquireNudgeLock(session, t.cfg.NudgeLockTimeout) {
-		return fmt.Errorf("nudge lock timeout for session %q: previous nudge may be hung", session)
+		return fmt.Errorf("%w: nudge lock timeout for session %q: previous nudge may be hung", runtime.ErrNudgeNotSent, session)
 	}
 	defer releaseNudgeLock(session)
 

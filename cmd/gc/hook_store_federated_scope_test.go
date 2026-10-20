@@ -1,7 +1,11 @@
 package main
 
 import (
+	"io"
+	"os"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/config"
@@ -248,5 +252,58 @@ func TestClaimStoreWithFallbackRunsTheSelectedStoresOwnCommand(t *testing.T) {
 	}
 	if revalidated != "single-store query" {
 		t.Fatalf("claim-time re-validation ran %q, want the selected store's own single-store query", revalidated)
+	}
+}
+
+// TestHookWorkQueryPrimaryStoreIsTheScopedStore pins the primary-only builder to
+// the store a federated claim keeps (scopeFederatedHookStores keeps stores[0]),
+// for every agent shape the fan-out distinguishes, and that it builds no other
+// leg's environment: each leg's env is a managed-Dolt projection (~0.25 s on
+// maintainer-city), and a federated claim reads only the first.
+func TestHookWorkQueryPrimaryStoreIsTheScopedStore(t *testing.T) {
+	cityDir := newReadyCityWithRigs(t)
+	cfg, err := loadCityConfig(cityDir, io.Discard)
+	if err != nil {
+		t.Fatalf("load city config: %v", err)
+	}
+	resolveRigPaths(cityDir, cfg.Rigs)
+	rig := cfg.Rigs[0].Name
+	for _, tc := range []struct {
+		name          string
+		agent         config.Agent
+		agentForQuery string
+	}{
+		{name: "city-scoped agent federates every rig", agent: config.Agent{Name: "worker"}, agentForQuery: "worker"},
+		{name: "rig-scoped identity puts its rig first", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: rig + "/worker"},
+		{name: "unknown rig keeps the own store first", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: "no-such-rig/worker"},
+		{name: "bare session identity", agent: config.Agent{Name: "worker", Dir: rig}, agentForQuery: "gc-session-1"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			a := tc.agent
+			overrides, err := hookQueryEnv(cityDir, cfg, &a)
+			if err != nil {
+				t.Fatalf("hookQueryEnv: %v", err)
+			}
+			overrides["GC_AGENT"] = tc.agentForQuery
+			workDir := agentCommandDir(cityDir, &a, cfg.Rigs)
+			queryEnv := mergeRuntimeEnv(os.Environ(), overrides)
+			full := hookWorkQueryStores(cityDir, cfg, &a, tc.agentForQuery, workDir, queryEnv, overrides)
+
+			var builds atomic.Int64
+			prev := hookStoreQueryEnv
+			hookStoreQueryEnv = func(cityPath string, cfg *config.City, a *config.Agent) (map[string]string, error) {
+				builds.Add(1)
+				return prev(cityPath, cfg, a)
+			}
+			t.Cleanup(func() { hookStoreQueryEnv = prev })
+
+			primary := hookWorkQueryPrimaryStore(cityDir, cfg, &a, tc.agentForQuery, workDir, queryEnv, overrides)
+			if !reflect.DeepEqual(primary, full[0]) {
+				t.Fatalf("primary store = %+v, want the full fan-out's first leg %+v", primary, full[0])
+			}
+			if got := builds.Load(); got > 1 {
+				t.Fatalf("the primary-only build constructed %d leg environments, want at most 1", got)
+			}
+		})
 	}
 }

@@ -344,7 +344,9 @@ type ClaimTarget struct {
 	// LiveFenceSessions reports the ids of the sessions that still hold a
 	// nudge fence and whether that census was available. Nil keeps strict
 	// fencing. An implementation calls it at most once per claim, and only
-	// when a due candidate is pinned to a session other than SessionID. A
+	// when a due candidate is pinned to a session other than SessionID. In
+	// ClaimBatch a pinned batch's due members are such candidates, and a live
+	// member that is not yet due makes its batch not whole without asking. A
 	// session-pinned item is claimable by another session only if the census
 	// is available, contains SessionID, and does not contain the item's
 	// session.
@@ -467,6 +469,15 @@ type NudgeShadows interface {
 	RollbackEnqueue(string) error
 	SweepStale(string, string, time.Time) error
 	StaleShadowsBefore(time.Time, int, map[string]bool) ([]nudgequeue.NudgeShadow, error)
+	// ShadowHistorySince lists, oldest first, at least every shadow created
+	// or retired at or after since. The cutoff bounds what must be listed,
+	// not what may be: the beads shadow view also lists every live and dead
+	// queue record however old, where the legacy gc:nudge store leaves out an
+	// open shadow created before since. A nudge can be listed once per
+	// shadow it has, as when a gc:nudge shadow was closed and a later save
+	// for the same id opened another; the view lists a nudge that has a
+	// queue record once, from the record, unless the record was retired
+	// migrated.
 	ShadowHistorySince(time.Time) ([]nudgequeue.NudgeShadow, error)
 	Find(string) (nudgequeue.NudgeShadow, bool, error)
 	FindIncludingTerminal(string) (nudgequeue.NudgeShadow, bool, error)

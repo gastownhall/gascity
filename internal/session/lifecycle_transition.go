@@ -96,6 +96,11 @@ func PromptHash(prompt string) string {
 // work bead. ComputeAwakeSet uses it to detect when an alive session has been
 // reassigned to a different bead — the trigger for a fresh-wake conversation
 // cycle under wake_mode=fresh.
+//
+// Usage attribution is a second consumer: the worker reads it to find the
+// formula a session's facts belong to. It is a single-valued pointer meaning
+// "the last bead the controller stamped", so it survives that bead's close and
+// a sleep.
 const CurrentBeadIDKey = "currently_processing_bead_id"
 
 var freshWakeConversationResetKeys = []string{
@@ -368,12 +373,15 @@ type CommitStartedPatchInput struct {
 	ConfirmState            bool
 	ClearSleepReason        bool
 	ClearPendingCreateClaim bool
-	// StartsAwakeInterval marks a commit that begins a new awake interval (a
-	// first start or a wake from a dormant state), as opposed to a recovery
-	// re-confirmation of an already-running runtime. When true the patch stamps
-	// a fresh awake_started_at epoch so each awake interval emits exactly one
-	// compute usage fact; the controller wake path does not otherwise refresh it
-	// (gastownhall/gascity#3513).
+	// StartsAwakeInterval marks a commit that begins a new awake interval: a
+	// first start, a wake from a dormant state, or a start (or its recovery)
+	// committed onto a bead already awake or active (heal can mark it awake
+	// while the start is in flight) that has no interval still open (no epoch,
+	// or one the compute lane has already accounted). A commit onto a bead
+	// whose interval is still open leaves it false, so that interval keeps its
+	// epoch. When true the patch stamps a fresh awake_started_at epoch so each
+	// awake interval emits exactly one compute usage fact; the controller wake
+	// path does not otherwise refresh it (gastownhall/gascity#3513).
 	StartsAwakeInterval bool
 	Now                 time.Time
 	// PrimedAt, when non-zero and PromptHash is non-empty, records that this

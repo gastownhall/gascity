@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/doctor"
 	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/fanout"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
@@ -33,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/telemetry"
+	"github.com/gastownhall/gascity/internal/worker"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
 
@@ -113,13 +115,16 @@ type CityRuntime struct {
 	// drainedLastTick records, per suspended scope root, whether its sessions
 	// were already drained on the previous tick (retireSuspendedScopes).
 	drainedLastTick map[string]bool
-	cityPath        string
-	cityName        string
-	configName      string
-	tomlPath        string
-	watchTargets    []config.WatchTarget
-	configRev       string
-	configDirty     *atomic.Bool
+	// bootCityStore is the bd store binding the city's boot lifecycle left
+	// behind; reload refuses to run against, or adopt, any other.
+	bootCityStore cityStoreRecord
+	cityPath      string
+	cityName      string
+	configName    string
+	tomlPath      string
+	watchTargets  []config.WatchTarget
+	configRev     string
+	configDirty   *atomic.Bool
 	// configDebounce is the config watcher's coalesce window; zero selects
 	// defaultConfigDebounce.
 	configDebounce time.Duration
@@ -177,6 +182,11 @@ type CityRuntime struct {
 	// split applied to the sweep that was 48.5% of the tick (ga-l7jdg).
 	detachedOrphan     *detachedOrphanLane
 	detachedOrphanOnce sync.Once
+
+	// claimLoop is the claim-loop guard (claim_loop_guard.go), fed by the same
+	// journal feed as the delta lanes; created on first use.
+	claimLoop     *claimLoopGuard
+	claimLoopOnce sync.Once
 
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
@@ -281,6 +291,12 @@ type CityRuntime struct {
 	transcriptMetaMu      sync.Mutex
 	transcriptMetaStarted bool
 	transcriptMetaDone    chan struct{}
+
+	// formulaNameMemo is the process-lifetime memo of acting bead id to formula
+	// name for usage attribution, built once through formulaMemoOnce. Neither
+	// field is guarded by transcriptMetaMu.
+	formulaMemoOnce sync.Once
+	formulaNameMemo *worker.FormulaNameMemo
 
 	fsPressureConsecutiveSkips int
 	fsPressureEpisodeLogged    bool
@@ -426,7 +442,7 @@ type CityRuntimeParams struct {
 }
 
 var (
-	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycle
+	cityRuntimeStartBeadsLifecycle       = startBeadsLifecycleForReload
 	cityRuntimeReloadLifecycleRetryDelay = time.Second
 	// reloadActiveTTL bounds how long a single accepted reload may occupy
 	// the activeReload slot. If a reconciler tick wedges in something that
@@ -522,6 +538,7 @@ func newCityRuntime(p CityRuntimeParams) (*CityRuntime, error) {
 
 	cr := &CityRuntime{
 		storageRoutes:           routes,
+		bootCityStore:           bootCityStoreFor(p.CityPath),
 		cityPath:                p.CityPath,
 		cityName:                p.CityName,
 		configName:              configName,
@@ -1476,7 +1493,16 @@ func (cr *CityRuntime) tickReconcilePoolDeaths(p *tickPass) bool {
 }
 
 func (cr *CityRuntime) tickConfigReload(p *tickPass) bool {
-	p.configChanged = p.dirty.Swap(false)
+	if p.dirty.Load() {
+		// Mark the reload in progress before clearing the flag, so ReadyWork
+		// never finds it neither pending nor in progress (configFreshness). Only
+		// this goroutine clears the flag, so a change marked after the Load
+		// stays marked for the next tick.
+		fresh := cr.freshness()
+		fresh.beginChange()
+		defer func() { fresh.endReload(p.manualReply.Outcome) }()
+		p.configChanged = p.dirty.Swap(false)
+	}
 	if p.configChanged {
 		p.dirtyCleared = true
 		source := reloadSourceWatch
@@ -2012,8 +2038,8 @@ func (cr *CityRuntime) rescanOrderDispatcherIfDue(cityRoot string, cfg *config.C
 }
 
 // replaceOrderDispatcher installs next as the active order dispatcher, carrying
-// warm last-run data, active gate-backoff state, and open-work suppression
-// streaks from the outgoing dispatcher so a rebuild (reload or rescan) reuses
+// warm last-run data, active gate-backoff state, open-work suppression
+// streaks and already-reported inapplicable orders from the outgoing dispatcher so a rebuild (reload or rescan) reuses
 // them instead of cold-starting (#3201).
 // Call after draining the outgoing dispatcher.
 func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
@@ -2022,6 +2048,7 @@ func (cr *CityRuntime) replaceOrderDispatcher(next orderDispatcher) {
 			nextMem.carryLastRunCacheFrom(prev)
 			nextMem.carryGateBackoffFrom(prev, time.Now())
 			nextMem.carryOpenWorkSuppressionFrom(prev)
+			nextMem.carryInapplicableReportsFrom(prev)
 		}
 	}
 	cr.od = next
@@ -2472,10 +2499,15 @@ func (cr *CityRuntime) applyStartupConfigReload(
 	if cr.tomlPath == "" || cityRoot == "" || cr.configRev == "" || lastProviderName == nil || ctx.Err() != nil {
 		return
 	}
+	// Marked in progress before the flag is cleared, as the tick's reload is.
+	fresh := cr.freshness()
+	fresh.beginChange()
+	var reply reloadControlReply
+	defer func() { fresh.endReload(reply.Outcome) }()
 	if dirty != nil {
 		dirty.Swap(false)
 	}
-	reply := cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
+	reply = cr.reloadConfigTraced(ctx, lastProviderName, cityRoot, nil, reloadSourceWatch)
 	if reply.Outcome == reloadOutcomeFailed && dirty != nil {
 		dirty.Store(true)
 	}
@@ -2566,6 +2598,24 @@ func (cr *CityRuntime) reloadConfigTraced(
 			}
 		}
 		if cr.cs != nil && cr.cs.storeMetadataChanged(result.Cfg) {
+			// Rig metadata may be adopted live; the city's store binding may
+			// not, since rebinding the city store is restart-only.
+			if cityUsesBdStoreContract(cityRoot) {
+				if storeErr := checkReloadCityStore(cityRoot, cr.bootCityStore); storeErr != nil {
+					err := fmt.Errorf("config reload: %w", storeErr)
+					fmt.Fprintf(cr.stderr, "%s: %v (keeping old config)\n", cr.logPrefix, err) //nolint:errcheck // best-effort stderr
+					telemetry.RecordConfigReload(ctx, result.Revision, string(source), string(reloadOutcomeFailed), len(warnings), err)
+					if trace != nil {
+						trace.RecordConfigReload(cr.configRev, result.Revision, TraceOutcomeFailed, source, nil, nil, false, warnings, err)
+					}
+					return reloadControlReply{
+						Outcome:  reloadOutcomeFailed,
+						Error:    err.Error(),
+						Revision: result.Revision,
+						Warnings: warnings,
+					}
+				}
+			}
 			if !cr.cs.updateFromRuntime(result.Cfg, cr.sp, result.Revision) {
 				return rejectSuperseded("during same-revision metadata publication")
 			}
@@ -2685,7 +2735,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 	resolveRigPaths(cityRoot, nextCfg.Rigs)
 	var lifecycleErr error
 	for attempt := 1; attempt <= cityRuntimeReloadLifecycleRetryLimit; attempt++ {
-		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.stderr)
+		lifecycleErr = cityRuntimeStartBeadsLifecycle(cityRoot, cr.cityName, nextCfg, cr.bootCityStore, cr.stderr)
 		if lifecycleErr == nil {
 			break
 		}
@@ -2926,7 +2976,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
-	cr.configRev = result.Revision
+	cr.adoptConfigRevision(result.Revision)
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
 	if trace != nil {
@@ -3333,6 +3383,7 @@ func (cr *CityRuntime) beadReconcileTick(ctx context.Context, sw *SeatWork, resu
 		withAssignedWorkDeferTracker(cr.adt),
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 		withReadyAssignedFlags(readyAssignedFlagsForBeads(result.ReadyAssigned, awakeAssignedWorkBeads, awakeAssignedStoreRefs)),
 		// The legs this tick read the surviving assigned work through. The
 		// orphan-close tie-break releases a held claim through its own leg
@@ -4197,6 +4248,7 @@ func (cr *CityRuntime) controlDispatcherTick(ctx context.Context) {
 		// this path would bypass the capacity breaker.
 		withEndpointCapacityGuard(cr.ensureEndpointCapacityGuard()),
 		withOnDeathGate(cr.onDeathGate()),
+		withPrepareBudget(defaultStartPrepareBudget),
 	)
 	cr.requestDeferredDrainFollowUpTick()
 }
@@ -4819,9 +4871,9 @@ type rigStoreOpenFailure struct {
 	err error
 }
 
-// openStandaloneRigStores opens the work store of every BOUND rig in cfg,
-// returning them keyed by rig name plus the rigs that failed to open, in cfg
-// order.
+// openStandaloneRigStores opens the work store of every BOUND rig in rigs,
+// returning them keyed by rig name plus the rigs that failed to open, in the
+// order rigs lists them.
 //
 // It deliberately does NOT decide what a failure means, because the two callers
 // disagree and both are right. The controller (buildStandaloneRigStores) warns
@@ -4830,14 +4882,21 @@ type rigStoreOpenFailure struct {
 // operator-visible log to say so. `gc ready` (readyRigLegStores) fails the whole
 // query: its entire output is a JSON array with nowhere to say it is short.
 //
-// open is how each rig store is opened; see rigStoreOpener.
-func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpener) (map[string]beads.Store, []rigStoreOpenFailure) {
-	if cfg == nil || len(cfg.Rigs) == 0 {
-		return nil, nil
-	}
-	stores := make(map[string]beads.Store, len(cfg.Rigs))
-	var failures []rigStoreOpenFailure
-	for _, rig := range cfg.Rigs {
+// Nor does it decide WHICH rigs to open: the caller hands it the rig list. The
+// controller hands it every configured rig; `gc ready` hands it only the
+// serving frame (readyServingRigs).
+//
+// open is how each rig store is opened; see rigStoreOpener. At most parallelism
+// opens run at once (fanout.Bounded): each open is a preflight subprocess and a
+// round of schema probes, so a walk that opens rigs one after another makes its
+// caller wait for the sum of them. A parallelism of 1 is that walk, unchanged —
+// in order, on the caller's goroutine — which is what every caller except `gc
+// ready` keeps (sequentialRigStoreOpens). Results land in per-rig slots and are
+// assembled in rig order, so neither the map nor the failure list depends on
+// which open finished first.
+func openStandaloneRigStores(rigs []config.Rig, cityPath string, open rigStoreOpener, parallelism int) (map[string]beads.Store, []rigStoreOpenFailure) {
+	bound := make([]config.Rig, 0, len(rigs))
+	for _, rig := range rigs {
 		// Unbound rigs (declared in city.toml but missing a
 		// .gc/site.toml binding) have an empty rig.Path;
 		// openStoreAtForCity would silently fall back to the city
@@ -4846,17 +4905,44 @@ func openStandaloneRigStores(cfg *config.City, cityPath string, open rigStoreOpe
 		if strings.TrimSpace(rig.Path) == "" {
 			continue
 		}
-		store, err := open(rig.Path, cityPath)
-		if err != nil {
-			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: err})
+		bound = append(bound, rig)
+	}
+	if len(bound) == 0 {
+		return nil, nil
+	}
+	opened := make([]beads.Store, len(bound))
+	openErrs := make([]error, len(bound))
+	fanout.Bounded(len(bound), parallelism, func(i int) {
+		opened[i], openErrs[i] = open(bound[i].Path, cityPath)
+	})
+	stores := make(map[string]beads.Store, len(bound))
+	var failures []rigStoreOpenFailure
+	for i, rig := range bound {
+		if openErrs[i] != nil {
+			failures = append(failures, rigStoreOpenFailure{rig: rig.Name, err: openErrs[i]})
 			continue
 		}
-		stores[rig.Name] = store
+		stores[rig.Name] = opened[i]
 	}
 	if len(stores) == 0 {
 		return nil, failures
 	}
 	return stores, failures
+}
+
+// sequentialRigStoreOpens is the parallelism every rig-store walk but `gc
+// ready`'s keeps: one open at a time, in config order, on the caller's
+// goroutine. The controller's opens run on its reload path under
+// CityRuntime.safeTick, and none of the other one-shot callers is on a claim's
+// critical path.
+const sequentialRigStoreOpens = 1
+
+// cityRigs is cfg's configured rigs, or none for a nil cfg.
+func cityRigs(cfg *config.City) []config.Rig {
+	if cfg == nil {
+		return nil
+	}
+	return cfg.Rigs
 }
 
 // rigStoreOpener opens the bead store of one rig of the city at cityPath.
@@ -4880,7 +4966,7 @@ func oneShotRigStoreOpener(cfg *config.City) rigStoreOpener {
 // continues past rigs it cannot open, and every open re-resolves the city
 // config from disk.
 func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, openStoreAtForCity)
+	stores, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, openStoreAtForCity, sequentialRigStoreOpens)
 	return reportStandaloneRigStoreFailures(stores, failures, stderr)
 }
 
@@ -4893,7 +4979,7 @@ func buildStandaloneRigStores(cfg *config.City, cityPath string, stderr io.Write
 // same cfg.Rigs through the same openStandaloneRigStores enumeration and differs
 // only in the opener it hands that walk, so it adds no store-enumeration logic.
 func buildStandaloneRigStoresWithConfig(cfg *config.City, cityPath string, stderr io.Writer) map[string]beads.Store {
-	stores, failures := openStandaloneRigStores(cfg, cityPath, oneShotRigStoreOpener(cfg))
+	stores, failures := openStandaloneRigStores(cityRigs(cfg), cityPath, oneShotRigStoreOpener(cfg), sequentialRigStoreOpens)
 	return reportStandaloneRigStoreFailures(stores, failures, stderr)
 }
 
@@ -5253,4 +5339,14 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// adoptConfigRevision records rev as the configuration this runtime runs. A
+// changed revision resets the claim-loop guard: the new config may have fixed
+// what held claims were failing on.
+func (cr *CityRuntime) adoptConfigRevision(rev string) {
+	if rev != cr.configRev {
+		cr.claimLoopGuardOf().configChanged()
+	}
+	cr.configRev = rev
 }

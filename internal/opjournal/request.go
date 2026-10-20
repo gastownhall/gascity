@@ -168,6 +168,20 @@ func validateProducer(p Producer) error {
 	return nil
 }
 
+// ValidatePayload refuses a payload Propose would refuse for an op of kind,
+// whatever the op's conversation: over MaxInlinePayload
+// (ErrPayloadTooLarge), not valid UTF-8, empty for a kind that requires a
+// payload, or set for a kind that takes none (ErrInvalidRequest). An unknown
+// kind is ErrUnknownKind. Producers check a payload with it before they know
+// the conversation.
+func ValidatePayload(kind Kind, payload string) error {
+	spec, err := Lookup(kind)
+	if err != nil {
+		return err
+	}
+	return validatePayload(payload, spec)
+}
+
 func validatePayload(payload string, spec Spec) error {
 	if len(payload) > MaxInlinePayload {
 		return fmt.Errorf("%w: %d bytes, max %d", ErrPayloadTooLarge, len(payload), MaxInlinePayload)
