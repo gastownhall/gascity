@@ -351,6 +351,33 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 	return cacheAnswerUnknown
 }
 
+// absentSince reports whether a presence-only listing that started at or after
+// since proves name absent (v5 O1), so a fresh read of a name the server does
+// not hold costs one tmux call instead of a refresh. A refresh's
+// process-table scan only refines sessions its listing holds, so it can never
+// make an absent name present. absentSince proves nothing, and the caller takes
+// the full fresh read, when the published snapshot already started at or after
+// since, when the fetcher cannot list presence, when the cache clock has not
+// reached since (a listing would start before it), when the listing fails, or
+// when it holds name. It never publishes: the shared snapshot is untouched.
+func (c *StateCache) absentSince(name string, since time.Time) bool {
+	if obs := c.observation(); obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+		return false
+	}
+	lister, ok := c.fetcher.(sessionPresenceLister)
+	if !ok || c.clock().Before(since) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	defer cancel()
+	names, err := lister.listSessionNames(ctx)
+	if err != nil {
+		return false
+	}
+	_, present := names[name]
+	return !present
+}
+
 // observeSince returns the published snapshot once a successful fetch that
 // started at or after since has produced it, refreshing when the published one
 // is older. It refreshes at most twice: a fetch already in flight before since
@@ -532,6 +559,36 @@ type tmuxFetcher struct {
 	// fails. Its zero value attempts immediately, so a bare &tmuxFetcher{tm:
 	// tm} behaves exactly as it did before this gate existed.
 	snapshotGate processSnapshotGate
+	// snapshot takes the process-table snapshot; nil is fetchProcessSnapshot.
+	// Tests count it instead of scanning the OS.
+	snapshot func(ctx context.Context) (processSnapshot, error)
+}
+
+// sessionPresenceLister is a fetcher that can list which sessions the server
+// holds without the rest of FetchState: the cheap half of a fresh read, which
+// StateCache.absentSince uses to prove a name absent.
+type sessionPresenceLister interface {
+	listSessionNames(ctx context.Context) (map[string]struct{}, error)
+}
+
+// listSessionNames lists every session the server holds, from the same
+// list-panes source FetchState reads, without the process-table scan. A server
+// that answers with no sessions lists none; any other failure is an error.
+func (f *tmuxFetcher) listSessionNames(ctx context.Context) (map[string]struct{}, error) {
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}")
+	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	names := make(map[string]struct{})
+	for _, name := range strings.Split(out, "\n") {
+		if name != "" {
+			names[name] = struct{}{}
+		}
+	}
+	return names, nil
 }
 
 // processSnapshotGate decides whether the full-OS process scan may be attempted
@@ -695,7 +752,11 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		state.ProcessesAvailable = false
 		return state, nil
 	}
-	processes, err := fetchProcessSnapshot(ctx)
+	snapshot := f.snapshot
+	if snapshot == nil {
+		snapshot = fetchProcessSnapshot
+	}
+	processes, err := snapshot(ctx)
 	if err != nil {
 		// Degrade, do NOT discard: tmux list-panes above already established
 		// session liveness. The process snapshot is a secondary refinement
