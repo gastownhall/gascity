@@ -179,6 +179,9 @@ esac
 		"bd update bead-1 --append-notes",
 		"## apply (--force, refused)",
 		"gc event emit mol-dog-stale-db.escalate",
+		// A distinct call site/blocker-kind from the dry-run force-blocker
+		// escalation; locks in that apply-path escalations dedup too.
+		"--dedup mol-dog-stale-db:bead-1:apply-errors",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {
@@ -942,6 +945,10 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 	for _, want := range []string{
 		"gc event emit mol-dog-stale-db.escalate",
 		"gc mail send human -s",
+		// Dedup key must carry the blocker's own kind (not a static label) so a
+		// *different* force blocker still alerts while repeats of this one are
+		// suppressed; see pl-7etw2 (duplicate escalations ~7 minutes apart).
+		"--dedup mol-dog-stale-db:bead-1:rig-protection",
 		"gc runtime drain-ack",
 	} {
 		if !strings.Contains(log, want) {

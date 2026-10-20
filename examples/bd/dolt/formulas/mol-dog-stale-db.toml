@@ -153,11 +153,16 @@ ESCALATE_SCRIPT="$(resolve_escalate_script)"
 send_escalation() {
   local subject="$1"
   local message="$2"
+  local dedup_key="${3:-}"
   if [ -n "$ESCALATE_SCRIPT" ] && [ -x "$ESCALATE_SCRIPT" ]; then
     "$ESCALATE_SCRIPT" --subject "$subject" --message "$message"
     return
   fi
-  gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message"
+  if [ -n "$dedup_key" ]; then
+    gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message" --dedup "$dedup_key"
+  else
+    gc mail send "${GC_ESCALATION_RECIPIENT:-human}" -s "$subject" -m "$message"
+  fi
 }
 
 maintenance_notice() {
@@ -202,6 +207,7 @@ RSS_BYTES=$(jq -r '.summary.bytes_freed_rss // 0' "$SCAN_FILE")
 SCAN_ERRS=$(jq -r '.summary.errors_total // 0' "$SCAN_FILE")
 INVALID_DROP_SKIPS=$(jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length' "$SCAN_FILE")
 SCAN_FORCE_BLOCKERS=$(jq -r '[.force_blockers[]?] | length' "$SCAN_FILE")
+SCAN_BLOCKER_KIND=$(jq -r '(.force_blockers[0].kind // "scan-error")' "$SCAN_FILE")
 # ga-xkc9mo: a 100%-protected leak (zero reap targets) must not collapse into
 # an indistinguishable orphans:0 -- roll up the protected population
 # separately. active-rig is the expected baseline (one live server per
@@ -231,7 +237,8 @@ if [ "$SCAN_ERRS" -gt 0 ] || [ "$INVALID_DROP_SKIPS" -gt 0 ] || [ "$SCAN_FORCE_B
   ESCALATED=1
   run_or_warn "send dry-run error escalation" send_escalation \
     "ESCALATION: Dolt cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s)" \
-    "Dry-run report attached to work bead. Operator review required before forcing cleanup."
+    "Dry-run report attached to work bead. Operator review required before forcing cleanup." \
+    "mol-dog-stale-db:${WORK_BEAD}:${SCAN_BLOCKER_KIND}"
   run_or_warn "emit dry-run error escalation" gc event emit mol-dog-stale-db.escalate \
     --message "dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
   fail_open_after_drain "gc dolt-cleanup dry-run reported ${SCAN_ERRS} error(s), ${INVALID_DROP_SKIPS} invalid stale database identifier(s), ${SCAN_FORCE_BLOCKERS} force blocker(s); leaving work bead open"
@@ -242,7 +249,8 @@ elif [ "$ORPHAN_DBS" -gt "{{max_orphans_for_sql}}" ]; then
   DONE_BYTES=$((DISK_BYTES + RSS_BYTES))
   run_or_warn "send max-orphan escalation" send_escalation \
     "ESCALATION: $ORPHAN_DBS stale Dolt databases exceed max_orphans_for_sql={{max_orphans_for_sql}}" \
-    "Dry-run report attached to work bead. Operator review required before forcing cleanup."
+    "Dry-run report attached to work bead. Operator review required before forcing cleanup." \
+    "mol-dog-stale-db:${WORK_BEAD}:max-orphan-threshold"
   run_or_warn "emit max-orphan escalation" gc event emit mol-dog-stale-db.escalate \
     --message "$ORPHAN_DBS stale databases > max_orphans_for_sql={{max_orphans_for_sql}} -> escalation sent"
 else
@@ -251,7 +259,8 @@ else
     append_report_note "apply (--force, failed)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation" send_escalation \
       "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
-      "gc dolt-cleanup --probe --force refused. Do not retry from an agent. Operator must confirm dolt is stopped (process gone AND port closed), then use the separate gc dolt cleanup --server-down-ok fallback if appropriate."
+      "gc dolt-cleanup --probe --force refused. Do not retry from an agent. Operator must confirm dolt is stopped (process gone AND port closed), then use the separate gc dolt cleanup --server-down-ok fallback if appropriate." \
+      "mol-dog-stale-db:${WORK_BEAD}:apply-refused"
     run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
       --message "apply refused; operator must verify dolt stopped before using gc dolt cleanup --server-down-ok"
     fail_open_after_drain "gc dolt-cleanup apply failed; leaving work bead open"
@@ -268,13 +277,16 @@ else
   if [ "$APPLY_ERRS" -gt 0 ] || [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
     ESCALATED=1
     APPLY_REFUSAL_MESSAGE="apply reported ${APPLY_ERRS} error(s); leaving work bead open"
+    APPLY_BLOCKER_KIND="apply-errors"
     if [ "$APPLY_MAX_ORPHAN_REFUSALS" -gt 0 ]; then
       APPLY_REFUSAL_MESSAGE="apply refused by max-orphan safety guard; leaving work bead open"
+      APPLY_BLOCKER_KIND="apply-max-orphan-refusal"
     fi
     append_report_note "apply (--force, refused)" "$APPLY_FILE"
     run_or_warn "send apply refusal escalation" send_escalation \
       "ESCALATION: gc dolt-cleanup apply refused [HIGH]" \
-      "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate."
+      "gc dolt-cleanup --probe --force refused or reported ${APPLY_ERRS} error(s). Do not retry from an agent. Operator must inspect the attached apply report before deciding whether any manual cleanup is appropriate." \
+      "mol-dog-stale-db:${WORK_BEAD}:${APPLY_BLOCKER_KIND}"
     run_or_warn "emit apply refusal escalation" gc event emit mol-dog-stale-db.escalate \
       --message "$APPLY_REFUSAL_MESSAGE"
     fail_open_after_drain "gc dolt-cleanup ${APPLY_REFUSAL_MESSAGE}"
