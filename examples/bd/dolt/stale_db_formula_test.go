@@ -975,7 +975,7 @@ const staleDBReportWrite = "gc bd update bead-1 --set-metadata gc.dolt_cleanup."
 // step-completion update (`--set-metadata gc.outcome=pass ... --status=closed`)
 // rather than `bd close --reason`, which a relocated wisp cannot take.
 func staleDBCloseWrite(bead string) string {
-	return "gc bd update " + bead + " --set-metadata gc.outcome=pass --set-metadata gc.close_summary=Stale DB scan complete"
+	return "gc bd update " + bead + " --set-metadata gc.outcome=pass --set-metadata close_reason=Stale DB scan complete"
 }
 
 // TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts pins the split-store

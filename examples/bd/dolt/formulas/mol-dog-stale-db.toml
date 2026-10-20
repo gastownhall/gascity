@@ -346,7 +346,9 @@ fi
 # store, where `close --reason` is refused and bare `bd` reports the wisp
 # missing. A status-closed update is not fenced on actor == assignee the way
 # `bd close` is, so it needs no --actor on a single-store city either.
-gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass --set-metadata "gc.close_summary=Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" --status=closed
+# The reason rides metadata close_reason, which gc's split store turns into
+# the bead's close reason when the same write closes it.
+gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass --set-metadata "close_reason=Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" --status=closed
 drain_ack_once # drain-ack before normal exit
 exit
 ```
