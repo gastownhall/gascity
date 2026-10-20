@@ -1497,26 +1497,37 @@ const (
 
 func (o *tmuxStartOps) createSession(name, workDir, command string, env map[string]string) error {
 	if command != "" || len(env) > 0 {
-		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, env)
+		return o.tm.NewSessionWithCommandAndEnv(name, workDir, command, withLaunchEnvRecord(env))
 	}
 	return o.tm.NewSession(name, workDir)
 }
 
 // respawnAgent relaunches the agent command in the session's existing agent
 // pane (respawn-pane -k on the agentPaneTarget pane, never the active one),
-// reusing the warm box and its session environment. The launch-half of the
-// un-weld relaunch path.
+// reusing the warm box. The launch-half of the un-weld relaunch path.
 //
 // respawn-pane takes no env argument: the new process inherits the tmux server's
-// global environment as filtered by the SESSION environment, so a withheld
-// credential has to already be marked removed there. NewSessionWithCommandAndEnv
-// does that at provision time, and this re-asserts it because a warm box is
-// explicitly long-lived — one provisioned by an older gc, whose create path only
-// built the one-shot `env -u` prefix, would otherwise hand the respawned agent
-// the controller's real value for the rest of the box's life. Re-marking a key
-// already marked is a no-op, and only controller-scope keys are marked, so a
-// relaunch that withholds no credential costs no extra tmux call at all.
+// global environment as filtered by the SESSION environment, which the box's
+// creation wrote. A relaunch is how a launch-env change (an agent's or a
+// provider's env, the workspace env) is applied, so the session environment is
+// first brought to what a fresh provision with env would hold (see
+// [Tmux.syncSessionLaunchEnv]); otherwise the relaunched agent keeps the
+// provision-time values.
+//
+// A withheld credential then has to be marked removed there.
+// NewSessionWithCommandAndEnv does that at provision time, and this re-asserts it
+// because a warm box is explicitly long-lived — one provisioned by an older gc,
+// whose create path only built the one-shot `env -u` prefix, would otherwise hand
+// the respawned agent the controller's real value for the rest of the box's
+// life. Re-marking a key already marked is a no-op, and only controller-scope
+// keys are marked.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
+	if err := validateUnsetEnvKeys(env); err != nil {
+		return err
+	}
+	if err := o.tm.syncSessionLaunchEnv(name, env); err != nil {
+		return err
+	}
 	if err := o.tm.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}

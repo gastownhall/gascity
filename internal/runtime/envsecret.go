@@ -73,6 +73,9 @@ var envArgvSafe = map[string]bool{
 	"GC_DOLT_PORT":       true,
 	"GC_HOME":            true,
 	"GC_SKILLS_DIR":      true,
+	// The tmux box's record of which keys its launch env set: variable names
+	// only, never their values.
+	"GC_LAUNCH_ENV_KEYS": true,
 }
 
 // metaCapabilityEnv names the values a provider's private meta sidecar must

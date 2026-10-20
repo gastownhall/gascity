@@ -536,24 +536,21 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 	if err := ops.respawnAgent("gc-test-token-pin", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 5 {
-		t.Fatalf("tmux calls = %d (%v), want 5 (set-environment, adopt check, pane lookup, respawn-pane, the input fence's environment read)", len(exec.calls), exec.calls)
+	// The calls before respawn-pane also sync the launch env into the box
+	// (relaunch_env_test.go); this test pins only the withholding.
+	removals := removalMarkCalls(exec.calls)
+	if len(removals) != 1 || !strings.Contains(removals[0], "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
+		t.Errorf("removal marks = %q, want GC_CONTROLLER_TOKEN marked removed from the session env", removals)
 	}
-
-	setEnv := strings.Join(exec.calls[0], " ")
-	if !strings.Contains(setEnv, "set-environment -t =gc-test-token-pin -r GC_CONTROLLER_TOKEN") {
-		t.Errorf("first call = %q, want it to mark GC_CONTROLLER_TOKEN removed from the session env", setEnv)
+	for _, c := range exec.calls {
+		if joined := strings.Join(c, " "); strings.Contains(joined, "-u GC_CONTROLLER_TOKEN") {
+			t.Errorf("call %q uses -u; that unsets the session entry and re-exposes the server's global value", joined)
+		}
 	}
-	if strings.Contains(setEnv, "-u GC_CONTROLLER_TOKEN") {
-		t.Errorf("first call = %q uses -u; that unsets the session entry and re-exposes the server's global value", setEnv)
-	}
-	if respawn := strings.Join(exec.calls[3], " "); !strings.Contains(respawn, "respawn-pane") {
-		t.Errorf("fourth call = %q, want respawn-pane", respawn)
-	}
-	// A non-empty key is a real value, not a withholding, and must not be
-	// marked for removal.
-	if strings.Contains(setEnv, "GC_CITY") {
-		t.Errorf("first call = %q marked GC_CITY removed; only empty-valued keys are withheld", setEnv)
+	if i := respawnCallIndex(exec.calls); i < 0 {
+		t.Errorf("calls = %v, want a respawn-pane", exec.calls)
+	} else if marks := removalMarkCalls(exec.calls[i:]); len(marks) != 0 {
+		t.Errorf("removal marks %q came after respawn-pane; the respawned agent would start with the value", marks)
 	}
 
 	t.Run("hosted beads namespace", func(t *testing.T) {
@@ -571,26 +568,27 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
-		if len(exec.calls) != 6 {
-			t.Fatalf("tmux calls = %d (%v), want two set-environment calls, the adopt check, the pane lookup, respawn-pane, then the input fence's environment read", len(exec.calls), exec.calls)
+		removals := removalMarkCalls(exec.calls)
+		if len(removals) != 2 {
+			t.Fatalf("removal marks = %q, want two (BEADS_DB, BEADS_FUTURE_AUTHORITY)", removals)
 		}
 		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
-			setEnv := strings.Join(exec.calls[i], " ")
-			if !strings.Contains(setEnv, "set-environment -t =gc-test-beads-pin -r "+key) {
-				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
+			if !strings.Contains(removals[i], "set-environment -t =gc-test-beads-pin -r "+key) {
+				t.Errorf("removal mark %d = %q, want %s marked removed from the session env", i, removals[i], key)
 			}
 		}
-		if respawn := strings.Join(exec.calls[4], " "); !strings.Contains(respawn, "respawn-pane") {
-			t.Errorf("fifth call = %q, want respawn-pane", respawn)
+		if i := respawnCallIndex(exec.calls); i < 0 {
+			t.Errorf("calls = %v, want a respawn-pane", exec.calls)
+		} else if marks := removalMarkCalls(exec.calls[i:]); len(marks) != 0 {
+			t.Errorf("removal marks %q came after respawn-pane", marks)
 		}
 	})
 }
 
-// No withheld CREDENTIAL means no extra tmux round-trip. The nesting-detection
-// flags every session env pins empty are deliberately included here: they are
-// not secrets, the `env -u` prefix already does what they need, and marking them
-// would put an extra tmux call on the hot path of every session in the repo for
-// no gain. Scope is a correctness property, not just a cost one — a marker
+// No withheld CREDENTIAL means no removal mark. The nesting-detection flags
+// every session env pins empty are deliberately included here: they are not
+// secrets, the `env -u` prefix already does what they need, and marking them
+// would put an extra tmux call on every relaunch for no gain. Scope is a correctness property, not just a cost one — a marker
 // failure is fatal, so every key marked is a key that can fail a launch.
 func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T) {
 	exec := &fakeExecutor{out: "agent\t@1.%0"}
@@ -608,9 +606,25 @@ func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T
 	if err := ops.respawnAgent("gc-test-no-pins", "/proj", "claude", env); err != nil {
 		t.Fatalf("respawnAgent: %v", err)
 	}
-	if len(exec.calls) != 4 {
-		t.Fatalf("tmux calls = %d (%v), want 4 (adopt check, pane lookup, respawn-pane and the input fence's environment read only; nesting flags must not be marked)", len(exec.calls), exec.calls)
+	if removals := removalMarkCalls(exec.calls); len(removals) != 0 {
+		t.Fatalf("removal marks = %q, want none; nesting flags must not be marked", removals)
 	}
+}
+
+// removalMarkCalls returns the `set-environment ... -r KEY` calls, in order.
+func removalMarkCalls(calls [][]string) []string {
+	var out []string
+	for _, c := range calls {
+		if slices.Contains(c, "set-environment") && slices.Contains(c, "-r") {
+			out = append(out, strings.Join(c, " "))
+		}
+	}
+	return out
+}
+
+// respawnCallIndex returns the index of the first respawn-pane call, or -1.
+func respawnCallIndex(calls [][]string) int {
+	return slices.IndexFunc(calls, func(c []string) bool { return slices.Contains(c, "respawn-pane") })
 }
 
 // Relaunch respawns the agent pane, never the active one. "=name:" resolves to
@@ -632,7 +646,7 @@ func TestRespawnTargetsAgentPaneNotActivePane(t *testing.T) {
 	}{
 		{"respawnAgent, marked pane moved behind a human's", "orphan\t@3.%8\nagent\t@4.%7\norphan\t@4.%9", func(_ *Tmux, ops *tmuxStartOps) error {
 			return ops.respawnAgent("gc-test-agent-pane", "/proj", "claude", nil)
-		}, [][]string{adopt, lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"}, {"show-environment", "-t", "=gc-test-agent-pane"}}},
+		}, [][]string{{"show-environment", "-t", "=gc-test-agent-pane"}, adopt, lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@4.%7", "-c", "/proj", "claude"}, {"show-environment", "-t", "=gc-test-agent-pane"}}},
 		{"unmarked session takes the first pane", "pane\t@3.%7\npane\t@3.%8", func(tm *Tmux, _ *tmuxStartOps) error {
 			return tm.RespawnPaneWithWorkDir("gc-test-agent-pane", "", "claude")
 		}, [][]string{lookup, {"respawn-pane", "-k", "-t", "=gc-test-agent-pane:@3.%7", "claude"}}},

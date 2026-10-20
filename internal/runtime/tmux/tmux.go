@@ -730,6 +730,126 @@ func durableWithholdKeys(env map[string]string) []string {
 	return keys
 }
 
+// launchEnvKeysEnvKey names the session-environment entry recording, as a
+// sorted comma-separated list, the keys the box's last launch env set to a
+// value. The session environment also holds gc's own session metadata (drain
+// markers, tokens), so without this record a relaunch could not tell a key the
+// operator removed from the launch env from metadata it must keep.
+const launchEnvKeysEnvKey = "GC_LAUNCH_ENV_KEYS"
+
+// launchEnvKeys returns the sorted keys env sets to a value, leaving out the
+// record entry itself.
+func launchEnvKeys(env map[string]string) []string {
+	var keys []string
+	for k, v := range env {
+		if v != "" && k != launchEnvKeysEnvKey {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// withLaunchEnvRecord returns env plus the launchEnvKeysEnvKey entry naming
+// the keys it sets, so the box's creation records them in the same
+// new-session call. An env that sets no key is returned unchanged.
+func withLaunchEnvRecord(env map[string]string) map[string]string {
+	keys := launchEnvKeys(env)
+	if len(keys) == 0 {
+		return env
+	}
+	out := make(map[string]string, len(env)+1)
+	for k, v := range env {
+		out[k] = v
+	}
+	out[launchEnvKeysEnvKey] = strings.Join(keys, ",")
+	return out
+}
+
+// syncSessionLaunchEnv brings a warm box's session environment to what a
+// fresh provision with env would leave there, before a relaunch respawns the
+// agent in it.
+//
+// respawn-pane takes no env from the caller: the respawned process inherits
+// the server's global environment as filtered by the SESSION environment, and
+// that was written once, when the box was created. Without this sync an env
+// change that triggers a warm relaunch never reaches the relaunched agent.
+//
+//   - A key env sets to a value is set when the box lacks it or holds another
+//     value. Values that are not argv-safe go through the private command file
+//     (see [Tmux.SetEnvironment]).
+//   - A key the last launch set (the launchEnvKeysEnvKey record) that env no
+//     longer sets, or an empty-valued key the box still holds a value for, is
+//     unset (-u), as a fresh box would never have had it. Durably withheld keys
+//     are skipped here: the caller marks them removed (-r) afterwards, and -u
+//     would only be undone.
+//   - Every other entry is gc's own session metadata and is left alone. A box
+//     created before the record existed has no record, so nothing is removed
+//     from it on this relaunch; the record written now covers the next one.
+//
+// An unchanged env costs one show-environment call.
+func (t *Tmux) syncSessionLaunchEnv(session string, env map[string]string) error {
+	current, err := t.GetAllEnvironment(session)
+	if err != nil {
+		return fmt.Errorf("reading session %q env: %w", session, err)
+	}
+	keys := launchEnvKeys(env)
+	for _, k := range keys {
+		if cur, ok := current[k]; ok && cur == env[k] {
+			continue
+		}
+		if err := t.SetEnvironment(session, k, env[k]); err != nil {
+			return fmt.Errorf("setting %s in session %q env: %w", k, session, err)
+		}
+	}
+
+	durable := make(map[string]bool)
+	for _, k := range durableWithholdKeys(env) {
+		durable[k] = true
+	}
+	stale := make(map[string]bool)
+	for _, k := range strings.Split(current[launchEnvKeysEnvKey], ",") {
+		if k != "" {
+			stale[k] = true
+		}
+	}
+	for k, v := range env {
+		if _, held := current[k]; held && v == "" {
+			stale[k] = true
+		}
+	}
+	staleKeys := make([]string, 0, len(stale))
+	for k := range stale {
+		staleKeys = append(staleKeys, k)
+	}
+	sort.Strings(staleKeys)
+	for _, k := range staleKeys {
+		if env[k] != "" || durable[k] || k == launchEnvKeysEnvKey || !validEnvNameRe.MatchString(k) {
+			continue
+		}
+		if _, held := current[k]; !held {
+			continue
+		}
+		if err := t.RemoveEnvironment(session, k); err != nil {
+			return fmt.Errorf("unsetting %s in session %q env: %w", k, session, err)
+		}
+	}
+
+	record := strings.Join(keys, ",")
+	cur, held := current[launchEnvKeysEnvKey]
+	switch {
+	case record == "" && held:
+		if err := t.RemoveEnvironment(session, launchEnvKeysEnvKey); err != nil {
+			return fmt.Errorf("unsetting %s in session %q env: %w", launchEnvKeysEnvKey, session, err)
+		}
+	case record != "" && cur != record:
+		if err := t.SetEnvironment(session, launchEnvKeysEnvKey, record); err != nil {
+			return fmt.Errorf("setting %s in session %q env: %w", launchEnvKeysEnvKey, session, err)
+		}
+	}
+	return nil
+}
+
 // markSessionEnvRemoved marks keys for REMOVAL in the session environment
 // (`set-environment -r`), so every process tmux starts in this session from now
 // on — respawn-pane, new-window, split-window — is started without them.
