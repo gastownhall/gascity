@@ -27,12 +27,17 @@ func companionOf(store beads.Store, id string, writes *int) Companion {
 	const value = "held"
 	return Companion{
 		Tag:  companionKey,
-		Item: beads.GuardedItem{Update: &beads.GuardedUpdate{ID: id, Opts: beads.UpdateOpts{Metadata: map[string]string{companionKey: value}}}},
+		Item: itemOf(beads.GuardedItem{Update: &beads.GuardedUpdate{ID: id, Opts: beads.UpdateOpts{Metadata: map[string]string{companionKey: value}}}}),
 		Write: func() error {
 			*writes++
 			return store.SetMetadata(id, companionKey, value)
 		},
 	}
+}
+
+// itemOf is a companion Item builder that returns item.
+func itemOf(item beads.GuardedItem) func() (beads.GuardedItem, error) {
+	return func() (beads.GuardedItem, error) { return item, nil }
 }
 
 func companionMark(t *testing.T, mem *beads.MemStore, id string) string {
@@ -212,7 +217,7 @@ func TestProposeWithProposesNothingWhenTheCompanionFails(t *testing.T) {
 	preview, _ := h.store.Preview(laneMsg("k1", RolePrompt, "hi"))
 	with := Companion{
 		Tag:   companionKey,
-		Item:  beads.GuardedItem{Update: &beads.GuardedUpdate{ID: "gc-row"}},
+		Item:  itemOf(beads.GuardedItem{Update: &beads.GuardedUpdate{ID: "gc-row"}}),
 		Write: func() error { return errRow },
 	}
 	if _, _, err := h.store.ProposeWith(context.Background(), laneMsg("k1", RolePrompt, "hi"), with); !errors.Is(err, errRow) {
@@ -325,6 +330,7 @@ func TestProposeWithRefusesBeforeWriting(t *testing.T) {
 	preview, _ := h.store.Preview(laneMsg("k1", RolePrompt, "hi"))
 	writes := 0
 	good := companionOf(h.mem, row, &writes)
+	goodItem, _ := good.Item()
 	cases := map[string]struct {
 		req  Request
 		with Companion
@@ -332,7 +338,7 @@ func TestProposeWithRefusesBeforeWriting(t *testing.T) {
 		"empty client key": {laneMsg("", RolePrompt, "hi"), good},
 		"no item":          {laneMsg("k1", RolePrompt, "hi"), Companion{Tag: good.Tag, Write: good.Write}},
 		"two items": {laneMsg("k1", RolePrompt, "hi"), Companion{
-			Tag: good.Tag, Item: beads.GuardedItem{Create: &beads.Bead{ID: "gc-x"}, Update: good.Item.Update}, Write: good.Write,
+			Tag: good.Tag, Item: itemOf(beads.GuardedItem{Create: &beads.Bead{ID: "gc-x"}, Update: goodItem.Update}), Write: good.Write,
 		}},
 		"nil write":       {laneMsg("k1", RolePrompt, "hi"), Companion{Tag: good.Tag, Item: good.Item}},
 		"no tag":          {laneMsg("k1", RolePrompt, "hi"), Companion{Item: good.Item, Write: good.Write}},
@@ -371,5 +377,47 @@ func TestProposeWithMintedKeySkipsTheRead(t *testing.T) {
 	t.Run("fallback", func(t *testing.T) {
 		h := newHarness(t)
 		check(t, h.rec, h.mem, h.store)
+	})
+}
+
+// TestProposeWithReplaysWhenTheItemWouldRefuse: the companion's Item is
+// built only once the read finds no op, so a builder that now refuses its
+// row (a closed session) does not stop a replay, and a first proposal it
+// refuses writes nothing.
+func TestProposeWithReplaysWhenTheItemWouldRefuse(t *testing.T) {
+	errClosed := errors.New("row is closed")
+	run := func(t *testing.T, mem *beads.MemStore, st *Store, batches func() int) {
+		row := companionRow(t, mem)
+		writes := 0
+		first, created, err := st.ProposeWith(context.Background(), laneMsg("k1", RolePrompt, "hi"), companionOf(mem, row, &writes))
+		if err != nil || !created {
+			t.Fatalf("first = created %v, %v", created, err)
+		}
+		refusing := companionOf(mem, row, &writes)
+		builds := 0
+		refusing.Item = func() (beads.GuardedItem, error) { builds++; return beads.GuardedItem{}, errClosed }
+		writes, before := 0, batches()
+		again, created, err := st.ProposeWith(context.Background(), laneMsg("k1", RolePrompt, "hi"), refusing)
+		if err != nil || created || again.ID != first.ID {
+			t.Fatalf("replay = %+v, created %v, %v; want the stored op", again, created, err)
+		}
+		if builds != 0 {
+			t.Fatalf("a replay built the companion %d times", builds)
+		}
+		preview, _ := st.Preview(laneMsg("k2", RolePrompt, "hi"))
+		if _, _, err := st.ProposeWith(context.Background(), laneMsg("k2", RolePrompt, "hi"), refusing); !errors.Is(err, errClosed) {
+			t.Fatalf("first proposal with a refusing item = %v, want its error", err)
+		}
+		if builds != 1 || writes != 0 || batches() != before || opExists(t, mem, preview.ID) {
+			t.Fatalf("a refused item wrote (%d builds, %d solo writes, %d batches)", builds, writes, batches()-before)
+		}
+	}
+	t.Run("batch", func(t *testing.T) {
+		h := newLaneHarness(t)
+		run(t, h.mem, h.store, func() int { return len(h.batcher.batches()) })
+	})
+	t.Run("fallback", func(t *testing.T) {
+		h := newHarness(t)
+		run(t, h.mem, h.store, func() int { return 0 })
 	})
 }

@@ -11,12 +11,15 @@ import (
 
 // Companion is a row write an op must not be durable without: a Stop's
 // content hold rides its interrupt (DES-O1 §10.5). Tag names the companion
-// and is part of the op's request digest. Item is the write as one
+// and is part of the op's request digest. Item builds the write as one
 // guarded-batch item; Write is the same write on its own. All three are
 // required, so the producer need not know which write the store takes.
+// ProposeWith calls Item, then Write on a store without batches, only once
+// its read finds no stored op, so a builder that reads and refuses the row
+// (session.Store.ContentHoldItem refuses a closed one) never stops a replay.
 type Companion struct {
 	Tag   string
-	Item  beads.GuardedItem
+	Item  func() (beads.GuardedItem, error)
 	Write func() error
 }
 
@@ -28,14 +31,17 @@ type Companion struct {
 //
 // The companion's Tag is part of the request: the op's digest covers it, so
 // a key already proposed without a companion (Propose), or with another
-// tag, is a *KeyReuseError and writes nothing, and Propose on a key proposed
-// here is one too. A proposal that finds the same request stored, a replay
-// or a lost race, writes no companion: the stored op was proposed with this
-// companion, which landed no later than it, and a later write (a resume's
-// clear) must stand. So a producer that must write the companion again, a
-// Stop after a resume cleared the last Stop's hold, needs a fresh key.
-// Refused requests and companions write nothing. ctx bounds the guarded
-// batch.
+// tag, is a *KeyReuseError, and Propose on a key proposed here is one too.
+// When the read finds that key nothing is written; on a store without
+// batches a conflicting op that lands between the read and the create is
+// the same error after the companion is written (at most the companion). A
+// proposal that finds the same request stored, a replay or a lost race,
+// neither builds nor writes the companion: the stored op was proposed with
+// this companion, which landed no later than it, and a later write (a
+// resume's clear, a close) must stand. So a producer that must write the
+// companion again, a Stop after a resume cleared the last Stop's hold, needs
+// a fresh key. Refused requests and companions, including an Item that
+// returns an error, write nothing. ctx bounds the guarded batch.
 func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (Op, bool, error) {
 	op, err := s.Preview(req)
 	if err != nil {
@@ -54,6 +60,13 @@ func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (O
 			return Op{}, false, fmt.Errorf("reading op %s before creating it: %w", op.ID, getErr)
 		}
 	}
+	item, err := with.Item()
+	if err != nil {
+		return Op{}, false, fmt.Errorf("building the companion of op %s: %w", op.ID, err)
+	}
+	if err := validCompanionItem(op.ID, item); err != nil {
+		return Op{}, false, err
+	}
 	if s.batcher == nil {
 		if err := with.Write(); err != nil {
 			return Op{}, false, fmt.Errorf("writing the companion of op %s: %w", op.ID, err)
@@ -64,7 +77,7 @@ func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (O
 	if err != nil {
 		return Op{}, false, err
 	}
-	res, class, applyErr := s.apply(ctx, "opjournal: propose "+string(op.Kind), []beads.GuardedItem{{Create: &b}, with.Item})
+	res, class, applyErr := s.apply(ctx, "opjournal: propose "+string(op.Kind), []beads.GuardedItem{{Create: &b}, item})
 	switch class {
 	case batchOK:
 		op.Revision = res.Revisions[op.ID]
@@ -103,14 +116,23 @@ func (s *Store) proposedElsewhere(op Op, batchErr error) (Op, bool, error) {
 
 // validCompanion refuses a companion ProposeWith cannot write both ways.
 func validCompanion(opID string, with Companion) error {
-	item := with.Item
 	switch {
 	case with.Tag == "" || strings.TrimSpace(with.Tag) != with.Tag:
 		return invalidf("op %s: a companion needs a tag without surrounding space", opID)
-	case (item.Create == nil) == (item.Update == nil):
-		return invalidf("op %s: a companion is exactly one create or update", opID)
+	case with.Item == nil:
+		return invalidf("op %s: a companion needs its batch item", opID)
 	case with.Write == nil:
 		return invalidf("op %s: a companion needs its write on its own", opID)
+	}
+	return nil
+}
+
+// validCompanionItem refuses a built companion item a batch cannot carry
+// beside the op.
+func validCompanionItem(opID string, item beads.GuardedItem) error {
+	switch {
+	case (item.Create == nil) == (item.Update == nil):
+		return invalidf("op %s: a companion is exactly one create or update", opID)
 	case item.Create != nil && item.Create.ID == opID, item.Update != nil && item.Update.ID == opID:
 		return invalidf("op %s: a companion cannot write the op's own row", opID)
 	}

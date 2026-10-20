@@ -115,10 +115,12 @@ func validContentHold(h ContentHold) error {
 // ContentHoldItem is SetContentHold's write as one guarded-batch item: an
 // unguarded update of row id that sets exactly the content_hold cell. A
 // producer that must not make an op durable without its hold (a Stop's
-// interrupt) writes it in the op's batch (opjournal.Store.ProposeWith). It
-// reads and refuses the rows SetContentHold refuses, so both forms of the
-// write hold the same rows; like SetContentHold's write, the item does not
-// guard against a close that lands between the read and the batch.
+// interrupt) writes it in the op's batch (opjournal.Store.ProposeWith, whose
+// Companion.Item calls it only once no op is stored, so a retry after the
+// row closed still replays). It reads and refuses the rows SetContentHold
+// refuses, so both forms of the write hold the same rows; like
+// SetContentHold's write, the item does not guard against a close that
+// lands between the read and the batch.
 func (s *Store) ContentHoldItem(id string, h ContentHold) (beads.GuardedItem, error) {
 	stamp, b, err := s.holdableRow(id, h)
 	if err != nil {

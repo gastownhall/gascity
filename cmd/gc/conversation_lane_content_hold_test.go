@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -114,6 +116,60 @@ func TestLaneHostHoldsContentUntilItsHoldClears(t *testing.T) {
 	}
 }
 
+// laneStopRequest is an operator Stop's interrupt on c's conversation.
+func laneStopRequest(c *interruptCase, key string) opjournal.Request {
+	return opjournal.Request{
+		Conversation: c.f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: key,
+		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
+		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
+	}
+}
+
+// heldStopCompanion is a Stop's hold as a producer writes it beside the
+// interrupt, counting the solo writes.
+func heldStopCompanion(c *interruptCase, hold session.ContentHold, soloWrites *int) opjournal.Companion {
+	front := sessionFrontDoor(c.f.store)
+	return opjournal.Companion{
+		Tag:   session.ContentHoldKey,
+		Item:  func() (beads.GuardedItem, error) { return front.ContentHoldItem(c.f.id, hold) },
+		Write: func() error { *soloWrites++; return front.SetContentHold(c.f.id, hold) },
+	}
+}
+
+// TestLaneHeldStopReplaysAfterItsRowCloses: a held Stop retried after its
+// row closed replays the stored interrupt, while a first held Stop on the
+// closed row is refused and writes nothing.
+func TestLaneHeldStopReplaysAfterItsRowCloses(t *testing.T) {
+	c := newInterruptCase(t, laneAtomicTurnCaps)
+	hold := laneHold(t)
+	soloWrites := 0
+	first, created, err := c.st.ProposeWith(context.Background(), laneStopRequest(c, "stop"), heldStopCompanion(c, hold, &soloWrites))
+	if err != nil || !created {
+		t.Fatalf("ProposeWith = created %v, %v", created, err)
+	}
+	if err := c.f.store.Close(c.f.id); err != nil {
+		t.Fatal(err)
+	}
+	again, created, err := c.st.ProposeWith(context.Background(), laneStopRequest(c, "stop"), heldStopCompanion(c, hold, &soloWrites))
+	if err != nil || created || again.ID != first.ID {
+		t.Fatalf("retry after the close = %s, created %v, %v; want a replay of %s", again.ID, created, err, first.ID)
+	}
+	fresh := laneStopRequest(c, "stop-2")
+	preview, err := c.st.Preview(fresh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := c.st.ProposeWith(context.Background(), fresh, heldStopCompanion(c, hold, &soloWrites)); !errors.Is(err, session.ErrSessionClosed) {
+		t.Fatalf("first held Stop on a closed row = %v, want ErrSessionClosed", err)
+	}
+	if _, err := c.f.store.Get(preview.ID); !errors.Is(err, beads.ErrNotFound) {
+		t.Fatalf("the refused Stop's op = %v, want none written", err)
+	}
+	if soloWrites != 0 {
+		t.Fatalf("the hold was written on its own %d times", soloWrites)
+	}
+}
+
 // TestLaneStopWithHoldRunsTheInterruptAndHoldsTheQueue composes a Stop as a
 // producer does: the interrupt op and its hold in one batch, the interrupt
 // run first, the queue held until the hold clears.
@@ -126,22 +182,9 @@ func TestLaneStopWithHoldRunsTheInterruptAndHoldsTheQueue(t *testing.T) {
 		return runtime.TurnHistory{}, nil
 	}
 	queued := c.f.propose(t, c.st, c.f.msg("queued", opjournal.RolePrompt, "next"))
-	front := sessionFrontDoor(c.f.store)
 	hold := laneHold(t)
-	item, err := front.ContentHoldItem(c.f.id, hold)
-	if err != nil {
-		t.Fatal(err)
-	}
 	soloWrites := 0
-	stop := opjournal.Request{
-		Conversation: c.f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "stop",
-		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
-		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
-	}
-	op, created, err := c.st.ProposeWith(context.Background(), stop, opjournal.Companion{
-		Tag: session.ContentHoldKey, Item: item,
-		Write: func() error { soloWrites++; return front.SetContentHold(c.f.id, hold) },
-	})
+	op, created, err := c.st.ProposeWith(context.Background(), laneStopRequest(c, "stop"), heldStopCompanion(c, hold, &soloWrites))
 	if err != nil || !created {
 		t.Fatalf("ProposeWith = created %v, %v", created, err)
 	}
