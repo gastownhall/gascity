@@ -1524,7 +1524,7 @@ func sessionCloseConfigLoads(t *testing.T, rigNames []string) int64 {
 
 	var stdout, stderr bytes.Buffer
 	before := loadCityConfigCalls.Load()
-	if code := cmdSessionClose([]string{sessionBead.ID}, &stdout, &stderr); code != 0 {
+	if code := cmdSessionClose([]string{sessionBead.ID}, "", &stdout, &stderr, false); code != 0 {
 		t.Fatalf("cmdSessionClose with %d rigs = %d, want 0; stdout=%s stderr=%s", len(rigNames), code, stdout.String(), stderr.String())
 	}
 	return loadCityConfigCalls.Load() - before

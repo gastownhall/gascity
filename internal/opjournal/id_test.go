@@ -256,3 +256,34 @@ func declaredIDInfixConstants(t *testing.T) []string {
 	}
 	return names
 }
+
+// TestValidateConversation pins the exported conversation check's verdicts:
+// it accepts well-formed ids up to the length limit and refuses every
+// malformed one as ErrInvalidRequest. It is validateConversation, the check
+// Propose applies, so the two cannot drift.
+func TestValidateConversation(t *testing.T) {
+	for _, conv := range []string{"gc-1", "gc-abc.def", strings.Repeat("a", maxConversationLen)} {
+		if err := ValidateConversation(conv); err != nil {
+			t.Errorf("ValidateConversation(%q) = %v, want nil", conv, err)
+		}
+	}
+	for _, conv := range []string{"", "gc 1", "gc@1", "gc#1", "gc,1", "gc\"1", "gc\x011", strings.Repeat("a", maxConversationLen+1), "\xff"} {
+		if err := ValidateConversation(conv); !errors.Is(err, ErrInvalidRequest) {
+			t.Errorf("ValidateConversation(%q) = %v, want ErrInvalidRequest", conv, err)
+		}
+	}
+}
+
+// TestMaxRefusedWhyLen pins the exported refused-reason budget to the token
+// limit a close applies: refused:<why> with a why of MaxRefusedWhyLen bytes
+// is a valid outcome reason, and one byte more is refused.
+func TestMaxRefusedWhyLen(t *testing.T) {
+	fits := Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + strings.Repeat("x", MaxRefusedWhyLen)}
+	if err := validateOutcome(fits, Cancel{}); err != nil {
+		t.Fatalf("validateOutcome(a %d-byte why) = %v, want nil", MaxRefusedWhyLen, err)
+	}
+	over := Outcome{Arm: ArmFailed, Reason: RefusedReasonPrefix + strings.Repeat("x", MaxRefusedWhyLen+1)}
+	if err := validateOutcome(over, Cancel{}); !errors.Is(err, ErrInvalidRequest) {
+		t.Fatalf("validateOutcome(a %d-byte why) = %v, want ErrInvalidRequest", MaxRefusedWhyLen+1, err)
+	}
+}

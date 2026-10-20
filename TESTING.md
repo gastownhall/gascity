@@ -77,7 +77,10 @@ one package with `bazel test //internal/config:config_test`, narrowed to the
 tests you changed with `--test_filter='^<TestName>$'`: only changed inputs
 re-run, and an unchanged target returns its cached result. A filter that
 matches no test still passes, so when the run is your evidence, add
-`--test_output=all --test_arg=-test.v` and check that the named tests ran.
+`--test_env=GO_TEST_WRAP_TESTV=1 --test_output=all` and check that the log
+shows `--- PASS` for the named tests. Keep the same flags when you re-run:
+`--test_output` and `--test_summary` are display only, while every change to
+`--test_arg`, `--test_env` or `--test_filter` is a new cache key.
 AGENTS.md "Build and test" maps the other `go test` flags onto Bazel's.
 `go test ./internal/config -run '^<TestName>$'` remains a convenience for a
 human working offline. It runs none of the nogo, format,

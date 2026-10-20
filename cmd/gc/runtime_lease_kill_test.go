@@ -31,7 +31,7 @@ func TestCmdSessionKillTakesTheRuntimeLease(t *testing.T) {
 	}
 	for _, force := range []bool{false, true} {
 		var stdout, stderr bytes.Buffer
-		if code := cmdSessionKillWithForce([]string{identity}, &stdout, &stderr, false, force); code != 1 || !strings.Contains(stderr.String(), "session is starting, retry") {
+		if code := cmdSessionKillWithForce([]string{identity}, "", &stdout, &stderr, false, force); code != 1 || !strings.Contains(stderr.String(), "session is starting, retry") {
 			t.Fatalf("kill (force=%v) under an unexpired lease = %d, %q; want a retryable refusal", force, code, stderr.String())
 		}
 	}
@@ -58,7 +58,7 @@ func TestCmdSessionKillTakesTheRuntimeLease(t *testing.T) {
 		released = mustGetBead(t, store, bead.ID).Metadata[sessionpkg.RuntimeLeaseHolderKey] == ""
 		return nil
 	}
-	if code := cmdSessionKillWithForce([]string{identity}, &stdout, &stderr, false, true); code != 0 || inner.IsRunning("s-gc-kill-lease") {
+	if code := cmdSessionKillWithForce([]string{identity}, "", &stdout, &stderr, false, true); code != 0 || inner.IsRunning("s-gc-kill-lease") {
 		t.Fatalf("kill --force past a hung holder with an expired record = %d, %q", code, stderr.String())
 	}
 	if epoch := mustGetBead(t, store, bead.ID).Metadata[sessionpkg.RuntimeLeaseEpochKey]; epoch != "6" {

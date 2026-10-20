@@ -400,14 +400,23 @@ func (r *Recorder) cannotRecord(kind opjournal.Kind, key string, minted bool, st
 }
 
 // Unrecorded is an Execute admission for a request the caller knows it cannot
-// record (an unmaterialized named target, a session with no generation),
-// counted under reason. The caller decides that only in auto; require
-// resolves the cause first or refuses.
+// record (an unmaterialized named target, a session with no generation or
+// whose row cannot be read), counted under reason. The caller decides that
+// only in auto; require resolves the cause first or refuses.
 func (r *Recorder) Unrecorded(kind opjournal.Kind, key, reason string) *Admission {
 	if r.recording() {
 		r.count(kind, StageAdmit, ResultUnrecorded, reason)
 	}
 	return &Admission{Decision: Execute, Key: key, rec: r}
+}
+
+// Refused counts a request the caller refuses in require because it knows it
+// cannot record it (Unrecorded's causes), under reason, as Admit counts a
+// require refusal. It counts nothing in another mode.
+func (r *Recorder) Refused(kind opjournal.Kind, reason string) {
+	if r.Mode == gate.Require {
+		r.count(kind, StageAdmit, ResultRefused, reason)
+	}
 }
 
 // Accept stores the request's answer in its in-flight entry, so a same-key

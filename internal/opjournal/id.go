@@ -193,6 +193,11 @@ func validatePrefix(prefix string) error {
 	return nil
 }
 
+// ValidateConversation refuses a conversation id Propose would refuse, as
+// ErrInvalidRequest. Producers check an id they did not resolve themselves (an
+// agent session's GC_SESSION_ID, which names the producing principal) with it.
+func ValidateConversation(conv string) error { return validateConversation(conv) }
+
 // validateConversation refuses conversation ids that cannot sit inside a
 // label, a lease or an id: empty, too long, whitespace, control characters,
 // '@', '#', ',' or '"'.

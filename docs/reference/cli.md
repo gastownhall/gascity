@@ -4354,7 +4354,11 @@ gc session attach <session-id-or-alias>
 
 End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key replays the close only when it names the session by its
+ID: a closed session's alias no longer resolves to it, and once another
+session holds the alias (a configured named session is created again under
+its name), a rerun by the alias closes that session.
 
 ```
 gc session close <session-id-or-alias> [flags]
@@ -4363,6 +4367,7 @@ gc session close <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again (without the first run's wait_nudges_withdrawn in --json); ignored when the gate is off (default: a new key each run) |
 
 ## gc session kill
 
@@ -4383,6 +4388,24 @@ restarts in place on its bead; while its started work is blocked, it holds its
 slot asleep. A task assigned directly to the seat with no route is kept, not
 released, and the seat holds its slot until that task is ready.
 
+With --key, a rerun after the controller restarted the session under the same
+ID reports the first kill, noting the restart, instead of killing the new run.
+A pool seat replaced as above is a new session with a new ID, though it may
+keep the killed seat's alias: a rerun must name the killed session by its ID,
+since by the alias it would kill the replacement.
+
+While the ops.lifecycle gate is require, a kill whose session row cannot be
+read, or names no session generation, is refused (op_journal_unavailable,
+naming unreadable_target and the read error, or no_generation) and nothing is
+killed. At auto, or with GC_OPS_LIFECYCLE=auto set to break glass, it runs the
+best-effort kill unrecorded.
+
+A recorded kill (the gate at auto or require) names the session generation it
+read before taking the session's runtime lease. If a start runs while it waits
+for that lease, the kill stops nothing and exits 1, its op closed
+failed&#123;refused:target_moved&#125;: rerun it without --key to kill the new run. A
+rerun with the same --key replays that failure, noting the restart.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4393,6 +4416,7 @@ gc session kill <session-id-or-alias> [flags]
 |------|------|---------|-------------|
 | `--force` | bool |  | destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired |
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again, even after the session restarted under the same ID; ignored when the gate is off (default: a new key each run) |
 
 ## gc session list
 
@@ -4586,7 +4610,11 @@ session back instead: it closes the bead as a failed create and releases the
 alias so the controller can create a replacement. A create that is still
 starting, or whose runtime is running, is never rolled back.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key of a reset that rolled back replays it only when it names
+the session by its ID: the rollback released the alias, and once the
+replacement the controller creates holds it, a rerun by the alias resets that
+session.
 
 ```
 gc session reset <session-id-or-alias> [flags]
@@ -4595,6 +4623,7 @@ gc session reset <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
 
 ## gc session submit
 
@@ -4634,6 +4663,7 @@ gc session suspend <session-id-or-alias> [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again (without the first run's mode in --json); ignored when the gate is off (default: a new key each run) |
 
 ## gc session unpin
 
@@ -4673,6 +4703,12 @@ After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
 has no wake reasons, it remains asleep.
 
+When a configured named session has no session to wake or reopen, the wake
+creates one as it resolves the target, before the wake is recorded. While the
+ops.lifecycle gate is require, a wake whose op the journal then cannot record
+is refused (op_journal_unavailable): the wake did not run, but the session it
+created stays and may start.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).
 
 ```
@@ -4689,6 +4725,7 @@ gc session wake mayor
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--json` | bool |  | emit JSONL |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again (without the first run's wait_nudges_withdrawn in --json); ignored when the gate is off (default: a new key each run) |
 
 ## gc shell
 

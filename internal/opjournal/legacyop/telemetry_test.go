@@ -120,6 +120,21 @@ func TestUnrecordedIsCountedOnce(t *testing.T) {
 	}
 }
 
+// A request the caller refuses for a cause it knows cannot be recorded is
+// counted as a require refusal under its reason; in auto, where the caller
+// runs it unrecorded instead, and in off, nothing is counted.
+func TestRefusedIsCountedInRequireOnly(t *testing.T) {
+	counts := captureCounts(t)
+	e := newEnv(t)
+	cliRecorder(e, gate.Require).Refused(opjournal.KindKill, ReasonNoGeneration)
+	cliRecorder(e, gate.Auto).Refused(opjournal.KindKill, ReasonNoGeneration)
+	cliRecorder(e, gate.Off).Refused(opjournal.KindKill, ReasonNoGeneration)
+	want := []countedStep{{"kill", SurfaceCLI, StageAdmit, ResultRefused, ReasonNoGeneration}}
+	if got := counts(); fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Fatalf("counted %+v, want %+v", got, want)
+	}
+}
+
 // An invalid outcome is the caller's bug, not a store failure: Finish logs it
 // as an error, counts the close failed and releases the entry, but reports no
 // degrade.
