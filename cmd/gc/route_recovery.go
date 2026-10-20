@@ -75,6 +75,20 @@ func (cr *CityRuntime) routeRecoveryLaneOf() *routeRecoveryLane {
 	return cr.routeRecovery
 }
 
+// claimLoopGuardOf is the runtime's claim-loop guard, created on first use. Its
+// alerts go to the runtime's recorder and stderr.
+func (cr *CityRuntime) claimLoopGuardOf() *claimLoopGuard {
+	cr.claimLoopOnce.Do(func() {
+		record := func(e events.Event) {
+			if cr.rec != nil {
+				cr.rec.Record(e)
+			}
+		}
+		cr.claimLoop = newClaimLoopGuard(record, cr.stderr)
+	})
+	return cr.claimLoop
+}
+
 // routeRecoveryEventProvider is the journal the delta feed tails, or nil when
 // this runtime has no controller state (every one-shot and standalone runtime).
 // A nil provider leaves the lane backstop-only, loudly, rather than pretending a
@@ -237,6 +251,11 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 	route := cr.routeRecoveryLaneOf()
 	completions := cr.completionsLaneOf()
 	orphans := cr.detachedOrphanLaneOf()
+	// The claim-loop guard rides the same feed. It needs no gap handling: a
+	// missed claim failure only delays a hold, and a missed bead change is
+	// covered by the hold's own expiry.
+	claimLoop := cr.claimLoopGuardOf()
+	registerClaimLoopGuard(ctx, cr.cityPath, claimLoop)
 	watchJournalForDeltaLanes(ctx, prov,
 		func() {
 			route.force(backstopReasonCursorGap)
@@ -249,6 +268,7 @@ func (cr *CityRuntime) startTickDeltaLanes(ctx context.Context, prov events.Prov
 			completions.observe(evt)
 			orphans.observe(evt)
 			cr.absorbCompletionFact(evt)
+			claimLoop.observe(evt)
 		})
 	go cr.runRouteRecoveryBackstopLoop(ctx, route)
 	go cr.runCompletionsSweepLoop(ctx, completions)
