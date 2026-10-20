@@ -5,7 +5,10 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -23,6 +26,7 @@ type claimLoopHarness struct {
 	t      *testing.T
 	guard  *claimLoopGuard
 	now    time.Time
+	seats  int
 	alerts []events.Event
 	stderr bytes.Buffer
 }
@@ -35,10 +39,18 @@ func newClaimLoopHarness(t *testing.T) *claimLoopHarness {
 	return h
 }
 
-// fail feeds one bead.claim_failed, stamped now.
+// fail feeds one bead.claim_failed from a fresh seat, stamped now: the shape
+// of a loop, where every failure is a new seat the controller spawned.
 func (h *claimLoopHarness) fail(template, beadID, errText string) {
 	h.t.Helper()
-	payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: "gcg-session-x", Error: errText})
+	h.seats++
+	h.failAs(fmt.Sprintf("gcg-session-%d", h.seats), template, beadID, errText)
+}
+
+// failAs feeds one bead.claim_failed from the named seat, stamped now.
+func (h *claimLoopHarness) failAs(seat, template, beadID, errText string) {
+	h.t.Helper()
+	payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: seat, Error: errText})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -46,6 +58,14 @@ func (h *claimLoopHarness) fail(template, beadID, errText string) {
 }
 
 func (h *claimLoopHarness) advance(d time.Duration) { h.now = h.now.Add(d) }
+
+// trip feeds the failures that hold the loop wisp for the loop template.
+func (h *claimLoopHarness) trip() {
+	h.t.Helper()
+	for i := 0; i < claimLoopTripFailures; i++ {
+		h.fail(loopTemplate, loopWisp, loopErr)
+	}
+}
 
 // held reports whether the loop wisp is withheld from template's demand this
 // pass.
@@ -57,6 +77,12 @@ func (h *claimLoopHarness) held(template string) bool {
 	return gotCounts[template] == 0 && len(gotDemand[template].WorkBeadIDs) == 0
 }
 
+func (h *claimLoopHarness) records() int {
+	h.guard.mu.Lock()
+	defer h.guard.mu.Unlock()
+	return len(h.guard.records)
+}
+
 const (
 	loopWisp     = "gcg--9223372036838841776"
 	loopTemplate = "bd.dog"
@@ -65,8 +91,8 @@ const (
 
 // TestClaimLoopGuardHoldsABeadAfterRepeatedIdenticalFailures is the trip: the
 // incident's shape, one bead failing the same way for every seat of one
-// template, stops counting as that template's spawn demand at the third
-// failure and raises one alert naming the bead, the template and the error.
+// template, stops counting as that template's spawn demand at the third seat
+// and raises one alert naming the bead, the template and the error.
 func TestClaimLoopGuardHoldsABeadAfterRepeatedIdenticalFailures(t *testing.T) {
 	h := newClaimLoopHarness(t)
 	for i := 1; i < claimLoopTripFailures; i++ {
@@ -101,9 +127,26 @@ func TestClaimLoopGuardHoldsABeadAfterRepeatedIdenticalFailures(t *testing.T) {
 	}
 }
 
+// TestClaimLoopGuardCountsSeatsNotRetries: one seat failing the same claim
+// again (a retry, or the same bead on a second leg) is one seat, not a loop.
+func TestClaimLoopGuardCountsSeatsNotRetries(t *testing.T) {
+	h := newClaimLoopHarness(t)
+	for i := 0; i < claimLoopTripFailures+2; i++ {
+		h.failAs("gcg-session-one", loopTemplate, loopWisp, loopErr)
+	}
+	if h.held(loopTemplate) {
+		t.Fatal("one seat's repeated failures held the bead")
+	}
+	h.fail(loopTemplate, loopWisp, loopErr)
+	h.fail(loopTemplate, loopWisp, loopErr)
+	if !h.held(loopTemplate) {
+		t.Fatal("not held once three distinct seats had failed")
+	}
+}
+
 // TestClaimLoopGuardRequiresTheSameError: failures that differ are not a loop.
 // A changed error restarts the streak, so it takes the full count of the NEW
-// error to hold.
+// error to hold. A server request id is not part of the error.
 func TestClaimLoopGuardRequiresTheSameError(t *testing.T) {
 	h := newClaimLoopHarness(t)
 	h.fail(loopTemplate, loopWisp, loopErr)
@@ -119,6 +162,18 @@ func TestClaimLoopGuardRequiresTheSameError(t *testing.T) {
 	h.fail(loopTemplate, loopWisp, "claimIssue: context deadline exceeded")
 	if !h.held(loopTemplate) {
 		t.Fatal("not held after the new error repeated the full count")
+	}
+
+	h = newClaimLoopHarness(t)
+	for i := 0; i < claimLoopTripFailures; i++ {
+		h.fail(loopTemplate, loopWisp, fmt.Sprintf("claimIssue: bd serve at https://x answered 500 internal: internal error (request_id req-%d)", i))
+	}
+	if !h.held(loopTemplate) {
+		t.Fatal("failures differing only by request id did not count as the same error")
+	}
+	var payload events.BeadClaimLoopHeldPayload
+	if err := json.Unmarshal(h.alerts[0].Payload, &payload); err != nil || strings.Contains(payload.Error, "request_id") {
+		t.Fatalf("alert error = %q (%v), want it without the request id", payload.Error, err)
 	}
 }
 
@@ -143,14 +198,31 @@ func TestClaimLoopGuardStreakMustFitTheWindow(t *testing.T) {
 	}
 }
 
+// TestClaimLoopGuardSeatsInFlightDoNotLengthenTheHold: seats already running
+// when the hold begins still fail after it; they are not probes, so the hold,
+// and the alert's held_until, stand.
+func TestClaimLoopGuardSeatsInFlightDoNotLengthenTheHold(t *testing.T) {
+	h := newClaimLoopHarness(t)
+	h.trip()
+	h.advance(time.Minute)
+	h.fail(loopTemplate, loopWisp, loopErr)
+	h.fail(loopTemplate, loopWisp, loopErr)
+	h.advance(claimLoopHoldBase - time.Minute - time.Second)
+	if !h.held(loopTemplate) {
+		t.Fatal("released before the first hold ran out")
+	}
+	h.advance(time.Second)
+	if h.held(loopTemplate) {
+		t.Fatalf("still withheld %s after the trip: in-flight seats lengthened the hold", claimLoopHoldBase)
+	}
+}
+
 // TestClaimLoopGuardBacksOffWithOneProbePerHold: a hold that runs out admits
-// the bead for one probe and then withholds it again while the probe reports;
-// a probe that fails the same way doubles the hold, up to the cap.
+// the bead for one demand pass and then withholds it again while the probe
+// reports; a probe that fails the same way doubles the hold, up to the cap.
 func TestClaimLoopGuardBacksOffWithOneProbePerHold(t *testing.T) {
 	h := newClaimLoopHarness(t)
-	for i := 0; i < claimLoopTripFailures; i++ {
-		h.fail(loopTemplate, loopWisp, loopErr)
-	}
+	h.trip()
 	hold := claimLoopHoldBase
 	for round := 0; round < 6; round++ {
 		h.advance(hold - time.Second)
@@ -177,9 +249,7 @@ func TestClaimLoopGuardBacksOffWithOneProbePerHold(t *testing.T) {
 // spawned or never reported does not wedge the bead out of demand forever.
 func TestClaimLoopGuardProbeThatNeverReportsIsRetried(t *testing.T) {
 	h := newClaimLoopHarness(t)
-	for i := 0; i < claimLoopTripFailures; i++ {
-		h.fail(loopTemplate, loopWisp, loopErr)
-	}
+	h.trip()
 	h.advance(claimLoopHoldBase)
 	if h.held(loopTemplate) {
 		t.Fatal("the first probe was not admitted")
@@ -220,9 +290,7 @@ func TestClaimLoopGuardResumesWhenTheBeadChanges(t *testing.T) {
 // config may have fixed what the claims failed on.
 func TestClaimLoopGuardResumesWhenTheConfigChanges(t *testing.T) {
 	h := newClaimLoopHarness(t)
-	for i := 0; i < claimLoopTripFailures; i++ {
-		h.fail(loopTemplate, loopWisp, loopErr)
-	}
+	h.trip()
 	h.guard.configChanged()
 	if h.held(loopTemplate) {
 		t.Fatal("still held after a config change")
@@ -233,22 +301,46 @@ func TestClaimLoopGuardResumesWhenTheConfigChanges(t *testing.T) {
 	}
 }
 
+// TestAdoptConfigRevisionResetsTheClaimLoopGuardOnChange pins the reload hook:
+// the same revision keeps every hold, a new one releases them.
+func TestAdoptConfigRevisionResetsTheClaimLoopGuardOnChange(t *testing.T) {
+	cr := &CityRuntime{configRev: "rev-1", stderr: io.Discard}
+	h := newClaimLoopHarness(t)
+	cr.claimLoopOnce.Do(func() { cr.claimLoop = h.guard })
+	h.trip()
+	cr.adoptConfigRevision("rev-1")
+	if !h.held(loopTemplate) {
+		t.Fatal("a reload to the same revision released the hold")
+	}
+	cr.adoptConfigRevision("rev-2")
+	if h.held(loopTemplate) {
+		t.Fatal("a reload to a new revision kept the hold")
+	}
+	if cr.configRev != "rev-2" {
+		t.Fatalf("configRev = %q, want rev-2", cr.configRev)
+	}
+}
+
 // TestClaimLoopGuardForgetsQuietRecords: a held bead that stops reporting has
-// left demand without an event saying so; its record must not live forever.
+// left demand without an event saying so; its record must not live forever,
+// whether the next thing the guard sees is a demand pass or another failure.
 func TestClaimLoopGuardForgetsQuietRecords(t *testing.T) {
 	h := newClaimLoopHarness(t)
-	for i := 0; i < claimLoopTripFailures; i++ {
-		h.fail(loopTemplate, loopWisp, loopErr)
-	}
+	h.trip()
 	h.advance(claimLoopForgetAfter + time.Second)
 	if h.held(loopTemplate) {
 		t.Fatal("a record quiet for longer than the forget horizon still holds")
 	}
-	h.guard.mu.Lock()
-	n := len(h.guard.records)
-	h.guard.mu.Unlock()
-	if n != 0 {
-		t.Fatalf("records = %d, want the quiet one swept", n)
+	if n := h.records(); n != 0 {
+		t.Fatalf("records = %d, want the quiet one swept by the demand pass", n)
+	}
+
+	h = newClaimLoopHarness(t)
+	h.trip()
+	h.advance(claimLoopForgetAfter + time.Second)
+	h.fail(loopTemplate, "gcg--other", loopErr)
+	if n := h.records(); n != 1 {
+		t.Fatalf("records = %d, want only the new streak: a failure sweeps the quiet one too", n)
 	}
 }
 
@@ -261,10 +353,7 @@ func TestClaimLoopGuardIgnoresWhatItCannotKey(t *testing.T) {
 		h.fail(loopTemplate, "", loopErr)
 		h.guard.observe(events.Event{Type: events.BeadClaimFailed, Subject: loopWisp, Payload: json.RawMessage(`{"template":`)})
 	}
-	h.guard.mu.Lock()
-	n := len(h.guard.records)
-	h.guard.mu.Unlock()
-	if n != 0 || len(h.alerts) != 0 {
+	if n := h.records(); n != 0 || len(h.alerts) != 0 {
 		t.Fatalf("records=%d alerts=%d, want none", n, len(h.alerts))
 	}
 }
@@ -273,9 +362,7 @@ func TestClaimLoopGuardIgnoresWhatItCannotKey(t *testing.T) {
 // pass; the guard answers with copies and only when it removes something.
 func TestClaimLoopGuardWithholdNeverEditsItsInputs(t *testing.T) {
 	h := newClaimLoopHarness(t)
-	for i := 0; i < claimLoopTripFailures; i++ {
-		h.fail(loopTemplate, loopWisp, loopErr)
-	}
+	h.trip()
 	counts := map[string]int{loopTemplate: 3, "other": 1}
 	demand := map[string]scaleCheckDemand{
 		loopTemplate: {Count: 3, WorkBeadIDs: []string{"gcg-a", loopWisp, "gcg-b"}},
@@ -323,6 +410,42 @@ func TestClaimLoopGuardRegistryFollowsTheController(t *testing.T) {
 	}
 }
 
+// TestTickDeltaLanesFeedTheClaimLoopGuard pins the controller wiring end to
+// end: starting the delta lanes publishes the runtime's guard for its city, and
+// claim failures on the journal reach it through the shared feed, so both
+// demand passes, which find the guard by city path, withhold the bead.
+func TestTickDeltaLanesFeedTheClaimLoopGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	backing := events.NewFake()
+	for i := 0; i < claimLoopTripFailures; i++ {
+		payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: loopTemplate, SessionID: fmt.Sprintf("gcg-session-%d", i), Error: loopErr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		backing.Record(events.Event{Type: events.BeadClaimFailed, Ts: time.Now(), Subject: loopWisp, Payload: payload})
+	}
+	prov := &observedEventProvider{Provider: backing, observed: make(chan struct{}, 8), after: claimLoopTripFailures + 1}
+
+	cr, _ := detachedOrphanRuntime(t)
+	cr.cityPath = t.TempDir()
+	cr.startTickDeltaLanes(ctx, prov)
+
+	select {
+	case <-prov.observed:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the feed never consumed the claim failures")
+	}
+	guard := claimLoopGuardFor(cr.cityPath)
+	if guard == nil || guard != cr.claimLoopGuardOf() {
+		t.Fatalf("the demand passes find guard %p for the city, want the runtime's %p", guard, cr.claimLoopGuardOf())
+	}
+	counts, demand := guard.withhold(map[string]int{loopTemplate: 1}, map[string]scaleCheckDemand{loopTemplate: {Count: 1, WorkBeadIDs: []string{loopWisp}}})
+	if counts[loopTemplate] != 0 || len(demand[loopTemplate].WorkBeadIDs) != 0 {
+		t.Fatalf("withheld demand = %v / %+v, want the wisp held after the feed delivered %d failures", counts, demand[loopTemplate], claimLoopTripFailures)
+	}
+}
+
 // TestDefaultDemandWithholdsAHeldBead runs both demand passes over one pool
 // with three routed beads, one of them held: the legacy pass and the v2 gather
 // must each count two.
@@ -343,9 +466,9 @@ func TestDefaultDemandWithholdsAHeldBead(t *testing.T) {
 	}
 	h := newClaimLoopHarness(t)
 	h.guard.now = time.Now
+	h.now = time.Now()
 	for i := 0; i < claimLoopTripFailures; i++ {
-		payload, _ := json.Marshal(events.BeadClaimFailedPayload{Template: "dog", Error: loopErr})
-		h.guard.observe(events.Event{Type: events.BeadClaimFailed, Ts: time.Now(), Subject: ids[1], Payload: payload})
+		h.fail("dog", ids[1], loopErr)
 	}
 	t.Cleanup(registerClaimLoopGuard(context.Background(), cityPath, h.guard))
 
@@ -367,12 +490,14 @@ func TestDefaultDemandWithholdsAHeldBead(t *testing.T) {
 	}
 }
 
-// TestHookClaimRecordsAClaimFailureForEverySkippedCandidate pins the guard's
-// input at its source: each served candidate a seat skips because its claim
-// write failed is reported with the seat's template and the error, on the
-// routed tier and the ready-assignment tier alike, and the seat still drains
-// claims_errored.
-func TestHookClaimRecordsAClaimFailureForEverySkippedCandidate(t *testing.T) {
+// TestHookClaimReportsAClaimFailureOnlyForARoutedCandidate pins the guard's
+// input at its source: a routed candidate the seat skips because its claim
+// write failed is reported with the error, and the seat still drains
+// claims_errored. A ready assignment skipped the same way is not reported: it is
+// assigned work, which wakes the seat it is assigned to and is never default
+// spawn demand, so a hold could not stop anything and its alert would say it
+// had.
+func TestHookClaimReportsAClaimFailureOnlyForARoutedCandidate(t *testing.T) {
 	writeErr := errors.New("claimIssue: bd serve at https://bdserve.example.test:30635 answered 503 busy")
 	type failure struct {
 		beadID string
@@ -401,17 +526,19 @@ func TestHookClaimRecordsAClaimFailureForEverySkippedCandidate(t *testing.T) {
 	if res := claimFirstEligibleHookCandidate(routed, opts, ops, "/city", &stdout, &stderr); res.terminal || !res.claimsErrored {
 		t.Fatalf("routed tier = %+v, want a non-terminal claims_errored skip", res)
 	}
+	if len(got) != 1 || got[0].beadID != "gcg-1" || !errors.Is(got[0].err, writeErr) {
+		t.Fatalf("claim failures reported = %+v, want gcg-1 with the write's error", got)
+	}
+	got = nil
 	assigned := []beads.Bead{{ID: "gcg-2", Status: "open", Assignee: "bd.dog-1"}}
-	// The ready tier skips only a failure that proves the bead is elsewhere;
-	// anything else is terminal there and reported differently.
 	ops.Claim = func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
 		return beads.Bead{}, false, beads.ErrNotFound
 	}
 	if res := claimFirstReadyHookAssignment(assigned, opts, ops, "/city", &stdout, &stderr); res.terminal || !res.claimsErrored {
 		t.Fatalf("ready tier = %+v, want a non-terminal claims_errored skip", res)
 	}
-	if len(got) != 2 || got[0].beadID != "gcg-1" || !errors.Is(got[0].err, writeErr) || got[1].beadID != "gcg-2" || !errors.Is(got[1].err, beads.ErrNotFound) {
-		t.Fatalf("claim failures reported = %+v, want gcg-1 (routed) then gcg-2 (ready)", got)
+	if len(got) != 0 {
+		t.Fatalf("the ready tier reported %+v; assigned work is not spawn demand the guard can hold", got)
 	}
 }
 
@@ -445,11 +572,88 @@ func TestClaimFailedEventNamesTheSeatTemplateAndTheError(t *testing.T) {
 			t.Errorf("%s: an event was built", name)
 		}
 	}
+	opened := 0
+	emitClaimFailedTo(func() events.Recorder { opened++; return events.Discard }, loopWisp, hookClaimOptions{}, errors.New("boom"))
+	if opened != 0 {
+		t.Fatal("the event log was opened for a failure with nothing to record")
+	}
 	if got := claimLoopErrorText("  héllo  "); got != "héllo" {
 		t.Fatalf("claimLoopErrorText trims to %q", got)
 	}
 	cut := claimLoopErrorText(strings.Repeat("a", claimLoopErrorMax-1) + "é")
 	if !strings.HasSuffix(cut, "a") || len(cut) != claimLoopErrorMax-1 {
 		t.Fatalf("claimLoopErrorText split a rune: len %d", len(cut))
+	}
+}
+
+// TestReloadThatChangesTheConfigReleasesClaimLoopHolds pins the reload hook in
+// place: a reload that adopts a changed config releases every hold, so a fix
+// made in city.toml is tried at once rather than after the hold.
+func TestReloadThatChangesTheConfigReleasesClaimLoopHolds(t *testing.T) {
+	cityPath := t.TempDir()
+	tomlPath := filepath.Join(cityPath, "city.toml")
+	writeClaimLoopCityConfig(t, tomlPath, 2)
+	cfg, err := config.Load(osFS{}, tomlPath)
+	if err != nil {
+		t.Fatalf("load config: %v", err)
+	}
+	sp := runtime.NewFake()
+	cr := newTestCityRuntime(t, CityRuntimeParams{
+		CityPath: cityPath,
+		CityName: "test-city",
+		TomlPath: tomlPath,
+		Cfg:      cfg,
+		SP:       sp,
+		BuildFn: func(*config.City, runtime.Provider, beads.Store) DesiredStateResult {
+			return DesiredStateResult{State: map[string]TemplateParams{}}
+		},
+		Dops:   newDrainOps(sp),
+		Rec:    events.Discard,
+		Stdout: io.Discard,
+		Stderr: io.Discard,
+	})
+	cs := newControllerState(context.Background(), cfg, sp, events.NewFake(), "test-city", cityPath)
+	cs.cityBeadStore = beads.NewMemStore()
+	cr.setControllerState(cs)
+	cr.sessionDrains = newDrainTracker()
+
+	guard := cr.claimLoopGuardOf()
+	for i := 0; i < claimLoopTripFailures; i++ {
+		payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: "test-city/dog", SessionID: fmt.Sprintf("gcg-session-%d", i), Error: loopErr})
+		if err != nil {
+			t.Fatal(err)
+		}
+		guard.observe(events.Event{Type: events.BeadClaimFailed, Ts: time.Now(), Subject: loopWisp, Payload: payload})
+	}
+	held := func() bool {
+		counts, demand := guard.withhold(map[string]int{"test-city/dog": 1}, map[string]scaleCheckDemand{"test-city/dog": {Count: 1, WorkBeadIDs: []string{loopWisp}}})
+		return counts["test-city/dog"] == 0 && len(demand["test-city/dog"].WorkBeadIDs) == 0
+	}
+	if !held() {
+		t.Fatal("fixture: the wisp is not held before the reload")
+	}
+	before := cr.configRev
+
+	writeClaimLoopCityConfig(t, tomlPath, 3)
+	lastProviderName := "fake"
+	cr.reloadConfig(context.Background(), &lastProviderName, cityPath)
+
+	if cr.configRev == before {
+		t.Fatalf("configRev stayed %q: the reload did not adopt the changed config", before)
+	}
+	if held() {
+		t.Fatal("the hold survived a reload that changed the config")
+	}
+}
+
+// writeClaimLoopCityConfig writes a one-pool city whose pool size is the only
+// thing a test changes between reloads.
+func writeClaimLoopCityConfig(t *testing.T, tomlPath string, maxActive int) {
+	t.Helper()
+	clearInheritedBeadsEnv(t)
+	requireNoLeakedDoltAfterForPaths(t, filepath.Dir(tomlPath))
+	data := fmt.Sprintf("[workspace]\nname = \"test-city\"\n\n[beads]\nprovider = \"file\"\n\n[session]\nprovider = \"fake\"\n\n[[agent]]\nname = \"dog\"\nstart_command = \"true\"\nmax_active_sessions = %d\n", maxActive)
+	if err := os.WriteFile(tomlPath, []byte(data), 0o644); err != nil {
+		t.Fatalf("write config: %v", err)
 	}
 }

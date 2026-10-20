@@ -119,7 +119,8 @@ package main
 // If a refusal reaches a claim anyway (a forwarding wrapper carries the method
 // its leaf lacks, so it passes the door and refuses per bead with
 // beads.ErrClaimUnsupported), it is a per-BEAD skip and not a terminal
-// tick: the escalation only ran because a work store returned not-found, which
+// tick: the escalation only ran because the work store was proved not to hold
+// the bead (its not-found, or a not-found from reading the same leg), which
 // proves this session owns nothing there and that no mutation is outstanding
 // anywhere (the capability refusal is returned before any write). That is the
 // same proof the work-side not-found carries, so it earns the same skip —
@@ -475,16 +476,18 @@ func (r *hookClaimClassRoute) escalates(ctx context.Context, from hookStore, id,
 // The write's own not-found is the proof. Any other error is settled by reading
 // the same leg through the caller's read seam (the package comment says why): a
 // not-found there proves it, and a read that finds the bead or fails proves
-// nothing. Two errors skip the read because they already answer it: a named
-// wisp refusal is the leg saying it HOLDS the bead, and a context that is done
-// cannot carry a read that would mean anything.
+// nothing. Three errors skip the read because they already answer it: a named
+// wisp refusal is the leg saying it HOLDS the bead; a store that did not answer
+// (workQueryStoreUnavailable: a timeout, a refused connection, contention) would
+// only be asked again while it is struggling; and a context that is done cannot
+// carry a read that would mean anything.
 func (r *hookClaimClassRoute) legProvedAbsent(ctx context.Context, from hookStore, id, assignee string, workErr error) bool {
 	switch {
 	case workErr == nil:
 		return false
 	case hookClaimBeadIsElsewhere(workErr):
 		return true
-	case r.readLeg == nil, hookClaimBeadIsAWisp(workErr), ctx.Err() != nil:
+	case r.readLeg == nil, hookClaimBeadIsAWisp(workErr), ctx.Err() != nil, workQueryStoreUnavailable(workErr):
 		return false
 	}
 	_, err := r.readLeg(ctx, from.dir, from.env, id, assignee)

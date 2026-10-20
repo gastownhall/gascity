@@ -7,43 +7,53 @@ package main
 // for every seat — a store the claim cannot reach, a write the store refuses —
 // the two never converge: the bead stays ready, the controller keeps counting
 // it, and each seat it spawns fails the claim, drains claims_errored and is
-// replaced. On maintainer-city one wisp the work store could not claim drew
-// 2,228 Opus seats over 31 hours that way.
+// replaced, for as long as the bead stays ready. The incident behind this guard
+// was one such bead drawing thousands of seats over a day and a half.
 //
 // The guard is the mechanical backstop for that whole class, whatever the
 // failure's cause:
 //
-//   - Input: bead.claim_failed, which `gc hook --claim` records for each served
-//     candidate whose claim write failed (template, bead, error text), read off
-//     the city's event journal by the same feed as the other delta lanes.
-//   - Trip: claimLoopTripFailures failures in a row of one template's claims of
-//     one bead with the SAME error text, the first and the last within
-//     claimLoopWindow. A different error starts a new streak: only a failure that
-//     repeats exactly is a loop.
-//   - Hold: the default routed-work demand count stops counting the bead for that
-//     template (withhold), so no seat is spawned for it, and bead.claim_loop_held
-//     names the template, the bead and the error for the operator.
-//   - Back off: when a hold runs out, the bead counts again until one probe seat
-//     has had claimLoopProbeGrace to claim it. A probe that fails the same way
-//     doubles the hold, up to claimLoopHoldMax.
-//   - Resume: any journal event naming the bead (updated, closed, deleted) drops
-//     its records, and a config reload that changes the revision drops every
-//     record. A successful claim is itself a bead update.
+//   - Input: bead.claim_failed, which `gc hook --claim` records for each routed
+//     candidate it skips because the claim write failed (template, seat, bead,
+//     error text), read off the city's event journal by the same feed as the
+//     delta lanes.
+//   - Trip: claimLoopTripFailures distinct seats of one template failing to
+//     claim one bead with the SAME error text, the first and the last within
+//     claimLoopWindow. A different error starts a new streak: only a failure
+//     that repeats exactly is a loop. A seat failing twice counts once.
+//   - Hold: the default routed-work demand count stops counting the bead for
+//     that template (withhold), so no seat is spawned for it, and
+//     bead.claim_loop_held names the template, the bead and the error for the
+//     operator. Seats already running when the hold begins may still fail; they
+//     do not lengthen it.
+//   - Back off: when a hold runs out, the bead counts for one demand pass, so a
+//     probe seat can be spawned, and is withheld again for claimLoopProbeGrace
+//     while the probe reports. A probe that fails the same way doubles the hold,
+//     up to claimLoopHoldMax; one that never reports is followed by another.
+//   - Resume: any journal event naming the bead (created, updated, closed,
+//     deleted) drops its records, and a config reload that changes the revision
+//     drops every record. A successful claim is itself a bead update. So is any
+//     other write to the bead, an operator's or a controller repair's, which
+//     costs at most a fresh streak.
 //
 // It holds no judgment: the thresholds are constants, the comparison is string
-// equality, and it never touches the bead — seats keep claiming whatever their
-// work query serves; only the controller's spawn count changes. The state is in
-// memory, so a controller restart forgets it and the guard re-learns after
-// claimLoopTripFailures more failures.
+// equality (after removing a server request id, which differs on every answer),
+// and it never touches the bead — seats keep claiming whatever their work query
+// serves; only the controller's spawn count changes. The state is in memory, so
+// a controller restart forgets it and the guard re-learns after
+// claimLoopTripFailures more seats fail.
 //
-// A custom scale_check is a number per template with no beads behind it, so the
-// guard cannot withhold one bead from it; such a pool still gets the alert.
+// The guard withholds only default routed-work demand, the one demand count
+// built bead by bead. A custom scale_check is a number per template with no
+// beads behind it, and assigned work wakes the seat it is assigned to, so
+// neither can be withheld here; the routed tier is the only one that reports.
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -55,9 +65,9 @@ import (
 // Thresholds are consts, not config, for the reason route recovery's are: each
 // is a knob that could recreate the loop it exists to stop.
 const (
-	// claimLoopTripFailures is how many claims in a row, with one error, trip a
-	// hold. Three seats is minutes of a loop and still more than the one or two
-	// failures an ordinary race or restart produces.
+	// claimLoopTripFailures is how many distinct seats failing with one error
+	// trip a hold. Three seats is minutes of a loop and still more than the one
+	// or two failures an ordinary race or restart produces.
 	claimLoopTripFailures = 3
 	// claimLoopWindow bounds a streak: a failure later than this after the
 	// streak's first starts a new one. It does not apply once a hold is in
@@ -68,9 +78,9 @@ const (
 	claimLoopHoldBase = 5 * time.Minute
 	claimLoopHoldMax  = 30 * time.Minute
 	// claimLoopProbeGrace is how long one probe has to report back after a hold
-	// runs out before the bead is withheld again. A seat claims within a minute
-	// or two of being spawned; a probe that never spawned or never reported is
-	// retried after this.
+	// runs out before the bead is admitted for another. A seat claims within a
+	// minute or two of being spawned; a probe that never spawned or never
+	// reported is followed by another after this.
 	claimLoopProbeGrace = 10 * time.Minute
 	// claimLoopForgetAfter drops a record that has seen no failure for this long:
 	// with probes at most claimLoopHoldMax+claimLoopProbeGrace apart, a bead still
@@ -81,6 +91,11 @@ const (
 	claimLoopErrorMax = 512
 )
 
+// claimLoopRequestID matches the correlation id a server appends to a 5xx
+// answer ("(request_id ...)"). It differs on every answer, so comparing it would
+// keep the same failure from ever repeating.
+var claimLoopRequestID = regexp.MustCompile(`\s*\(request_id [^)]*\)`)
+
 // claimLoopKey is one template's claims of one bead.
 type claimLoopKey struct {
 	template string
@@ -89,12 +104,14 @@ type claimLoopKey struct {
 
 // claimLoopRecord is the streak of identical claim failures for one key.
 type claimLoopRecord struct {
-	err      string    // the error text the streak repeats
-	failures int       // consecutive failures with err
-	first    time.Time // the streak's first failure
-	last     time.Time // the streak's last failure
-	holds    int       // holds in this streak; 0 = not held
-	until    time.Time // while held: withheld until this time
+	err      string              // the error text the streak repeats
+	seats    map[string]struct{} // the seats (session ids) counted in the streak
+	failures int                 // distinct failing seats; one without a session id counts on its own
+	first    time.Time           // the streak's first failure
+	last     time.Time           // the streak's last failure
+	holds    int                 // holds in this streak; 0 = not held
+	until    time.Time           // while held: withheld until this time
+	probing  bool                // a probe was admitted and has not reported
 }
 
 // claimLoopGuard is one city's guard. Its methods are safe for concurrent use:
@@ -115,9 +132,10 @@ func newClaimLoopGuard(record func(events.Event), stderr io.Writer) *claimLoopGu
 	return &claimLoopGuard{records: map[claimLoopKey]*claimLoopRecord{}, now: time.Now, record: record, stderr: stderr}
 }
 
-// claimLoopErrorText is the comparable, bounded form of a claim error's text.
+// claimLoopErrorText is the comparable, bounded form of a claim error's text:
+// trimmed, without a server request id, and cut on a rune boundary.
 func claimLoopErrorText(text string) string {
-	text = strings.TrimSpace(text)
+	text = strings.TrimSpace(claimLoopRequestID.ReplaceAllString(text, ""))
 	if len(text) <= claimLoopErrorMax {
 		return text
 	}
@@ -161,35 +179,41 @@ func (g *claimLoopGuard) observeFailure(evt events.Event) {
 		return
 	}
 	text := claimLoopErrorText(payload.Error)
+	seat := strings.TrimSpace(payload.SessionID)
 	at := evt.Ts
 	if at.IsZero() {
 		at = g.now()
 	}
 	var alert *events.Event
 	g.mu.Lock()
+	g.sweep(at)
 	rec := g.records[key]
-	switch {
-	case rec == nil || rec.err != text:
-		rec = &claimLoopRecord{err: text, failures: 1, first: at, last: at}
+	if rec == nil || rec.err != text || (rec.holds == 0 && at.Sub(rec.first) > claimLoopWindow) {
+		rec = &claimLoopRecord{err: text, seats: map[string]struct{}{}, first: at}
 		g.records[key] = rec
-	case rec.holds == 0 && at.Sub(rec.first) > claimLoopWindow:
-		*rec = claimLoopRecord{err: text, failures: 1, first: at, last: at}
-	default:
-		rec.failures++
-		rec.last = at
 	}
+	rec.last = at
+	if _, counted := rec.seats[seat]; seat != "" && counted {
+		g.mu.Unlock()
+		return // the same seat failing again is not another seat failing
+	}
+	if seat != "" {
+		rec.seats[seat] = struct{}{}
+	}
+	rec.failures++
 	switch {
 	case rec.holds == 0 && rec.failures >= claimLoopTripFailures:
 		rec.holds = 1
 		rec.until = at.Add(claimLoopHold(rec.holds))
 		alert = g.heldEvent(key, rec, at)
-		fmt.Fprintf(g.stderr, "claim-loop guard: holding %s for %s: %d claims in a row failed with %q; not counted as spawn demand until %s\n", //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(g.stderr, "claim-loop guard: holding %s for %s: %d seats in a row failed to claim it with %q; not counted as spawn demand until %s\n", //nolint:errcheck // best-effort stderr
 			key.beadID, key.template, rec.failures, rec.err, rec.until.UTC().Format(time.RFC3339))
-	case rec.holds > 0:
-		// A probe failed the same way: hold again, longer.
+	case rec.probing:
+		// The probe failed the same way: hold again, longer.
+		rec.probing = false
 		rec.holds++
 		rec.until = at.Add(claimLoopHold(rec.holds))
-		fmt.Fprintf(g.stderr, "claim-loop guard: probe of %s for %s failed again (%d in a row); holding until %s\n", //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(g.stderr, "claim-loop guard: probe of %s for %s failed the same way (%d seats); holding until %s\n", //nolint:errcheck // best-effort stderr
 			key.beadID, key.template, rec.failures, rec.until.UTC().Format(time.RFC3339))
 	}
 	g.mu.Unlock()
@@ -214,7 +238,7 @@ func (g *claimLoopGuard) heldEvent(key claimLoopKey, rec *claimLoopRecord, at ti
 		Ts:      at.UTC(),
 		Actor:   "controller",
 		Subject: key.beadID,
-		Message: fmt.Sprintf("%d claims of %s by %s seats failed with the same error; it is not counted as spawn demand until %s or until it changes", rec.failures, key.beadID, key.template, rec.until.UTC().Format(time.RFC3339)),
+		Message: fmt.Sprintf("%d %s seats in a row failed to claim %s with the same error; it is not counted as spawn demand until %s or until it changes", rec.failures, key.template, key.beadID, rec.until.UTC().Format(time.RFC3339)),
 		Payload: payload,
 	}
 }
@@ -264,8 +288,9 @@ func (g *claimLoopGuard) heldNow(key claimLoopKey, now time.Time) bool {
 	if now.Before(rec.until) {
 		return true
 	}
-	// The hold ran out: count the bead this time, so one seat can probe it,
-	// and withhold it again until the probe has had time to report.
+	// The hold ran out: count the bead this pass, so one seat can probe it,
+	// and withhold it again while the probe reports.
+	rec.probing = true
 	rec.until = now.Add(claimLoopProbeGrace)
 	return false
 }
@@ -342,10 +367,11 @@ func cloneScaleCheckDemandMap(in map[string]scaleCheckDemand) map[string]scaleCh
 	return out
 }
 
-// claimLoopGuards maps a normalized city path to its controller's guard, so the
-// demand passes, which know only the city path, can consult it. A process that
-// runs no controller — every CLI command — registers none, and its demand reads
-// are untouched.
+// claimLoopGuards maps a normalized city path to its controller's guard. The
+// legacy demand pass runs behind a build function that holds the city path but
+// not the runtime, so the registry is how both demand passes reach the guard of
+// the controller running their city. A process that runs no controller — every
+// CLI command — registers none, and its demand reads are untouched.
 var claimLoopGuards sync.Map // normalized city path → *claimLoopGuard
 
 // registerClaimLoopGuard publishes g for cityPath until ctx ends, and returns

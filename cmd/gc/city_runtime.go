@@ -2969,11 +2969,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
-	if result.Revision != cr.configRev {
-		// A new config may have fixed what held claims were failing on.
-		cr.claimLoopGuardOf().configChanged()
-	}
-	cr.configRev = result.Revision
+	cr.adoptConfigRevision(result.Revision)
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
 	if trace != nil {
@@ -5336,4 +5332,14 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// adoptConfigRevision records rev as the configuration this runtime runs. A
+// changed revision resets the claim-loop guard: the new config may have fixed
+// what held claims were failing on.
+func (cr *CityRuntime) adoptConfigRevision(rev string) {
+	if rev != cr.configRev {
+		cr.claimLoopGuardOf().configChanged()
+	}
+	cr.configRev = rev
 }

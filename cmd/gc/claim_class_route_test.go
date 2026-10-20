@@ -236,9 +236,10 @@ func TestClassRoutedWritesSettleAnUnrecognizedErrorByReadingTheLeg(t *testing.T)
 }
 
 // TestClassRoutedClaimSkipsTheSettlingReadWhenItCannotMeanAnything pins the
-// two errors that already answer the read: a named wisp refusal, which is the
-// leg saying it HOLDS the bead, and a context that is done, which no read can
-// run under. Neither may read the leg, and neither may escalate.
+// errors that already answer the read: a named wisp refusal, which is the leg
+// saying it HOLDS the bead; a store that did not answer, which a second request
+// would only load further; and a context that is done, which no read can run
+// under. None may read the leg, and none may escalate.
 func TestClassRoutedClaimSkipsTheSettlingReadWhenItCannotMeanAnything(t *testing.T) {
 	class := newClaimRouteClassStore(t)
 	mintClaimRouteBead(t, class, "gcg-620", nil)
@@ -251,6 +252,7 @@ func TestClassRoutedClaimSkipsTheSettlingReadWhenItCannotMeanAnything(t *testing
 	}{
 		{"named wisp refusal", context.Background(), fmt.Errorf("claiming bead %q: %w", "gcg-620", beads.ErrWispNotClaimable)},
 		{"claim context done", canceled, errors.New("claimIssue: request canceled")},
+		{"store did not answer", context.Background(), errors.New("claimIssue: dial tcp 10.0.0.1:30635: connect: connection refused")},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			workErr := tt.err
