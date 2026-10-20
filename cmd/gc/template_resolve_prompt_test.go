@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	goruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -1382,6 +1383,9 @@ func TestResolveTemplatePromptTemplateStillRendersProbedDefaultBranch(t *testing
 // (a wedged filesystem or an unresponsive remote helper).
 func installBlockingGitForTemplate(t *testing.T) string {
 	t.Helper()
+	if goruntime.GOOS == "windows" {
+		t.Skip("shell-script fake git is not portable to windows")
+	}
 	binDir := t.TempDir()
 	logPath := filepath.Join(t.TempDir(), "git-calls.log")
 	script := "#!/bin/sh\n" +

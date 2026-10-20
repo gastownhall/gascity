@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -131,5 +132,54 @@ func TestRunCtx_WithoutDeadlineStillWaitsForPipeHolder(t *testing.T) {
 	}
 	if elapsed < 3*time.Second {
 		t.Fatalf("runCtx returned after %s, want it to wait out the 4s pipe holder (no WaitDelay without a deadline)", elapsed)
+	}
+}
+
+// A git that exits while a descendant still holds its output pipe is an
+// incomplete probe even under a live ctx: WaitDelay expires, and
+// DefaultBranchCtx must return that error rather than walk on to a guessed
+// "main". The orphan lives 30s; the call must return in well under that.
+func TestDefaultBranchCtx_PipeHeldAfterExitReturnsErrorNotMain(t *testing.T) {
+	holdPipe := "sleep 30 &\n" +
+		"echo $! > \"$GC_TEST_READY_FIFO\"\n"
+	cases := []struct {
+		name string
+		body string
+	}{
+		{
+			name: "symbolic-ref",
+			body: "case \"$1\" in symbolic-ref) " + holdPipe + "exit 0 ;; esac\n" +
+				"exit 1\n",
+		},
+		{
+			name: "show-ref",
+			body: "case \"$1\" in symbolic-ref) exit 1 ;; show-ref) " + holdPipe + "exit 0 ;; esac\n" +
+				"exit 1\n",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			pidCh := startOrphanFake(t, tc.body)
+			ctx, cancel := context.WithTimeout(context.Background(), time.Hour)
+			defer cancel()
+
+			start := time.Now()
+			branch, err := New(t.TempDir()).DefaultBranchCtx(ctx)
+			elapsed := time.Since(start)
+			pid := waitOrphanPid(t, pidCh)
+
+			if !errors.Is(err, exec.ErrWaitDelay) {
+				t.Fatalf("DefaultBranchCtx = %q, %v; want errors.Is(exec.ErrWaitDelay)", branch, err)
+			}
+			if branch != "" {
+				t.Fatalf("branch = %q, want empty: an incomplete probe must not fall back to a guessed main", branch)
+			}
+			if elapsed >= 10*time.Second {
+				t.Fatalf("DefaultBranchCtx returned after %s, want under 10s (WaitDelay bound, orphan lives 30s)", elapsed)
+			}
+			if err := syscall.Kill(pid, 0); err != nil {
+				t.Fatalf("orphan %d gone when DefaultBranchCtx returned (%v): the pipe was not still held", pid, err)
+			}
+		})
 	}
 }

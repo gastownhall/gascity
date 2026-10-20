@@ -74,7 +74,8 @@ func (g *Git) DefaultBranch() (string, error) {
 
 // DefaultBranchCtx is DefaultBranch bounded by ctx. An ordinary non-zero git
 // exit keeps the candidate chain going, and the chain still ends at "main".
-// A probe that ctx cut short returns ("", err) with err wrapping ctx.Err():
+// A probe that ctx cut short, or whose output pipe was still held after git
+// exited, returns ("", err) with err wrapping ctx.Err() or exec.ErrWaitDelay:
 // "main" would be a guess presented as an answer, so the caller decides what
 // an unanswered probe means. A ctx that is already done spawns nothing.
 func (g *Git) DefaultBranchCtx(ctx context.Context) (string, error) {
@@ -86,6 +87,8 @@ func (g *Git) DefaultBranchCtx(ctx context.Context) (string, error) {
 		}
 	} else if ctxErr := ctx.Err(); ctxErr != nil {
 		return "", fmt.Errorf("probing default branch: %w", ctxErr)
+	} else if errors.Is(err, exec.ErrWaitDelay) {
+		return "", fmt.Errorf("probing default branch: %w", err)
 	}
 	for _, candidate := range []string{"main", "master"} {
 		_, err := g.runCtx(ctx, "show-ref", "--verify", "--quiet", "refs/remotes/origin/"+candidate)
@@ -94,6 +97,9 @@ func (g *Git) DefaultBranchCtx(ctx context.Context) (string, error) {
 		}
 		if ctxErr := ctx.Err(); ctxErr != nil {
 			return "", fmt.Errorf("probing default branch: %w", ctxErr)
+		}
+		if errors.Is(err, exec.ErrWaitDelay) {
+			return "", fmt.Errorf("probing default branch: %w", err)
 		}
 	}
 	return "main", nil

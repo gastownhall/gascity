@@ -470,7 +470,7 @@ func (p *agentBuildParams) defaultBranch(rigName, dir string) string {
 	branch, err := git.New(dir).DefaultBranchCtx(ctx)
 	if err != nil {
 		if p.gitLatch.trip(err) && p.stderr != nil {
-			fmt.Fprintf(p.stderr, "buildDesiredState: default-branch probe in %s did not complete within %s (%v); the build's remaining probes are skipped and DefaultBranch renders empty\n", dir, p.gitProbeTimeout(), err) //nolint:errcheck // best-effort stderr
+			fmt.Fprintf(p.stderr, "buildDesiredState: default-branch probe in %s did not complete (deadline %s) (%v); the build's remaining probes are skipped and DefaultBranch renders empty\n", dir, p.gitProbeTimeout(), err) //nolint:errcheck // best-effort stderr
 		}
 		return ""
 	}
