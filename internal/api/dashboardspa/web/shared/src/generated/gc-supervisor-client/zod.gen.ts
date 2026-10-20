@@ -547,7 +547,7 @@ export const zConversationOpProposeBody = z.object({
     after: z.string().optional(),
     causation: z.string().optional(),
     client_key: z.string().optional(),
-    client_seq: z.coerce.bigint().gte(BigInt(0)).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
+    client_seq: z.coerce.bigint().gte(BigInt(0)).lte(BigInt(9223372036854776000)).optional(),
     correlation: z.string().optional(),
     finish_by: z.iso.datetime().optional(),
     kind: z.enum([
@@ -10723,7 +10723,7 @@ export const zProposeSessionOpPath = z.object({
 });
 
 /**
- * Created
+ * The same request was proposed before: the stored operation, with created false.
  */
 export const zProposeSessionOpResponse = zConversationOpProposeResult;
 

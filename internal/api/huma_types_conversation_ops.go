@@ -54,7 +54,7 @@ type ConversationOpProposeBody struct {
 	Policy      *ConversationOpPolicyBody `json:"policy,omitempty" doc:"The operation's policy; omitted fields take the kind's defaults."`
 	Scope       *ConversationOpScopeBody  `json:"scope,omitempty" doc:"The operation's validity scope; omitted takes the kind's default."`
 	After       string                    `json:"after,omitempty" doc:"An operation id of the same session this one runs after."`
-	ClientSeq   uint64                    `json:"client_seq,omitempty" doc:"The producer's own sequence number: it keeps two quick proposals in their order even when relayed concurrently."`
+	ClientSeq   uint64                    `json:"client_seq,omitempty" maximum:"9223372036854775807" doc:"The producer's own sequence number: it keeps two quick proposals in their order even when relayed concurrently."`
 	NotBefore   *time.Time                `json:"not_before,omitempty" doc:"Do not start before this time."`
 	StartBy     *time.Time                `json:"start_by,omitempty" doc:"Close the operation failed if it has not started by this time."`
 	FinishBy    *time.Time                `json:"finish_by,omitempty" doc:"The deadline for the operation to finish."`

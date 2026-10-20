@@ -18,7 +18,7 @@ type ConversationOp struct {
 	Conversation string                 `json:"conversation" doc:"Session (conversation) id the operation targets."`
 	Kind         string                 `json:"kind" enum:"message,interrupt,respond,create,wake,suspend,resume,restart,kill,close" doc:"Operation kind."`
 	Status       string                 `json:"status" enum:"submitted,accepted,executing,settling,closed" doc:"Operation status. A legacy-executed operation stays submitted until it closes."`
-	Attempt      int                    `json:"attempt,omitempty" doc:"Executions after the first (an adopted orphan, or a conversation-lane redelivery)."`
+	Attempt      int                    `json:"attempt,omitempty" doc:"How many times the operation was executed, counted by its executor. A legacy-executed operation counts executions after the first (an adopted orphan), so its first run reads 0. A lane operation counts the lane's takes, its first included, so one delivered once reads 1 and a redelivery 2; maybe_delivered says whether an earlier take may have reached the agent."`
 	Outcome      *ConversationOpOutcome `json:"outcome,omitempty" doc:"Present when status is closed."`
 
 	Executor        string     `json:"executor,omitempty" enum:"lane,legacy,legacy:api,legacy:cli" doc:"Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only."`

@@ -43,7 +43,11 @@ func isCacheActor(actor string) bool {
 // Operation-journal rows (type "op") record no bead.* event (DES-O1 D18): an
 // op row's change is recorded as op.changed and a fact row as fact.recorded,
 // each derived from the row's post-image (journalRowEvent) and dropped like a
-// bead.updated when it repeats the last one recorded for the row. Every other
+// bead.updated when it repeats the last one recorded for the row; a closed
+// op's op.changed forgets the row, as a bead.closed does. A one-shot CLI's
+// write to a journal row reaches this bridge through the controller's
+// doorbell, which refreshes the row through the cache
+// (class_store_emit_oprows.go). Every other
 // journal row, the runtime row and DES-BX's event-fact and projector rows
 // included, records nothing.
 func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSource, eventType, beadID, runID, sessionID, stepID string, dependsOnStepIDs *[]string, payload json.RawMessage) {
@@ -54,9 +58,12 @@ func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSourc
 		}
 		if derived, journal := journalRowEvent(eventType, payload); journal {
 			switch {
-			case derived != nil:
-				derived.Actor = cacheNotificationActor(source)
-				dedup.record(recorder, *derived)
+			case derived.event != nil:
+				derived.event.Actor = cacheNotificationActor(source)
+				dedup.record(recorder, *derived.event)
+				if derived.closed {
+					dedup.forget(beadID)
+				}
 			case eventType == events.BeadDeleted:
 				dedup.forget(beadID)
 			}
@@ -80,27 +87,36 @@ func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSourc
 // bead's notification a decode.
 var journalTypeMarker = []byte(`"issue_type":"` + opjournal.BeadType + `"`)
 
+// journalRowDerived is the event a journal row's post-image derives, nil
+// when it derives none; closed says the row is a closed op, whose last event
+// this is, so the dedup forgets it as it forgets a bead.closed's bead.
+type journalRowDerived struct {
+	event  *events.Event
+	closed bool
+}
+
 // journalRowEvent reports whether a cache notification is an operation
 // journal row's (a bead of type "op") and, for an op or fact row that was not
 // deleted, the event its post-image derives: op.changed or fact.recorded,
 // whose subject is the row id and session id the conversation. A row that
 // does not decode records nothing and is logged: the lane quarantines it and
 // a reader reports it.
-func journalRowEvent(eventType string, payload json.RawMessage) (*events.Event, bool) {
+func journalRowEvent(eventType string, payload json.RawMessage) (journalRowDerived, bool) {
 	if !bytes.Contains(payload, journalTypeMarker) {
-		return nil, false
+		return journalRowDerived{}, false
 	}
 	b, ok := beads.DecodeBeadEventPayload(payload)
 	if !ok || b.Type != opjournal.BeadType {
-		return nil, false
+		return journalRowDerived{}, false
 	}
 	if eventType == events.BeadDeleted {
-		return nil, true
+		return journalRowDerived{}, true
 	}
 	var (
-		e   events.Event
-		p   events.Payload
-		err error
+		e      events.Event
+		p      events.Payload
+		closed bool
+		err    error
 	)
 	switch {
 	case slices.Contains(b.Labels, opjournal.LabelOp):
@@ -108,6 +124,7 @@ func journalRowEvent(eventType string, payload json.RawMessage) (*events.Event, 
 		if op, err = opjournal.DecodeOp(b); err == nil {
 			e = events.Event{Type: events.OpChanged, Subject: op.ID, SessionID: op.Conversation}
 			p = api.OpChangedPayloadFor(op)
+			closed = op.Status == opjournal.StatusClosed
 		}
 	case slices.Contains(b.Labels, opjournal.LabelFact):
 		var f opjournal.Fact
@@ -116,16 +133,16 @@ func journalRowEvent(eventType string, payload json.RawMessage) (*events.Event, 
 			p = api.FactRecordedPayloadFor(f)
 		}
 	default:
-		return nil, true
+		return journalRowDerived{}, true
 	}
 	if err == nil {
 		e.Payload, err = json.Marshal(p)
 	}
 	if err != nil {
 		log.Printf("caching-store: journal row %s: no %s event: %v", b.ID, journalEventName(b), err)
-		return nil, true
+		return journalRowDerived{}, true
 	}
-	return &e, true
+	return journalRowDerived{event: &e, closed: closed}, true
 }
 
 // journalEventName names the event a journal row would derive, for a log line.

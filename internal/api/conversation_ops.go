@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -19,28 +20,50 @@ import (
 
 // The producer API (DES-O1 §11, OJ-20): an external producer proposes,
 // reads and cancels a session's conversation-lane ops. It writes only lane
-// ops, and only of the kinds [ops] authoritative lists, so a proposal is
-// never silently shadowed by a legacy path. The ops.* gates do not apply:
-// they govern the legacy request surfaces, which record shadow ops.
+// ops, only of the kinds the city's running lane host executes, and only
+// with a delivery mode that lane lowers, so a proposal is never silently
+// shadowed by a legacy path nor parked unexecuted. The ops.* gates do not
+// apply: they govern the legacy request surfaces, which record shadow ops.
 
 // t3PrincipalPrefix starts the asserted principal of a T3 Code environment,
 // t3:<environment id> (COJ T3 critic §3). The wire pattern
 // (ConversationProducerBody) admits only it and operator.
 const t3PrincipalPrefix = "t3:"
 
-// ConversationLanePoker is the optional State extension through which the
-// API rings the controller's conversation lane host for a session after it
-// wrote one of its lane ops, so the op does not wait for the host's
-// anti-entropy scan. It does nothing while no lane host runs.
-type ConversationLanePoker interface {
+// previewConversation stands in for the session while a proposal is
+// validated before its session is resolved: resolving a configured named
+// session materializes its row, which a refused request must not do.
+const previewConversation = "preview"
+
+// ConversationLaneHost is the optional State extension through which the
+// producer API reaches the controller's conversation lane host. A State
+// without it runs no lane host: Propose refuses every kind and session reads
+// carry no observed turn.
+type ConversationLaneHost interface {
+	// ConversationLaneKinds is the op kinds the city's lane host executes:
+	// those [ops] authoritative listed when the host started, while it runs,
+	// and nil when no host runs. A config reload does not change them.
+	ConversationLaneKinds() []string
+	// PokeConversationLane rings the lane host for conversation after the
+	// API wrote one of its lane ops, so the op does not wait for the host's
+	// anti-entropy scan.
 	PokeConversationLane(conversation string)
+}
+
+// conversationLaneKinds is the kinds the city's running lane host executes,
+// nil when the State offers no lane host.
+func (s *Server) conversationLaneKinds() []string {
+	if h, ok := s.state.(ConversationLaneHost); ok {
+		return h.ConversationLaneKinds()
+	}
+	return nil
 }
 
 // pokeConversationLane rings the conversation lane for conv, when the State
 // offers it.
 func (s *Server) pokeConversationLane(conv string) {
-	if p, ok := s.state.(ConversationLanePoker); ok {
-		p.PokeConversationLane(conv)
+	if h, ok := s.state.(ConversationLaneHost); ok {
+		h.PokeConversationLane(conv)
 	}
 }
 
@@ -160,11 +183,13 @@ func proposeError(err error) error {
 }
 
 // humaHandleConversationOpPropose is the Huma-typed handler for POST
-// /v0/city/{cityName}/session/{id}/ops (Propose).
+// /v0/city/{cityName}/session/{id}/ops (Propose). Every refusal comes before
+// the session is resolved, so a refused request materializes no named
+// session and writes nothing.
 func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *ConversationOpProposeInput) (*ConversationOpProposeOutput, error) {
 	body := input.Body
-	if cfg := s.state.Config(); cfg == nil || !cfg.Ops.LaneExecutes(body.Kind) {
-		return nil, apierr.KindNotEnabled.Msgf("kind_not_enabled: [ops] authoritative does not list %q, so no conversation lane would execute it; nothing was written", body.Kind)
+	if !slices.Contains(s.conversationLaneKinds(), body.Kind) {
+		return nil, apierr.KindNotEnabled.Msgf("kind_not_enabled: no running conversation lane host executes %q (it runs the kinds [ops] authoritative listed at the controller's start), so this request wrote nothing", body.Kind)
 	}
 	producer, err := producerOf(body.ConversationProducerBody)
 	if err != nil {
@@ -184,6 +209,13 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	st, err := s.conversationOpStore()
 	if err != nil {
 		return nil, err
+	}
+	preview, err := st.Preview(proposeRequest(previewConversation, key, minted, producer, body))
+	if err != nil {
+		return nil, proposeError(err)
+	}
+	if spec, err := opjournal.Lookup(preview.Kind); err == nil && spec.Class == opjournal.ClassContent && !preview.Policy.Message.When.LaneLowered() {
+		return nil, apierr.WhenNotSupported.Msgf("when_not_supported: this build's conversation lane does not deliver a %q message; this request wrote nothing", preview.Policy.Message.When)
 	}
 	conv, err := s.resolveSessionIDMaterializingNamedWithContext(ctx, sessions.Store, input.ID)
 	if err != nil {
@@ -348,6 +380,9 @@ func (s *Server) observedSessionTurn(conv, generation string) *SessionTurn {
 		return nil
 	}
 	cells := row.Turn
+	if cells.Generation == 0 && cells.State == "" && len(cells.Caps) == 0 {
+		return nil
+	}
 	out := &SessionTurn{Generation: cells.Generation, State: string(opjournal.TurnStateUnknown)}
 	gen, err := strconv.ParseInt(strings.TrimSpace(generation), 10, 64)
 	if err != nil || gen != cells.Generation {

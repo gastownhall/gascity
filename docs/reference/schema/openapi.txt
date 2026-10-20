@@ -2335,7 +2335,7 @@
             "type": "string"
           },
           "attempt": {
-            "description": "Executions after the first (an adopted orphan, or a conversation-lane redelivery).",
+            "description": "How many times the operation was executed, counted by its executor. A legacy-executed operation counts executions after the first (an adopted orphan), so its first run reads 0. A lane operation counts the lane's takes, its first included, so one delivered once reads 1 and a redelivery 2; maybe_delivered says whether an earlier take may have reached the agent.",
             "format": "int64",
             "type": "integer"
           },
@@ -2590,6 +2590,7 @@
           "client_seq": {
             "description": "The producer's own sequence number: it keeps two quick proposals in their order even when relayed concurrently.",
             "format": "int64",
+            "maximum": 9223372036854776000,
             "minimum": 0,
             "type": "integer"
           },
@@ -3229,6 +3230,7 @@
               "urn:gascity:error:wait-not-found",
               "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
+              "urn:gascity:error:when-not-supported",
               "urn:gascity:error:workflow-not-found"
             ],
             "format": "uri",
@@ -3286,6 +3288,7 @@
               "urn:gascity:error:wait-not-found",
               "urn:gascity:error:wake-will-not-start",
               "urn:gascity:error:webhook-rejected",
+              "urn:gascity:error:when-not-supported",
               "urn:gascity:error:workflow-not-found"
             ]
           }
@@ -9368,7 +9371,7 @@
           },
           "turn": {
             "$ref": "#/components/schemas/SessionTurn",
-            "description": "The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while [ops] authoritative lists a kind."
+            "description": "The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."
           },
           "work_dir": {
             "type": "string"
@@ -36914,6 +36917,7 @@
         "summary": "Get v0 city by city name events"
       },
       "post": {
+        "description": "Appends a caller-authored event to the city's event log. op.changed and fact.recorded, which the controller derives from operation-journal rows, are refused 422.",
         "operationId": "emit-event",
         "parameters": [
           {
@@ -50717,7 +50721,7 @@
         "summary": "List a session's open operations"
       },
       "post": {
-        "description": "Writes a conversation-lane operation, create-if-absent under its id, which derives from the session, the principal and the client key. 201 when this request wrote it, 200 with the stored operation when the same request was proposed before. Only kinds listed in [ops] authoritative are accepted; any other is refused 409 kind-not-enabled and nothing is written. A client key that already names a different request from the same principal is refused 409 key-reuse, naming the existing op_id. Watch op.changed and fact.recorded on the city event stream from the returned cursor; after reconnecting, read a non-terminal operation again with GET .../ops/{op}, whose row is authoritative.",
+        "description": "Writes a conversation-lane operation, create-if-absent under its id, which derives from the session, the principal and the client key. 201 when this request wrote it, 200 with the stored operation when the same request was proposed before. Only kinds the city's running conversation lane host executes are accepted: those [ops] authoritative listed when the controller started. Any other, or any kind while no lane host runs, is refused 409 kind-not-enabled. A message whose policy.message.when this build's lane does not deliver (now, interrupt) is refused 409 when-not-supported. A client key that already names a different request from the same principal is refused 409 key-reuse, naming the existing op_id. A refused request writes nothing and materializes no named session. Watch op.changed and fact.recorded on the city event stream from the returned cursor; after reconnecting, read a non-terminal operation again with GET .../ops/{op}, whose row is authoritative.",
         "operationId": "propose-session-op",
         "parameters": [
           {
@@ -50774,6 +50778,21 @@
           "required": true
         },
         "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ConversationOpProposeResult"
+                }
+              }
+            },
+            "description": "The same request was proposed before: the stored operation, with created false.",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
           "201": {
             "content": {
               "application/json": {
@@ -50783,6 +50802,36 @@
               }
             },
             "description": "Created",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"
@@ -51085,6 +51134,36 @@
               }
             },
             "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "401": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unauthorized",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "403": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Forbidden",
             "headers": {
               "X-GC-Request-Id": {
                 "$ref": "#/components/headers/X-GC-Request-Id"

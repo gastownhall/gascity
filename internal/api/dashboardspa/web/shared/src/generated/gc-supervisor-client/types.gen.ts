@@ -872,7 +872,7 @@ export type ConversationOp = {
      */
     at?: string;
     /**
-     * Executions after the first (an adopted orphan, or a conversation-lane redelivery).
+     * How many times the operation was executed, counted by its executor. A legacy-executed operation counts executions after the first (an adopted orphan), so its first run reads 0. A lane operation counts the lane's takes, its first included, so one delivered once reads 1 and a redelivery 2; maybe_delivered says whether an earlier take may have reached the agent.
      */
     attempt?: number;
     /**
@@ -4126,7 +4126,7 @@ export type SessionResponse = {
     template: string;
     title: string;
     /**
-     * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while [ops] authoritative lists a kind.
+     * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row.
      */
     turn?: SessionTurn;
     work_dir?: string;
@@ -19641,6 +19641,14 @@ export type ProposeSessionOpData = {
 
 export type ProposeSessionOpErrors = {
     /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
      * Not Found
      */
     404: ErrorModel;
@@ -19665,6 +19673,10 @@ export type ProposeSessionOpErrors = {
 export type ProposeSessionOpError = ProposeSessionOpErrors[keyof ProposeSessionOpErrors];
 
 export type ProposeSessionOpResponses = {
+    /**
+     * The same request was proposed before: the stored operation, with created false.
+     */
+    200: ConversationOpProposeResult;
     /**
      * Created
      */
@@ -19754,6 +19766,14 @@ export type CancelSessionOpData = {
 };
 
 export type CancelSessionOpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
     /**
      * Not Found
      */

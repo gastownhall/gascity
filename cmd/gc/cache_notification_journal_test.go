@@ -139,3 +139,82 @@ func TestCacheBridgeSkipsEventFactAndProjectorRows(t *testing.T) {
 		t.Fatalf("events = %v", got)
 	}
 }
+
+// The derived events carry the cache's actor; a deleted journal row records
+// nothing, neither bead.deleted nor a derived event, and forgets the row, so
+// a row created again with the same post-image is announced again; a closed
+// op forgets its row too.
+func TestCacheBridgeJournalRowActorDeleteAndForget(t *testing.T) {
+	cache, st, ep := journalCache(t)
+	op, err := st.Preview(opjournal.Request{
+		Conversation: "gc-1", Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane,
+		ClientKey: "m", Producer: opjournal.Producer{Principal: "t3:env", Actor: "user"}, Payload: "x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := opjournal.EncodeOp(op)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cache.Create(row); err != nil {
+		t.Fatal(err)
+	}
+	if len(ep.Events) != 1 || ep.Events[0].Type != events.OpChanged || ep.Events[0].Actor != cacheLocalActor {
+		t.Fatalf("events = %v (actor %q), want one op.changed by %s", journalEventLog(ep), ep.Events[0].Actor, cacheLocalActor)
+	}
+	if err := cache.Delete(op.ID); err != nil {
+		t.Fatal(err)
+	}
+	if len(ep.Events) != 1 {
+		t.Fatalf("deleting a journal row recorded %v", journalEventLog(ep))
+	}
+	if _, err := cache.Create(row); err != nil {
+		t.Fatal(err)
+	}
+	if got := journalEventLog(ep); len(got) != 2 || ep.Events[1].Type != events.OpChanged {
+		t.Fatalf("events after the row came back = %v, want a second op.changed", got)
+	}
+}
+
+// A closed op's op.changed forgets its row, as a bead.closed forgets its
+// bead, so closes of journal rows do not fill the dedup: a repeat of the
+// closed post-image is recorded again, while a repeat of an open one is
+// dropped.
+func TestCacheBridgeClosedOpForgetsItsRow(t *testing.T) {
+	cache, st, _ := journalCache(t)
+	ep := events.NewFake()
+	rec := cacheChangeRecorder(ep)
+	notify := func(id string) {
+		t.Helper()
+		b, err := cache.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		payload, err := beads.EncodeBeadEventPayload(b)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec(beads.ChangeLocal, events.BeadUpdated, id, "", "", "", nil, payload)
+	}
+	op, _, err := st.Propose(opjournal.Request{
+		Conversation: "gc-1", Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane,
+		ClientKey: "c", Producer: opjournal.Producer{Principal: "t3:env", Actor: "user"}, Payload: "x",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	notify(op.ID)
+	notify(op.ID)
+	if n := len(ep.Events); n != 1 {
+		t.Fatalf("an open op's repeat was recorded: %v", journalEventLog(ep))
+	}
+	if _, _, err := st.Cancel(op.ID, "t3:env", ""); err != nil {
+		t.Fatal(err)
+	}
+	notify(op.ID)
+	notify(op.ID)
+	if n := len(ep.Events); n != 3 {
+		t.Fatalf("events = %v, want the closed op.changed twice (the close forgot the row)", journalEventLog(ep))
+	}
+}

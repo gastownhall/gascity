@@ -4,23 +4,32 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/api/genclient"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
 
 // The producer API (DES-O1 §11, OJ-20): Propose, Get, the open-op list and
 // Cancel over a session's conversation lane.
 
-// lanePokeState is the city's State with a conversation lane that records
-// its doorbell.
+// lanePokeState is the city's State with a conversation lane host that
+// executes kinds, latched when it was made as the controller's host latches
+// them at start, and records its doorbell.
 type lanePokeState struct {
 	*fakeState
+	kinds []string
 	mu    sync.Mutex
 	pokes []string
+}
+
+func (l *lanePokeState) ConversationLaneKinds() []string {
+	return append([]string(nil), l.kinds...)
 }
 
 func (l *lanePokeState) PokeConversationLane(conv string) {
@@ -36,13 +45,14 @@ func (l *lanePokeState) poked() []string {
 }
 
 // newLaneOpsEnv is an opsEnv whose [ops] authoritative lists kinds, served
-// through a State whose conversation lane records its pokes. Every ops gate
-// stays off: the producer API does not depend on them.
+// through a State whose running conversation lane host executes them and
+// records its pokes. Every ops gate stays off: the producer API does not
+// depend on them.
 func newLaneOpsEnv(t *testing.T, kinds ...string) (*opsEnv, *lanePokeState) {
 	t.Helper()
 	e := newControlOpsEnv(t, "off", "off")
 	e.fs.cfg.Ops.Authoritative = kinds
-	st := &lanePokeState{fakeState: e.fs}
+	st := &lanePokeState{fakeState: e.fs, kinds: kinds}
 	e.resolver.state = st
 	return e, st
 }
@@ -366,7 +376,8 @@ func TestSessionGetExposesTheObservedTurn(t *testing.T) {
 			Turn *SessionTurn `json:"turn"`
 		}](t, rec).Turn
 		if got == nil || got.Generation != gen || got.State != "running" || got.ID != "turn-7" || got.LastID != "turn-6" || got.LastEnd != "completed" ||
-			got.At == nil || !got.At.Equal(at) || len(got.Caps) != 2 || got.Caps[1] != (SessionTurnCapPair{Key: "fence", Value: "atomic"}) {
+			got.At == nil || !got.At.Equal(at) || len(got.Caps) != 2 || got.Caps[1] != (SessionTurnCapPair{Key: "fence", Value: "atomic"}) ||
+			got.LastAt == nil || !got.LastAt.Equal(at.Add(-time.Minute)) || got.ObservedAt == nil || !got.ObservedAt.Equal(at) {
 			t.Fatalf("turn = %+v", got)
 		}
 	})
@@ -400,4 +411,318 @@ func TestSessionGetExposesTheObservedTurn(t *testing.T) {
 			t.Fatal("a city that lists no kind carries a turn")
 		}
 	})
+}
+
+// A replayed proposal answers 200 with the same body as the first one's 201,
+// and the generated client decodes both (the spec declares both).
+func TestProposeReplayDecodesThroughTheGeneratedClient(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Typed")
+	body := `{"kind":"message","client_key":"k-typed","payload":"hello"}`
+	first, err := genclient.ParseProposeSessionOpResponse(e.post(t, "/session/"+info.ID+"/ops", "", body).Result())
+	if err != nil {
+		t.Fatalf("parse first: %v", err)
+	}
+	if first.StatusCode() != http.StatusCreated || first.JSON201 == nil || !first.JSON201.Created {
+		t.Fatalf("first: status %d, JSON201 %+v, body %s", first.StatusCode(), first.JSON201, first.Body)
+	}
+	again, err := genclient.ParseProposeSessionOpResponse(e.post(t, "/session/"+info.ID+"/ops", "", body).Result())
+	if err != nil {
+		t.Fatalf("parse replay: %v", err)
+	}
+	if again.StatusCode() != http.StatusOK || again.JSON200 == nil {
+		t.Fatalf("replay: status %d, JSON200 %+v, body %s", again.StatusCode(), again.JSON200, again.Body)
+	}
+	if again.JSON200.Created || again.JSON200.OpId != first.JSON201.OpId || again.JSON200.Op.Id != first.JSON201.OpId {
+		t.Fatalf("replay = %+v, want op %s with created false", again.JSON200, first.JSON201.OpId)
+	}
+}
+
+// A message whose delivery mode this build's lane parks unexecuted (now,
+// interrupt) is refused 409 when-not-supported before anything is written.
+func TestProposeRefusesAWhenTheLaneDoesNotLower(t *testing.T) {
+	e, st := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Now")
+	for _, when := range []string{"now", "interrupt"} {
+		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k-`+when+`","payload":"x","policy":{"message":{"when":"`+when+`"}}}`)
+		wantStatus(t, "when "+when, rec, http.StatusConflict)
+		if code := problemCode(t, rec); code != "when-not-supported" {
+			t.Fatalf("when %s: code = %q, want when-not-supported", when, code)
+		}
+	}
+	if rows := e.opRows(t); len(rows) != 0 {
+		t.Fatalf("refused proposals wrote %d op rows", len(rows))
+	}
+	if p := st.poked(); len(p) != 0 {
+		t.Fatalf("refused proposals poked the lane: %v", p)
+	}
+	for _, when := range []string{"boundary", "after_turn", "if_idle", "steer"} {
+		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k-`+when+`","payload":"x","policy":{"message":{"when":"`+when+`"}}}`)
+		wantStatus(t, "when "+when, rec, http.StatusCreated)
+	}
+}
+
+// The kind gate is the running lane host's latched kinds, not the live
+// config: a reload that lists a kind does not switch Propose on, a host that
+// is not running (no kinds) refuses a listed kind, and a State with no lane
+// host refuses every kind. A session read carries the observed turn on the
+// same condition.
+func TestProposeGatesOnTheRunningLaneHost(t *testing.T) {
+	t.Run("reload lists a kind", func(t *testing.T) {
+		e, _ := newLaneOpsEnv(t)
+		info := e.session(t, "Reload")
+		e.fs.cfg.Ops.Authoritative = []string{"message"}
+		rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`)
+		wantStatus(t, "after reload", rec, http.StatusConflict)
+		if code := problemCode(t, rec); code != "kind-not-enabled" {
+			t.Fatalf("code = %q", code)
+		}
+	})
+	t.Run("host not running", func(t *testing.T) {
+		e, st := newLaneOpsEnv(t, "message")
+		st.kinds = nil // a refused or stopped host executes nothing
+		info := e.session(t, "Refused")
+		e.putRuntimeRow(t, info.ID, opjournal.TurnCells{Generation: generationOf(t, e.store, info.ID), State: opjournal.TurnStateRunning, ID: "t", At: time.Now()})
+		wantStatus(t, "propose", e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`), http.StatusConflict)
+		if rows := e.opRows(t); len(rows) != 0 {
+			t.Fatalf("wrote %d op rows", len(rows))
+		}
+		if strings.Contains(e.get(t, "/session/"+info.ID).Body.String(), `"turn"`) {
+			t.Fatal("a session read carries a turn while no lane host runs")
+		}
+	})
+	t.Run("no lane host", func(t *testing.T) {
+		e, _ := newLaneOpsEnv(t, "message")
+		e.resolver.state = e.fs
+		info := e.session(t, "Hostless")
+		wantStatus(t, "propose", e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`), http.StatusConflict)
+	})
+}
+
+// A proposal to a configured named session with no row that is refused (a
+// payload over the limit, an invalid policy or key, an unlowered when)
+// materializes no session row; an accepted one does.
+func TestProposeRefusalMaterializesNoNamedSession(t *testing.T) {
+	for _, tc := range []struct{ name, body, code string }{
+		{"payload too large", `{"kind":"message","client_key":"k","payload":"` + strings.Repeat("x", opjournal.MaxInlinePayload+1) + `"}`, "payload-too-large"},
+		{"policy of another kind", `{"kind":"message","client_key":"k","payload":"x","policy":{"interrupt":{"on_failure":"fail"}}}`, "validation"},
+		{"invalid key", `{"kind":"message","client_key":"` + strings.Repeat("k", 513) + `","payload":"x"}`, "invalid-idempotency-key"},
+		{"unlowered when", `{"kind":"message","client_key":"k","payload":"x","policy":{"message":{"when":"now"}}}`, "when-not-supported"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, _ := newLaneOpsEnv(t, "message")
+			rowsBefore, _ := e.sessionRowsAndStarts(t)
+			rec := e.post(t, "/session/"+url.PathEscape("myrig/worker")+"/ops", "", tc.body)
+			if rec.Code < 400 || !strings.Contains(rec.Body.String(), tc.code) {
+				t.Fatalf("status %d: %s", rec.Code, rec.Body.String())
+			}
+			if rows, _ := e.sessionRowsAndStarts(t); rows != rowsBefore {
+				t.Fatalf("a refused proposal materialized the named session: rows %d -> %d", rowsBefore, rows)
+			}
+			if n := len(e.opRows(t)); n != 0 {
+				t.Fatalf("op rows = %d", n)
+			}
+		})
+	}
+	e, _ := newLaneOpsEnv(t, "message")
+	rowsBefore, _ := e.sessionRowsAndStarts(t)
+	wantStatus(t, "accepted", e.post(t, "/session/"+url.PathEscape("myrig/worker")+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`), http.StatusCreated)
+	if rows, _ := e.sessionRowsAndStarts(t); rows != rowsBefore+1 {
+		t.Fatalf("an accepted proposal did not materialize the named session: rows %d -> %d", rowsBefore, rows)
+	}
+}
+
+// The payload limit and the key shape are refused with their own codes.
+func TestProposeRefusalCodes(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Codes")
+	rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"`+strings.Repeat("x", opjournal.MaxInlinePayload+1)+`"}`)
+	wantStatus(t, "too large", rec, http.StatusUnprocessableEntity)
+	if code := problemCode(t, rec); code != "payload-too-large" {
+		t.Fatalf("too large: code = %q", code)
+	}
+	rec = e.post(t, "/session/"+info.ID+"/ops", strings.Repeat("k", 513), `{"kind":"message","payload":"x"}`)
+	wantStatus(t, "invalid key", rec, http.StatusUnprocessableEntity)
+	if code := problemCode(t, rec); code != "invalid-idempotency-key" {
+		t.Fatalf("invalid key: code = %q", code)
+	}
+	if rows := e.opRows(t); len(rows) != 0 {
+		t.Fatalf("refused proposals wrote %d op rows", len(rows))
+	}
+}
+
+// The cursor a proposal returns is captured before its write: an event the
+// write itself records lands after it, so a stream from the cursor sees it.
+func TestProposeCursorPrecedesTheWrite(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Cursor")
+	e.recordUnrelatedEvent()
+	var writeSeq uint64
+	e.store.set(func(s *opsTestStore) {
+		s.onOpCreate = func() {
+			e.recordUnrelatedEvent()
+			seq, err := e.fs.eventProv.LatestSeq()
+			if err != nil {
+				t.Errorf("LatestSeq: %v", err)
+			}
+			writeSeq = seq
+		}
+	})
+	rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`)
+	wantStatus(t, "propose", rec, http.StatusCreated)
+	cursor, err := strconv.ParseUint(decodeInto[ConversationOpProposeResult](t, rec).Cursor, 10, 64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if writeSeq == 0 || cursor >= writeSeq {
+		t.Fatalf("cursor %d, the write's event %d: the cursor must precede the write", cursor, writeSeq)
+	}
+}
+
+// seedLaneOp writes a lane op of conv's under key as its row would read
+// after the lane worked on it: mutate moves the previewed op on.
+func (e *opsEnv) seedLaneOp(t *testing.T, conv, key string, mutate func(*opjournal.Op)) opjournal.Op {
+	t.Helper()
+	st := e.opStore(t)
+	op, err := st.Preview(opjournal.Request{
+		Conversation: conv, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLane,
+		ClientKey: key, Producer: opjournal.Producer{Principal: "t3:env", Actor: "user"}, Payload: "secret text",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mutate(&op)
+	b, err := opjournal.EncodeOp(op)
+	if err != nil {
+		t.Fatalf("EncodeOp: %v", err)
+	}
+	if _, err := e.store.Create(b); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.Get(op.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return got
+}
+
+// executingLaneOp moves op to executing under a lane lease, taken at at.
+func executingLaneOp(op *opjournal.Op, at time.Time) {
+	op.Status = opjournal.StatusExecuting
+	op.Attempt = 1
+	op.LaneSeq = 1
+	op.DeliveryKey = op.ID + ":1"
+	op.Lease = opjournal.Lease{Lane: string(opjournal.LaneConversation), Conversation: op.Conversation, Generation: 1, Nonce: "n1", Deadline: at.Add(time.Hour)}
+	op.Transitions = append(op.Transitions, opjournal.Transition{Status: opjournal.StatusExecuting, At: at, By: "lane:n1"})
+}
+
+// DES-O1 §11's op record on the wire: a closed lane delivery carries its
+// executor, producer, sequence numbers, the time of its last transition and
+// its outcome's result, delivery record and turn link included, and never
+// its text.
+func TestOpGetCarriesTheClosedLaneDeliveryRecord(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Delivered")
+	taken := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	closedAt := taken.Add(2 * time.Second)
+	op := e.seedLaneOp(t, info.ID, "k", func(op *opjournal.Op) {
+		executingLaneOp(op, taken)
+		op.Lease = opjournal.Lease{}
+		op.Status = opjournal.StatusClosed
+		op.Outcome = opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{
+			Generation: 3, Turn: "turn-4", TurnLink: opjournal.LinkExact, TurnBasis: "runtime_turn",
+			Delivery: opjournal.RecordedDelivery{Seq: 1, At: taken.Add(time.Second), Ack: opjournal.AckDelivered, MessageID: "msg-9", MessageAt: taken.Add(time.Second)},
+		}}
+		op.Transitions = append(op.Transitions, opjournal.Transition{Status: opjournal.StatusClosed, At: closedAt, By: "lane:n1"})
+	})
+	rec := e.get(t, "/session/"+info.ID+"/ops/"+op.ID)
+	wantStatus(t, "get", rec, http.StatusOK)
+	if strings.Contains(rec.Body.String(), "secret text") {
+		t.Fatalf("the op record carries its text: %s", rec.Body.String())
+	}
+	got := decodeInto[ConversationOp](t, rec)
+	if got.Status != "closed" || got.Executor != "lane" || got.Principal != "t3:env" || got.Actor != "user" || got.ClientKey != "k" ||
+		got.Attempt != 1 || got.LaneSeq != 1 || got.CancelRequested || got.At == nil || !got.At.Equal(closedAt) {
+		t.Fatalf("op = %+v", got)
+	}
+	if got.Outcome == nil || got.Outcome.Arm != "succeeded" || got.Outcome.Result == nil {
+		t.Fatalf("outcome = %+v", got.Outcome)
+	}
+	r := got.Outcome.Result
+	if r.Generation != 3 || r.Turn != "turn-4" || r.TurnLink != "exact" || r.TurnBasis != "runtime_turn" || r.Delivery == nil {
+		t.Fatalf("result = %+v", r)
+	}
+	if d := r.Delivery; d.Seq != 1 || d.Ack != "delivered" || d.MessageID != "msg-9" || d.At == nil || !d.At.Equal(taken.Add(time.Second)) || d.MessageAt == nil {
+		t.Fatalf("delivery = %+v", d)
+	}
+}
+
+// A cancel of an executing lane op records the request, says so on the op
+// (cancel_requested), and rings the lane so the worker sees it.
+func TestCancelOfAnExecutingOpRequestsAndPokes(t *testing.T) {
+	e, st := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Executing")
+	op := e.seedLaneOp(t, info.ID, "k", func(op *opjournal.Op) { executingLaneOp(op, time.Now().UTC()) })
+	rec := e.post(t, "/session/"+info.ID+"/ops/"+op.ID+"/cancel", "", `{"principal":"t3:env","reason":"edited"}`)
+	wantStatus(t, "cancel", rec, http.StatusOK)
+	c := decodeInto[ConversationOpCancelResult](t, rec)
+	if c.Result != "requested" || c.Op.Status != "executing" || !c.Op.CancelRequested || c.Op.Outcome != nil {
+		t.Fatalf("cancel = %+v", c)
+	}
+	if got := st.poked(); len(got) != 1 || got[0] != info.ID {
+		t.Fatalf("pokes = %v, want [%s]", got, info.ID)
+	}
+	rec = e.get(t, "/session/"+info.ID+"/ops/"+op.ID)
+	if got := decodeInto[ConversationOp](t, rec); !got.CancelRequested {
+		t.Fatalf("get after the cancel = %+v", got)
+	}
+}
+
+// A closed session's ops stay readable: its producer reads the outcome of
+// what it proposed after the session ended.
+func TestOpsOfAClosedSessionStayReadable(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Ended")
+	rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`)
+	wantStatus(t, "propose", rec, http.StatusCreated)
+	id := decodeInto[ConversationOpProposeResult](t, rec).OpID
+	if err := e.store.Close(info.ID); err != nil {
+		t.Fatal(err)
+	}
+	wantStatus(t, "get", e.get(t, "/session/"+info.ID+"/ops/"+id), http.StatusOK)
+	rec = e.get(t, "/session/"+info.ID+"/ops")
+	wantStatus(t, "list", rec, http.StatusOK)
+	if list := decodeInto[ListBody[ConversationOp]](t, rec); list.Total != 1 || list.Items[0].ID != id {
+		t.Fatalf("list = %s", rec.Body.String())
+	}
+}
+
+// A runtime row whose observer has recorded no turn cells yet reads as no
+// turn, not as generation 0 unknown.
+func TestSessionGetOmitsAnUnobservedTurn(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Unobserved")
+	e.putRuntimeRow(t, info.ID, opjournal.TurnCells{})
+	if body := e.get(t, "/session/"+info.ID).Body.String(); strings.Contains(body, `"turn"`) {
+		t.Fatalf("an unobserved runtime row carries a turn: %s", body)
+	}
+}
+
+// op.changed and fact.recorded are the controller's, derived from journal
+// rows: POST /v0/events refuses them and records nothing, so a caller cannot
+// show a producer a terminal status its op never reached.
+func TestEventEmitRefusesJournalDerivedTypes(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	for _, typ := range []string{"op.changed", "fact.recorded"} {
+		before, err := e.fs.eventProv.LatestSeq()
+		if err != nil {
+			t.Fatal(err)
+		}
+		rec := e.post(t, "/events", "", `{"type":"`+typ+`","actor":"ci","subject":"gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa"}`)
+		wantStatus(t, typ, rec, http.StatusUnprocessableEntity)
+		if after, _ := e.fs.eventProv.LatestSeq(); after != before {
+			t.Fatalf("%s: recorded an event (seq %d -> %d)", typ, before, after)
+		}
+	}
+	wantStatus(t, "another type", e.post(t, "/events", "", `{"type":"deploy.completed","actor":"ci"}`), http.StatusCreated)
 }

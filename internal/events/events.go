@@ -537,8 +537,12 @@ const (
 	// the op as its row reads after the change (DES-O1 D18), without the
 	// message text. The controller derives it once from the row's post-image
 	// in its cache-notification bridge, and journal rows record no bead.*
-	// event. The row is authoritative: a consumer that reconnects reads a
-	// non-terminal op again with GET .../session/{id}/ops/{op}.
+	// event: a one-shot CLI's write to one journals nothing and rings the
+	// controller, which refreshes the row through its cache; with no
+	// controller to answer, the cache's next reconcile announces it. No
+	// writer may record one itself (IsJournalDerived). The row is
+	// authoritative: a consumer that reconnects reads a non-terminal op
+	// again with GET .../session/{id}/ops/{op}.
 	OpChanged = "op.changed"
 	// FactRecorded fires when an occurrence fact row is recorded: a session
 	// or turn started or ended, an interaction raised or resolved. It is
@@ -580,6 +584,14 @@ const (
 	StorageBindingUncheckable   = "storage.binding.uncheckable"
 	StorageBindingNotConfigured = "storage.binding.not_configured"
 )
+
+// IsJournalDerived reports whether eventType is one the controller derives
+// from an operation-journal row's post-image (op.changed, fact.recorded). No
+// writer may author one, whatever its payload: a consumer renders it as the
+// row's state, and only the row can say what that is.
+func IsJournalDerived(eventType string) bool {
+	return eventType == OpChanged || eventType == FactRecorded
+}
 
 // KnownEventTypes lists every event-type constant this package defines.
 // The SSE projection uses this set (via a test) to verify that every

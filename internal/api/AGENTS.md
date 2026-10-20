@@ -257,9 +257,19 @@ naming another turn is 422 `idempotency_mismatch`.
 `POST`/`GET .../session/{id}/ops`, `GET .../ops/{op}` and
 `POST .../ops/{op}/cancel` (`conversation_ops.go`; DES-O1 §11) write and read
 conversation-lane ops directly. They do not go through `legacyop` or the
-`ops.*` gates: a proposal is a lane op (`executor = lane`) or nothing, and a
-kind `[ops] authoritative` does not list is refused 409 `kind-not-enabled`
-before any write, so no proposal is ever silently shadowed. The op id, not
+`ops.*` gates: a proposal is a lane op (`executor = lane`) or nothing. The
+kind gate is the running lane host's, read through the optional
+`ConversationLaneHost` State extension: the kinds `[ops] authoritative`
+listed when the controller started, while its host runs, never the live
+config, which a reload replaces without changing what the host executes.
+Any other kind, or any kind while no host runs, is refused 409
+`kind-not-enabled`; a message whose `when` the lane does not lower
+(`opjournal.When.LaneLowered`: `now`, `interrupt`) is refused 409
+`when-not-supported`. Every refusal, the request's own validation included
+(`opjournal.Store.Preview`), comes before the session is resolved, so a
+refused request writes nothing and materializes no named session, and no
+proposal is ever silently shadowed or parked. A replay answers 200 with the
+same body as the first answer's 201; both are declared. The op id, not
 the `Idempotency-Key` LRU, is the idempotency: it derives from the session,
 the asserted principal (`operator` or `t3:<environment id>`) and the client
 key, so a retry across restarts returns the stored op and a different
@@ -270,7 +280,14 @@ Journal rows (bead type `op`) record no `bead.*` event. The controller's
 cache-notification bridge (`cmd/gc/cache_notification.go`) derives
 `op.changed` from an op row's post-image and `fact.recorded` from a fact
 row's, and records nothing for runtime rows or DES-BX's `gc:event-fact` and
-`gc:event-projector` rows. Both payloads are pure functions of the row
+`gc:event-projector` rows. A one-shot CLI's write to a journal row (the
+in-band hook pass, the CLI's shadow ops) journals nothing either: its
+emitter (`cmd/gc/class_store_emit_oprows.go`) rings the controller's lane
+doorbell with the row ids, `lane:<conversation>:<id>[,<id>...]`, whose
+handler refreshes each row through the controller's sessions cache, so the
+same bridge derives the event; with no controller to answer, the cache's
+next reconcile does. No writer may author either event: `POST /v0/events`
+and `gc event emit` refuse them (`events.IsJournalDerived`). Both payloads are pure functions of the row
 (`OpChangedPayloadFor`, `FactRecordedPayloadFor`) and never carry the op's
 payload text. The fields `conversationOpRecord` adds to `ConversationOp` are
 set only on the op routes and `op.changed`; a session command's answer keeps

@@ -377,7 +377,7 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 	h := newConversationLaneHost(cs, kinds)
 	h.start(ctx)
 	cs.ledgerFeeds.setRowsChanged(h.pokeChangedRows)
-	cs.setConversationLanePoke(h.Poke)
+	cs.setConversationLaneHost(h)
 	return h
 }
 
@@ -1070,29 +1070,45 @@ func conversationLaneStatusFor(cityPath string, now time.Time) conversationLaneS
 // laneSocketIDRe is the shape of a conversation or op id on the lane: verb.
 var laneSocketIDRe = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
 
-// laneSocketReply answers lane:<conversation>[:<op id>]: it validates the ids,
-// refreshes the op's row in the sessions cache when one is named, and pokes
-// the conversation. The reply is ok, no-host, or refused <reason>.
+// laneSocketMaxRows bounds the row ids one lane: verb names.
+const laneSocketMaxRows = 64
+
+// laneSocketReply answers lane:<conversation>[:<row id>[,<row id>...]]: it
+// validates the ids, refreshes each named journal row (an op, fact or
+// runtime row a one-shot CLI wrote) in the sessions cache, and pokes the
+// conversation. The refresh runs whatever the host's state, so a row written
+// out of process reaches the controller's readers, and its op.changed or
+// fact.recorded, even while no lane runs. The reply is ok, no-host, or
+// refused <reason>.
 func laneSocketReply(cityPath, payload string) string {
-	conv, op, hasOp := strings.Cut(payload, ":")
+	conv, rows, hasRows := strings.Cut(payload, ":")
+	var ids []string
+	if hasRows {
+		ids = strings.Split(rows, ",")
+	}
 	switch {
 	case !laneSocketIDRe.MatchString(conv):
 		return "refused invalid conversation id"
-	case hasOp && !laneSocketIDRe.MatchString(op):
-		return "refused invalid op id"
+	case len(ids) > laneSocketMaxRows:
+		return fmt.Sprintf("refused %d row ids, max %d", len(ids), laneSocketMaxRows)
+	}
+	for _, id := range ids {
+		if !laneSocketIDRe.MatchString(id) {
+			return "refused invalid op id"
+		}
 	}
 	h := conversationLaneHostFor(cityPath)
 	if h == nil {
 		return "no-host"
+	}
+	for _, id := range ids {
+		h.refreshRow(id)
 	}
 	if state, reason := h.stateReason(); state != laneHostStateRunning {
 		if reason == "" {
 			reason = "conversation lanes are " + state
 		}
 		return "refused " + reason
-	}
-	if hasOp {
-		h.refreshRow(op)
 	}
 	if !h.Poke(conv) {
 		return "refused the lane host is stopping"
@@ -1107,8 +1123,10 @@ func (h *conversationLaneHost) stateReason() (string, string) {
 	return h.state, h.reason
 }
 
-// refreshRow re-reads op id into the sessions cache, so a producer's write
-// from another process is visible to the controller's readers at once. A
+// refreshRow re-reads journal row id into the sessions cache, so a
+// producer's write from another process is visible to the controller's
+// readers at once and its cache announces the change (op.changed,
+// fact.recorded). A
 // quiescent city is not read; a row that is gone is nothing to refresh.
 func (h *conversationLaneHost) refreshRow(id string) {
 	defer h.env.beginStoreWork()()
@@ -1120,7 +1138,7 @@ func (h *conversationLaneHost) refreshRow(id string) {
 		return
 	}
 	if _, err := cache.RefreshRow(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
-		h.noteError("refresh", fmt.Errorf("refreshing op %s: %w", id, err))
+		h.noteError("refresh", fmt.Errorf("refreshing journal row %s: %w", id, err))
 	}
 }
 
