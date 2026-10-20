@@ -78,6 +78,36 @@ func (e CityCreateRequestBootstrapProfile) Valid() bool {
 	}
 }
 
+// Defines values for ConversationFactKind.
+const (
+	InteractionRaised   ConversationFactKind = "interaction.raised"
+	InteractionResolved ConversationFactKind = "interaction.resolved"
+	SessionEnded        ConversationFactKind = "session.ended"
+	SessionStarted      ConversationFactKind = "session.started"
+	TurnEnded           ConversationFactKind = "turn.ended"
+	TurnStarted         ConversationFactKind = "turn.started"
+)
+
+// Valid indicates whether the value is a known member of the ConversationFactKind enum.
+func (e ConversationFactKind) Valid() bool {
+	switch e {
+	case InteractionRaised:
+		return true
+	case InteractionResolved:
+		return true
+	case SessionEnded:
+		return true
+	case SessionStarted:
+		return true
+	case TurnEnded:
+		return true
+	case TurnStarted:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ConversationKind.
 const (
 	Dm     ConversationKind = "dm"
@@ -93,6 +123,30 @@ func (e ConversationKind) Valid() bool {
 	case Room:
 		return true
 	case Thread:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpExecutor.
+const (
+	Lane      ConversationOpExecutor = "lane"
+	Legacy    ConversationOpExecutor = "legacy"
+	LegacyApi ConversationOpExecutor = "legacy:api"
+	LegacyCli ConversationOpExecutor = "legacy:cli"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpExecutor enum.
+func (e ConversationOpExecutor) Valid() bool {
+	switch e {
+	case Lane:
+		return true
+	case Legacy:
+		return true
+	case LegacyApi:
+		return true
+	case LegacyCli:
 		return true
 	default:
 		return false
@@ -186,6 +240,30 @@ func (e ConversationOpOutcomeArm) Valid() bool {
 	case ConversationOpOutcomeArmSkipped:
 		return true
 	case ConversationOpOutcomeArmSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpResultTurnLink.
+const (
+	Ambiguous  ConversationOpResultTurnLink = "ambiguous"
+	Correlated ConversationOpResultTurnLink = "correlated"
+	Exact      ConversationOpResultTurnLink = "exact"
+	None       ConversationOpResultTurnLink = "none"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpResultTurnLink enum.
+func (e ConversationOpResultTurnLink) Valid() bool {
+	switch e {
+	case Ambiguous:
+		return true
+	case Correlated:
+		return true
+	case Exact:
+		return true
+	case None:
 		return true
 	default:
 		return false
@@ -1902,6 +1980,45 @@ type ControlStalledPayload struct {
 	StorePath  *string `json:"store_path,omitempty"`
 }
 
+// ConversationFact defines model for ConversationFact.
+type ConversationFact struct {
+	// At When it happened: the source's time, or the observer's clock when the source gives none.
+	At time.Time `json:"at"`
+
+	// Basis How the fact is known: runtime (the provider recorded it), observed (gc inferred it) or lane. Open: a newer build may add values.
+	Basis *string `json:"basis,omitempty"`
+
+	// CauseOps Operations that caused the fact.
+	CauseOps *[]string `json:"cause_ops,omitempty"`
+
+	// Conversation Session (conversation) id the fact belongs to.
+	Conversation string `json:"conversation"`
+
+	// Detail The source's own word for the occurrence, e.g. a provider stop reason.
+	Detail *string `json:"detail,omitempty"`
+
+	// Generation Session generation the fact happened in.
+	Generation int64 `json:"generation"`
+
+	// Id Fact id, keyed by the occurrence.
+	Id string `json:"id"`
+
+	// Interaction The occurrence of an interaction.* fact.
+	Interaction *string `json:"interaction,omitempty"`
+
+	// Kind Fact kind.
+	Kind ConversationFactKind `json:"kind"`
+
+	// Reason Open reason token, e.g. a turn.ended reason (completed, interrupted, superseded).
+	Reason *string `json:"reason,omitempty"`
+
+	// Turn The turn of a turn.* fact, as its runtime names it.
+	Turn *string `json:"turn,omitempty"`
+}
+
+// ConversationFactKind Fact kind.
+type ConversationFactKind string
+
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
 type ConversationGroupParticipant struct {
 	GroupID     string            `json:"GroupID"`
@@ -1930,28 +2047,85 @@ type ConversationKind string
 
 // ConversationOp defines model for ConversationOp.
 type ConversationOp struct {
-	// Attempt Executions after the first (an adopted orphan).
+	// Actor The producer's actor class, an open token. Set on the op routes and op.changed only.
+	Actor *string `json:"actor,omitempty"`
+
+	// At When the operation last changed status. Set on the op routes and op.changed only.
+	At *time.Time `json:"at,omitempty"`
+
+	// Attempt Executions after the first (an adopted orphan, or a conversation-lane redelivery).
 	Attempt *int64 `json:"attempt,omitempty"`
+
+	// CancelRequested True once a cancel is recorded on an operation that was already executing; its outcome says whether the cancel won. Set on the op routes and op.changed only.
+	CancelRequested *bool `json:"cancel_requested,omitempty"`
+
+	// Causation What caused the operation, as the producer named it. Set on the op routes and op.changed only.
+	Causation *string `json:"causation,omitempty"`
+
+	// ClientKey The producer's client key: the Idempotency-Key, or the key the server minted. Set on the op routes and op.changed only.
+	ClientKey *string `json:"client_key,omitempty"`
+
+	// ClientSeq The producer's own sequence number, which orders its operations of equal precedence. Set on the op routes and op.changed only.
+	ClientSeq *int64 `json:"client_seq,omitempty"`
 
 	// Conversation Session (conversation) id the operation targets.
 	Conversation string `json:"conversation"`
+
+	// Correlation The producer's correlation id. Set on the op routes and op.changed only.
+	Correlation *string `json:"correlation,omitempty"`
+
+	// CreatedAt When the operation was proposed. Set on the op routes and op.changed only.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+
+	// Executor Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.
+	Executor *ConversationOpExecutor `json:"executor,omitempty"`
 
 	// Id Operation id. Equals request_id on async responses.
 	Id string `json:"id"`
 
 	// Kind Operation kind.
-	Kind    ConversationOpKind     `json:"kind"`
-	Outcome *ConversationOpOutcome `json:"outcome,omitempty"`
+	Kind ConversationOpKind `json:"kind"`
+
+	// LaneSeq The conversation lane's sequence number of the operation's last take. Set on the op routes and op.changed only.
+	LaneSeq *int64 `json:"lane_seq,omitempty"`
+
+	// MaybeDelivered The last attempt that may have reached the agent (a redelivery after an ambiguous attempt), 0 when none may have. Set on the op routes and op.changed only.
+	MaybeDelivered *int64                 `json:"maybe_delivered,omitempty"`
+	Outcome        *ConversationOpOutcome `json:"outcome,omitempty"`
+
+	// Principal The producer's principal: operator, conversation:<id>, t3:<environment id>, or gc:<producer> for gc's own producers. Asserted, not authenticated. Set on the op routes and op.changed only.
+	Principal *string `json:"principal,omitempty"`
 
 	// Status Operation status. A legacy-executed operation stays submitted until it closes.
 	Status ConversationOpStatus `json:"status"`
 }
+
+// ConversationOpExecutor Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.
+type ConversationOpExecutor string
 
 // ConversationOpKind Operation kind.
 type ConversationOpKind string
 
 // ConversationOpStatus Operation status. A legacy-executed operation stays submitted until it closes.
 type ConversationOpStatus string
+
+// ConversationOpDelivery defines model for ConversationOpDelivery.
+type ConversationOpDelivery struct {
+	// Ack The runtime's answer (open vocabulary, e.g. delivered, delivered_unobserved, in_band).
+	Ack *string `json:"ack,omitempty"`
+
+	// At The lane's clock just before the delivery's first input.
+	At *time.Time `json:"at,omitempty"`
+
+	// MessageAt The runtime's creation time for the delivered message, when it reports one.
+	MessageAt *time.Time `json:"message_at,omitempty"`
+
+	// MessageId The runtime's id for the delivered message, when it reports one.
+	MessageId *string `json:"message_id,omitempty"`
+
+	// Seq lane_seq of the delivery's head operation.
+	Seq *int64 `json:"seq,omitempty"`
+}
 
 // ConversationOpOutcome defines model for ConversationOpOutcome.
 type ConversationOpOutcome struct {
@@ -1962,7 +2136,8 @@ type ConversationOpOutcome struct {
 	Degradation *string `json:"degradation,omitempty"`
 
 	// Reason Why a failed or skipped operation ended (open vocabulary; refused:<why> names a refusal).
-	Reason *string `json:"reason,omitempty"`
+	Reason *string               `json:"reason,omitempty"`
+	Result *ConversationOpResult `json:"result,omitempty"`
 
 	// Via How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).
 	Via *string `json:"via,omitempty"`
@@ -1970,6 +2145,31 @@ type ConversationOpOutcome struct {
 
 // ConversationOpOutcomeArm Outcome arm.
 type ConversationOpOutcomeArm string
+
+// ConversationOpResult defines model for ConversationOpResult.
+type ConversationOpResult struct {
+	// CoalescedInto The operation this one was delivered with, when coalesced.
+	CoalescedInto *string `json:"coalesced_into,omitempty"`
+
+	// ContextEpoch Context epoch the operation ran in.
+	ContextEpoch *int64                  `json:"context_epoch,omitempty"`
+	Delivery     *ConversationOpDelivery `json:"delivery,omitempty"`
+
+	// Generation Session generation the operation ran in.
+	Generation *int64 `json:"generation,omitempty"`
+
+	// Turn The turn the operation ran in or was linked to; empty when the link is none.
+	Turn *string `json:"turn,omitempty"`
+
+	// TurnBasis The rule that decided the turn link (open vocabulary, e.g. runtime_turn, history_diff, no_source).
+	TurnBasis *string `json:"turn_basis,omitempty"`
+
+	// TurnLink Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
+	TurnLink *ConversationOpResultTurnLink `json:"turn_link,omitempty"`
+}
+
+// ConversationOpResultTurnLink Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
+type ConversationOpResultTurnLink string
 
 // ConversationRef defines model for ConversationRef.
 type ConversationRef struct {
@@ -2413,6 +2613,11 @@ type ExtmsgAdapterInfo struct {
 
 	// Provider Adapter provider key.
 	Provider string `json:"provider"`
+}
+
+// FactRecordedPayload defines model for FactRecordedPayload.
+type FactRecordedPayload struct {
+	Fact ConversationFact `json:"fact"`
 }
 
 // FanoutPolicy defines model for FanoutPolicy.
@@ -3099,6 +3304,11 @@ type OKWithIDResponseBody struct {
 
 	// Status Operation result.
 	Status string `json:"status"`
+}
+
+// OpChangedPayload defines model for OpChangedPayload.
+type OpChangedPayload struct {
+	Op ConversationOp `json:"op"`
 }
 
 // OpsRecordingDegradedPayload defines model for OpsRecordingDegradedPayload.
@@ -6853,6 +7063,22 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeFactRecorded defines model for TypedEventStreamEnvelopeFactRecorded.
+type TypedEventStreamEnvelopeFactRecorded struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          FactRecordedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
 	Actor            string                   `json:"actor"`
@@ -7051,6 +7277,22 @@ type TypedEventStreamEnvelopeMoleculeResolved struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          MoleculeResolvedPayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOpChanged defines model for TypedEventStreamEnvelopeOpChanged.
+type TypedEventStreamEnvelopeOpChanged struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OpChangedPayload         `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -8790,6 +9032,23 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeFactRecorded defines model for TypedTaggedEventStreamEnvelopeFactRecorded.
+type TypedTaggedEventStreamEnvelopeFactRecorded struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          FactRecordedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical struct {
 	Actor            string                   `json:"actor"`
@@ -9001,6 +9260,23 @@ type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          MoleculeResolvedPayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOpChanged defines model for TypedTaggedEventStreamEnvelopeOpChanged.
+type TypedTaggedEventStreamEnvelopeOpChanged struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OpChangedPayload         `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -12362,6 +12638,32 @@ func (t *EventPayload) MergeExecutionStepStalledPayload(v ExecutionStepStalledPa
 	return err
 }
 
+// AsFactRecordedPayload returns the union data inside the EventPayload as a FactRecordedPayload
+func (t EventPayload) AsFactRecordedPayload() (FactRecordedPayload, error) {
+	var body FactRecordedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromFactRecordedPayload overwrites any union data inside the EventPayload as the provided FactRecordedPayload
+func (t *EventPayload) FromFactRecordedPayload(v FactRecordedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeFactRecordedPayload performs a merge with any union data inside the EventPayload, using the provided FactRecordedPayload
+func (t *EventPayload) MergeFactRecordedPayload(v FactRecordedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
 func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
 	var body GroupCreatedEventPayload
@@ -12508,6 +12810,32 @@ func (t *EventPayload) FromNoPayload(v NoPayload) error {
 
 // MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
 func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOpChangedPayload returns the union data inside the EventPayload as a OpChangedPayload
+func (t EventPayload) AsOpChangedPayload() (OpChangedPayload, error) {
+	var body OpChangedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOpChangedPayload overwrites any union data inside the EventPayload as the provided OpChangedPayload
+func (t *EventPayload) FromOpChangedPayload(v OpChangedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOpChangedPayload performs a merge with any union data inside the EventPayload, using the provided OpChangedPayload
+func (t *EventPayload) MergeOpChangedPayload(v OpChangedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16437,6 +16765,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeFactRecorded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeFactRecorded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeFactRecorded() (TypedEventStreamEnvelopeFactRecorded, error) {
+	var body TypedEventStreamEnvelopeFactRecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeFactRecorded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeFactRecorded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeFactRecorded(v TypedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeFactRecorded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeFactRecorded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeFactRecorded(v TypedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskCritical
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskCritical() (TypedEventStreamEnvelopeGcStoreDiskCritical, error) {
 	var body TypedEventStreamEnvelopeGcStoreDiskCritical
@@ -16791,6 +17147,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMoleculeResolved(
 // MergeTypedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMoleculeResolved
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMoleculeResolved(v TypedEventStreamEnvelopeMoleculeResolved) error {
 	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeOpChanged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOpChanged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOpChanged() (TypedEventStreamEnvelopeOpChanged, error) {
+	var body TypedEventStreamEnvelopeOpChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOpChanged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOpChanged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOpChanged(v TypedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOpChanged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOpChanged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOpChanged(v TypedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18639,6 +19023,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "fact.recorded":
+		return t.AsTypedEventStreamEnvelopeFactRecorded()
 	case "gc.store.disk_critical":
 		return t.AsTypedEventStreamEnvelopeGcStoreDiskCritical()
 	case "gc.store.disk_warn":
@@ -18665,6 +19051,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
+	case "op.changed":
+		return t.AsTypedEventStreamEnvelopeOpChanged()
 	case "ops.recording_degraded":
 		return t.AsTypedEventStreamEnvelopeOpsRecordingDegraded()
 	case "order.completed":
@@ -20006,6 +20394,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtm
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeFactRecorded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeFactRecorded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeFactRecorded() (TypedTaggedEventStreamEnvelopeFactRecorded, error) {
+	var body TypedTaggedEventStreamEnvelopeFactRecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeFactRecorded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeFactRecorded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeFactRecorded(v TypedTaggedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeFactRecorded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeFactRecorded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeFactRecorded(v TypedTaggedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical() (TypedTaggedEventStreamEnvelopeGcStoreDiskCritical, error) {
 	var body TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
@@ -20360,6 +20776,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMolec
 // MergeTypedTaggedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMoleculeResolved
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMoleculeResolved(v TypedTaggedEventStreamEnvelopeMoleculeResolved) error {
 	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOpChanged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOpChanged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOpChanged() (TypedTaggedEventStreamEnvelopeOpChanged, error) {
+	var body TypedTaggedEventStreamEnvelopeOpChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOpChanged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOpChanged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOpChanged(v TypedTaggedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOpChanged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOpChanged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOpChanged(v TypedTaggedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -22208,6 +22652,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "fact.recorded":
+		return t.AsTypedTaggedEventStreamEnvelopeFactRecorded()
 	case "gc.store.disk_critical":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical()
 	case "gc.store.disk_warn":
@@ -22234,6 +22680,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
+	case "op.changed":
+		return t.AsTypedTaggedEventStreamEnvelopeOpChanged()
 	case "ops.recording_degraded":
 		return t.AsTypedTaggedEventStreamEnvelopeOpsRecordingDegraded()
 	case "order.completed":

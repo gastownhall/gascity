@@ -34,6 +34,7 @@ go_library(
         "errors_install.go",
         "event_envelope_schemas.go",
         "event_payloads.go",
+        "event_payloads_ops.go",
         "event_stream_pump.go",
         "handler_agent_output.go",
         "handler_agent_output_stream.go",

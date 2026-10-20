@@ -532,6 +532,19 @@ const (
 	// D13).
 	OpsRecordingDegraded = "ops.recording_degraded"
 
+	// OpChanged fires when an operation-journal op row changes: proposed,
+	// accepted, taken, released, settled, canceled or closed. The payload is
+	// the op as its row reads after the change (DES-O1 D18), without the
+	// message text. The controller derives it once from the row's post-image
+	// in its cache-notification bridge, and journal rows record no bead.*
+	// event. The row is authoritative: a consumer that reconnects reads a
+	// non-terminal op again with GET .../session/{id}/ops/{op}.
+	OpChanged = "op.changed"
+	// FactRecorded fires when an occurrence fact row is recorded: a session
+	// or turn started or ended, an interaction raised or resolved. It is
+	// derived like OpChanged, once per fact.
+	FactRecorded = "fact.recorded"
+
 	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
 	// recompute over one bd-backed scope as a one-shot upgrade step: the
 	// first start under a bd version the scope has not been repaired with.
@@ -630,6 +643,7 @@ var KnownEventTypes = []string{
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
 	OpsRecordingDegraded,
+	OpChanged, FactRecorded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,

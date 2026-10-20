@@ -2090,6 +2090,79 @@
         ],
         "type": "object"
       },
+      "ConversationFact": {
+        "additionalProperties": false,
+        "properties": {
+          "at": {
+            "description": "When it happened: the source's time, or the observer's clock when the source gives none.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "basis": {
+            "description": "How the fact is known: runtime (the provider recorded it), observed (gc inferred it) or lane. Open: a newer build may add values.",
+            "type": "string"
+          },
+          "cause_ops": {
+            "description": "Operations that caused the fact.",
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "conversation": {
+            "description": "Session (conversation) id the fact belongs to.",
+            "type": "string"
+          },
+          "detail": {
+            "description": "The source's own word for the occurrence, e.g. a provider stop reason.",
+            "type": "string"
+          },
+          "generation": {
+            "description": "Session generation the fact happened in.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "id": {
+            "description": "Fact id, keyed by the occurrence.",
+            "type": "string"
+          },
+          "interaction": {
+            "description": "The occurrence of an interaction.* fact.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Fact kind.",
+            "enum": [
+              "session.started",
+              "session.ended",
+              "turn.started",
+              "turn.ended",
+              "interaction.raised",
+              "interaction.resolved"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Open reason token, e.g. a turn.ended reason (completed, interrupted, superseded).",
+            "type": "string"
+          },
+          "turn": {
+            "description": "The turn of a turn.* fact, as its runtime names it.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "kind",
+          "conversation",
+          "generation",
+          "at"
+        ],
+        "type": "object"
+      },
       "ConversationGroupParticipant": {
         "additionalProperties": false,
         "properties": {
@@ -2185,13 +2258,59 @@
       "ConversationOp": {
         "additionalProperties": false,
         "properties": {
+          "actor": {
+            "description": "The producer's actor class, an open token. Set on the op routes and op.changed only.",
+            "type": "string"
+          },
+          "at": {
+            "description": "When the operation last changed status. Set on the op routes and op.changed only.",
+            "format": "date-time",
+            "type": "string"
+          },
           "attempt": {
-            "description": "Executions after the first (an adopted orphan).",
+            "description": "Executions after the first (an adopted orphan, or a conversation-lane redelivery).",
             "format": "int64",
+            "type": "integer"
+          },
+          "cancel_requested": {
+            "description": "True once a cancel is recorded on an operation that was already executing; its outcome says whether the cancel won. Set on the op routes and op.changed only.",
+            "type": "boolean"
+          },
+          "causation": {
+            "description": "What caused the operation, as the producer named it. Set on the op routes and op.changed only.",
+            "type": "string"
+          },
+          "client_key": {
+            "description": "The producer's client key: the Idempotency-Key, or the key the server minted. Set on the op routes and op.changed only.",
+            "type": "string"
+          },
+          "client_seq": {
+            "description": "The producer's own sequence number, which orders its operations of equal precedence. Set on the op routes and op.changed only.",
+            "format": "int64",
+            "minimum": 0,
             "type": "integer"
           },
           "conversation": {
             "description": "Session (conversation) id the operation targets.",
+            "type": "string"
+          },
+          "correlation": {
+            "description": "The producer's correlation id. Set on the op routes and op.changed only.",
+            "type": "string"
+          },
+          "created_at": {
+            "description": "When the operation was proposed. Set on the op routes and op.changed only.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "executor": {
+            "description": "Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.",
+            "enum": [
+              "lane",
+              "legacy",
+              "legacy:api",
+              "legacy:cli"
+            ],
             "type": "string"
           },
           "id": {
@@ -2214,9 +2333,24 @@
             ],
             "type": "string"
           },
+          "lane_seq": {
+            "description": "The conversation lane's sequence number of the operation's last take. Set on the op routes and op.changed only.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "maybe_delivered": {
+            "description": "The last attempt that may have reached the agent (a redelivery after an ambiguous attempt), 0 when none may have. Set on the op routes and op.changed only.",
+            "format": "int64",
+            "type": "integer"
+          },
           "outcome": {
             "$ref": "#/components/schemas/ConversationOpOutcome",
             "description": "Present when status is closed."
+          },
+          "principal": {
+            "description": "The producer's principal: operator, conversation:\u003cid\u003e, t3:\u003cenvironment id\u003e, or gc:\u003cproducer\u003e for gc's own producers. Asserted, not authenticated. Set on the op routes and op.changed only.",
+            "type": "string"
           },
           "status": {
             "description": "Operation status. A legacy-executed operation stays submitted until it closes.",
@@ -2236,6 +2370,36 @@
           "kind",
           "status"
         ],
+        "type": "object"
+      },
+      "ConversationOpDelivery": {
+        "additionalProperties": false,
+        "properties": {
+          "ack": {
+            "description": "The runtime's answer (open vocabulary, e.g. delivered, delivered_unobserved, in_band).",
+            "type": "string"
+          },
+          "at": {
+            "description": "The lane's clock just before the delivery's first input.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "message_at": {
+            "description": "The runtime's creation time for the delivered message, when it reports one.",
+            "format": "date-time",
+            "type": "string"
+          },
+          "message_id": {
+            "description": "The runtime's id for the delivered message, when it reports one.",
+            "type": "string"
+          },
+          "seq": {
+            "description": "lane_seq of the delivery's head operation.",
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          }
+        },
         "type": "object"
       },
       "ConversationOpOutcome": {
@@ -2259,6 +2423,10 @@
             "description": "Why a failed or skipped operation ended (open vocabulary; refused:\u003cwhy\u003e names a refusal).",
             "type": "string"
           },
+          "result": {
+            "$ref": "#/components/schemas/ConversationOpResult",
+            "description": "What a succeeded or coalesced operation produced. Set on the op routes and op.changed only."
+          },
           "via": {
             "description": "How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).",
             "type": "string"
@@ -2267,6 +2435,48 @@
         "required": [
           "arm"
         ],
+        "type": "object"
+      },
+      "ConversationOpResult": {
+        "additionalProperties": false,
+        "properties": {
+          "coalesced_into": {
+            "description": "The operation this one was delivered with, when coalesced.",
+            "type": "string"
+          },
+          "context_epoch": {
+            "description": "Context epoch the operation ran in.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "delivery": {
+            "$ref": "#/components/schemas/ConversationOpDelivery",
+            "description": "The conversation lane's delivery record."
+          },
+          "generation": {
+            "description": "Session generation the operation ran in.",
+            "format": "int64",
+            "type": "integer"
+          },
+          "turn": {
+            "description": "The turn the operation ran in or was linked to; empty when the link is none.",
+            "type": "string"
+          },
+          "turn_basis": {
+            "description": "The rule that decided the turn link (open vocabulary, e.g. runtime_turn, history_diff, no_source).",
+            "type": "string"
+          },
+          "turn_link": {
+            "description": "Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.",
+            "enum": [
+              "exact",
+              "correlated",
+              "ambiguous",
+              "none"
+            ],
+            "type": "string"
+          }
+        },
         "type": "object"
       },
       "ConversationRef": {
@@ -2888,6 +3098,9 @@
             "$ref": "#/components/schemas/ExecutionStepStalledPayload"
           },
           {
+            "$ref": "#/components/schemas/FactRecordedPayload"
+          },
+          {
             "$ref": "#/components/schemas/GroupCreatedEventPayload"
           },
           {
@@ -2904,6 +3117,9 @@
           },
           {
             "$ref": "#/components/schemas/NoPayload"
+          },
+          {
+            "$ref": "#/components/schemas/OpChangedPayload"
           },
           {
             "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
@@ -3630,6 +3846,19 @@
           "provider",
           "account_id",
           "name"
+        ],
+        "type": "object"
+      },
+      "FactRecordedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "fact": {
+            "$ref": "#/components/schemas/ConversationFact",
+            "description": "The recorded fact."
+          }
+        },
+        "required": [
+          "fact"
         ],
         "type": "object"
       },
@@ -5379,6 +5608,19 @@
         },
         "required": [
           "status"
+        ],
+        "type": "object"
+      },
+      "OpChangedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation as its row reads after the change."
+          }
+        },
+        "required": [
+          "op"
         ],
         "type": "object"
       },
@@ -13498,6 +13740,7 @@
             "extmsg.outbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound",
+            "fact.recorded": "#/components/schemas/TypedEventStreamEnvelopeFactRecorded",
             "gc.store.disk_critical": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedEventStreamEnvelopeGcStoreMaintenanceDone",
@@ -13511,6 +13754,7 @@
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
+            "op.changed": "#/components/schemas/TypedEventStreamEnvelopeOpChanged",
             "ops.recording_degraded": "#/components/schemas/TypedEventStreamEnvelopeOpsRecordingDegraded",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
@@ -13706,6 +13950,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeExtmsgUnbound"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeFactRecorded"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeGcStoreDiskCritical"
           },
           {
@@ -13743,6 +13990,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOpChanged"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOpsRecordingDegraded"
@@ -15510,6 +15760,8 @@
                 "beads.conditional_writes.degraded",
                 "beads.blocked.recomputed",
                 "ops.recording_degraded",
+                "op.changed",
+                "fact.recorded",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -16559,6 +16811,63 @@
         "title": "TypedEventStreamEnvelope extmsg.unbound",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeFactRecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/FactRecordedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "fact.recorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope fact.recorded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeGcStoreDiskCritical": {
         "additionalProperties": false,
         "properties": {
@@ -17298,6 +17607,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOpChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "op.changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope op.changed",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOpsRecordingDegraded": {
@@ -20824,6 +21190,7 @@
             "extmsg.outbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutbound",
             "extmsg.outbound_channel_mismatch": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch",
             "extmsg.unbound": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound",
+            "fact.recorded": "#/components/schemas/TypedTaggedEventStreamEnvelopeFactRecorded",
             "gc.store.disk_critical": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical",
             "gc.store.disk_warn": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskWarn",
             "gc.store.maintenance.done": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreMaintenanceDone",
@@ -20837,6 +21204,7 @@
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
+            "op.changed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpChanged",
             "ops.recording_degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpsRecordingDegraded",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
@@ -21032,6 +21400,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeExtmsgUnbound"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeFactRecorded"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeGcStoreDiskCritical"
           },
           {
@@ -21069,6 +21440,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpChanged"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpsRecordingDegraded"
@@ -22939,6 +23313,8 @@
                 "beads.conditional_writes.degraded",
                 "beads.blocked.recomputed",
                 "ops.recording_degraded",
+                "op.changed",
+                "fact.recorded",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -24061,6 +24437,67 @@
         "title": "TypedTaggedEventStreamEnvelope extmsg.unbound",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeFactRecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/FactRecordedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "fact.recorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope fact.recorded",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeGcStoreDiskCritical": {
         "additionalProperties": false,
         "properties": {
@@ -24852,6 +25289,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOpChanged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpChangedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "op.changed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope op.changed",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOpsRecordingDegraded": {

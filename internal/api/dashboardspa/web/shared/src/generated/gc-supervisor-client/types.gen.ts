@@ -751,6 +751,53 @@ export type ControlStalledPayload = {
     store_path?: string;
 };
 
+export type ConversationFact = {
+    /**
+     * When it happened: the source's time, or the observer's clock when the source gives none.
+     */
+    at: string;
+    /**
+     * How the fact is known: runtime (the provider recorded it), observed (gc inferred it) or lane. Open: a newer build may add values.
+     */
+    basis?: string;
+    /**
+     * Operations that caused the fact.
+     */
+    cause_ops?: Array<string> | null;
+    /**
+     * Session (conversation) id the fact belongs to.
+     */
+    conversation: string;
+    /**
+     * The source's own word for the occurrence, e.g. a provider stop reason.
+     */
+    detail?: string;
+    /**
+     * Session generation the fact happened in.
+     */
+    generation: number;
+    /**
+     * Fact id, keyed by the occurrence.
+     */
+    id: string;
+    /**
+     * The occurrence of an interaction.* fact.
+     */
+    interaction?: string;
+    /**
+     * Fact kind.
+     */
+    kind: 'session.started' | 'session.ended' | 'turn.started' | 'turn.ended' | 'interaction.raised' | 'interaction.resolved';
+    /**
+     * Open reason token, e.g. a turn.ended reason (completed, interrupted, superseded).
+     */
+    reason?: string;
+    /**
+     * The turn of a turn.* fact, as its runtime names it.
+     */
+    turn?: string;
+};
+
 export type ConversationGroupParticipant = {
     GroupID: string;
     Handle: string;
@@ -783,13 +830,49 @@ export type ConversationKind = 'dm' | 'room' | 'thread';
 
 export type ConversationOp = {
     /**
-     * Executions after the first (an adopted orphan).
+     * The producer's actor class, an open token. Set on the op routes and op.changed only.
+     */
+    actor?: string;
+    /**
+     * When the operation last changed status. Set on the op routes and op.changed only.
+     */
+    at?: string;
+    /**
+     * Executions after the first (an adopted orphan, or a conversation-lane redelivery).
      */
     attempt?: number;
+    /**
+     * True once a cancel is recorded on an operation that was already executing; its outcome says whether the cancel won. Set on the op routes and op.changed only.
+     */
+    cancel_requested?: boolean;
+    /**
+     * What caused the operation, as the producer named it. Set on the op routes and op.changed only.
+     */
+    causation?: string;
+    /**
+     * The producer's client key: the Idempotency-Key, or the key the server minted. Set on the op routes and op.changed only.
+     */
+    client_key?: string;
+    /**
+     * The producer's own sequence number, which orders its operations of equal precedence. Set on the op routes and op.changed only.
+     */
+    client_seq?: number;
     /**
      * Session (conversation) id the operation targets.
      */
     conversation: string;
+    /**
+     * The producer's correlation id. Set on the op routes and op.changed only.
+     */
+    correlation?: string;
+    /**
+     * When the operation was proposed. Set on the op routes and op.changed only.
+     */
+    created_at?: string;
+    /**
+     * Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.
+     */
+    executor?: 'lane' | 'legacy' | 'legacy:api' | 'legacy:cli';
     /**
      * Operation id. Equals request_id on async responses.
      */
@@ -799,13 +882,48 @@ export type ConversationOp = {
      */
     kind: 'message' | 'interrupt' | 'respond' | 'create' | 'wake' | 'suspend' | 'resume' | 'restart' | 'kill' | 'close';
     /**
+     * The conversation lane's sequence number of the operation's last take. Set on the op routes and op.changed only.
+     */
+    lane_seq?: number;
+    /**
+     * The last attempt that may have reached the agent (a redelivery after an ambiguous attempt), 0 when none may have. Set on the op routes and op.changed only.
+     */
+    maybe_delivered?: number;
+    /**
      * Present when status is closed.
      */
     outcome?: ConversationOpOutcome;
     /**
+     * The producer's principal: operator, conversation:<id>, t3:<environment id>, or gc:<producer> for gc's own producers. Asserted, not authenticated. Set on the op routes and op.changed only.
+     */
+    principal?: string;
+    /**
      * Operation status. A legacy-executed operation stays submitted until it closes.
      */
     status: 'submitted' | 'accepted' | 'executing' | 'settling' | 'closed';
+};
+
+export type ConversationOpDelivery = {
+    /**
+     * The runtime's answer (open vocabulary, e.g. delivered, delivered_unobserved, in_band).
+     */
+    ack?: string;
+    /**
+     * The lane's clock just before the delivery's first input.
+     */
+    at?: string;
+    /**
+     * The runtime's creation time for the delivered message, when it reports one.
+     */
+    message_at?: string;
+    /**
+     * The runtime's id for the delivered message, when it reports one.
+     */
+    message_id?: string;
+    /**
+     * lane_seq of the delivery's head operation.
+     */
+    seq?: number;
 };
 
 export type ConversationOpOutcome = {
@@ -822,9 +940,44 @@ export type ConversationOpOutcome = {
      */
     reason?: string;
     /**
+     * What a succeeded or coalesced operation produced. Set on the op routes and op.changed only.
+     */
+    result?: ConversationOpResult;
+    /**
      * How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).
      */
     via?: string;
+};
+
+export type ConversationOpResult = {
+    /**
+     * The operation this one was delivered with, when coalesced.
+     */
+    coalesced_into?: string;
+    /**
+     * Context epoch the operation ran in.
+     */
+    context_epoch?: number;
+    /**
+     * The conversation lane's delivery record.
+     */
+    delivery?: ConversationOpDelivery;
+    /**
+     * Session generation the operation ran in.
+     */
+    generation?: number;
+    /**
+     * The turn the operation ran in or was linked to; empty when the link is none.
+     */
+    turn?: string;
+    /**
+     * The rule that decided the turn link (open vocabulary, e.g. runtime_turn, history_diff, no_source).
+     */
+    turn_basis?: string;
+    /**
+     * Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
+     */
+    turn_link?: 'exact' | 'correlated' | 'ambiguous' | 'none';
 };
 
 export type ConversationRef = {
@@ -1027,7 +1180,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1361,6 +1514,13 @@ export type ExtmsgAdapterInfo = {
      * Adapter provider key.
      */
     provider: string;
+};
+
+export type FactRecordedPayload = {
+    /**
+     * The recorded fact.
+     */
+    fact: ConversationFact;
 };
 
 export type FanoutPolicy = {
@@ -2175,6 +2335,13 @@ export type OkWithIdResponseBody = {
      * Operation result.
      */
     status: string;
+};
+
+export type OpChangedPayload = {
+    /**
+     * The operation as its row reads after the change.
+     */
+    op: ConversationOp;
 };
 
 export type OpsRecordingDegradedPayload = {
@@ -5921,6 +6088,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'fact.recorded';
+} & TypedEventStreamEnvelopeFactRecorded) | ({
     type: 'gc.store.disk_critical';
 } & TypedEventStreamEnvelopeGcStoreDiskCritical) | ({
     type: 'gc.store.disk_warn';
@@ -5947,6 +6116,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'op.changed';
+} & TypedEventStreamEnvelopeOpChanged) | ({
     type: 'ops.recording_degraded';
 } & TypedEventStreamEnvelopeOpsRecordingDegraded) | ({
     type: 'order.completed';
@@ -6865,6 +7036,24 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
 };
 
 /**
+ * TypedEventStreamEnvelope fact.recorded
+ */
+export type TypedEventStreamEnvelopeFactRecorded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: FactRecordedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'fact.recorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope gc.store.disk_critical
  */
 export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
@@ -7095,6 +7284,24 @@ export type TypedEventStreamEnvelopeMoleculeResolved = {
     subject?: string;
     ts: string;
     type: 'molecule.resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope op.changed
+ */
+export type TypedEventStreamEnvelopeOpChanged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'op.changed';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8288,6 +8495,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'fact.recorded';
+} & TypedTaggedEventStreamEnvelopeFactRecorded) | ({
     type: 'gc.store.disk_critical';
 } & TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) | ({
     type: 'gc.store.disk_warn';
@@ -8314,6 +8523,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'op.changed';
+} & TypedTaggedEventStreamEnvelopeOpChanged) | ({
     type: 'ops.recording_degraded';
 } & TypedTaggedEventStreamEnvelopeOpsRecordingDegraded) | ({
     type: 'order.completed';
@@ -9276,6 +9487,25 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope fact.recorded
+ */
+export type TypedTaggedEventStreamEnvelopeFactRecorded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: FactRecordedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'fact.recorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope gc.store.disk_critical
  */
 export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
@@ -9519,6 +9749,25 @@ export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
     subject?: string;
     ts: string;
     type: 'molecule.resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope op.changed
+ */
+export type TypedTaggedEventStreamEnvelopeOpChanged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'op.changed';
     workflow?: WorkflowEventProjection;
 };
 
