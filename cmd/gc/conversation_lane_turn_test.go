@@ -25,29 +25,39 @@ type scriptedTurns struct {
 	delivered int
 	readsSent int // reads since the last delivery
 	history   func(delivered, readsSince int) (runtime.TurnHistory, error)
+	// receipt is the last delivery's receipt, the runtime's message stamp a
+	// history may start a turn at.
+	receipt runtime.DeliveryReceipt
 }
 
-func (s *scriptedTurns) took() {
+func (s *scriptedTurns) took(r runtime.DeliveryReceipt) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.delivered++
 	s.readsSent = 0
+	s.receipt = r
 }
 
 func (s *scriptedTurns) NudgeFenced(ctx context.Context, name string, content []runtime.ContentBlock, n runtime.FencedNudge) error {
-	err := s.FullFake.NudgeFenced(ctx, name, content, n)
+	var r runtime.DeliveryReceipt
+	inner := n
+	inner.Receipt = &r
+	err := s.FullFake.NudgeFenced(ctx, name, content, inner)
 	if err == nil {
-		s.took()
+		if n.Receipt != nil {
+			*n.Receipt = r
+		}
+		s.took(r)
 	}
 	return err
 }
 
-func (s *scriptedTurns) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
-	err := s.FullFake.NudgeKeyed(name, content, key)
+func (s *scriptedTurns) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
+	r, err := s.FullFake.NudgeKeyed(name, content, key)
 	if err == nil {
-		s.took()
+		s.took(r)
 	}
-	return err
+	return r, err
 }
 
 func (s *scriptedTurns) TurnHistory(ctx context.Context, _ string) (runtime.TurnHistory, error) {

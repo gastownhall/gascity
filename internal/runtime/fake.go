@@ -38,7 +38,15 @@ type Fake struct {
 	Activity         map[string]time.Time // session → last activity time
 	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
 	// session name.
-	Bindings                map[string]SessionBinding
+	Bindings map[string]SessionBinding
+	// KeyedDeliveries are the deliveries a [FullFake] holds, by session name
+	// then delivery key: the first keyed delivery under a key stays, and
+	// LookupDelivery finds it. A test may seed it; it is created on first
+	// use.
+	KeyedDeliveries map[string]map[string]DeliveryReceipt
+	// LookupDeliveryErrors fail a [FullFake]'s LookupDelivery by session
+	// name.
+	LookupDeliveryErrors    map[string]error
 	StartErrors             map[string]error // per-session Start errors for testing
 	StopErrors              map[string]error // per-session Stop errors for testing
 	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
