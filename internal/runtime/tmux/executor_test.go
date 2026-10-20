@@ -588,8 +588,9 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 // No withheld CREDENTIAL means no removal mark. The nesting-detection flags
 // every session env pins empty are deliberately included here: they are not
 // secrets, the `env -u` prefix already does what they need, and marking them
-// would put an extra tmux call on every relaunch for no gain. Scope is a correctness property, not just a cost one — a marker
-// failure is fatal, so every key marked is a key that can fail a launch.
+// would put an extra tmux call on every relaunch for no gain. Scope is a
+// correctness property, not just a cost one — a marker failure is fatal, so
+// every key marked is a key that can fail a launch.
 func TestRespawnAgentSkipsSessionEnvMarkingWhenNoCredentialWithheld(t *testing.T) {
 	exec := &fakeExecutor{out: "agent\t@1.%0"}
 	tm := NewTmux()

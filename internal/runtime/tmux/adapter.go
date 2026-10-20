@@ -1520,7 +1520,7 @@ func (o *tmuxStartOps) createSession(name, workDir, command string, env map[stri
 // whose create path only built the one-shot `env -u` prefix, would otherwise hand
 // the respawned agent the controller's real value for the rest of the box's
 // life. Re-marking a key already marked is a no-op, and only controller-scope
-// keys are marked.
+// and BEADS_ keys are marked.
 func (o *tmuxStartOps) respawnAgent(name, workDir, command string, env map[string]string) error {
 	if err := validateUnsetEnvKeys(env); err != nil {
 		return err
