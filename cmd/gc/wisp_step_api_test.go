@@ -239,6 +239,13 @@ func stepHookCity(t *testing.T) (hookBudgetFixture, *controllerState) {
 	t.Helper()
 	f := newHookBudgetFixture(t)
 	f.activeStep(t)
+	return f, hookCityController(t, f)
+}
+
+// hookCityController is a controller holding the hook budget fixture city's
+// store, as the supervisor would.
+func hookCityController(t *testing.T, f hookBudgetFixture) *controllerState {
+	t.Helper()
 	cfg, err := loadCityConfig(f.cityDir, io.Discard)
 	if err != nil {
 		t.Fatalf("loadCityConfig: %v", err)
@@ -248,7 +255,7 @@ func stepHookCity(t *testing.T) (hookBudgetFixture, *controllerState) {
 		t.Fatalf("openCityStoreAt: %v", err)
 	}
 	resetHookBudgetProcessState(t)
-	return f, &controllerState{cfg: cfg, cityBeadStore: store, beadStores: map[string]beads.Store{}, cityName: loadedCityName(cfg, f.cityDir), cityPath: f.cityDir}
+	return &controllerState{cfg: cfg, cityBeadStore: store, beadStores: map[string]beads.Store{}, cityName: loadedCityName(cfg, f.cityDir), cityPath: f.cityDir}
 }
 
 // withActiveWorkStepClient points the step reminder at client for the test.

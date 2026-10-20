@@ -22,6 +22,15 @@ import (
 // emitting bead.* events altogether (DES-O1 D18, V2-16); until then this keeps
 // the cost to one read per item. The pre-batch reads run before the backing
 // validates the batch, so a batch it refuses as invalid still pays them.
+//
+// None of the wrapper's own reads outlast ctx: a caller bounds the batch by it
+// (the in-band hook pass, whose output is kept only if it exits in time), and
+// the emission is best-effort. A ctx that has ended before the batch, during
+// a pre-batch read too, applies nothing and returns its cause, whatever the
+// backing does with an ended ctx. Once ctx ends after the batch landed, the
+// re-reads stop and nothing is journaled, with one diagnostic: the batch
+// still succeeded, and the op-journal rows guarded batches write are read
+// live by the lane host, not through these events.
 func (s *emittingClassStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
 	batcher, ok := beads.GuardedBatcherFor(s.Store)
 	if !ok {
@@ -29,6 +38,9 @@ func (s *emittingClassStore) ApplyGuarded(ctx context.Context, b beads.GuardedBa
 	}
 	wasClosed := make(map[string]bool, len(b.Items))
 	for _, it := range b.Items {
+		if err := context.Cause(ctx); err != nil {
+			return beads.GuardedResult{}, err
+		}
 		if it.Update == nil {
 			continue
 		}
@@ -38,12 +50,33 @@ func (s *emittingClassStore) ApplyGuarded(ctx context.Context, b beads.GuardedBa
 		}
 		wasClosed[it.Update.ID] = s.closedBefore(it.Update.ID)
 	}
+	// Asked again past the last read: not every backing refuses an ended ctx
+	// before it starts work.
+	if err := context.Cause(ctx); err != nil {
+		return beads.GuardedResult{}, err
+	}
 	res, err := batcher.ApplyGuarded(ctx, b)
 	if err != nil {
 		return beads.GuardedResult{}, err
 	}
+	emissions, err := s.guardedBatchEmissions(ctx, b, wasClosed)
+	if err != nil {
+		warnClassStoreEmit(fmt.Errorf("bead.* skipped for a guarded batch of %d items that landed: %w", len(b.Items), err))
+		return res, nil
+	}
+	s.emit(emissions...)
+	return res, nil
+}
+
+// guardedBatchEmissions re-reads each row a landed batch wrote for its event,
+// wasClosed saying which updated rows were closed before it. It stops with
+// ctx's cause once ctx ends, before a read or before the journal append.
+func (s *emittingClassStore) guardedBatchEmissions(ctx context.Context, b beads.GuardedBatch, wasClosed map[string]bool) ([]classStoreEmission, error) {
 	emissions := make([]classStoreEmission, 0, len(b.Items))
 	for _, it := range b.Items {
+		if err := context.Cause(ctx); err != nil {
+			return nil, err
+		}
 		var (
 			emission classStoreEmission
 			ok       bool
@@ -57,8 +90,10 @@ func (s *emittingClassStore) ApplyGuarded(ctx context.Context, b beads.GuardedBa
 			emissions = append(emissions, emission)
 		}
 	}
-	s.emit(emissions...)
-	return res, nil
+	if err := context.Cause(ctx); err != nil {
+		return nil, err
+	}
+	return emissions, nil
 }
 
 // guardedCreatedEmission is the bead.created row for a create a guarded batch
