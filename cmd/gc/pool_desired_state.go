@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"path/filepath"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -50,6 +51,11 @@ type SessionRequest struct {
 	// pool's floor spawn cannot be starved by a warm pool's large elastic
 	// demand (follow-up to #2893).
 	FloorGuarantee bool
+	// Parked marks a resume request for a seat parked on pre-assigned
+	// blocked work (parkedSeats): it keeps the seat selected, so it sleeps
+	// rather than draining as an orphan, but takes no cap headroom and is
+	// not pool demand (PoolDesiredCounts) until its pin is ready.
+	Parked bool
 }
 
 func beadPriority(b beads.Bead) int {
@@ -206,7 +212,15 @@ func PoolDesiredCounts(states []PoolDesiredState) map[string]int {
 	}
 	counts := make(map[string]int, len(states))
 	for _, state := range states {
-		counts[state.Template] = len(state.Requests)
+		n := 0
+		for _, request := range state.Requests {
+			if !request.Parked {
+				n++
+			}
+		}
+		if n > 0 {
+			counts[state.Template] = n
+		}
 	}
 	return counts
 }
@@ -276,20 +290,6 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
-// ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
-// caller-supplied decision time while preserving per-work demand provenance.
-func ComputePoolDesiredStatesWithDemandTracedAt(
-	cfg *config.City,
-	assignedWorkBeads []beads.Bead,
-	sessionInfos []sessionpkg.Info,
-	scaleCheckCounts map[string]int,
-	scaleCheckDemand map[string]scaleCheckDemand,
-	decisionTime time.Time,
-	trace *sessionReconcilerTraceCycle,
-) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
-}
-
 func computePoolDesiredStates(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
@@ -308,6 +308,24 @@ func computePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
 	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+}
+
+// computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
+// pass's parked seats (parkSeats): a parked seat's resume request is marked
+// Parked, accepted outside the nested caps (it takes no headroom from
+// anything, floors included) and left out of the pool's demand count. A seat
+// is parked here only when every request it makes is an open pin.
+func computePoolDesiredStatesParkedAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	parked parkedSeats,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
 	// Build reverse lookup: any identifier → session bead ID.
@@ -356,6 +374,9 @@ func computePoolDesiredStatesAt(
 	// routing does not depend on the agent, so it is resolved once and the
 	// beads bucketed by the template they route to, in order (A3).
 	routedWork := make(map[string][]int)
+	// unparkable are the seats holding work that is not an open pin: never
+	// parked, whatever the verdict says.
+	unparkable := make(map[string]bool)
 	for i, wb := range assignedWorkBeads {
 		routedTo := routedToOrLegacyWorkflowTarget(wb)
 		if wb.Status != "in_progress" && wb.Status != "open" {
@@ -380,6 +401,9 @@ func computePoolDesiredStatesAt(
 			}
 		}
 		routedWork[routedTo] = append(routedWork[routedTo], i)
+		if wb.Status != "open" && sessionBeadID != "" {
+			unparkable[sessionBeadID] = true
+		}
 	}
 
 	for i := range cfg.Agents {
@@ -453,6 +477,7 @@ func computePoolDesiredStatesAt(
 					WorkPack:       strings.TrimSpace(wb.Metadata[beadmeta.PackMetadataKey]),
 					WorkWorkspace:  strings.TrimSpace(wb.Metadata[beadmeta.PackWorkspaceMetadataKey]),
 					BrainParentSID: strings.TrimSpace(wb.Metadata[beadmeta.BrainParentSIDMetadataKey]),
+					Parked:         parked.parked(sessionBeadID) && !unparkable[sessionBeadID],
 				})
 				continue
 			}
@@ -504,6 +529,9 @@ func computePoolDesiredStatesAt(
 			resumeSessionBeadIDs[req.SessionBeadID] = struct{}{}
 		}
 	}
+	// A parked seat's requests stand outside the caps: they are accepted
+	// after them, and count toward no limit or floor.
+	resumeRequests, parkedRequests := splitParkedRequests(resumeRequests)
 	protectedNewRequests, inFlightNewRequests := poolNewDemandRequests(cfg, sessionInfos, resumeSessionBeadIDs, decisionTime)
 	sessionInfoByID := make(map[string]sessionpkg.Info, len(sessionInfos))
 	for _, info := range sessionInfos {
@@ -651,7 +679,44 @@ func computePoolDesiredStatesAt(
 		}
 	}
 
-	return applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace)
+	return withParkedRequests(applyNestedCaps(cfg, allRequests, aliasHeldTemplates, trace), parkedRequests)
+}
+
+// splitParkedRequests separates a parked seat's requests from the counted
+// ones, keeping each side's order.
+func splitParkedRequests(requests []SessionRequest) (counted, parked []SessionRequest) {
+	for _, req := range requests {
+		if req.Parked {
+			parked = append(parked, req)
+		} else {
+			counted = append(counted, req)
+		}
+	}
+	return counted, parked
+}
+
+// withParkedRequests adds each parked seat's first request to its template's
+// accepted state, one per seat, after the caps: it selects the seat (the
+// realize binds it like a resume) without being counted by them.
+func withParkedRequests(states []PoolDesiredState, parked []SessionRequest) []PoolDesiredState {
+	if len(parked) == 0 {
+		return states
+	}
+	seen := make(map[string]bool, len(parked))
+	for _, req := range parked {
+		if seen[req.SessionBeadID] {
+			continue
+		}
+		seen[req.SessionBeadID] = true
+		i := slices.IndexFunc(states, func(s PoolDesiredState) bool { return s.Template == req.Template })
+		if i < 0 {
+			states = append(states, PoolDesiredState{Template: req.Template})
+			i = len(states) - 1
+		}
+		states[i].Requests = append(states[i].Requests, req)
+	}
+	sort.Slice(states, func(i, j int) bool { return states[i].Template < states[j].Template })
+	return states
 }
 
 func concreteNestedCapRequests(

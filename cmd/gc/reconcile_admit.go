@@ -46,7 +46,7 @@ const (
 	intentMarkerClear     = "marker-clear"      // A13's pinned skip: clears the runtime's restart marker (SESS-521)
 	intentBaseline        = "baseline"          // A8 (M2)
 	intentRowHeal         = "row-heal"          // A6's heals and markers, and other row writes
-	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals: a fresh read under the name lock first
+	intentRowHealFresh    = "row-heal-fresh"    // A6's not-alive heals, A21's parked clear: a fresh read under the name lock first
 )
 
 // capClass is the cap an intent counts against (P4); none is per endpoint.
