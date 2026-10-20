@@ -1234,8 +1234,33 @@ func TestWorkLadderAndTheHookShareTheCells(t *testing.T) {
 	for _, store := range []string{key.Store, ""} {
 		raw := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: store, Bead: key.Bead, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaAdopt}))
 		cell, err := workladder.DecodeStarted(raw)
-		if err != nil || !cell.Names(key) {
+		if err != nil || !cell.Names(key, 7) {
 			t.Fatalf("store %q: the ladder reads %q as %+v, %v; want it naming %v", store, raw, cell, err, key)
+		}
+	}
+	// The two decoders of the one cell agree on what it names, resident and
+	// unmarked entries alike, at every generation: the hook's writer and the
+	// ladder's reader can never disagree on whether a claim is started.
+	for _, resident := range []bool{false, true} {
+		for _, entryGen := range []int64{1, 2} {
+			raw := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{
+				Store: "rig:gascity", Bead: "gcg-1", Gen: entryGen, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: resident,
+			}))
+			hook, err := session.DecodeWorkStarted(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			ladderCell, err := workladder.DecodeStarted(raw)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, k := range []workladder.ClaimKey{{Store: "city", Bead: "gcg-1"}, {Store: "rig:gascity", Bead: "gcg-1"}, {Store: "rig:other", Bead: "gcg-1"}, {Bead: "gcg-1"}, {Store: "city", Bead: "gcg-2"}} {
+				for _, rowGen := range []int64{0, 1, 2, 3} {
+					if h, l := hook.Names(k.Store, k.Bead, rowGen), ladderCell.Names(k, rowGen); h != l {
+						t.Errorf("%s: key %+v at row gen %d: the hook reads %v, the ladder %v", raw, k, rowGen, h, l)
+					}
+				}
+			}
 		}
 	}
 	if _, err := workladder.DecodeStarted(`{"v":1,"claims":[{"store":"s","bead":"b","gen":1,"at":"","via":"claim"}]}`); err == nil {

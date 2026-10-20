@@ -233,6 +233,7 @@ go_test(
         "waits_test.go",
         "wdelete_edge_test.go",
         "wedge_repro_test.go",
+        "work_cells_resident_test.go",
         "work_cells_test.go",
         "worker_dir_test.go",
     ],

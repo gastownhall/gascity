@@ -381,6 +381,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The work ladder and the execution backstop read a rig seat's started
+  graph steps as started.** On a city that relocates its coordination classes
+  (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
+  a graph step it claimed in the session's `work_started` cell under the
+  rig's work store (`rig:<rig>`), while the step lives in the city-scope
+  class binding, where the ladder and the backstop look it up (`city`). The
+  ladder then treated the seat's started claim as unstarted and nudged it as
+  claimed (a release was still refused by the bead's `gc.session_id`), and
+  the backstop missed the record. The hook now records the store the claim
+  resides in, the spelling every reader uses, and marks the entry
+  `resident`. An entry written by an older `gc` is read by bead alone, and
+  only at the session generation it was recorded in; the hook rewrites such
+  an entry to the resident spelling the next time it hands that claim to
+  the seat. A rollback still reads the new entries.
+
 - **A config reload no longer creates or rebinds a city's bead store.** When a
   city's `.beads/metadata.json` went missing (for example, a `git` checkout
   deleted a file an older commit had tracked), the next reload fell back to

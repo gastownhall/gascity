@@ -274,7 +274,7 @@ func newExecutionClaimSnapshot(work []beads.Bead, stores []beads.Store, storeRef
 			Kind:        strings.TrimSpace(wb.Metadata[beadmeta.KindMetadataKey]),
 		}
 		if i < len(storeRefs) {
-			claim.StoreRef = normalizeIdleClaimStoreRef(storeRefs[i])
+			claim.StoreRef = claimStoreRef(storeRefs[i])
 		}
 		if i < len(stores) {
 			claim.Store = stores[i]
@@ -598,9 +598,11 @@ func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bo
 // workStartedAtGen reports execution evidence for claim from the row's
 // work_started cell (PHASE1-2 W1): the seat's own `gc hook --claim` records
 // each claim it hands to a turn, fenced by the incarnation's token and
-// generation, so an entry naming claim (Names' store matching) at the row's
-// current generation proves the claim started this incarnation, as a stamp
-// does. A long silent turn emits no step_started and no pane output, so
+// generation, so an entry naming claim (NamesAt: its residence, the
+// claimStoreRef the snapshot keyed the claim by, or an older hook's leg
+// spelling of it, which only an entry at this generation may use) at the
+// row's current generation proves the claim started this incarnation, as a
+// stamp does. A long silent turn emits no step_started and no pane output, so
 // without it such a seat reads as never started and is drained (ga-jfzcmp).
 // It fails closed, unlike the cell's release readers: an unreadable cell, an
 // unreadable row generation, or an entry from another generation is no
@@ -615,7 +617,7 @@ func workStartedAtGen(s beads.Bead, claim executionClaim) bool {
 		return false
 	}
 	for _, e := range cell.Claims {
-		if e.Gen == gen && (sessionpkg.WorkStarted{Claims: []sessionpkg.WorkStartedEntry{e}}).Names(claim.StoreRef, claim.BeadID) {
+		if e.Gen == gen && e.NamesAt(claim.StoreRef, claim.BeadID, gen) {
 			return true
 		}
 	}

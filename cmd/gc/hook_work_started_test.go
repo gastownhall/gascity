@@ -246,8 +246,10 @@ func TestHookClaimRecordsStartedBeforeTheResult(t *testing.T) {
 		t.Fatalf("conditional row writes = %d, want 1", row.store.rowWrites)
 	}
 	cell := row.cell(t)
-	if len(cell.Claims) != 1 || cell.Claims[0] != (session.WorkStartedEntry{Store: startedStoreRef, Bead: "work-1", Gen: 7, At: time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), Via: session.WorkStartedViaClaim}) {
-		t.Fatalf("work_started = %+v, want the one minted entry", cell.Claims)
+	// Resident: the minted claim's compare-and-swap committed in the work
+	// leg, the residence every reader keys it by (claimStoreRef).
+	if len(cell.Claims) != 1 || cell.Claims[0] != (session.WorkStartedEntry{Store: startedStoreRef, Bead: "work-1", Gen: 7, At: time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), Via: session.WorkStartedViaClaim, Resident: true}) {
+		t.Fatalf("work_started = %+v, want the one minted entry, marked resident", cell.Claims)
 	}
 	if got := decodeTurnBoundResult(t, stdout.buf.String()); got.Action != "work" || got.BeadID != "work-1" {
 		t.Fatalf("result %+v, want work-1 handed out", got)
@@ -373,7 +375,7 @@ func TestStartedWriteSurvivesAControllerWriteBetweenReadAndCAS(t *testing.T) {
 	if err != nil || res != hookStartedRecorded {
 		t.Fatalf("record = %v, %v; want recorded after a retry", res, err)
 	}
-	if row.meta(t, session.WorkLadderKey) != ladder || !row.cell(t).Names(key.Store, key.Bead) {
+	if row.meta(t, session.WorkLadderKey) != ladder || !row.cell(t).Names(key.Store, key.Bead, 7) {
 		t.Fatalf("row %q / %q: want the controller's cell and the agent's entry both intact", row.meta(t, session.WorkLadderKey), row.meta(t, session.WorkStartedKey))
 	}
 
@@ -515,7 +517,7 @@ func TestUndeliveredClaimForgetsStartedBeforeRelease(t *testing.T) {
 	if code != 1 || rec < 0 || forget < 0 || release < 0 || rec >= forget || forget >= release {
 		t.Fatalf("code %d, effects %v; want record, then forget, then release", code, l.log)
 	}
-	if row.cell(t).Names(startedStoreRef, "work-1") {
+	if row.cell(t).Names(startedStoreRef, "work-1", 7) {
 		t.Fatalf("work_started %+v still names the released claim", row.cell(t))
 	}
 }
@@ -588,7 +590,7 @@ func TestUnrecordedClaimOutsideTheDrainAckFence(t *testing.T) {
 		if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), l.ops(startedAssignedWork, row, nil), stdout, &stderr); code != 0 {
 			t.Fatalf("code %d; stderr=%s", code, stderr.String())
 		}
-		if l.index("record:work-1:adopt") < 0 || !row.cell(t).Names(startedStoreRef, "work-1") || l.acked {
+		if l.index("record:work-1:adopt") < 0 || !row.cell(t).Names(startedStoreRef, "work-1", 7) || l.acked {
 			t.Fatalf("effects %v, cell %+v; want the adoption to record the claim, without an ack", l.log, row.cell(t))
 		}
 	})
@@ -766,7 +768,7 @@ func TestHookClaimResetsAnUnreadableCell(t *testing.T) {
 	if got := decodeTurnBoundResult(t, stdout.buf.String()); code != 0 || got.BeadID != "work-1" {
 		t.Fatalf("code %d, result %+v; want work-1 delivered", code, got)
 	}
-	if cell := row.cell(t); len(cell.Claims) != 1 || !cell.Names(startedStoreRef, "work-1") {
+	if cell := row.cell(t); len(cell.Claims) != 1 || !cell.Names(startedStoreRef, "work-1", 7) {
 		t.Fatalf("work_started = %+v, want a readable cell holding work-1", cell)
 	}
 	// Reported as a reset, never as a claim delivered without a record: it
@@ -969,7 +971,7 @@ func TestStartedGateBlockedClaimSurvivesTheNudge(t *testing.T) {
 	ops.ReadWorkMeta = readClaim
 	stdout := &orderedWriter{l: l}
 	var stderr bytes.Buffer
-	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr); code != 0 || !row.cell(t).Names("", claim.ID) {
+	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr); code != 0 || !row.cell(t).Names("", claim.ID, 7) {
 		t.Fatalf("hand-over: code %d, cell %+v; stderr=%s", code, row.cell(t), stderr.String())
 	}
 

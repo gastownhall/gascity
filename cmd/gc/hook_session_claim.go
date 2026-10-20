@@ -214,8 +214,13 @@ func hookStartedFenceOf(env []string) hookStartedFence {
 }
 
 // hookStartedKey is a claim as the work cells name it: its store ref
-// (normalizeIdleClaimStoreRef's form, "" when unknown) and bead ID.
-type hookStartedKey struct{ Store, Bead string }
+// (claimStoreRef's form, "" when unknown) and bead ID. Resident reports that
+// Store is the store the claim was proved to reside in (hookStartedKeyFor),
+// which the entry it writes is marked as (session.WorkStartedEntry.Resident).
+type hookStartedKey struct {
+	Store, Bead string
+	Resident    bool
+}
 
 // hookStartedResult is what the started write found.
 type hookStartedResult uint8
@@ -261,21 +266,37 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 	case strings.TrimSpace(fresh.InstanceToken) != fence.Token || (fence.HasGen && rowGen != fence.Gen):
 		return hookStartedStale, nil, nil
 	}
-	if session.WorkLadderReleases(fresh.WorkLadderRaw, key.Store, key.Bead) {
+	// The ladder keys its release by the claim's residence (claimStoreRef). A
+	// key whose store is not a proven residence may be the leg's spelling of
+	// it, so the fence then matches the release by bead alone: refusing a
+	// hand-over the controller is releasing is the safe side of a doubt.
+	fenceStore := key.Store
+	if !key.Resident {
+		fenceStore = ""
+	}
+	if session.WorkLadderReleases(fresh.WorkLadderRaw, fenceStore, key.Bead) {
 		return hookStartedReleasing, nil, nil
 	}
 	cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
 	if err != nil {
 		cell, reset = session.WorkStarted{}, err
 	}
-	if cell.Names(key.Store, key.Bead) {
-		return hookStartedAlreadyRecorded, nil, nil
-	}
 	gen := rowGen
 	if fence.HasGen {
 		gen = fence.Gen
 	}
-	cell = cell.With(session.WorkStartedEntry{Store: key.Store, Bead: key.Bead, Gen: gen, At: now.UTC(), Via: via})
+	if cell.Names(key.Store, key.Bead, gen) {
+		// Recorded already. An older hook may have spelled it by its leg:
+		// re-spell that entry as the residence this run proved, in place,
+		// keeping its generation, time and way (the cell's migration).
+		if key.Resident {
+			if respelled, changed := cell.Respelled(key.Store, key.Bead, gen); changed {
+				return hookStartedAlreadyRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(respelled)}, nil
+			}
+		}
+		return hookStartedAlreadyRecorded, nil, nil
+	}
+	cell = cell.With(session.WorkStartedEntry{Store: key.Store, Bead: key.Bead, Gen: gen, At: now.UTC(), Via: via, Resident: key.Resident && key.Store != ""})
 	return hookStartedRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell)}, reset
 }
 
@@ -339,10 +360,11 @@ func forgetWorkStartedVia(front sessionFrontGetter, sessionID string, key hookSt
 func forgetWorkStarted(front *session.Store, sessionID string, key hookStartedKey) error {
 	_, err := front.UpdateRowFenced(sessionID, hookStartedWriteAttempts, func(fresh session.Info, _ session.PersistedResponse) (session.RowPatch, bool) {
 		cell, err := session.DecodeWorkStarted(fresh.WorkStartedRaw)
-		if fresh.Closed || err != nil || !cell.Names(key.Store, key.Bead) {
+		gen, _ := strconv.ParseInt(strings.TrimSpace(fresh.Generation), 10, 64)
+		if fresh.Closed || err != nil || !cell.Names(key.Store, key.Bead, gen) {
 			return session.RowPatch{}, false
 		}
-		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead))}}, true
+		return session.RowPatch{Metadata: session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell.Without(key.Store, key.Bead, gen))}}, true
 	})
 	return err
 }
@@ -366,9 +388,11 @@ func sessionWorkStartedVia(front sessionFrontGetter, sessionID string) (string, 
 	return info.WorkStartedRaw, nil
 }
 
-// hookClaimStoreRefForDir is the production StoreRef seam: the store a claim
-// made in dir lives in, as the work cells key it ("city" or "rig:<name>"),
-// or "" when the city or its config cannot be read or dir is no store root.
+// hookClaimStoreRefForDir is the production StoreRef seam: the work leg at
+// dir, as the work cells key a claim residing in it ("city" or
+// "rig:<name>"), or "" when the city or its config cannot be read or dir is
+// no store root. A claim the class route took resides in the binding instead
+// (hookStartedKeyFor).
 func hookClaimStoreRefForDir(dir string) string {
 	cityPath, err := resolveCity()
 	if err != nil {
@@ -388,7 +412,7 @@ func claimStoreRefAt(cityPath string, cfg *config.City, dir string) string {
 	if ref == "" {
 		return ""
 	}
-	return normalizeIdleClaimStoreRef(ref)
+	return claimStoreRef(ref)
 }
 
 // emitWorkStartedUnrecorded is the production EmitWorkStartedUnrecorded seam:

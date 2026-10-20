@@ -219,6 +219,10 @@ type StartedClaim struct {
 	Gen int64
 	At  time.Time
 	Via string
+	// Resident marks a claim whose Key.Store is the store it resides in, the
+	// way every reader keys it; an unmarked claim's store may be the work leg
+	// an older hook ran in (internal/session.WorkStartedEntry).
+	Resident bool
 }
 
 // Started via values.
@@ -227,12 +231,18 @@ const (
 	ViaAdopt = "adopt"
 )
 
-// Names reports whether s holds key. A claim recorded with no store (the
-// hook could not resolve it) names its bead in every store, and a key with no
-// store matches its bead under any: the agent's writer
-// (internal/session.WorkStarted.Names) reads it the same way.
-func (s Started) Names(key ClaimKey) bool {
-	return slices.ContainsFunc(s.Claims, func(c StartedClaim) bool { return SameClaim(c.Key, key) })
+// Names reports whether s holds key on a row at generation gen. A claim
+// recorded with no store (the hook could not resolve it) names its bead in
+// every store, and a key with no store matches its bead under any. A claim
+// not marked Resident also names its bead under any store at its own
+// generation: an older hook spelled a binding-resident claim by its rig leg.
+// The agent's writer (internal/session.WorkStartedEntry.NamesAt) reads it the
+// same way.
+func (s Started) Names(key ClaimKey, gen int64) bool {
+	return slices.ContainsFunc(s.Claims, func(c StartedClaim) bool {
+		return SameClaim(c.Key, key) ||
+			!c.Resident && gen > 0 && c.Gen == gen && SameClaim(ClaimKey{Bead: c.Key.Bead}, ClaimKey{Bead: key.Bead})
+	})
 }
 
 // SameClaim reports whether a and b name the same claim: the same bead, in
@@ -247,18 +257,19 @@ type wireStarted struct {
 }
 
 type wireStartedC struct {
-	Store string `json:"store"`
-	Bead  string `json:"bead"`
-	Gen   int64  `json:"gen"`
-	At    string `json:"at"`
-	Via   string `json:"via"`
+	Store    string `json:"store"`
+	Bead     string `json:"bead"`
+	Gen      int64  `json:"gen"`
+	At       string `json:"at"`
+	Via      string `json:"via"`
+	Resident bool   `json:"resident,omitempty"`
 }
 
 // EncodeStarted is the work_started cell's text for s, in s's order.
 func EncodeStarted(s Started) string {
 	w := wireStarted{V: Version, Claims: []wireStartedC{}}
 	for _, c := range s.Claims {
-		w.Claims = append(w.Claims, wireStartedC{Store: c.Key.Store, Bead: c.Key.Bead, Gen: c.Gen, At: fmtTime(c.At), Via: c.Via})
+		w.Claims = append(w.Claims, wireStartedC{Store: c.Key.Store, Bead: c.Key.Bead, Gen: c.Gen, At: fmtTime(c.At), Via: c.Via, Resident: c.Resident})
 	}
 	b, err := json.Marshal(w)
 	if err != nil { // unreachable: every field is a string or number
@@ -296,7 +307,7 @@ func DecodeStarted(raw string) (Started, error) {
 		if err != nil {
 			return bad("claim %d: time %q: %v", i, c.At, err)
 		}
-		s.Claims = append(s.Claims, StartedClaim{Key: ClaimKey{Store: c.Store, Bead: c.Bead}, Gen: c.Gen, At: at, Via: c.Via})
+		s.Claims = append(s.Claims, StartedClaim{Key: ClaimKey{Store: c.Store, Bead: c.Bead}, Gen: c.Gen, At: at, Via: c.Via, Resident: c.Resident})
 	}
 	return s, nil
 }

@@ -341,8 +341,10 @@ type hookClaimOps struct {
 	// ReadWorkStarted reads the session row's raw work_started cell: the
 	// drain-ack fence's input.
 	ReadWorkStarted hookReadWorkStartedFunc
-	// StoreRef names the store a claim made in dir lives in, as the work
-	// cells key it, or "" when it is not knowable.
+	// StoreRef names the work leg at dir as the work cells key a claim that
+	// resides in it (claimStoreRef), or "" when it is not knowable. A claim
+	// the class route took resides in the binding instead: the cells' key for
+	// a claim is hookStartedKeyFor's, never this alone.
 	StoreRef func(dir string) string
 	// EmitWorkStartedUnrecorded publishes work.started_unrecorded when a
 	// claim is delivered without its work_started record. Best-effort.
@@ -1615,7 +1617,7 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 	if fence.Token == "" {
 		err = errors.New("no instance token to fence the write by")
 	} else {
-		res, err = ops.RecordWorkStarted(sessionID, fence, hookStartedKey{Store: ops.StoreRef(dir), Bead: beadID}, via)
+		res, err = ops.RecordWorkStarted(sessionID, fence, hookStartedKeyFor(ops, dir, beadID, minted), via)
 	}
 	switch {
 	case errors.Is(err, errWorkStartedReset):
@@ -1730,12 +1732,41 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	return 1
 }
 
-// forgetHookWorkStarted drops bead from this session's work_started cell,
-// best effort: an unwind that cannot drop it still gives the claim back.
+// forgetHookWorkStarted drops bead, a claim this invocation minted, from this
+// session's work_started cell under the key its record wrote, best effort:
+// an unwind that cannot drop it still gives the claim back.
 func forgetHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) {
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && strings.TrimSpace(bead.ID) != "" {
-		_ = ops.ForgetWorkStarted(sessionID, hookStartedKey{Store: ops.StoreRef(dir), Bead: strings.TrimSpace(bead.ID)})
+		_ = ops.ForgetWorkStarted(sessionID, hookStartedKeyFor(ops, dir, bead.ID, true))
 	}
+}
+
+// hookStartedKeyFor is the work cells' key for beadID, a claim this
+// invocation minted, or adopted, in the work leg at dir: its residence,
+// spelled by claimStoreRef as every controller reader spells it.
+//
+// A bead this invocation's class route proved the binding holds resides in
+// the binding, whatever leg the hook ran in: a graph step claimed or adopted
+// by a rig seat lives in the city-scope binding, and the census, the ladder
+// and the backstop key it "city". Anything else resides in the work leg: a
+// minted claim's compare-and-swap committed there, and a city that relocates
+// nothing has no other store a bead its leg serves could live in. Both are
+// proven residences (Resident).
+//
+// An adoption on a city with a class route that did not prove the binding
+// holds the bead keeps the leg's spelling, unproven: its readback may have
+// failed before the residence was asked. Its entry is written unmarked, as
+// the older hook wrote every entry, so the readers match it by bead at its
+// generation (session.WorkStartedEntry.NamesAt) instead of trusting a store
+// nobody proved.
+func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, minted bool) hookStartedKey {
+	beadID = strings.TrimSpace(beadID)
+	if route := ops.ClassRoute; route != nil && route.knownResident(beadID) {
+		ref := route.storeRef()
+		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
+	}
+	ref := ops.StoreRef(dir)
+	return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != "" && (minted || ops.ClassRoute == nil)}
 }
 
 // writeHookClaimNoWork writes the single drain result for a hook that claimed
@@ -1886,8 +1917,9 @@ func fenceHookDrainAck(label, reason string, opts hookClaimOptions, ops hookClai
 // (gas-kg6), so it does not hold the ack either. err reports a read that
 // failed, when no held claim was found. Two reads are answers, not
 // failures: a bead the store no longer has (beads.ErrNotFound) holds
-// nothing, and an entry naming another store than this context's, which
-// this context may not be able to read, is skipped when its read fails.
+// nothing, and an entry naming a store this context cannot read, which is
+// neither its work leg nor the class binding its route reads through, is
+// skipped when its read fails.
 func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaimOps, dir string) (beads.Bead, error) {
 	raw, err := ops.ReadWorkStarted(sessionID)
 	if err != nil {
@@ -1898,7 +1930,17 @@ func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaim
 		return beads.Bead{}, err
 	}
 	identities := hookClaimIdentityCandidates(append([]string{opts.Assignee}, opts.IdentityCandidates...)...)
-	here := ops.StoreRef(dir)
+	// The stores this context reads an entry's bead in: its work leg, and the
+	// class binding its route reads through to (ReadWorkMeta is class-routed),
+	// where a graph step's resident entry points. A leg it cannot name skips
+	// nothing, as before.
+	here := map[string]bool{}
+	if leg := ops.StoreRef(dir); leg != "" {
+		here[leg] = true
+		if binding := ops.ClassRoute.storeRef(); binding != "" {
+			here[binding] = true
+		}
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), hookClaimMutationTimeout)
 	defer cancel()
 	var readErr error
@@ -1907,7 +1949,7 @@ func hookHeldStartedClaim(sessionID string, opts hookClaimOptions, ops hookClaim
 		switch {
 		case errors.Is(err, beads.ErrNotFound):
 			continue
-		case err != nil && e.Store != "" && here != "" && e.Store != here:
+		case err != nil && e.Store != "" && len(here) > 0 && !here[e.Store]:
 			continue
 		case err != nil:
 			readErr = errors.Join(readErr, fmt.Errorf("reading %s: %w", e.Bead, err))
