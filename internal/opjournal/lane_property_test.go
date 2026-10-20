@@ -283,7 +283,8 @@ func (w *propWorld) unflaky(fn func()) {
 // goes in its unit (alone, its interrupt under the same lease, never maybe
 // delivered, with no turn at the probe or after a step that settled at a
 // boundary) or post-unit (alone, at a boundary, its interrupt closed); and
-// no other content goes while a unit of the conversation is open.
+// no other content goes while a unit of the conversation is open, but what
+// the probe admits past its content block.
 func (w *propWorld) checkNowDelivery(d Delivery) {
 	conv := d.Fence.Conversation
 	w.unflaky(func() {
@@ -324,7 +325,8 @@ func (w *propWorld) checkNowDelivery(d Delivery) {
 				}
 			}
 		}
-		if unit {
+		admitted := w.probe.ContentBlock != "" && !slices.ContainsFunc(d.Ops, func(op Op) bool { return !w.probe.admits(op) })
+		if unit || admitted {
 			return
 		}
 		for mid, c := range w.nowMsgs {
@@ -536,9 +538,8 @@ func (w *propWorld) propose() {
 				break
 			}
 			// A deliver-now message, untargeted or aimed at a turn of the
-			// current session; without after or not_before, so its unit
-			// waits only on the lane (N3's premise).
-			req.After, req.NotBefore = "", time.Time{}
+			// current session, keeping any after or not_before drawn above:
+			// N3 holds whatever its unit waits on.
 			req.Policy.Message.When = []When{WhenNow, WhenNow, WhenInterrupt}[r.IntN(3)]
 			if req.Policy.Message.When == WhenNow && r.IntN(2) == 0 {
 				req.Policy.Message.NowGeneration = max(1, w.convs[conv].view.Generation)
@@ -894,7 +895,7 @@ func (w *propWorld) checkNowPairs() {
 		}
 		if i.Kind != KindInterrupt || i.Executor != ExecutorLane || i.Causation != mid || i.Producer != m.Producer ||
 			i.Policy.Guarantee != GuaranteeAtMostOnce || i.Policy.Interrupt.OnFailure != OnFailureFail || i.After != "" ||
-			i.Scope.Turn != m.Policy.Message.NowTurn || m.After != "" {
+			i.Scope.Turn != m.Policy.Message.NowTurn || m.After == iid {
 			w.fail("derived interrupt %s of %s is misshapen (N1): %+v", iid, mid, i)
 		}
 		if i.Status == StatusClosed && i.Outcome.Arm == ArmCanceled && i.Cancel.By == nowCascadeBy {

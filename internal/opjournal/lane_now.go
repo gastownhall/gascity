@@ -108,9 +108,9 @@ func isNowMessage(op Op) bool {
 	return w == WhenNow || w == WhenInterrupt
 }
 
-// hasNowShape reports a lane interrupt keyed as a derived interrupt: client
+// nowKeyShape reports a lane interrupt keyed as a derived interrupt: client
 // key <causation>:interrupt.
-func hasNowShape(op Op) bool {
+func nowKeyShape(op Op) bool {
 	if op.Kind != KindInterrupt || op.Executor != ExecutorLane || op.Causation == "" {
 		return false
 	}
@@ -118,11 +118,20 @@ func hasNowShape(op Op) bool {
 	return ok && head == op.Causation
 }
 
+// hasNowShape reports a lane interrupt that may be a derived interrupt, its
+// deliver-now partner to be read: keyed as one (nowKeyShape), with a
+// causation that is an op id of namespace prefix. Any other causation (a
+// mail or session bead, a producer's own id) names no deliver-now message,
+// and the interrupt is plain.
+func hasNowShape(op Op, prefix string) bool {
+	return nowKeyShape(op) && strings.HasPrefix(op.Causation, prefix+opIDInfix) && validOpID(op.Causation)
+}
+
 // isDerivedOf reports whether i is deliver-now message m's derived
 // interrupt: its id is pinned by m's conversation, principal and id
 // (checkOpID ties the id to those), and it names m as its causation.
 func isDerivedOf(i, m Op) bool {
-	return hasNowShape(i) && isNowMessage(m) && i.Causation == m.ID &&
+	return nowKeyShape(i) && isNowMessage(m) && i.Causation == m.ID &&
 		i.Conversation == m.Conversation && i.Producer.Principal == m.Producer.Principal
 }
 
@@ -130,7 +139,9 @@ func isDerivedOf(i, m Op) bool {
 // its message, that is not open in the pass's read.
 type nowRow struct {
 	// state is afterClosed for a row found (open or not: see op.Status),
-	// afterMissing or afterUnreadable.
+	// afterMissing or afterUnreadable. A row found that is no op, or an op
+	// of a kind this build does not know, is afterClosed with a zero op: it
+	// is neither a deliver-now message nor a derived interrupt.
 	state afterState
 	op    Op
 	// err is an unreadable row's read or decode error; undecodable says it
@@ -169,7 +180,7 @@ func (l *ConversationLane) readNow(snap *laneSnapshot) {
 			if id, err := NowInterruptID(snap.prefix, op); err == nil {
 				read(id)
 			}
-		case hasNowShape(op):
+		case hasNowShape(op, snap.prefix):
 			read(op.Causation)
 		}
 	}
@@ -183,10 +194,16 @@ func (l *ConversationLane) readNowRow(id string) nowRow {
 	if err != nil {
 		return nowRow{state: afterUnreadable, err: err}
 	}
+	if !isOpBead(b) {
+		return nowRow{state: afterClosed}
+	}
 	op, err := DecodeOp(b)
-	if err != nil {
-		undecodable := errors.Is(err, ErrUnsupportedSchema) || errors.Is(err, ErrUnsupportedValue) ||
-			errors.Is(err, ErrUnsupportedKind) || errors.Is(err, ErrCorruptOp)
+	switch {
+	case errors.Is(err, ErrUnsupportedKind):
+		// Deliver-now messages and interrupts are kinds this build knows.
+		return nowRow{state: afterClosed}
+	case err != nil:
+		undecodable := errors.Is(err, ErrUnsupportedSchema) || errors.Is(err, ErrUnsupportedValue) || errors.Is(err, ErrCorruptOp)
 		return nowRow{state: afterUnreadable, err: err, undecodable: undecodable}
 	}
 	return nowRow{state: afterClosed, op: op}
@@ -234,8 +251,8 @@ const (
 
 // nowOp returns op's deliver-now state, made on first use, or nil for an op
 // that is neither a deliver-now message nor a derived-shape interrupt.
-func (rp *rulesPlan) nowOp(op Op) *nowOpState {
-	if !isNowMessage(op) && !hasNowShape(op) {
+func (rp *rulesPlan) nowOp(op Op, prefix string) *nowOpState {
+	if !isNowMessage(op) && !hasNowShape(op, prefix) {
 		return nil
 	}
 	st := &nowOpState{e: entry{op: op, cur: op}}
@@ -294,7 +311,14 @@ func (rp *rulesPlan) planNow(snap laneSnapshot, conv ConversationView) {
 	}
 }
 
-// planNowMessage finishes deliver-now message st.
+// planNowMessage finishes deliver-now message st. A lowered message whose
+// derived interrupt is open, by the read or by its own row, or whose
+// interrupt's read failed transiently, holds the content (openUnits). A
+// derived row this build cannot decode (quarantined, or undecodable at its
+// id) holds nothing: this build cannot tell whether the unit is open, and
+// holding every content op behind a row it will never read would stall the
+// conversation until the message's start_by. The newer build that wrote
+// the row orders the unit when it serves the lane.
 func (rp *rulesPlan) planNowMessage(snap laneSnapshot, conv ConversationView, st *nowOpState, open map[string]Op, quarantined map[string]bool) {
 	m := st.e.op
 	if st.closing != nil {
@@ -329,11 +353,13 @@ func (rp *rulesPlan) planNowMessage(snap laneSnapshot, conv ConversationView, st
 		until := time.Time{}
 		if !row.undecodable {
 			until = rp.now.Add(TransientBackoffBase)
+			rp.openUnits = append(rp.openUnits, m.ID)
 		}
 		rp.nowWait(st, WaitNowUnreadable, row.detail(), until, m.ID)
 	case read && row.state == afterClosed && isDerivedOf(row.op, m) && row.op.Status != StatusClosed:
 		// Open by its own row, though the open list missed it: read again
 		// shortly.
+		rp.openUnits = append(rp.openUnits, m.ID)
 		rp.nowWait(st, WaitNowUnreadable, "the derived interrupt is open but was not listed", rp.now.Add(TransientBackoffBase), m.ID)
 	case read && row.state == afterClosed && isDerivedOf(row.op, m):
 		rp.postUnit(st, nowDegradation(row.op.Outcome, true))
@@ -406,9 +432,13 @@ func (rp *rulesPlan) nowGeneration(m Op) int64 {
 
 // planUnitEntry finishes a lowered message st whose derived interrupt ist is
 // open and not closing: the unit waits as its first waiting op does, for
-// both ids, or is one control entry.
+// both ids, or is one control entry. Either way the unit is open
+// (openUnits), unless it may have run.
 func (rp *rulesPlan) planUnitEntry(st, ist *nowOpState) {
 	m, i := st.e.op, ist.e.op
+	if st.e.cur.MaybeDelivered == 0 && ist.e.cur.MaybeDelivered == 0 {
+		rp.openUnits = append(rp.openUnits, m.ID)
+	}
 	switch {
 	case ist.wait == WaitInFlight, st.wait == WaitInFlight:
 		w := ist
@@ -684,6 +714,10 @@ func (tp *takePlan) planUnit(rp rulesPlan, e entry, probe Probe, now time.Time) 
 		stale()
 	case probe.ContentBlock != "":
 		tp.waitEntry(e, WaitContentBlock, probe.ContentBlock, time.Time{})
+		if tp.unitBlocked == nil {
+			tp.unitBlocked = map[string]bool{}
+		}
+		tp.unitBlocked[m.ID] = true
 	case probe.Pending != "":
 		tp.waitEntry(e, WaitPendingInteraction, "", time.Time{})
 	case probe.Boundary != TriYes && probe.Boundary != TriNo:
@@ -782,11 +816,15 @@ func (l *ConversationLane) unitEffect(ctx context.Context, exec Executor, tb *ta
 		switch {
 		case nr.Delivery != nil:
 			ne.m, ne.mSent, ne.mPreCall = normalizeDelivery(nr.Delivery), true, ne.iPreCall
-			after := TurnAfter{Boundary: TriYes, Live: TriNo}
-			if ne.i.kind == resultSettled && ne.i.settled.Turn != "" {
-				after.Known = []string{ne.i.settled.Turn}
+			// Only a settled interrupt says no turn was live when the
+			// message went; otherwise the probe's evidence stands (D23).
+			if ne.i.kind == resultSettled {
+				after := TurnAfter{Boundary: TriYes, Live: TriNo}
+				if ne.i.settled.Turn != "" {
+					after.Known = []string{ne.i.settled.Turn}
+				}
+				ne.after = &after
 			}
-			ne.after = &after
 		case ne.i.kind == resultSettled:
 			// The command may have carried the message.
 			ne.m = unknownResult(errors.New("fused executor settled the interrupt but returned no delivery result"))
@@ -904,9 +942,11 @@ func (l *ConversationLane) doneNow(ctx context.Context, tb *takenBatch, ne nowEf
 }
 
 // releaseUnattempted releases a unit's message the effect did not send:
-// accepted, no lease, no retry gate and no failure counted, maybe_delivered
-// kept, last_error not_attempted with why. A cancel recorded while it was
-// in flight closes it canceled instead.
+// accepted, no lease, no retry gate and no failure counted, the Take's
+// attempt undone (an attempt counts a send, so the message's own transient
+// backoff never grows across units), maybe_delivered kept, last_error
+// not_attempted with why. A cancel recorded while it was in flight closes
+// it canceled instead.
 func releaseUnattempted(tb *takenBatch, cur Op, now time.Time, why string) Op {
 	by := "lane:" + tb.lease.Nonce
 	if cur.Cancel.Recorded() {
@@ -916,6 +956,9 @@ func releaseUnattempted(tb *takenBatch, cur Op, now time.Time, why string) Op {
 	next.Status = StatusAccepted
 	next.Lease = Lease{}
 	next.RetryAt = time.Time{}
+	if next.Attempt > next.MaybeDelivered {
+		next.Attempt--
+	}
 	next.LastError = lastError(lastErrorNotAttempted, errors.New(why))
 	next.Transitions = appendTransition(cur.Transitions, Transition{Status: StatusAccepted, At: now, By: by})
 	return next

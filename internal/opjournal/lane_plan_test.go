@@ -50,7 +50,7 @@ func snapOf(ops ...Op) laneSnapshot {
 		id := op.Causation
 		if isNowMessage(op) {
 			id, _ = NowInterruptID(s.prefix, op)
-		} else if !hasNowShape(op) {
+		} else if !hasNowShape(op, s.prefix) {
 			continue
 		}
 		if !s.openIDs[id] {

@@ -8,6 +8,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 // busyProbe is a running runtime with turn turn in progress.
@@ -195,8 +197,9 @@ func TestLaneNowReplaceOutcomes(t *testing.T) {
 			}
 			got := h.get(t, m.ID)
 			if got.Status != StatusAccepted || !got.RetryAt.IsZero() || got.Failures != 0 || got.MaybeDelivered != 0 ||
+				!got.Lease.IsZero() || got.Attempt != 0 ||
 				!strings.HasPrefix(got.LastError, lastErrorNotAttempted+": ") || !strings.Contains(got.LastError, tc.why) {
-				t.Fatalf("message %s retry %s failures %d maybe %d last_error %q", got.Status, got.RetryAt, got.Failures, got.MaybeDelivered, got.LastError)
+				t.Fatalf("message %s lease %+v attempt %d retry %s failures %d maybe %d last_error %q", got.Status, got.Lease, got.Attempt, got.RetryAt, got.Failures, got.MaybeDelivered, got.LastError)
 			}
 			if tc.arm == "" {
 				// The unit waits out the interrupt's backoff, holding the
@@ -668,5 +671,164 @@ func TestLaneNowText(t *testing.T) {
 		}
 		i := h.get(t, nowID(t, m))
 		assertNoIdentifiers(t, d.Text, []Op{h.get(t, m.ID), i}, d.Key)
+	}
+}
+
+// U-ORDER across a failed read (N3): a lowered message whose producer after
+// cannot be read on a later pass still forms its unit, so content that
+// arrived after it is never taken while the unit is open, and the unit's
+// interrupt never cuts a turn that content started.
+func TestLaneNowUOrderAcrossAnAfterRead(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	x := h.propose(t, laneMsg("x", RoleNotice, "earlier notice"))
+	exec := newFakeExec(h.clk)
+	l := h.lane(t, "ctl")
+	mustPass(t, l, view(), exec)
+	wantOutcome(t, h.get(t, x.ID), ArmSucceeded, "")
+	h.clk.Advance(time.Millisecond)
+	m := h.propose(t, nowReq("now", func(r *Request) { r.After = x.ID }))
+	exec.probe.Available = false
+	if res := mustPass(t, l, view(), exec); !slices.Equal(res.Lowered, []string{m.ID}) {
+		t.Fatalf("lowering pass %+v", res)
+	}
+	h.clk.Advance(time.Millisecond)
+	n := h.propose(t, laneMsg("later", RolePrompt, "other work"))
+	fs.setFail(func(id string) bool { return id == x.ID })
+	exec.probe = idleProbe()
+	res := mustPass(t, l, view(), exec)
+	fs.setFail(nil)
+	if res.Took != TakeNow || !slices.Equal(res.Taken, []string{nowID(t, m), m.ID}) {
+		t.Fatalf("pass %+v, want the unit with its after unread", res)
+	}
+	if w := waitOf(res.Waits, n.ID); w.Reason != WaitBlocked {
+		t.Fatalf("later content wait %+v, want blocked by the unit", w)
+	}
+	if ds := exec.delivered(); len(ds) != 2 || ds[1].Ops[0].ID != m.ID {
+		t.Fatalf("deliveries %+v, want the message before the later content", ds)
+	}
+}
+
+// A fused command whose interrupt did not settle leaves the message's link
+// evidence the probe's: only a settled interrupt says no turn is live, so a
+// link the probe's evidence grades ambiguous stays ambiguous (D23).
+func TestLaneNowFusedUnsettledKeepsTheProbeEvidence(t *testing.T) {
+	h := newLaneHarness(t)
+	m := h.propose(t, nowReq("a", nowTarget(1, "t1")))
+	exec := &fusedExec{fakeExec: newFakeExec(h.clk)}
+	exec.probe = idleProbe()
+	exec.probe.Boundary, exec.probe.TurnLive = TriNo, TriUnknown
+	exec.probe.Caps.FusedNow = true
+	exec.now = func(NowCall) NowResult {
+		return NowResult{
+			Interrupt: Rejected{Arm: ArmSkipped, Reason: ReasonStale},
+			Delivery: Delivered{
+				Record:   DeliveryRecord{At: h.clk.Now(), Ack: AckDelivered},
+				Evidence: TurnEvidence{HasSource: true, Seen: []SeenTurn{{ID: "t3", Generation: 1}}, FirstRead: FirstTurnRead{Done: true, Current: "t3"}},
+				Via:      "fake",
+			},
+		}
+	}
+	mustPass(t, h.lane(t, "ctl"), view(), exec)
+	got := h.get(t, m.ID)
+	if r := got.Outcome.Result; got.Outcome.Arm != ArmSucceeded || r.TurnLink != LinkAmbiguous {
+		t.Fatalf("message %s link %s/%s, want ambiguous from the probe's evidence", got.Outcome.Arm, r.TurnLink, r.TurnBasis)
+	}
+}
+
+// A unit Take that never sent its message is no attempt of it: after the
+// unit's transient retries, the message's first real send is attempt 1 and
+// a transient miss of it backs off from the base.
+func TestLaneNowUnattemptedTakesAreNoAttempts(t *testing.T) {
+	h := newLaneHarness(t)
+	m := h.propose(t, nowReq("a"))
+	exec := newFakeExec(h.clk)
+	exec.probe = busyProbe("t1")
+	l := h.lane(t, "ctl")
+	exec.interrupt = func(InterruptCall) ControlResult {
+		return NotDelivered{Transient: true, Cause: errors.New("busy socket")}
+	}
+	for range 3 {
+		mustPass(t, l, view(), exec)
+		if got := h.get(t, m.ID); got.Attempt != 0 {
+			t.Fatalf("message attempt %d after an unsent unit", got.Attempt)
+		}
+		i := h.get(t, nowID(t, m))
+		h.clk.Advance(i.RetryAt.Sub(h.clk.Now()) + time.Millisecond)
+	}
+	exec.interrupt = settledT1(afterT1())
+	exec.deliver = func(Delivery) DeliveryResult { return NotDelivered{Transient: true, Cause: errors.New("pane busy")} }
+	mustPass(t, l, view(), exec)
+	got := h.get(t, m.ID)
+	if got.Attempt != 1 || got.Failures != 0 || !got.RetryAt.Equal(h.clk.Now().Add(TransientBackoffBase)) {
+		t.Fatalf("message attempt %d failures %d retry in %s, want attempt 1 backing off %s", got.Attempt, got.Failures, got.RetryAt.Sub(h.clk.Now()), TransientBackoffBase)
+	}
+}
+
+// A plain lane interrupt keyed <X>:interrupt with causation X runs as any
+// interrupt unless X is an op of this namespace that is a deliver-now
+// message: a causation that is no op id, a row that is no op, or an op of a
+// kind this build does not know leaves it plain. An op-shaped causation
+// with no row is an orphan, as before.
+func TestLaneNowPlainInterruptShapes(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		causation func(t *testing.T, h *laneHarness) string
+		runs      bool
+	}{
+		{"a mail bead", func(t *testing.T, h *laneHarness) string {
+			b, err := h.mem.Create(beads.Bead{Title: "a mail bead", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b.ID
+		}, true},
+		{"a producer's own id", func(*testing.T, *laneHarness) string { return "t3-msg-42" }, true},
+		{"an op-shaped bead that is no op", func(t *testing.T, h *laneHarness) string {
+			b, err := h.mem.Create(beads.Bead{ID: "gc-op-abcdefghijklmnopqrstuvwxyz", Title: "not an op", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			return b.ID
+		}, true},
+		{"an op of an unknown kind", func(t *testing.T, h *laneHarness) string {
+			req := laneMsg("future", RoleNotice, "x")
+			req.Conversation = "gc-2"
+			op, err := h.store.Preview(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b, err := EncodeOp(op)
+			if err != nil {
+				t.Fatal(err)
+			}
+			b.Metadata[keyKind] = "teleport"
+			if _, err := h.mem.Create(b); err != nil {
+				t.Fatal(err)
+			}
+			return op.ID
+		}, true},
+		{"an op id with no row", func(*testing.T, *laneHarness) string { return "gc-op-abcdefghijklmnopqrstuvwxy2" }, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			c := tc.causation(t, h)
+			req := laneInterrupt(c+":interrupt", "")
+			req.Causation = c
+			x := h.propose(t, req)
+			exec := newFakeExec(h.clk)
+			exec.probe = busyProbe("t1")
+			mustPass(t, h.lane(t, "ctl"), view(), exec)
+			got := h.get(t, x.ID)
+			if tc.runs {
+				if len(exec.interrupts) != 1 {
+					t.Fatalf("plain interrupt not run: %s %s{%s}", got.Status, got.Outcome.Arm, got.Outcome.Reason)
+				}
+				return
+			}
+			if len(exec.interrupts) != 0 {
+				t.Fatalf("orphan interrupt ran")
+			}
+			wantOutcome(t, got, ArmSkipped, ReasonNotNeeded)
+		})
 	}
 }

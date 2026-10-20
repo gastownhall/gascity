@@ -127,6 +127,11 @@ type rulesPlan struct {
 	nowOrder []string
 	// lowerings are the deliver-now messages this pass lowers.
 	lowerings []nowLowering
+	// openUnits are the lowered deliver-now messages whose derived
+	// interrupt is open, whatever either op waits on: while any is, no
+	// content is taken (U-ORDER), unless planTake admits it past the
+	// content block the unit waits on.
+	openUnits []string
 }
 
 func (rp *rulesPlan) waitOpDetail(op Op, r WaitReason, detail string, until time.Time) {
@@ -200,7 +205,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		}
 		// A deliver-now op's waits and placement are left to planNow
 		// (phase 2), which pairs it with its partner; its closes stand.
-		ns := rp.nowOp(op)
+		ns := rp.nowOp(op, snap.prefix)
 		waitOpDetail := func(op Op, r WaitReason, detail string, until time.Time) {
 			if ns != nil {
 				ns.wait, ns.detail, ns.until = r, detail, until
@@ -284,7 +289,10 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 			waitOp(op, WaitScopeFuture, time.Time{})
 			continue
 		}
-		if op.After != "" {
+		// A lowered deliver-now message passed its after at the lowering,
+		// and the target, closed, is immutable: it is not read again.
+		loweredNow := isNowMessage(op) && op.Status != StatusSubmitted
+		if op.After != "" && !loweredNow {
 			if snap.openIDs[op.After] {
 				waitOp(op, WaitAfterPending, time.Time{})
 				continue
@@ -507,6 +515,9 @@ type takePlan struct {
 	busy   bool
 	more   bool
 	next   time.Time
+	// unitBlocked are the open units (by message id) that wait on the
+	// probe's content block this pass.
+	unitBlocked map[string]bool
 }
 
 // takeSpec is the batch a Take writes.
@@ -572,9 +583,12 @@ func planTake(rp rulesPlan, probe Probe, conv ConversationView, now time.Time) (
 	control, path := tp.planControl(rp, probe, now)
 	// While a deliver-now unit is open no content is taken (U-ORDER): its
 	// message heads the content, and its interrupt must not cut a turn
-	// other content just started.
+	// other content just started. Content the probe admits past a content
+	// block (the 2026-10-19 ruling's drain reminder) still goes while every
+	// open unit waits on that block: the block, not the unit, holds the
+	// session, and the unit's interrupt runs only once it lifts.
 	var content *contentBatch
-	unitOpen := slices.ContainsFunc(rp.control, func(e entry) bool { return e.unit != nil })
+	unitOpen := slices.ContainsFunc(rp.openUnits, func(id string) bool { return !tp.unitBlocked[id] })
 	held := false
 	if unitOpen {
 		for _, e := range rp.content {

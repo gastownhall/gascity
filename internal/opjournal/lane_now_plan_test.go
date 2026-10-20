@@ -627,3 +627,217 @@ func TestPlanNowPostUnitContent(t *testing.T) {
 		t.Fatalf("take %+v, want the earlier steer alone", tp.take)
 	}
 }
+
+// U-ORDER (N3) holds every content candidate while a lowered message's
+// derived interrupt is open, whatever either op waits on, so no content
+// starts a turn the unit's interrupt would then cut; a lowered message's
+// own after is never read again (its target closed succeeded before the
+// lowering, and a closed op is immutable). An interrupt this build cannot
+// decode (quarantined) holds nothing: this build cannot tell whether the
+// unit is open, and holding the lane behind a row it cannot read would stall
+// all content until the message's start_by.
+func TestPlanNowUOrderHolds(t *testing.T) {
+	now := t0.Add(time.Second)
+	take := func(t *testing.T, snap laneSnapshot) takePlan {
+		t.Helper()
+		rp := planRules(snap, view(), now, "lane:ctl")
+		tp, err := planTake(rp, idleProbe(), view(), now)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tp
+	}
+	held := func(t *testing.T, tp takePlan, n Op) {
+		t.Helper()
+		if tp.take != nil && tp.take.kind == TakeContent {
+			t.Fatalf("took content %+v while the unit is open", tp.take.ops)
+		}
+		if w := waitOf(tp.waits, n.ID); w.Reason != WaitBlocked {
+			t.Fatalf("content %s wait %+v, want blocked by the open unit", n.ID, w)
+		}
+	}
+	t.Run("a lowered message's after is not read again", func(t *testing.T) {
+		p := newPlanner(t)
+		x := p.op(laneMsg("x", RoleNotice, "earlier"))
+		m, i := lowered(t, p.op(nowReq("a", func(r *Request) { r.After = x.ID })), now)
+		n := p.op(laneMsg("n", RolePrompt, "later"))
+		snap := snapOf(m, i, n)
+		snap.after[x.ID] = afterTarget{state: afterUnreadable, err: errFlakyRead}
+		tp := take(t, snap)
+		if tp.take == nil || tp.take.kind != TakeNow {
+			t.Fatalf("take %+v, want the unit: its after was satisfied at the lowering", tp.take)
+		}
+		held(t, tp, n)
+		// An unlowered message still waits on its after.
+		u := p.op(nowReq("b", func(r *Request) { r.After = x.ID }))
+		snap = snapOf(u)
+		snap.after[x.ID] = afterTarget{state: afterUnreadable, err: errFlakyRead}
+		rp := planRules(snap, view(), now, "lane:ctl")
+		if w := waitOf(rp.waits, u.ID); w.Reason != WaitAfterUnreadable || len(rp.lowerings) != 0 {
+			t.Fatalf("unlowered: wait %+v lowerings %v", w, rp.lowerings)
+		}
+	})
+	t.Run("the interrupt waits for a future scope", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		i.Scope.Generation = 5
+		n := p.op(laneMsg("n", RolePrompt, "later"))
+		tp := take(t, snapOf(m, i, n))
+		if tp.take != nil {
+			t.Fatalf("take %+v", tp.take)
+		}
+		held(t, tp, n)
+	})
+	t.Run("the interrupt is open but not listed", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		n := p.op(laneMsg("n", RolePrompt, "later"))
+		snap := snapOf(m, n)
+		snap.nowRows[i.ID] = nowRow{state: afterClosed, op: i}
+		rp := planRules(snap, view(), now, "lane:ctl")
+		// The message waits to read again shortly, never post-unit while its
+		// interrupt is open (N2).
+		if w := waitOf(rp.waits, m.ID); w.Reason != WaitNowUnreadable || !w.Until.Equal(now.Add(TransientBackoffBase)) {
+			t.Fatalf("message wait %+v", w)
+		}
+		if slices.ContainsFunc(rp.content, func(e entry) bool { return e.op.ID == m.ID }) {
+			t.Fatalf("message is content %+v while its interrupt is open", rp.content)
+		}
+		tp := take(t, snap)
+		if tp.take != nil {
+			t.Fatalf("take %+v", tp.take)
+		}
+		held(t, tp, n)
+	})
+	t.Run("the interrupt's read failed", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		n := p.op(laneMsg("n", RolePrompt, "later"))
+		snap := snapOf(m, n)
+		snap.nowRows[i.ID] = nowRow{state: afterUnreadable, err: errFlakyRead}
+		held(t, take(t, snap), n)
+	})
+	t.Run("a quarantined interrupt holds nothing", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		n := p.op(laneMsg("n", RolePrompt, "later"))
+		snap := snapOf(m, n)
+		snap.openIDs[i.ID] = true
+		snap.quarantined = []QuarantinedRow{{ID: i.ID}}
+		tp := take(t, snap)
+		if tp.take == nil || tp.take.kind != TakeContent || tp.take.ops[0].op.ID != n.ID {
+			t.Fatalf("take %+v, want the content", tp.take)
+		}
+	})
+	t.Run("an interrupt closing this pass holds nothing", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		i.StartBy = now.Add(-time.Millisecond)
+		n := p.op(laneMsg("n", RolePrompt, "later"))
+		rp := planRules(snapOf(m, i, n), view(), now, "lane:ctl")
+		if len(rp.openUnits) != 0 {
+			t.Fatalf("open units %v with the interrupt closing", rp.openUnits)
+		}
+	})
+}
+
+// The partner reads (mutation guards): an interrupt open by its own row but
+// not listed keeps its message off the content (above); a message open by
+// its row but not listed keeps its interrupt open, waiting to read again;
+// a quarantined message keeps its interrupt waiting, never plain; and a
+// foreign op open at the derived id sends the message post-unit, marked.
+func TestPlanNowPartnerReads(t *testing.T) {
+	now := t0.Add(time.Second)
+	t.Run("the message is open but not listed", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		snap := snapOf(i)
+		snap.nowRows[m.ID] = nowRow{state: afterClosed, op: m}
+		rp := planRules(snap, view(), now, "lane:ctl")
+		if w := waitOf(rp.waits, i.ID); w.Reason != WaitNowUnreadable || !w.Until.Equal(now.Add(TransientBackoffBase)) || len(rp.closes) != 0 || len(rp.control) != 0 {
+			t.Fatalf("wait %+v closes %v control %+v", w, closesOf(rp), rp.control)
+		}
+	})
+	t.Run("the message is quarantined", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		snap := snapOf(i)
+		snap.openIDs[m.ID] = true
+		snap.quarantined = []QuarantinedRow{{ID: m.ID}}
+		rp := planRules(snap, view(), now, "lane:ctl")
+		if w := waitOf(rp.waits, i.ID); w.Reason != WaitNowUnreadable || !w.Until.IsZero() || len(rp.closes) != 0 || len(rp.control) != 0 {
+			t.Fatalf("wait %+v closes %v control %+v", w, closesOf(rp), rp.control)
+		}
+	})
+	t.Run("a foreign op at the derived id", func(t *testing.T) {
+		p := newPlanner(t)
+		m, i := lowered(t, p.op(nowReq("a")), now)
+		foreign := i
+		foreign.Causation = ""
+		rp := planRules(snapOf(m, foreign), view(), now, "lane:ctl")
+		if len(rp.content) != 1 || rp.content[0].op.ID != m.ID || !rp.content[0].postUnit || rp.content[0].nowDegradation != DegradationInterruptFailed || !rp.content[0].candidate() {
+			t.Fatalf("content %+v, want the message post-unit, marked", rp.content)
+		}
+		if len(rp.openUnits) != 0 {
+			t.Fatalf("open units %v", rp.openUnits)
+		}
+	})
+}
+
+// A lane interrupt is a derived interrupt (or an orphan) only when its
+// causation is an op id of this store's namespace: any other causation, or
+// one whose row is no op or of a kind this build does not know, makes it
+// plain.
+func TestPlanNowShape(t *testing.T) {
+	for _, tc := range []struct {
+		causation string
+		want      bool
+	}{
+		{"gc-op-abcdefghijklmnopqrstuvwxyz", true},
+		{"gc-op-abcdefghijklmnopqrstuvwxy2", true},
+		{"other-op-abcdefghijklmnopqrstuvwxyz", false},
+		{"gc-12", false},
+		{"t3-msg-42", false},
+		{"gc-op-short", false},
+	} {
+		op := Op{Kind: KindInterrupt, Executor: ExecutorLane, Causation: tc.causation, ClientKey: tc.causation + ":interrupt"}
+		if got := hasNowShape(op, "gc"); got != tc.want {
+			t.Errorf("hasNowShape(causation %q) = %v, want %v", tc.causation, got, tc.want)
+		}
+	}
+}
+
+// The drain reminder the 2026-10-19 ruling admits past a content block is
+// taken while an open unit waits on that block; content the block holds
+// still waits, and the unit stays open.
+func TestPlanNowUOrderAdmitsPastTheBlock(t *testing.T) {
+	now := t0.Add(time.Second)
+	p := newPlanner(t)
+	m, i := lowered(t, p.op(nowReq("a")), now)
+	drain := p.op(laneMsg("drain", RoleNotice, "please run drain-ack", func(r *Request) { r.Producer.Principal = "gc:planner/drain" }))
+	other := p.op(laneMsg("other", RoleNotice, "x"))
+	rp := planRules(snapOf(m, i, drain, other), view(), now, "lane:ctl")
+	probe := idleProbe()
+	probe.ContentBlock = "draining"
+	probe.ContentAdmit = []ContentClass{{Role: RoleNotice, When: WhenBoundary, Principal: "gc:planner/drain"}}
+	tp, err := planTake(rp, probe, view(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.take == nil || tp.take.kind != TakeContent || len(tp.take.ops) != 1 || tp.take.ops[0].op.ID != drain.ID {
+		t.Fatalf("take %+v, want the admitted drain notice alone", tp.take)
+	}
+	for _, id := range []string{m.ID, i.ID, other.ID} {
+		if w := waitOf(tp.waits, id); w.Reason != WaitContentBlock {
+			t.Fatalf("%s wait %+v, want content_block", id, w)
+		}
+	}
+	// A unit waiting on anything else (here its backoff) still holds the
+	// admitted notice.
+	i.Status, i.Attempt, i.RetryAt = StatusAccepted, 1, now.Add(time.Second)
+	rp = planRules(snapOf(m, i, drain), view(), now, "lane:ctl")
+	tp, _ = planTake(rp, probe, view(), now)
+	if w := waitOf(tp.waits, drain.ID); tp.take != nil || w.Reason != WaitBlocked {
+		t.Fatalf("take %+v drain wait %+v with the unit in its backoff", tp.take, w)
+	}
+}

@@ -71,10 +71,11 @@ func TestLaneNowReplacementAfter(t *testing.T) {
 	acp := laneAtomicTurnCaps
 	t1Ended := runtime.EndedTurn{TurnID: "t1"}
 	reads := map[string]func(context.Context) (runtime.TurnHistory, error){
-		"idle":    laneReadOf(runtime.TurnHistory{Recent: []runtime.EndedTurn{t1Ended}}, nil),
-		"newer":   laneReadOf(runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t2"}, Recent: []runtime.EndedTurn{t1Ended}}, nil),
-		"lagging": laneReadOf(runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t1"}}, nil),
-		"error":   laneReadOf(runtime.TurnHistory{}, errors.New("transcript unreadable")),
+		"idle":          laneReadOf(runtime.TurnHistory{Recent: []runtime.EndedTurn{t1Ended}}, nil),
+		"newer":         laneReadOf(runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t2"}, Recent: []runtime.EndedTurn{t1Ended}}, nil),
+		"idle, t0 only": laneReadOf(runtime.TurnHistory{Recent: []runtime.EndedTurn{{TurnID: "t0"}}}, nil),
+		"lagging":       laneReadOf(runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t1"}}, nil),
+		"error":         laneReadOf(runtime.TurnHistory{}, errors.New("transcript unreadable")),
 	}
 	boundary := opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriNo, Known: []string{"t1"}}
 	newer := opjournal.TurnAfter{Boundary: opjournal.TriNo, Live: opjournal.TriYes, Turn: "t2", Known: []string{"t2", "t1"}}
@@ -91,6 +92,7 @@ func TestLaneNowReplacementAfter(t *testing.T) {
 		{name: "transcript, idle", caps: inferred, read: "idle", replaced: "t1", want: boundary},
 		{name: "transcript, newer turn", caps: inferred, read: "newer", replaced: "t1", want: newer},
 		{name: "transcript, lagging", caps: inferred, read: "lagging", replaced: "t1", want: boundary},
+		{name: "transcript, idle without the replaced turn", caps: inferred, read: "idle, t0 only", replaced: "t1", want: opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriNo, Known: []string{"t0", "t1"}}},
 		{name: "transcript, read fails", caps: inferred, read: "error", replaced: "t1", want: keystrokeUnread},
 		{name: "transcript without ends", caps: noEnds, read: "newer", replaced: "t1", want: keystrokeUnread},
 		{name: "acp, idle", caps: acp, transport: "acp", protocol: true, read: "idle", replaced: "t1", want: boundary},
@@ -203,6 +205,9 @@ func TestLaneNowReplacementRequest(t *testing.T) {
 // ErrReplacementNotPrepared to Unknown.
 func TestLaneNowReplacementResultMapping(t *testing.T) {
 	notPrepared := fmt.Errorf("x: %w", session.ErrReplacementNotPrepared)
+	// A protocol interrupt whose dispatch failed may have reached the
+	// runtime (session.InterruptTurnOn).
+	maybeSent := fmt.Errorf("x: %w: %w", session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable)
 	e := replacementExec(t, worker.TurnCapabilities{}, "", false, nil)
 	for _, tc := range []struct {
 		name string
@@ -219,6 +224,7 @@ func TestLaneNowReplacementResultMapping(t *testing.T) {
 		{"not current", &runtime.TurnNotCurrentError{Session: "s", TurnID: "t1"}, opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}},
 		{"not ended", session.TurnNotEndedError("turn", errors.New("busy")), opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonNoBoundary, Turn: "t1"}},
 		{"unavailable", runtime.ErrRuntimeUnavailable, opjournal.NotDelivered{Transient: true, Unavailable: true, Cause: runtime.ErrRuntimeUnavailable}},
+		{"maybe sent", maybeSent, opjournal.Unknown{Cause: maybeSent}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := laneInterruptResult(context.Background(), worker.InterruptResult{}, tc.err, "t1", false)
@@ -235,10 +241,14 @@ func TestLaneNowReplacementResultMapping(t *testing.T) {
 		name    string
 		err     error
 		reason  string
+		turn    string // the interrupt's recorded turn
 		keepRef bool
 	}{
-		{"not prepared keeps the ref", notPrepared, opjournal.ReasonReplacementNotPrepared, true},
-		{"refusal restores it", fmt.Errorf("x: %w", session.ErrTurnInterruptUnsupported), opjournal.ReasonUnsupported, false},
+		{"not prepared keeps the ref", notPrepared, opjournal.ReasonReplacementNotPrepared, "t1", true},
+		// A step that may have run is never sent again (N5): the message
+		// waits for the boundary.
+		{"maybe sent keeps the ref", maybeSent, opjournal.ReasonAmbiguousDelivery, "", true},
+		{"refusal restores it", fmt.Errorf("x: %w", session.ErrTurnInterruptUnsupported), opjournal.ReasonUnsupported, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newNowCase(t)
@@ -246,11 +256,7 @@ func TestLaneNowReplacementResultMapping(t *testing.T) {
 			m := c.f.propose(t, c.st, c.f.nowMsg())
 			c.pass(t)
 			iid := laneNowID(t, c.st, m)
-			turn := ""
-			if tc.keepRef {
-				turn = "t1"
-			}
-			assertOutcome(t, c.f.get(t, c.st, iid), opjournal.ArmFailed, tc.reason, turn, "")
+			assertOutcome(t, c.f.get(t, c.st, iid), opjournal.ArmFailed, tc.reason, tc.turn, "")
 			ref := c.ints.current(c.f.id)
 			if kept := ref == (opjournal.InterruptRef{Op: iid, Turn: "t1"}); kept != tc.keepRef {
 				t.Fatalf("ref %+v, want kept %v", ref, tc.keepRef)

@@ -118,7 +118,10 @@
 // effective generation, and now_turn, no after), M moved to accepted. A pass
 // that lowers reads again before any Take. While both are open they are one
 // unit: a control entry in M's arrival order, taken [I, M] under one lease
-// (TakeNow), and while a unit is open no content is taken (U-ORDER). The
+// (TakeNow), and while a unit is open no content is taken (U-ORDER),
+// whatever either op waits on, but content the probe admits past a content
+// block every open unit waits on; an interrupt this build cannot decode
+// holds nothing. A lowered M's after is not read again. The
 // unit's effect is direct when the probe shows no turn to replace (I closes
 // skipped{stale} with no call and M goes at once); otherwise the
 // interrupt's replacement step (InterruptCall.ForReplacement), then M as a
