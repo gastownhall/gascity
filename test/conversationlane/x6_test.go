@@ -29,17 +29,16 @@ import (
 // x6Principals are the fan-in producers.
 var x6Principals = []string{"gc:x6-p0", "gc:x6-p1", "gc:x6-p2", "gc:x6-p3", "gc:x6-p4"}
 
-// x6SteadyP99 and x6SteadyMax bound the steady phase's latency. A notice
-// that arrives just after a Take waits for that batch's effect, its link
-// wait (opjournal.DefaultLinkWait), the runtime's next boundary (the 3 s
-// quiescence after the delivery) and the next pass: measured p99 3.4 s
-// (max 3.6 s) alone on an executor and 5.1 s (max 5.3 s) beside the other
-// evidence shards, so DES-O1's 5 s p99 holds only on an unloaded host even
-// at 20 notices a second, and the bound keeps margin over the loaded
-// measurement.
+// x6SteadyP99 and x6SteadyMax bound the steady phase's latency: DES-O1's
+// p99 <= 5 s, and a max two seconds over it. A notice that arrives just
+// after a Take waits for that batch's effect, its link wait
+// (opjournal.DefaultLinkWait), the runtime's next boundary (the 3 s
+// quiescence after the delivery) and the next pass: measured p99 3.5 s (max
+// 3.7 s) with the phase alone on its host, which is why the phases run
+// sequentially and the package runs X6 before its parallel tests.
 const (
-	x6SteadyP99 = 6 * time.Second
-	x6SteadyMax = 8 * time.Second
+	x6SteadyP99 = 5 * time.Second
+	x6SteadyMax = 7 * time.Second
 )
 
 // x6MinGap is the least spacing of two injections: the quiescence window,
@@ -162,9 +161,10 @@ func (c *laneCity) injectionSizes(phase string) []int {
 	return sizes
 }
 
+// TestX6FanIn runs its phases one after another, never in parallel: the
+// steady phase measures latency, which a city beside it would load.
 func TestX6FanIn(t *testing.T) {
 	t.Run("burst", func(t *testing.T) {
-		parallelCity(t)
 		c := newLaneCity(t, armSQLite, activityLastNudge)
 		c.startController("")
 		// Busy for long enough that the whole burst is proposed before the
@@ -177,7 +177,6 @@ func TestX6FanIn(t *testing.T) {
 		}
 	})
 	t.Run("steady", func(t *testing.T) {
-		parallelCity(t)
 		c := newLaneCity(t, armSQLite, activityLastNudge)
 		c.startController("")
 		ids := c.x6Produce(400, "steady", 50*time.Millisecond, true)
@@ -192,7 +191,6 @@ func TestX6FanIn(t *testing.T) {
 		if os.Getenv("GC_LANE_X6_FULL") != "1" {
 			t.Skip("DES-O1's literal X6 line (5,000 notices in 60 s) is a manual measurement: --test_env=GC_LANE_X6_FULL=1")
 		}
-		parallelCity(t)
 		c := newLaneCity(t, armSQLite, activityLastNudge)
 		c.startController("")
 		ids := c.x6Produce(5000, "full", 12*time.Millisecond, true)

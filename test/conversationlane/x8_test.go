@@ -10,6 +10,8 @@ package conversationlane_test
 // alternate in one goroutine, so commit order is created_at order:
 // CompareOrder's interim key is the producer's created_at, which commit skew
 // could reorder for truly concurrent producers until arrival_seq (OJ-10a).
+// The stream goes on until the restarted host has taken x8AfterRestart of
+// its ops live.
 
 import (
 	"fmt"
@@ -26,6 +28,9 @@ const (
 	x8ProducerA = "gc:x8-a"
 	x8OpsA      = 160
 	x8OpsB      = 40
+	// x8AfterRestart is how many ops at least the stream proposes after the
+	// restarted controller answers.
+	x8AfterRestart = 40
 )
 
 // laneOrder sorts ops as the lane delivers notices: CompareOrder, then each
@@ -95,15 +100,39 @@ func runX8(t *testing.T, failpoint string) {
 		restarted <- restart{p, err}
 	}()
 
+	// The stream runs past its minimum until x8AfterRestart ops followed
+	// the restarted controller's coming up, so the host restarts mid-stream
+	// and takes the rest of the stream live. The SQLite handle is held
+	// across the stream without blocking the restart's own store reads.
 	var ids []string
 	a, b := 0, 0
+	var r restart
+	var upAt time.Time
+	afterUp := 0
+	deadline := time.Now().Add(3 * time.Minute)
 	c.mustStore(func(_ beads.Store, st *opjournal.Store) error {
-		for a+b < x8OpsA+x8OpsB {
+		for a+b < x8OpsA+x8OpsB || afterUp < x8AfterRestart {
+			if upAt.IsZero() {
+				select {
+				case r = <-restarted:
+					if r.err != nil {
+						return fmt.Errorf("restarting the controller: %w", r.err)
+					}
+					upAt = time.Now()
+				default:
+				}
+			}
+			if time.Now().After(deadline) {
+				return fmt.Errorf("after %d ops the controller had not died at %s and come back up (up at %v)", a+b, failpoint, upAt)
+			}
+			if !upAt.IsZero() {
+				afterUp++
+			}
 			if (a+b)%5 == 4 {
 				key := fmt.Sprintf("x8-b-%d", b)
-				r := c.nudge("queue", key, fmt.Sprintf("x8 b %03d", b))
-				if r.code() != 0 {
-					return fmt.Errorf("nudge %s = %d: %s", key, r.code(), r.stderr)
+				res := c.nudge("queue", key, fmt.Sprintf("x8 b %03d", b))
+				if res.code() != 0 {
+					return fmt.Errorf("nudge %s = %d: %s", key, res.code(), res.stderr)
 				}
 				ids = append(ids, c.cliOpID(key))
 				b++
@@ -123,15 +152,9 @@ func runX8(t *testing.T, failpoint string) {
 		}
 		return nil
 	})
-
-	var r restart
-	select {
-	case r = <-restarted:
-	case <-time.After(2 * time.Minute):
-		t.Fatalf("the controller never died at %s:\n%s", failpoint, readFile(killed.log))
-	}
-	if r.err != nil {
-		t.Fatalf("restarting the controller: %v", r.err)
+	t.Logf("x8: %d ops, the last %d after the restarted controller came up", len(ids), afterUp)
+	if upAt.IsZero() || afterUp < x8AfterRestart {
+		t.Fatalf("%d ops followed the restart, want at least %d", afterUp, x8AfterRestart)
 	}
 	c.ctl = r.p
 	assertKilledByFailpoint(t, killed.cmd.ProcessState, readFile(killed.log), failpoint)

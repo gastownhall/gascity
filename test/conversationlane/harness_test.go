@@ -102,9 +102,13 @@ type laneCity struct {
 	// read once the controller started it.
 	conv  string
 	token string
-	// mu serializes the test's own store handles: embedded Dolt serves one
-	// open handle per process at a time.
+	// mu guards logs, procs, conv and token.
 	mu sync.Mutex
+	// doltMu serializes the test's own store handles on the Dolt arm:
+	// embedded Dolt serves one open handle per process at a time. SQLite
+	// handles run concurrently, so a stream may hold one while a restart
+	// reads the store.
+	doltMu sync.Mutex
 }
 
 // ctlProc is one controller process the test started.
@@ -338,8 +342,15 @@ func (c *laneCity) launchController(failpoint string) (*ctlProc, error) {
 		reply, err := c.socket("ping")
 		pinged := err == nil && reply == fmt.Sprint(cmd.Process.Pid)
 		box := c.boxUp()
-		active, readErr := c.sessionActive()
-		if pinged && box && active {
+		// The store is read only once the controller answers: by then its
+		// boot opened (and on a fresh city created) the sessions binding,
+		// which a read racing that boot must never do itself.
+		var active bool
+		var readErr error
+		if pinged && box {
+			active, readErr = c.sessionActive()
+		}
+		if active {
 			return p, nil
 		}
 		if time.Now().After(deadline) {
@@ -466,8 +477,10 @@ func (c *laneCity) boxUp() bool {
 // withStore runs fn over a fresh handle on the sessions store and the op
 // store over it, closed after.
 func (c *laneCity) withStore(fn func(raw beads.Store, st *opjournal.Store) error) error {
-	c.mu.Lock()
-	defer c.mu.Unlock()
+	if c.arm == armDolt {
+		c.doltMu.Lock()
+		defer c.doltMu.Unlock()
+	}
 	var raw beads.Store
 	var closeFn func() error
 	switch c.arm {
@@ -481,6 +494,10 @@ func (c *laneCity) withStore(fn func(raw beads.Store, st *opjournal.Store) error
 		graph, err := sqlitebinding.GraphPath(filepath.Join(c.dir, ".gc", "lanes"))
 		if err != nil {
 			return err
+		}
+		// The controller creates the binding; a handle here must never.
+		if _, err := os.Stat(graph); err != nil {
+			return fmt.Errorf("the SQLite binding %s: %w", graph, err)
 		}
 		s, err := beads.OpenSQLiteStore(filepath.Dir(graph), beads.WithSQLiteStoreIDPrefix(laneIDPrefix))
 		if err != nil {
@@ -521,12 +538,27 @@ func (c *laneCity) sessionActive() (bool, error) {
 		for _, b := range rows {
 			state := b.Metadata["state"]
 			if b.Metadata["session_name"] == sessionName && (state == "active" || state == "awake") && b.Status != "closed" {
-				c.conv, c.token, active = b.ID, b.Metadata["instance_token"], true
+				c.setSession(b.ID, b.Metadata["instance_token"])
+				active = true
 			}
 		}
 		return nil
 	})
 	return active, err
+}
+
+// setSession records the named session's id and token. A restart that
+// finds them unchanged writes nothing, so a stream that reads them while a
+// goroutine restarts the controller does not race it.
+func (c *laneCity) setSession(conv, token string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.conv != conv {
+		c.conv = conv
+	}
+	if c.token != token {
+		c.token = token
+	}
 }
 
 // get reads op id.

@@ -30,6 +30,11 @@ func TestCLIInlinePassControllerDown(t *testing.T) {
 		if r.code() != 0 || r.stdout != "Nudged "+sessionName+"\n" {
 			t.Fatalf("nudge = %d, %q; stderr %s", r.code(), r.stdout, r.stderr)
 		}
+		// The city's own config warnings aside, the nudge prints nothing:
+		// the ring is silent for a delivered op.
+		if strings.Contains(r.stderr, "gc session nudge") {
+			t.Fatalf("stderr %q, want no nudge warning on a delivered nudge", r.stderr)
+		}
 		op := c.get(c.cliOpID("inline-1"))
 		if op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != "live" {
 			t.Fatalf("op %+v, want succeeded via live", op)

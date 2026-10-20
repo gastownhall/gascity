@@ -31,6 +31,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"slices"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -215,7 +216,7 @@ func deliverSessionNudgeLane(target nudgeTarget, store beads.Store, sp runtime.P
 		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Errorf("reading session %s: %w", target.sessionID, err)), "", key)
 		return true, 1
 	case absent:
-		fmt.Fprintf(stderr, "gc session nudge: session %s has no session row\n", target.sessionID) //nolint:errcheck // best-effort stderr
+		n.refusal().refuse(cliOpCodeUnavailable, cliLaneUnavailable(fmt.Sprintf("session %s has no session row", target.sessionID)), "", key)
 		return true, 1
 	}
 	serves, err := laneServesSession(sp, st, target.sessionName, view)
@@ -335,9 +336,13 @@ func (n *cliLaneNudge) report(id string, replayed bool, res opjournal.PassResult
 		return n.writeQueued(id, replayed, " in the conversation lane")
 	}
 	if passErr != nil {
-		if op.Status == opjournal.StatusExecuting {
+		switch {
+		case op.Status == opjournal.StatusClosed:
+		case slices.Contains(res.Taken, id):
 			n.warnf("recording the delivery of op %s failed (%v); the controller takes it again after its lease lapses, and it may repeat (recorded on the op)", id, passErr)
-		} else if op.Status != opjournal.StatusClosed {
+		case op.Status == opjournal.StatusExecuting:
+			n.warnf("the inline delivery did not run (%v); another lane host holds it, and op %s is taken again if that delivery does not finish", passErr, id)
+		default:
 			n.warnf("the inline delivery did not run (%v); op %s waits for the controller", passErr, id)
 		}
 	}
@@ -367,7 +372,7 @@ func (n *cliLaneNudge) ring(id string) {
 	if err != nil {
 		why = err.Error()
 	}
-	n.warnf("no controller lane host answered (%s); op %s is delivered once one runs", why, id)
+	n.warnf("no controller lane host answered (%s); op %s waits in the conversation lane for a lane host serving the session", why, id)
 }
 
 func (n *cliLaneNudge) writeDelivered(id string, replayed bool) int {
@@ -431,8 +436,11 @@ func cliLaneQueuedNote(op opjournal.Op, res opjournal.PassResult) string {
 		case opjournal.WaitContentHold:
 			return " (input to the session is on hold; the controller delivers it once the hold is lifted)"
 		case opjournal.WaitNotLive:
-			return " (this process cannot type into the session; the controller delivers it)"
+			return " (this process cannot type into the session; the session's lane host delivers it)"
 		case opjournal.WaitInFlight:
+			if op.Status == opjournal.StatusExecuting {
+				return " (a delivery of this nudge is in flight; if it does not finish, the controller delivers it again after its lease lapses)"
+			}
 			return " (another delivery to the session is in flight; the controller delivers this one after it)"
 		case opjournal.WaitUnavailable:
 			return " (the session's runtime did not answer; the controller delivers it once it does)"

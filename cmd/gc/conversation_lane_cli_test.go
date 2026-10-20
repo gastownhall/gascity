@@ -451,7 +451,7 @@ func TestSessionNudgeLaneRefusesBeforeResolving(t *testing.T) {
 			t.Fatalf("preflight = %v, output %q", err, out.String())
 		}
 	})
-	t.Run("the resolver runs the lane preflight first when message is listed", func(t *testing.T) {
+	t.Run("cliLaneExecutesMessage reads [ops] authoritative", func(t *testing.T) {
 		cfg := &config.City{}
 		cfg.Ops.Authoritative = []string{"message"}
 		if !cliLaneExecutesMessage(cfg) || cliLaneExecutesMessage(&config.City{}) || cliLaneExecutesMessage(nil) {
@@ -552,7 +552,7 @@ func TestSessionNudgeLaneACPIsNotLiveFromTheCLI(t *testing.T) {
 	for _, call := range c.sp.Calls[calls:] {
 		t.Fatalf("runtime call %+v from the CLI into an ACP session", call)
 	}
-	if !strings.Contains(stdout, "(this process cannot type into the session; the controller delivers it)") {
+	if !strings.Contains(stdout, "(this process cannot type into the session; the session's lane host delivers it)") {
 		t.Fatalf("stdout %q", stdout)
 	}
 	if row := c.row(t); row.Metadata["wake_request"] != "" {
@@ -764,4 +764,241 @@ func TestCmdSessionNudgeLaneRefusesBeforeMaterializing(t *testing.T) {
 	if n := cliOpSessionRows(t, dir); n != 0 {
 		t.Fatalf("session rows = %d, want none: the refusal comes before the resolution", n)
 	}
+}
+
+// laneGetFailStore fails the next fails Gets of bead failID with failErr (a
+// store hiccup when nil): a session or runtime row the in-run checks cannot
+// read, and that a later read, the legacy path's included, would.
+type laneGetFailStore struct {
+	laneTestStore
+	failID  string
+	failErr error
+	fails   int
+}
+
+func (s *laneGetFailStore) Get(id string) (beads.Bead, error) {
+	if s.fails > 0 && id == s.failID {
+		s.fails--
+		if s.failErr != nil {
+			return beads.Bead{}, s.failErr
+		}
+		return beads.Bead{}, errors.New("store hiccup")
+	}
+	return s.laneTestStore.Get(id)
+}
+
+// nudgeOver runs gc session nudge's delivery over store instead of the
+// fixture's.
+func (c *cliLaneCity) nudgeOver(store beads.Store, mode nudgeDeliveryMode, key string, asJSON bool, msg string) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeKeyed(c.target, store, c.sp, msg, mode, key, asJSON, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+// Every refusal after the target resolved exits 1 with the failure envelope
+// and writes nothing: no op, no queue item, no delivery. None falls back to
+// the legacy path.
+func TestSessionNudgeLaneRefusesInRun(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, c *cliLaneCity, store *laneGetFailStore) beads.Store
+		text  string
+	}{
+		{name: "the sessions store cannot open as a lane store", setup: func(_ *testing.T, _ *cliLaneCity, store *laneGetFailStore) beads.Store {
+			return noBatchStore{store}
+		}, text: "op journal cannot record this request (opening lane store"},
+		{name: "the session row cannot be read", setup: func(_ *testing.T, c *cliLaneCity, store *laneGetFailStore) beads.Store {
+			store.failID, store.fails = c.id, 1
+			return store
+		}, text: "op journal cannot record this request (reading session "},
+		{name: "the session row is absent", setup: func(_ *testing.T, c *cliLaneCity, store *laneGetFailStore) beads.Store {
+			// Both of the view's reads miss the row.
+			store.failID, store.failErr, store.fails = c.id, beads.ErrNotFound, 2
+			return store
+		}, text: "has no session row"},
+		{name: "the runtime row cannot be read", setup: func(t *testing.T, c *cliLaneCity, store *laneGetFailStore) beads.Store {
+			c.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
+			id, err := opjournal.RuntimeRowID("gc", c.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			store.failID, store.fails = id, 1
+			return store
+		}, text: "runtime row"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &laneGetFailStore{laneTestStore: newLaneTestStore()}
+			c := newCLILaneCityOver(t, store)
+			prevPoller := startNudgePoller
+			startNudgePoller = func(_, _, _ string) error { return nil }
+			t.Cleanup(func() { startNudgePoller = prevPoller })
+			use := tc.setup(t, c, store)
+			calls := len(c.nudges())
+			code, stdout, stderr := c.nudgeOver(use, nudgeDeliveryWaitIdle, "k-in-run", true, cliLaneTestMessage)
+			if code != 1 {
+				t.Fatalf("nudge = %d, stdout %q, stderr %q; want refused", code, stdout, stderr)
+			}
+			if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeUnavailable {
+				t.Fatalf("failure code %q, want %s", got, cliOpCodeUnavailable)
+			}
+			if !strings.Contains(stderr, tc.text) || !strings.Contains(stderr, "(key k-in-run)") {
+				t.Fatalf("stderr %q, want %q and the key", stderr, tc.text)
+			}
+			store.fails = 0
+			if ops := c.ops(t); len(ops) != 0 {
+				t.Fatalf("op rows %+v, want none", ops)
+			}
+			if n := c.queuedItems(t); n != 0 {
+				t.Fatalf("%d queue items, want none", n)
+			}
+			if n := len(c.nudges()); n != calls {
+				t.Fatalf("%d deliveries, want none", n-calls)
+			}
+			if len(c.rings) != 0 {
+				t.Fatalf("rings %v after a refusal", c.rings)
+			}
+		})
+	}
+}
+
+// A nudge whose op the pass closes without success is a failure: exit 1
+// and op_failed, never "Nudged".
+func TestSessionNudgeLaneClosedSessionFails(t *testing.T) {
+	for _, asJSON := range []bool{false, true} {
+		c := newCLILaneCity(t)
+		if err := c.store.Close(c.id); err != nil {
+			t.Fatalf("closing the session row: %v", err)
+		}
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-closed", asJSON, cliLaneTestMessage)
+		if code != 1 || strings.Contains(stdout, "Nudged") {
+			t.Fatalf("nudge = %d, stdout %q; stderr %q; want a failure", code, stdout, stderr)
+		}
+		op := c.only(t)
+		if op.Status != opjournal.StatusClosed || op.Outcome.Arm == opjournal.ArmSucceeded {
+			t.Fatalf("op %+v, want closed without success", op)
+		}
+		if !strings.Contains(stderr, "op "+op.ID+" closed ") {
+			t.Fatalf("stderr %q", stderr)
+		}
+		if asJSON {
+			if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeFailed {
+				t.Fatalf("failure code %q, want %s", got, cliOpCodeFailed)
+			}
+		}
+		if len(c.nudges()) != 0 {
+			t.Fatalf("deliveries %+v into a closed session", c.nudges())
+		}
+	}
+}
+
+// The ring stays silent for an op this run closed, whatever answers it.
+func TestSessionNudgeLaneRingSilentForAClosedOp(t *testing.T) {
+	c := newCLILaneCity(t)
+	c.ringReply = "no-host"
+	code, _, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+	if code != 0 || stderr != "" {
+		t.Fatalf("nudge = %d, stderr %q; want delivered with no warning", code, stderr)
+	}
+	if len(c.rings) != 1 {
+		t.Fatalf("rings %v, want one", c.rings)
+	}
+}
+
+// Each wait the pass names has its note; an unnamed op or wait has none.
+func TestCLILaneQueuedNote(t *testing.T) {
+	ifNeeded := opjournal.Op{ID: "gc-op-1", Status: opjournal.StatusSubmitted, Policy: cliLaneNudgePolicy(nudgeDeliveryWaitIdle)}
+	liveOnly := opjournal.Op{ID: "gc-op-1", Status: opjournal.StatusSubmitted, Policy: cliLaneNudgePolicy(nudgeDeliveryQueue)}
+	executing := opjournal.Op{ID: "gc-op-1", Status: opjournal.StatusExecuting, Policy: cliLaneNudgePolicy(nudgeDeliveryWaitIdle)}
+	wait := func(reason opjournal.WaitReason) opjournal.PassResult {
+		return opjournal.PassResult{Waits: []opjournal.OpWait{{ID: "gc-op-2", Reason: opjournal.WaitBusy}, {ID: "gc-op-1", Reason: reason, Detail: "kill_pending"}}}
+	}
+	for _, tc := range []struct {
+		name string
+		op   opjournal.Op
+		res  opjournal.PassResult
+		want string
+	}{
+		{name: "busy", op: ifNeeded, res: wait(opjournal.WaitBusy), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
+		{name: "boundary unknown", op: ifNeeded, res: wait(opjournal.WaitBoundaryUnknown), want: " (the session is mid-turn; the controller delivers it at the next idle boundary)"},
+		{name: "pending interaction", op: ifNeeded, res: wait(opjournal.WaitPendingInteraction), want: " (the session is waiting on a permission prompt; the controller delivers it after the prompt is answered)"},
+		{name: "not running, if_needed", op: ifNeeded, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
+		{name: "dormant, if_needed", op: ifNeeded, res: wait(opjournal.WaitDormant), want: " (the session is not running; the controller wakes it to deliver the nudge)"},
+		{name: "not running, live_only", op: liveOnly, res: wait(opjournal.WaitNotRunning), want: " (the session is not running; the nudge is delivered the next time it runs)"},
+		{name: "no session, live_only", op: liveOnly, res: wait(opjournal.WaitNoSession), want: " (the session is not running; the nudge is delivered the next time it runs)"},
+		{name: "content block", op: ifNeeded, res: wait(opjournal.WaitContentBlock), want: " (the session cannot take input now: kill_pending; the controller delivers it once that clears)"},
+		{name: "content hold", op: ifNeeded, res: wait(opjournal.WaitContentHold), want: " (input to the session is on hold; the controller delivers it once the hold is lifted)"},
+		{name: "not live", op: ifNeeded, res: wait(opjournal.WaitNotLive), want: " (this process cannot type into the session; the session's lane host delivers it)"},
+		{name: "another delivery in flight", op: ifNeeded, res: wait(opjournal.WaitInFlight), want: " (another delivery to the session is in flight; the controller delivers this one after it)"},
+		{name: "this op in flight", op: executing, res: wait(opjournal.WaitInFlight), want: " (a delivery of this nudge is in flight; if it does not finish, the controller delivers it again after its lease lapses)"},
+		{name: "unavailable", op: ifNeeded, res: wait(opjournal.WaitUnavailable), want: " (the session's runtime did not answer; the controller delivers it once it does)"},
+		{name: "incarnation", op: ifNeeded, res: wait(opjournal.WaitIncarnation), want: " (the session's runtime is being replaced; the controller delivers it to the new one)"},
+		{name: "after earlier input", op: ifNeeded, res: wait(opjournal.WaitAfterPending), want: " (earlier input to the session goes first; the controller delivers it after that)"},
+		{name: "a wait it does not name", op: ifNeeded, res: wait(opjournal.WaitReason("other")), want: ""},
+		{name: "no wait for the op", op: ifNeeded, res: opjournal.PassResult{Waits: []opjournal.OpWait{{ID: "gc-op-2", Reason: opjournal.WaitBusy}}}, want: ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := cliLaneQueuedNote(tc.op, tc.res); got != tc.want {
+				t.Fatalf("note %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
+// The notes reach the output from a real pass: a permission prompt and a
+// stopped runtime.
+func TestSessionNudgeLaneQueuedNotesFromThePass(t *testing.T) {
+	t.Run("pending interaction", func(t *testing.T) {
+		c := newCLILaneCity(t)
+		c.sp.SetPendingInteraction(c.name, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval"})
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+		if code != 0 || !strings.Contains(stdout, "(the session is waiting on a permission prompt;") {
+			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
+		}
+	})
+	t.Run("not running, if_needed", func(t *testing.T) {
+		c := newCLILaneCity(t)
+		if err := c.sp.Stop(c.name); err != nil {
+			t.Fatal(err)
+		}
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "", false, cliLaneTestMessage)
+		if code != 0 || !strings.Contains(stdout, "(the session is not running; the controller wakes it to deliver the nudge)") {
+			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
+		}
+	})
+}
+
+// A pass that fails before its Take, over an op another lane holds, does
+// not claim this run's delivery failed to record; a rerun while that lane
+// holds the op notes the op's own delivery in flight.
+func TestSessionNudgeLaneHeldOpAttribution(t *testing.T) {
+	withLaneFailpoint(t, "cli:take", true)
+	store := &laneFailStore{laneTestStore: newLaneTestStore()}
+	c := newCLILaneCityOver(t, store)
+	if !crashed(func() { c.nudge(nudgeDeliveryWaitIdle, "k-held", false, cliLaneTestMessage) }) {
+		t.Fatal("the take failpoint did not fire")
+	}
+	if op := c.only(t); op.Status != opjournal.StatusExecuting {
+		t.Fatalf("op %s, want executing under the first run's lease", op.Status)
+	}
+	withLaneFailpoint(t, "", false)
+	t.Run("a pass error before the take", func(t *testing.T) {
+		store.failList = true
+		defer func() { store.failList = false }()
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-held", false, cliLaneTestMessage)
+		if code != 0 || !strings.HasPrefix(stdout, "Queued nudge for ") {
+			t.Fatalf("nudge = %d, %q; %s", code, stdout, stderr)
+		}
+		if strings.Contains(stderr, "recording the delivery") || strings.Contains(stderr, "may repeat") {
+			t.Fatalf("stderr %q blames this run for a Take it never made", stderr)
+		}
+		if !strings.Contains(stderr, "warning: the inline delivery did not run") || !strings.Contains(stderr, "another lane host holds it") {
+			t.Fatalf("stderr %q", stderr)
+		}
+	})
+	t.Run("a rerun while the op is in flight", func(t *testing.T) {
+		code, stdout, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-held", false, cliLaneTestMessage)
+		if code != 0 || !strings.Contains(stdout, "(a delivery of this nudge is in flight;") {
+			t.Fatalf("nudge = %d, stdout %q; stderr %q", code, stdout, stderr)
+		}
+	})
 }
