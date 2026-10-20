@@ -197,6 +197,7 @@ import (
 	"io"
 	"maps"
 	"os"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
@@ -411,6 +412,13 @@ func parseBdByIDUpdateArgs(args []string) (op bdByIDOp, rejected string, ok bool
 				return bdByIDOp{}, name, false
 			}
 			metadata[key] = metaValue
+		case "--unset-metadata":
+			// bd's flag is a repeatable StringArray: one key per occurrence,
+			// never comma-split (a comma is not a legal key character, so bd
+			// refuses `a,b` as one invalid key — and so does
+			// doBdByIDUpdate). Key validity is checked at execution, where
+			// the error can be bd's rather than an "unserved" refusal.
+			op.Update.UnsetMetadata = append(op.Update.UnsetMetadata, value)
 		default:
 			return bdByIDOp{}, name, false
 		}
@@ -446,8 +454,13 @@ var bdByIDUpdateValueFlags = map[string]bool{
 	"--status": true, "-s": true, "--title": true, "--description": true,
 	"-d": true, "--assignee": true, "-a": true, "--type": true, "-t": true,
 	"--parent": true, "--priority": true, "-p": true, "--add-label": true,
-	"--remove-label": true, "--set-metadata": true,
+	"--remove-label": true, "--set-metadata": true, "--unset-metadata": true,
 }
+
+// bdMetadataKeyPattern is bd's own metadata key grammar
+// (beads internal/storage.validMetadataKeyRe), which bd applies to every
+// --set-metadata and --unset-metadata key before it writes.
+var bdMetadataKeyPattern = regexp.MustCompile(`^[a-zA-Z_][a-zA-Z0-9_./]*$`)
 
 // bdByIDUpdateUnrepresentable explains the rejection an operator is most likely
 // to hit, because the core pack's step-completion close writes it on
@@ -468,7 +481,7 @@ func bdByIDUpdateWritesFields(op bdByIDOp, metadata map[string]string) bool {
 	return u.Status != nil || u.Title != nil || u.Description != nil ||
 		u.Assignee != nil || u.Type != nil || u.ParentID != nil ||
 		u.Priority != nil || len(u.Labels) > 0 || len(u.RemoveLabels) > 0 ||
-		len(metadata) > 0
+		len(metadata) > 0 || len(u.UnsetMetadata) > 0
 }
 
 // parseBdByIDCloseArgs parses the tail of `gc bd close` and `gc bd reopen`.
@@ -1908,6 +1921,16 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
 func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
+	// bd validates every --unset-metadata key before it writes anything
+	// (storage.ValidateMetadataKey), so an invalid one fails the whole command
+	// with nothing applied. Matching that keeps a typo from being reported as
+	// a successful unset of a key that was never there.
+	for _, key := range op.Update.UnsetMetadata {
+		if !bdMetadataKeyPattern.MatchString(key) {
+			fmt.Fprintf(stderr, "gc bd update: %s: invalid metadata key %q: must match %s\n", op.ID, key, bdMetadataKeyPattern.String()) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
 	if err := graph.Update(op.ID, op.Update); err != nil {
 		fmt.Fprintf(stderr, "gc bd update: %s: %v\n", op.ID, err) //nolint:errcheck // best-effort stderr
 		return 1

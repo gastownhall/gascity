@@ -75,6 +75,12 @@ func (s *SQLiteStore) UpdateIfMatch(id string, expectedRevision int64, opts Upda
 	if err := s.ensureOpen(); err != nil {
 		return err
 	}
+	if len(opts.UnsetMetadata) > 0 {
+		// The same refusal every other ConditionalWriter gives
+		// (validateConditionalUpdateOpts), so a caller cannot come to rely on
+		// a guarded unset only one store would honor.
+		return &ConditionalUpdateFieldUnsupportedError{Field: "unset_metadata"}
+	}
 	if updateOptsEmpty(opts) {
 		return ErrEmptyConditionalUpdate
 	}

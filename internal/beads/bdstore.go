@@ -1712,7 +1712,22 @@ func bdSplitSafeLabels(lists ...[]string) error {
 
 // bdSplitSafeUpdate is bdSplitSafeKeys and bdSplitSafeLabels for opts.
 func bdSplitSafeUpdate(opts UpdateOpts) error {
-	return errors.Join(bdSplitSafeKeys(opts.Metadata), bdSplitSafeLabels(opts.Labels, opts.RemoveLabels))
+	unset := make(map[string]string, len(opts.UnsetMetadata))
+	for _, key := range opts.UnsetMetadata {
+		unset[key] = ""
+	}
+	return errors.Join(bdSplitSafeKeys(opts.Metadata), bdSplitSafeKeys(unset), bdSplitSafeLabels(opts.Labels, opts.RemoveLabels))
+}
+
+// bdUnsetMetadataArgs renders opts.UnsetMetadata as bd's repeatable
+// `--unset-metadata <key>` flags. bd applies them after every
+// --set-metadata, which is UpdateOpts.UnsetMetadata's contract too.
+func bdUnsetMetadataArgs(keys []string) []string {
+	args := make([]string, 0, 2*len(keys))
+	for _, key := range keys {
+		args = append(args, "--unset-metadata", key)
+	}
+	return args
 }
 
 // bdUpdateArgs builds the `bd update` argv for opts, fanning each set field to
@@ -1755,6 +1770,7 @@ func bdUpdateArgs(id string, opts UpdateOpts) []string {
 			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
 		}
 	}
+	args = append(args, bdUnsetMetadataArgs(opts.UnsetMetadata)...)
 	for _, l := range opts.Labels {
 		args = append(args, "--add-label", l)
 	}
@@ -1964,6 +1980,7 @@ func (s *BdStore) UpdateAll(ids []string, opts UpdateOpts) (int, error) {
 			args = append(args, "--set-metadata", k+"="+opts.Metadata[k])
 		}
 	}
+	args = append(args, bdUnsetMetadataArgs(opts.UnsetMetadata)...)
 	for _, l := range opts.Labels {
 		args = append(args, "--add-label", l)
 	}
@@ -2169,6 +2186,11 @@ func (tx *bdStoreTx) Create(b Bead) (Bead, error) {
 }
 
 func (tx *bdStoreTx) Update(id string, opts UpdateOpts) error {
+	// A staged Tx re-emits the whole post-mutation metadata map as sets
+	// (preservedUpdateOpts), which cannot express a removal.
+	if err := refuseUnsetMetadata("bd store transaction update "+id, opts); err != nil {
+		return err
+	}
 	if !hasUpdateOpts(opts) {
 		return nil
 	}
@@ -2381,6 +2403,7 @@ func hasUpdateOpts(opts UpdateOpts) bool {
 		opts.ParentID != nil ||
 		opts.Assignee != nil ||
 		len(opts.Metadata) > 0 ||
+		len(opts.UnsetMetadata) > 0 ||
 		len(opts.Labels) > 0 ||
 		len(opts.RemoveLabels) > 0
 }

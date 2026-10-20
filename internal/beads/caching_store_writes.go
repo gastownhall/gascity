@@ -1344,6 +1344,9 @@ func applyUpdateOptsToBead(bead Bead, opts UpdateOpts) Bead {
 			bead.Metadata[key] = value
 		}
 	}
+	// After the sets, as every backing applies them: a key named in both is
+	// absent from the row the backing now holds, so it must be absent here.
+	unsetMetadataKeys(bead.Metadata, opts.UnsetMetadata)
 	if len(opts.Labels) > 0 || len(opts.RemoveLabels) > 0 {
 		remove := make(map[string]struct{}, len(opts.RemoveLabels))
 		for _, label := range opts.RemoveLabels {

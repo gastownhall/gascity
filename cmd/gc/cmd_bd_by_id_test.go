@@ -1305,6 +1305,8 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"dep", "tree", "gcg-1", "--direction=up", "--max-depth", "3"},
 		{"update", "gcg-1", "--status", "closed"},
 		{"update", "gcg-1", "--set-metadata", "gc.outcome=pass", "--status=closed"},
+		{"update", "gcg-1", "--unset-metadata", "pr.followup_url"},
+		{"update", "gcg-1", "--unset-metadata=a", "--unset-metadata", "b", "--set-metadata", "c=1"},
 		{"close", "gcg-1"},
 		{"close", "gcg-1", "--json"},
 		{"reopen", "gcg-1"},
@@ -2858,5 +2860,157 @@ func TestBdByIDUnservedReadOnASingleStoreCityPaysNothing(t *testing.T) {
 	}
 	if *registries != 0 {
 		t.Errorf("an unrelocated city constructed %d provider registr(ies) for an unserved read; the bypass must short-circuit first", *registries)
+	}
+}
+
+// unsetMetadataSplitCity prepares a split city whose coordination classes live
+// in a real sqlite-beads binding (the production shape) and seeds one resident
+// carrying metadata, returning the resident and the binding's store.
+func unsetMetadataSplitCity(t *testing.T, metadata map[string]string) (capture string, resident beads.Bead, store beads.Store) {
+	t.Helper()
+	capture, cityDir := bdSQLRefusalCityDir(t, bdSQLRefusalSplitStorage)
+	resetCLIStorageRoutes(t)
+	captureCLIStorageStderr(t)
+	binding, relocated, err := cliSoleClassBinding(cityDir)
+	if err != nil || !relocated {
+		t.Fatalf("resolving the relocated class binding: relocated=%t err=%v", relocated, err)
+	}
+	resident, err = binding.Store.Create(beads.Bead{Title: "finalize step", Type: "task", Metadata: metadata})
+	if err != nil {
+		t.Fatalf("seeding the relocated class binding: %v", err)
+	}
+	if !bdIDIsClassReserved(resident.ID) {
+		t.Fatalf("the binding minted %q, outside every reserved class namespace", resident.ID)
+	}
+	return capture, resident, binding.Store
+}
+
+// TestGcBdUpdateUnsetMetadataIsServedInProcess is the finalize-handoff write
+// that a split city used to refuse: `gc bd update <graph-id> --unset-metadata
+// <key>`. It must be answered by the class binding with bd's semantics and
+// never reach bd, which does not hold the bead.
+func TestGcBdUpdateUnsetMetadataIsServedInProcess(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		args       []string
+		wantStatus string
+		wantSet    map[string]string
+		wantAbsent []string
+	}{
+		{
+			name:       "one key",
+			args:       []string{"--unset-metadata", "pr.followup_url"},
+			wantSet:    map[string]string{"pr.followup_number": "7", "keep": "yes"},
+			wantAbsent: []string{"pr.followup_url"},
+		},
+		{
+			name:       "repeated flag and inline spelling",
+			args:       []string{"--unset-metadata", "pr.followup_url", "--unset-metadata=pr.followup_number"},
+			wantSet:    map[string]string{"keep": "yes"},
+			wantAbsent: []string{"pr.followup_url", "pr.followup_number"},
+		},
+		{
+			name:       "absent key is a no-op",
+			args:       []string{"--unset-metadata", "never.set"},
+			wantSet:    map[string]string{"pr.followup_url": "u", "pr.followup_number": "7", "keep": "yes"},
+			wantAbsent: []string{"never.set"},
+		},
+		{
+			// bd applies every --set-metadata before every --unset-metadata,
+			// whatever their argv order, so the key named in both is absent.
+			name:       "combined with set and status, unset wins",
+			args:       []string{"--unset-metadata", "both", "--set-metadata", "gc.outcome=pass", "--set-metadata", "both=x", "--unset-metadata", "pr.followup_url", "--status", "closed"},
+			wantStatus: "closed",
+			wantSet:    map[string]string{"gc.outcome": "pass", "pr.followup_number": "7", "keep": "yes"},
+			wantAbsent: []string{"both", "pr.followup_url"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			capture, resident, store := unsetMetadataSplitCity(t, map[string]string{
+				"pr.followup_url": "u", "pr.followup_number": "7", "keep": "yes",
+			})
+			var stdout, stderr bytes.Buffer
+			args := append([]string{"update", resident.ID}, tc.args...)
+			if code := doBd(args, &stdout, &stderr); code != 0 {
+				t.Fatalf("doBd %v exited %d; stderr=%q", args, code, stderr.String())
+			}
+			if data, err := os.ReadFile(capture); err == nil && strings.Contains(string(data), "update "+resident.ID) {
+				t.Fatalf("the unset was forwarded to bd: %q", data)
+			}
+			if !strings.Contains(stdout.String(), resident.ID) {
+				t.Errorf("the answer does not render the updated bead; stdout=%q", stdout.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if tc.wantStatus != "" && after.Status != tc.wantStatus {
+				t.Errorf("status = %q, want %q", after.Status, tc.wantStatus)
+			}
+			for key, want := range tc.wantSet {
+				if after.Metadata[key] != want {
+					t.Errorf("metadata[%s] = %q, want %q (metadata=%v)", key, after.Metadata[key], want, after.Metadata)
+				}
+			}
+			for _, key := range tc.wantAbsent {
+				if _, present := after.Metadata[key]; present {
+					t.Errorf("metadata[%s] still present (as %q); an unset must remove the key, not blank it", key, after.Metadata[key])
+				}
+			}
+		})
+	}
+}
+
+// TestGcBdUpdateUnsetMetadataRejectsAnInvalidKeyLikeBd pins the failure half of
+// bd's contract. bd's --unset-metadata is a repeatable flag, never
+// comma-split, and bd validates every key before writing, so `a,b` is one
+// invalid key: the command exits non-zero and nothing — not even the other
+// edits in the same call — is applied.
+func TestGcBdUpdateUnsetMetadataRejectsAnInvalidKeyLikeBd(t *testing.T) {
+	for _, key := range []string{"pr.followup_url,keep", "", "9starts.with.digit"} {
+		t.Run(fmt.Sprintf("%q", key), func(t *testing.T) {
+			_, resident, store := unsetMetadataSplitCity(t, map[string]string{"pr.followup_url": "u", "keep": "yes"})
+			var stdout, stderr bytes.Buffer
+			args := []string{"update", resident.ID, "--set-metadata", "gc.outcome=pass", "--unset-metadata", key}
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd %v exited 0; stdout=%q", args, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid metadata key") {
+				t.Errorf("stderr does not explain the invalid key: %q", stderr.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if after.Metadata["pr.followup_url"] != "u" || after.Metadata["keep"] != "yes" || after.Metadata["gc.outcome"] != "" {
+				t.Errorf("a rejected update wrote anyway: %v", after.Metadata)
+			}
+		})
+	}
+}
+
+// TestGcBdUpdateNotesStaysRefusedBesideUnset pins that serving
+// --unset-metadata did not widen the door: --notes and --append-notes still
+// have no representation in the class store and are still refused whole.
+func TestGcBdUpdateNotesStaysRefusedBesideUnset(t *testing.T) {
+	for _, flag := range []string{"--notes", "--append-notes"} {
+		t.Run(flag, func(t *testing.T) {
+			_, resident, store := unsetMetadataSplitCity(t, map[string]string{"pr.followup_url": "u"})
+			var stdout, stderr bytes.Buffer
+			args := []string{"update", resident.ID, "--unset-metadata", "pr.followup_url", flag, "done"}
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd %v exited 0; stdout=%q", args, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), flag) {
+				t.Errorf("the refusal does not name %s: %q", flag, stderr.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if after.Metadata["pr.followup_url"] != "u" {
+				t.Errorf("the refused update applied its unset anyway: %v", after.Metadata)
+			}
+		})
 	}
 }
