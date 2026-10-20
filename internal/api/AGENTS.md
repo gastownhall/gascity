@@ -169,19 +169,31 @@ The synchronous session commands record ops through `runSyncOp`
 `ops.control`, `/wake`, `/suspend`, `/kill`, `/close` and `/reset` under
 `ops.lifecycle`. The op is admitted after the front-door checks (target
 resolution, the always-on named close refusal, a named stop turn's turn
-identity) and closed from the legacy result before the answer. A sync command
-caches no in-flight answer, so a same-key request while one runs is 409
-`in_flight`; a retryable error leaves a client-keyed op open for a same-key
-retry to adopt. A retry that reuses a key on a session-scoped command (stop,
-kill, respond) reuses the first request's scope (`priorSessionScope`), so a
-session that moved to another generation or turn since replays the first
-request instead of refusing the key as another request. With the gates off
-nothing is read or written beyond the legacy path, except that a `/stop` that
-names a turn is stopped turn-scoped through the worker in every mode.
+identity) and before the command's effect, and closed from the command's
+result, every step of it (a `/close?delete=true` closes its op after the
+delete), before the answer. A sync command caches no in-flight answer, so a
+same-key request while one runs is 409 `in_flight`; a retryable error leaves
+a client-keyed op open for a same-key retry to adopt. A retry that reuses a
+key on a session-scoped command (stop, kill, respond) reuses the first
+request's scope (`priorSessionScope`), so a session that moved to another
+generation or turn since replays the first request instead of refusing the
+key as another request; a kill that adopts an op whose generation is gone
+refuses `refused:target_moved`, as `gc session kill` does. With the gates
+off nothing is read or written beyond the legacy path, except that a `/stop`
+that names a turn is stopped turn-scoped through the worker in every mode. A
+request `auto` could not record runs exactly as in off (I8).
 
 While `ops.control` records, `/stop` reads the session's turn live
-(`resolveStopTurn`) and interrupts a running turn turn-scoped. On a protocol
-turn source it never falls back to the unfenced session-scoped interrupt: no
-turn running is nothing to stop, and a turn read that fails sends nothing
-(DES-T3I §14 item 3). Keep it that way: a late protocol interrupt kills the
-next turn.
+(`resolveStopTurn`) only when its turns come from its runtime's protocol
+(t3bridge, ACP), and interrupts a running turn turn-scoped; every other
+runtime keeps the session-scoped legacy stop. On a protocol turn source it
+never falls back to the unfenced session-scoped interrupt: no turn running,
+or no runtime session bound, is nothing to stop, and a turn source that
+cannot be read, or a turn-scoped interrupt the runtime refuses, sends
+nothing (DES-T3I §14 item 3). Keep it that way: a late protocol interrupt
+kills the next turn. A turn the stop read but the request did not name that
+ends before the interrupt lands is `skipped{not_needed}`, 200; only a named
+turn is refused `turn_not_current`. A turn's target key
+(`stop:<gen>:<turn>`) replays only a stop that succeeded or found nothing to
+do; one whose op failed hands the request to its own key (minted when it has
+none), so a failed stop never uses up its turn.

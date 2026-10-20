@@ -4433,7 +4433,8 @@ type SessionResponse struct {
 // SessionStopBody defines model for SessionStopBody.
 type SessionStopBody struct {
 	// Turn The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running.
-	Turn *string `json:"turn,omitempty"`
+	Turn                 *string                `json:"turn,omitempty"`
+	AdditionalProperties map[string]interface{} `json:"-"`
 }
 
 // SessionStrandedClaimsPayload defines model for SessionStrandedClaimsPayload.
@@ -11664,6 +11665,74 @@ type CreateSessionJSONRequestBody = SessionCreateBody
 
 // PostV0CityByCityNameSlingJSONRequestBody defines body for PostV0CityByCityNameSling for application/json ContentType.
 type PostV0CityByCityNameSlingJSONRequestBody = SlingInputBody
+
+// Getter for additional properties for SessionStopBody. Returns the specified
+// element and whether it was found
+func (a SessionStopBody) Get(fieldName string) (value interface{}, found bool) {
+	if a.AdditionalProperties != nil {
+		value, found = a.AdditionalProperties[fieldName]
+	}
+	return
+}
+
+// Setter for additional properties for SessionStopBody
+func (a *SessionStopBody) Set(fieldName string, value interface{}) {
+	if a.AdditionalProperties == nil {
+		a.AdditionalProperties = make(map[string]interface{})
+	}
+	a.AdditionalProperties[fieldName] = value
+}
+
+// Override default JSON handling for SessionStopBody to handle AdditionalProperties
+func (a *SessionStopBody) UnmarshalJSON(b []byte) error {
+	object := make(map[string]json.RawMessage)
+	err := json.Unmarshal(b, &object)
+	if err != nil {
+		return err
+	}
+
+	if raw, found := object["turn"]; found {
+		err = json.Unmarshal(raw, &a.Turn)
+		if err != nil {
+			return fmt.Errorf("error reading 'turn': %w", err)
+		}
+		delete(object, "turn")
+	}
+
+	if len(object) != 0 {
+		a.AdditionalProperties = make(map[string]interface{})
+		for fieldName, fieldBuf := range object {
+			var fieldVal interface{}
+			err := json.Unmarshal(fieldBuf, &fieldVal)
+			if err != nil {
+				return fmt.Errorf("error unmarshaling field %s: %w", fieldName, err)
+			}
+			a.AdditionalProperties[fieldName] = fieldVal
+		}
+	}
+	return nil
+}
+
+// Override default JSON handling for SessionStopBody to handle AdditionalProperties
+func (a SessionStopBody) MarshalJSON() ([]byte, error) {
+	var err error
+	object := make(map[string]json.RawMessage)
+
+	if a.Turn != nil {
+		object["turn"], err = json.Marshal(a.Turn)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling 'turn': %w", err)
+		}
+	}
+
+	for fieldName, field := range a.AdditionalProperties {
+		object[fieldName], err = json.Marshal(field)
+		if err != nil {
+			return nil, fmt.Errorf("error marshaling '%s': %w", fieldName, err)
+		}
+	}
+	return json.Marshal(object)
+}
 
 // AsAdapterEventPayload returns the union data inside the EventPayload as a AdapterEventPayload
 func (t EventPayload) AsAdapterEventPayload() (AdapterEventPayload, error) {

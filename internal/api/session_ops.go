@@ -687,9 +687,9 @@ func opAdmitError(err error, key string) error {
 	case errors.Is(err, opjournal.ErrKeyReuse):
 		return apierr.IdempotencyMismatch.Msg("idempotency_mismatch: Idempotency-Key reused with a different request")
 	case errors.Is(err, legacyop.ErrUnavailable):
-		return apierr.OpJournalUnavailable.Msg("op_journal_unavailable: the operation journal cannot record this request; nothing was delivered: " + err.Error())
+		return apierr.OpJournalUnavailable.Msg("op_journal_unavailable: the operation journal cannot record this request; nothing was done: " + err.Error())
 	case errors.Is(err, opjournal.ErrPayloadTooLarge):
-		return apierr.PayloadTooLarge.Msg(fmt.Sprintf("payload_too_large: the message exceeds the operation journal's %d-byte limit", opjournal.MaxInlinePayload))
+		return apierr.PayloadTooLarge.Msg(fmt.Sprintf("payload_too_large: the request exceeds the operation journal's %d-byte limit", opjournal.MaxInlinePayload))
 	case errors.Is(err, opjournal.ErrInvalidRequest) && key != "" && opjournal.ValidateClientKey(key) != nil:
 		return apierr.InvalidIdempotencyKey.Msg("invalid_idempotency_key: " + err.Error())
 	case errors.Is(err, opjournal.ErrInvalidRequest):

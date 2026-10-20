@@ -3749,6 +3749,7 @@ export type SessionStopBody = {
      * The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running.
      */
     turn?: string;
+    [key: string]: unknown;
 };
 
 export type SessionStrandedClaimsPayload = {

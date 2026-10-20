@@ -98,9 +98,12 @@ type SessionControlInput struct {
 }
 
 // SessionStopBody is the optional request body for POST
-// .../session/{id}/stop (X11 D10).
+// .../session/{id}/stop (X11 D10). It admits fields it does not know, as the
+// endpoint did before it declared a body: a client that sends one (T3's
+// planned intent, BUILD-PLAN FK-1) is not refused, and the field is ignored.
 type SessionStopBody struct {
-	Turn string `json:"turn,omitempty" maxLength:"128" doc:"The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running."`
+	_    struct{} `json:"-" additionalProperties:"true"`
+	Turn string   `json:"turn,omitempty" maxLength:"128" doc:"The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running."`
 }
 
 // SessionStopInput is the Huma input for POST

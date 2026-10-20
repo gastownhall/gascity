@@ -18,17 +18,24 @@ package api
 // a minted-key op closes failed{refused:...} (D10).
 //
 // /stop resolves the turn it interrupts in X11 D10's order: the turn the
-// request names (its optional turn field), then, while ops.control records,
+// request names (its optional turn field), then, while ops.control records
+// and the session's turns come from its runtime's protocol (t3bridge, ACP),
 // a live read of the session's turn through the worker (TI-2b). A known turn
-// is interrupted turn-scoped, and only while it is current; on a runtime
-// whose turns come from its protocol (t3bridge, ACP) a stop never sends an
-// unfenced interrupt (DES-T3I §14 item 3): no turn running is nothing to
-// stop, and a turn that cannot be read is refused, nothing sent. A turn the
-// request names is the op's target key, stop:<generation>:<turn>, so two
-// stops of one turn are one op; so is a resolved turn when the request
-// carries no Idempotency-Key. A request that carries one keeps it, and a
-// retry under it reuses its first request's scope, so the retry replays that
-// stop instead of interrupting a later turn.
+// is interrupted turn-scoped, and only while it is current. On a protocol
+// turn source a stop never sends an unfenced interrupt (DES-T3I §14 item 3):
+// no turn running is nothing to stop, and a turn source that cannot be read
+// is refused, nothing sent. Every other runtime (tmux included) keeps the
+// session-scoped legacy stop, and so does a request auto could not record
+// (I8). A turn the request names is the op's target key,
+// stop:<generation>:<turn>, so two stops of one turn are one op; so is a
+// resolved turn when the request carries no Idempotency-Key. A target key
+// replays only a stop that succeeded or found nothing to do: one whose op
+// failed is retried under the request's own key (minted when it has none),
+// so a failed stop never uses up its turn. A request that carries a key
+// otherwise keeps it, and a retry under it reuses its first request's scope,
+// so the retry replays that stop instead of interrupting a later turn. A
+// turn the request did not name that ends before the interrupt lands was
+// nothing to stop; only a named one is refused turn_not_current.
 
 import (
 	"context"
@@ -65,6 +72,9 @@ const (
 const (
 	refusedSessionStarting = "session_starting"
 	refusedWillNotStart    = "will_not_start"
+	// refusedTargetMoved closes a kill whose session moved to another
+	// generation than the one its op is scoped to, as gc session kill does.
+	refusedTargetMoved = "target_moved"
 	// refusedWakeConflict stands in for a wake conflict state that leaves
 	// no token characters.
 	refusedWakeConflict = "wake_conflict"
@@ -151,10 +161,15 @@ type syncOpRequest struct {
 	conv string
 	// key is the op's client key: the Idempotency-Key header, a target key
 	// (stop:<generation>:<turn>), or "" for the recorder to mint one.
-	key     string
-	scope   opjournal.Scope
-	policy  opjournal.Policy
-	payload string
+	key string
+	// turnKeyed says key is a target key; successorKey is then the key the
+	// request is recorded under instead when the target key's op closed
+	// without success (the Idempotency-Key header, "" to mint one).
+	turnKeyed    bool
+	successorKey string
+	scope        opjournal.Scope
+	policy       opjournal.Policy
+	payload      string
 	// unrecordable, when set, is the legacyop.Reason* the request cannot be
 	// recorded for (a session row with no generation, or one that did not
 	// read): auto runs it unrecorded, require refuses it.
@@ -224,21 +239,31 @@ func (s *Server) admitSyncOp(req syncOpRequest) (*legacyop.Admission, error) {
 
 // runSyncOp records req, runs the legacy command through run unless the op
 // already finished, and closes the op from run's result, before the answer
-// (DES-O0API §7.1). run gets whether the recorder minted the op's key and
-// returns the op result and the wire error the command answers with. A
-// same-key retry of a finished op is answered from the stored outcome
-// without running anything; its refusals are rebuilt through mapErr.
-func (s *Server) runSyncOp(req syncOpRequest, mapErr func(error) error, run func(minted bool) (legacyop.Result, error)) (syncOpFields, error) {
+// (DES-O0API §7.1). run gets the admission (whether it recorded, whether the
+// recorder minted the op's key, the op) and returns the op result and the
+// wire error the command answers with. A same-key retry of a finished op is
+// answered from the stored outcome without running anything; its refusals
+// are rebuilt through mapErr. A target key's op that closed without success
+// is not replayed: the request is admitted again under its successor key, so
+// a failed stop of a turn does not refuse every later stop of it.
+func (s *Server) runSyncOp(req syncOpRequest, mapErr func(error) error, run func(adm *legacyop.Admission) (legacyop.Result, error)) (syncOpFields, error) {
 	adm, err := s.admitSyncOp(req)
 	if err != nil {
 		return syncOpFields{}, err
+	}
+	if req.turnKeyed && adm.Decision == legacyop.Replay && adm.Cached == nil &&
+		adm.Op.Status == opjournal.StatusClosed && !syncOpReplaysAsSuccess(adm.Op) {
+		req.key, req.turnKeyed = req.successorKey, false
+		if adm, err = s.admitSyncOp(req); err != nil {
+			return syncOpFields{}, err
+		}
 	}
 	if adm.Decision == legacyop.Replay {
 		return syncReplay(adm, mapErr)
 	}
 	handedOff := false
 	defer releaseOnPanic(adm, &handedOff)
-	res, runErr := run(adm.Minted)
+	res, runErr := run(adm)
 	return s.finishSyncOp(adm, res), runErr
 }
 
@@ -305,7 +330,9 @@ func replayedSyncError(op opjournal.Op, mapErr func(error) error) error {
 		}
 		return replayed(session.ErrTurnInterruptUnsupported)
 	case reason == opjournal.ReasonStale && op.Kind == opjournal.KindInterrupt:
-		return replayed(&runtime.TurnNotCurrentError{Session: op.Conversation, TurnID: op.Scope.Turn})
+		// The stored outcome says the turn was not current when the op ran,
+		// not which turn ran then or runs now.
+		return replayed(fmt.Errorf("session %q: turn %q was not the current turn when the stop ran: %w", op.Conversation, op.Scope.Turn, runtime.ErrTurnNotCurrent))
 	case reason == opjournal.ReasonStale:
 		return replayed(session.ErrNoPendingInteraction)
 	case strings.HasPrefix(reason, opjournal.RefusedReasonPrefix):
@@ -314,6 +341,8 @@ func replayedSyncError(op opjournal.Op, mapErr func(error) error) error {
 			return replayed(sentinel)
 		}
 		switch {
+		case op.Kind == opjournal.KindKill && why == refusedTargetMoved:
+			return apierr.SessionConflict.Msg(fmt.Sprintf("%s: replayed op %s: session %s had moved past generation %d, which the kill was recorded for, so nothing was killed; resend with a new Idempotency-Key to kill the new run", refusedTargetMoved, op.ID, op.Conversation, op.Scope.Generation))
 		case op.Kind == opjournal.KindWake && why == refusedWillNotStart:
 			return apierr.WakeWillNotStart.Msg(fmt.Sprintf("replayed op %s: the wake was recorded for session %s, but it will not start", op.ID, op.Conversation))
 		case op.Kind == opjournal.KindWake:
@@ -425,17 +454,19 @@ func (s *Server) priorSessionScope(kind opjournal.Kind, conv, key string) (opjou
 // stopPlan is how a /stop interrupts its session.
 type stopPlan struct {
 	// turn, when set, is interrupted turn-scoped through handle, whose turn
-	// capabilities are caps. named says the request named it (or the op the
-	// request replays did): a refusal for turn identity is then the answer,
-	// never a fall-back to the session-scoped stop.
+	// capabilities are caps. named says the request named it: a turn that is
+	// no longer current is then refused turn_not_current; a turn read live
+	// (or reused from the op a same-key retry adopts, which read it live)
+	// that ended was nothing to stop.
 	turn   string
 	named  bool
 	handle worker.Handle
 	caps   worker.TurnCapabilities
-	// noTurn says a protocol runtime read no turn running: nothing to stop.
+	// noTurn says a protocol turn source read no turn running: nothing to
+	// stop.
 	noTurn bool
-	// unreadable is a protocol runtime's turn read that failed: refuse,
-	// nothing sent.
+	// unreadable is a turn source that could not be read: refuse, nothing
+	// sent.
 	unreadable error
 }
 
@@ -474,10 +505,20 @@ func (s *Server) stopSession(ctx context.Context, target, key, named string) (sy
 	}
 	req := syncOpRequest{kind: opjournal.KindInterrupt, conv: id, key: key, policy: interruptOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
+		// The client key is the op's key, or a target key's successor: in
+		// require it is checked even when a target key stands in for it.
+		if err := s.checkBeforeEffect(opjournal.KindInterrupt, key); err != nil {
+			return syncAnswer{}, err
+		}
 		req, plan = s.stopOpRequest(ctx, store.Store, req, plan)
 	}
-	fields, err := s.runSyncOp(req, humaStopError, func(minted bool) (legacyop.Result, error) {
-		return s.executeStop(store.Store, id, plan, minted)
+	fields, err := s.runSyncOp(req, humaStopError, func(adm *legacyop.Admission) (legacyop.Result, error) {
+		run := plan
+		if !adm.Recorded && !run.named {
+			// I8: a stop auto could not record runs as it does in off.
+			run = stopPlan{}
+		}
+		return s.executeStop(store.Store, id, run, adm.Minted)
 	})
 	if err != nil {
 		return syncAnswer{}, err
@@ -509,17 +550,17 @@ func (s *Server) namedStopPlan(ctx context.Context, store beads.Store, id, turn 
 // stopOpRequest completes a recorded /stop's op request and plan (X11 D10,
 // DES-O0API §3.2): the session(generation) scope; a named turn in it, keyed
 // stop:<generation>:<turn>; else, under a client key that already names a
-// stop, that stop's scope; else the turn a live read finds running, keyed by
-// it when the request carries no key.
+// stop, that stop's scope; else the turn a live read of a protocol turn
+// source finds running, keyed by it when the request carries no key. A
+// target key's successor is the request's own key. A request that cannot be
+// recorded resolves nothing: it runs as in off.
 func (s *Server) stopOpRequest(ctx context.Context, store beads.Store, req syncOpRequest, plan stopPlan) (syncOpRequest, stopPlan) {
 	scope, why, whyErr := sessionOpScope(store, req.conv)
 	if why != "" {
 		req.unrecordable, req.unrecordableErr = why, whyErr
-		if !plan.named {
-			plan = s.resolveStopTurn(ctx, store, req.conv)
-		}
 		return req, plan
 	}
+	clientKey := req.key
 	switch {
 	case plan.named:
 		scope.Turn = plan.turn
@@ -545,6 +586,9 @@ func (s *Server) stopOpRequest(ctx context.Context, store beads.Store, req syncO
 			}
 		}
 	}
+	if req.key != clientKey {
+		req.turnKeyed, req.successorKey = true, clientKey
+	}
 	req.scope = scope
 	return req, plan
 }
@@ -560,32 +604,47 @@ func stopTargetKey(gen int64, turn, fallback string) string {
 }
 
 // priorStopPlan is the plan of a same-key retry of a stop scoped to turn: it
-// interrupts that turn only, as the request that named or resolved it did.
+// interrupts that turn only, as the request that resolved it did. That
+// request read the turn live, since a named turn is always target-keyed, so
+// the retry is not named either: a turn that ended meanwhile (the first
+// attempt's interrupt landed before it died) was nothing to stop.
 func (s *Server) priorStopPlan(ctx context.Context, store beads.Store, id, turn string) stopPlan {
-	plan := stopPlan{turn: turn, named: true}
+	plan := stopPlan{turn: turn}
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
-		plan.unreadable = err
+		plan.unreadable = fmt.Errorf("reading the turns of session %s before stopping turn %q, nothing sent: %w", id, turn, err)
 		return plan
 	}
-	plan.handle = handle
-	plan.caps, _ = handle.TurnCapabilities(ctx)
+	caps, err := handle.TurnCapabilities(ctx)
+	if err != nil {
+		plan.unreadable = fmt.Errorf("reading the turns of session %s before stopping turn %q, nothing sent: %w", id, turn, err)
+		return plan
+	}
+	plan.handle, plan.caps = handle, caps
 	return plan
 }
 
 // resolveStopTurn reads the turn running on session id now (X11 D10 step 2,
-// TI-2b's live read), within stopTurnReadBound. A running turn is stopped
-// turn-scoped. With none running, or no turn source, the stop is the
-// session-scoped legacy one, except on a protocol runtime (DES-T3I §14 item
-// 3): there no turn running is nothing to stop, and a read that fails sends
-// nothing.
+// TI-2b's live read), within stopTurnReadBound, when its turns come from its
+// runtime's protocol. A running turn is stopped turn-scoped, no turn running
+// is nothing to stop, and a session whose turns cannot be read is refused,
+// nothing sent: a protocol turn source never gets the unfenced session-scoped
+// stop (DES-T3I §14 item 3). A session whose turn source cannot be told is
+// refused the same way. Every other turn source keeps the legacy
+// session-scoped stop, unread.
 func (s *Server) resolveStopTurn(ctx context.Context, store beads.Store, id string) stopPlan {
+	unreadable := func(err error) stopPlan {
+		return stopPlan{unreadable: fmt.Errorf("reading the turn of session %s before stopping it, nothing sent: %w", id, err)}
+	}
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
-		return stopPlan{}
+		return unreadable(err)
 	}
 	caps, err := handle.TurnCapabilities(ctx)
-	if err != nil || caps.Source == worker.TurnSourceNone {
+	if err != nil {
+		return unreadable(err)
+	}
+	if caps.Source != worker.TurnSourceProtocol {
 		return stopPlan{}
 	}
 	readCtx, cancel := context.WithTimeout(ctx, stopTurnReadBound)
@@ -594,16 +653,13 @@ func (s *Server) resolveStopTurn(ctx context.Context, store beads.Store, id stri
 	switch {
 	case err == nil && hist.Current.Active():
 		return stopPlan{turn: hist.Current.TurnID, handle: handle, caps: caps}
-	case caps.Source != worker.TurnSourceProtocol:
-		return stopPlan{}
-	case err == nil:
+	case err == nil, errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// No turn running, or no runtime session bound (DES-T3I D2).
 		return stopPlan{noTurn: true}
-	case errors.Is(err, runtime.ErrTurnIdentityUnsupported), errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable):
-		return stopPlan{}
-	case errors.Is(err, runtime.ErrRuntimeUnavailable):
-		return stopPlan{unreadable: fmt.Errorf("reading the turn of session %s before stopping it, nothing sent: %w", id, err)}
+	case errors.Is(err, runtime.ErrRuntimeUnavailable), errors.Is(err, runtime.ErrTurnIdentityUnsupported):
+		return unreadable(err)
 	default:
-		return stopPlan{unreadable: fmt.Errorf("reading the turn of session %s before stopping it, nothing sent: %w: %w", id, runtime.ErrRuntimeUnavailable, err)}
+		return unreadable(fmt.Errorf("%w: %w", runtime.ErrRuntimeUnavailable, err))
 	}
 }
 
@@ -618,18 +674,21 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 		return syncOpResult(opjournal.KindInterrupt, plan.unreadable, minted), humaStopError(plan.unreadable)
 	case plan.turn != "":
 		err := plan.handle.Interrupt(context.Background(), worker.InterruptRequest{Turn: plan.turn})
-		if err == nil {
+		switch {
+		case err == nil:
 			res := syncOpResult(opjournal.KindInterrupt, nil, minted)
 			if plan.caps.Fence != runtime.TurnFenceAtomic {
 				res.Outcome.Degradation = session.DegradationUnfencedInterrupt
 			}
 			return res, nil
-		}
-		if plan.named || !errors.Is(err, runtime.ErrTurnIdentityUnsupported) {
+		case !plan.named && errors.Is(err, runtime.ErrTurnNotCurrent):
+			// The turn the stop read ended on its own before the interrupt
+			// landed (nothing was sent): nothing to stop, as for an idle
+			// session.
+			return legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}}, nil
+		default:
 			return syncOpResult(opjournal.KindInterrupt, err, minted), humaStopError(err)
 		}
-		// The read found a turn but the runtime cannot interrupt it
-		// turn-scoped (nothing was sent): stop it session-scoped, as today.
 	}
 	if err := s.sessionManager(store).StopTurn(id); err != nil {
 		return syncOpResult(opjournal.KindInterrupt, err, minted), humaSessionManagerError(err)
@@ -668,12 +727,12 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 			return syncAnswer{}, err
 		}
 	}
-	fields, err := s.runSyncOp(req, humaSessionManagerError, func(minted bool) (legacyop.Result, error) {
+	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
 		err := mgr.Respond(id, resp)
 		if err != nil {
-			return syncOpResult(opjournal.KindRespond, err, minted), humaSessionManagerError(err)
+			return syncOpResult(opjournal.KindRespond, err, adm.Minted), humaSessionManagerError(err)
 		}
-		return syncOpResult(opjournal.KindRespond, nil, minted), nil
+		return syncOpResult(opjournal.KindRespond, nil, adm.Minted), nil
 	})
 	if err != nil {
 		return syncAnswer{}, err
@@ -737,11 +796,11 @@ func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req s
 // call, its error mapped onto the wire by humaSessionManagerError.
 func (s *Server) lifecycleOp(kind opjournal.Kind, id, key string, policy opjournal.Policy, run func() error) (syncOpFields, error) {
 	req := syncOpRequest{kind: kind, conv: id, key: key, policy: policy}
-	return s.runSyncOp(req, humaSessionManagerError, func(minted bool) (legacyop.Result, error) {
+	return s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
 		if err := run(); err != nil {
-			return syncOpResult(kind, err, minted), humaSessionManagerError(err)
+			return syncOpResult(kind, err, adm.Minted), humaSessionManagerError(err)
 		}
-		return syncOpResult(kind, nil, minted), nil
+		return syncOpResult(kind, nil, adm.Minted), nil
 	})
 }
 
@@ -764,6 +823,41 @@ func (s *Server) killOpRequest(store beads.Store, id, key string) syncOpRequest 
 	}
 	req.scope = scope
 	return req
+}
+
+// errKillTargetMoved classifies a recorded kill whose session moved to
+// another generation than the one its op is scoped to.
+var errKillTargetMoved = errors.New("the kill's target moved")
+
+// killScopeMoved checks a recorded kill's session row, read under the kill's
+// runtime lease, against the generation its op is scoped to (adm.Op.Scope):
+// a same-key retry that adopts an op left open, after the session restarted,
+// or a start that ran while the kill waited for the lease, would otherwise
+// stop a run the op does not name. It returns an error wrapping
+// errKillTargetMoved naming both generations, as gc session kill refuses
+// (refused:target_moved). A kill that is not recorded, or a row that does not
+// read with a generation, passes: the kill's own read then decides.
+func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error {
+	if !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession {
+		return nil
+	}
+	now, why, _ := sessionOpScope(store, id)
+	if why != "" || now.Generation == adm.Op.Scope.Generation {
+		return nil
+	}
+	return fmt.Errorf("%s: session %s is at generation %d, not generation %d, which op %s was recorded for, so nothing was killed; resend with a new Idempotency-Key to kill the new run: %w",
+		refusedTargetMoved, id, now.Generation, adm.Op.Scope.Generation, adm.Op.ID, errKillTargetMoved)
+}
+
+// killOpResult is a kill's op result: a moved target closes
+// failed{refused:target_moved} under any key, since a retry under the same
+// key would find the same op scoped to the generation that is gone; the rest
+// as for every command.
+func killOpResult(err error, minted bool) legacyop.Result {
+	if errors.Is(err, errKillTargetMoved) {
+		return legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.RefusedReasonPrefix + refusedTargetMoved}}
+	}
+	return syncOpResult(opjournal.KindKill, err, minted)
 }
 
 // wakeHTTPError maps a wake's error onto the wire.

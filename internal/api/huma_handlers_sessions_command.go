@@ -1123,17 +1123,27 @@ func (s *Server) killSession(target, key string) (syncAnswer, error) {
 	}
 
 	// Under the kill fence, as `gc session kill`: without it the controller
-	// reads the kill as a crash (heal, accrual, a same-pass restart).
+	// reads the kill as a crash (heal, accrual, a same-pass restart). A
+	// recorded kill stops only the generation its op is scoped to, checked
+	// under the fence's runtime lease.
 	mgr := s.sessionManager(store.Store)
-	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(minted bool) (legacyop.Result, error) {
-		kill := func(ctx context.Context, by session.Actor) error { return mgr.Kill(ctx, by, id) }
+	fields, err := s.runSyncOp(s.killOpRequest(store.Store, id, key), humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
+		kill := func(ctx context.Context, by session.Actor) error {
+			if err := killScopeMoved(store.Store, id, adm); err != nil {
+				return err
+			}
+			return mgr.Kill(ctx, by, id)
+		}
 		err := mgr.KillFenced(context.Background(), s.actor(session.ActorOperator), id, kill)
-		res := syncOpResult(opjournal.KindKill, err, minted)
-		// A closed session, or one whose runtime is already gone, is already
-		// killed: report the outcome rather than an error.
-		if err != nil && !errors.Is(err, session.ErrSessionClosed) && !errors.Is(err, session.ErrSessionInactive) {
+		res := killOpResult(err, adm.Minted)
+		switch {
+		case errors.Is(err, errKillTargetMoved):
+			return res, apierr.SessionConflict.Msg(err.Error())
+		case err != nil && !errors.Is(err, session.ErrSessionClosed) && !errors.Is(err, session.ErrSessionInactive):
 			return res, humaSessionManagerError(err)
 		}
+		// A closed session, or one whose runtime is already gone, is already
+		// killed: report the outcome rather than an error.
 		return res, nil
 	})
 	if err != nil {
@@ -1285,7 +1295,10 @@ func (s *Server) humaHandleSessionClose(ctx context.Context, input *SessionClose
 
 // closeSession closes target, as a close op under ops.lifecycle, deleting
 // its bead after when del is set, and returns the answer. The always-on
-// named session refusal comes first, as a front-door refusal: no op.
+// named session refusal comes first, as a front-door refusal: no op. The
+// nudge withdrawal and the delete are part of the op's run, so the op closes
+// only after them: a delete that fails is a retryable error, which leaves a
+// client-keyed op open for a same-key retry to adopt and delete again.
 func (s *Server) closeSession(ctx context.Context, target, key string, del bool) (syncAnswer, error) {
 	store := s.state.SessionsBeadStore()
 	if store.Store == nil {
@@ -1307,30 +1320,28 @@ func (s *Server) closeSession(ctx context.Context, target, key string, del bool)
 	if err != nil {
 		return syncAnswer{}, humaSessionManagerError(err)
 	}
-	var closeResult session.CloseResult
-	fields, err := s.lifecycleOp(opjournal.KindClose, id, key, opjournal.Policy{}, func() error {
-		var err error
-		closeResult, err = handle.CloseDetailed(ctx, s.actor(session.ActorOperator))
-		return err
+	req := syncOpRequest{kind: opjournal.KindClose, conv: id, key: key}
+	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
+		closeResult, err := handle.CloseDetailed(ctx, s.actor(session.ActorOperator))
+		if err != nil {
+			return syncOpResult(opjournal.KindClose, err, adm.Minted), humaSessionManagerError(err)
+		}
+		// The city's nudge queue withdraws the nudges and closes their
+		// shadows in the nudges class.
+		if err := s.withdrawQueuedWaitNudges(closeResult.WaitNudgeIDs); err != nil {
+			log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
+		}
+		// Optional: permanently delete the bead after closing.
+		if del {
+			if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
+				log.Printf("gc api: deleting bead after close %s: %v", id, err)
+				return syncOpResult(opjournal.KindClose, err, adm.Minted), apierr.Internal.Msg("closed but delete failed: " + err.Error())
+			}
+		}
+		return syncOpResult(opjournal.KindClose, nil, adm.Minted), nil
 	})
 	if err != nil {
 		return syncAnswer{}, err
-	}
-	if fields.Replayed {
-		return syncAnswer{ID: id, syncOpFields: fields}, nil
-	}
-	// The city's nudge queue withdraws the nudges and closes their shadows in
-	// the nudges class.
-	if err := s.withdrawQueuedWaitNudges(closeResult.WaitNudgeIDs); err != nil {
-		log.Printf("gc api: withdrawing queued wait nudges after close %s: %v", id, err)
-	}
-
-	// Optional: permanently delete the bead after closing.
-	if del {
-		if err := deleteSessionBeadAfterClose(store.Store, id); err != nil {
-			log.Printf("gc api: deleting bead after close %s: %v", id, err)
-			return syncAnswer{}, apierr.Internal.Msg("closed but delete failed: " + err.Error())
-		}
 	}
 	return syncAnswer{ID: id, syncOpFields: fields}, nil
 }
@@ -1370,12 +1381,12 @@ func (s *Server) wakeSessionOp(ctx context.Context, target, key string) (syncAns
 		return syncAnswer{}, humaResolveError(err)
 	}
 	req := syncOpRequest{kind: opjournal.KindWake, conv: id, key: key}
-	fields, err := s.runSyncOp(req, humaSessionManagerError, func(minted bool) (legacyop.Result, error) {
+	fields, err := s.runSyncOp(req, humaSessionManagerError, func(adm *legacyop.Admission) (legacyop.Result, error) {
 		err := s.wakeSession(store, id)
 		if err != nil {
-			return wakeOpResult(err, minted), wakeHTTPError(id, err)
+			return wakeOpResult(err, adm.Minted), wakeHTTPError(id, err)
 		}
-		return wakeOpResult(nil, minted), nil
+		return wakeOpResult(nil, adm.Minted), nil
 	})
 	if err != nil {
 		return syncAnswer{}, err
