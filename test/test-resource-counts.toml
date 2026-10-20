@@ -3002,6 +3002,24 @@ calls = 1
 tagged = true
 
 [[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/harness_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
+path = "test/conversationlane/x2_test.go"
+resource = "fixed_sleep"
+calls = 2
+tagged = true
+
+[[count]]
 path = "test/dashport/projection_test.go"
 resource = "listener_helper"
 calls = 11
