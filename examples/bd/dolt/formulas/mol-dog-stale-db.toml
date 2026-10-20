@@ -202,7 +202,7 @@ RSS_BYTES=$(jq -r '.summary.bytes_freed_rss // 0' "$SCAN_FILE")
 SCAN_ERRS=$(jq -r '.summary.errors_total // 0' "$SCAN_FILE")
 INVALID_DROP_SKIPS=$(jq -r '[.dropped.skipped[]? | select(.reason == "invalid-identifier")] | length' "$SCAN_FILE")
 SCAN_FORCE_BLOCKERS=$(jq -r '[.force_blockers[]?] | length' "$SCAN_FILE")
-# ga-xkc9mo: a 100%-protected leak (zero reap targets) must not collapse into
+# A 100%-protected leak (zero reap targets) must not collapse into
 # an indistinguishable orphans:0 -- roll up the protected population
 # separately. active-rig is the expected baseline (one live server per
 # registered rig); everything else is a genuine unreapable leak.
