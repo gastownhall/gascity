@@ -5323,8 +5323,10 @@ func idleRespawnAckUnsafeToStop(
 // state cache after a `gc session kill`), and a heal on it wrote state=awake
 // over the killed row, which the next pass restarted in place on its claim
 // instead of freeing the slot. A fresh read that fails wakes nothing. The
-// pass's first confirmation fixes since, so the later ones reuse the fresh
-// listing (and process snapshot) it took rather than each paying for one.
+// pass's first confirmation fixes since, so a later one reuses a refreshed
+// snapshot an earlier one published rather than each paying for a refresh. A
+// provider may prove an absent name without publishing (tmux's presence-only
+// listing), so each absent confirmation pays its own cheap listing.
 type healAliveConfirmer struct {
 	sp    runtime.Provider
 	since time.Time

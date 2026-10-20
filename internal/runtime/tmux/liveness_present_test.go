@@ -498,12 +498,22 @@ func newPresenceHarness(t *testing.T) *presenceHarness {
 	return h
 }
 
-// presenceListings counts the presence-only listings (list-panes -a with the
-// session name alone) among the executor's calls.
+// presenceLines is a presence listing's output for names, each line ended as
+// presenceListingFormat ends it.
+func presenceLines(names ...string) string {
+	lines := make([]string, len(names))
+	for i, name := range names {
+		lines[i] = name + "\t" + runtimeInventoryEnd
+	}
+	return strings.Join(lines, "\n")
+}
+
+// presenceListings counts the presence-only listings (list-panes -a in
+// presenceListingFormat) among the executor's calls.
 func (h *presenceHarness) presenceListings() int {
 	n := 0
 	for _, call := range h.fe.calls {
-		if call[len(call)-1] == "#{session_name}" {
+		if call[len(call)-1] == presenceListingFormat {
 			n++
 		}
 	}
@@ -518,7 +528,7 @@ func (h *presenceHarness) presenceListings() int {
 // absence; publishing the presence listing into the shared snapshot.
 func TestFreshReadAbsentNameRunsNoProcessSnapshot(t *testing.T) {
 	h := newPresenceHarness(t)
-	h.fe.outs = []string{"worker-1\nworker-1\nworker-2"}
+	h.fe.outs = []string{presenceLines("worker-1", "worker-1", "worker-2")}
 	got, err := h.p.ObserveLivenessSince("worker-9", []string{"codex"}, h.now)
 	requireLiveness(t, got, err, runtime.Liveness{})
 	if h.snapshots != 0 {
@@ -549,7 +559,7 @@ func TestFreshReadAbsentNameRunsNoProcessSnapshot(t *testing.T) {
 func TestFreshReadPresentNameTakesFullRefreshWithProcesses(t *testing.T) {
 	h := newPresenceHarness(t)
 	h.fe.outs = []string{
-		"worker-1",
+		presenceLines("worker-1"),
 		"worker-1\t0\tbash\t101\t0\t1000\t$3\t800",
 	}
 	h.processes = []processRuntimeState{
@@ -594,7 +604,7 @@ func TestFreshReadNeverUsesAListingTakenBeforeSince(t *testing.T) {
 	h.now = h.now.Add(time.Second) // inside the TTL: the old snapshot is still a cache hit
 	h.fe.calls, h.fe.idx = nil, 0
 	h.fe.outs = []string{
-		"other\nworker-1",
+		presenceLines("other", "worker-1"),
 		"other\t0\tbash\t201\t0\t1000\t$1\t700\nworker-1\t0\tbash\t101\t0\t1000\t$3\t800",
 	}
 	h.processes = []processRuntimeState{{PID: "101", PPID: "1", Command: "bash", Args: "bash"}, {PID: "102", PPID: "101", Command: "codex", Args: "codex"}}
@@ -636,5 +646,59 @@ func TestFreshReadFailedPresenceListingTakesFullRefresh(t *testing.T) {
 	requireLivenessUnknown(t, got, err, ErrNoServer)
 	if h.presenceListings() != 1 {
 		t.Fatalf("tmux calls = %q, want one presence listing before the full refresh", h.fe.calls)
+	}
+}
+
+// Only a well-formed listing is evidence, and only for a name gc could have
+// created: a line without the end marker, or a name validateSessionName
+// rejects (whose trailing whitespace the executor's trim could cut from a
+// bare name listing), takes today's full refresh.
+// Kills: parsing a listing whose lines lack the marker; answering a name gc
+// cannot create from the presence listing.
+func TestFreshReadPresenceListingOnlyForWellFormedValidNames(t *testing.T) {
+	h := newPresenceHarness(t)
+	h.fe.outs = []string{"worker-1", "worker-1\t0\tbash\t101\t0\t1000\t$3\t800"}
+	got, err := h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if h.snapshots != 1 || len(h.fe.calls) != 2 {
+		t.Fatalf("malformed listing: snapshots=%d calls=%q, want the full refresh", h.snapshots, h.fe.calls)
+	}
+
+	h.now = h.now.Add(time.Minute)
+	h.fe.calls, h.fe.idx = nil, 0
+	h.fe.outs = []string{"zz-trail \t0\tbash\t101\t0\t1000\t$3\t800"}
+	got, err = h.p.ObserveLivenessSince("zz-trail ", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{Running: true, Alive: true, ObjectID: "$3", ObjectCreated: "800", PanePID: "101"})
+	if h.presenceListings() != 0 {
+		t.Fatalf("tmux calls = %q, want no presence listing for a name gc cannot create", h.fe.calls)
+	}
+}
+
+// deadlineExecutor is a fakeExecutor that records each call's context
+// deadline.
+type deadlineExecutor struct {
+	fakeExecutor
+	deadlines []time.Duration
+}
+
+func (d *deadlineExecutor) executeCtx(ctx context.Context, args []string) (string, error) {
+	if dl, ok := ctx.Deadline(); ok {
+		d.deadlines = append(d.deadlines, time.Until(dl))
+	}
+	return d.execute(args)
+}
+
+// The presence listing runs under its own short bound, so a wedged server
+// costs a fresh read at most presenceListingTimeout more than the full refresh
+// alone did.
+// Kills: running the listing under fetchTimeout or with no bound.
+func TestFreshReadPresenceListingHasItsOwnShortBound(t *testing.T) {
+	h := newPresenceHarness(t)
+	de := &deadlineExecutor{fakeExecutor: fakeExecutor{out: presenceLines("worker-1")}}
+	h.p.tm.exec = de
+	got, err := h.p.ObserveLivenessSince("worker-9", nil, h.now)
+	requireLiveness(t, got, err, runtime.Liveness{})
+	if len(de.deadlines) != 1 || de.deadlines[0] > presenceListingTimeout || de.deadlines[0] <= 0 {
+		t.Fatalf("listing deadlines = %v, want one within %v", de.deadlines, presenceListingTimeout)
 	}
 }

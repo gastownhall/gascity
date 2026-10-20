@@ -351,26 +351,37 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 	return cacheAnswerUnknown
 }
 
+// presenceListingTimeout bounds a presence-only listing. A healthy one takes
+// tens of milliseconds; one slower than this proves nothing, and the caller
+// takes the full refresh with its own fetchTimeout, so a wedged server costs a
+// fresh read at most this much more than it did before the listing existed.
+const presenceListingTimeout = time.Second
+
 // absentSince reports whether a presence-only listing that started at or after
 // since proves name absent (v5 O1), so a fresh read of a name the server does
 // not hold costs one tmux call instead of a refresh. A refresh's
 // process-table scan only refines sessions its listing holds, so it can never
 // make an absent name present. absentSince proves nothing, and the caller takes
-// the full fresh read, when the published snapshot already started at or after
-// since, when the fetcher cannot list presence, when the cache clock has not
-// reached since (a listing would start before it), when the listing fails, or
-// when it holds name. It never publishes: the shared snapshot is untouched.
+// the full fresh read, for a name gc could not have created
+// (validateSessionName), when the published snapshot already started at or
+// after since, when the fetcher is not tmux's, when the cache clock has not
+// reached since (a listing would start before it), when the listing fails or
+// runs past presenceListingTimeout, or when it holds name. It never publishes:
+// the shared snapshot is untouched.
 func (c *StateCache) absentSince(name string, since time.Time) bool {
+	if validateSessionName(name) != nil {
+		return false
+	}
 	if obs := c.observation(); obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
 		return false
 	}
-	lister, ok := c.fetcher.(sessionPresenceLister)
+	fetcher, ok := c.fetcher.(*tmuxFetcher)
 	if !ok || c.clock().Before(since) {
 		return false
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
+	ctx, cancel := context.WithTimeout(context.Background(), presenceListingTimeout)
 	defer cancel()
-	names, err := lister.listSessionNames(ctx)
+	names, err := fetcher.listPresentSessions(ctx)
 	if err != nil {
 		return false
 	}
@@ -564,18 +575,17 @@ type tmuxFetcher struct {
 	snapshot func(ctx context.Context) (processSnapshot, error)
 }
 
-// sessionPresenceLister is a fetcher that can list which sessions the server
-// holds without the rest of FetchState: the cheap half of a fresh read, which
-// StateCache.absentSince uses to prove a name absent.
-type sessionPresenceLister interface {
-	listSessionNames(ctx context.Context) (map[string]struct{}, error)
-}
+// presenceListingFormat lists one session name per pane, ended like
+// runtimeInventoryFormat so the executor's trim of tmux's output cannot cut a
+// name's own trailing characters.
+const presenceListingFormat = "#{session_name}\t" + runtimeInventoryEnd
 
-// listSessionNames lists every session the server holds, from the same
+// listPresentSessions lists every session the server holds, from the same
 // list-panes source FetchState reads, without the process-table scan. A server
-// that answers with no sessions lists none; any other failure is an error.
-func (f *tmuxFetcher) listSessionNames(ctx context.Context) (map[string]struct{}, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}")
+// that answers with no sessions lists none; any other failure, or a line that
+// does not end with runtimeInventoryEnd, is an error.
+func (f *tmuxFetcher) listPresentSessions(ctx context.Context) (map[string]struct{}, error) {
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", presenceListingFormat)
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			return map[string]struct{}{}, nil
@@ -583,10 +593,15 @@ func (f *tmuxFetcher) listSessionNames(ctx context.Context) (map[string]struct{}
 		return nil, err
 	}
 	names := make(map[string]struct{})
-	for _, name := range strings.Split(out, "\n") {
-		if name != "" {
-			names[name] = struct{}{}
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
 		}
+		name, end, ok := strings.Cut(line, "\t")
+		if !ok || end != runtimeInventoryEnd || name == "" {
+			return nil, fmt.Errorf("tmux presence listing: malformed line %q", line)
+		}
+		names[name] = struct{}{}
 	}
 	return names, nil
 }

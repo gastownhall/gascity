@@ -431,7 +431,8 @@ func TestSeamBackedPeekReadsADeadPane(t *testing.T) {
 
 // A fresh read on a real private tmux server: a name the server does not hold
 // reads absent without a process-table scan, and a live session is read from
-// the full refresh, whose scan finds its agent process (v5 O1).
+// the full refresh, whose scan finds its agent process (v5 O1). The agent runs
+// under a shell that cannot exec it, so only the scan can see it.
 func TestFreshReadRealTmuxAbsentNameSkipsProcessScan(t *testing.T) {
 	p := newObjectServer(t)
 	fetcher, ok := p.cache.fetcher.(*tmuxFetcher)
@@ -443,7 +444,7 @@ func TestFreshReadRealTmuxAbsentNameSkipsProcessScan(t *testing.T) {
 		scans++
 		return fetchProcessSnapshot(ctx)
 	}
-	startObjectSession(t, p, "agent", "sleep 300")
+	startObjectSession(t, p, "agent", "sh -c 'sleep 300; :'")
 
 	got, err := p.ObserveLivenessSince("missing", []string{"sleep"}, time.Now())
 	if err != nil || got != (runtime.Liveness{}) {
