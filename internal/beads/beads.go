@@ -48,6 +48,12 @@ var ErrCacheUnavailable = errors.New("bead cache unavailable")
 // installed nothing. The caller may retry.
 var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
 
+// ErrRowRefreshYielded is the ErrRowRefreshFenced a refresh asked to yield
+// (RowRefreshOptions.YieldToLocalWrites) returns while a local write of the
+// cache that may touch the row is in flight. It says nothing about the row;
+// the caller retries once the write has returned.
+var ErrRowRefreshYielded = fmt.Errorf("a local write is in flight: %w", ErrRowRefreshFenced)
+
 // ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
 // projection stops when the caller's context is canceled.
 var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
@@ -367,9 +373,13 @@ func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
 //   - Every mutated bead carries a nonzero opaque int64 revision. Callers may
 //     test it only for equality; arithmetic, ordering across beads, and gap
 //     inference are undefined. A token is never intentionally reused during one
-//     bead's observed lifetime. A never-mutated bead may read back as zero on a
-//     counter-backed store, so zero means "no usable token", not "revisions
-//     unsupported".
+//     bead's observed lifetime. A never-mutated bead may read back as zero (a
+//     row an older binary inserted before its store minted a token on insert,
+//     or a row seeded at zero). That zero is the row's real token, compared
+//     exactly like any other: a fence at zero lands while the row is
+//     unrewritten and is refused after any whole-row mutation below. A read
+//     that omits the revision reads as zero too, so a fence on it fails
+//     closed; re-read the row for its token.
 //   - Every successful mutation of revision-guarded whole-row content —
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;

@@ -121,6 +121,21 @@ var ErrSessionNotFound = errors.New("session not found")
 // with errors.Is.
 var ErrNudgeDeliveredUnobserved = errors.New("nudge delivered but unobserved")
 
+// ErrNudgeDeliveryUnconfirmed reports that a nudge's submit was sent to the
+// session but the provider could not confirm it took: the message may have
+// been delivered, or may still sit unsubmitted in the session's input.
+// Callers that retry may count it as a failed attempt; callers that must not
+// deliver twice treat the nudge as possibly delivered. Providers wrap their
+// own unconfirmed submits with this sentinel so callers can dispatch with
+// errors.Is.
+var ErrNudgeDeliveryUnconfirmed = errors.New("nudge delivery unconfirmed")
+
+// ErrNudgeNotSent reports that a nudge failed before any of its input
+// reached the session: nothing was delivered, so a retry cannot deliver the
+// message twice. Providers wrap their own pre-send failures with this
+// sentinel so callers can dispatch with errors.Is.
+var ErrNudgeNotSent = errors.New("nudge not sent")
+
 // ErrExecUnsupported reports that a provider implements [ExecProvider] but the
 // underlying runtime does not implement the RPP `exec` wire op (it answered
 // exit 2). Carriers treat this as "fall back to the legacy driving op".
@@ -165,6 +180,72 @@ var ErrStopUnsupported = fmt.Errorf("%w: stop not implemented", ErrStopRefused)
 // (exec get-meta/set-meta answered exit 2). A token read that returns it is
 // "absent by construction", never "unverifiable".
 var ErrMetaUnsupported = errors.New("runtime does not implement session metadata")
+
+// ErrMetadataNotMirrored reports that SetMeta or RemoveMeta changed the stored
+// value, which is in force, but the runtime could not reflect the change onto
+// its own view of the session (a UI projection). A caller that needs only the
+// value in force may treat the change as done and report the error as a
+// warning.
+var ErrMetadataNotMirrored = errors.New("session metadata changed but not mirrored by the runtime")
+
+// MetadataNotMirroredError is the error a runtime returns when SetMeta or
+// RemoveMeta changed the stored value but could not reflect the change onto its
+// own view of the session. It matches [ErrMetadataNotMirrored] and unwraps to
+// Cause, so errors.Is still finds the reason (for example
+// [ErrRuntimeUnavailable]).
+type MetadataNotMirroredError struct {
+	Session string
+	Key     string
+	Cause   error
+}
+
+// Error implements error.
+func (e *MetadataNotMirroredError) Error() string {
+	msg := fmt.Sprintf("%s: %s for %q", ErrMetadataNotMirrored, e.Key, e.Session)
+	if e.Cause != nil {
+		msg += ": " + e.Cause.Error()
+	}
+	return msg
+}
+
+// Is reports whether target is [ErrMetadataNotMirrored].
+func (e *MetadataNotMirroredError) Is(target error) bool {
+	return target == ErrMetadataNotMirrored
+}
+
+// Unwrap returns the reason the change could not be mirrored.
+func (e *MetadataNotMirroredError) Unwrap() error {
+	return e.Cause
+}
+
+// OnlyMetadataNotMirrored reports whether err consists solely of mirror
+// failures: every value landed, and only the runtime's own view of it lags.
+// It descends errors.Join and single-error wraps. A [MetadataNotMirroredError]
+// anywhere on that path settles its branch regardless of its cause, and so
+// does [ErrMetadataNotMirrored] itself. Any other multi-error wrap must consist
+// solely of mirror failures in every member.
+func OnlyMetadataNotMirrored(err error) bool {
+	switch e := err.(type) { //nolint:errorlint // walks the error tree by hand: every member of a join must be a mirror failure, which errors.Is cannot express
+	case nil:
+		return false
+	case *MetadataNotMirroredError:
+		return true
+	case interface{ Unwrap() []error }:
+		members := e.Unwrap()
+		if len(members) == 0 {
+			return false
+		}
+		for _, member := range members {
+			if !OnlyMetadataNotMirrored(member) {
+				return false
+			}
+		}
+		return true
+	case interface{ Unwrap() error }:
+		return OnlyMetadataNotMirrored(e.Unwrap())
+	}
+	return err == ErrMetadataNotMirrored //nolint:errorlint // a leaf of the hand walk above; errors.Is would re-descend what the walk already split
+}
 
 // ErrListUnsupported reports that the runtime cannot enumerate sessions (exec
 // list-running answered exit 2). It is never a complete empty list.
@@ -234,6 +315,10 @@ func wrapsJoin(err error) bool {
 func isSessionGoneLeaf(err error) bool {
 	if errors.Is(err, ErrSessionNotFound) {
 		return true
+	}
+	if errors.Is(err, ErrFenceMismatch) {
+		// A miss names a session, whose name may hold the phrases below.
+		return false
 	}
 	msg := err.Error()
 	return strings.Contains(msg, "session not found") ||
@@ -389,12 +474,17 @@ type Provider interface {
 
 	// Interrupt sends a soft interrupt signal (e.g., Ctrl-C / SIGINT) to
 	// the named session. Best-effort: returns nil if the session doesn't
-	// exist. Used for graceful shutdown before Stop. A provider with a
-	// protocol-level cancel may instead wait a bounded time for the
-	// interrupted turn to end and return [ErrInterruptNotSettled] if it
-	// does not. That wait blocks the caller for up to the provider's whole
-	// bound (ACP: cancel_timeout plus two 1s SIGINT waits, 12s by default),
-	// and any lock the caller holds across the call is held that long too.
+	// exist and the provider can safely treat that as a no-op. Providers
+	// that interrupt through a runtime they observe rather than own return
+	// [ErrSessionNotFound] when it shows no live session and
+	// [ErrRuntimeUnavailable] when they cannot read it, so callers do not
+	// mistake a no-op for an interrupt. Used for graceful shutdown before
+	// Stop. A provider with a protocol-level cancel may instead wait a
+	// bounded time for the interrupted turn to end and return
+	// [ErrInterruptNotSettled] if it does not. That wait blocks the caller
+	// for up to the provider's whole bound (ACP: cancel_timeout plus two 1s
+	// SIGINT waits, 12s by default), and any lock the caller holds across
+	// the call is held that long too.
 	Interrupt(name string) error
 
 	// IsRunning reports whether the named provider runtime exists. It does not
@@ -1214,10 +1304,10 @@ type Config struct {
 	// transported into the session environment.
 	CopyFiles []CopyEntry
 
-	// FingerprintExtra carries additional config data that should
-	// participate in fingerprint comparison but isn't part of the session
-	// startup command (e.g. pool config). Nil means no
-	// extra data — the fingerprint covers only Command + Env.
+	// FingerprintExtra carries additional config data that isn't part of
+	// the session startup command (pool sizing, skill and MCP hashes, ...).
+	// Each key has a ChangePolicy (FingerprintExtraChangePolicy); only
+	// Restart keys participate in fingerprint comparison.
 	FingerprintExtra map[string]string
 
 	// PromptSuffix is the shell-quoted prompt text appended to Command

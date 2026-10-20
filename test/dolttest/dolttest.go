@@ -6,11 +6,6 @@
 //
 // Discovery is Linux-only via /proc and a no-op elsewhere, mirroring the
 // scan test/integration already uses (readProcessSnapshot); CI runs on Linux.
-//
-// It is also where the dolt global config that every real-dolt test seeds
-// lives (GlobalConfigJSON, WriteGlobalConfig), together with the unroutable
-// proxy that reproduces a slow network deterministically
-// (UnroutableHTTPSProxyEnv). See globalconfig.go.
 package dolttest
 
 import (
@@ -78,14 +73,14 @@ func SweepStale(parent, prefix string) {
 
 // SweepOrphanStoreDirs runs the symptom-based fallback sweep
 // (internal/doltorphan.Sweep) over root, removing stray dolt store
-// directories regardless of what created them: age > 60m, a .dolt marker
-// present, and not held open by any live process. It composes with, but
-// does not replace, SweepStale and Guard above — those reap live or
-// recently-dead *processes* via a specific run-root naming convention;
-// this catches the *directory* left behind in cases those miss (a killed
-// test binary whose pid was later reused, an ad-hoc dolt invocation
-// outside any tracked run-root, etc). Call at suite startup, alongside
-// SweepStale, before the run spawns any dolt of its own.
+// directories regardless of what created them: age > 60m, a Dolt store
+// present (a .dolt/noms directory), and not held open by any live process.
+// It composes with, but does not replace, SweepStale and Guard above —
+// those reap live or recently-dead *processes* via a specific run-root
+// naming convention; this catches the *directory* left behind in cases
+// those miss (a killed test binary whose pid was later reused, an ad-hoc
+// dolt invocation outside any tracked run-root, etc). Call at suite
+// startup, alongside SweepStale, before the run spawns any dolt of its own.
 func SweepOrphanStoreDirs(root string) {
 	result := doltorphan.Sweep(doltorphan.SweepConfig{Root: root})
 	for _, dir := range result.Removed {

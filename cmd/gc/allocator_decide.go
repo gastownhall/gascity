@@ -58,8 +58,13 @@ type allocInputs struct {
 	// ScaleCheck is the external-reads lane's scale_check result at Now
 	// (externalReadsRecording.scaleCheck), nil when missing or stale (I5).
 	ScaleCheck *scaleCheckResult
-	Obs        *ObservationSnapshot
-	ObsMaxAge  time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment (the pairing
+	// guard, claimHeldTemplates). A nil ClaimsSeen holds nothing.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Endpoints is each config-only endpoint key's breaker reading.
 	Endpoints map[endpointKey]endpointView
 	// ProviderHealth is I7 at Now; nil reads as no registry (fail open).

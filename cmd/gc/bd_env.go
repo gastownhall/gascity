@@ -195,8 +195,11 @@ func workspacePinnedBdBinaryOptional(cityPath string) (string, error) {
 	// choice, so carry it through managed lifecycle subprocesses for that
 	// first initialization (and for callers that intentionally keep the pin
 	// process-scoped). Once workspace.env has a PATH or BD_BIN, the branches
-	// above remain authoritative.
-	if raw := strings.TrimSpace(os.Getenv("BD_BIN")); raw != "" {
+	// above remain authoritative. Read it through the native-open env guard: a
+	// concurrent scope's proxied native open withholds every BD_* key from the
+	// process env for its whole library open, and a bare os.Getenv inside that
+	// window would see no pin at all.
+	if raw := strings.TrimSpace(ambientNativeDoltOpenEnv("BD_BIN")); raw != "" {
 		if !filepath.IsAbs(raw) {
 			warnIgnoredAmbientBdBin(raw, "not an absolute path")
 			return "", nil
@@ -697,9 +700,11 @@ func applyHostedBeadsCredentialEnv(env map[string]string, cityPath string) error
 	// The ambient BEADS_* namespace is untrusted for the exact hosted
 	// workspace selector. In particular, an inherited credential command must
 	// not replace the bridge selected below. Non-hosted/legacy paths retain the
-	// historical ambient fallback for compatibility.
+	// historical ambient fallback for compatibility, read through the native-open
+	// env guard: a concurrent scope's native open projects its own credential
+	// command into the process env for the length of the open.
 	if !selected {
-		if command := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
+		if command := strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_CREDENTIAL_COMMAND")); command != "" {
 			env["BEADS_DOLT_CREDENTIAL_COMMAND"] = command
 			return nil
 		}
@@ -1342,8 +1347,13 @@ func managedLocalDoltHost(host string) bool {
 	return contract.DoltHostIsLocal(host)
 }
 
+// externalDoltEnvOverrideTarget reports a process-local external endpoint:
+// an ambient BEADS_DOLT_SERVER_SOCKET, else a non-local GC_DOLT_HOST. The
+// socket is read through the native-open env guard, because a concurrent
+// scope's native open projects its own socket into the process env for the
+// length of the open; the GC_DOLT_* keys are never projected there.
 func externalDoltEnvOverrideTarget() (contract.DoltConnectionTarget, bool) {
-	if socket := strings.TrimSpace(os.Getenv("BEADS_DOLT_SERVER_SOCKET")); socket != "" {
+	if socket := strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_SERVER_SOCKET")); socket != "" {
 		return contract.DoltConnectionTarget{Socket: socket, External: true}, true
 	}
 	hostOverride := strings.TrimSpace(os.Getenv("GC_DOLT_HOST"))
@@ -2380,12 +2390,12 @@ func mirrorBeadsDoltServerEnv(env map[string]string, carryAmbientTLS bool) {
 	//
 	// Two intentional asymmetries with the sibling BEADS_DOLT_* branches above,
 	// kept deliberately (do not "normalize" them into the map->map convention):
-	//  1. Ambient fallback via a bare os.Getenv: the external-endpoint TLS branch
-	//     (mirrorNativeDoltTLSEnv) also reads ambient env, but through the
-	//     ambientNativeDoltOpenEnv guard; this credential branch is the only one
-	//     that reads the ambient process env with a bare os.Getenv, because a
-	//     controller commonly exports only the helper and never seeds it into the
-	//     projected map.
+	//  1. Ambient fallback: like the external-endpoint TLS branch
+	//     (mirrorNativeDoltTLSEnv), this branch reads the ambient process env,
+	//     because a controller commonly exports only the helper and never seeds it
+	//     into the projected map. BEADS_DOLT_CREDENTIAL_COMMAND is read through the
+	//     ambientNativeDoltOpenEnv guard, since a concurrent scope's native open
+	//     projects its own command there; GC_DOLT_CRED_CMD is never projected.
 	//  2. Preserve-not-clear: when no source exists this branch leaves any
 	//     existing target value untouched instead of deleting/emptying it. The
 	//     siblings clear their target to defeat stale tmux inheritance; the
@@ -2398,7 +2408,7 @@ func mirrorBeadsDoltServerEnv(env map[string]string, carryAmbientTLS bool) {
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = cred
 	} else if ambient := strings.TrimSpace(os.Getenv("GC_DOLT_CRED_CMD")); ambient != "" {
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
-	} else if ambient := strings.TrimSpace(os.Getenv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
+	} else if ambient := strings.TrimSpace(ambientNativeDoltOpenEnv("BEADS_DOLT_CREDENTIAL_COMMAND")); ambient != "" {
 		env["BEADS_DOLT_CREDENTIAL_COMMAND"] = ambient
 	}
 	mirrorNativeDoltTLSEnv(env, carryAmbientTLS)

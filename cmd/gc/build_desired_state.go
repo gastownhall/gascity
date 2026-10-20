@@ -1119,14 +1119,14 @@ type livePoolSessions map[string]int
 // the cross-rig guarantee: an unqualified base name never normalizes to a
 // dir-scoped agent, and a same-base-name pool in another rig (rigB/planner)
 // normalizes to itself, so neither inflates this rig's count.
-func livePoolSessionsByIdentity(cfg *config.City, infos []session.Info) livePoolSessions {
+func livePoolSessionsByIdentity(lookup agentLookup, infos []session.Info) livePoolSessions {
 	out := make(livePoolSessions)
 	for _, si := range infos {
 		if !isPoolManagedSessionInfo(si) || !poolSessionIsLiveInfo(si) {
 			continue
 		}
 		if t := strings.TrimSpace(si.Template); t != "" {
-			out[normalizeAgentTemplateIdentity(cfg, t)]++
+			out[lookup.normalize(t)]++
 		}
 	}
 	return out
@@ -1135,9 +1135,9 @@ func livePoolSessionsByIdentity(cfg *config.City, infos []session.Info) livePool
 // count is the number of live pool sessions whose template is equivalent to
 // template (agentTemplateIdentitiesEquivalent): equal trimmed identities
 // normalize equally, so the normalized count is exactly the equivalence count.
-func (l livePoolSessions) count(cfg *config.City, template string) int {
+func (l livePoolSessions) count(lookup agentLookup, template string) int {
 	if t := strings.TrimSpace(template); t != "" {
-		return l[normalizeAgentTemplateIdentity(cfg, t)]
+		return l[lookup.normalize(t)]
 	}
 	return 0
 }
@@ -1180,7 +1180,10 @@ func buildDemandTargets(
 	// authoritative, so each such template is reported partial (retain, don't
 	// drain) and the error reaches the demand pass's error list instead of
 	// being dropped here.
-	livePools := livePoolSessionsByIdentity(cfg, allOpenSessionInfos)
+	// One agent index for the build: every normalization below is a map
+	// lookup, not a scan of every agent (Gate S fix 3).
+	lookup := newAgentLookup(cfg)
+	livePools := livePoolSessionsByIdentity(lookup, allOpenSessionInfos)
 	var cityLegs []classStoreCandidate
 	var cityLegsErr error
 	if store != nil {
@@ -1266,7 +1269,7 @@ func buildDemandTargets(
 		hasCustomScaleCheck := strings.TrimSpace(cfg.Agents[i].ScaleCheck) != ""
 		template := cfg.Agents[i].QualifiedName()
 		storeScopedControlDispatcher := cfg.Agents[i].Name == config.ControlDispatcherAgentName
-		runningSessions := livePools.count(cfg, template)
+		runningSessions := livePools.count(lookup, template)
 
 		// Cold-pool wake probe (FR-S0.1): a pool with a custom scale_check that
 		// returns 0 while it has zero running sessions and min=0 would never wake
@@ -2659,6 +2662,9 @@ func defaultNamedSessionDemand(targets []defaultScaleCheckTarget, _ *config.City
 // that helper for identity, not claimability, and must keep resolving an
 // expanded root's target.
 func controllerDemandRouteCandidates(b beads.Bead) []string {
+	if workflowTopologyIsNonExecutable(b.Metadata[beadmeta.KindMetadataKey], b.Metadata[beadmeta.WorkflowExpandedMetadataKey]) {
+		return nil
+	}
 	candidates := routedToAndLegacyWorkflowCandidates(b)
 	if len(candidates) == 0 {
 		return nil
@@ -4592,8 +4598,8 @@ func resolveTemplateForSessionBeadInfo(
 // realizePoolDesiredSessions uses a deep-copied instance agent +
 // qualifiedInstance, and this helper is what makes the other pool-backed
 // paths (rediscovery, store-backed dependency-floor) agree. GC_ALIAS and
-// FingerprintExtra are part of CoreFingerprint, so divergent shapes across
-// ticks trip the reconciler's config-drift drain.
+// the Restart-policy FingerprintExtra keys are part of CoreFingerprint, so
+// divergent shapes across ticks trip the reconciler's config-drift drain.
 //
 // Named beads resolve to their own stored alias (configured_named_identity),
 // NOT the shared backing template's qualified name. The main named-session
@@ -5390,11 +5396,7 @@ func claimFreshPoolSlotInfo(bp *agentBuildParams, cfgAgent *config.Agent, usedSl
 	if bp != nil {
 		// The v2 realization memo counts its occupancy's slots once (A3).
 		if held := bp.realizeMemo.freshSlots(cfgAgent); held != nil {
-			for slot := 1; unlimited || slot <= upper; slot++ {
-				if usedSlots[slot] || held[slot] {
-					continue
-				}
-				usedSlots[slot] = true
+			if slot, ok := bp.realizeMemo.claimFreshSlot(held, usedSlots, upper, unlimited); ok {
 				return slot, nil
 			}
 			return 0, fmt.Errorf("%w: pool template %q has no free concrete slot", errPoolSessionNameUnavailable, cfgAgent.QualifiedName())

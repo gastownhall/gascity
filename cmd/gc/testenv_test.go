@@ -9,7 +9,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/pathutil"
-	"github.com/gastownhall/gascity/test/dolttest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // gcEnvVars lists the GC_* identity and session-routing variables that
@@ -198,11 +198,10 @@ func preserveTestControlEnv(key string) bool {
 		key == managedDoltTestModeEnv ||
 		key == managedDoltTestParentPIDEnv ||
 		key == "GC_DOLT_REAL_BINARY" ||
-		// internal/testenv sets this once per test process. It is a hermeticity
-		// switch, not live city state, but the DOLT_ prefix scan in
-		// liveEnvKeysForTests would unset it before any test ran and blank it in
-		// every clearGCEnv.
-		key == dolttest.DisableEventFlushVar ||
+		// internal/testenv sets this once per test binary so no dolt a test runs
+		// forks a detached `dolt send-metrics`. The DOLT_ prefix scrub below would
+		// otherwise strip it before sanitizedBaseEnv could hand it to a child.
+		key == "DOLT_DISABLE_EVENT_FLUSH" ||
 		// The live herdr tier's opt-in. Without it here the scrub below would
 		// strip the variable before any cmd/gc live journey could read it, so
 		// `make test-herdr-live` could never reach the journeys in this package.
@@ -349,6 +348,10 @@ func gcBeadsBdTestHomeEnv(t *testing.T) []string {
 	}
 }
 
+func writeTestDoltIdentity(homeDir string) error {
+	return testutil.SeedDoltGlobalConfig(homeDir)
+}
+
 // doltIdentityHomeDir returns a fresh directory for dolt/git identity files,
 // created outside every t.TempDir() tree rather than nested inside one.
 // t.TempDir()'s cleanup is a single-pass, non-retrying RemoveAll on its
@@ -373,8 +376,8 @@ func configureTestDoltIdentityEnv(t *testing.T) {
 	if err := writeTestGitIdentity(homeDir); err != nil {
 		t.Fatalf("write test git identity: %v", err)
 	}
-	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
-		t.Fatalf("write test dolt global config: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("write test dolt identity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(homeDir, ".gitconfig"))

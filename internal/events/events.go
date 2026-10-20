@@ -94,6 +94,25 @@ const (
 	// LIVENESS fact, not a graph execution fact — nothing about the step's
 	// topology is asserted, and no projector consumes it.
 	ExecutionStepStalled = "execution.step_stalled"
+	// The work-progress ladder's facts (PHASE1-2 §6, the v2 lane step
+	// work-ladder): one seat's pacing of one piece of outstanding work.
+	// Subject carries the work bead, SessionID the seat; the payload is
+	// WorkLadderPayload. WorkNudged and WorkNudgeFailed are a delivered and a
+	// refused nudge (a degraded provider's are marked paused);
+	// WorkRecycleRequested is a recycle posted to the planner (arm A16);
+	// WorkReleased is an unstarted claim given back; WorkReleaseUnfinished
+	// a release that kept the claim (no lane serves its route, no single live
+	// hit) or failed, retried at Cap; WorkEscalated is an alert: a started
+	// claim or a continuation still unanswered, a started claim recycled, a
+	// release that did not finish, or a release that raced a start (an
+	// invariant alarm). They are controller liveness facts, as
+	// execution.step_stalled is.
+	WorkNudged            = "work.nudged"
+	WorkNudgeFailed       = "work.nudge_failed"
+	WorkRecycleRequested  = "work.recycle_requested"
+	WorkReleased          = "work.released"
+	WorkReleaseUnfinished = "work.release_unfinished"
+	WorkEscalated         = "work.escalated"
 	// BeadDeadAssigneeReopened fires when the reconciler reopens a routed work
 	// bead whose assignee resolves to no open session bead — the owning session
 	// closed/retired while the bead stayed assigned, leaving it open+routed but
@@ -234,6 +253,15 @@ const (
 	// agent panes, and nothing off-pane distinguishes "fence acting" from
 	// "fence inert".
 	SessionDrainFenceUnavailable = "session.drain_fence_unavailable"
+	// WorkStartedUnrecorded fires when a claim `gc hook --claim` handed to a
+	// turn is not recorded in the session row's work_started cell: the write
+	// failed (a store error, a CAS lost every attempt, a seat with no instance
+	// token to fence it by) and the claim was delivered anyway, the hook
+	// failing open; or the cell was unreadable and was reset to this claim, so
+	// the claims it held are no longer recorded. The message says which. The
+	// record is the off-pane sign that the work ladder sees those claims as
+	// unstarted, protected from release only by its quiet gate.
+	WorkStartedUnrecorded = "work.started_unrecorded"
 	// SessionDemandClaimDivergence fires when a seat the controller spawned on
 	// DEMAND evidence drains with no work. It is a diagnostics counter for the
 	// agreement invariant between the two readers — the controller's demand read
@@ -371,7 +399,13 @@ const (
 	// that some or all of its work did not run: a bead scope it could not
 	// reach, or a safety gate that held a step back. It accompanies the run's
 	// order.completed so a skip is never read as a clean completion.
-	OrderSkipped                    = "order.skipped"
+	OrderSkipped = "order.skipped"
+	// OrderInapplicable reports that an order declares requires_backend and
+	// its bead scope uses a backend it does not name, so the dispatcher will
+	// not run it there. It is not a failure: the order is reported, not
+	// dispatched. Emitted once per order, scope and backend per controller
+	// boot (see cmd/gc/order_dispatch.go).
+	OrderInapplicable               = "order.inapplicable"
 	ProviderSwapped                 = "provider.swapped"
 	WorkerOperation                 = "worker.operation"
 	ProjectIdentityStamped          = "project.identity.stamped"
@@ -469,6 +503,16 @@ const (
 	// emission is wired in stage 3 — nothing emits it yet.
 	BeadsConditionalWritesDegraded = "beads.conditional_writes.degraded"
 
+	// OpsRecordingDegraded fires when the API or the controller's op
+	// sweeper cannot record or close operation-journal ops under an ops gate
+	// (ops.content, ops.control, ops.lifecycle) that is auto or require: in
+	// auto the request ran unrecorded or its op stayed open, in require it
+	// was refused. Latched by the emitter to at most one event per (gate,
+	// surface, stage, reason) per ten minutes per reporter: one per city per
+	// process for the API, one for the controller's op sweeper (DES-O0API
+	// D13).
+	OpsRecordingDegraded = "ops.recording_degraded"
+
 	// BeadsBlockedRecomputed fires when gc start runs bd's full is_blocked
 	// recompute over one bd-backed scope as a one-shot upgrade step: the
 	// first start under a bd version the scope has not been repaired with.
@@ -523,6 +567,7 @@ var KnownEventTypes = []string{
 	SessionResetStalled,
 	SessionWorkQueryFailed,
 	SessionDrainFenceUnavailable,
+	WorkStartedUnrecorded,
 	SessionDemandClaimDivergence,
 	SessionColdStartTimeout,
 	SessionConversationReset,
@@ -535,6 +580,7 @@ var KnownEventTypes = []string{
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,
 	ExecutionClaimWindowExpired,
 	ExecutionStepStalled,
+	WorkNudged, WorkNudgeFailed, WorkRecycleRequested, WorkReleased, WorkReleaseUnfinished, WorkEscalated,
 	MailSent, MailRead, MailArchived, MailMarkedRead, MailMarkedUnread,
 	MailReplied, MailDeleted,
 	ConvoyCreated, ConvoyClosed,
@@ -548,7 +594,7 @@ var KnownEventTypes = []string{
 	RequestResultSessionSubmit, RequestResultRigCreate, RequestFailed,
 	RigProvisionProgress,
 	CityCreated, CityUnregisterRequested,
-	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped,
+	OrderFired, OrderCompleted, OrderFailed, OrderSuppressed, OrderSkipped, OrderInapplicable,
 	ProviderSwapped, WorkerOperation, ProjectIdentityStamped, SupervisorFSPressureSkippedTick,
 	MoleculeResolved,
 	SupervisorStarted, SupervisorShutdownRequested, SupervisorRequest,
@@ -563,6 +609,7 @@ var KnownEventTypes = []string{
 	BackendCredentialResolved,
 	EmergencySignaled, EmergencyAcked,
 	BeadsConditionalWritesDegraded, BeadsBlockedRecomputed,
+	OpsRecordingDegraded,
 	StorageBindingConverged, StorageBindingGenesis,
 	StorageBindingUnconverged, StorageBindingUncheckable,
 	StorageBindingNotConfigured,

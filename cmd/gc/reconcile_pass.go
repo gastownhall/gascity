@@ -91,7 +91,7 @@ func (p *planner) tracePass(e gatherEnv, now time.Time) passResult {
 	a, err := decideAllocation(allocInputs{
 		Now: now, Cfg: cfg, ConfigRev: w.Env.ConfigRev, EnvGen: w.Env.Gen, CityPath: e.CityPath, CityName: e.CityName,
 		CitySuspended: w.CitySuspended, SuspendedRigPaths: w.SuspendedRigPaths, Census: w.Census, Demand: w.Demand,
-		ScaleCheck: w.ScaleCheck, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
+		ScaleCheck: w.ScaleCheck, ScaleCheckStartedAt: w.ScaleCheckStartedAt, ClaimsSeen: w.ClaimsSeen, Obs: w.Obs, ObsMaxAge: w.ObsMaxAge, Endpoints: w.Gates, ProviderHealth: w.ProviderHealth,
 		Episodes: w.Episodes, SleepPolicies: w.SleepPolicies, TransportRefused: w.TransportRefused, ReadyWaits: w.ReadyWaits,
 		InFlight: w.InFlight, Backoff: w.Backoff,
 	})
@@ -231,7 +231,7 @@ func (p *planner) submit(w *World, a *allocDecision, admitted []intent) {
 	}
 	for _, it := range admitted {
 		e := inflightEntry{Kind: it.Kind, Key: it.Key, Endpoint: it.Endpoint}
-		if it.Kind == intentClose && pass.held.release == nil {
+		if (it.Kind == intentClose || it.Kind == intentStop && stopReason(it) == executionStalledDrainReason) && pass.held.release == nil {
 			pass.held.release = newCloseReleases(w, p.stranded, p.stderr)
 		}
 		if it.Kind == intentCreate {

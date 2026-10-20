@@ -32,7 +32,6 @@ import (
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 	"github.com/gastownhall/gascity/internal/worker"
-	"github.com/gastownhall/gascity/test/dolttest"
 	"github.com/gastownhall/gascity/test/toolhome"
 	"golang.org/x/mod/semver"
 )
@@ -772,9 +771,9 @@ func pinnedBeadsModuleVersion() (string, error) {
 // whatever happens to be installed on the host.
 func TestBuildPinnedBDBinaryForTestsUsesGoModSource(t *testing.T) {
 	// Load-bearing for the census even though waitTestRealBDPath calls it
-	// again: this is the cmd/gc+untagged slow_process_gate call site the
-	// 57 -> 58 bump accounts for across census.go, test-resources.toml, and
-	// TESTING.md. Deleting it as redundant fails the ledger gate.
+	// again: this is a cmd/gc+untagged slow_process_gate call site counted in
+	// test/test-resource-counts.toml. Deleting it as redundant fails the
+	// census gate until the counts file is regenerated.
 	skipSlowCmdGCTest(t, "builds a real bd binary from source; run make test-cmd-gc-process for full coverage")
 
 	// Route through waitTestRealBDPath so this shares waitTestRealBDPathOnce
@@ -986,8 +985,8 @@ func managedBdWaitTestTemplate(t *testing.T, bdPath, doltPath string) string {
 			managedBdWaitTemplateErr = fmt.Errorf("MkdirTemp(template home): %w", err)
 			return
 		}
-		if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
-			managedBdWaitTemplateErr = fmt.Errorf("write template dolt global config: %w", err)
+		if err := writeTestDoltIdentity(homeDir); err != nil {
+			managedBdWaitTemplateErr = fmt.Errorf("write template dolt identity: %w", err)
 			return
 		}
 		env := waitTestEnv(map[string]string{
@@ -3746,8 +3745,8 @@ func setupFreshManagedBdWaitTestCity(t *testing.T) string {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
-		t.Fatalf("dolttest.WriteGlobalConfig: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("writeTestDoltIdentity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)
@@ -3826,8 +3825,8 @@ func setupManagedBdWaitTestCity(t *testing.T) (string, string) {
 	t.Setenv("GC_DOLT", "")
 
 	homeDir := filepath.Join(shortSocketTempDir(t, "gc-bd-home-"), "home")
-	if err := dolttest.WriteGlobalConfig(homeDir); err != nil {
-		t.Fatalf("dolttest.WriteGlobalConfig: %v", err)
+	if err := writeTestDoltIdentity(homeDir); err != nil {
+		t.Fatalf("writeTestDoltIdentity: %v", err)
 	}
 	t.Setenv("HOME", homeDir)
 	t.Setenv("DOLT_ROOT_PATH", homeDir)

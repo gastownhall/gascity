@@ -22,8 +22,11 @@ type SessionRuntimeResolver func(info sessionpkg.Info, sessionKind string, metad
 // FactoryConfig constructs worker-owned session handles and catalogs without
 // leaking session.Manager setup into higher layers.
 type FactoryConfig struct {
-	Store                 beads.Store
-	Provider              runtime.Provider
+	Store    beads.Store
+	Provider runtime.Provider
+	// CityPath is the city whose runtime leases the manager's starts and
+	// stops take. A factory whose handles create, start or stop sessions
+	// needs it: without one, those refuse with session.ErrRuntimeLeaseNoCity.
 	CityPath              string
 	SearchPaths           []string
 	Recorder              events.Recorder
@@ -47,6 +50,9 @@ type FactoryConfig struct {
 	// once across requests rather than once per request. Nil gives the factory
 	// a private memo.
 	ActivityMemo *DerivedActivityMemo
+	// DeferredSubmits is where the factory's manager queues a submit a
+	// session cannot take yet. Nil keeps the city's state.json queue.
+	DeferredSubmits sessionpkg.DeferredSubmitQueue
 }
 
 // Factory centralizes worker-boundary object construction for callers such as
@@ -70,7 +76,7 @@ type Factory struct {
 // NewFactory constructs a Factory backed by a session.Manager configured for
 // the caller's city/runtime context.
 func NewFactory(cfg FactoryConfig) (*Factory, error) {
-	opts := make([]sessionpkg.ManagerOption, 0, 4)
+	opts := make([]sessionpkg.ManagerOption, 0, 5)
 	if cfg.CityPath != "" || cfg.ResolveTransport != nil {
 		opts = append(opts, sessionpkg.WithCityPath(cfg.CityPath))
 	}
@@ -82,6 +88,9 @@ func NewFactory(cfg FactoryConfig) (*Factory, error) {
 	}
 	if cfg.StaleKeyDetectionWaiter != nil {
 		opts = append(opts, sessionpkg.WithStaleKeyDetectionWaiter(cfg.StaleKeyDetectionWaiter))
+	}
+	if cfg.DeferredSubmits != nil {
+		opts = append(opts, sessionpkg.WithDeferredSubmitQueue(cfg.DeferredSubmits))
 	}
 	manager := sessionpkg.NewManagerWithOptions(cfg.Store, cfg.Provider, opts...)
 	return newFactory(manager, cfg)
@@ -277,14 +286,20 @@ func (f *Factory) RuntimeHandle(sessionName, providerName, transport string, pro
 	if f.provider == nil {
 		return nil, sessionpkg.ErrSessionNotFound
 	}
-	return NewRuntimeHandle(RuntimeHandleConfig{
+	cfg := RuntimeHandleConfig{
 		Provider:     f.provider,
 		SessionName:  sessionName,
 		ProviderName: providerName,
 		Transport:    transport,
 		ProcessNames: append([]string(nil), processNames...),
 		Recorder:     f.recorder,
-	})
+	}
+	if f.manager != nil {
+		if city, err := f.manager.CityDir(); err == nil {
+			cfg.CityPath = city.Path()
+		}
+	}
+	return NewRuntimeHandle(cfg)
 }
 
 // Adapter returns a transcript adapter configured with the factory's search

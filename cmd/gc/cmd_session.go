@@ -19,6 +19,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -225,7 +226,7 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+	if err := validateSessionTransportAt(cityPath, resolved, sessionTransport, sp); err != nil {
 		fmt.Fprintf(stderr, "gc session new: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -278,10 +279,12 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 
 	// Try reconciler-first path only when this specific city is managed by a
 	// standalone controller or the machine-wide supervisor. A reachable
-	// supervisor socket alone is not enough for unmanaged ad-hoc cities.
+	// supervisor socket alone is not enough for unmanaged ad-hoc cities. On a
+	// worker site no poke reaches a controller, but the remote one starts the
+	// session at its next reconcile.
 	if cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
-			// Controller is running — create bead only, let reconciler start it.
+		if pokeErr := pokeController(cityPath); controllerWillReconcile(cityPath, pokeErr) {
+			// A controller will reconcile — create bead only, let it start the session.
 			kindMeta := map[string]string{
 				"agent_name":     sessionQualifiedName,
 				"session_origin": sessionOriginForConfiguredNamed(configuredOwner, requestedAlias),
@@ -355,8 +358,11 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			titleDone := maybeAutoTitle(sessionFrontDoor(sessStore), info.ID, title, titleHint, titleProvider, info.WorkDir, stderr)
 			defer func() { <-titleDone }() // ensure title goroutine completes on all exit paths
 
-			// Enqueue the new session to trigger an immediate reconcile.
-			_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
+			// Enqueue the new session to trigger an immediate reconcile. A
+			// worker site has no controller to enqueue to; say so instead.
+			if !noteWorkerSitePoke(stderr, "gc session new", pokeErr) {
+				_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
+			}
 
 			if jsonOutput {
 				if err := writeSessionNewJSON(stdout, stderr, sessionNewJSON{
@@ -380,6 +386,14 @@ func cmdSessionNew(args []string, alias, title, titleHint string, noAttach, json
 			if !shouldAttachNewSession(noAttach, sessionTransport) {
 				if sessionTransport == config.SessionTransportACP && !noAttach && !jsonOutput {
 					fmt.Fprintln(stdout, "Session uses ACP transport; not attaching.") //nolint:errcheck // best-effort stdout
+				}
+				return 0
+			}
+			// A worker site's sessions run where its remote controller runs,
+			// so this box has nothing to wait for or attach to.
+			if onWorkerSite(cityPath) {
+				if !jsonOutput {
+					fmt.Fprintln(stdout, "Worker site: the remote controller runs this session; not attaching.") //nolint:errcheck // best-effort stdout
 				}
 				return 0
 			}
@@ -551,41 +565,56 @@ type acpRouteRegistrar interface {
 	RouteACP(name string)
 }
 
+// validateSessionTransportAt validates a create's transport for the city at
+// cityPath. On a worker site the remote controller's runtime starts the
+// session and the box's guard routes no transport, so only the
+// configuration is checked there.
+func validateSessionTransportAt(cityPath string, resolved *config.ResolvedProvider, transport string, sp runtime.Provider) error {
+	if onWorkerSite(cityPath) {
+		return validateResolvedSessionTransportConfig(resolved, transport)
+	}
+	return validateResolvedSessionTransport(resolved, transport, sp)
+}
+
 func validateResolvedSessionTransport(resolved *config.ResolvedProvider, transport string, sp runtime.Provider) error {
-	transport = strings.TrimSpace(transport)
-	switch transport {
-	case "":
-		return nil
+	if err := validateResolvedSessionTransportConfig(resolved, transport); err != nil {
+		return err
+	}
+	switch transport = strings.TrimSpace(transport); transport {
 	case config.SessionTransportTmux:
-		if sessionProviderSupportsTmux(sp) {
-			return nil
+		if !sessionProviderSupportsTmux(sp) {
+			return fmt.Errorf("provider %q requires tmux transport but the session provider cannot route tmux sessions", sessionTransportProviderName(resolved, transport))
 		}
-		providerName := transport
-		if resolved != nil && resolved.Name != "" {
-			providerName = resolved.Name
-		}
-		return fmt.Errorf("provider %q requires tmux transport but the session provider cannot route tmux sessions", providerName)
 	case config.SessionTransportACP:
+		if !sessionProviderSupportsACP(sp) {
+			return fmt.Errorf("provider %q requires ACP transport but the session provider cannot route ACP sessions", sessionTransportProviderName(resolved, transport))
+		}
+	}
+	return nil
+}
+
+// validateResolvedSessionTransportConfig checks a transport against the
+// configuration alone: the transport is known, and an ACP transport's
+// provider supports ACP.
+func validateResolvedSessionTransportConfig(resolved *config.ResolvedProvider, transport string) error {
+	switch transport = strings.TrimSpace(transport); transport {
+	case "", config.SessionTransportTmux:
+		return nil
+	case config.SessionTransportACP:
+		if resolved != nil && !resolved.SupportsACP {
+			return fmt.Errorf("provider %q does not support ACP transport", sessionTransportProviderName(resolved, transport))
+		}
+		return nil
 	default:
 		return fmt.Errorf("unknown session transport %q", transport)
 	}
-	providerName := ""
-	if resolved != nil {
-		providerName = resolved.Name
-		if !resolved.SupportsACP {
-			if providerName == "" {
-				providerName = transport
-			}
-			return fmt.Errorf("provider %q does not support ACP transport", providerName)
-		}
+}
+
+func sessionTransportProviderName(resolved *config.ResolvedProvider, transport string) string {
+	if resolved != nil && resolved.Name != "" {
+		return resolved.Name
 	}
-	if sessionProviderSupportsACP(sp) {
-		return nil
-	}
-	if providerName == "" {
-		providerName = transport
-	}
-	return fmt.Errorf("provider %q requires ACP transport but the session provider cannot route ACP sessions", providerName)
+	return transport
 }
 
 func sessionProviderSupportsACP(sp runtime.Provider) bool {
@@ -1682,6 +1711,7 @@ func buildResumeCommand(cityPath string, cfg *config.City, info session.Info, se
 // newSessionSuspendCmd creates the "gc session suspend <id-or-alias>" command.
 func newSessionSuspendCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "suspend <session-id-or-alias>",
 		Short: "Suspend a session (save state, free resources)",
@@ -1691,7 +1721,7 @@ The session bead persists and can be resumed later.
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionSuspend(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionSuspend(args, key, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -1699,6 +1729,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	addOpKeyFlag(cmd, &key, cliOpKeyNoModeNote)
 	return cmd
 }
 
@@ -1710,23 +1741,20 @@ var (
 	sessionSuspendEnqueueController = enqueueController
 )
 
-// cmdSessionSuspend is the CLI entry point for "gc session suspend".
+// cmdSessionSuspend is the CLI entry point for "gc session suspend", recorded
+// under the op key key (empty mints one). One suspend op covers both paths.
 //
 // Phase 2: sets held_until metadata on the session bead and pokes the
 // controller. The reconciler handles the actual process stop. Falls back
 // to direct suspend via the session manager if the controller isn't running.
-func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+func cmdSessionSuspend(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
 	store, code := openCityStore(stderr, "gc session suspend")
 	if store == nil {
 		return code
 	}
 
 	cityPath, cityErr := resolveCity()
-	var cfg *config.City
-	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
-	}
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, configWarnWriter(asJSON, stderr))
 	// Every store consumer here is session-class (session-ID resolution, held_until
 	// suspend patch, session worker handle), so route the whole flow through the
 	// session coordination-class store for relocation-safety.
@@ -1737,60 +1765,76 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 		return 1
 	}
 
+	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
+		verb: "gc session suspend", kind: opjournal.KindSuspend, key: key, conversation: sessionID,
+		cfgErr: cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionSuspendResult(stdout, stderr, asJSON, sessionID, "", op)
+	}
+	defer op.end()
+
 	// Try reconciler-first path: set held_until metadata, poke controller.
 	// Only use this path when the city is managed by a standalone controller
-	// or the machine-wide supervisor — not for unmanaged ad-hoc cities.
+	// or the machine-wide supervisor — not for unmanaged ad-hoc cities. A
+	// worker site takes it too: its remote controller drains the hold.
 	if cityErr == nil && sessionSuspendManagedReconciler(cityPath) {
-		if pokeErr := sessionSuspendPokeController(cityPath); pokeErr == nil {
-			// Controller is running — metadata-only suspend: the operator
+		if pokeErr := sessionSuspendPokeController(cityPath); controllerWillReconcile(cityPath, pokeErr) {
+			// A controller will reconcile — metadata-only suspend: the operator
 			// hold (the disposition's Suspend cell), which the reconciler drains.
 			if _, err := sessionFrontDoor(sessStore).OperatorSuspend(sessionID, time.Now()); err != nil {
+				op.finishErr(err)
 				fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 				return 1
 			}
-			// Enqueue the held session to trigger an immediate reconcile.
-			_ = sessionSuspendEnqueueController(cityPath, reconcilekey.Session(sessionID))
-			if asJSON {
-				if err := writeSessionActionJSON(stdout, sessionActionResult{
-					Action:    "suspend",
-					SessionID: sessionID,
-					Mode:      "managed",
-					State:     "suspended",
-				}); err != nil {
-					fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
-					return 1
-				}
-				return 0
+			op.finishErr(nil)
+			// Enqueue the held session to trigger an immediate reconcile. A
+			// worker site has no controller to enqueue to; say so instead.
+			if !noteWorkerSitePoke(stderr, "gc session suspend", pokeErr) {
+				_ = sessionSuspendEnqueueController(cityPath, reconcilekey.Session(sessionID))
 			}
-			fmt.Fprintf(stdout, "Session %s suspended. Resume with: gc session wake %s\n", sessionID, sessionID) //nolint:errcheck // best-effort stdout
-			return 0
+			return emitSessionSuspendResult(stdout, stderr, asJSON, sessionID, "managed", op)
 		}
 	}
 
 	// Fallback: controller not running — direct suspend via worker handle.
 	sp, err := newSessionProvider()
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
 	if err := handle.Stop(context.Background(), sessionActor(session.ActorOperator, cityPath)); err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	op.finishErr(nil)
+	return emitSessionSuspendResult(stdout, stderr, asJSON, sessionID, "direct", op)
+}
 
+// emitSessionSuspendResult prints a suspend's success output. mode is managed
+// or direct; a replay, which does not know which path ran, leaves it empty.
+func emitSessionSuspendResult(stdout, stderr io.Writer, asJSON bool, sessionID, mode string, op *cliOp) int {
 	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
+		result := sessionActionResult{
 			Action:    "suspend",
 			SessionID: sessionID,
-			Mode:      "direct",
+			Mode:      mode,
 			State:     "suspended",
-		}); err != nil {
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session suspend: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -1803,15 +1847,20 @@ func cmdSessionSuspend(args []string, stdout, stderr io.Writer, jsonOutput ...bo
 // newSessionCloseCmd creates the "gc session close <id-or-alias>" command.
 func newSessionCloseCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "close <session-id-or-alias>",
 		Short: "Close a session permanently",
 		Long: `End a conversation. Stops the runtime if active and closes the bead.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key replays the close only when it names the session by its
+ID: a closed session's alias no longer resolves to it, and once another
+session holds the alias (a configured named session is created again under
+its name), a rerun by the alias closes that session.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionClose(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionClose(args, key, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -1819,23 +1868,20 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	addOpKeyFlag(cmd, &key, cliOpKeyNoWithdrawnNote)
 	return cmd
 }
 
-// cmdSessionClose is the CLI entry point for "gc session close".
-func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+// cmdSessionClose is the CLI entry point for "gc session close", recorded
+// under the op key key (empty mints one).
+func cmdSessionClose(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
 	store, code := openCityStore(stderr, "gc session close")
 	if store == nil {
 		return code
 	}
 
 	cityPath, cityErr := resolveCity()
-	var cfg *config.City
-	var cfgErr error
-	if cityErr == nil {
-		cfg, cfgErr = loadCityConfig(cityPath, configWarnWriter(sessionJSONRequested(jsonOutput), stderr))
-	}
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, configWarnWriter(asJSON, stderr))
 	// SURGICAL route: the session-class consumers (session-ID resolution, session
 	// worker handle, session bead read) go through the session coordination-class
 	// store for relocation-safety. The post-close work-release below
@@ -1879,8 +1925,22 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		}
 	}
 
+	// The close op is proposed after the front-door refusal above, before the
+	// close writes the row.
+	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
+		verb: "gc session close", kind: opjournal.KindClose, key: key, conversation: sessionID,
+		cfgErr: cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionCloseResult(stdout, stderr, asJSON, sessionID, 0, op)
+	}
+	defer op.end()
 	closeResult, err := handle.CloseDetailed(context.Background(), sessionActor(session.ActorOperator, cityPath))
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -1916,13 +1976,25 @@ func cmdSessionClose(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		strand(&strandedClaimAlerts{rec: openCityRecorderAt(cityPath, stderr)}, releaseSeatOfBead(closedSessionBead), "manual", out, time.Now(), stderr)
 	}
 
+	// The op closes once the close's cleanup ran: a run killed before here
+	// leaves the op to the sweeper, and a same-key rerun is not told the
+	// cleanup happened.
+	op.finishErr(nil)
+	op.noteReplayByID(args[0])
+	return emitSessionCloseResult(stdout, stderr, asJSON, sessionID, len(closeResult.WaitNudgeIDs), op)
+}
+
+// emitSessionCloseResult prints a close's success output, a replay's included.
+func emitSessionCloseResult(stdout, stderr io.Writer, asJSON bool, sessionID string, withdrawn int, op *cliOp) int {
 	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
+		result := sessionActionResult{
 			Action:              "close",
 			SessionID:           sessionID,
 			State:               "closed",
-			WaitNudgesWithdrawn: len(closeResult.WaitNudgeIDs),
-		}); err != nil {
+			WaitNudgesWithdrawn: withdrawn,
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session close: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -2369,6 +2441,7 @@ func outputLineCount(output string) int {
 func newSessionKillCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
 	var force bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "kill <session-id-or-alias>",
 		Short: "Force-kill session runtime",
@@ -2389,10 +2462,28 @@ restarts in place on its bead; while its started work is blocked, it holds its
 slot asleep. A task assigned directly to the seat with no route is kept, not
 released, and the seat holds its slot until that task is ready.
 
+With --key, a rerun after the controller restarted the session under the same
+ID reports the first kill, noting the restart, instead of killing the new run.
+A pool seat replaced as above is a new session with a new ID, though it may
+keep the killed seat's alias: a rerun must name the killed session by its ID,
+since by the alias it would kill the replacement.
+
+While the ops.lifecycle gate is require, a kill whose session row cannot be
+read, or names no session generation, is refused (op_journal_unavailable,
+naming unreadable_target and the read error, or no_generation) and nothing is
+killed. At auto, or with GC_OPS_LIFECYCLE=auto set to break glass, it runs the
+best-effort kill unrecorded.
+
+A recorded kill (the gate at auto or require) names the session generation it
+read before taking the session's runtime lease. If a start runs while it waits
+for that lease, the kill stops nothing and exits 1, its op closed
+failed{refused:target_moved}: rerun it without --key to kill the new run. A
+rerun with the same --key replays that failure, noting the restart.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionKillWithForce(args, stdout, stderr, jsonOutput, force) != 0 {
+			if cmdSessionKillWithForce(args, key, stdout, stderr, jsonOutput, force) != 0 {
 				return errExit
 			}
 			return nil
@@ -2401,6 +2492,7 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
 	cmd.Flags().BoolVar(&force, "force", false, "destroy a session even when it has live background subagents, or past a hung holder of its runtime lease whose record expired")
+	addOpKeyFlag(cmd, &key, cliOpKeyRestartedNote)
 	return cmd
 }
 
@@ -2410,20 +2502,20 @@ var sessionKillPokeController = enqueueController
 
 // cmdSessionKill is the CLI entry point for "gc session kill".
 func cmdSessionKill(args []string, stdout, stderr io.Writer) int {
-	return cmdSessionKillWithForce(args, stdout, stderr, false, false)
+	return cmdSessionKillWithForce(args, "", stdout, stderr, false, false)
 }
 
-func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, force bool) int {
+// cmdSessionKillWithForce is "gc session kill" recorded under the op key key
+// (empty mints one). --force is an execution option outside the op's digest:
+// a key reused with another --force replays the first run.
+func cmdSessionKillWithForce(args []string, key string, stdout, stderr io.Writer, asJSON, force bool) int {
 	store, code := openCityStore(stderr, "gc session kill")
 	if store == nil {
 		return code
 	}
 
-	cityPath, err := resolveCity()
-	var cfg *config.City
-	if err == nil {
-		cfg, _ = loadCityConfig(cityPath, configWarnWriter(asJSON, stderr))
-	}
+	cityPath, cityErr := resolveCity()
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, configWarnWriter(asJSON, stderr))
 	// Every store consumer here is session-class (session-ID resolution, session
 	// bead read, session worker handle, circuit-breaker clear, asleep sync), so
 	// route the whole flow through the session coordination-class store for
@@ -2478,6 +2570,28 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		return 1
 	}
 
+	// The kill op (DES-O0API §8.4) is scoped to the generation the row
+	// already loaded names, and proposed after the live-subagent refusal,
+	// before the lease and the fence. A row that did not read, or read with
+	// no generation, is not recordable.
+	scope, unrecordable, unrecordableErr := cliOpSessionScope(info, infoErr)
+	var unreplayed []string
+	if force {
+		unreplayed = []string{"--force"}
+	}
+	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
+		verb: "gc session kill", kind: opjournal.KindKill, key: key, conversation: sessionID,
+		scope: scope, unrecordable: unrecordable, unrecordableErr: unrecordableErr, cfgErr: cfgErr, unreplayed: unreplayed,
+		asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
+	}
+	defer op.end()
+
 	// Record the kill intent BEFORE tearing the runtime down. Stopping first left
 	// a window in which the row still claimed a live runtime next to a dead one,
 	// and a controller tick landing there handled the kill as a crash: it
@@ -2500,12 +2614,23 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		req := session.RuntimeLeaseRequest{City: cityPath, Name: info.SessionName, ID: sessionID, TTL: session.RuntimeLeaseTTLFor(cfg)}
 		lease, overridden, err := killRuntimeLease(killCtx, sessionFrontDoor(sessStore), req, force, stderr)
 		if err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 		releaseLease, leaseOverridden = lease.Release, overridden
 		defer releaseLease()
 		killBy.Lease = lease
+	}
+	// A recorded kill stops only the generation its op is scoped to. A start
+	// that ran while the kill waited for the lease has made another run, which
+	// the kill refuses rather than stop under an op that does not name it; the
+	// op closes once the lease is released, as on every other path.
+	if err := op.killScopeMoved(sessionFrontDoor(sessStore), sessionID); err != nil {
+		releaseLease()
+		op.finishOutcome(cliOpRefusedOutcome(cliOpRefusedTargetMoved))
+		fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
 	}
 	// The fence, the stop and the asleep sync are Manager.KillFencedReport's,
 	// the same kill the API's routes run: under the lease taken above, it
@@ -2524,7 +2649,11 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	} else {
 		killErr = handle.Kill(killCtx, killBy)
 	}
+	// The op closes only after the lease is released, so no op store write
+	// runs under it.
 	if killErr != nil && (identity == "" || !runtimeAlreadyInactive) {
+		releaseLease()
+		op.finishOutcome(cliOpKillFailure(killErr))
 		fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2535,12 +2664,17 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		if err := resetSessionCircuitBreakerAfterExplicitKill(cityPath, sessStore, sessionID, identity); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: warning: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			if killErr != nil {
+				releaseLease()
+				op.finishErr(err)
 				fmt.Fprintf(stderr, "gc session kill: %v\n", killErr) //nolint:errcheck // best-effort stderr
 				return 1
 			}
 		}
 	}
+	outcome := sessionVerbSentinels.SyncResult(opjournal.KindKill, nil, true).Outcome
 	if killErr != nil {
+		// The runtime was already gone: nothing was killed.
+		outcome = opjournal.Outcome{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonNotNeeded}
 		fmt.Fprintf(stderr, "gc session kill: warning: session %s runtime was already inactive; cleared named-session circuit breaker\n", sessionID) //nolint:errcheck // best-effort stderr
 	}
 
@@ -2552,6 +2686,7 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 	// and a spurious poke when the asleep sync was skipped is harmless — the
 	// reconciler observes unchanged state and continues.
 	releaseLease()
+	op.finishOutcome(outcome)
 	if err := sessionKillPokeController(cityPath, reconcilekey.Session(sessionID)); err != nil {
 		fmt.Fprintf(stderr, "gc session kill: warning: poke failed: %v\n", err) //nolint:errcheck // best-effort stderr
 	}
@@ -2572,11 +2707,18 @@ func cmdSessionKillWithForce(args []string, stdout, stderr io.Writer, asJSON, fo
 		Payload: api.SessionLifecyclePayloadJSON(sessionID, "", "killed"),
 	})
 	recordSessionKillStop(info, infoErr, cfg)
+	return emitSessionKillResult(stdout, stderr, asJSON, sessionID, op)
+}
+
+// emitSessionKillResult prints a kill's success output, a replay's included.
+func emitSessionKillResult(stdout, stderr io.Writer, asJSON bool, sessionID string, op *cliOp) int {
 	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
+		result := sessionActionResult{
 			Action:    "kill",
 			SessionID: sessionID,
-		}); err != nil {
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session kill: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -2610,7 +2752,7 @@ func recordSessionKillStop(info session.Info, beadErr error, cfg *config.City) {
 // failure other than busy never holds the kill hostage: it falls back to the
 // name's flock alone, with a warning.
 func killRuntimeLease(ctx context.Context, front *session.Store, req session.RuntimeLeaseRequest, force bool, stderr io.Writer) (lease *session.RuntimeLease, overridden bool, err error) {
-	lease, err = session.WaitOperatorRuntimeLease(ctx, front, req)
+	lease, err = sessionKillWaitLease(ctx, front, req)
 	if force && errors.Is(err, session.ErrRuntimeLeaseBusy) {
 		lease, err = session.ForceRuntimeLease(front, req)
 		overridden = err == nil
@@ -2625,6 +2767,10 @@ func killRuntimeLease(ctx context.Context, front *session.Store, req session.Run
 // sessionKillHandle builds the worker handle `gc session kill` stops through.
 // A var so a test can hand the command a handle that cannot fence the kill.
 var sessionKillHandle = workerHandleForSessionWithConfig
+
+// sessionKillWaitLease waits for the runtime lease `gc session kill` takes. A
+// var so a test can finish a start that holds the lease while the kill waits.
+var sessionKillWaitLease = session.WaitOperatorRuntimeLease
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
@@ -2688,6 +2834,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc session submit: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 
@@ -2784,11 +2934,22 @@ type sessionNudgeJSON struct {
 	Outcome       string `json:"outcome"`
 }
 
-// cmdSessionNudge is the CLI entry point for "gc session nudge".
+// cmdSessionNudge is the CLI entry point for "gc session nudge". A worker site
+// refuses before it resolves the target or writes anything
+// (errWorkerSiteDeliveryNeedsController).
 func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
+	cityPath, err := resolveCity()
+	if err != nil {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc session nudge: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	targetInfo, err := resolveNudgeTarget(target)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr

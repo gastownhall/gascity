@@ -249,6 +249,16 @@ func TestAdmitMatrix(t *testing.T) {
 			e.clk.Advance(ExecutionBound + time.Second)
 			return msg("k1", "hello")
 		}, [2]want{busy, busy}, [2]want{busy, busy}},
+		{"expired legacy:api op", func(t *testing.T, e *env, _ *Recorder) Request {
+			e.seed(t, msg("k1", "hello"), ExecutorAPI)
+			e.clk.Advance(ExecutionBound + time.Second)
+			return msg("k1", "hello")
+		}, [2]want{replay, replay}, [2]want{replay, replay}},
+		{"expired legacy:cli op", func(t *testing.T, e *env, _ *Recorder) Request {
+			e.seed(t, msg("k1", "hello"), ExecutorCLI)
+			e.clk.Advance(ExecutionBound + time.Second)
+			return msg("k1", "hello")
+		}, [2]want{replay, replay}, [2]want{replay, replay}},
 	}
 	for _, s := range states {
 		for _, mode := range []gate.Mode{gate.Auto, gate.Require} {
@@ -309,31 +319,75 @@ func TestAdmitMatrix(t *testing.T) {
 	}
 }
 
-// The CLI closes an open op past its finish_by itself, as the sweeper would,
-// and replays that.
-func TestAdmitCLIClosesAnExpiredOp(t *testing.T) {
-	e := newEnv(t)
-	e.seed(t, msg("k1", "hello"), ExecutorCLI)
-	e.clk.Advance(ExecutionBound + time.Second)
-	adm, err := cliRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
-	if err != nil || adm.Decision != Replay || adm.Op.Status != opjournal.StatusClosed ||
-		adm.Op.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
-		t.Fatalf("Admit = %+v, %v", adm, err)
+// Either surface closes an open legacy op past its finish_by itself, as the
+// sweeper would, and replays that. Neither adopts it: its executor may have
+// delivered, so a re-run could deliver twice.
+func TestAdmitClosesAnExpiredOp(t *testing.T) {
+	for _, surface := range []string{"api", "cli"} {
+		for _, executor := range []opjournal.ExecutorKind{ExecutorAPI, ExecutorCLI} {
+			t.Run(fmt.Sprintf("%s/%s", surface, executor), func(t *testing.T) {
+				e := newEnv(t)
+				r := cliRecorder(e, gate.Auto)
+				if surface == "api" {
+					r = apiRecorder(e, gate.Auto)
+				}
+				op := e.seed(t, msg("k1", "hello"), executor)
+				e.clk.Advance(ExecutionBound + time.Second)
+				adm, err := r.Admit(msg("k1", "hello"))
+				if err != nil || adm.Decision != Replay || adm.Adopted || adm.Op.Status != opjournal.StatusClosed ||
+					adm.Op.Attempt != 0 || adm.Op.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
+					t.Fatalf("Admit = %+v, %v", adm, err)
+				}
+				if got, err := e.st.Get(op.ID); err != nil || got.Status != opjournal.StatusClosed || got.Attempt != 0 {
+					t.Fatalf("stored op = %+v, %v; want closed at attempt 0", got, err)
+				}
+				if r.Inflight != nil && r.Inflight.Len() != 0 {
+					t.Fatalf("registry holds %d entries after the replay", r.Inflight.Len())
+				}
+			})
+		}
 	}
 }
 
-// Only lanes settle lane ops: the CLI's expiry rule leaves an expired lane op
-// that shares the id open, writing nothing.
-func TestAdmitCLILeavesAnExpiredLaneOp(t *testing.T) {
-	e := newEnv(t)
-	lane := e.seed(t, msg("k1", "hello"), opjournal.ExecutorLane)
-	e.clk.Advance(ExecutionBound + time.Second)
-	rev := lane.Revision
-	if adm, err := cliRecorder(e, gate.Auto).Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
-		t.Fatalf("Admit = %+v, %v; want busy", adm, err)
+// Only lanes settle lane ops: either surface's expiry rule leaves an expired
+// lane op that shares the id open, writing nothing.
+func TestAdmitLeavesAnExpiredLaneOp(t *testing.T) {
+	for _, surface := range []string{"api", "cli"} {
+		t.Run(surface, func(t *testing.T) {
+			e := newEnv(t)
+			r := cliRecorder(e, gate.Auto)
+			if surface == "api" {
+				r = apiRecorder(e, gate.Auto)
+			}
+			lane := e.seed(t, msg("k1", "hello"), opjournal.ExecutorLane)
+			e.clk.Advance(ExecutionBound + time.Second)
+			rev := lane.Revision
+			if adm, err := r.Admit(msg("k1", "hello")); !errors.Is(err, ErrBusy) {
+				t.Fatalf("Admit = %+v, %v; want busy", adm, err)
+			}
+			if b, _ := e.mem.Get(lane.ID); b.Revision != rev || b.Status != "open" {
+				t.Fatalf("the lane op was written: revision %d (was %d), %s", b.Revision, rev, b.Status)
+			}
+		})
 	}
-	if b, _ := e.mem.Get(lane.ID); b.Revision != rev || b.Status != "open" {
-		t.Fatalf("the lane op was written: revision %d (was %d), %s", b.Revision, rev, b.Status)
+}
+
+// Admit decides expiry on a clock read after it reserves the op's in-flight
+// entry: a holder releases the entry only past the op's finish_by, so a
+// clock read before Reserve could find the op unexpired and adopt an op the
+// holder may have delivered. Here the clock passes finish_by while Admit
+// opens the store, before Reserve.
+func TestAdmitReadsTheClockAfterReserving(t *testing.T) {
+	e := newEnv(t)
+	e.seed(t, msg("k1", "hello"), ExecutorAPI)
+	r := apiRecorder(e, gate.Auto)
+	r.Open = func() (*opjournal.Store, error) {
+		e.clk.Advance(ExecutionBound + time.Nanosecond)
+		return e.st, nil
+	}
+	adm, err := r.Admit(msg("k1", "hello"))
+	if err != nil || adm.Decision != Replay || adm.Adopted || adm.Op.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
+		t.Fatalf("Admit = %+v, %v; want a replay of deadline_in_flight", adm, err)
 	}
 }
 
@@ -486,6 +540,47 @@ func TestFinish(t *testing.T) {
 		}
 		if !e.clk.Now().After(adm.Op.FinishBy) {
 			t.Fatalf("gave up at %s, before finish_by %s", e.clk.Now(), adm.Op.FinishBy)
+		}
+		// The store recovers before the sweeper runs: a same-key retry closes
+		// the op as expired rather than adopting an op whose effect may have
+		// landed.
+		e.fault.updateForever = false
+		again, err := r.Admit(msg("k1", "hello"))
+		if err != nil || again.Decision != Replay || again.Adopted || again.Op.Attempt != 0 ||
+			again.Op.Outcome != failed(opjournal.ReasonDeadlineInFlight) {
+			t.Fatalf("same-key retry = %+v, %v; want a replay of deadline_in_flight", again, err)
+		}
+		if r.Inflight.Len() != 0 {
+			t.Fatalf("registry %d after the retry", r.Inflight.Len())
+		}
+	})
+	t.Run("the background close reopens the store for each attempt", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		adm, _ := r.Admit(msg("k1", "hello"))
+		r.sleep = func(time.Duration) { e.clk.Advance(time.Minute) }
+		e.fault.updateForever = true
+		healthy, err := opjournal.NewStore(beads.SessionStore{Store: e.mem}, e.clk, opjournal.WithIDPrefix("gc"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var reopens atomic.Int32
+		r.Open = func() (*opjournal.Store, error) {
+			if reopens.Add(1) == 1 {
+				return nil, errors.New("transport: refused")
+			}
+			return healthy, nil
+		}
+		f := adm.Finish(Result{Outcome: out})
+		if f.Closed || f.Background == nil {
+			t.Fatalf("Finish = %+v, want a background close", f)
+		}
+		<-f.Background
+		if got, _ := e.st.Get(adm.Op.ID); got.Status != opjournal.StatusClosed || got.Outcome != out {
+			t.Fatalf("stored %+v", got)
+		}
+		if r.Inflight.Len() != 0 || reopens.Load() != 2 {
+			t.Fatalf("registry %d, reopened %d times; want 0 and 2", r.Inflight.Len(), reopens.Load())
 		}
 	})
 	t.Run("leave open, then a same-key retry adopts", func(t *testing.T) {
@@ -668,8 +763,8 @@ func TestDegradeReasonsAndUnrecorded(t *testing.T) {
 		fmt.Errorf("x: %w", opjournal.ErrContention):                 DegradeContention,
 		errors.New("transport"):                                      DegradeStoreError,
 	} {
-		if got := degradeReason(err); got != want {
-			t.Errorf("degradeReason(%v) = %s, want %s", err, got, want)
+		if got := DegradeReason(err); got != want {
+			t.Errorf("DegradeReason(%v) = %s, want %s", err, got, want)
 		}
 	}
 	if openReason(opjournal.ErrNoNamespace) != ReasonNoNamespace || openReason(errors.New("x")) != ReasonStoreUnavailable {

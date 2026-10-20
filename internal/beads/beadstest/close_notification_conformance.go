@@ -175,7 +175,7 @@ func primedNotifyingCache(t *testing.T, backing beads.Store) (*beads.CachingStor
 
 // currentRevision reads id's revision token from s.Get. The conditional cases
 // read it from the backing, not the cache: a cache primed from a store whose
-// list rows publish no token (NativeDoltStore) holds Revision 0 for the bead,
+// list rows publish no token (BdStore) holds Revision 0 for the bead,
 // which means absent and fences nothing.
 func currentRevision(t *testing.T, s beads.Store, id string) int64 {
 	t.Helper()

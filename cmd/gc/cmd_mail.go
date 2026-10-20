@@ -531,6 +531,10 @@ $GC_ALIAS, $GC_AGENT, or "human".`,
 }
 
 func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdout, stderr io.Writer) int {
+	// One composed city-config load for the whole invocation: the suspension
+	// check, the mail provider, the target resolution and every store open each
+	// loaded it again (see invocationConfigMemo).
+	defer beginInvocationConfigMemo()()
 	// --inject writes a <system-reminder> straight into a provider's system
 	// prompt. With no recipient argument the mailbox falls back through
 	// GC_SESSION_ID/GC_ALIAS/GC_AGENT to "human"
@@ -543,19 +547,30 @@ func cmdMailCheckWithFormat(args []string, inject bool, hookFormat string, stdou
 		return 0
 	}
 	cityPath, cityPathErr := resolveCity()
+	configLoaded := false
 	if cityPathErr == nil {
-		if cfg, err := loadCityConfig(cityPath, stderr); err == nil && citySuspended(cfg) {
+		cfg, err := loadCityConfig(cityPath, stderr)
+		if err == nil && citySuspended(cfg) {
 			if inject {
 				return 0
 			}
 			fmt.Fprintln(stderr, "gc mail check: city is suspended") //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		configLoaded = err == nil
 	}
 	if cityPathErr != nil {
 		return doMailCheckFallback(args, inject, hookFormat, stdout, stderr)
 	}
 	c, reason := mailCheckAPIClient(cityPath)
+	// An injecting check reads the mailbox in process whatever the controller
+	// says (routeMailCheck), and any check without a controller does. Its config
+	// load above ran the builtin readiness pass the routing read needs, so
+	// resolve the routes alongside the mail provider's store open
+	// (prewarmCLIStorageRoutes).
+	if configLoaded && (inject || c == nil) {
+		defer prewarmCLIStorageRoutes(cityPath)()
+	}
 	return routeMailCheck(cityPath, args, inject, hookFormat, c, reason, stdout, stderr)
 }
 

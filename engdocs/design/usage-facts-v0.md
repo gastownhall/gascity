@@ -212,11 +212,19 @@ yet settled.
   The single-key marker sidesteps open question 3 (`beads.Tx` validation across
   store impls).
 - **The awake epoch is `awake_started_at` at nanosecond precision**, stamped
-  fresh on every confirmed start/wake — both create-time `ConfirmStartedPatch`
-  and the controller's `CommitStartedPatch` wake path — rather than a separate
-  UUID. Refreshing it on every interval is what lets later intervals on a reused
-  session bill; nanosecond precision keeps two intervals that begin within the
-  same wall-clock second distinct.
+  fresh whenever a confirmed start/wake opens an awake interval — both
+  create-time `ConfirmStartedPatch` and the controller's `CommitStartedPatch`
+  wake path — rather than a separate UUID. Refreshing it on every interval is
+  what lets later intervals on a reused session bill; nanosecond precision
+  keeps two intervals that begin within the same wall-clock second distinct.
+  Heal can mark a bead `awake` while its claimed start is still in flight but
+  never writes the epoch, so a live state at commit does not prove an interval
+  is open. The controller commit therefore stamps a fresh epoch on any start
+  out of a pending or dormant state, and on a start or recovery committed onto
+  a live bead unless that bead's interval is still open (an epoch the compute
+  lane has not yet recorded in `usage_compute_emitted_at`); an open interval's
+  epoch is never replaced (`startOpensAwakeInterval` in
+  `cmd/gc/session_lifecycle_parallel.go`).
 - **Model facts emit from the transcript-tail watcher, as proposed.** The single
   per-invocation tail extraction that drives the `gc.agent.*` token instruments
   (`recordInvocationTelemetry`) also builds one model `usage.Fact` per pending
@@ -236,6 +244,16 @@ yet settled.
   payload's `RunID` is wired today, resolved through the shared
   `beadmeta.ResolveRunID` that the compute-fact emitter also uses so a run's model
   and compute facts group together.
+- **Model-fact coverage is per transcript family: claude, codex, opencode.**
+  Families outside `invocationUsageSpecs` are skipped before any transcript
+  discovery. OpenCode mirrors a session as one JSON export named for its
+  `session_key` (`<root>/<session_key>.json`), so it is resolved by that key,
+  never by workdir (sessions sharing a workdir would be attributed each other's
+  export), and the whole export is parsed rather than tail-windowed. The
+  provider-recorded per-call `cost` is carried through `TailUsage.ReportedCostUSD`
+  and preferred over the price table, since the price table cannot know the
+  upstream (for example OpenRouter) a session routed through. A call with no
+  reported cost falls back to the registry and is flagged `Unpriced` on a miss.
 - **`gc costs` reads the local sink, not the event log** (see the `gc costs`
   section): it reflects facts only under the default `local` provider. The read
   is resilient to a partially corrupt log: a malformed line (a torn mid-append,

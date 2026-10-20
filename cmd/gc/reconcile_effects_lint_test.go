@@ -46,6 +46,7 @@ var effectBannedMethods = []string{
 	"CreateWait", "CancelWait", "CancelWaits", "ExpireWait", "FailWait", "CloseWaitFromNudge", "FailWaitFromNudge",
 	"MarkWaitReady", "MarkWaitReadyForRedelivery", "SetWaitNudgeID", "RetryClosedWait", "ReassignWaits",
 	"StopUnattendedSession", "StopForCleanup",
+	"MintIncarnation", "ConfirmIncarnation", // the Manager's and legacy's mint: a v2 effect mints in its own CAS section
 	"NewStore", // session.NewStore: the raw session front door
 }
 

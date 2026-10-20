@@ -45,7 +45,8 @@ func TestLivePoolSessionsMatchThePairwiseEquivalence(t *testing.T) {
 		live(""), live("   "),
 		live("rig-C/ghost"), // no configured agent: counts for nothing configured
 	}
-	got := livePoolSessionsByIdentity(cfg, infos)
+	lookup := newAgentLookup(cfg)
+	got := livePoolSessionsByIdentity(lookup, infos)
 	for i := range cfg.Agents {
 		template := cfg.Agents[i].QualifiedName()
 		want := 0
@@ -54,12 +55,12 @@ func TestLivePoolSessionsMatchThePairwiseEquivalence(t *testing.T) {
 				want++
 			}
 		}
-		if n := got.count(cfg, template); n != want {
+		if n := got.count(lookup, template); n != want {
 			t.Errorf("%s: %d live pool sessions, want %d (the pairwise walk's)", template, n, want)
 		}
 	}
 	for template, want := range map[string]int{"planner": 2, "rig-A/planner": 2, "rig-A/gc.planner": 2, "rig-B/planner": 1, "rig-A/coder": 1, "": 0, "  ": 0} {
-		if n := got.count(cfg, template); n != want {
+		if n := got.count(lookup, template); n != want {
 			t.Errorf("%q: %d live pool sessions, want %d", template, n, want)
 		}
 	}

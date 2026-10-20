@@ -61,6 +61,20 @@ const (
 
 const defaultPoolClaimNudge = "Run gc hook --claim --drain-ack --json now; if it returns work, execute it immediately."
 
+// defaultHeldClaimNudge is the default for a seat whose claim (the %s) has
+// started its step, the execution backstop's started seat: PHASE1-2 §6.6's
+// started-rung text. It carries no --drain-ack, which on a hook answer of no
+// work, the started step gate- or hold-blocked, acked a drain and gave the
+// claim back (mc-ilr3b).
+const defaultHeldClaimNudge = "You hold %s and its step has started. Continue it now (run gc hook --claim --json to re-read your assignment). If you are waiting on something, say what, then stop."
+
+// idleClaimNudgeLabel and continuationClaimNudgeLabel name the claim and
+// continuation backstops in their log lines and their planner notices.
+const (
+	idleClaimNudgeLabel         = "idle-claim-nudge"
+	continuationClaimNudgeLabel = "continuation-claim-nudge"
+)
+
 // nudgeStalledPoolClaims is a reconcile-tick backstop that runs for every
 // runtime (herdr AND tmux). It re-delivers the claim nudge to a pool slot that
 // is running but whose assigned trigger bead is still UNCLAIMED (open, not
@@ -119,7 +133,7 @@ func nudgeStalledPoolClaims(
 	// The shared engine keys work by bead ID alone, which cannot tell two
 	// same-ID beads in different stores apart, so this predicate carries its own
 	// store-scoped snapshot and leaves the engine's ID map empty.
-	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, "idle-claim-nudge", poolClaimBackstop{
+	runNudgeBackstop(sp, store, sessionBeads, nil, now, stdout, idleClaimNudgeLabel, poolClaimBackstop{
 		cfg:   cfg,
 		work:  newIdleClaimWorkSnapshot(claimWork, claimWorkStoreRefs),
 		now:   now,
@@ -179,7 +193,7 @@ func nudgeStalledPoolContinuations(
 		nil,
 		now,
 		stdout,
-		"continuation-claim-nudge",
+		continuationClaimNudgeLabel,
 		poolContinuationBackstop{
 			cfg:        cfg,
 			candidates: newPoolContinuationCandidateSnapshot(sessionBeads, candidates),
@@ -252,8 +266,15 @@ func (p poolContinuationBackstop) content(s beads.Bead) string {
 }
 
 func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopResolution {
+	res, _ := revalidateContinuation(target)
+	return res
+}
+
+// revalidateContinuation is revalidate's verdict on target, with the step as
+// the live read found it (the zero bead when it held).
+func revalidateContinuation(target backstopTarget) (backstopResolution, beads.Bead) {
 	if target.Store == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// Assigned-work snapshots normally carry a CachingStore. A plain Get can
 	// therefore return the pre-claim row after another process has already
@@ -273,11 +294,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 	// leg-vs-owner grouping work in ga-m4sj2.
 	live := beads.HandlesFor(target.Store).Live
 	if live == nil {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	current, err := live.Get(target.ID)
 	if err != nil || current.ID != target.ID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// target.StoreRef is the OWNER scope selectReadyContinuationClaimCandidates
 	// proved for this row, not the leg it was read from: inside a class binding a
@@ -291,11 +312,11 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(current.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(current.Metadata[beadmeta.ContinuationGroupMetadataKey]) == "" ||
 		strings.TrimSpace(current.Metadata[beadmeta.SessionAffinityMetadataKey]) != "require" {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
 	root, err := live.Get(target.RootID)
 	if err != nil || root.ID != target.RootID {
-		return backstopResolutionHold
+		return backstopResolutionHold, beads.Bead{}
 	}
 	// Mirrors evaluateReadyContinuationClaimCandidate: the root proves the run is
 	// live, not who owns this step. gc.session_name on the root is a dashboard
@@ -308,9 +329,9 @@ func (p poolContinuationBackstop) revalidate(target backstopTarget) backstopReso
 		strings.TrimSpace(root.Metadata[beadmeta.RootStoreRefMetadataKey]) != target.StoreRef ||
 		strings.TrimSpace(root.Metadata[beadmeta.FormulaContractMetadataKey]) != "graph.v2" ||
 		strings.TrimSpace(root.Metadata[beadmeta.KindMetadataKey]) != "workflow" {
-		return backstopResolutionClear
+		return backstopResolutionClear, current
 	}
-	return backstopResolutionOutstanding
+	return backstopResolutionOutstanding, current
 }
 
 func (p poolContinuationBackstop) observe(store beads.Store, s *beads.Bead, target backstopTarget, now time.Time, stdout io.Writer) {
@@ -324,8 +345,8 @@ func (p poolContinuationBackstop) reserve(store beads.Store, s *beads.Bead, targ
 func (p poolContinuationBackstop) exhausted(_ beads.Store, _ *beads.Bead, _ io.Writer) {
 }
 
-func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	clearContinuationClaimMarker(store, s, stdout)
+func (p poolContinuationBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
+	return clearContinuationClaimMarker(store, s, stdout)
 }
 
 type poolContinuationCandidateSnapshot struct {
@@ -529,7 +550,7 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	if !writeSessionMetadata(store, s, map[string]string{
 		idleClaimNudgeStalledKey:      p.now.UTC().Format(time.RFC3339),
 		idleClaimNudgeStalledTokenKey: strings.TrimSpace(s.Metadata["instance_token"]),
-	}, "idle-claim-nudge", stdout) {
+	}, idleClaimNudgeLabel, stdout) {
 		return
 	}
 	fmt.Fprintf(stdout, //nolint:errcheck // best-effort
@@ -540,8 +561,15 @@ func (p poolClaimBackstop) exhausted(store beads.Store, s *beads.Bead, stdout io
 	}
 }
 
-func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) {
-	clearIdleClaimMarker(store, s, stdout)
+// clear wipes the claim backstop's pacing marker, and withdraws the slot's
+// warm-bind claim notice (withdrawWarmBindNotice) whether or not there was a
+// marker to wipe: the backstop clears once the slot's trigger is claimed,
+// gone or unbound, which leaves that notice nothing to claim, and a trigger
+// claimed before the backstop first saw it left no marker.
+func (p poolClaimBackstop) clear(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
+	wiped := clearIdleClaimMarker(store, s, stdout)
+	withdrawWarmBindNotice(store, s, "the claim backstop found no work outstanding", stdout)
+	return wiped
 }
 
 type idleClaimWorkSnapshot struct {
@@ -640,6 +668,21 @@ func stalledPoolClaimNudgeFor(cfg *config.City, session beads.Bead) string {
 	return nudge
 }
 
+// heldClaimNudgeFor is stalledPoolClaimNudgeFor for a seat whose claim beadID
+// has started: its configured nudge, else defaultHeldClaimNudge naming the
+// claim, and "" when its template names no configured agent. A configured
+// nudge that carries --drain-ack is not sent to a started seat either: the
+// default stands in for it, since an ack on the nudge's no-work answer is how
+// started work was lost (mc-ilr3b), and the hook's fence holds only a claim
+// whose start was recorded.
+func heldClaimNudgeFor(cfg *config.City, session beads.Bead, beadID string) string {
+	nudge, known := configuredClaimNudgeFor(cfg, session)
+	if known && (nudge == "" || strings.Contains(nudge, "--drain-ack")) {
+		return fmt.Sprintf(defaultHeldClaimNudge, strings.TrimSpace(beadID))
+	}
+	return nudge
+}
+
 func configuredClaimNudgeFor(cfg *config.City, session beads.Bead) (string, bool) {
 	template := normalizedSessionTemplate(session, cfg)
 	if template == "" {
@@ -680,20 +723,21 @@ func clearIdleClaimLatch(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	if s.Metadata[idleClaimNudgeStalledKey] == "" && s.Metadata[idleClaimNudgeStalledTokenKey] == "" {
 		return
 	}
-	writeSessionMetadata(store, s, map[string]string{idleClaimNudgeStalledKey: "", idleClaimNudgeStalledTokenKey: ""}, "idle-claim-nudge", stdout)
+	writeSessionMetadata(store, s, map[string]string{idleClaimNudgeStalledKey: "", idleClaimNudgeStalledTokenKey: ""}, idleClaimNudgeLabel, stdout)
 }
 
 // clearIdleClaimMarker wipes the marker once the slot no longer has unclaimed
-// work, so the next assignment starts its grace clock fresh. No-op (no store
-// write) when there is nothing to clear, so steady-state ticks stay silent.
-func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+// work, so the next assignment starts its grace clock fresh, and reports
+// whether it wiped one. No-op (no store write) when there is nothing to clear,
+// so steady-state ticks stay silent.
+func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
 	if s.Metadata[idleClaimNudgeTriggerKey] == "" &&
 		s.Metadata[idleClaimNudgeCountKey] == "" &&
 		s.Metadata[idleClaimNudgeAtKey] == "" &&
 		s.Metadata[idleClaimNudgeTokenKey] == "" &&
 		s.Metadata[idleClaimNudgeStalledKey] == "" &&
 		s.Metadata[idleClaimNudgeStalledTokenKey] == "" {
-		return
+		return false
 	}
 	kvs := map[string]string{
 		idleClaimNudgeTriggerKey:      "",
@@ -705,11 +749,12 @@ func clearIdleClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "idle-claim-nudge: clearing %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	for k := range kvs {
 		delete(s.Metadata, k)
 	}
+	return true
 }
 
 func writeContinuationClaimMarker(
@@ -741,14 +786,16 @@ func writeContinuationClaimMarker(
 	return true
 }
 
-func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) {
+// clearContinuationClaimMarker wipes the continuation marker and reports
+// whether it wiped one. No-op (no store write) when there is nothing to clear.
+func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Writer) bool {
 	if s.Metadata[continuationClaimNudgeWorkKey] == "" &&
 		s.Metadata[continuationClaimNudgeRootKey] == "" &&
 		s.Metadata[continuationClaimNudgeStoreRefKey] == "" &&
 		s.Metadata[continuationClaimNudgeGenerationKey] == "" &&
 		s.Metadata[continuationClaimNudgeCountKey] == "" &&
 		s.Metadata[continuationClaimNudgeAtKey] == "" {
-		return
+		return false
 	}
 	kvs := map[string]string{
 		continuationClaimNudgeWorkKey:       "",
@@ -760,11 +807,12 @@ func clearContinuationClaimMarker(store beads.Store, s *beads.Bead, stdout io.Wr
 	}
 	if err := store.SetMetadataBatch(s.ID, kvs); err != nil {
 		fmt.Fprintf(stdout, "continuation-claim-nudge: clearing %s failed: %v\n", s.ID, err) //nolint:errcheck // best-effort
-		return
+		return false
 	}
 	for key := range kvs {
 		delete(s.Metadata, key)
 	}
+	return true
 }
 
 func atoiOr0(s string) int {

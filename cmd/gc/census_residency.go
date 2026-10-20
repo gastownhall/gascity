@@ -296,6 +296,8 @@ func censusCityName(cfg *config.City) string {
 }
 
 // servingRigStores is the suspension FRAME: the rig legs a census may read.
+// `gc ready` opens exactly this frame (readyServingRigs), so a row the census
+// counts is a row a seat can claim, and a suspended rig's row is neither.
 //
 // It keeps the pre-resolver rule exactly — a rig is a leg when it is DECLARED in
 // cfg.Rigs, its store is open, and its path is not suspended — so an entry in

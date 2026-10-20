@@ -28,16 +28,6 @@
 // GC_*_HELPER, ...) flow through untouched so opt-in test paths and
 // helper-subprocess trampolines keep working.
 //
-// Process-wide dolt default: dolt forks a detached `dolt send-metrics` after
-// every command unless DOLT_DISABLE_EVENT_FLUSH is present in its environment,
-// whatever metrics.disabled says, and no test has a use for that process.
-// init() sets the variable once for every go-test binary, so a test that runs
-// dolt, directly or through gc or bd, inherits it from the process instead of
-// calling Setenv itself. Test code that builds a child environment from
-// scratch rather than from os.Environ() must carry it too; see
-// test/dolttest.DisableEventFlushVar. Testscript subcommand mode, below, is
-// left alone: testscript owns that child's environment.
-//
 // Passthrough: a parent that intentionally launches a helper subprocess
 // with seeded leak-vector vars (e.g. workspacesvc's proxy_process tests,
 // where proxy_process.go seeds GC_CITY/GC_CITY_PATH/GC_CITY_RUNTIME_DIR/
@@ -71,6 +61,35 @@
 // store traced back to test clients reaching the local server on port 3307
 // (ga-4c2ss6). For the rare legitimate case, set ProdDoltPortOptOutVar
 // (GC_ALLOW_PROD_DOLT_PORT_IN_TESTS) to "1".
+//
+// Hermetic git template: in go-test mode init() also points GIT_TEMPLATE_DIR
+// at a template directory holding a config with maintenance.auto=false, an
+// empty hooks/ and an empty info/exclude, replacing any ambient
+// GIT_TEMPLATE_DIR (which beats init.templateDir) that is not already that
+// template. Every repo this binary or a child it spawns makes with git init or
+// git clone then starts with git's detached auto-maintenance off. Git 2.55
+// starts that daemon after commit, merge, am, fetch and pull, and it races
+// t.TempDir's RemoveAll ("directory not empty", ga-zoe1wr). The template lives
+// in $TEST_TMPDIR when Bazel sets it, else os.TempDir(), named for the owner's
+// uid and a digest of its contents. Git copies a template's hooks/ into every
+// repo it makes, so an existing template is verified against what init()
+// writes (entry by entry, content byte for byte, and on unix owner and mode)
+// before it is used, and one that differs makes init() panic naming the
+// directory to remove. A test binary that another one re-execs inherits
+// GIT_TEMPLATE_DIR and keeps it when it is an absolute path that passes the
+// same verification, so a child started with a TMPDIR of its own creates
+// nothing there. Testscript subcommand mode is left alone, as above. Code that
+// builds a child env from scratch must carry GIT_TEMPLATE_DIR into it, or the
+// repos that child makes lose the guard, and a child that is a test binary
+// installs a template of its own in its temp dir.
+//
+// Dolt event flush: in a go-test binary init() also sets
+// DOLT_DISABLE_EVENT_FLUSH. dolt forks a detached `dolt send-metrics` after each
+// command unless that variable is present, and metrics.disabled in the dolt
+// global config does not stop the fork, so every dolt a test runs, directly or
+// through gc or bd, would otherwise leave a metrics process behind. The variable
+// is a presence switch; dolt does not read its value. Testscript subcommand mode
+// skips it with the scrub, because testscript owns that child env exactly.
 package testenv
 
 import (
@@ -104,6 +123,10 @@ func isGoTestBinary() bool {
 // the list are scrubbed as usual; the passthrough var itself is unset so the
 // list does not flow onward to further subprocesses.
 const PassthroughVar = "GC_TESTENV_PASSTHROUGH"
+
+// doltDisableEventFlushVar is the variable dolt checks, by presence only, before
+// it forks the detached `dolt send-metrics` it otherwise runs after each command.
+const doltDisableEventFlushVar = "DOLT_DISABLE_EVENT_FLUSH"
 
 // LeakVectorVars is the list of env vars that point at live-city paths,
 // session identities, bead stores, or Dolt runtimes. If any of these survive
@@ -161,6 +184,9 @@ var LeakVectorVars = []string{
 	"GC_DOLT_PORT",
 	"GC_DOLT_USER",
 	"GC_HOME",
+	"GC_OPS_CONTENT",
+	"GC_OPS_CONTROL",
+	"GC_OPS_LIFECYCLE",
 	"GC_SESSION_ID",
 	"GC_SESSION_NAME",
 	"GC_TMUX_SESSION",
@@ -176,19 +202,6 @@ const ProdDoltPort = "3307"
 // Dolt-port guard. Set it to "1" for the rare legitimate case where a test
 // process must deliberately target a local Dolt server on ProdDoltPort.
 const ProdDoltPortOptOutVar = "GC_ALLOW_PROD_DOLT_PORT_IN_TESTS"
-
-// doltDisableEventFlushVar is the environment variable dolt checks, by presence
-// alone, before forking a detached `dolt send-metrics` after a command. Its
-// value is cosmetic: empty, 0, false, true and 1 all stop the fork.
-// doltDisableEventFlushValue and the name are kept as a stdlib-only copy of
-// test/dolttest.DisableEventFlushVar and DisableEventFlushValue, for the same
-// reason as isLocalDoltHost: that package links domain code, and this one is
-// blank-imported by every test binary. dolttest's
-// TestDisableEventFlushEnvMatchesTheTestProcess pins the two copies together.
-const (
-	doltDisableEventFlushVar   = "DOLT_DISABLE_EVENT_FLUSH"
-	doltDisableEventFlushValue = "1"
-)
 
 // doltPortVars maps each env var that selects a Dolt server port to the env
 // var that selects the matching Dolt server host. An empty host var name
@@ -372,7 +385,8 @@ func init() {
 			_ = os.Unsetenv(name)
 		}
 	}
-	if err := os.Setenv(doltDisableEventFlushVar, doltDisableEventFlushValue); err != nil {
-		panic("testenv: setting " + doltDisableEventFlushVar + ": " + err.Error())
-	}
+	seedGitTemplate()
+	// Not a leak vector, so the scrub above leaves it alone and a passthrough
+	// list cannot name it; set unconditionally because only its presence counts.
+	_ = os.Setenv(doltDisableEventFlushVar, "1")
 }

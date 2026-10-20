@@ -631,16 +631,19 @@ func (s *Server) resolveSessionIDAllowClosedWithConfig(store beads.Store, identi
 // wakes for days). This gate restores the declared-404 contract for targets
 // that can never deliver, while keeping the accept-then-work model for slow
 // paths (cold named-session wakes).
-func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store, identifier string) error {
-	if _, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{}); err == nil {
-		return nil
+//
+// It returns the resolved session id, or "" for a configured named session
+// that has no row yet (the async path materializes it).
+func (s *Server) sessionTargetDeliverable(ctx context.Context, store beads.Store, identifier string) (string, error) {
+	if id, err := s.resolveSessionTargetIDWithContext(ctx, store, identifier, apiSessionResolveOptions{}); err == nil {
+		return id, nil
 	} else if !errors.Is(err, session.ErrSessionNotFound) {
-		return err
+		return "", err
 	}
 	if _, ok, specErr := s.findNamedSessionSpecForTarget(store, identifier); specErr == nil && ok {
-		return nil
+		return "", nil
 	}
-	return apiSessionTargetNotFound(identifier)
+	return "", apiSessionTargetNotFound(identifier)
 }
 
 // rejectPendingInteraction refuses a text delivery synchronously while the
@@ -717,7 +720,7 @@ func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, 
 	if err != nil {
 		return messageOutcome{}, err
 	}
-	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: result.Queued, Deferred: result.Deferred}}
+	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: result.Queued, Deferred: result.Deferred, Interrupt: result.Interrupt}}
 	if result.Deferred {
 		out.willStart, out.willNotStartReason = s.deferToController(store, id)
 	}

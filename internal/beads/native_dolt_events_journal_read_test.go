@@ -1409,3 +1409,41 @@ func TestActiveEventsJournalTakesTheProxiedAnswerOverItsLeaf(t *testing.T) {
 		t.Fatalf("ActiveEventsJournal = (%T, %v), want the proxied store itself", journal, ok)
 	}
 }
+
+// cyclicBackingStore is a wrapper whose Backing is itself: a chain that never
+// reaches a journal or an end.
+type cyclicBackingStore struct{ Store }
+
+func (s *cyclicBackingStore) Backing() Store { return s }
+
+// EventsJournalCarrier leaves activation to its caller, so it finds the
+// carrier of a journal that is off — a feed tails one the scope turns on
+// later — and, as ActiveEventsJournal does, stops at the outermost carrier.
+func TestEventsJournalCarrierFindsTheCarrierActiveOrNot(t *testing.T) {
+	native := newNativeDoltStoreForTest(&nativeJournalReaderSpy{})
+	cache := NewCachingStoreForTest(native, nil)
+	if _, ok := ActiveEventsJournal(cache); ok {
+		t.Fatal("the native journal is active; this case needs one that is off")
+	}
+	if got := EventsJournalCarrier(cache); got != Store(native) {
+		t.Errorf("EventsJournalCarrier(a cache over an inactive native journal) = %T, want the native store", got)
+	}
+
+	proxied, _, _ := newSplitFixture(t)
+	if got := EventsJournalCarrier(NewCachingStoreForTest(proxied, nil)); got != Store(proxied) {
+		t.Errorf("EventsJournalCarrier(a cache over a proxied store) = %T, want the proxied store, not its leaf", got)
+	}
+}
+
+func TestEventsJournalCarrierRefusesAChainWithNoJournal(t *testing.T) {
+	for name, store := range map[string]Store{
+		"a cached store with no journal": NewCachingStoreForTest(NewMemStore(), nil),
+		"a store with no journal":        NewMemStore(),
+		"a Backing chain that cycles":    &cyclicBackingStore{Store: NewMemStore()},
+		"nil":                            nil,
+	} {
+		if got := EventsJournalCarrier(store); got != nil {
+			t.Errorf("%s: EventsJournalCarrier = %T, want nil", name, got)
+		}
+	}
+}

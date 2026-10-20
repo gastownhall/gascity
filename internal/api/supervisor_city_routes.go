@@ -199,6 +199,18 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityGet(sm, "/beads", (*Server).humaHandleBeadList, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), listOrder("(created_at DESC, id DESC) — newest beads first"))
 	cityGet(sm, "/beads/graph/{rootID}", (*Server).humaHandleBeadGraph, errorStatuses(http.StatusNotFound))
 	cityGet(sm, "/beads/ready", (*Server).humaHandleBeadReady, errorStatuses(http.StatusNotFound, http.StatusServiceUnavailable))
+	// Ready work as `gc ready` answers it: live, the serving frame, fail-loud
+	// (see ReadyWorkReader). Distinct from /beads/ready, which prefers the
+	// controller's read cache and degrades a failing rig to a partial answer.
+	// An unknown query parameter is refused: a misspelled filter would
+	// otherwise widen the answer to everything.
+	cityGet(sm, "/work/ready", (*Server).humaHandleWorkReady, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), describes(workReadyDescription),
+		func(o *huma.Operation) { o.RejectUnknownQueryParameters = true })
+	// A session's step reminder as its hooks read it: live, over the stores the
+	// controller holds (see ActiveWorkStepReader). Unknown query parameters are
+	// refused for the same reason as /work/ready.
+	cityGet(sm, "/work/active-step", (*Server).humaHandleWorkActiveStep, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusServiceUnavailable), describes(workActiveStepDescription),
+		func(o *huma.Operation) { o.RejectUnknownQueryParameters = true })
 	cityRegister(sm, huma.Operation{
 		OperationID:   "create-bead",
 		Method:        http.MethodPost,

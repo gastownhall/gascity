@@ -388,6 +388,14 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 			return &cfg.Agents[i]
 		}
 	}
+	return findAgentByLegacyTemplate(cfg, template)
+}
+
+// findAgentByLegacyTemplate is findAgentByTemplate's migration fallbacks, for
+// a trimmed template no agent matches exactly: a legacy bound form resolves to
+// the unbound agent, then a legacy unbound form to the one bound agent it
+// names (none when two match).
+func findAgentByLegacyTemplate(cfg *config.City, template string) *config.Agent {
 	for i := range cfg.Agents {
 		if legacyBoundTemplateMatchesUnboundAgent(&cfg.Agents[i], template) {
 			return &cfg.Agents[i]
@@ -403,6 +411,74 @@ func findAgentByTemplate(cfg *config.City, template string) *config.Agent {
 		}
 	}
 	return legacyUnboundMatch
+}
+
+// agentLookup is findAgentByTemplate over an index of cfg's agents, built
+// once, for a caller that resolves many templates against one config (the
+// demand build: one per agent and live pool session). An exact match
+// (config.AgentMatchesIdentity: the qualified name, or an unbound agent's
+// dir and name) is a map lookup, the earlier agent winning as in the scan;
+// anything else takes findAgentByTemplate's legacy fallbacks unchanged. It
+// is built per use rather than cached on the config, which callers may
+// mutate in place.
+type agentLookup struct {
+	cfg         *config.City
+	byQualified map[string]int
+	byDirName   map[[2]string]int // unbound agents only
+}
+
+func newAgentLookup(cfg *config.City) agentLookup {
+	l := agentLookup{cfg: cfg, byQualified: map[string]int{}, byDirName: map[[2]string]int{}}
+	if cfg == nil {
+		return l
+	}
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if q := a.QualifiedName(); !mapHas(l.byQualified, q) {
+			l.byQualified[q] = i
+		}
+		if k := [2]string{a.Dir, a.Name}; a.BindingName == "" && !mapHas(l.byDirName, k) {
+			l.byDirName[k] = i
+		}
+	}
+	return l
+}
+
+func mapHas[K comparable, V any](m map[K]V, k K) bool {
+	_, ok := m[k]
+	return ok
+}
+
+// find is findAgentByTemplate(l.cfg, template).
+func (l agentLookup) find(template string) *config.Agent {
+	template = strings.TrimSpace(template)
+	if l.cfg == nil || template == "" {
+		return nil
+	}
+	best := -1
+	if i, ok := l.byQualified[template]; ok {
+		best = i
+	}
+	dir, name := config.ParseQualifiedName(template)
+	if i, ok := l.byDirName[[2]string{dir, name}]; ok && (best < 0 || i < best) {
+		best = i
+	}
+	if best >= 0 {
+		return &l.cfg.Agents[best]
+	}
+	return findAgentByLegacyTemplate(l.cfg, template)
+}
+
+// normalize is normalizeAgentTemplateIdentity(l.cfg, template).
+func (l agentLookup) normalize(template string) string {
+	template = strings.TrimSpace(template)
+	if template == "" {
+		return ""
+	}
+	if agent := l.find(template); agent != nil {
+		return agent.QualifiedName()
+	}
+	return template
 }
 
 func legacyBoundTemplateMatchesUnboundAgent(agent *config.Agent, template string) bool {

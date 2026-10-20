@@ -1111,10 +1111,9 @@ func standaloneBDEnvForDir(dir string) []string {
 		"LC_ALL",
 		"TZ",
 		"DOLT_ROOT_PATH",
-		// internal/testenv sets this process-wide; this allowlist rebuilds the
-		// child env from scratch, so carry it or every standalone bd/dolt
-		// command forks a detached `dolt send-metrics`.
-		dolttest.DisableEventFlushVar,
+		// Presence-only switch that stops dolt forking a detached
+		// `dolt send-metrics`; internal/testenv sets it for the test process.
+		"DOLT_DISABLE_EVENT_FLUSH",
 		integrationRealBDBinaryEnv,
 		integrationGCBinaryEnv,
 		integrationDoltBinaryEnv,
@@ -1697,14 +1696,14 @@ func newIsolatedEnvRoot(t *testing.T, useDolt bool) (string, string, []string) {
 func seedDoltIdentityForRoot(gcHome string) error {
 	switch mode := doltIdentityMode(); mode {
 	case doltIdentityModeIsolated:
-		return dolttest.WriteGlobalConfig(gcHome)
+		return seedIsolatedDoltConfig(gcHome)
 	case doltIdentityModeSkip:
 		return nil
 	case doltIdentityModeGlobal:
 		if err := ensureGlobalDoltIdentity(); err != nil {
 			return err
 		}
-		return dolttest.WriteGlobalConfig(gcHome)
+		return seedIsolatedDoltConfig(gcHome)
 	default:
 		return fmt.Errorf("%s=%q is invalid", integrationDoltIdentityEnv, mode)
 	}
@@ -1756,6 +1755,10 @@ func trimmedCommandOutput(binary string, args ...string) (string, error) {
 		return "", err
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func seedIsolatedDoltConfig(gcHome string) error {
+	return testutil.SeedDoltGlobalConfig(gcHome)
 }
 
 func registerCityCommandEnv(cityDir string, env []string) {
@@ -2319,6 +2322,7 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	integrationToolBinDir = filepath.Join(t.TempDir(), "bin")
 
 	t.Setenv("BEADS_DOLT_AUTO_START", "0")
+	t.Setenv("DOLT_DISABLE_EVENT_FLUSH", "1")
 	t.Setenv("BEADS_DIR", "/host/beads")
 	t.Setenv("GC_DOLT", "skip")
 	t.Setenv("GC_DOLT_HOST", "ambient-host")
@@ -2361,8 +2365,11 @@ func TestStandaloneBDEnvAllowsBDAutoStart(t *testing.T) {
 	if got["XDG_RUNTIME_DIR"] != dir {
 		t.Fatalf("XDG_RUNTIME_DIR = %q, want %q", got["XDG_RUNTIME_DIR"], dir)
 	}
-	if got[dolttest.DisableEventFlushVar] != dolttest.DisableEventFlushValue {
-		t.Fatalf("%s = %q, want %q carried into standalone bd env", dolttest.DisableEventFlushVar, got[dolttest.DisableEventFlushVar], dolttest.DisableEventFlushValue)
+	// internal/testenv sets this process-wide and the allowlist rebuilds the
+	// child env from scratch, so a standalone bd/dolt command forks a detached
+	// `dolt send-metrics` unless the allowlist carries it.
+	if got["DOLT_DISABLE_EVENT_FLUSH"] != "1" {
+		t.Fatalf("DOLT_DISABLE_EVENT_FLUSH = %q, want 1 carried into standalone bd env", got["DOLT_DISABLE_EVENT_FLUSH"])
 	}
 	for _, key := range []string{
 		"GC_DOLT",
@@ -2653,6 +2660,9 @@ func TestNewIsolatedToolEnvSeedsLocalDoltIdentity(t *testing.T) {
 	}
 	if !strings.Contains(string(data), `"metrics.disabled":"true"`) {
 		t.Fatalf("isolated dolt config leaves dolt usage metrics on (egress to eventsapi.dolthub.com): %s", string(data))
+	}
+	if !strings.Contains(string(data), `"versioncheck.disabled":"true"`) {
+		t.Fatalf("isolated dolt config leaves dolt's release version check on (a synchronous HTTPS fetch inside every `dolt version`): %s", string(data))
 	}
 }
 

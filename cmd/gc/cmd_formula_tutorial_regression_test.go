@@ -262,6 +262,53 @@ title = "[{{epic}}] Deploy {{env}}"
 	}
 }
 
+// TestFormulaShowOnCompleteGatesDownstreamOnFanout is the end-to-end acceptance
+// check for the graph.v2 on_complete ordering fix: `gc formula show` on a
+// fixture whose downstream step needs an on_complete source must surface the
+// <source>-fanout control as the downstream blocker, not the raw source.
+func TestFormulaShowOnCompleteGatesDownstreamOnFanout(t *testing.T) {
+	cityDir := writeTutorialFormulaCity(t, "fanout-gate", `
+formula = "fanout-gate"
+
+[requires]
+formula_compiler = ">=2.0.0"
+
+[[steps]]
+id = "A"
+title = "Expand work"
+
+[steps.on_complete]
+for_each = "output.items"
+bond = "mol-item"
+
+[[steps]]
+id = "B"
+title = "Consume results"
+needs = ["A"]
+`)
+
+	t.Chdir(cityDir)
+	t.Setenv("GC_CITY_PATH", cityDir)
+
+	var stdout bytes.Buffer
+	cmd := newFormulaShowCmd(&stdout, &bytes.Buffer{})
+	cmd.SetArgs([]string{"fanout-gate"})
+	if err := cmd.Execute(); err != nil {
+		t.Fatalf("formula show execute: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, "A-fanout") {
+		t.Fatalf("formula show should surface the A-fanout control, got:\n%s", out)
+	}
+	if !strings.Contains(out, "B: Consume results [needs: fanout-gate.A-fanout]") {
+		t.Fatalf("downstream step B should block on the A-fanout control, got:\n%s", out)
+	}
+	if strings.Contains(out, "B: Consume results [needs: fanout-gate.A]") {
+		t.Fatalf("downstream step B must not block on the raw on_complete source A, got:\n%s", out)
+	}
+}
+
 func writeTutorialFormulaCity(t *testing.T, formulaName, formulaBody string) string {
 	t.Helper()
 

@@ -30,6 +30,11 @@ type RuntimeHandleConfig struct {
 	Transport    string
 	ProcessNames []string
 	Recorder     events.Recorder
+	// CityPath is the city the session belongs to, which scopes the
+	// handle's bounded turn reads as a SessionHandle's are; empty scopes
+	// them to Provider, so they share no read with the city's
+	// SessionHandles. Set it wherever the handle reads turns.
+	CityPath string
 }
 
 // RuntimeHandle adapts a legacy runtime session name to the canonical worker
@@ -42,6 +47,7 @@ type RuntimeHandle struct {
 	transport    string
 	processNames []string
 	recorder     events.Recorder
+	cityPath     string
 }
 
 var _ Handle = (*RuntimeHandle)(nil)
@@ -65,6 +71,7 @@ func NewRuntimeHandle(cfg RuntimeHandleConfig) (*RuntimeHandle, error) {
 		transport:    strings.TrimSpace(cfg.Transport),
 		processNames: append([]string(nil), cfg.ProcessNames...),
 		recorder:     recorder,
+		cityPath:     strings.TrimSpace(cfg.CityPath),
 	}, nil
 }
 
@@ -80,8 +87,10 @@ func (h *RuntimeHandle) Start(ctx context.Context, _ sessionpkg.Actor) (err erro
 	return err
 }
 
-// StartResolved starts a runtime-only handle using the provided resolved command.
-func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, startCommand string, cfg runtime.Config) (err error) {
+// StartResolved starts a runtime-only handle using the provided resolved
+// command. It has no session row, so it has no incarnation to run under: the
+// legacy bead-less start (§3.3 S8), allowlisted until legacy is deleted.
+func (h *RuntimeHandle) StartResolved(ctx context.Context, by sessionpkg.Actor, _ sessionpkg.Incarnation, startCommand string, cfg runtime.Config) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationStartResolved)
 	defer func() { event.finish(err) }()
 
@@ -276,15 +285,60 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 // session bead to pick provider-specific keys, keystroke and protocol
 // runtimes both get Interrupt; a runtime that cannot interrupt the turn is
 // sent nothing and reported with [sessionpkg.ErrTurnInterruptUnsupported].
-func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err error) {
+// A turn-scoped interrupt (req.Turn) needs a provider that observes and
+// fences turns itself, since a RuntimeHandle reads no transcript: it runs
+// the provider's InterruptTurn and WaitTurnEnded, and is refused, nothing
+// sent, on any other provider, and with an input fence, which a protocol
+// turn interrupt cannot carry (runtime.ErrInputFenceUnsupported).
+func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if req.Turn != "" {
+		if !req.Fence.IsZero() {
+			if err = req.Fence.Validate(); err != nil {
+				return err
+			}
+		}
+		err = h.interruptTurn(ctx, req.Turn, req.Fence)
+		return err
+	}
+	if !req.Fence.IsZero() {
+		if err = req.Fence.Validate(); err != nil {
+			return err
+		}
+		if runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
+			err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
+			return err
+		}
+	}
 	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
 		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
 		return err
 	}
+	if !req.Fence.IsZero() {
+		err = runtime.InterruptWithContext(runtime.WithInputFence(ctx, req.Fence), h.provider, h.sessionName)
+		return err
+	}
 	err = h.provider.Interrupt(h.sessionName)
+	return err
+}
+
+// interruptTurn is the turn-scoped interrupt from the provider alone: its
+// turn capabilities decide the refusal, and its turn fence the interrupt.
+func (h *RuntimeHandle) interruptTurn(ctx context.Context, turn string, fence runtime.InputFence) error {
+	caps := h.turnCapabilities()
+	if err := turnInterruptRefusal(caps, h.sessionName, turn); err != nil {
+		return err
+	}
+	tf, ok := h.provider.(runtime.TurnFenceProvider)
+	if caps.Source != TurnSourceProtocol || !ok {
+		return fmt.Errorf("interrupting turn %q of %s: %w", turn, h.sessionName, runtime.ErrTurnIdentityUnsupported)
+	}
+	if err := protocolTurnInterruptFenceRefusal(fence, h.sessionName, turn); err != nil {
+		return err
+	}
+	_, err := sessionpkg.InterruptTurnOn(ctx, tf, h.sessionName, turn)
 	return err
 }
 
@@ -292,6 +346,7 @@ func (h *RuntimeHandle) Interrupt(ctx context.Context, _ InterruptRequest) (err 
 // Like Message, it is permanently excluded from invocation telemetry;
 // see SessionHandle.recordInvocationTelemetry.
 func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req NudgeRequest) (result NudgeResult, err error) {
+	ctx = nudgeDeliveryContext(ctx, req)
 	event := h.beginOperationEvent(ctx, workerOperationNudge)
 	defer func() {
 		event.payload.Delivered = boolPointer(result.Delivered)
@@ -302,9 +357,21 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		err = fmt.Errorf("nudge text is required")
 		return NudgeResult{}, err
 	}
+	ctx, unfenced, err := fencedNudgeContext(ctx, req, func() (runtime.InputFencing, error) {
+		return runtime.InputFencingFor(h.provider, h.sessionName), nil
+	})
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	defer func() { result.Unfenced = unfenced && result.Delivered }()
+	_, fenced := runtime.InputFenceFrom(ctx)
 	// Decided on a fresh read, not the provider's cache: the tmux state
 	// cache can show a crashed agent alive for seconds after the crash.
 	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
+	// A fenced nudge reports what the read found instead of undelivered.
+	if err = runtime.LivenessFenceMiss(ctx, h.sessionName, live, liveErr); err != nil {
+		return NudgeResult{}, err
+	}
 	if liveErr != nil || live.Running && !live.Alive {
 		// A dead agent's pane takes nothing (mc-48az4): the caller queues it.
 		result = NudgeResult{Undelivered: NudgeUndeliveredAgentDead}
@@ -321,13 +388,23 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 	}
 	switch req.Delivery {
 	case "", NudgeDeliveryDefault:
-		if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+		if fenced {
+			err = runtime.NudgeWithContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), false)
+		} else {
+			err = runtime.NudgeWithDeliveryKey(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text))
+		}
+		if err != nil {
 			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}
 		return result, nil
 	case NudgeDeliveryImmediate:
-		if err := h.nudgeNow(req.Text); err != nil {
+		if fenced {
+			err = runtime.NudgeWithContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), true)
+		} else {
+			err = h.nudgeNow(req.Text)
+		}
+		if err != nil {
 			return NudgeResult{}, runtimeInteractionError(err)
 		}
 		result = NudgeResult{Delivered: true}

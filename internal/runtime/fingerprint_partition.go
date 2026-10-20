@@ -26,8 +26,9 @@ import (
 // Classification (settled adversarially; see
 // docs/architecture/worker-runtime-transport-unweld-v0.md §6):
 //
-//	PROVISION (box):  Env (allow-listed), FingerprintExtra, PreStart,
-//	                  OverlayDir, OverlayProviders, CopyFiles.
+//	PROVISION (box):  Env (allow-listed), FingerprintExtra (Restart-policy
+//	                  keys), PreStart, OverlayDir, OverlayProviders,
+//	                  CopyFiles.
 //	LAUNCH (agent):   Command, Lifecycle, Upstream, OperatorEnv, MCPServers,
 //	                  AcceptStartupDialogs, MouseOn, SessionSetup,
 //	                  SessionSetupScript.
@@ -60,13 +61,15 @@ func LaunchFingerprint(cfg Config) string {
 // hashProvisionFields writes the box-affecting core fields to h, using the same
 // per-field framing as hashCoreFields.
 func hashProvisionFields(h hash.Hash, cfg Config) {
+	hashProvisionFieldsExtra(h, cfg, restartFingerprintExtra(cfg.FingerprintExtra))
+}
+
+// hashProvisionFieldsExtra is hashProvisionFields with FingerprintExtra
+// replaced by extra.
+func hashProvisionFieldsExtra(h hash.Hash, cfg Config, extra map[string]string) {
 	hashSortedMapIncluded(h, cfg.Env, envFingerprintInclude)
 
-	if len(cfg.FingerprintExtra) > 0 {
-		h.Write([]byte("fp")) //nolint:errcheck // hash.Write never errors
-		h.Write([]byte{0})    //nolint:errcheck // hash.Write never errors
-		hashSortedMap(h, cfg.FingerprintExtra)
-	}
+	hashFingerprintExtra(h, extra)
 
 	for _, ps := range cfg.PreStart {
 		h.Write([]byte(ps)) //nolint:errcheck // hash.Write never errors

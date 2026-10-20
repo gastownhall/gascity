@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/gastownhall/gascity/test/dolttest"
+	"github.com/gastownhall/gascity/internal/testutil"
 )
 
 // These tests drive the shipped maintenance orders against REAL bd scopes of
@@ -85,7 +85,7 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 			t.Fatal(err)
 		}
 	}
-	if err := dolttest.WriteGlobalConfig(home); err != nil {
+	if err := testutil.SeedDoltGlobalConfig(home); err != nil {
 		t.Fatal(err)
 	}
 	for _, entry := range os.Environ() {
@@ -118,7 +118,7 @@ func newBdTopologyCity(t *testing.T, bd string) *bdTopologyCity {
 	// unless HOME's dolt config disables it; on a healthy network that call
 	// returns in 0.2 s and hides a missing config, so the slow network is
 	// reproduced deterministically instead of waited for.
-	c.env = append(c.env, dolttest.UnroutableHTTPSProxyEnv()...)
+	c.env = append(c.env, testutil.UnroutableHTTPSProxyEnv()...)
 	writeExecutable(t, filepath.Join(c.binDir, "escalate.sh"), "#!/bin/sh\nprintf 'ESCALATION %s\\n' \"$*\" >> \""+c.gcLog+"\"\n")
 	t.Cleanup(c.stopProcesses)
 	return c

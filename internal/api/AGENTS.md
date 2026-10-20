@@ -40,6 +40,10 @@ Violating any fails the build; full rationale is in the architecture docs.
   `events.NoPayload` for events whose envelope fields alone
   capture the semantics. Enforced by
   `TestEveryKnownEventTypeHasRegisteredPayload`.
+- **Nudge queue through State.** The API writes the city's nudge
+  queue only through `State.NudgeQueue`; only `seededState` builds a
+  `nudgequeue.StateFileQueue`. Enforced by
+  `TestAPIReachesTheNudgeQueueOnlyThroughState`.
 
 ## Configuration publication
 
@@ -101,3 +105,59 @@ warning, so the create must do the same instead of failing. Keep explicit
 per-session options, validated at create time, in `template_overrides`;
 otherwise startup can mistake its own baseline for config drift or compare one
 session's overrides against the template.
+
+## City op state and kept terminal events
+
+The supervisor builds a new `Server` for a city whenever the city's `State`
+changes, while the old one's `/submit` and `/messages` deliveries may still
+run. What those deliveries share lives per city per process in `cityOps`
+(`session_ops.go`; DES-O0API D9, I3), not on a `Server`: the in-flight
+registry, the degrade reporter, the kept terminal events and the city's live
+`Server`. `SupervisorMux` never removes a city's `cityOps`, and
+`getCityServer` publishes a new `Server` before it retires the one it
+replaces, so a same-key retry still finds a replaced `Server`'s running
+delivery, and that delivery a live `Server` to report through.
+
+In every `ops.content` mode, `off` included, a delivery records its terminal
+event to the city's live `Server`'s event log (`emitMessageResult`), and a
+recorded one closes its op through that `Server`'s store (`openOpStore`); its
+own `Server` serves only when the city has no live `Server` (the supervisor
+dropped it). An event the log refuses is kept, in order, and recorded when the
+supervisor publishes the city's next `Server`, before the city's next terminal
+event, and before a same-key retry of its request is answered. Three points
+answer such a retry: the `Idempotency-Key` LRU (`withMessageIdempotency`), the
+in-flight registry and the stored op (`replayAnswer`). Each records the kept
+events first and answers 409 `in_flight` while the retry's event stays kept,
+so no 202 goes out without its terminal event after its cursor. A new answer
+point must do the same. The stored op's replay then re-emits its event unless
+the log just took a kept one of its request, endpoint and type, which is after
+its cursor too (`cityOps.emitReplay`); one for the other endpoint, whose
+waiter would never match it, does not stand in for it.
+`engdocs/design/async-request-result.md` rules 8 and 9 are the client
+contract.
+
+The city's terminal events serialize on one lock, `cityOps.emitMu`, held
+across the event log's `Record` in every `ops.content` mode, `off` included,
+so the kept events are recorded in order and before any later one; the three
+answer points take it before they check for kept events. A slow event log (an
+exec provider runs its script once per event, under a 30-second timeout)
+therefore holds back the city's other terminal events, and the answers to
+same-key retries, until its `Record` returns
+(`TestCityOpsSerializesTerminalEventsAcrossABlockedWrite`). Keep the lock's
+critical section to the log write: no store, runtime or other blocking call
+under it.
+
+A recorded delivery ends, through its own timeout, inside its op's
+`finish_by`, `legacyop.ExecutionBound` after its admission or adoption:
+`/messages` at `sessionMessageAsyncTimeout`, a recorded `/submit` at
+`sessionSubmitAsyncTimeout` (`TestMessageDeliveryTimeoutsEndInsideFinishBy`).
+It closes its op from its result, or `failed{deadline_in_flight}` from the
+timeout, with time left for that close to land. That time is a fixed margin,
+`ExecutionBound` less the delivery's timeout (five minutes for `/submit`,
+eleven for `/messages`), and the store I/O around the delivery spends it
+first: `Admit` stamps `finish_by` before the delivery's timer starts, and a
+delivery that runs to its timeout closes its op after the timer fires. Past
+`finish_by` the controller's op sweeper, or a same-key retry, closes an op
+still open `failed{deadline_in_flight}`, and the retry replays it; nothing
+adopts it, since its message may have landed. A new recorded endpoint must
+bound its delivery the same way.

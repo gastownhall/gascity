@@ -84,6 +84,12 @@ func TestNewEnvSeedsDoltAuthorIdentity(t *testing.T) {
 	if !strings.Contains(string(body), `"metrics.disabled":"true"`) {
 		t.Errorf("seeded dolt config does not disable dolt usage metrics: %s", body)
 	}
+	// Without versioncheck.disabled `dolt version` fetches the latest release
+	// over HTTPS before it prints, and gc's and bd's version probes time out on
+	// a slow network.
+	if !strings.Contains(string(body), `"versioncheck.disabled":"true"`) {
+		t.Errorf("seeded dolt config does not disable dolt's release version check: %s", body)
+	}
 }
 
 // NewEnv hands a child only the variables it lists, so the process-wide
@@ -188,6 +194,21 @@ func passwdHomeForTest(t *testing.T) string {
 		return ""
 	}
 	return strings.TrimSpace(lu.HomeDir)
+}
+
+// TestNewEnvForwardsGitTemplateDir pins the host-env allowlist entry for the
+// hermetic git template internal/testenv installs. NewEnv builds the child's
+// environment from an allowlist, so a gc or git the child runs makes repos
+// carrying maintenance.auto=false only if GIT_TEMPLATE_DIR is on it.
+func TestNewEnvForwardsGitTemplateDir(t *testing.T) {
+	template := filepath.Join(t.TempDir(), "gc-test-gittemplate")
+	t.Setenv("GIT_TEMPLATE_DIR", template)
+
+	env := NewEnv("", t.TempDir(), t.TempDir())
+
+	if got := env.Get("GIT_TEMPLATE_DIR"); got != template {
+		t.Fatalf("NewEnv() GIT_TEMPLATE_DIR = %q, want %q", got, template)
+	}
 }
 
 // The acceptance env must never hand gc the operator's home, in any mode: gc

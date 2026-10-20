@@ -10,6 +10,29 @@
       }
     },
     "schemas": {
+      "ActiveWorkStep": {
+        "additionalProperties": false,
+        "properties": {
+          "description": {
+            "description": "The step bead's description; empty when it has none.",
+            "type": "string"
+          },
+          "id": {
+            "description": "The step bead's id.",
+            "type": "string"
+          },
+          "title": {
+            "description": "The step bead's title.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "description"
+        ],
+        "type": "object"
+      },
       "AdapterCapabilities": {
         "additionalProperties": false,
         "properties": {
@@ -826,8 +849,20 @@
             "description": "City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.",
             "type": "string"
           },
+          "idempotency_key": {
+            "description": "The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.",
+            "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the request was recorded as."
+          },
+          "replayed": {
+            "description": "True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key.",
+            "type": "boolean"
+          },
           "request_id": {
-            "description": "Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
+            "description": "Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.",
             "type": "string"
           },
           "status": {
@@ -2098,6 +2133,93 @@
         ],
         "type": "string"
       },
+      "ConversationOp": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "description": "Executions after the first (an adopted orphan).",
+            "format": "int64",
+            "type": "integer"
+          },
+          "conversation": {
+            "description": "Session (conversation) id the operation targets.",
+            "type": "string"
+          },
+          "id": {
+            "description": "Operation id. Equals request_id on async responses.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "Operation kind.",
+            "enum": [
+              "message",
+              "interrupt",
+              "respond",
+              "create",
+              "wake",
+              "suspend",
+              "resume",
+              "restart",
+              "kill",
+              "close"
+            ],
+            "type": "string"
+          },
+          "outcome": {
+            "$ref": "#/components/schemas/ConversationOpOutcome",
+            "description": "Present when status is closed."
+          },
+          "status": {
+            "description": "Operation status. A legacy-executed operation stays submitted until it closes.",
+            "enum": [
+              "submitted",
+              "accepted",
+              "executing",
+              "settling",
+              "closed"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "conversation",
+          "kind",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ConversationOpOutcome": {
+        "additionalProperties": false,
+        "properties": {
+          "arm": {
+            "description": "Outcome arm.",
+            "enum": [
+              "succeeded",
+              "failed",
+              "skipped",
+              "canceled"
+            ],
+            "type": "string"
+          },
+          "degradation": {
+            "description": "How a succeeded operation fell short of its policy, e.g. unfenced_interrupt.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why a failed or skipped operation ended (open vocabulary; refused:\u003cwhy\u003e names a refusal).",
+            "type": "string"
+          },
+          "via": {
+            "description": "How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).",
+            "type": "string"
+          }
+        },
+        "required": [
+          "arm"
+        ],
+        "type": "object"
+      },
       "ConversationRef": {
         "additionalProperties": false,
         "properties": {
@@ -2516,15 +2638,18 @@
               "urn:gascity:error:idempotency-mismatch",
               "urn:gascity:error:internal",
               "urn:gascity:error:invalid-cursor",
+              "urn:gascity:error:invalid-idempotency-key",
               "urn:gascity:error:invalid-request",
               "urn:gascity:error:mail-not-found",
               "urn:gascity:error:method-not-allowed",
               "urn:gascity:error:not-implemented",
+              "urn:gascity:error:op-journal-unavailable",
               "urn:gascity:error:operation-in-progress",
               "urn:gascity:error:order-not-found",
               "urn:gascity:error:pack-credential-required",
               "urn:gascity:error:pack-not-found",
               "urn:gascity:error:patch-not-found",
+              "urn:gascity:error:payload-too-large",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
               "urn:gascity:error:run-not-found",
@@ -2566,15 +2691,18 @@
               "urn:gascity:error:idempotency-mismatch",
               "urn:gascity:error:internal",
               "urn:gascity:error:invalid-cursor",
+              "urn:gascity:error:invalid-idempotency-key",
               "urn:gascity:error:invalid-request",
               "urn:gascity:error:mail-not-found",
               "urn:gascity:error:method-not-allowed",
               "urn:gascity:error:not-implemented",
+              "urn:gascity:error:op-journal-unavailable",
               "urn:gascity:error:operation-in-progress",
               "urn:gascity:error:order-not-found",
               "urn:gascity:error:pack-credential-required",
               "urn:gascity:error:pack-not-found",
               "urn:gascity:error:patch-not-found",
+              "urn:gascity:error:payload-too-large",
               "urn:gascity:error:provider-not-found",
               "urn:gascity:error:rig-not-found",
               "urn:gascity:error:run-not-found",
@@ -2721,6 +2849,12 @@
             "$ref": "#/components/schemas/NoPayload"
           },
           {
+            "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/OrderInapplicablePayload"
+          },
+          {
             "$ref": "#/components/schemas/OrderSkippedPayload"
           },
           {
@@ -2827,6 +2961,9 @@
           },
           {
             "$ref": "#/components/schemas/WebhookRejectedPayload"
+          },
+          {
+            "$ref": "#/components/schemas/WorkLadderPayload"
           },
           {
             "$ref": "#/components/schemas/WorkerOperationEventPayload"
@@ -5176,6 +5313,63 @@
         ],
         "type": "object"
       },
+      "OpsRecordingDegradedPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "detail": {
+            "description": "The store error's text, at most 512 bytes.",
+            "type": "string"
+          },
+          "gate": {
+            "description": "The ops rollout gate whose recording degraded.",
+            "enum": [
+              "ops.content",
+              "ops.control",
+              "ops.lifecycle"
+            ],
+            "type": "string"
+          },
+          "mode": {
+            "description": "The gate's resolved mode.",
+            "enum": [
+              "auto",
+              "require"
+            ],
+            "type": "string"
+          },
+          "reason": {
+            "description": "Reason class: conditional_writes_unsupported, type_unregistered, no_namespace, store_error or contention.",
+            "type": "string"
+          },
+          "stage": {
+            "description": "The recording step that failed.",
+            "enum": [
+              "open",
+              "propose",
+              "close",
+              "adopt",
+              "sweep"
+            ],
+            "type": "string"
+          },
+          "surface": {
+            "description": "Which producer degraded: the API server or the controller's op sweeper.",
+            "enum": [
+              "api",
+              "controller"
+            ],
+            "type": "string"
+          }
+        },
+        "required": [
+          "gate",
+          "mode",
+          "surface",
+          "stage",
+          "reason"
+        ],
+        "type": "object"
+      },
       "OptionChoiceDTO": {
         "additionalProperties": false,
         "properties": {
@@ -5358,6 +5552,36 @@
         },
         "required": [
           "entries"
+        ],
+        "type": "object"
+      },
+      "OrderInapplicablePayload": {
+        "additionalProperties": false,
+        "properties": {
+          "backend": {
+            "type": "string"
+          },
+          "order_name": {
+            "type": "string"
+          },
+          "requires_backend": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "scope": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "order_name",
+          "scope",
+          "backend",
+          "requires_backend"
         ],
         "type": "object"
       },
@@ -6757,6 +6981,152 @@
         ],
         "type": "object"
       },
+      "ReadyBead": {
+        "additionalProperties": false,
+        "properties": {
+          "assignee": {
+            "type": "string"
+          },
+          "blocked_by": {
+            "items": {
+              "$ref": "#/components/schemas/ReadyBeadBlocker"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "close_reason": {
+            "type": "string"
+          },
+          "created_at": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "defer_until": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "dependencies": {
+            "items": {
+              "$ref": "#/components/schemas/ReadyBeadDep"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "description": {
+            "type": "string"
+          },
+          "ephemeral": {
+            "type": "boolean"
+          },
+          "from": {
+            "type": "string"
+          },
+          "id": {
+            "type": "string"
+          },
+          "is_blocked": {
+            "type": "boolean"
+          },
+          "issue_type": {
+            "type": "string"
+          },
+          "labels": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "metadata": {
+            "additionalProperties": {
+              "type": "string"
+            },
+            "type": "object"
+          },
+          "needs": {
+            "items": {
+              "type": "string"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          },
+          "no_history": {
+            "type": "boolean"
+          },
+          "parent": {
+            "type": "string"
+          },
+          "priority": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "ref": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          },
+          "title": {
+            "type": "string"
+          },
+          "updated_at": {
+            "format": "date-time",
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "title",
+          "status",
+          "issue_type",
+          "created_at"
+        ],
+        "type": "object"
+      },
+      "ReadyBeadBlocker": {
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "status"
+        ],
+        "type": "object"
+      },
+      "ReadyBeadDep": {
+        "additionalProperties": false,
+        "properties": {
+          "depends_on_id": {
+            "type": "string"
+          },
+          "issue_id": {
+            "type": "string"
+          },
+          "type": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "issue_id",
+          "depends_on_id",
+          "type"
+        ],
+        "type": "object"
+      },
       "Record": {
         "additionalProperties": false,
         "properties": {
@@ -6815,6 +7185,10 @@
           "error_message": {
             "description": "Human-readable error description.",
             "type": "string"
+          },
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the failed request was recorded as, when it was."
           },
           "operation": {
             "description": "Which operation failed.",
@@ -7893,6 +8267,10 @@
       "SessionMessageSucceededPayload": {
         "additionalProperties": false,
         "properties": {
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the request was recorded as, when it was; on a replay of a finished request the will_start fields are absent."
+          },
           "queued": {
             "description": "True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.",
             "type": "boolean"
@@ -11207,12 +11585,48 @@
         ],
         "type": "object"
       },
+      "SessionSubmitInterrupt": {
+        "additionalProperties": false,
+        "properties": {
+          "degradation": {
+            "description": "unfenced_interrupt when the runtime accepted the interrupt without fencing it to that turn.",
+            "type": "string"
+          },
+          "outcome": {
+            "description": "settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent.",
+            "enum": [
+              "settled",
+              "no_turn",
+              "stale",
+              "unsettled",
+              "unavailable"
+            ],
+            "type": "string"
+          },
+          "turn_id": {
+            "description": "The turn the interrupt targeted, when one was sighted.",
+            "type": "string"
+          }
+        },
+        "required": [
+          "outcome"
+        ],
+        "type": "object"
+      },
       "SessionSubmitSucceededPayload": {
         "additionalProperties": false,
         "properties": {
           "intent": {
             "description": "Resolved submit intent (default, follow_up, interrupt_now).",
             "type": "string"
+          },
+          "interrupt": {
+            "$ref": "#/components/schemas/SessionSubmitInterrupt",
+            "description": "What an interrupt_now did about the running turn, on a runtime that reports turns. Absent when no turn fence ran."
+          },
+          "op": {
+            "$ref": "#/components/schemas/ConversationOp",
+            "description": "The operation the request was recorded as, when it was; on a replay of a finished request the will_start and interrupt fields are absent."
           },
           "queued": {
             "description": "Whether the message was queued for later delivery.",
@@ -12537,11 +12951,15 @@
           },
           "supports_interrupt_now": {
             "type": "boolean"
+          },
+          "supports_steer": {
+            "type": "boolean"
           }
         },
         "required": [
           "supports_follow_up",
-          "supports_interrupt_now"
+          "supports_interrupt_now",
+          "supports_steer"
         ],
         "type": "object"
       },
@@ -12971,9 +13389,11 @@
             "mail.replied": "#/components/schemas/TypedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved",
+            "ops.recording_degraded": "#/components/schemas/TypedEventStreamEnvelopeOpsRecordingDegraded",
             "order.completed": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedEventStreamEnvelopeOrderFired",
+            "order.inapplicable": "#/components/schemas/TypedEventStreamEnvelopeOrderInapplicable",
             "order.skipped": "#/components/schemas/TypedEventStreamEnvelopeOrderSkipped",
             "order.suppressed": "#/components/schemas/TypedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedEventStreamEnvelopeProjectIdentityStamped",
@@ -13022,6 +13442,13 @@
             "supervisor.started": "#/components/schemas/TypedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected",
+            "work.escalated": "#/components/schemas/TypedEventStreamEnvelopeWorkEscalated",
+            "work.nudge_failed": "#/components/schemas/TypedEventStreamEnvelopeWorkNudgeFailed",
+            "work.nudged": "#/components/schemas/TypedEventStreamEnvelopeWorkNudged",
+            "work.recycle_requested": "#/components/schemas/TypedEventStreamEnvelopeWorkRecycleRequested",
+            "work.release_unfinished": "#/components/schemas/TypedEventStreamEnvelopeWorkReleaseUnfinished",
+            "work.released": "#/components/schemas/TypedEventStreamEnvelopeWorkReleased",
+            "work.started_unrecorded": "#/components/schemas/TypedEventStreamEnvelopeWorkStartedUnrecorded",
             "worker.operation": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -13190,6 +13617,9 @@
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeMoleculeResolved"
           },
           {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOpsRecordingDegraded"
+          },
+          {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderCompleted"
           },
           {
@@ -13197,6 +13627,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderInapplicable"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeOrderSkipped"
@@ -13341,6 +13774,27 @@
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWebhookRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkEscalated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkNudgeFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkNudged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkRecycleRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkReleaseUnfinished"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkReleased"
+          },
+          {
+            "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkStartedUnrecorded"
           },
           {
             "$ref": "#/components/schemas/TypedEventStreamEnvelopeWorkerOperation"
@@ -14722,6 +15176,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.drain_fence_unavailable",
+                "work.started_unrecorded",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
@@ -14744,6 +15199,12 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "work.nudged",
+                "work.nudge_failed",
+                "work.recycle_requested",
+                "work.released",
+                "work.release_unfinished",
+                "work.escalated",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -14775,6 +15236,7 @@
                 "order.failed",
                 "order.suppressed",
                 "order.skipped",
+                "order.inapplicable",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -14803,6 +15265,7 @@
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
                 "beads.blocked.recomputed",
+                "ops.recording_degraded",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -16593,6 +17056,63 @@
         "title": "TypedEventStreamEnvelope molecule.resolved",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeOpsRecordingDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "ops.recording_degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope ops.recording_degraded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeOrderCompleted": {
         "additionalProperties": false,
         "properties": {
@@ -16762,6 +17282,63 @@
           "payload"
         ],
         "title": "TypedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeOrderInapplicable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderInapplicablePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.inapplicable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope order.inapplicable",
         "type": "object"
       },
       "TypedEventStreamEnvelopeOrderSkipped": {
@@ -19500,6 +20077,405 @@
         "title": "TypedEventStreamEnvelope webhook.rejected",
         "type": "object"
       },
+      "TypedEventStreamEnvelopeWorkEscalated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.escalated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.escalated",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkNudgeFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.nudge_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.nudge_failed",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkNudged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.nudged",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.nudged",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkRecycleRequested": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.recycle_requested",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.recycle_requested",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkReleaseUnfinished": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.release_unfinished",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.release_unfinished",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.released",
+        "type": "object"
+      },
+      "TypedEventStreamEnvelopeWorkStartedUnrecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.started_unrecorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload"
+        ],
+        "title": "TypedEventStreamEnvelope work.started_unrecorded",
+        "type": "object"
+      },
       "TypedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -19615,9 +20591,11 @@
             "mail.replied": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailReplied",
             "mail.sent": "#/components/schemas/TypedTaggedEventStreamEnvelopeMailSent",
             "molecule.resolved": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved",
+            "ops.recording_degraded": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpsRecordingDegraded",
             "order.completed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted",
             "order.failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFailed",
             "order.fired": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired",
+            "order.inapplicable": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderInapplicable",
             "order.skipped": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSkipped",
             "order.suppressed": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSuppressed",
             "project.identity.stamped": "#/components/schemas/TypedTaggedEventStreamEnvelopeProjectIdentityStamped",
@@ -19666,6 +20644,13 @@
             "supervisor.started": "#/components/schemas/TypedTaggedEventStreamEnvelopeSupervisorStarted",
             "webhook.received": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookReceived",
             "webhook.rejected": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected",
+            "work.escalated": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkEscalated",
+            "work.nudge_failed": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudgeFailed",
+            "work.nudged": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudged",
+            "work.recycle_requested": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRecycleRequested",
+            "work.release_unfinished": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished",
+            "work.released": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleased",
+            "work.started_unrecorded": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded",
             "worker.operation": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
           },
           "propertyName": "type"
@@ -19834,6 +20819,9 @@
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeMoleculeResolved"
           },
           {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOpsRecordingDegraded"
+          },
+          {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderCompleted"
           },
           {
@@ -19841,6 +20829,9 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderFired"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderInapplicable"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeOrderSkipped"
@@ -19985,6 +20976,27 @@
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWebhookRejected"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkEscalated"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudgeFailed"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkNudged"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkRecycleRequested"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkReleased"
+          },
+          {
+            "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded"
           },
           {
             "$ref": "#/components/schemas/TypedTaggedEventStreamEnvelopeWorkerOperation"
@@ -21461,6 +22473,7 @@
                 "session.reset_stalled",
                 "session.work_query_failed",
                 "session.drain_fence_unavailable",
+                "work.started_unrecorded",
                 "session.demand_claim_divergence",
                 "session.cold_start_timeout",
                 "session.conversation_reset",
@@ -21483,6 +22496,12 @@
                 "execution.step_completed",
                 "execution.claim_window_expired",
                 "execution.step_stalled",
+                "work.nudged",
+                "work.nudge_failed",
+                "work.recycle_requested",
+                "work.released",
+                "work.release_unfinished",
+                "work.escalated",
                 "mail.sent",
                 "mail.read",
                 "mail.archived",
@@ -21514,6 +22533,7 @@
                 "order.failed",
                 "order.suppressed",
                 "order.skipped",
+                "order.inapplicable",
                 "provider.swapped",
                 "worker.operation",
                 "project.identity.stamped",
@@ -21542,6 +22562,7 @@
                 "emergency.acked",
                 "beads.conditional_writes.degraded",
                 "beads.blocked.recomputed",
+                "ops.recording_degraded",
                 "storage.binding.converged",
                 "storage.binding.genesis",
                 "storage.binding.unconverged",
@@ -23457,6 +24478,67 @@
         "title": "TypedTaggedEventStreamEnvelope molecule.resolved",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeOpsRecordingDegraded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OpsRecordingDegradedPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "ops.recording_degraded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope ops.recording_degraded",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeOrderCompleted": {
         "additionalProperties": false,
         "properties": {
@@ -23638,6 +24720,67 @@
           "city"
         ],
         "title": "TypedTaggedEventStreamEnvelope order.fired",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeOrderInapplicable": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/OrderInapplicablePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "order.inapplicable",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope order.inapplicable",
         "type": "object"
       },
       "TypedTaggedEventStreamEnvelopeOrderSkipped": {
@@ -26568,6 +27711,433 @@
         "title": "TypedTaggedEventStreamEnvelope webhook.rejected",
         "type": "object"
       },
+      "TypedTaggedEventStreamEnvelopeWorkEscalated": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.escalated",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.escalated",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkNudgeFailed": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.nudge_failed",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.nudge_failed",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkNudged": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.nudged",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.nudged",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkRecycleRequested": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.recycle_requested",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.recycle_requested",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.release_unfinished",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.release_unfinished",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkReleased": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/WorkLadderPayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.released",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.released",
+        "type": "object"
+      },
+      "TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded": {
+        "additionalProperties": false,
+        "properties": {
+          "actor": {
+            "type": "string"
+          },
+          "city": {
+            "type": "string"
+          },
+          "depends_on_step_ids": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "message": {
+            "type": "string"
+          },
+          "payload": {
+            "$ref": "#/components/schemas/SessionLifecyclePayload"
+          },
+          "run_id": {
+            "type": "string"
+          },
+          "seq": {
+            "format": "int64",
+            "minimum": 0,
+            "type": "integer"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "step_id": {
+            "type": "string"
+          },
+          "subject": {
+            "type": "string"
+          },
+          "ts": {
+            "format": "date-time",
+            "type": "string"
+          },
+          "type": {
+            "const": "work.started_unrecorded",
+            "type": "string"
+          },
+          "workflow": {
+            "$ref": "#/components/schemas/WorkflowEventProjection"
+          }
+        },
+        "required": [
+          "seq",
+          "type",
+          "ts",
+          "actor",
+          "payload",
+          "city"
+        ],
+        "title": "TypedTaggedEventStreamEnvelope work.started_unrecorded",
+        "type": "object"
+      },
       "TypedTaggedEventStreamEnvelopeWorkerOperation": {
         "additionalProperties": false,
         "properties": {
@@ -27069,6 +28639,81 @@
         "required": [
           "webhook",
           "reason"
+        ],
+        "type": "object"
+      },
+      "WorkActiveStepBody": {
+        "additionalProperties": false,
+        "properties": {
+          "step": {
+            "$ref": "#/components/schemas/ActiveWorkStep",
+            "description": "The session's current formula step, exactly the bead its step reminder names; absent when there is none."
+          }
+        },
+        "type": "object"
+      },
+      "WorkLadderPayload": {
+        "additionalProperties": false,
+        "properties": {
+          "attempt": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "bead_id": {
+            "type": "string"
+          },
+          "generation": {
+            "format": "int64",
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string"
+          },
+          "paused": {
+            "type": "boolean"
+          },
+          "reason": {
+            "type": "string"
+          },
+          "rung": {
+            "type": "string"
+          },
+          "session_id": {
+            "type": "string"
+          },
+          "session_name": {
+            "type": "string"
+          },
+          "store_ref": {
+            "type": "string"
+          },
+          "template": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "session_id",
+          "bead_id",
+          "generation"
+        ],
+        "type": "object"
+      },
+      "WorkReadyBody": {
+        "additionalProperties": false,
+        "properties": {
+          "items": {
+            "description": "The ready work, in the query's order, cut to its limit: exactly the rows gc ready prints.",
+            "items": {
+              "$ref": "#/components/schemas/ReadyBead"
+            },
+            "type": [
+              "array",
+              "null"
+            ]
+          }
+        },
+        "required": [
+          "items"
         ],
         "type": "object"
       },
@@ -51205,6 +52850,371 @@
           }
         },
         "summary": "Get v0 city by city name waits"
+      }
+    },
+    "/v0/city/{cityName}/work/active-step": {
+      "get": {
+        "description": "A session's current formula step, exactly the bead its step reminder names, read by the controller from the stores it already holds open. The work store is the one at `scope_root` (the city when omitted, else the rig at that path) and the graph store is the one the city's class routing gives it; both are read live at request time, never from a read cache. The identities are tried in the order given. `step` is absent when there is no current step. While a config change is pending or being applied, after a failed reload, or for a scope the controller holds no store for, the request is refused with 503 `service-unavailable`; a failed read is 503 `store-unavailable`. Either 503 means the caller should read the stores in-process instead.",
+        "operationId": "get-v0-city-by-city-name-work-active-step",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.",
+            "explode": true,
+            "in": "query",
+            "name": "assignee",
+            "required": true,
+            "schema": {
+              "description": "The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.",
+              "items": {
+                "type": "string"
+              },
+              "maxItems": 8,
+              "minItems": 1,
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.",
+            "explode": false,
+            "in": "query",
+            "name": "scope_root",
+            "schema": {
+              "description": "Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.",
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkActiveStepBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name work active step"
+      }
+    },
+    "/v0/city/{cityName}/work/ready": {
+      "get": {
+        "description": "Ready work exactly as `gc ready` answers it, read by the controller from the stores it already holds open. Every store is read live at request time (never from a read cache), so work that became ready before the request is in the answer. It reads the city store, the serving (non-suspended) rigs and any relocated class binding, merges them first-store-wins in that order, applies the filters, orders and cuts to the limit. Any store that cannot be read fails the whole request with 503 `store-unavailable`; there is no partial answer. The answer matches `gc ready` only while the controller's config is current, so while a config change is pending or being applied, or after a failed reload, the request is refused with 503 `service-unavailable`. Either 503 means the caller should read the stores in-process instead.",
+        "operationId": "get-v0-city-by-city-name-work-ready",
+        "parameters": [
+          {
+            "description": "City name.",
+            "in": "path",
+            "name": "cityName",
+            "required": true,
+            "schema": {
+              "description": "City name.",
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only work whose assignee is exactly this identity.",
+            "explode": false,
+            "in": "query",
+            "name": "assignee",
+            "schema": {
+              "description": "Only work whose assignee is exactly this identity.",
+              "type": "string"
+            }
+          },
+          {
+            "description": "Only work with no assignee.",
+            "explode": false,
+            "in": "query",
+            "name": "unassigned",
+            "schema": {
+              "description": "Only work with no assignee.",
+              "type": "boolean"
+            }
+          },
+          {
+            "description": "Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.",
+            "explode": true,
+            "in": "query",
+            "name": "metadata_field",
+            "schema": {
+              "description": "Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Drop beads of this issue type. Repeatable.",
+            "explode": true,
+            "in": "query",
+            "name": "exclude_type",
+            "schema": {
+              "description": "Drop beads of this issue type. Repeatable.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Drop beads carrying this label. Repeatable.",
+            "explode": true,
+            "in": "query",
+            "name": "exclude_label",
+            "schema": {
+              "description": "Drop beads carrying this label. Repeatable.",
+              "items": {
+                "type": "string"
+              },
+              "type": [
+                "array",
+                "null"
+              ]
+            }
+          },
+          {
+            "description": "Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).",
+            "explode": false,
+            "in": "query",
+            "name": "sort",
+            "schema": {
+              "description": "Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).",
+              "enum": [
+                "oldest",
+                "newest"
+              ],
+              "type": "string"
+            }
+          },
+          {
+            "description": "At most this many rows, cut after the merge and the order; 0 is unlimited.",
+            "explode": false,
+            "in": "query",
+            "name": "limit",
+            "schema": {
+              "description": "At most this many rows, cut after the merge and the order; 0 is unlimited.",
+              "format": "int64",
+              "minimum": 0,
+              "type": "integer"
+            }
+          },
+          {
+            "description": "List beads in this status instead of ready work.",
+            "explode": false,
+            "in": "query",
+            "name": "status",
+            "schema": {
+              "description": "List beads in this status instead of ready work.",
+              "enum": [
+                "open",
+                "in_progress",
+                "blocked",
+                "closed"
+              ],
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WorkReadyBody"
+                }
+              }
+            },
+            "description": "OK",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "400": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Bad Request",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "404": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Not Found",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "422": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Unprocessable Entity",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "500": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Internal Server Error",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          },
+          "503": {
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorModel"
+                }
+              }
+            },
+            "description": "Service Unavailable",
+            "headers": {
+              "X-GC-Request-Id": {
+                "$ref": "#/components/headers/X-GC-Request-Id"
+              }
+            }
+          }
+        },
+        "summary": "Get v0 city by city name work ready"
       }
     },
     "/v0/city/{cityName}/workflow/{workflow_id}": {

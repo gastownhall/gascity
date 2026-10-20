@@ -780,7 +780,7 @@ func TestNamedReopenConcurrentWriterLosesFence(t *testing.T) {
 }
 
 // revisionlessListStore reads its rows back from List with no revision, as
-// the native store does: there, Get is the only read that carries one.
+// BdStore does (mc-3c8h5): there, Get is the only read that carries one.
 type revisionlessListStore struct{ beads.Store }
 
 func (s revisionlessListStore) List(q beads.ListQuery) ([]beads.Bead, error) {
@@ -822,7 +822,7 @@ func TestCreateEffect_NamedReopenFencesOnTheLiveReReadOfTheRow(t *testing.T) {
 }
 
 // Kills a reopen that re-reads the row through the cache: a cached row's
-// revision lags (a List-primed native row carries none), so the CAS must be
+// revision lags (a List-primed bd row carries none), so the CAS must be
 // taken on a live read.
 func TestCreateEffect_NamedReopenReReadsTheRowLive(t *testing.T) {
 	cfg := mayorCity()

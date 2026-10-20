@@ -345,11 +345,19 @@ func (s *emittingClassStore) emitUpdated(id string) {
 // carried one, so a committed close still rides bead.closed with a non-empty
 // status, and skipped otherwise.
 func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, wasClosed bool) {
+	if emission, ok := s.afterUpdateEmission(id, opts, wasClosed); ok {
+		s.emit(emission)
+	}
+}
+
+// afterUpdateEmission is emitAfterUpdate's row, for a caller that records
+// several in one journal open.
+func (s *emittingClassStore) afterUpdateEmission(id string, opts beads.UpdateOpts, wasClosed bool) (classStoreEmission, bool) {
 	bead, ok := s.snapshot(id)
 	if !ok {
 		if opts.Status == nil {
 			warnClassStoreEmit(fmt.Errorf("bead.updated skipped: %s could not be re-read after the update", id))
-			return
+			return classStoreEmission{}, false
 		}
 		bead = beads.Bead{ID: id, Status: *opts.Status, Metadata: maps.Clone(opts.Metadata)}
 	}
@@ -357,7 +365,7 @@ func (s *emittingClassStore) emitAfterUpdate(id string, opts beads.UpdateOpts, w
 	if !wasClosed && beadStatusIsClosed(bead.Status) {
 		eventType = events.BeadClosed
 	}
-	s.emit(classStoreEmission{eventType: eventType, bead: bead})
+	return classStoreEmission{eventType: eventType, bead: bead}, true
 }
 
 // emitClosed records bead.closed for a close this store proved committed.
@@ -781,6 +789,14 @@ func (s *emittingClassStore) DepListBatch(ids []string) (map[string][]beads.Dep,
 		return nil, beads.ErrDepListBatchUnsupported
 	}
 	return batch.DepListBatch(ids)
+}
+
+// ReadyOrdered forwards a bounded ordered ready read (beads.OrderedReadyReader).
+// It emits nothing because it writes nothing, and it exists for the reason
+// DepListBatch does: a silent wrapper would send every bounded ready read of a
+// class binding down the whole-set path.
+func (s *emittingClassStore) ReadyOrdered(query beads.ReadyQuery, order beads.ReadyOrder) ([]beads.Bead, bool, error) {
+	return beads.ReadyOrdered(s.Store, query, order)
 }
 
 func (s *emittingClassStore) ApplyGraphPlan(ctx context.Context, plan *beads.GraphApplyPlan) (*beads.GraphApplyResult, error) {

@@ -91,7 +91,7 @@
       "package": "main",
       "function": "executePlannedStartsTraced",
       "file": "cmd/gc/session_lifecycle_parallel.go",
-      "ccn": 68
+      "ccn": 69
     },
     {
       "package": "main",

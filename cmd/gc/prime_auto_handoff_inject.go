@@ -29,11 +29,14 @@ type primeHookContextInjection struct {
 // the caller already proved for this SessionStart; the mail context reuses
 // both instead of resolving the city, opening its store, and reading the
 // session again.
-func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
+//
+// step, when non-nil, is the step reminder lookup the caller started for
+// cityPath; nil reads the reminder here.
+func primeHookContextSuffix(cityPath string, sessionStart *primeSessionStart, step *wispStepLookup, hookMode bool, hookContext primeHookContext, stderr io.Writer, consumeHandoff bool) primeHookContextInjection {
 	if !hookMode {
 		return primeHookContextInjection{}
 	}
-	injection := primeHookContextInjection{text: wispStepInjectionContent(cityPath)}
+	injection := primeHookContextInjection{text: step.contentFor(cityPath)}
 	if primeHookSessionStart(hookContext) {
 		var startMail sessionStartMail
 		if sessionStart != nil {

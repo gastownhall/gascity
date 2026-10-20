@@ -30,6 +30,8 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
 )
@@ -338,11 +340,16 @@ const sessionMessageTimeout = 4 * time.Minute
 const defaultClientTimeout = 60 * time.Second
 
 // SessionSubmitResponse is the domain-facing shape of a session submit result.
+// Replayed marks a SubmitSessionWithKey retry answered from a finished
+// request's stored outcome: nothing ran again, and Message says that the
+// retry's own options, resume included, took no effect (request_id rule 6).
 type SessionSubmitResponse struct {
-	Status string               `json:"status"`
-	ID     string               `json:"id"`
-	Queued bool                 `json:"queued"`
-	Intent session.SubmitIntent `json:"intent"`
+	Status   string               `json:"status"`
+	ID       string               `json:"id"`
+	Queued   bool                 `json:"queued"`
+	Intent   session.SubmitIntent `json:"intent"`
+	Replayed bool                 `json:"replayed,omitempty"`
+	Message  string               `json:"message,omitempty"`
 }
 
 // sseEvent is a parsed SSE frame from the event stream.
@@ -1466,37 +1473,46 @@ func (c *Client) SendSessionMessage(id, message string) error {
 
 // SubmitSession sends a semantic submit request to a session. The id may
 // be either a bead ID or a resolvable session alias/name. Internally
-// handles the async protocol: POST → 202 + request_id → SSE event.
+// handles the async protocol: POST → 202 + request_id → SSE event. It sends
+// no Idempotency-Key.
 func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) (SessionSubmitResponse, error) {
+	return c.submitSession(id, message, intent, "")
+}
+
+// SubmitSessionWithKey is SubmitSession under an Idempotency-Key. When the
+// server records both requests (a recording ops.content mode), a retry with
+// the same key against the same session gets the first request's outcome
+// instead of a second delivery. Otherwise only a retry the server's
+// Idempotency-Key cache answers gets it (the same id spelling, at most 30
+// minutes later, and not across a restart); any other retry delivers again
+// (request_id rules 3 and 6 in engdocs/design/async-request-result.md). A
+// replay of a request that already finished is answered from the 202's
+// stored outcome without waiting on the event stream. That outcome is the
+// op's, which can differ from the first request's when its close kept
+// failing (request_id rule 4): a replayed failure does not prove the message
+// was not delivered. A replay runs nothing, so this call's resume does not
+// start a session the first request only queued for (request_id rule 6); a
+// replayed success says so in the response's Replayed and Message, a replayed
+// failure in its error. An empty key sends none, as SubmitSession does.
+func (c *Client) SubmitSessionWithKey(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
+	return c.submitSession(id, message, intent, key)
+}
+
+func (c *Client) submitSession(id, message string, intent session.SubmitIntent, key string) (SessionSubmitResponse, error) {
 	if err := c.requireCityScope(); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	// `gc session submit` is an operator's own send, so it resumes a held
-	// session (CONTRACT v5.9 D8).
-	resume := true
-	body := genclient.SubmitSessionJSONRequestBody{Message: message, Resume: &resume}
-	if intent != "" {
-		i := genclient.SubmitIntent(intent)
-		body.Intent = &i
-	}
-	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, nil, body)
+	accepted, err := c.postSubmitSession(id, message, intent, key)
 	if err != nil {
-		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("request failed: %w", err)}
-	}
-	if resp == nil {
-		return SessionSubmitResponse{}, &connError{err: fmt.Errorf("nil response")}
-	}
-	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
 		return SessionSubmitResponse{}, err
 	}
-	if resp.JSON202 == nil {
-		return SessionSubmitResponse{}, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	if out, done, err := replayedSubmitOutcome(accepted, intent); done {
+		return out, err
 	}
-	requestID := resp.JSON202.RequestId
 
 	ctx, cancel := context.WithTimeout(context.Background(), sessionMessageTimeout)
 	defer cancel()
-	env, err := c.waitForEvent(ctx, requestID, events.RequestResultSessionSubmit, RequestOperationSessionSubmit, resp.JSON202.EventCursor)
+	env, err := c.waitForEvent(ctx, accepted.RequestId, events.RequestResultSessionSubmit, RequestOperationSessionSubmit, accepted.EventCursor)
 	if err != nil {
 		return SessionSubmitResponse{}, err
 	}
@@ -1517,6 +1533,66 @@ func (c *Client) SubmitSession(id, message string, intent session.SubmitIntent) 
 		Queued: p.Queued,
 		Intent: session.SubmitIntent(p.Intent),
 	}, nil
+}
+
+// postSubmitSession posts one submit request and returns its 202 body; key,
+// when set, is the request's Idempotency-Key.
+func (c *Client) postSubmitSession(id, message string, intent session.SubmitIntent, key string) (*genclient.AsyncAcceptedBody, error) {
+	// `gc session submit` is an operator's own send, so it resumes a held
+	// session (CONTRACT v5.9 D8).
+	resume := true
+	body := genclient.SubmitSessionJSONRequestBody{Message: message, Resume: &resume}
+	if intent != "" {
+		i := genclient.SubmitIntent(intent)
+		body.Intent = &i
+	}
+	params := &genclient.SubmitSessionParams{XGCRequest: "true"}
+	if key != "" {
+		params.IdempotencyKey = &key
+	}
+	resp, err := c.cw.SubmitSessionWithResponse(context.Background(), c.cityName, id, params, body)
+	if err != nil {
+		return nil, &connError{err: fmt.Errorf("request failed: %w", err)}
+	}
+	if resp == nil {
+		return nil, &connError{err: fmt.Errorf("nil response")}
+	}
+	if err := apiErrorFromResponse(resp.StatusCode(), pdOf(resp)); err != nil {
+		return nil, err
+	}
+	if resp.JSON202 == nil {
+		return nil, fmt.Errorf("API returned %d with no body", resp.StatusCode())
+	}
+	return resp.JSON202, nil
+}
+
+// replayedSubmitOutcome answers a 202 that replays a finished submit from the
+// stored outcome it carries (DES-O0API §6.5): done is false for any other 202,
+// which the caller resolves on the event stream. intent is the request's: a
+// replay's op does not carry it on the wire.
+func replayedSubmitOutcome(body *genclient.AsyncAcceptedBody, intent session.SubmitIntent) (SessionSubmitResponse, bool, error) {
+	if body.Replayed == nil || !*body.Replayed || body.Op == nil || body.Op.Outcome == nil ||
+		body.Op.Status != genclient.ConversationOpStatus(opjournal.StatusClosed) {
+		return SessionSubmitResponse{}, false, nil
+	}
+	op := body.Op
+	outcome := opjournal.Outcome{Arm: opjournal.Arm(op.Outcome.Arm)}
+	if op.Outcome.Reason != nil {
+		outcome.Reason = *op.Outcome.Reason
+	}
+	arm, reason := outcome.Effective()
+	if arm != opjournal.ArmSucceeded {
+		return SessionSubmitResponse{}, true, fmt.Errorf("submit failed: %s: %s",
+			messageReplayErrorCode(RequestOperationSessionSubmit, reason), replayMessage(op.Id, arm, reason))
+	}
+	queued := op.Outcome.Via != nil && *op.Outcome.Via == legacyop.ViaLegacyQueued
+	if intent == "" {
+		intent = session.SubmitIntentDefault
+	}
+	return SessionSubmitResponse{
+		Status: "accepted", ID: op.Conversation, Queued: queued, Intent: intent,
+		Replayed: true, Message: replayMessage(op.Id, arm, reason),
+	}, true, nil
 }
 
 // SlingRequest carries the parameters of a sling mutation for Client.Sling.

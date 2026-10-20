@@ -12,7 +12,6 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/testutil"
-	"github.com/gastownhall/gascity/test/dolttest"
 )
 
 // supervisorIsolatedHomeEnv is gc's opt-in (cmd/gc supervisorIsolatedHomeEnv)
@@ -62,6 +61,10 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 		// runner's real global config, which has no beads.role, so `gc doctor`
 		// failed its beads-role check on any host that had never opted in.
 		"GIT_CONFIG_GLOBAL", "GIT_CONFIG_NOSYSTEM",
+		// internal/testenv points this at a template whose config turns off git's
+		// detached auto-maintenance; the child carries it so the repos it creates
+		// with git init or git clone have that off too (ga-zoe1wr).
+		"GIT_TEMPLATE_DIR",
 		"CLAUDE_CONFIG_DIR", // Claude Code reads OAuth credentials from here
 		"ANTHROPIC_AUTH_TOKEN",
 		"ANTHROPIC_API_KEY",
@@ -158,17 +161,18 @@ func NewEnv(gcBinary, gcHome, runtimeDir string) *Env {
 	// ambient identity made that a coin flip: green on a developer box, red on a
 	// fresh CI runner. Seed under GC_HOME rather than the real home so a run
 	// never writes host Dolt state; test/integration seeds the same config. It
-	// also turns dolt's version check and usage metrics off, so no dolt the
-	// suite runs calls the network.
-	if err := dolttest.WriteGlobalConfig(gcHome); err != nil {
-		panic(fmt.Sprintf("acceptance: seeding dolt global config under %s: %v", gcHome, err))
+	// also turns dolt's usage metrics and release version check off, so no dolt
+	// the suite runs calls eventsapi.dolthub.com or stalls in `dolt version` on a
+	// slow network.
+	if err := testutil.SeedDoltGlobalConfig(gcHome); err != nil {
+		panic(fmt.Sprintf("acceptance: %v", err))
 	}
 	e.vars["DOLT_ROOT_PATH"] = gcHome
-	// A child gets only the variables listed here, so the process-wide
-	// DOLT_DISABLE_EVENT_FLUSH that internal/testenv sets does not reach it, and
-	// the seeded metrics.disabled stops dolt sending metrics, not forking the
-	// detached send-metrics process that would.
-	e.vars[dolttest.DisableEventFlushVar] = dolttest.DisableEventFlushValue
+	// That config does not stop dolt forking a detached `dolt send-metrics` after
+	// each command; only the presence of this variable does. NewEnv hands a child
+	// only the vars set here, so the one internal/testenv sets for the test
+	// process never reaches it.
+	e.vars["DOLT_DISABLE_EVENT_FLUSH"] = "1"
 
 	// The Makefile points GIT_CONFIG_GLOBAL at scripts/test-gitconfig-path, but a
 	// caller that runs `go test -tags acceptance_a` directly supplies no seed at

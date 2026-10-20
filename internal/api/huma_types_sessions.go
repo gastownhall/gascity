@@ -67,8 +67,13 @@ type SessionCreateInput struct {
 // asyncAcceptedBody is the response body for all async session 202 responses.
 type asyncAcceptedBody struct {
 	Status      string `json:"status" doc:"Async request status." example:"accepted"`
-	RequestID   string `json:"request_id" doc:"Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
+	RequestID   string `json:"request_id" doc:"Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
 	EventCursor string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty."`
+	// IdempotencyKey, Replayed and Op are set only when the server recorded
+	// the request as an operation (an ops gate is auto or require).
+	IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery."`
+	Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key."`
+	Op             *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as."`
 }
 
 // SessionCreateOutput is the Huma output for POST /v0/sessions.

@@ -190,6 +190,17 @@ func Phase1Profiles() []Profile {
 				RecallResponseContains: "OpenCode phase 1 validates the tmux CLI transcript contract.",
 				ResetResponseContains:  "I cannot repeat the earlier OpenCode summary because this session started fresh.",
 			},
+			Usage: UsageExpectation{
+				Supported:       true,
+				Invocations:     1,
+				InputTokens:     100,
+				OutputTokens:    40,
+				CacheReadTokens: 10,
+				Model:           "deepseek/deepseek-v4.1-flash",
+				// OpenCode records its own per-call cost, so the default price
+				// table carries no rate for it.
+				DefaultCostPriced: false,
+			},
 		},
 		{
 			ID:       ProfileMimoCodeTmuxCLI,

@@ -18,7 +18,8 @@ const (
 	SurfaceController = "controller"
 )
 
-// Stages: the telemetry stages (admit, close, adopt, sweep) and, for a
+// Stages: the telemetry stages (admit, close, adopt, sweep, and open for a
+// controller sweeper pass that could not open the op store) and, for a
 // Degrade, the step that failed (open, propose, close, adopt, sweep).
 const (
 	StageAdmit   = "admit"
@@ -54,6 +55,7 @@ const (
 	ReasonInvalidRequest       = "invalid_request"
 	ReasonUnmaterializedTarget = "unmaterialized_target"
 	ReasonNoGeneration         = "no_generation"
+	ReasonUnreadableTarget     = "unreadable_target"
 	ReasonProposeError         = "propose_error"
 )
 
@@ -115,6 +117,14 @@ func (r *Recorder) degrade(kind opjournal.Kind, stage, reason string, err error)
 	}
 	if r.Degraded != nil {
 		r.Degraded(d)
+	}
+}
+
+// closeHealthy tells the Healthy hook that a close just worked, so its owner's
+// next close failure is news again.
+func (r *Recorder) closeHealthy() {
+	if r.Healthy != nil {
+		r.Healthy(StageClose)
 	}
 }
 

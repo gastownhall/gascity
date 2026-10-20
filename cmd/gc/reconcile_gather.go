@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"slices"
 	"strconv"
 	"strings"
@@ -48,6 +49,8 @@ type gatherEnv struct {
 	RigStores  func() map[string]beads.Store
 	Recording  func() *externalReadsRecording // K1's latest; nil before the first
 	ReadyWaits func() map[string]bool         // K1's waits step's latest (I10)
+	// WakeReads asks K1 for a pass; nil asks nothing.
+	WakeReads func()
 	// Nudges and WorkStore are the nudges-class and city work stores C8's
 	// steps write through. WorkStore is also the work leg of the pass's
 	// WorkLegs, which the live work read (L5) plans over.
@@ -81,8 +84,13 @@ type World struct {
 	Mislabelled map[rowKey]bool
 	Demand      demandView
 	ScaleCheck  *scaleCheckResult
-	Obs         *ObservationSnapshot
-	ObsMaxAge   time.Duration
+	// ScaleCheckStartedAt is when ScaleCheck's run started, and ClaimsSeen
+	// when the planner first saw each open work assignment: the decide's
+	// pairing guard (claimHeldTemplates) reads both.
+	ScaleCheckStartedAt time.Time
+	ClaimsSeen          map[workClaim]time.Time
+	Obs                 *ObservationSnapshot
+	ObsMaxAge           time.Duration
 	// Patrol is the patrol interval, read once by gather, so the decide
 	// never reaches the config's environment-backed reader.
 	Patrol     time.Duration
@@ -146,6 +154,49 @@ type World struct {
 	// fresh is one row's fresh runtime read, which the fresh accessors read
 	// in its pass's stead (withRuntime): set only inside an effect.
 	fresh *freshRow
+}
+
+// workClaim is one work assignment: the work bead, store-scoped, and the
+// assignee it names.
+type workClaim struct {
+	bead     storeScopedBeadKey
+	assignee string
+}
+
+// workClaimOf is d's i-th assigned work row's claim, or false when it names
+// no assignee.
+func workClaimOf(d demandView, i int) (workClaim, bool) {
+	assignee := strings.TrimSpace(d.AssignedWork[i].Assignee)
+	if assignee == "" {
+		return workClaim{}, false
+	}
+	ref := ""
+	if i < len(d.AssignedStoreRefs) {
+		ref = d.AssignedStoreRefs[i]
+	}
+	return workClaim{bead: storeScopedBeadKey{StoreRef: normalizeDemandStoreRef(ref), ID: d.AssignedWork[i].ID}, assignee: assignee}, true
+}
+
+// claimsSeenAt records, at now, the first sight of each of d's work
+// assignments the planner has not seen, forgets those d no longer holds,
+// and returns the pass's copy and whether any was new. An assignment is new
+// again when its assignee changes.
+func (p *planner) claimsSeenAt(d demandView, now time.Time) (map[workClaim]time.Time, bool) {
+	seen := make(map[workClaim]time.Time, len(d.AssignedWork))
+	fresh := false
+	for i := range d.AssignedWork {
+		c, ok := workClaimOf(d, i)
+		if !ok {
+			continue
+		}
+		at, known := p.claimsSeen[c]
+		if !known {
+			at, fresh = now, true
+		}
+		seen[c] = at
+	}
+	p.claimsSeen = seen
+	return maps.Clone(seen), fresh
 }
 
 // gather builds the pass's World at now. It first drains the settlements
@@ -221,7 +272,15 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 	if w.Demand, err = gatherDemand(dg, newV2DemandReads(now, rec)); err != nil {
 		return World{}, err
 	}
-	w.ScaleCheck = rec.scaleCheck(now)
+	w.ScaleCheck, w.ScaleCheckStartedAt = rec.scaleCheckRun(now)
+	var newClaim bool
+	// Stamp first sights after the work read, not at the pass's start: a
+	// run that starts between the two may count a bead the read then shows
+	// claimed, and the claim must not predate that run.
+	w.ClaimsSeen, newClaim = p.claimsSeenAt(w.Demand, p.clock.Now())
+	if newClaim && len(w.Demand.CustomCheckTemplates) > 0 && e.WakeReads != nil {
+		e.WakeReads() // a custom count may predate the claim: a newer run ends its subtraction
+	}
 
 	w.Observed = observeCensus(w.Obs, w.Census, now, w.ObsMaxAge)
 	w.Classified = p.classifiedOf(w.Census, w.Observed)

@@ -99,6 +99,26 @@ var (
 	// Idempotency (two-phase reserve/complete).
 	IdempotencyInFlight = Register(ProblemType{Code: "idempotency-in-flight", Status: http.StatusConflict, Title: "Idempotency Key In Flight"})
 	IdempotencyMismatch = Register(ProblemType{Code: "idempotency-mismatch", Status: http.StatusUnprocessableEntity, Title: "Idempotency Key Body Mismatch"})
+	// InvalidIdempotencyKey is an Idempotency-Key the operation journal
+	// cannot record under (empty after trimming, over 512 bytes, control
+	// characters, leading or trailing space). Only an ops gate in require
+	// refuses it; auto runs such a request unrecorded.
+	InvalidIdempotencyKey = Register(ProblemType{Code: "invalid-idempotency-key", Status: http.StatusUnprocessableEntity, Title: "Invalid Idempotency Key"})
+
+	// Operation journal (DES-O0API D12): refusals of an ops gate in require,
+	// made before the request is delivered. A request to a configured named
+	// session with no row is checked for these before the session is
+	// materialized, except a store that opens but cannot write the op row:
+	// that refusal comes after the materialization, which require needs to
+	// name the op's conversation (§6.4).
+	//
+	// OpJournalUnavailable is an op store that cannot record the request
+	// (no conditional writes, no op bead type, a store error). The client may
+	// retry; nothing was delivered.
+	OpJournalUnavailable = Register(ProblemType{Code: "op-journal-unavailable", Status: http.StatusServiceUnavailable, Title: "Operation Journal Unavailable"})
+	// PayloadTooLarge is a request payload over the operation journal's
+	// 16 KiB inline limit.
+	PayloadTooLarge = Register(ProblemType{Code: "payload-too-large", Status: http.StatusUnprocessableEntity, Title: "Payload Too Large"})
 
 	// Backend availability. store-unavailable is the bead-store-not-live 503 emitted
 	// by the shared cacheLiveOr503 helper; service-unavailable is the generic 503

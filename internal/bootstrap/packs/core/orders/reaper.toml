@@ -10,3 +10,7 @@ trigger = "cooldown"
 interval = "30m"
 timeout = "900s"
 skip_aliases = ["mol-dog-reaper"]
+# Interim: the script reads through `gc bd sql`, which an http-served store
+# refuses. Until it moves onto served verbs it is not dispatched for an http
+# scope (reported as inapplicable there); every other backend keeps it.
+requires_backend = ["dolt", "doltlite", "postgres"]

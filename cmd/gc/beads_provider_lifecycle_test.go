@@ -24,7 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/fsys"
-	"github.com/gastownhall/gascity/test/dolttest"
+	"github.com/gastownhall/gascity/internal/testutil"
 	"gopkg.in/yaml.v3"
 )
 
@@ -14335,7 +14335,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 			if err := os.MkdirAll(home, 0o755); err != nil {
 				t.Fatal(err)
 			}
-			if err := dolttest.WriteGlobalConfig(home); err != nil {
+			if err := testutil.SeedDoltGlobalConfig(home); err != nil {
 				t.Fatal(err)
 			}
 			for _, args := range [][]string{{"init", "-q"}, {"config", "user.name", "Test"}, {"config", "user.email", "test@example.invalid"}} {
@@ -14353,7 +14353,7 @@ func TestGcBeadsBdProviderOwnedRealLifecycleStopsOwnedProcesses(t *testing.T) {
 				// that call returns in 0.2 s and hides a missing config, so the test
 				// reproduces the slow network deterministically instead of waiting
 				// for one.
-				cmd.Env = sanitizedBaseEnv(append([]string{"HOME=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0"}, dolttest.UnroutableHTTPSProxyEnv()...)...)
+				cmd.Env = sanitizedBaseEnv(append([]string{"HOME=" + home, "GC_CITY_PATH=" + dir, "BEADS_DIR=" + filepath.Join(dir, ".beads"), "BD_BIN=" + bdPath, "GC_BEADS_PROVIDER_OWNED=1", "GC_BEADS_TRANSPORT=" + transport, "GC_BEADS_TARGET=local", "GC_BEADS_PROXIED_IDLE_TIMEOUT=0"}, testutil.UnroutableHTTPSProxyEnv()...)...)
 				if out, err := cmd.CombinedOutput(); err != nil {
 					t.Fatalf("gc-beads-bd %v: %v\n%s", args, err, out)
 				} else {

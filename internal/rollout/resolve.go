@@ -61,6 +61,24 @@ func Resolve(cfg *config.City, opts ResolveOptions) (Flags, error) {
 		readBeadsAllowSchemaBehindMigrate,
 		func(f *Flags, r resolved[bool]) { f.allowSchemaBehindMigrate = r })
 
+	// ops.content, ops.control, ops.lifecycle — Mode gates, EnvOverrides
+	// semantics.
+	if err := resolveModeGate(cfg, lookup, &f, opsContentSpec(),
+		readOpsContent,
+		func(f *Flags, r resolved[Mode]) { f.opsContent = r }); err != nil {
+		return Flags{}, err
+	}
+	if err := resolveModeGate(cfg, lookup, &f, opsControlSpec(),
+		readOpsControl,
+		func(f *Flags, r resolved[Mode]) { f.opsControl = r }); err != nil {
+		return Flags{}, err
+	}
+	if err := resolveModeGate(cfg, lookup, &f, opsLifecycleSpec(),
+		readOpsLifecycle,
+		func(f *Flags, r resolved[Mode]) { f.opsLifecycle = r }); err != nil {
+		return Flags{}, err
+	}
+
 	return f, nil
 }
 
