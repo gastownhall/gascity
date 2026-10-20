@@ -1467,6 +1467,7 @@ go_test(
         "event_authorship_test.go",
         "event_export_test.go",
         "execution_backstop_test.go",
+        "execution_backstop_work_started_test.go",
         "execution_emit_store_test.go",
         "execution_stalled_convergence_test.go",
         "explicit_restart_signal_test.go",

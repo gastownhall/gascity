@@ -46,8 +46,9 @@ package main
 //
 // # Execution evidence vetoes the drain, not the nudge
 //
-// A seat whose claimed step started this incarnation (an execution.step_started
-// stamped on the row as executionClaimStartedKey) is never escalated: draining
+// A seat whose claimed step started this incarnation (an execution.step_started,
+// or its own hook's work_started entry at the row's generation, stamped on the
+// row as executionClaimStartedKey) is never escalated: draining
 // it throws its work away and wakes it onto the same claim again (v5.10x,
 // mc-muv2x). The evidence proves the step started, not that a turn is still
 // running it, so it does not hold the nudge (ga-ba7k1f). A turn that dies on a
@@ -120,7 +121,8 @@ const (
 	executionClaimNudgeTokenKey = "execution_claim_nudge_token"
 	// executionClaimStartedKey persists execution evidence (mc-muv2x):
 	// "<instance_token>|<bead id>" once the backstop has seen an
-	// execution.step_started of that claimed bead from this incarnation. The
+	// execution.step_started of that claimed bead from this incarnation, or
+	// the row's work_started entry for it (workStartedAtGen). The
 	// veto reads it, so the evidence outlives the event log's tail: a long
 	// turn's step_started can scroll out of any bounded window before its
 	// pane next goes quiet. A value for another token or bead is no evidence,
@@ -356,8 +358,12 @@ func (p poolExecutionBackstop) resolve(s beads.Bead, _ map[string]beads.Bead, se
 	// a claim that can carry a step_started (executionLifecycleCandidate) is
 	// ever stamped, so any other reads no tail, never pays for a read that
 	// cannot answer, and keeps the activity clock alone, as before the veto.
+	// The seat's own work_started entry (workStartedAtGen) is the same
+	// evidence for any claim, read off the row with no tail, so it is
+	// consulted first and stamps the same way.
 	started := p.markedStarted(s, claim.BeadID)
-	if !started && executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID) {
+	if !started && (workStartedAtGen(s, claim) ||
+		executionLifecycleCandidate(claim, s) && p.executedSinceWake(s, claim.BeadID)) {
 		started = p.markStarted(&s, claim.BeadID)
 	}
 	if hold := p.quietHold(s, sessName); hold != "" {
@@ -559,6 +565,33 @@ func (p poolExecutionBackstop) executedSinceWake(s beads.Bead, beadID string) bo
 	}
 	for _, e := range evts {
 		if e.SessionID == s.ID || e.Actor == s.ID {
+			return true
+		}
+	}
+	return false
+}
+
+// workStartedAtGen reports execution evidence for claim from the row's
+// work_started cell (PHASE1-2 W1): the seat's own `gc hook --claim` records
+// each claim it hands to a turn, fenced by the incarnation's token and
+// generation, so an entry naming claim (Names' store matching) at the row's
+// current generation proves the claim started this incarnation, as a stamp
+// does. A long silent turn emits no step_started and no pane output, so
+// without it such a seat reads as never started and is drained (ga-jfzcmp).
+// It fails closed, unlike the cell's release readers: an unreadable cell, an
+// unreadable row generation, or an entry from another generation is no
+// evidence, and the activity clock decides, as before W1.
+func workStartedAtGen(s beads.Bead, claim executionClaim) bool {
+	gen, err := strconv.ParseInt(strings.TrimSpace(s.Metadata["generation"]), 10, 64)
+	if err != nil || gen < 1 {
+		return false
+	}
+	cell, err := sessionpkg.DecodeWorkStarted(s.Metadata[sessionpkg.WorkStartedKey])
+	if err != nil {
+		return false
+	}
+	for _, e := range cell.Claims {
+		if e.Gen == gen && (sessionpkg.WorkStarted{Claims: []sessionpkg.WorkStartedEntry{e}}).Names(claim.StoreRef, claim.BeadID) {
 			return true
 		}
 	}
