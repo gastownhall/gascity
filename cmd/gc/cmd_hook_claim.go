@@ -318,6 +318,11 @@ type hookClaimOps struct {
 	// not-found from ONE leg be checked against the others before it opens the
 	// escalation. See claim_class_route.go.
 	ClassRoute *hookClaimClassRoute
+	// ClassesRelocated reports that the city relocates its coordination
+	// classes even when ClassRoute is nil because the route degraded (a
+	// binding with no claim CAS): a bead its leg serves may then reside in the
+	// binding, so an adoption's leg is no proven residence (hookStartedKeyFor).
+	ClassesRelocated bool
 	// ReclaimStale attempts a scoped stale-lease reclaim (ga-7rj87d FR1/FR2)
 	// for exactly one candidate bead ID. Only consulted when
 	// hookClaimOptions.AutoReclaimStaleClaims is set.
@@ -1620,6 +1625,10 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 		res, err = ops.RecordWorkStarted(sessionID, fence, hookStartedKeyFor(ops, dir, beadID, minted), via)
 	}
 	switch {
+	case errors.Is(err, errWorkStartedRespell):
+		// Recorded; only the migration of its entry failed. Not unrecorded.
+		fmt.Fprintf(stderr, "gc hook --claim: %s on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
+		return res
 	case errors.Is(err, errWorkStartedReset):
 		// Recorded, over a cell no reader could use: report what was lost.
 		fmt.Fprintf(stderr, "gc hook --claim: recorded %s as started on session %s: %v\n", beadID, sessionID, err) //nolint:errcheck
@@ -1732,12 +1741,16 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	return 1
 }
 
-// forgetHookWorkStarted drops bead, a claim this invocation minted, from this
-// session's work_started cell under the key its record wrote, best effort:
-// an unwind that cannot drop it still gives the claim back.
-func forgetHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) {
+// forgetHookWorkStarted drops every record of bead, a claim this invocation
+// is giving back, from this session's work_started cell, best effort: an
+// unwind that cannot drop it still gives the claim back. It forgets by bead
+// (an unknown store names it in every store), not under the key its record
+// wrote: that key follows the class route's residence memo, which can learn
+// the bead after the record (a continuation listing), and a released claim
+// must not read as started under any spelling.
+func forgetHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, _ string) {
 	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && strings.TrimSpace(bead.ID) != "" {
-		_ = ops.ForgetWorkStarted(sessionID, hookStartedKeyFor(ops, dir, bead.ID, true))
+		_ = ops.ForgetWorkStarted(sessionID, hookStartedKey{Bead: strings.TrimSpace(bead.ID)})
 	}
 }
 
@@ -1753,12 +1766,13 @@ func forgetHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 // nothing has no other store a bead its leg serves could live in. Both are
 // proven residences (Resident).
 //
-// An adoption on a city with a class route that did not prove the binding
-// holds the bead keeps the leg's spelling, unproven: its readback may have
-// failed before the residence was asked. Its entry is written unmarked, as
-// the older hook wrote every entry, so the readers match it by bead at its
-// generation (session.WorkStartedEntry.NamesAt) instead of trusting a store
-// nobody proved.
+// An adoption on a city that relocates classes (a class route, or one that
+// degraded) that the route did not prove the binding holds keeps the leg's
+// spelling, unproven: its readback may have failed before the residence was
+// asked, or no route could ask it. Its entry is written unmarked, as the older
+// hook wrote every entry, so the readers match it by bead at its generation
+// (session.WorkStartedEntry.NamesAt) instead of trusting a store nobody
+// proved.
 func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, minted bool) hookStartedKey {
 	beadID = strings.TrimSpace(beadID)
 	if route := ops.ClassRoute; route != nil && route.knownResident(beadID) {
@@ -1766,7 +1780,8 @@ func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, minted bool) hookSt
 		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
 	}
 	ref := ops.StoreRef(dir)
-	return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != "" && (minted || ops.ClassRoute == nil)}
+	relocates := ops.ClassRoute != nil || ops.ClassesRelocated
+	return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != "" && (minted || !relocates)}
 }
 
 // writeHookClaimNoWork writes the single drain result for a hook that claimed

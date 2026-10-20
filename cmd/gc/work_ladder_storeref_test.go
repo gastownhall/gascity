@@ -203,3 +203,23 @@ func TestWorkLadderReleasesLiveReadIsTheLastGuard(t *testing.T) {
 		t.Fatalf("work.released = %d", n)
 	}
 }
+
+// TestWorkLadderReadsTheLegSpellingAtTheRowsGeneration: the relaxation is
+// read at the ROW's generation, never the ladder cell's. A cell left at an
+// older generation (6, a recycle ago) beside an unmarked entry of that
+// generation names nothing for the row at 7: with every seed stripped, the
+// claim stays claimed.
+func TestWorkLadderReadsTheLegSpellingAtTheRowsGeneration(t *testing.T) {
+	c := newLadderCity(t)
+	const bead = "gcg-100"
+	c.bindingClaim(bead, "")
+	cell := fmt.Sprintf(`{"v":1,"claims":[{"store":"rig:gascity","bead":%q,"gen":6,"at":"2026-10-07T11:00:00Z","via":"claim"}]}`, bead)
+	ladder := workladder.EncodeLadder(workladder.Record{V: 1, Gen: 6, Entries: []workladder.Entry{{
+		Key: workladder.ClaimKey{Store: "city", Bead: bead}, Kind: workladder.KindClaim, Rung: workladder.RungClaimed, Since: c.now.Add(-time.Minute),
+	}}})
+	c.setRow(map[string]string{session.WorkStartedKey: cell, session.WorkLadderKey: ladder})
+	c.pass()
+	if e := c.entry(bead); e.Rung != workladder.RungClaimed || e.Seed != 0 {
+		t.Fatalf("entry %+v: the ladder cell's generation started the claim", e)
+	}
+}

@@ -283,6 +283,15 @@ func claimRouteTopology(bindings []storeref.ClassBinding, refused error) storere
 	return assembleResidencyTopology(nil, newUnprobedWorkResidual(), nil, bindings, refused)
 }
 
+// hookClaimClassesRelocated reports whether a class-route resolution found a
+// city that relocates its coordination classes: a route opened, or a binding
+// that cannot claim, which degrades the route to nil (hookClaimRouteVerdict)
+// but still holds the relocated beads. The started key must not take a
+// degraded city's legs for proven residences (hookStartedKeyFor).
+func hookClaimClassesRelocated(opened *hookClaimClassRoute, err error) bool {
+	return opened != nil || errors.Is(err, errClaimRouteBindingCannotClaim)
+}
+
 // hookClaimRouteVerdict turns one class-route resolution into the claim ops the
 // invocation runs with, and reports whether `gc hook --claim` may proceed.
 //

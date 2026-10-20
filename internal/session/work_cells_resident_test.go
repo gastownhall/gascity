@@ -112,6 +112,50 @@ func TestWorkStartedRespelled(t *testing.T) {
 	if _, changed := w.Respelled("", "gcg-1", 2); changed {
 		t.Fatal("an unknown store was written as a residence")
 	}
+	// Another generation's entry is no record of this incarnation, even one
+	// already spelled as the residence: it is left as it is.
+	older := WorkStarted{Claims: []WorkStartedEntry{legacyEntry("city", "gcg-1", 1)}}
+	if got, changed := older.Respelled("city", "gcg-1", 2); changed || got.Claims[0] != older.Claims[0] {
+		t.Fatalf("an older generation's entry was re-spelled: %+v", got.Claims)
+	}
+	// A storeless entry already names the bead in every store: re-spelling it
+	// would narrow it.
+	wild := WorkStarted{Claims: []WorkStartedEntry{legacyEntry("", "gcg-1", 2)}}
+	if got, changed := wild.Respelled("city", "gcg-1", 2); changed || got.Claims[0] != wild.Claims[0] {
+		t.Fatalf("a storeless entry was re-spelled: %+v", got.Claims)
+	}
+	// A resident entry already names the claim: the leg spelling beside it is
+	// dropped, not re-spelled into a duplicate.
+	both := WorkStarted{Claims: []WorkStartedEntry{residentEntry("city", "gcg-1", 2), legacyEntry("rig:gascity", "gcg-1", 2)}}
+	if got, changed := both.Respelled("city", "gcg-1", 2); !changed || len(got.Claims) != 1 || got.Claims[0] != residentEntry("city", "gcg-1", 2) {
+		t.Fatalf("Respelled beside a resident entry = %+v, %v; want the leg spelling dropped", got.Claims, changed)
+	}
+}
+
+// TestWorkStartedRecordsBead: the entries a reader keyed by any store honors
+// at a generation: a resident one at every generation, a storeless one, an
+// unmarked one at its own generation; never another bead.
+func TestWorkStartedRecordsBead(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		entry WorkStartedEntry
+		gen   int64
+		want  bool
+	}{
+		{"resident, another generation", residentEntry("city", "gcg-1", 1), 2, true},
+		{"storeless, another generation", legacyEntry("", "gcg-1", 1), 2, true},
+		{"unmarked, its generation", legacyEntry("rig:gascity", "gcg-1", 2), 2, true},
+		{"unmarked, another generation", legacyEntry("rig:gascity", "gcg-1", 1), 2, false},
+		{"unmarked, an unreadable generation", legacyEntry("rig:gascity", "gcg-1", 0), 0, false},
+	} {
+		w := WorkStarted{Claims: []WorkStartedEntry{c.entry}}
+		if got := w.RecordsBead("gcg-1", c.gen); got != c.want {
+			t.Errorf("%s: RecordsBead = %v, want %v", c.name, got, c.want)
+		}
+		if w.RecordsBead("gcg-2", c.gen) {
+			t.Errorf("%s: recorded another bead", c.name)
+		}
+	}
 }
 
 // TestWorkStartedResidentWire: the marker is one optional field; a cell

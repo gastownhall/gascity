@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/dispatch"
+	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/session"
 )
@@ -815,23 +816,38 @@ func claimHookWork(city *hookCity, workQuery, workDir string, queryEnv []string,
 	// exception, a binding with no claim CAS, degrades to unrouted claiming;
 	// see hookClaimRouteVerdict.
 	opened, err := hookClaimClassRouteForCity(city.path)
-	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
-	if !proceed {
-		return 1
-	}
-	if route != nil {
-		route.recorder = city.recorder
-	}
 	// Work-store writes announce themselves to the city's event log so the run
 	// views see a claim within a poll (hook_claim_bead_events.go). They are
 	// wrapped before the class route, whose binding writes announce themselves.
-	ops := classRoutedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), route)
+	ops, proceed := routedHookClaimOps(withHookClaimBeadEvents(city.claimOps(), city.path), opened, err, city.recorder, stderr)
+	if !proceed {
+		return 1
+	}
 	// A kept claim is announced before its result is written; this announces
 	// whatever is left on the way out (a release, a reclaim, a claim that
 	// stopped on an error).
 	defer ops.announceBeadEvents()
 	run := hookRigLegRunner(city.path, city.cfg, stores, shellWorkQueryWithEnv)
 	return claimHookWorkWithRunner(workQuery, workDir, queryEnv, stores, claimOpts, ops, run, emitFailure, stdout, stderr)
+}
+
+// routedHookClaimOps is the claim ops one class-route resolution (opened, err)
+// yields over base, and whether the claim may proceed (hookClaimRouteVerdict).
+// A route that opened takes recorder and wraps the ops; a city that relocates
+// its classes, even through a route that degraded to nil, is marked so
+// (ClassesRelocated), so the started key never takes its legs for proven
+// residences.
+func routedHookClaimOps(base hookClaimOps, opened *hookClaimClassRoute, err error, recorder func() events.Recorder, stderr io.Writer) (hookClaimOps, bool) {
+	route, proceed := hookClaimRouteVerdict(opened, err, stderr)
+	if !proceed {
+		return base, false
+	}
+	if route != nil {
+		route.recorder = recorder
+	}
+	ops := classRoutedHookClaimOps(base, route)
+	ops.ClassesRelocated = hookClaimClassesRelocated(opened, err)
+	return ops, true
 }
 
 // claimHookWorkWithRunner is claimHookWork with the work-query runner and claim

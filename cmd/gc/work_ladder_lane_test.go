@@ -1242,7 +1242,7 @@ func TestWorkLadderAndTheHookShareTheCells(t *testing.T) {
 	// unmarked entries alike, at every generation: the hook's writer and the
 	// ladder's reader can never disagree on whether a claim is started.
 	for _, resident := range []bool{false, true} {
-		for _, entryGen := range []int64{1, 2} {
+		for _, entryGen := range []int64{0, 1, 2} {
 			raw := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{
 				Store: "rig:gascity", Bead: "gcg-1", Gen: entryGen, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: resident,
 			}))

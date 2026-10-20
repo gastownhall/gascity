@@ -219,9 +219,11 @@ type StartedClaim struct {
 	Gen int64
 	At  time.Time
 	Via string
-	// Resident marks a claim whose Key.Store is the store it resides in, the
-	// way every reader keys it; an unmarked claim's store may be the work leg
-	// an older hook ran in (internal/session.WorkStartedEntry).
+	// Resident marks a claim whose Key.Store is the store it resides in, as
+	// the hook proved it, the way every reader keys it; an unmarked claim's
+	// store is the work leg the hook ran in, unproven: an older hook's entry,
+	// or an adoption whose residence the hook could not prove
+	// (internal/session.WorkStartedEntry).
 	Resident bool
 }
 
@@ -235,7 +237,8 @@ const (
 // recorded with no store (the hook could not resolve it) names its bead in
 // every store, and a key with no store matches its bead under any. A claim
 // not marked Resident also names its bead under any store at its own
-// generation: an older hook spelled a binding-resident claim by its rig leg.
+// generation: its store is the leg the hook ran in, which for a
+// binding-resident claim reached through a rig seat is not its residence.
 // The agent's writer (internal/session.WorkStartedEntry.NamesAt) reads it the
 // same way.
 func (s Started) Names(key ClaimKey, gen int64) bool {

@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -232,6 +233,8 @@ func TestHookStartedKeyForIsTheResidence(t *testing.T) {
 		{"work-leg claim, minted on a split city", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", true, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
 		{"work-leg claim, adopted on a split city", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", false, hookStartedKey{Store: "rig:gascity", Bead: "ga-1"}},
 		{"adopted on a city with no route", hookClaimOps{StoreRef: leg}, "ga-1", false, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
+		{"adopted on a city whose route degraded", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "gcg-1", false, hookStartedKey{Store: "rig:gascity", Bead: "gcg-1"}},
+		{"minted on a city whose route degraded", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "ga-1", true, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
 		{"unknown leg", hookClaimOps{StoreRef: func(string) string { return "" }}, " ga-1 ", true, hookStartedKey{Bead: "ga-1"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
@@ -250,19 +253,26 @@ func TestHookStartedKeyForIsTheResidence(t *testing.T) {
 // and its failed read is skipped, as before.
 func TestHookDrainAckFenceReadsTheBindingsEntries(t *testing.T) {
 	cell := startedCell(session.WorkStartedEntry{Store: "city", Bead: residenceStep, Gen: 7, Resident: true})
+	other := startedCell(session.WorkStartedEntry{Store: "rig:other", Bead: residenceStep, Gen: 7, Resident: true})
 	route := newClaimRouteFor(t, newClaimRouteClassStore(t))
 	for _, c := range []struct {
 		name  string
+		cell  string
 		route *hookClaimClassRoute
+		leg   string
 		acked bool
 	}{
-		{"a rig seat with a class route", route, false},
-		{"a rig seat on a city with no route", nil, true},
+		{"a rig seat with a class route", cell, route, startedStoreRef, false},
+		{"a rig seat on a city with no route", cell, nil, startedStoreRef, true},
+		// A leg this context cannot name skips nothing, the binding's
+		// entries or any other store's, as before.
+		{"an unknown leg with a class route", other, route, "", false},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			l := &startedLog{}
 			ops := l.ops(`[]`, nil, nil)
-			ops.ReadWorkStarted = func(string) (string, error) { return cell, nil }
+			ops.StoreRef = func(string) string { return c.leg }
+			ops.ReadWorkStarted = func(string) (string, error) { return c.cell, nil }
 			ops.ReadWorkMeta = func(context.Context, string, []string, string, string) (beads.Bead, error) {
 				return beads.Bead{}, errors.New("sqlite: database is locked")
 			}
@@ -278,24 +288,182 @@ func TestHookDrainAckFenceReadsTheBindingsEntries(t *testing.T) {
 	}
 }
 
-// TestForgetDropsALegSpelledEntryOfTheClaim: an unwind gives a claim back,
-// and a released claim must not read as started. If the cell still holds an
-// older hook's leg spelling of it at this generation (a re-spell the hook
-// could not land), the forget drops that entry too; an older generation's
-// leg spelling of the same bead is no record of this incarnation and stays.
-func TestForgetDropsALegSpelledEntryOfTheClaim(t *testing.T) {
+// TestUnwindForgetsEveryRecordOfTheBead: an unwind gives a claim back, and a
+// released claim must not read as started under any spelling or generation:
+// were the seat to claim it again, a stale record would make the new claim
+// read started before any turn began it. The unwind forgets by bead, so it
+// does not depend on the class route's memo still agreeing with the key the
+// record wrote. Other beads' entries stay.
+func TestUnwindForgetsEveryRecordOfTheBead(t *testing.T) {
 	cell := session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{
 		{Store: startedStoreRef, Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim},
+		{Store: "city", Bead: residenceStep, Gen: 6, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true},
 		{Store: startedStoreRef, Bead: "gcg-200", Gen: 6, At: stepsTestNow, Via: session.WorkStartedViaClaim},
 	}})
 	row := newStartedRow(t, map[string]string{session.WorkStartedKey: cell})
-	for _, bead := range []string{residenceStep, "gcg-200"} {
-		if err := forgetWorkStarted(row.front, row.id, hookStartedKey{Store: "city", Bead: bead, Resident: true}); err != nil {
-			t.Fatal(err)
+	l := &startedLog{}
+	ops := l.ops(`[]`, row, nil)
+	forgetHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, "/rig")
+	got := row.cell(t)
+	if len(got.Claims) != 1 || got.Claims[0].Bead != "gcg-200" {
+		t.Fatalf("cell %+v: want every record of %s forgotten and gcg-200 kept", got.Claims, residenceStep)
+	}
+}
+
+// TestHookUnwindForgetsARouteProvenClaim (F-C through the route): a rig seat
+// mints a binding-resident graph step, records it (city, resident), and its
+// result line cannot be written. The unwind forgets the entry and gives the
+// claim back in the binding, where it landed.
+func TestHookUnwindForgetsARouteProvenClaim(t *testing.T) {
+	h := newResidenceHook(t, `[{"id":"gcg-100","status":"open","metadata":{"gc.routed_to":"worker"}}]`, "", nil)
+	mintClaimRouteBead(t, h.class, residenceStep, map[string]string{"gc.routed_to": "worker"})
+	stdout := &orderedWriter{l: h.log, err: syscall.EPIPE}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), h.ops, stdout, &stderr); code == 0 {
+		t.Fatalf("exit 0 though the result could not be written; stderr %s", stderr.String())
+	}
+	if h.log.index("record:"+residenceStep+":claim") < 0 {
+		t.Fatalf("effects %v: want the claim recorded before the result write", h.log.log)
+	}
+	if cell := h.row.cell(t); cell.Names("city", residenceStep, 7) || len(cell.Claims) != 0 {
+		t.Fatalf("cell %+v: the given-back claim still reads started", cell.Claims)
+	}
+	if b, err := h.class.Get(residenceStep); err != nil || b.Assignee != "" || b.Status != "open" {
+		t.Fatalf("binding holds %s as %q/%q (%v); want it given back", residenceStep, b.Status, b.Assignee, err)
+	}
+}
+
+// TestHookUnprovenAdoptionRecordsNothingNew (the respell guard): an adoption
+// whose residence the hook could not prove finds the claim already recorded.
+// Over an older hook's leg spelling it writes nothing (it must not mark an
+// unproven leg as the residence, which no reader keyed city could match);
+// over a resident entry an earlier proven hand-over wrote, it adds no
+// duplicate leg spelling.
+func TestHookUnprovenAdoptionRecordsNothingNew(t *testing.T) {
+	legacy := session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Store: startedStoreRef, Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim}}})
+	proven := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: "city", Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}))
+	for name, cell := range map[string]string{"an older hook's leg spelling": legacy, "a resident entry": proven} {
+		t.Run(name, func(t *testing.T) {
+			fresh := session.Info{InstanceToken: "tok", Generation: "7", WorkStartedRaw: cell}
+			res, patch, err := decideWorkStarted(fresh, hookStartedFence{Token: "tok", Gen: 7, HasGen: true},
+				hookStartedKey{Store: startedStoreRef, Bead: residenceStep}, session.WorkStartedViaAdopt, stepsTestNow)
+			if err != nil || res != hookStartedAlreadyRecorded || patch != nil {
+				t.Fatalf("decide = %v, patch %v, %v; want already recorded and nothing written", res, patch, err)
+			}
+		})
+	}
+	t.Run("through the hook, the readback failing", func(t *testing.T) {
+		h := newResidenceHook(t, `[{"id":"gcg-100","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, legacy,
+			func(string) (beads.Bead, error) { return beads.Bead{}, errors.New("bd: connection refused") })
+		before := h.row.store.rowWrites
+		if code, stderr := h.run(t); code != 0 {
+			t.Fatalf("exit %d; stderr %s", code, stderr)
+		}
+		if h.row.store.rowWrites != before || h.row.meta(t, session.WorkStartedKey) != legacy {
+			t.Fatalf("the cell was rewritten to %s", h.row.meta(t, session.WorkStartedKey))
+		}
+	})
+}
+
+// respellFailingStore fails every conditional write to the session row with a
+// hard store error.
+type respellFailingStore struct{ *casCountingStore }
+
+func (s respellFailingStore) UpdateIfMatch(id string, expectedRevision int64, opts beads.UpdateOpts) error {
+	if id == s.rowID {
+		return errors.New("sqlite: disk I/O error")
+	}
+	return s.casCountingStore.UpdateIfMatch(id, expectedRevision, opts)
+}
+
+// TestHookRespellFailureIsNotUnrecorded: re-spelling an older hook's entry is
+// a migration of a claim the cell already records. A store error on that
+// write leaves it recorded under the leg's spelling (which the readers still
+// match at its generation): the claim is delivered as recorded, with one
+// stderr line, and no work.started_unrecorded.
+func TestHookRespellFailureIsNotUnrecorded(t *testing.T) {
+	legacy := session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Store: startedStoreRef, Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim}}})
+	row := newStartedRow(t, map[string]string{session.WorkStartedKey: legacy})
+	front := session.NewStore(beads.SessionStore{Store: blindWriteRefusingStore{inner: respellFailingStore{row.store}}})
+	res, err := recordWorkStarted(front, row.id, hookStartedFence{Token: startedToken, Gen: 7, HasGen: true},
+		hookStartedKey{Store: "city", Bead: residenceStep, Resident: true}, session.WorkStartedViaAdopt, stepsTestNow)
+	if res != hookStartedAlreadyRecorded || !errors.Is(err, errWorkStartedRespell) {
+		t.Fatalf("record = %v, %v; want already recorded with the re-spell failure", res, err)
+	}
+	l := &startedLog{}
+	ops := l.ops(`[]`, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) { return res, err })
+	var stderr bytes.Buffer
+	if got := recordHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, "/rig", false, &stderr); got != hookStartedAlreadyRecorded {
+		t.Fatalf("recordHookWorkStarted = %v, want already recorded", got)
+	}
+	if len(l.unrecorded) != 0 || !strings.Contains(stderr.String(), "re-spelling") {
+		t.Fatalf("unrecorded %v, stderr %q; want no work.started_unrecorded and one note", l.unrecorded, stderr.String())
+	}
+}
+
+// TestHookClaimClassesRelocated: a route that opened, or one a binding with no
+// claim CAS degraded to nil, both mean the city relocates; a city with no
+// binding, or a resolution that failed outright (the claim is refused before
+// any key is computed), does not.
+func TestHookClaimClassesRelocated(t *testing.T) {
+	route := newClaimRouteFor(t, newClaimRouteClassStore(t))
+	for _, c := range []struct {
+		name   string
+		opened *hookClaimClassRoute
+		err    error
+		want   bool
+	}{
+		{"a route opened", route, nil, true},
+		{"a binding with no claim CAS", nil, fmt.Errorf("probe: %w", errClaimRouteBindingCannotClaim), true},
+		{"a city that relocates nothing", nil, nil, false},
+		{"a resolution that failed", nil, errors.New("binding unreadable"), false},
+	} {
+		if got := hookClaimClassesRelocated(c.opened, c.err); got != c.want {
+			t.Errorf("%s: relocated = %v, want %v", c.name, got, c.want)
 		}
 	}
-	got := row.cell(t)
-	if len(got.Claims) != 1 || got.Claims[0].Bead != "gcg-200" || got.Claims[0].Gen != 6 {
-		t.Fatalf("cell %+v: want this generation's leg spelling dropped, the older one kept", got.Claims)
+}
+
+// TestRoutedHookClaimOpsMarksARelocatedCity: the ops a class-route resolution
+// yields. A route that opened wraps them and takes the recorder; a binding
+// with no claim CAS degrades to no route but still marks the city as one
+// that relocates (so an adoption there is no proven residence); a city that
+// relocates nothing is neither; any other failure refuses the claim.
+func TestRoutedHookClaimOpsMarksARelocatedCity(t *testing.T) {
+	route := newClaimRouteFor(t, newClaimRouteClassStore(t))
+	recorder := func() events.Recorder { return events.Discard }
+	leg := func(string) string { return startedStoreRef }
+	for _, c := range []struct {
+		name               string
+		opened             *hookClaimClassRoute
+		err                error
+		proceed, relocated bool
+		routed             bool
+	}{
+		{"a route opened", route, nil, true, true, true},
+		{"a binding with no claim CAS", nil, fmt.Errorf("probe: %w", errClaimRouteBindingCannotClaim), true, true, false},
+		{"a city that relocates nothing", nil, nil, true, false, false},
+		{"any other failure", nil, errors.New("binding unreadable"), false, false, false},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			ops, proceed := routedHookClaimOps(hookClaimOps{StoreRef: leg}, c.opened, c.err, recorder, &stderr)
+			if proceed != c.proceed {
+				t.Fatalf("proceed = %v, want %v", proceed, c.proceed)
+			}
+			if !proceed {
+				return
+			}
+			if ops.ClassesRelocated != c.relocated || (ops.ClassRoute != nil) != c.routed {
+				t.Fatalf("relocated %v, routed %v; want %v, %v", ops.ClassesRelocated, ops.ClassRoute != nil, c.relocated, c.routed)
+			}
+			if c.routed && ops.ClassRoute.recorder == nil {
+				t.Fatal("the opened route did not take the recorder")
+			}
+			key := hookStartedKeyFor(ops, "/rig", "gcg-9", false)
+			if key.Resident == c.relocated {
+				t.Fatalf("an adoption's key %+v on relocated=%v: want unmarked exactly when the city relocates", key, c.relocated)
+			}
+		})
 	}
 }

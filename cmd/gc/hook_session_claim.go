@@ -250,6 +250,11 @@ var errWorkStartedContended = errors.New("work_started: the row moved on every a
 // the claim is recorded, but the claims the old cell held are not.
 var errWorkStartedReset = errors.New("work_started was unreadable and was reset to this claim; the claims it held are no longer recorded")
 
+// errWorkStartedRespell marks a re-spelling write that failed on a claim the
+// cell already records: the claim is recorded (under the leg's spelling, which
+// the readers still match at its generation), so it is not unrecorded.
+var errWorkStartedRespell = errors.New("re-spelling the claim's work_started entry as the store it resides in failed; it stays recorded as the leg it ran in")
+
 // decideWorkStarted is the started write's decision on a fresh read of the
 // row: refuse a closed row and another incarnation's (stale), refuse a claim
 // the controller is releasing, skip one already recorded, else record it
@@ -285,9 +290,12 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 	if fence.HasGen {
 		gen = fence.Gen
 	}
-	if cell.Names(key.Store, key.Bead, gen) {
-		// Recorded already. An older hook may have spelled it by its leg:
-		// re-spell that entry as the residence this run proved, in place,
+	// Recorded already: an entry names the claim. A key that is not a proven
+	// residence may be the leg's spelling of a claim the cell holds under its
+	// residence, so any entry the readers honor for the bead counts.
+	if cell.Names(key.Store, key.Bead, gen) || (!key.Resident && cell.RecordsBead(key.Bead, gen)) {
+		// An older hook (or an unproven adoption) may have spelled it by its
+		// leg: re-spell that entry as the residence this run proved, in place,
 		// keeping its generation, time and way (the cell's migration).
 		if key.Resident {
 			if respelled, changed := cell.Respelled(key.Store, key.Bead, gen); changed {
@@ -329,6 +337,8 @@ func recordWorkStarted(front *session.Store, sessionID string, fence hookStarted
 		return session.RowPatch{Metadata: patch}, len(patch) > 0
 	})
 	switch {
+	case err != nil && res == hookStartedAlreadyRecorded:
+		return res, fmt.Errorf("%w: %w", errWorkStartedRespell, err)
 	case err != nil:
 		return hookStartedUnrecorded, err
 	case res == hookStartedRecorded && !wrote:

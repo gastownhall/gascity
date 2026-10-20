@@ -3,6 +3,7 @@ package session
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 )
@@ -37,14 +38,17 @@ const (
 // hook could not resolve it; an entry with no store names its bead in every
 // store.
 //
-// Resident marks an entry whose Store is the store the claim RESIDES in: the
-// store its claim compare-and-swap or its adoption readback ran against,
-// spelled as the census spells it, which is how every reader keys the claim.
-// An unmarked entry was written by an older hook, which spelled Store as the
-// work LEG it ran in. The two agree except for a bead resident in a relocated
-// class binding claimed through a rig seat's leg (a graph step: the leg says
-// rig:<rig>, its residence city), so an unmarked entry also names its bead
-// under any store, at its own generation only (NamesAt).
+// Resident marks an entry whose Store is the store the claim RESIDES in, as
+// the hook proved it (the store its claim compare-and-swap ran against, or the
+// class binding its route proved holds the bead), spelled as the census spells
+// it, which is how every reader keys the claim. An unmarked entry's Store is
+// the work LEG the hook ran in, which it could not prove the bead resides in:
+// every entry an older hook wrote, and this hook's for an adoption on a city
+// that relocates classes whose residence it could not prove. Leg and residence
+// agree except for a bead resident in a relocated class binding reached
+// through a rig seat's leg (a graph step: the leg says rig:<rig>, its
+// residence city), so an unmarked entry also names its bead under any store,
+// at its own generation only (NamesAt).
 type WorkStartedEntry struct {
 	Store    string    `json:"store"`
 	Bead     string    `json:"bead"`
@@ -154,24 +158,49 @@ func (w WorkStarted) Without(store, bead string, gen int64) WorkStarted {
 	return out
 }
 
-// Respelled is w with every unmarked entry that names bead at generation gen
-// (NamesAt) re-spelled as resident in store, keeping its generation, time,
-// way and place in the cell: the hook's migration of a claim an older hook
-// recorded under its leg. changed reports whether any entry was re-spelled.
-// An unknown store ("") is never written as a residence.
+// Respelled is w with every unmarked entry recorded at generation gen that
+// names bead under a store (NamesAt) re-spelled as resident in store, keeping
+// its generation, time, way and place in the cell: the hook's migration of a
+// claim it recorded under its leg before it could prove the residence (an
+// older hook's, or this one's unproven adoption). An entry of another
+// generation, and a storeless one (which already names the bead in every
+// store), are left as they are; an unknown store ("") is never written as a
+// residence. A resident entry already naming the claim makes a re-spelled
+// duplicate redundant, so the leg spelling is dropped instead. changed
+// reports whether the cell changed.
 func (w WorkStarted) Respelled(store, bead string, gen int64) (out WorkStarted, changed bool) {
 	out = WorkStarted{V: workCellVersion, Claims: append([]WorkStartedEntry(nil), w.Claims...)}
 	if strings.TrimSpace(store) == "" {
 		return out, false
 	}
-	for i, c := range out.Claims {
-		if c.Resident || !c.NamesAt(store, bead, gen) {
-			continue
+	resident := slices.ContainsFunc(w.Claims, func(c WorkStartedEntry) bool {
+		return c.Resident && sameClaim(c.Store, c.Bead, store, bead)
+	})
+	kept := out.Claims[:0]
+	for _, c := range out.Claims {
+		if !c.Resident && c.Store != "" && c.Gen == gen && c.NamesAt(store, bead, gen) {
+			changed = true
+			if resident {
+				continue
+			}
+			c.Store, c.Resident = store, true
+			resident = true
 		}
-		out.Claims[i].Store, out.Claims[i].Resident = store, true
-		changed = true
+		kept = append(kept, c)
 	}
+	out.Claims = kept
 	return out, changed
+}
+
+// RecordsBead reports whether w holds an entry for bead that a reader keyed
+// by any store honors on a row at generation gen: a resident entry (exact, at
+// every generation), a storeless one, or an unmarked one recorded at gen. A
+// hook whose key is not a proven residence asks it before writing an entry
+// that would only duplicate one the readers already match.
+func (w WorkStarted) RecordsBead(bead string, gen int64) bool {
+	return slices.ContainsFunc(w.Claims, func(c WorkStartedEntry) bool {
+		return c.Bead != "" && c.Bead == bead && (c.Resident || c.Store == "" || (gen > 0 && c.Gen == gen))
+	})
 }
 
 // DecodeWorkLadderRelease reads the one field of a work_ladder cell the hook
