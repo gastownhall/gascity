@@ -1518,9 +1518,10 @@ type BeadAssignInputBody struct {
 
 // BeadClaimFailedPayload defines model for BeadClaimFailedPayload.
 type BeadClaimFailedPayload struct {
-	Error     string  `json:"error"`
-	SessionId *string `json:"session_id,omitempty"`
-	Template  string  `json:"template"`
+	Error        string  `json:"error"`
+	RuntimeEpoch *int64  `json:"runtime_epoch,omitempty"`
+	SessionId    *string `json:"session_id,omitempty"`
+	Template     string  `json:"template"`
 }
 
 // BeadClaimLoopHeldPayload defines model for BeadClaimLoopHeldPayload.

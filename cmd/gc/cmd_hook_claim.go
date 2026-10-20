@@ -3295,7 +3295,11 @@ func claimFailedEvent(beadID string, opts hookClaimOptions, err error) (events.E
 	}
 	sessionID := hookClaimSessionID(opts.Env)
 	text := claimLoopErrorText(err.Error())
-	payload, marshalErr := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: sessionID, Error: text})
+	var epoch int64
+	if opts.StartedFence.HasGen {
+		epoch = opts.StartedFence.Gen
+	}
+	payload, marshalErr := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: sessionID, RuntimeEpoch: epoch, Error: text})
 	if marshalErr != nil {
 		return events.Event{}, false
 	}

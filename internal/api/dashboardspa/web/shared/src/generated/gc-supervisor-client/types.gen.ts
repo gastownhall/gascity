@@ -348,6 +348,7 @@ export type BeadAssignInputBody = {
 
 export type BeadClaimFailedPayload = {
     error: string;
+    runtime_epoch?: number;
     session_id?: string;
     template: string;
 };

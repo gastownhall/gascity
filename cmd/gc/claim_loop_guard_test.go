@@ -47,10 +47,17 @@ func (h *claimLoopHarness) fail(template, beadID, errText string) {
 	h.failAs(fmt.Sprintf("gcg-session-%d", h.seats), template, beadID, errText)
 }
 
-// failAs feeds one bead.claim_failed from the named seat, stamped now.
-func (h *claimLoopHarness) failAs(seat, template, beadID, errText string) {
+// failAs feeds one bead.claim_failed from the named session, stamped now.
+func (h *claimLoopHarness) failAs(session, template, beadID, errText string) {
 	h.t.Helper()
-	payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: seat, Error: errText})
+	h.failAsStart(session, 0, template, beadID, errText)
+}
+
+// failAsStart feeds one bead.claim_failed from one start (runtime epoch) of
+// the named session, stamped now.
+func (h *claimLoopHarness) failAsStart(session string, epoch int64, template, beadID, errText string) {
+	h.t.Helper()
+	payload, err := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: session, RuntimeEpoch: epoch, Error: errText})
 	if err != nil {
 		h.t.Fatal(err)
 	}
@@ -144,6 +151,25 @@ func TestClaimLoopGuardCountsSeatsNotRetries(t *testing.T) {
 	}
 }
 
+// TestClaimLoopGuardCountsEachStartOfAReusedSession: a named singleton keeps
+// its session bead when it is woken again, so the same session id failing in a
+// new start (runtime epoch) is a new seat, while a retry within one start is
+// not.
+func TestClaimLoopGuardCountsEachStartOfAReusedSession(t *testing.T) {
+	h := newClaimLoopHarness(t)
+	for i := 0; i < claimLoopTripFailures; i++ {
+		h.failAsStart("gcg-session-singleton", 4, loopTemplate, loopWisp, loopErr)
+	}
+	if h.held(loopTemplate) {
+		t.Fatal("retries within one start held the bead")
+	}
+	h.failAsStart("gcg-session-singleton", 5, loopTemplate, loopWisp, loopErr)
+	h.failAsStart("gcg-session-singleton", 6, loopTemplate, loopWisp, loopErr)
+	if !h.held(loopTemplate) {
+		t.Fatal("three starts of one session failing the same way did not hold the bead")
+	}
+}
+
 // TestClaimLoopGuardRequiresTheSameError: failures that differ are not a loop.
 // A changed error restarts the streak, so it takes the full count of the NEW
 // error to hold. A server request id is not part of the error.
@@ -174,6 +200,13 @@ func TestClaimLoopGuardRequiresTheSameError(t *testing.T) {
 	var payload events.BeadClaimLoopHeldPayload
 	if err := json.Unmarshal(h.alerts[0].Payload, &payload); err != nil || strings.Contains(payload.Error, "request_id") {
 		t.Fatalf("alert error = %q (%v), want it without the request id", payload.Error, err)
+	}
+	// The failure event itself keeps the id: it is how an operator finds the
+	// server's log line.
+	e, ok := claimFailedEvent(loopWisp, hookClaimOptions{Env: []string{"GC_TEMPLATE=" + loopTemplate}}, errors.New("answered 500 internal: internal error (request_id req-9)"))
+	var failed events.BeadClaimFailedPayload
+	if !ok || json.Unmarshal(e.Payload, &failed) != nil || !strings.Contains(failed.Error, "(request_id req-9)") {
+		t.Fatalf("bead.claim_failed error = %q, want the request id kept", failed.Error)
 	}
 }
 
@@ -214,6 +247,31 @@ func TestClaimLoopGuardSeatsInFlightDoNotLengthenTheHold(t *testing.T) {
 	h.advance(time.Second)
 	if h.held(loopTemplate) {
 		t.Fatalf("still withheld %s after the trip: in-flight seats lengthened the hold", claimLoopHoldBase)
+	}
+}
+
+// TestClaimLoopGuardOnlyTheProbeLengthensAHold: once a probe's failure has
+// doubled the hold, a later seat failing the same way (one spawned before the
+// hold, still finishing) leaves the new hold's end where it is.
+func TestClaimLoopGuardOnlyTheProbeLengthensAHold(t *testing.T) {
+	h := newClaimLoopHarness(t)
+	h.trip()
+	h.advance(claimLoopHoldBase)
+	if h.held(loopTemplate) {
+		t.Fatal("the probe was not admitted when the hold ran out")
+	}
+	h.advance(time.Minute)
+	h.fail(loopTemplate, loopWisp, loopErr) // the probe fails: the hold doubles
+	end := h.now.Add(claimLoopHold(2))
+	h.advance(time.Minute)
+	h.fail(loopTemplate, loopWisp, loopErr) // a straggler, not a probe
+	h.now = end.Add(-time.Second)
+	if !h.held(loopTemplate) {
+		t.Fatal("released before the doubled hold ran out")
+	}
+	h.now = end
+	if h.held(loopTemplate) {
+		t.Fatal("a straggler after the probe lengthened the hold again")
 	}
 }
 
@@ -546,7 +604,11 @@ func TestHookClaimReportsAClaimFailureOnlyForARoutedCandidate(t *testing.T) {
 // decodes, and that a hook outside any template's seat records nothing.
 func TestClaimFailedEventNamesTheSeatTemplateAndTheError(t *testing.T) {
 	long := strings.Repeat("x", claimLoopErrorMax+100)
-	opts := hookClaimOptions{Assignee: "bd.dog-1", Env: []string{"GC_TEMPLATE=bd.dog", "GC_SESSION_ID=gcg-session-1"}}
+	opts := hookClaimOptions{
+		Assignee:     "bd.dog-1",
+		Env:          []string{"GC_TEMPLATE=bd.dog", "GC_SESSION_ID=gcg-session-1"},
+		StartedFence: hookStartedFence{Token: "token", Gen: 7, HasGen: true},
+	}
 	e, ok := claimFailedEvent(loopWisp, opts, errors.New("  "+long+"  "))
 	if !ok {
 		t.Fatal("no event for a templated seat's claim failure")
@@ -556,7 +618,7 @@ func TestClaimFailedEventNamesTheSeatTemplateAndTheError(t *testing.T) {
 		t.Fatal(err)
 	}
 	if e.Type != events.BeadClaimFailed || e.Subject != loopWisp || e.SessionID != "gcg-session-1" || e.Actor != "bd.dog-1" ||
-		payload.Template != "bd.dog" || payload.SessionID != "gcg-session-1" || payload.Error != long[:claimLoopErrorMax] {
+		payload.Template != "bd.dog" || payload.SessionID != "gcg-session-1" || payload.RuntimeEpoch != 7 || payload.Error != long[:claimLoopErrorMax] {
 		t.Fatalf("event = %+v payload = %+v, want bead.claim_failed for %s by bd.dog with the bounded error", e, payload, loopWisp)
 	}
 	for name, tc := range map[string]struct {

@@ -53,11 +53,12 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
-	// BeadClaimFailed fires when gc hook --claim was served a candidate and
-	// skipped it because the claim write itself failed: not a lost race (that
-	// is BeadClaimRejected) but an error, after which the seat drains with
-	// claims_errored. The payload names the seat's template and the error text.
-	// It is the input of the controller's claim-loop guard
+	// BeadClaimFailed fires when gc hook --claim skips a routed candidate
+	// because the claim write itself failed: not a lost race (that is
+	// BeadClaimRejected) but an error. The seat goes on to its other
+	// candidates and, if none claims, drains claims_errored. The payload names
+	// the seat (template, session, runtime epoch) and the error text. It is
+	// the input of the controller's claim-loop guard
 	// (cmd/gc/claim_loop_guard.go): the same bead failing the same way for
 	// every seat a template spawns is a spawn loop, not a slow claim.
 	BeadClaimFailed = "bead.claim_failed"

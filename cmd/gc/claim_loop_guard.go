@@ -16,7 +16,8 @@ package main
 //   - Input: bead.claim_failed, which `gc hook --claim` records for each routed
 //     candidate it skips because the claim write failed (template, seat, bead,
 //     error text), read off the city's event journal by the same feed as the
-//     delta lanes.
+//     delta lanes. A seat is a session and its runtime epoch, so a session
+//     woken again for the same bead counts again.
 //   - Trip: claimLoopTripFailures distinct seats of one template failing to
 //     claim one bead with the SAME error text, the first and the last within
 //     claimLoopWindow. A different error starts a new streak: only a failure
@@ -105,7 +106,7 @@ type claimLoopKey struct {
 // claimLoopRecord is the streak of identical claim failures for one key.
 type claimLoopRecord struct {
 	err      string              // the error text the streak repeats
-	seats    map[string]struct{} // the seats (session ids) counted in the streak
+	seats    map[string]struct{} // the seats (claimLoopSeat) counted in the streak
 	failures int                 // distinct failing seats; one without a session id counts on its own
 	first    time.Time           // the streak's first failure
 	last     time.Time           // the streak's last failure
@@ -132,10 +133,11 @@ func newClaimLoopGuard(record func(events.Event), stderr io.Writer) *claimLoopGu
 	return &claimLoopGuard{records: map[claimLoopKey]*claimLoopRecord{}, now: time.Now, record: record, stderr: stderr}
 }
 
-// claimLoopErrorText is the comparable, bounded form of a claim error's text:
-// trimmed, without a server request id, and cut on a rune boundary.
+// claimLoopErrorText is the bounded form of a claim error's text: trimmed and
+// cut on a rune boundary. bead.claim_failed carries it whole, request id
+// included, because that id is an operator's handle on the server's log line.
 func claimLoopErrorText(text string) string {
-	text = strings.TrimSpace(claimLoopRequestID.ReplaceAllString(text, ""))
+	text = strings.TrimSpace(text)
 	if len(text) <= claimLoopErrorMax {
 		return text
 	}
@@ -144,6 +146,25 @@ func claimLoopErrorText(text string) string {
 		cut--
 	}
 	return text[:cut]
+}
+
+// claimLoopComparable is the form the guard compares: the bounded text without
+// a server request id.
+func claimLoopComparable(text string) string {
+	return claimLoopErrorText(claimLoopRequestID.ReplaceAllString(text, ""))
+}
+
+// claimLoopSeat names the seat a failure came from. A session bead keeps its
+// id when its runtime restarts (a woken named singleton, a resumed seat), and
+// the runtime epoch advances on each start, so the pair counts each start as a
+// seat while a seat retrying within one start counts once. No session id is an
+// anonymous seat.
+func claimLoopSeat(payload events.BeadClaimFailedPayload) string {
+	session := strings.TrimSpace(payload.SessionID)
+	if session == "" || payload.RuntimeEpoch == 0 {
+		return session
+	}
+	return fmt.Sprintf("%s@%d", session, payload.RuntimeEpoch)
 }
 
 // claimLoopHold is how long the holds-th hold of a streak lasts.
@@ -178,8 +199,8 @@ func (g *claimLoopGuard) observeFailure(evt events.Event) {
 	if key.template == "" || key.beadID == "" {
 		return
 	}
-	text := claimLoopErrorText(payload.Error)
-	seat := strings.TrimSpace(payload.SessionID)
+	text := claimLoopComparable(payload.Error)
+	seat := claimLoopSeat(payload)
 	at := evt.Ts
 	if at.IsZero() {
 		at = g.now()

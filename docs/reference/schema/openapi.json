@@ -1051,6 +1051,10 @@
           "error": {
             "type": "string"
           },
+          "runtime_epoch": {
+            "format": "int64",
+            "type": "integer"
+          },
           "session_id": {
             "type": "string"
           },

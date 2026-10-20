@@ -96,23 +96,27 @@ type BeadClaimReleasedPayload struct {
 func (BeadClaimReleasedPayload) IsEventPayload() {}
 
 // BeadClaimFailedPayload is the typed payload for bead.claim_failed events. The
-// envelope's Subject is the bead a seat of Template was served and could not
-// claim; Error is the claim write's own error text, bounded in length, which is
-// what the claim-loop guard compares to tell one deterministic failure repeating
+// envelope's Subject is the routed bead a seat of Template could not claim.
+// SessionID and RuntimeEpoch name the seat: a session bead keeps its id across
+// restarts, and the epoch advances on each one, so together they tell a seat
+// retrying from a new seat. Error is the claim write's own error text, bounded
+// in length, which the claim-loop guard compares to tell one failure repeating
 // from unrelated ones.
 type BeadClaimFailedPayload struct {
-	Template  string `json:"template"`
-	SessionID string `json:"session_id,omitempty"`
-	Error     string `json:"error"`
+	Template     string `json:"template"`
+	SessionID    string `json:"session_id,omitempty"`
+	RuntimeEpoch int64  `json:"runtime_epoch,omitempty"`
+	Error        string `json:"error"`
 }
 
 // IsEventPayload marks BeadClaimFailedPayload as an events.Payload variant.
 func (BeadClaimFailedPayload) IsEventPayload() {}
 
 // BeadClaimLoopHeldPayload is the typed payload for bead.claim_loop_held
-// events. The envelope's Subject is the held bead. Failures is how many claims
-// in a row by Template's seats failed with Error; HeldUntil is when the next
-// probe seat may be spawned for the bead if nothing changes before then.
+// events. The envelope's Subject is the held bead. Failures is how many
+// distinct seats of Template in a row failed to claim it with Error (a server
+// request id removed); HeldUntil is when the next probe seat may be spawned for
+// the bead if nothing changes before then.
 type BeadClaimLoopHeldPayload struct {
 	Template  string    `json:"template"`
 	Error     string    `json:"error"`

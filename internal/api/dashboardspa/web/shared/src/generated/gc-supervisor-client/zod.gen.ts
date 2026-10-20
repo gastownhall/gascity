@@ -104,6 +104,7 @@ export const zBeadAssignInputBody = z.object({
 
 export const zBeadClaimFailedPayload = z.object({
     error: z.string(),
+    runtime_epoch: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' }).optional(),
     session_id: z.string().optional(),
     template: z.string()
 });
