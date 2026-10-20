@@ -120,3 +120,36 @@ func TestConversationLanesDoctorNotFixable(t *testing.T) {
 		t.Fatalf("check = %s fix %v warmup %v", c.Name(), c.CanFix(), c.WarmupEligible())
 	}
 }
+
+// TestConversationLanesDoctorWarnsMessageUnderV2 pins ga-f35wnp's visible
+// half: message listed under the v2 reconciler warns, whatever the host's
+// state; nothing warns under legacy or with the list empty.
+func TestConversationLanesDoctorWarnsMessageUnderV2(t *testing.T) {
+	running := conversationLaneStatus{State: laneHostStateRunning, Kinds: []string{"message"}, LastPassAt: "2026-10-16T12:00:00Z", LastPassAgeMS: 1000}
+	for _, tc := range []struct {
+		name       string
+		kinds      []string
+		reconciler string
+		st         conversationLaneStatus
+		status     doctor.CheckStatus
+		warns      bool
+	}{
+		{name: "v2 with message", kinds: []string{"message"}, reconciler: "v2", st: running, status: doctor.StatusWarning, warns: true},
+		{name: "v2 with message, host missing", kinds: []string{"message"}, reconciler: "v2", st: conversationLaneStatus{State: laneHostStateNone}, status: doctor.StatusError, warns: true},
+		{name: "legacy with message", kinds: []string{"message"}, st: running, status: doctor.StatusOK},
+		{name: "v2 with the list empty", reconciler: "v2", status: doctor.StatusOK},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c, _ := newConversationLanesCheckForTest(tc.kinds, newLaneTestStore(), tc.st, nil)
+			c.cfg.Daemon.SessionReconciler = tc.reconciler
+			c.lookupEnv = func(string) (string, bool) { return "", false }
+			r := c.Run(&doctor.CheckContext{CityPath: "/city"})
+			if r.Status != tc.status || strings.Contains(r.Message, laneMessageUnderV2Warning) != tc.warns {
+				t.Fatalf("Run = %v %q, want %v, warning %v", r.Status, r.Message, tc.status, tc.warns)
+			}
+			if tc.warns && tc.status == doctor.StatusWarning && r.Severity != doctor.SeverityAdvisory {
+				t.Fatalf("severity %v, want advisory", r.Severity)
+			}
+		})
+	}
+}
