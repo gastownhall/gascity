@@ -109,6 +109,34 @@
 // no identifier (I14). A lane store must apply guarded batches
 // (NewLaneStore); there is no production caller until OJ-12.
 //
+// # Deliver-now
+//
+// A deliver-now message M (when: now, or the legacy interrupt) is lowered
+// by the rule phase into its derived interrupt I in one guarded batch: I
+// created at NowInterruptID (client key <M>:interrupt, M's producer,
+// causation M, at most once, on_failure fail, scoped to M's now_gen, or the
+// effective generation, and now_turn, no after), M moved to accepted. A pass
+// that lowers reads again before any Take. While both are open they are one
+// unit: a control entry in M's arrival order, taken [I, M] under one lease
+// (TakeNow), and while a unit is open no content is taken (U-ORDER). The
+// unit's effect is direct when the probe shows no turn to replace (I closes
+// skipped{stale} with no call and M goes at once); otherwise the
+// interrupt's replacement step (InterruptCall.ForReplacement), then M as a
+// replacement delivery only when the step settled at a boundary
+// (Settled.After) with time left, linked from the step's read so the
+// replaced turn is never its candidate; or one FusedNowExecutor command. A
+// targeted unit whose turn is not running, and a runtime that is not
+// running, close I skipped{stale} at plan time; a unit never reports Busy.
+// A message the effect did not send is released with no gate and no failure
+// counted (last_error not_attempted). Once I is closed, M is urgent content
+// that goes alone at a boundary, marked interrupt_unsupported after
+// failed{unsupported} and interrupt_failed after any other failure, unless
+// its delivery has its own mark. An open I whose M is closed or gone is an
+// orphan: it closes canceled (cancel_by lane:cascade) when M was canceled,
+// which replaces the rule close of an I that never ran, else
+// skipped{not_needed}. A partner row that cannot be read waits
+// now_unreadable.
+//
 // # Executor and open rows
 //
 // gc.op.executor says who executes an op: lane, legacy, legacy:api or

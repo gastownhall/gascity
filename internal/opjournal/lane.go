@@ -138,6 +138,10 @@ type Caps struct {
 	// alone does not waits text_too_long, holding the content behind it, for
 	// a runtime with room. 0 means no cap; a negative value is refused.
 	MaxText int
+	// FusedNow runs a deliver-now unit's replacement and message as one
+	// runtime command (T3 protocol 2's restart_active, DES-O1 §10.3); the
+	// executor must implement FusedNowExecutor.
+	FusedNow bool
 }
 
 // leaseTTL is the lease a Take under c holds.
@@ -242,6 +246,11 @@ type Delivery struct {
 	Ops []Op
 	// Redelivery says some op may already have reached the agent.
 	Redelivery bool
+	// Replacement says the delivery follows its deliver-now unit's
+	// interrupt step at the boundary that step reached: the executor sends
+	// it at once, as interrupt_now sends its message once the interrupt
+	// settled.
+	Replacement bool
 	// Text is RenderDelivery(Ops, Caps.Text, Redelivery && !Caps.Dedup).
 	Text string
 }
@@ -255,6 +264,11 @@ type InterruptCall struct {
 	Turn string
 	// Seq is this attempt's lane_seq; every Take assigns a new one.
 	Seq uint64
+	// ForReplacement marks a deliver-now unit's interrupt step (X11 D11):
+	// once the turn settles the executor prepares the session for the
+	// message the unit then delivers, and reports in Settled.After whether
+	// the message may go now.
+	ForReplacement bool
 }
 
 // RespondCall is one respond effect. It carries no delivery key: Op.ID is
@@ -313,6 +327,9 @@ type Settled struct {
 	Turn        string
 	Via         string
 	Degradation string
+	// After is the session's turns as a replacement step left them
+	// (InterruptCall.ForReplacement); zero, Boundary unknown, otherwise.
+	After TurnAfter
 }
 
 // NotDelivered says the effect definitely did not happen. Transient causes
@@ -374,6 +391,9 @@ const (
 	TakeNone    TakeKind = ""
 	TakeContent TakeKind = "content"
 	TakeControl TakeKind = "control"
+	// TakeNow is a deliver-now unit: its derived interrupt and its message
+	// under one lease (DES-O1 §10.3).
+	TakeNow TakeKind = "now"
 )
 
 // DoneArm says how a pass's Done ended.
@@ -398,9 +418,11 @@ const (
 	WaitAfterUnreadable WaitReason = "after_unreadable"
 	WaitNotBefore       WaitReason = "not_before"
 	WaitRetryBackoff    WaitReason = "retry_backoff"
-	// WaitNowUnlowered is a deliver-now message (or a legacy interrupt
-	// message): inert until OJ-17 lowers it.
-	WaitNowUnlowered       WaitReason = "now_unlowered"
+	// WaitNowUnreadable is a deliver-now message, or its derived
+	// interrupt, whose partner row could not be read: on a timer when the
+	// read failed, with none when the row will not decode on a retry either
+	// (a newer build's row, which a newer host may serve).
+	WaitNowUnreadable      WaitReason = "now_unreadable"
 	WaitContentHold        WaitReason = "content_hold"
 	WaitContentBlock       WaitReason = "content_block"
 	WaitPendingInteraction WaitReason = "pending_interaction"
@@ -462,6 +484,8 @@ type PassResult struct {
 	Closed      []ClosedOp
 	Waits       []OpWait
 	Quarantined []QuarantinedRow
+	// Lowered are the deliver-now messages this pass lowered.
+	Lowered []string
 	// Wake: an if_needed content op met a dormant, sessionless or
 	// not-running runtime.
 	Wake bool
@@ -590,6 +614,14 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		if rp.rowErr != nil {
 			return res, rp.rowErr
 		}
+		// A lowering re-reads before any Take, so no content goes ahead of
+		// the unit it formed.
+		switch done, err := l.writeLowerings(ctx, rp.lowerings, &res); {
+		case err != nil:
+			return res, err
+		case !done, len(rp.lowerings) > 0:
+			continue
+		}
 		if !rp.takePossible {
 			return res, nil
 		}
@@ -598,6 +630,11 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		probe, err := exec.Probe(ctx, conv)
 		if err == nil {
 			err = probe.Caps.validate()
+		}
+		if err == nil && probe.Caps.FusedNow {
+			if _, ok := exec.(FusedNowExecutor); !ok {
+				err = errors.New("probe caps: fused_now without DeliverNow")
+			}
 		}
 		if err != nil {
 			return res, fmt.Errorf("probing conversation %s: %w", conv.ID, err)
@@ -635,6 +672,9 @@ func (l *ConversationLane) Pass(ctx context.Context, conv ConversationView, exec
 		res.Taken = takenIDs(taken)
 		if err := l.hooks.run(stageAfterTake); err != nil {
 			return res, err
+		}
+		if tp.take.kind == TakeNow {
+			return res, l.runNow(ctx, exec, taken, &res)
 		}
 		result, preCall := l.effect(ctx, exec, taken)
 		if err := l.hooks.run(stageAfterEffect); err != nil {
@@ -679,6 +719,12 @@ type laneSnapshot struct {
 	rt          runtimeSnap
 	// after holds each after target that is not open.
 	after map[string]afterTarget
+	// prefix is the store's namespace prefix, which derived interrupt ids
+	// are pinned in.
+	prefix string
+	// nowRows holds the deliver-now partner rows that are not open, read by
+	// id (readNow).
+	nowRows map[string]nowRow
 }
 
 // runtimeSnap is the runtime row as read.
@@ -756,6 +802,7 @@ func (l *ConversationLane) read(conv ConversationView) (laneSnapshot, error) {
 		}
 		snap.after[op.After] = l.readAfter(op.After)
 	}
+	l.readNow(&snap)
 	return snap, nil
 }
 

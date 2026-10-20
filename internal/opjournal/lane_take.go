@@ -95,7 +95,9 @@ func (l *ConversationLane) take(ctx context.Context, snap laneSnapshot, spec *ta
 		next.Attempt = e.op.Attempt + 1
 		next.LaneSeq = spec.baseSeq + uint64(i) + 1
 		next.RetryAt = time.Time{}
-		if spec.kind == TakeContent {
+		// Only content carries a delivery key: a control op's is its id,
+		// the same on every re-take, and a unit's interrupt is one.
+		if spec.kind == TakeContent || spec.kind == TakeNow && e.op.Kind == KindMessage {
 			next.DeliveryKey = spec.key
 		}
 		next.Transitions = appendTransition(e.op.Transitions, Transition{Status: StatusExecuting, At: now, By: by})

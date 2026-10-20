@@ -13,6 +13,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/gastownhall/gascity/internal/beads"
 )
 
 const (
@@ -95,6 +97,15 @@ type propWorld struct {
 	afterDown    bool
 	afterTargets map[string]bool
 	fr           *rand.Rand
+
+	// Deliver-now: nowMsgs maps each deliver-now message to its
+	// conversation; sentInterrupt holds the derived interrupts an attempt
+	// may have run; lastStep is each conversation's last replacement
+	// step's result.
+	nowMsgs       map[string]string
+	nowIDs        []string // nowMsgs' keys, in proposal order
+	sentInterrupt map[string]bool
+	lastStep      map[string]ControlResult
 }
 
 func (w *propWorld) fail(format string, args ...any) {
@@ -112,6 +123,7 @@ func newPropWorld(t *testing.T, seed uint64) *propWorld {
 		keyOfAttempt: map[string]map[int]string{}, rejectedKeys: map[string]bool{}, lost: map[string]bool{},
 		afterTargets: map[string]bool{}, fr: rand.New(rand.NewPCG(seed+77, seed)),
 		answers: map[string]int{},
+		nowMsgs: map[string]string{}, sentInterrupt: map[string]bool{}, lastStep: map[string]ControlResult{},
 	}
 	fs.setFail(func(id string) bool {
 		if w.afterDown && w.afterTargets[id] {
@@ -143,6 +155,7 @@ func (e propExec) Deliver(_ context.Context, d Delivery) DeliveryResult {
 	w := e.w
 	conv := w.convs[d.Fence.Conversation]
 	w.checkInFlight(d.Fence.Conversation, d.Ops)
+	w.checkNowDelivery(d)
 	assertNoIdentifiersQuiet(w, d)
 	wantNote := d.Redelivery && !conv.dedup
 	if n := strings.Count(d.Text, RedeliveryNote); (wantNote && n != 1) || (!wantNote && n != 0) {
@@ -218,7 +231,29 @@ func (e propExec) Deliver(_ context.Context, d Delivery) DeliveryResult {
 	return res
 }
 
-func (e propExec) Interrupt(context.Context, InterruptCall) ControlResult { return e.w.controlRes() }
+func (e propExec) Interrupt(_ context.Context, c InterruptCall) ControlResult {
+	w := e.w
+	if !c.ForReplacement {
+		return w.controlRes()
+	}
+	w.cov.add("now_replace")
+	w.checkInFlight(c.Fence.Conversation, []Op{c.Op})
+	if w.sentInterrupt[c.Op.ID] {
+		w.fail("derived interrupt %s sent again after an attempt that may have run (N5)", c.Op.ID)
+	}
+	if target := c.Op.Scope.Turn; target != "" && c.Turn != target {
+		w.fail("derived interrupt %s aimed at %q, not its target %q", c.Op.ID, c.Turn, target)
+	}
+	if target := c.Op.Scope.Turn; target != "" && w.probe.TurnLive == TriYes && w.probe.Turn != "" && w.probe.Turn != target {
+		w.fail("derived interrupt %s for turn %s sent while %s runs (T5)", c.Op.ID, target, w.probe.Turn)
+	}
+	res := w.controlRes()
+	if _, nd := res.(NotDelivered); !nd {
+		w.sentInterrupt[c.Op.ID] = true
+	}
+	w.lastStep[c.Fence.Conversation] = res
+	return res
+}
 
 // Respond answers as scripted. A respond is at most once and the first
 // effective answer wins, so an occurrence gets at most one effect that may
@@ -234,6 +269,86 @@ func (e propExec) Respond(_ context.Context, c RespondCall) ControlResult {
 		}
 	}
 	return r
+}
+
+// unflaky runs fn with the store's reads healthy.
+func (w *propWorld) unflaky(fn func()) {
+	flaky, down := w.flaky, w.afterDown
+	w.flaky, w.afterDown = false, false
+	defer func() { w.flaky, w.afterDown = flaky, down }()
+	fn()
+}
+
+// checkNowDelivery is N2, N3 and N4 at a delivery: a deliver-now message
+// goes in its unit (alone, its interrupt under the same lease, never maybe
+// delivered, with no turn at the probe or after a step that settled at a
+// boundary) or post-unit (alone, at a boundary, its interrupt closed); and
+// no other content goes while a unit of the conversation is open.
+func (w *propWorld) checkNowDelivery(d Delivery) {
+	conv := d.Fence.Conversation
+	w.unflaky(func() {
+		unit := false
+		for _, op := range d.Ops {
+			if !isNowMessage(op) {
+				continue
+			}
+			iid, _ := NowInterruptID("gc", op)
+			i, err := w.h.store.Get(iid)
+			inUnit := err == nil && i.Status == StatusExecuting && i.Lease == op.Lease
+			if len(d.Ops) != 1 {
+				w.fail("deliver-now message %s delivered with %d other ops", op.ID, len(d.Ops)-1)
+			}
+			switch {
+			case inUnit:
+				unit = true
+				w.cov.add("now_unit")
+				if d.Redelivery || op.MaybeDelivered > 0 {
+					w.fail("maybe-delivered message %s in a unit (N4)", op.ID)
+				}
+				if i.LaneSeq+1 != op.LaneSeq {
+					w.fail("unit %s/%s lane_seqs %d/%d (N2)", iid, op.ID, i.LaneSeq, op.LaneSeq)
+				}
+				if d.Replacement {
+					if s, ok := w.lastStep[conv].(Settled); !ok || s.After.Boundary != TriYes {
+						w.fail("message %s sent after a step that did not settle at a boundary (N4): %+v", op.ID, w.lastStep[conv])
+					}
+				} else if w.probe.Boundary != TriYes || w.probe.TurnLive == TriYes {
+					w.fail("message %s sent directly while a turn may run (N4): %+v", op.ID, w.probe)
+				}
+			case err == nil && i.Status != StatusClosed:
+				w.fail("message %s typed while its interrupt is %s outside its unit (N2)", op.ID, i.Status)
+			default:
+				w.cov.add("now_post_unit")
+				if w.probe.Boundary != TriYes || !w.probe.Caps.Live {
+					w.fail("post-unit message %s typed off a boundary (N4): %+v", op.ID, w.probe)
+				}
+			}
+		}
+		if unit {
+			return
+		}
+		for mid, c := range w.nowMsgs {
+			if c != conv {
+				continue
+			}
+			m, err := w.h.store.Get(mid)
+			if err != nil || m.Status == StatusSubmitted || m.Status == StatusClosed {
+				continue
+			}
+			iid, _ := NowInterruptID("gc", m)
+			if i, err := w.h.store.Get(iid); err == nil && i.Status != StatusClosed {
+				w.fail("content %v delivered while unit %s/%s is open (N3)", takenOpIDs(d.Ops), iid, mid)
+			}
+		}
+	})
+}
+
+func takenOpIDs(ops []Op) []string {
+	out := make([]string, len(ops))
+	for i, op := range ops {
+		out[i] = op.ID
+	}
+	return out
 }
 
 func assertNoIdentifiersQuiet(w *propWorld, d Delivery) {
@@ -278,6 +393,12 @@ func (w *propWorld) randomProbe() Probe {
 	p.Caps.Respond = r.IntN(2) == 0
 	p.Caps.Text = []TextStyle{TextReminder, TextPlain}[r.IntN(2)]
 	p.Caps.Input = []FenceMode{FenceAtomic, FenceChecked, FenceNone}[r.IntN(3)]
+	// The session's turns as the probe read them.
+	p.TurnLive = []Tri{TriYes, TriNo, TriUnknown}[r.IntN(3)]
+	if p.TurnLive == TriYes {
+		p.Turn = fmt.Sprintf("t%d", r.IntN(3))
+		p.KnownTurns = []string{p.Turn}
+	}
 	if r.IntN(6) == 0 {
 		p.Caps.Live, p.Caps.InBand = false, true
 	}
@@ -343,13 +464,25 @@ func (w *propWorld) randomContent() func(Delivery) (DeliveryResult, bool) {
 }
 
 func (w *propWorld) randomControl() func() ControlResult {
-	switch w.r.IntN(5) {
+	switch w.r.IntN(8) {
 	case 0:
 		return func() ControlResult { return NotDelivered{Transient: true} }
 	case 1:
 		return func() ControlResult { return Unknown{} }
 	case 2:
 		return func() ControlResult { return Rejected{Arm: ArmFailed, Reason: ReasonNoBoundary} }
+	case 3:
+		return func() ControlResult { return Rejected{Arm: ArmSkipped, Reason: ReasonStale} }
+	case 4:
+		// A replacement step that settled, then another turn ran.
+		return func() ControlResult {
+			return Settled{Turn: "t", After: TurnAfter{Boundary: TriNo, Live: TriYes, Turn: "t9", Known: []string{"t"}}}
+		}
+	case 5, 6:
+		// A replacement step that settled at the boundary.
+		return func() ControlResult {
+			return Settled{Turn: "t", After: TurnAfter{Boundary: TriYes, Live: TriNo, Known: []string{"t"}}}
+		}
 	default:
 		return func() ControlResult { return Settled{Turn: "t"} }
 	}
@@ -398,6 +531,21 @@ func (w *propWorld) propose() {
 			}
 		case 1:
 			req = w.respondRequest(conv, key)
+		default:
+			if r.IntN(5) != 0 {
+				break
+			}
+			// A deliver-now message, untargeted or aimed at a turn of the
+			// current session; without after or not_before, so its unit
+			// waits only on the lane (N3's premise).
+			req.After, req.NotBefore = "", time.Time{}
+			req.Policy.Message.When = []When{WhenNow, WhenNow, WhenInterrupt}[r.IntN(3)]
+			if req.Policy.Message.When == WhenNow && r.IntN(2) == 0 {
+				req.Policy.Message.NowGeneration = max(1, w.convs[conv].view.Generation)
+				if r.IntN(2) == 0 {
+					req.Policy.Message.NowTurn = fmt.Sprintf("t%d", r.IntN(3))
+				}
+			}
 		}
 	}
 	// Ops arrive at distinct instants: the interim order key (OJ-10a)
@@ -412,6 +560,10 @@ func (w *propWorld) propose() {
 	}
 	w.ids = append(w.ids, op.ID)
 	w.convOf[op.ID] = conv
+	if isNowMessage(op) {
+		w.nowMsgs[op.ID] = conv
+		w.nowIDs = append(w.nowIDs, op.ID)
+	}
 }
 
 func (w *propWorld) cancel() {
@@ -419,6 +571,11 @@ func (w *propWorld) cancel() {
 		return
 	}
 	id := w.ids[w.r.IntN(len(w.ids))]
+	if len(w.nowIDs) > 0 && w.r.IntN(2) == 0 {
+		// A deliver-now message, so cancels reach lowered units (the
+		// cascade).
+		id = w.nowIDs[w.r.IntN(len(w.nowIDs))]
+	}
 	if _, _, err := w.h.store.Cancel(id, "operator", ""); err != nil {
 		w.t.Fatalf("Cancel: %v", err)
 	}
@@ -634,6 +791,7 @@ func (w *propWorld) check() {
 			w.rowSeen[conv] = rt
 		}
 	}
+	w.checkNowPairs()
 	prevMax := maps.Clone(w.maxSeq)
 	for _, id := range w.ids {
 		b, err := w.h.mem.Get(id)
@@ -706,6 +864,50 @@ func (w *propWorld) check() {
 		if o.Arm == ArmSucceeded && !o.Result.Delivery.IsZero() && w.convs[w.convOf[id]].transcript[id] == 0 && !w.lost[id] {
 			w.lost[id] = true
 			w.fail("op %s closed succeeded but the agent never saw it (at least once)", id)
+		}
+	}
+}
+
+// checkNowPairs is N1 and N7: every lowered message has its one derived
+// interrupt, shaped as the lowering writes it (from then on it is tracked
+// as an op of the run), and an interrupt closes before or with its message,
+// unless it closes after it as an orphan (the cascade, or not_needed).
+func (w *propWorld) checkNowPairs() {
+	for _, mid := range w.nowIDs {
+		conv := w.nowMsgs[mid]
+		m, err := w.h.store.Get(mid)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		iid, _ := NowInterruptID("gc", m)
+		i, err := w.h.store.Get(iid)
+		switch {
+		case errors.Is(err, beads.ErrNotFound) && slices.ContainsFunc(m.Transitions, func(t Transition) bool { return t.Status == StatusAccepted }):
+			w.fail("lowered message %s (%s) has no derived interrupt (N1)", mid, m.Status)
+			continue
+		case err != nil:
+			continue
+		}
+		if _, tracked := w.convOf[iid]; !tracked {
+			w.ids = append(w.ids, iid)
+			w.convOf[iid] = conv
+		}
+		if i.Kind != KindInterrupt || i.Executor != ExecutorLane || i.Causation != mid || i.Producer != m.Producer ||
+			i.Policy.Guarantee != GuaranteeAtMostOnce || i.Policy.Interrupt.OnFailure != OnFailureFail || i.After != "" ||
+			i.Scope.Turn != m.Policy.Message.NowTurn || m.After != "" {
+			w.fail("derived interrupt %s of %s is misshapen (N1): %+v", iid, mid, i)
+		}
+		if i.Status == StatusClosed && i.Outcome.Arm == ArmCanceled && i.Cancel.By == nowCascadeBy {
+			w.cov.add("now_cascade")
+		}
+		if i.Status != StatusClosed || m.Status != StatusClosed {
+			continue
+		}
+		iAt, mAt := i.Transitions[len(i.Transitions)-1].At, m.Transitions[len(m.Transitions)-1].At
+		orphan := i.Outcome.Arm == ArmCanceled && i.Cancel.By == nowCascadeBy ||
+			i.Outcome.Arm == ArmSkipped && i.Outcome.Reason == ReasonNotNeeded
+		if iAt.After(mAt) && !orphan {
+			w.fail("derived interrupt %s closed %s{%s} after its message %s (N7)", iid, i.Outcome.Arm, i.Outcome.Reason, mid)
 		}
 	}
 }
@@ -811,7 +1013,7 @@ func TestLaneProperties(t *testing.T) {
 			"delivery", "redelivery", "note", "replay_dedup", "closed:poison", "closed:ambiguous_delivery",
 			"closed:stale", "closed:canceled", "closed:busy", "closed:dependency_failed", "closed:expired_before_start",
 			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group", "after_unreadable",
-			"respond_answered",
+			"respond_answered", "now_unit", "now_post_unit", "now_replace", "now_cascade",
 		} {
 			if cov.counts[k] == 0 {
 				t.Errorf("the property runs never exercised %s (%v)", k, cov.counts)

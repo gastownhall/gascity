@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"testing"
 	"time"
 
@@ -423,10 +424,10 @@ func TestLaneRespondResultMapping(t *testing.T) {
 			}
 		})
 	}
-	if got, want := laneRespondResult(context.Background(), nil, true), (opjournal.Settled{Via: laneViaLive, Degradation: opjournal.DegradationUnfencedDelivery}); got != want {
+	if got, want := laneRespondResult(context.Background(), nil, true), (opjournal.Settled{Via: laneViaLive, Degradation: opjournal.DegradationUnfencedDelivery}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("unfenced answer = %#v, want %#v", got, want)
 	}
-	if got, want := laneRespondResult(context.Background(), nil, false), (opjournal.Settled{Via: laneViaLive}); got != want {
+	if got, want := laneRespondResult(context.Background(), nil, false), (opjournal.Settled{Via: laneViaLive}); !reflect.DeepEqual(got, want) {
 		t.Fatalf("fenced answer = %#v, want %#v", got, want)
 	}
 	notSent := func(cause error) error {
@@ -532,7 +533,7 @@ func TestLaneExecRespondHoldsTheSessionMutationLock(t *testing.T) {
 	if n := len(f.responses()); n != 0 {
 		t.Fatalf("%d answers reached the runtime under a held lock", n)
 	}
-	if res := e.Respond(context.Background(), call); res != (opjournal.Settled{Via: laneViaLive}) {
+	if res := e.Respond(context.Background(), call); !reflect.DeepEqual(res, opjournal.Settled{Via: laneViaLive}) {
 		t.Fatalf("Respond once the lock is free = %#v", res)
 	}
 }
@@ -578,7 +579,7 @@ func TestLaneExecRespondDeadlineAfterTheRecheckSendsNothing(t *testing.T) {
 		t.Fatalf("%d answers reached the runtime past the deadline", n)
 	}
 	hook.onPending = nil
-	if res := e.Respond(context.Background(), call); res != (opjournal.Settled{Via: laneViaLive}) {
+	if res := e.Respond(context.Background(), call); !reflect.DeepEqual(res, opjournal.Settled{Via: laneViaLive}) {
 		t.Fatalf("Respond within its deadline = %#v", res)
 	}
 }

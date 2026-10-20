@@ -214,6 +214,11 @@ func (l *ConversationLane) settle(tb *takenBatch, er effectResult, preCall time.
 		if degradation == "" && (spec.probe.Caps.Input == FenceNone || spec.view.Token == "") {
 			degradation = DegradationUnfencedDelivery
 		}
+		if degradation == "" {
+			// A post-unit deliver-now message's mark (its interrupt's
+			// failure) yields to the delivery's own.
+			degradation = spec.degradation
+		}
 		o := Outcome{Arm: ArmSucceeded, Degradation: degradation, Result: Result{
 			Generation:   spec.fence.Generation,
 			ContextEpoch: spec.fence.Epoch,
@@ -406,6 +411,10 @@ type doneItem struct {
 	// stale says a refusal or an unknown error left the item's row unread
 	// since: it is re-read before it is written again.
 	stale bool
+	// redo, when set, is what Done writes for the op as re-read under this
+	// Take's lease: a deliver-now unit settles each of its ops under its
+	// own result. Unset, the batch's one result decides (doneNext).
+	redo func(cur Op, now time.Time) Op
 }
 
 // done settles a Take with one guarded batch (DES-O1 §4.7), reconciled after
@@ -422,17 +431,34 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 	for _, op := range tb.ops {
 		items = append(items, &doneItem{kind: doneOp, id: op.ID, cur: op, next: l.doneNext(tb, er, success, op, now)})
 	}
-	budget := min(max(tb.lease.Deadline.Sub(now)-doneBudgetSlack, doneMinBudget), doneMaxBudget)
-	var cause error
-	if settleBy := er.settleBy(); !settleBy.IsZero() && settleBy.Sub(now) < budget {
-		budget, cause = settleBy.Sub(now), errSettleByPassed
-	}
-	dctx, cancel := context.WithTimeoutCause(context.WithoutCancel(ctx), budget, cause)
+	dctx, cancel := doneContext(ctx, tb, er.settleBy(), now)
 	defer cancel()
 	endErr, err := l.writeDone(dctx, tb, er, success, items, now)
 	if err == nil {
 		res.Done = er.doneArm()
 	}
+	endErr = errors.Join(endErr, l.reportDone(res, items, err, now))
+	return errors.Join(err, er.contractErr, endErr)
+}
+
+// doneContext is a Done's context: it runs on past ctx, for the time left in
+// tb's lease bounded by doneMinBudget and doneMaxBudget, but never past
+// settleBy when one is set.
+func doneContext(ctx context.Context, tb *takenBatch, settleBy, now time.Time) (context.Context, context.CancelFunc) {
+	budget := min(max(tb.lease.Deadline.Sub(now)-doneBudgetSlack, doneMinBudget), doneMaxBudget)
+	var cause error
+	if !settleBy.IsZero() && settleBy.Sub(now) < budget {
+		budget, cause = settleBy.Sub(now), errSettleByPassed
+	}
+	return context.WithTimeoutCause(context.WithoutCancel(ctx), budget, cause)
+}
+
+// reportDone reports a Done's op items in res: a superseded item makes the
+// Done superseded, a written close is reported and re-checks the end of its
+// occurrence (Store.endClosed), and a written release's gate is the next
+// timer. It returns the re-checks' failures.
+func (l *ConversationLane) reportDone(res *PassResult, items []*doneItem, err error, now time.Time) error {
+	var endErr error
 	for _, it := range items {
 		switch {
 		case it.kind != doneOp:
@@ -447,7 +473,7 @@ func (l *ConversationLane) done(ctx context.Context, tb *takenBatch, er effectRe
 			res.Next = minTime(res.Next, it.next.RetryAt)
 		}
 	}
-	return errors.Join(err, er.contractErr, endErr)
+	return endErr
 }
 
 // writeDone applies Done's items, with the ends of the occurrences their
@@ -667,6 +693,9 @@ func (l *ConversationLane) reconcile(tb *takenBatch, er effectResult, success Ou
 			} else {
 				it.superseded = true
 			}
+		case cur.Status == StatusExecuting && cur.Lease == tb.lease && it.redo != nil:
+			it.cur = cur
+			it.next = it.redo(cur, l.now())
 		case cur.Status == StatusExecuting && cur.Lease == tb.lease:
 			it.cur = cur
 			it.next = l.doneNext(tb, er, success, cur, l.now())

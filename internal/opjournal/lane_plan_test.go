@@ -36,13 +36,27 @@ func (p *planner) op(req Request, mods ...func(*Op)) Op {
 	return op
 }
 
+// snapOf is a snapshot of ops in namespace gc, read over a store that holds
+// nothing else: every deliver-now partner that is not among ops reads
+// missing (readNow).
 func snapOf(ops ...Op) laneSnapshot {
-	s := laneSnapshot{openIDs: map[string]bool{}, after: map[string]afterTarget{}}
+	s := laneSnapshot{openIDs: map[string]bool{}, after: map[string]afterTarget{}, prefix: "gc", nowRows: map[string]nowRow{}}
 	for _, op := range ops {
 		s.ops = append(s.ops, op)
 		s.openIDs[op.ID] = true
 	}
 	slices.SortFunc(s.ops, CompareOrder)
+	for _, op := range s.ops {
+		id := op.Causation
+		if isNowMessage(op) {
+			id, _ = NowInterruptID(s.prefix, op)
+		} else if !hasNowShape(op) {
+			continue
+		}
+		if !s.openIDs[id] {
+			s.nowRows[id] = nowRow{state: afterMissing}
+		}
+	}
 	return s
 }
 
@@ -97,6 +111,8 @@ func TestPlanRulesRows(t *testing.T) {
 		wait  WaitReason
 		cand  bool
 		retry bool
+		// lower: the op is lowered (a deliver-now message).
+		lower bool
 	}{
 		{name: "R1 closed", req: laneMsg("a", RolePrompt, "x"), conv: func(v *ConversationView) { v.Closed = true }, close: "skipped{conversation_closed}"},
 		{name: "R1 closed in flight", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){live}, conv: func(v *ConversationView) { v.Closed = true }, wait: WaitInFlight},
@@ -124,8 +140,9 @@ func TestPlanRulesRows(t *testing.T) {
 		{name: "R16 after undecodable", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.After = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa" }), after: &afterTarget{state: afterUnreadable, err: ErrUnsupportedSchema, undecodable: true}, wait: WaitAfterUnreadable},
 		{name: "R17 not before", req: laneMsg("a", RolePrompt, "x", func(r *Request) { r.NotBefore = now.Add(time.Minute) }), wait: WaitNotBefore},
 		{name: "R18 retry at", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){func(op *Op) { op.Status, op.Attempt, op.RetryAt = StatusAccepted, 1, now.Add(time.Second) }}, wait: WaitRetryBackoff},
-		{name: "R19 now", req: laneMsg("a", RolePrompt, "x", withWhen(WhenNow)), wait: WaitNowUnlowered},
-		{name: "R19 legacy interrupt", req: laneMsg("a", RolePrompt, "x", withWhen(WhenInterrupt)), wait: WaitNowUnlowered},
+		{name: "R19 now", req: laneMsg("a", RolePrompt, "x", withWhen(WhenNow)), lower: true},
+		{name: "R19 legacy interrupt", req: laneMsg("a", RolePrompt, "x", withWhen(WhenInterrupt)), lower: true},
+		{name: "R19 now waits its not_before", req: laneMsg("a", RolePrompt, "x", withWhen(WhenNow), func(r *Request) { r.NotBefore = now.Add(time.Minute) }), wait: WaitNotBefore},
 		{name: "R20 content hold", req: laneMsg("a", RolePrompt, "x"), conv: func(v *ConversationView) { v.ContentHold = true }, wait: WaitContentHold},
 		{name: "R20 steer bypasses the hold", req: laneMsg("a", RolePrompt, "x", withWhen(WhenSteer)), conv: func(v *ConversationView) { v.ContentHold = true }, cand: true},
 		{name: "settling", req: laneMsg("a", RolePrompt, "x"), mods: []func(*Op){func(op *Op) { op.Status = StatusSettling }}, wait: WaitSettling},
@@ -148,6 +165,12 @@ func TestPlanRulesRows(t *testing.T) {
 			}
 			if got := waitsOf(rp.waits)[op.ID]; got != tc.wait {
 				t.Fatalf("wait %q, want %q", got, tc.wait)
+			}
+			if lowered := len(rp.lowerings) == 1 && rp.lowerings[0].m.ID == op.ID; lowered != tc.lower || len(rp.lowerings) > 1 {
+				t.Fatalf("lowerings %+v, want lowered=%v", rp.lowerings, tc.lower)
+			}
+			if tc.lower && rp.takePossible {
+				t.Fatal("a pass that lowers takes nothing before it reads again")
 			}
 			all := append(candidatesOf(rp.control), candidatesOf(rp.content)...)
 			if (len(all) == 1) != tc.cand {
@@ -193,11 +216,11 @@ func TestPlanRulesBlockingWaiters(t *testing.T) {
 	if w := waitsOf(tp.waits)[later.ID]; w != WaitBlocked {
 		t.Fatalf("later op wait %q", w)
 	}
-	// now_unlowered does not block.
+	// A pass that lowers a deliver-now message takes nothing: it reads
+	// again first, so no content goes ahead of the unit.
 	rp = planRules(snapOf(nowOp, later), view(), now, "lane:ctl")
-	tp, _ = planTake(rp, idleProbe(), view(), now)
-	if tp.take == nil || tp.take.ops[0].op.ID != later.ID {
-		t.Fatalf("now_unlowered blocked: %+v", tp)
+	if rp.takePossible || len(rp.lowerings) != 1 || rp.lowerings[0].m.ID != nowOp.ID {
+		t.Fatalf("lowering pass: takePossible %v lowerings %+v", rp.takePossible, rp.lowerings)
 	}
 	if !rp.next.IsZero() && rp.next.Before(now) {
 		t.Fatalf("next %s", rp.next)
