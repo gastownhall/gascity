@@ -1,8 +1,11 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -237,5 +240,159 @@ func TestDrainReminderNoticeHeldByTheContentHold(t *testing.T) {
 	}
 	if got := f.get(t, st, notice.ID); got.Outcome.Arm != opjournal.ArmSucceeded || len(f.nudges()) != 1 {
 		t.Fatalf("after the clear the notice = %+v, %d nudges; want delivered past draining", got.Outcome, len(f.nudges()))
+	}
+}
+
+// TestExecutionBackstopHoldsAHeldSeat drives the execution backstop through
+// a whole budget's ticks on a held seat, quiet and holding a claim it never
+// started: it sends nothing, spends no attempt, does not drain the seat and
+// names the hold. Once the hold clears, its nudges and its drain resume from
+// the pacing it held.
+func TestExecutionBackstopHoldsAHeldSeat(t *testing.T) {
+	f := newExecutionBackstopFixture(t)
+	hold := laneHold(t)
+	if err := sessionFrontDoor(f.store).SetContentHold(f.session.ID, hold); err != nil {
+		t.Fatalf("SetContentHold: %v", err)
+	}
+	f.tickStale(t)
+	if n, drains, stalled := f.nudgeCount(), len(f.drained), f.stalledEvents(); n != 0 || drains != 0 || stalled != 0 {
+		t.Fatalf("held seat: %d nudges, %d drains, %d stalled events; want none; stdout=%s", n, drains, stalled, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimNudgeCountKey); got != "0" {
+		t.Fatalf("attempts spent on a held seat = %q, want 0", got)
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); !strings.HasPrefix(got, backstopHoldContentHeld+" ") {
+		t.Fatalf("hold breadcrumb = %q, want %s", got, backstopHoldContentHeld)
+	}
+	if cleared, standing, err := sessionFrontDoor(f.store).ClearContentHold(f.session.ID, hold.String()); err != nil || !cleared {
+		t.Fatalf("ClearContentHold = %v, %q, %v", cleared, standing, err)
+	}
+	f.tickStale(t)
+	if n, drains := f.nudgeCount(), len(f.drained); n != idleClaimNudgeMaxAttempts || drains != 1 {
+		t.Fatalf("after the clear: %d nudges, %d drains; want %d nudges, then one drain; stdout=%s", n, drains, idleClaimNudgeMaxAttempts, f.stdout.String())
+	}
+	if got := f.sessionMeta(t, executionClaimHoldKey); got != "" {
+		t.Fatalf("hold breadcrumb after the clear = %q, want none", got)
+	}
+}
+
+// TestPoolClaimBackstopDoesNotDrainAHeldSlot: a slot at its nudge cap,
+// quiet, whose trigger is still open and unclaimed, is not drained while its
+// conversation is held, and is once the hold is gone.
+func TestPoolClaimBackstopDoesNotDrainAHeldSlot(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	now := base.Add(idleClaimNudgeBackoff + time.Second)
+	sp := quietClaimFake(t, now)
+	s := atCapSession(base, "tok-1")
+	s.Metadata[session.ContentHoldKey] = laneHold(t).String()
+	store := beads.NewMemStoreFrom(0, []beads.Bead{s, {ID: "work-a", Status: "open"}}, nil)
+	open := []beads.Bead{{ID: "work-a", Status: "open"}}
+	drains := &drainRecorder{}
+	var out bytes.Buffer
+	nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{s}, open, nil, now, liveClaimDrain(store, drains.request), &out)
+	if got := mustGetTestBead(t, store, s.ID); len(drains.ids) != 0 || sp.CountCalls("Nudge", "session-a") != 0 || got.Metadata[idleClaimNudgeStalledKey] != "" {
+		t.Fatalf("held slot: drains %v, %d nudges, latch %q; want none", drains.ids, sp.CountCalls("Nudge", "session-a"), got.Metadata[idleClaimNudgeStalledKey])
+	}
+	if err := store.SetMetadata(s.ID, session.ContentHoldKey, ""); err != nil {
+		t.Fatal(err)
+	}
+	nudgeStalledPoolClaims(sp, idleClaimTestCfg(), store, []beads.Bead{mustGetTestBead(t, store, s.ID)}, open, nil, now, liveClaimDrain(store, drains.request), &out)
+	if len(drains.ids) != 1 || drains.ids[0] != s.ID {
+		t.Fatalf("drains after the clear = %v, want the slot drained once", drains.ids)
+	}
+}
+
+// TestRunNudgeBackstopProposesNothingToAHeldConversation: under the lane, a
+// held conversation gets no notice op and spends no attempt across a whole
+// budget's backoffs, and a backstop at its cap takes no terminal action;
+// once the hold clears, both resume.
+func TestRunNudgeBackstopProposesNothingToAHeldConversation(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f, "message")
+	holdFixture(t, f)
+	exhausted := 0
+	pred := noticeTestBackstop{target: backstopTarget{ID: "wb-1"}, text: "claim wb-1", exhaustedCalls: &exhausted}
+	var out bytes.Buffer
+	rows := backstopRows(t, f, 0, f.clk.Now().Add(-time.Hour))
+	for range idleClaimNudgeMaxAttempts + 1 {
+		runNoticeBackstop(f, rows, pred, &out)
+		f.clk.Advance(idleClaimNudgeBackoff)
+		rows = []beads.Bead{f.row(t)}
+	}
+	if n, spent := len(f.openOps(t)), f.meta(t, noticeTestAttemptsKey); n != 0 || spent != "0" {
+		t.Fatalf("held conversation: %d open ops, attempts %q; want no notice and none spent; journal %q", n, spent, out.String())
+	}
+	runNoticeBackstop(f, backstopRows(t, f, idleClaimNudgeMaxAttempts, f.clk.Now().Add(-time.Hour)), pred, &out)
+	if exhausted != 0 {
+		t.Fatalf("terminal actions on a held conversation = %d, want none", exhausted)
+	}
+	releaseFixture(t, f)
+	runNoticeBackstop(f, []beads.Bead{f.row(t)}, pred, &out)
+	if exhausted != 1 {
+		t.Fatalf("terminal actions after the clear = %d, want 1", exhausted)
+	}
+	last := f.clk.Now().Add(-time.Hour)
+	runNoticeBackstop(f, backstopRows(t, f, 0, last), pred, &out)
+	f.get(t, f.laneStore(t), noticeOpID(t, f, "idle-claim-nudge", "wb-1", episode(last), 1))
+	if n := len(f.nudges()); n != 0 {
+		t.Fatalf("the backstop typed %d nudges itself, want 0", n)
+	}
+}
+
+// TestDrainReminderHoldsForAHeldConversation: a due drain reminder for a
+// held row is neither proposed nor nudged, and spends no attempt across a
+// whole budget's cadence, with the lane or without it. Once the hold clears
+// it goes out by its route.
+func TestDrainReminderHoldsForAHeldConversation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kinds []string
+		after drainReminderOutcome
+	}{{"lane", []string{"message"}, drainReminderProposed}, {"direct", nil, drainReminderDelivered}} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneFixture(t)
+			newNoticeLaneHost(t, f, tc.kinds...)
+			_, info := wedgeDrainReminderRow(t, f)
+			holdFixture(t, f)
+			var out bytes.Buffer
+			for range drainReminderMaxAttempts + 1 {
+				if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderHeld {
+					t.Fatalf("held row: outcome %v, want held; journal %q", got, out.String())
+				}
+				f.clk.Advance(drainReminderInterval)
+			}
+			if n, ops, spent := len(f.nudges()), len(f.openOps(t)), f.meta(t, drainReminderCountKey); n != 0 || ops != 0 || spent != "" {
+				t.Fatalf("held row: %d nudges, %d open ops, %s %q; want nothing sent or spent", n, ops, drainReminderCountKey, spent)
+			}
+			if got := f.meta(t, drainReminderHoldKey); got != drainReminderHoldContentHeld {
+				t.Fatalf("%s = %q, want %s", drainReminderHoldKey, got, drainReminderHoldContentHeld)
+			}
+			releaseFixture(t, f)
+			if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != tc.after {
+				t.Fatalf("after the clear: outcome %v, want %v; journal %q", got, tc.after, out.String())
+			}
+		})
+	}
+}
+
+// TestDrainReminderAnnouncesABudgetSpentBeforeTheHold: the hold stops new
+// attempts, not the record of spent ones, so an exhausted budget is still
+// announced on a held row.
+func TestDrainReminderAnnouncesABudgetSpentBeforeTheHold(t *testing.T) {
+	f := newLaneFixture(t)
+	newNoticeLaneHost(t, f)
+	_, info := wedgeDrainReminderRow(t, f)
+	row := f.row(t)
+	if !writeDrainReminderMarker(f.store, info, row, drainReminderIdentity(row), drainReminderMaxAttempts, 0, drainReminderMaxAttempts,
+		f.clk.Now().Add(-drainReminderInterval), io.Discard) {
+		t.Fatal("seeding the spent budget failed")
+	}
+	holdFixture(t, f)
+	var out bytes.Buffer
+	if got := maybeRemindDrainingSession(f.sp, f.store, info, f.clk, &out); got != drainReminderExhausted {
+		t.Fatalf("outcome = %v, want exhausted; journal %q", got, out.String())
+	}
+	if got := f.meta(t, drainReminderHoldKey); got != drainReminderHoldExhausted {
+		t.Fatalf("%s = %q, want %s", drainReminderHoldKey, got, drainReminderHoldExhausted)
 	}
 }

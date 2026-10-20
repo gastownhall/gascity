@@ -35,13 +35,19 @@ type Companion struct {
 // When the read finds that key nothing is written; on a store without
 // batches a conflicting op that lands between the read and the create is
 // the same error after the companion is written (at most the companion). A
-// proposal that finds the same request stored, a replay or a lost race,
-// neither builds nor writes the companion: the stored op was proposed with
-// this companion, which landed no later than it, and a later write (a
-// resume's clear, a close) must stand. So a producer that must write the
-// companion again, a Stop after a resume cleared the last Stop's hold, needs
-// a fresh key. Refused requests and companions, including an Item that
-// returns an error, write nothing. ctx bounds the guarded batch.
+// proposal whose read finds the same request stored, a replay, neither
+// builds nor writes the companion, and on a lane store neither does one that
+// loses the create to it, whose batch is refused whole: the stored op was
+// proposed with this companion, which landed no later than it, and a later
+// write (a resume's clear, a close) must stand. On a store without batches
+// the companion is written before the create, so a proposal that loses the
+// create to the same request, or retries a MintedKey (which reads nothing
+// first), has written it when it returns the stored op as a replay, over
+// any clear that landed after the winner's write. So a producer that must
+// write the companion again, a Stop after a resume cleared the last Stop's
+// hold, needs a fresh key, and one whose lost race must write nothing opens
+// its store with NewLaneStore. Refused requests and companions, including an
+// Item that returns an error, write nothing. ctx bounds the guarded batch.
 func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (Op, bool, error) {
 	op, err := s.Preview(req)
 	if err != nil {

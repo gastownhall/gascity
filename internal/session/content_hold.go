@@ -12,9 +12,12 @@ import (
 )
 
 // ContentHoldKey is a conversation row's content hold (DES-O1 D21, §10.5):
-// "<principal>@<RFC3339 with fractional seconds>" while its normal-precedence content is held. Only
-// the conversation lane reads it; Stop sets it and resume clears it, and no
-// lifecycle transition touches it (it is conversation-scoped).
+// "<principal>@<RFC3339 with fractional seconds>" while its
+// normal-precedence content is held. The conversation lane holds that
+// content on it, and the planner's reminders hold on it too (they deliver
+// nothing and spend no attempt while it stands); Stop sets it and resume
+// clears it, and no lifecycle transition touches it (it is
+// conversation-scoped).
 const ContentHoldKey = "content_hold"
 
 // contentHoldByMax bounds a hold's principal, as opjournal bounds principals.

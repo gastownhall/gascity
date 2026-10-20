@@ -130,6 +130,7 @@ const (
 	drainReminderHoldUnreadable    = "activity_unreadable"
 	drainReminderHoldExhausted     = "attempts_exhausted"
 	drainReminderHoldAckUnknown    = "ack_unreadable"
+	drainReminderHoldContentHeld   = "content_held"
 )
 
 // drainReminderLabel prefixes this pass's journal lines so they are greppable
@@ -200,6 +201,11 @@ func maybeRemindDrainingSession(
 
 	if due.exhausted {
 		return announceDrainReminderExhausted(store, info, name, due, stdout)
+	}
+
+	if drainReminderContentHeld(due) {
+		noteDrainReminderHold(store, info, drainReminderHoldContentHeld)
+		return drainReminderHeld
 	}
 
 	if outcome, proceed := drainReminderQuietHold(sp, store, info, name, due.now); !proceed {
@@ -461,6 +467,18 @@ func settleLastDrainReminder(store beads.Store, info sessions.Info, name string,
 		return 0, false
 	}
 	return failed, true
+}
+
+// drainReminderContentHeld reports whether due's row, as loaded, holds its
+// conversation's content (session.ContentHeldInfo; SESSION-RUNTIME-027). The
+// reminder is content that hold keeps: the lane holds its notice until its
+// start_by, and a direct nudge would type past the hold. So a held row is not
+// reminded and no attempt is spent; the budget, and the drain-ack escalation
+// it paces (drainRemindersSpent), wait for the hold to clear. The gate runs
+// after the exhaustion check, so a budget spent before the hold is still
+// announced.
+func drainReminderContentHeld(due drainReminderDue) bool {
+	return sessions.ContentHeldInfo(sessionInfoFromBead(due.row))
 }
 
 // drainReminderQuietHold runs the liveness and quiet gates that can still stop a

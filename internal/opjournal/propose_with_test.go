@@ -144,6 +144,39 @@ func TestProposeWithLosesARaceAsAReplay(t *testing.T) {
 	}
 }
 
+// TestProposeWithWithoutBatchesLosesARaceAfterItsCompanion pins the store
+// without batches: the companion is written before the create, so a
+// proposal that loses the create to the same request has written it when it
+// replays, over a clear that landed after the winner's write.
+func TestProposeWithWithoutBatchesLosesARaceAfterItsCompanion(t *testing.T) {
+	h := newHarness(t)
+	row := companionRow(t, h.mem)
+	writes, winnerWrites := 0, 0
+	var winner Op
+	loser := companionOf(h.mem, row, &writes)
+	write := loser.Write
+	loser.Write = func() error {
+		// Between the loser's read and its write: the winner proposes, and a
+		// resume clears the winner's companion.
+		op, created, err := h.store.ProposeWith(context.Background(), laneMsg("k1", RolePrompt, "hi"), companionOf(h.mem, row, &winnerWrites))
+		if err != nil || !created {
+			t.Fatalf("winner = created %v, %v", created, err)
+		}
+		winner = op
+		if err := h.mem.SetMetadata(row, companionKey, ""); err != nil {
+			t.Fatal(err)
+		}
+		return write()
+	}
+	op, created, err := h.store.ProposeWith(context.Background(), laneMsg("k1", RolePrompt, "hi"), loser)
+	if err != nil || created || op.ID != winner.ID {
+		t.Fatalf("loser = %s, created %v, %v; want a replay of the winner's %s", op.ID, created, err, winner.ID)
+	}
+	if got := companionMark(t, h.mem, row); got != "held" || writes != 1 {
+		t.Fatalf("companion = %q after %d loser writes; want the loser's write standing over the clear", got, writes)
+	}
+}
+
 func TestProposeWithUnknownBatchRereads(t *testing.T) {
 	t.Run("committed", func(t *testing.T) {
 		h := newLaneHarness(t)
