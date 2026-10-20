@@ -24,8 +24,10 @@ var _ runtime.TurnObservationProvider = (*Provider)(nil)
 // that restore records an interrupted turn, or a failed one whose diff was
 // already captured, as completed. A turn that was Current and is then, idle,
 // neither Current nor in Recent is V1's normal end, which a reader infers
-// without knowing how it ended; a reader must not read a Recent status of
-// completed as success.
+// without knowing how it ended. A Recent status of completed is therefore
+// not proof of success; the lane's turn fold still journals such a restored
+// turn completed (a known residual: a gc-interrupted turn whose restore
+// lands before the idle read ends completed, not interrupted).
 var v1TurnCapabilities = runtime.TurnCapabilities{
 	Start:    runtime.TurnStartRecorded,
 	End:      runtime.TurnEndInferred,

@@ -204,13 +204,15 @@ type TurnObservation struct {
 	// SessionGone reports that the runtime exited.
 	SessionGone bool
 	// InferIdleEnds reports a source that keeps no record of some ends, so
-	// they are inferred at the idle boundary: T3 V1, which clears latestTurn
-	// at most turn ends, so a turn reads as running and then, idle, as in
-	// neither Current nor Recent. For such a source a running turn the
-	// observation shows idle with that turn missing, and no ended turn
-	// newer than Seen, ended normally: the fold journals an inferred end
-	// (InferredIdleEnd), not an unobserved one. A newer turn, current or in
-	// Recent, while the running turn's end was never seen is still a gap.
+	// they are inferred at the idle boundary: a turn reads as running and
+	// then, idle, as in neither Current nor Recent. For such a source a
+	// running turn the observation shows idle with that turn missing, and
+	// no ended turn newer than Seen, ended normally: the fold journals an
+	// inferred end (InferredIdleEnd), not an unobserved one. A newer turn,
+	// current or in Recent, while the running turn's end was never seen is
+	// still a gap. Residual: an inferred end never enters Recent, so Seen
+	// never anchors on it; if the source restores that turn to Recent only
+	// after the next turn has run, the next turn's idle end reads as a gap.
 	InferIdleEnds bool
 	// ObservedAt is the observer's clock at the read. It is required and
 	// non-zero: it dates every cell write and every fact without a source

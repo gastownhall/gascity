@@ -441,7 +441,7 @@ func TestSessionControlOpsReplayOfAFailedOpIsOpAlreadyFailed(t *testing.T) {
 }
 
 // protocolStopEnv is an opsEnv, ops.control auto, whose session runs on a protocol runtime that
-// records turns, as t3bridge does.
+// records its turns' starts and ends.
 func protocolStopEnv(t *testing.T) (*opsEnv, session.Info) {
 	t.Helper()
 	return protocolStopEnvMode(t, "auto")

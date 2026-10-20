@@ -2250,8 +2250,10 @@ func TestLaneTurnObserverV1InferredEndCreditsInterrupt(t *testing.T) {
 // TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere pins that the
 // ruling is V1's alone: a source that records every end (a protocol one
 // such as ACP), a transcript whose ends are inferred by the worker's idle
-// overlay (tmux Claude), and a V1 session downgraded to boundary still end a
-// running turn that idles out of Recent unobserved.
+// overlay (tmux Claude), and a V1 session downgraded to boundary, whether
+// the same observer or a successor reads the idle snapshot, still end a
+// running turn that idles out of Recent unobserved. The successor knows of
+// the downgrade only from the row's stamp.
 func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 	recordedProtocol := laneObsV1Caps
 	recordedProtocol.End, recordedProtocol.Fence, recordedProtocol.Link, recordedProtocol.Lossless = runtime.TurnEndRecorded, runtime.TurnFenceAtomic, runtime.TurnLinkExact, true
@@ -2261,11 +2263,13 @@ func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 		name      string
 		caps      worker.TurnCapabilities
 		downgrade bool
+		restart   bool
 	}{
-		{"recorded protocol", recordedProtocol, false},
-		{"recorded transcript", laneObsCaps, false},
-		{"inferred transcript", inferredTranscript, false},
-		{"V1 downgraded", laneObsV1Caps, true},
+		{"recorded protocol", recordedProtocol, false, false},
+		{"recorded transcript", laneObsCaps, false, false},
+		{"inferred transcript", inferredTranscript, false, false},
+		{"V1 downgraded", laneObsV1Caps, true, false},
+		{"V1 downgraded, then restart", laneObsV1Caps, true, true},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			f := newLaneObsFixture(t)
@@ -2274,6 +2278,12 @@ func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 			f.see(laneRunning("t1"))
 			if c.downgrade {
 				f.o.observe(context.Background(), worker.TurnUpdate{Err: fmt.Errorf("scan: %w", runtime.ErrTurnIdentityUnsupported)})
+			}
+			if c.restart {
+				if !strings.Contains(f.row().Turn.Caps.String(), "end=boundary") {
+					t.Fatalf("caps = %q, want the downgrade stamped before the restart", f.row().Turn.Caps)
+				}
+				f.restart()
 			}
 			f.see(laneIdle())
 			f.wantFacts("turn.started:t1", "turn.ended:t1:unobserved")
