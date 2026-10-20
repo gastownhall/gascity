@@ -161,6 +161,19 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	// DeliveryKey is the caller's stable identity for this one delivery, as
+	// NudgeRequest.DeliveryKey. It reaches a runtime that deduplicates keyed
+	// deliveries on every intent that sends now, deliver-now and immediate
+	// defaults included. A message the session queues (a follow-up, a
+	// dormant row, a deliver-now that waits for the turn boundary) is later
+	// delivered by the queue under the queue's own key.
+	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Redelivery says DeliveryKey's delivery may already have reached the
+	// session, as NudgeRequest.Redelivery. The lookup runs before anything
+	// else the submit does: when the runtime holds the delivery there is no
+	// turn sighting, interrupt, start or send, and the result is Replayed.
+	// Ignored without a DeliveryKey.
+	Redelivery bool `json:"redelivery,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
@@ -171,6 +184,9 @@ type MessageResult struct {
 	// Interrupt is what an interrupt_now did about the running turn
 	// (session.SubmitOutcome.Interrupt); nil when no turn fence ran.
 	Interrupt *sessionpkg.TurnInterruptReport `json:"-"`
+	// Replayed: a redelivery the runtime already held. Nothing was done;
+	// Queued is false and Interrupt nil.
+	Replayed bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -257,10 +273,18 @@ type NudgeRequest struct {
 	// passes the same key, so a runtime that deduplicates keyed deliveries
 	// ([runtime.KeyedNudgeProvider]) replays the first delivery instead of
 	// delivering twice. Distinct content needs a distinct key. Empty
-	// delivers unkeyed. Only default delivery is sure to carry the key:
-	// immediate and wait-idle delivery can go out unkeyed, as through
-	// [runtime.ImmediateNudgeProvider], whose NudgeNow takes no key.
+	// delivers unkeyed. Default and immediate delivery carry the key to a
+	// runtime that deduplicates keyed deliveries; wait-idle delivery goes
+	// out unkeyed.
 	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Redelivery says DeliveryKey's delivery may already have reached the
+	// session: an earlier attempt under the key timed out, lost its answer
+	// or crashed. A runtime that keeps keyed deliveries is asked first; one
+	// it holds is not sent again, and the result is Delivered and Replayed
+	// with its receipt. A failed lookup is the nudge's error, wrapping
+	// runtime.ErrNudgeNotSent; nothing is sent. Ignored without a
+	// DeliveryKey.
+	Redelivery bool `json:"redelivery,omitempty"`
 	// Fence, when set, delivers only to the incarnation it names (see
 	// runtime.InputFence): a miss is a *runtime.FenceMismatchError, and a
 	// runtime that cannot fence the session refuses with
@@ -352,8 +376,17 @@ type NudgeResult struct {
 	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
 	// Unfenced reports a fenced request (NudgeRequest.Fence) delivered
 	// without its fence, as AllowUnfenced permits for a runtime that cannot
-	// fence the session. Set only when Delivered.
+	// fence the session. Set only when Delivered, and never when Replayed.
 	Unfenced bool `json:"unfenced,omitempty"`
+	// Replayed reports a redelivery (NudgeRequest.Redelivery) the runtime
+	// already held: nothing was sent; Delivered is true.
+	Replayed bool `json:"replayed,omitempty"`
+	// Receipt is the runtime's receipt of the delivery, from a runtime that
+	// deduplicates keyed deliveries: for a delivery a RuntimeHandle made
+	// now, or one a redelivery's lookup found (either handle). A
+	// SessionHandle's live delivery goes through the session manager and
+	// reports none. Zero otherwise; never text.
+	Receipt runtime.DeliveryReceipt `json:"-"`
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not

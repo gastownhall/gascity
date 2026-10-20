@@ -117,6 +117,23 @@ last 16 MiB (`sessionlog.ScanTurns`) while `WatchTurns` folds what was appended
 since its last rescan (`sessionlog.TurnFollower`), so the two can disagree
 about a turn that began before that window.
 
+## Keyed deliveries
+
+A request's `DeliveryKey` (`NudgeRequest`, `MessageRequest`) reaches only a
+runtime that deduplicates keyed deliveries (`runtime.KeyedNudgeProvider` at
+the leaf a composite routes to). Default and immediate delivery carry it;
+wait-idle delivery and a message the session queues do not. A `RuntimeHandle`
+reports the runtime's receipt on `NudgeResult.Receipt`.
+
+`Redelivery` says an earlier attempt under the key may have landed. The
+handle looks the delivery up (`runtime.LookupDelivery`,
+`session.Manager.LookupDelivery`) before any effect: for `Message`, before
+`Manager.Submit` and so before any turn sighting or interrupt. A delivery the
+runtime holds is never sent again: the result is `Replayed`, with the held
+receipt on a nudge. A lookup that cannot tell fails the request wrapping
+`runtime.ErrNudgeNotSent`, with nothing sent. A request without `Redelivery`
+looks nothing up.
+
 ## Codex activity
 
 Codex activity comes from matching native turn lifecycle events, not assistant
