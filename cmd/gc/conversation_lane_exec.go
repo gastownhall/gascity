@@ -24,6 +24,9 @@ const (
 	// laneViaSteer is the via of a steer typed into a running turn
 	// (DES-O1 §10.4).
 	laneViaSteer = "steer"
+	// laneViaReplayed is the via of a redelivery the runtime already held:
+	// nothing was sent now (OJ-7).
+	laneViaReplayed = "replayed"
 	// laneDegradationTurnStartUnobserved marks a delivery the runtime
 	// accepted without seeing the turn it should start
 	// (runtime.ErrNudgeDeliveredUnobserved).
@@ -34,9 +37,6 @@ const (
 	// lanePendingUnknown is Probe.Pending for a pending interaction the
 	// runtime names no request id for.
 	lanePendingUnknown = "?"
-	// laneDeliveryKeyPrefix scopes a lane delivery key in the runtime's key
-	// space (OJ-7's format).
-	laneDeliveryKeyPrefix = "gc:"
 	// laneProbeBudget bounds one probe's runtime calls.
 	laneProbeBudget = 10 * time.Second
 )
@@ -421,8 +421,11 @@ var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a ha
 // probe resolved. A steer goes out with immediate delivery, into the running
 // turn without waiting for idle (a keystroke runtime types it; a protocol
 // runtime's immediate nudge is its steer, runtime.SteerProtocol), and is
-// recorded via steer. A delivery the runtime took then gathers its turn
-// evidence within the link wait (linkEvidence).
+// recorded via steer. A redelivery (d.Redelivery) asks a runtime that keeps
+// keyed deliveries first, and one it already holds is replayed: nothing is
+// sent, nothing is stamped and no turn is read. A delivery the runtime took
+// now records the runtime's receipt and gathers its turn evidence within the
+// link wait (linkEvidence).
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
 	if h == nil {
@@ -441,15 +444,21 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		Text:          d.Text,
 		Delivery:      delivery,
 		Wake:          worker.NudgeWakeLiveOnly,
-		DeliveryKey:   laneDeliveryKeyPrefix + d.Key,
+		DeliveryKey:   opjournal.RuntimeDeliveryKey(d.Key),
 		Fence:         fence,
 		AllowUnfenced: true,
+		Redelivery:    d.Redelivery,
 	})
 	out := laneDeliveryResult(res, err, at, fence.IsZero(), d.Steer)
 	if dv, ok := out.(opjournal.Delivered); ok {
-		stampLastNudgeDeliveredAt(sessionFrontDoor(e.deps.sessions), e.info.ID, e.deps.clk.Now())
 		rec := dv.Record
 		rec.Generation, rec.Epoch, rec.Mode = d.Fence.Generation, d.Fence.Epoch, d.Mode
+		if res.Replayed {
+			// Its turn predates the probe, so no read could link it.
+			dv.Evidence = e.linkStart(rec)
+			return dv
+		}
+		stampLastNudgeDeliveredAt(sessionFrontDoor(e.deps.sessions), e.info.ID, e.deps.clk.Now())
 		dv.Evidence = e.linkEvidence(ctx, rec)
 		out = dv
 	}
@@ -458,7 +467,9 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 
 // laneDeliveryResult maps one nudge's answer to the lane's result (DES-O1
 // §7.2). unfencedReq says the request carried no fence, because the row
-// names no token; steer says it was a steer, recorded via steer. A submit
+// names no token; steer says it was a steer, recorded via steer. A delivery
+// records the runtime's receipt (its message id, stamp and turn); a replay
+// of one the runtime already held is recorded via replayed. A submit
 // the runtime could not confirm may have delivered, so it is Unknown; a
 // nudge refused on a pending interaction, whichever runtime refused it, or
 // one the runtime reports never sent, is a transient miss. Any other error
@@ -466,15 +477,19 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 // retake under a fresh key would deliver it twice.
 func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfencedReq, steer bool) opjournal.DeliveryResult {
 	via := laneViaLive
-	if steer {
+	switch {
+	case res.Replayed:
+		via = laneViaReplayed
+	case steer:
 		via = laneViaSteer
 	}
 	delivered := func(ack opjournal.AckKind, degradation string) opjournal.Delivered {
 		if res.Unfenced || unfencedReq {
 			degradation = opjournal.DegradationUnfencedDelivery
 		}
+		r := res.Receipt
 		return opjournal.Delivered{
-			Record:      opjournal.DeliveryRecord{At: at, Ack: ack},
+			Record:      opjournal.DeliveryRecord{At: at, Ack: ack, MessageID: r.MessageID, MessageAt: r.MessageAt, TurnID: r.TurnID},
 			Evidence:    opjournal.TurnEvidence{HasSource: false},
 			Via:         via,
 			Degradation: degradation,

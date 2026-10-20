@@ -392,6 +392,13 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 	steered := func(ack opjournal.AckKind, degradation string) opjournal.DeliveryResult {
 		return opjournal.Delivered{Record: opjournal.DeliveryRecord{At: at, Ack: ack}, Via: laneViaSteer, Degradation: degradation}
 	}
+	receipt := runtime.DeliveryReceipt{MessageID: "m-1", MessageAt: laneT0.Add(time.Millisecond), TurnID: "turn-1"}
+	withReceipt := func(via, degradation string) opjournal.DeliveryResult {
+		return opjournal.Delivered{
+			Record: opjournal.DeliveryRecord{At: at, Ack: opjournal.AckDelivered, MessageID: receipt.MessageID, MessageAt: receipt.MessageAt, TurnID: receipt.TurnID},
+			Via:    via, Degradation: degradation,
+		}
+	}
 	someErr := errors.New("tmux exploded")
 	permissionPrompt := fmt.Errorf("%w: session %q is waiting on a permission prompt (Edit file, request tmux-1); answer it with respond (approve or deny) before sending text",
 		runtime.ErrPendingInteraction, "s")
@@ -406,6 +413,11 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 		wantUnknwn bool
 	}{
 		{name: "delivered", res: worker.NudgeResult{Delivered: true}, want: delivered(opjournal.AckDelivered, "")},
+		{name: "delivered with a receipt", res: worker.NudgeResult{Delivered: true, Receipt: receipt}, want: withReceipt(laneViaLive, "")},
+		{name: "replayed", res: worker.NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}, want: withReceipt(laneViaReplayed, "")},
+		{name: "replayed steer", res: worker.NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}, steer: true, want: withReceipt(laneViaReplayed, "")},
+		{name: "replayed with no token", res: worker.NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}, unfenced: true, want: withReceipt(laneViaReplayed, opjournal.DegradationUnfencedDelivery)},
+		{name: "redelivery lookup failed", err: fmt.Errorf("looking up the earlier delivery: %w: %w", runtime.ErrNudgeNotSent, errors.New("snapshot unreadable")), transient: true},
 		{name: "delivered unfenced", res: worker.NudgeResult{Delivered: true, Unfenced: true}, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
 		{name: "delivered with no token", res: worker.NudgeResult{Delivered: true}, unfenced: true, want: delivered(opjournal.AckDelivered, opjournal.DegradationUnfencedDelivery)},
 		{name: "unobserved", err: fmt.Errorf("submit: %w", runtime.ErrNudgeDeliveredUnobserved), want: delivered(opjournal.AckDeliveredUnobserved, laneDegradationTurnStartUnobserved)},
@@ -490,8 +502,8 @@ func TestLaneExecDeliversFencedRequest(t *testing.T) {
 	req := reqs[0]
 	wantFence := runtime.InputFence{Generation: 1, Epoch: 1, Token: f.token}
 	if req.Fence != wantFence || !req.AllowUnfenced || req.Wake != worker.NudgeWakeLiveOnly ||
-		req.Delivery != worker.NudgeDeliveryDefault || req.DeliveryKey != "gc:"+got.DeliveryKey || req.Source != "" {
-		t.Fatalf("request = %+v, want fence %+v, AllowUnfenced, live_only, default, key gc:%s, no source", req, wantFence, got.DeliveryKey)
+		req.Delivery != worker.NudgeDeliveryDefault || req.DeliveryKey != opjournal.RuntimeDeliveryKey(got.DeliveryKey) || req.Source != "" || req.Redelivery {
+		t.Fatalf("request = %+v, want fence %+v, AllowUnfenced, live_only, default, key gc:%s, no source, no redelivery", req, wantFence, got.DeliveryKey)
 	}
 	if req.Text != "please run the tests" {
 		t.Fatalf("text = %q, want the prompt verbatim", req.Text)
