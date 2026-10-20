@@ -1,6 +1,7 @@
 package opjournal
 
 import (
+	"fmt"
 	"reflect"
 	"testing"
 )
@@ -72,5 +73,39 @@ func TestInterruptCreditsReadsTheOpsThatRan(t *testing.T) {
 	}
 	if _, err := h.store.InterruptCredits("", 2); err == nil {
 		t.Fatal("InterruptCredits accepted an empty conversation")
+	}
+}
+
+// TestInterruptCreditsLooksPastInterruptsThatDidNotRun pins the lookback's
+// unit: the newest interrupt ops that ran in the generation, so newer ones
+// that never ran, or ran in another generation, do not hide an older one that
+// ran; the read stops after interruptCreditPages pages of rows.
+func TestInterruptCreditsLooksPastInterruptsThatDidNotRun(t *testing.T) {
+	h := newHarness(t)
+	ran := h.propose(t, creditInterruptReq("ran", 2, "t1"))
+	if _, err := h.store.Transition(ran.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+		t.Fatal(err)
+	}
+	for i := range interruptCreditLookback + 1 {
+		h.propose(t, creditInterruptReq(fmt.Sprintf("waiting-%d", i), 2, fmt.Sprintf("w%d", i)))
+	}
+	for i := range interruptCreditLookback + 1 {
+		op := h.propose(t, creditInterruptReq(fmt.Sprintf("older-%d", i), 1, fmt.Sprintf("o%d", i)))
+		if _, err := h.store.Transition(op.ID, StatusSubmitted, StatusExecuting, "lane"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := h.store.InterruptCredits("gc-1", 2)
+	if err != nil {
+		t.Fatalf("InterruptCredits: %v", err)
+	}
+	if want := []InterruptRef{{Op: ran.ID, Turn: "t1"}}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("credits = %+v, want %+v", got, want)
+	}
+	for i := range interruptCreditLookback*interruptCreditPages - 2*(interruptCreditLookback+1) {
+		h.propose(t, creditInterruptReq(fmt.Sprintf("later-%d", i), 2, fmt.Sprintf("l%d", i)))
+	}
+	if got, err := h.store.InterruptCredits("gc-1", 2); err != nil || len(got) != 0 {
+		t.Fatalf("credits behind %d newer rows = %+v, %v, want none read", interruptCreditLookback*interruptCreditPages, got, err)
 	}
 }

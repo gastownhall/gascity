@@ -422,7 +422,9 @@ func TestLaneTurnObserverDowngrades(t *testing.T) {
 }
 
 // TestLaneTurnObserverErrorsLeaveCells pins that an unavailable read writes
-// nothing, and that a session that is gone ends the watch.
+// nothing, and that a not-found one of a session whose row is live does not
+// either and leaves the watch running: a protocol runtime answers not found
+// until it runs, as while its session is woken.
 func TestLaneTurnObserverErrorsLeaveCells(t *testing.T) {
 	f := newLaneObsFixture(t)
 	f.start()
@@ -433,15 +435,17 @@ func TestLaneTurnObserverErrorsLeaveCells(t *testing.T) {
 		t.Fatalf("an unavailable read wrote %d batches, state %d", f.batcher.count()-before, f.o.state)
 	}
 	f.o.observe(context.Background(), worker.TurnUpdate{Err: fmt.Errorf("read: %w", runtime.ErrSessionNotFound)})
-	if f.batcher.count() != before || f.o.state != laneTurnDone || f.o.updates() != nil {
-		t.Fatalf("a gone session wrote %d batches, state %d", f.batcher.count()-before, f.o.state)
+	if f.batcher.count() != before || f.o.state != laneTurnWatching || f.o.updates() == nil {
+		t.Fatalf("a not-found read of a live row wrote %d batches, state %d", f.batcher.count()-before, f.o.state)
 	}
-	if st := f.stats.status(); st.Watching != 0 {
-		t.Fatalf("watching = %d after the session went", st.Watching)
+	if st := f.stats.status(); st.Watching != 1 {
+		t.Fatalf("watching = %d after a not-found read of a live row, want 1", st.Watching)
 	}
 	if row := f.row(); row.Turn.ID != "t1" || row.Turn.State != opjournal.TurnStateRunning {
-		t.Fatalf("cells = %+v, want t1 left running for session.ended", row.Turn)
+		t.Fatalf("cells = %+v, want t1 left running", row.Turn)
 	}
+	f.see(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
+	f.wantFacts("turn.started:t1", "turn.ended:t1:completed")
 }
 
 // TestLaneTurnObserverRetriesRefusedBatches pins the write's recovery: a
@@ -1215,7 +1219,9 @@ func (s laneTurnFailStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatc
 
 // TestLaneHostTurnFailuresAreNotLaneFailures pins that the observer's
 // failures are counted as its own, not as the lane's pass errors the doctor
-// reports.
+// reports, and logged under a stage of their own, apart from the lane
+// executor's turn-evidence degradations ("turns"), so neither one's rate
+// limit silences the other.
 func TestLaneHostTurnFailuresAreNotLaneFailures(t *testing.T) {
 	l := newLaneHostTurns(t, string(opjournal.KindMessage))
 	l.hh.env.setStore(laneTurnFailStore{l.store})
@@ -1225,10 +1231,15 @@ func TestLaneHostTurnFailuresAreNotLaneFailures(t *testing.T) {
 	}
 	l.hh.nextPass(t)
 	l.send(laneRunning("t1"))
+	logged := func() bool {
+		return slices.ContainsFunc(l.hh.logLines(), func(line string) bool {
+			return strings.HasPrefix(line, "conversation-lanes: turn-observer failed: ")
+		})
+	}
 	deadline := time.After(laneWaitBudget)
 	for {
 		s := l.hh.h.status(l.f.clk.Now())
-		if s.Turns != nil && s.Turns.Errors > 0 {
+		if s.Turns != nil && s.Turns.Errors > 0 && logged() {
 			if s.Errors != 0 || s.ErrorsSinceSuccess != 0 || s.LastError != "" {
 				t.Fatalf("lane status = %+v, want the observer's failure kept out of it", s)
 			}
@@ -1239,7 +1250,7 @@ func TestLaneHostTurnFailuresAreNotLaneFailures(t *testing.T) {
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("no observer failure counted (status %+v)", s)
+			t.Fatalf("no observer failure counted and logged under its own stage (status %+v, log %q)", s, l.hh.logLines())
 		case <-time.After(time.Millisecond):
 		}
 	}
@@ -1401,6 +1412,200 @@ func TestLaneTurnObserverExpectsTheTakesOwnTurn(t *testing.T) {
 			t.Fatal("a read made before the take ended the expectation")
 		}
 	})
+}
+
+// TestLaneTurnObserverExpectationOutlivesARunningTurn pins the expectation's
+// window past a turn the take found running: the turn the take started can
+// begin only after that one ends, so the window starts again at its end, also
+// when it ran past laneTurnExpectFor, and closes laneTurnExpectFor later.
+func TestLaneTurnObserverExpectationOutlivesARunningTurn(t *testing.T) {
+	t0 := laneEnded("t0", runtime.TurnStatusCompleted)
+	runPast := func(t *testing.T) *laneObsFixture {
+		t.Helper()
+		f := newLaneObsFixture(t)
+		f.start()
+		f.see(laneRunning("t0"))
+		f.o.expect(f.clk.Now())
+		f.clk.Advance(2 * laneTurnExpectFor)
+		if d, pending := f.o.pending(f.clk.Now()); !pending || d != laneTurnHold {
+			t.Fatalf("t0 running past the window: %s, %v; want held for %s", d, pending, laneTurnHold)
+		}
+		f.see(laneIdle(t0))
+		if _, pending := f.o.pending(f.clk.Now()); !pending {
+			t.Fatal("the end of the turn the take found running ended the expectation")
+		}
+		return f
+	}
+	t.Run("delivered after it", func(t *testing.T) {
+		f := runPast(t)
+		began := f.clk.Now()
+		f.see(laneRunningAt("t1", began, t0))
+		f.see(laneIdle(laneCompletedAt("t1", began), t0))
+		if _, pending := f.o.pending(f.clk.Now()); pending {
+			t.Fatal("still pending after the delivered turn ended")
+		}
+		f.wantFacts("turn.started:t0", "turn.ended:t0:completed", "turn.started:t1", "turn.ended:t1:completed")
+	})
+	t.Run("nothing after it", func(t *testing.T) {
+		f := runPast(t)
+		f.clk.Advance(laneTurnExpectFor)
+		if _, pending := f.o.pending(f.clk.Now()); pending {
+			t.Fatal("still pending laneTurnExpectFor after the running turn ended")
+		}
+	})
+}
+
+// TestLaneTurnObserverExpectsBlindBeforeTheFirstFold pins the expectation of
+// a take made before the observer folded anything, for a source that records
+// no start: which turns the take found is unknown, so no turn without a start
+// meets it until a fold names them; the turns that fold names are the ones
+// the take found, and a later one meets it.
+func TestLaneTurnObserverExpectsBlindBeforeTheFirstFold(t *testing.T) {
+	bare := func(id string) runtime.EndedTurn {
+		return runtime.EndedTurn{TurnID: id, Status: runtime.TurnStatusCompleted}
+	}
+	for _, tc := range []struct {
+		name  string
+		first func(*laneObsFixture)
+	}{
+		{"before any update", func(*laneObsFixture) {}},
+		{"after an unavailable read", func(f *laneObsFixture) {
+			f.o.observe(context.Background(), worker.TurnUpdate{Err: fmt.Errorf("read: %w", runtime.ErrRuntimeUnavailable)})
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneObsFixture(t)
+			f.start()
+			tc.first(f)
+			f.o.expect(f.clk.Now())
+			f.see(laneIdle(bare("t0")))
+			if _, pending := f.o.pending(f.clk.Now()); !pending {
+				t.Fatal("an earlier turn the first fold journaled ended the expectation")
+			}
+			f.see(laneIdle(bare("t1"), bare("t0")))
+			if _, pending := f.o.pending(f.clk.Now()); pending {
+				t.Fatal("a turn after the ones the first fold named left the expectation")
+			}
+			f.wantFacts("turn.started:t0", "turn.ended:t0:completed", "turn.started:t1", "turn.ended:t1:completed")
+		})
+	}
+}
+
+// TestLaneTurnObserverFirstUpdateEndsItsHold pins the hold for the watch's
+// first update: whatever that update brings ends it, so a source that keeps
+// failing in one class, which WatchTurns reports once, does not hold the
+// worker; a failed read whose generation could not be read either, which
+// leaves nothing to keep, included.
+func TestLaneTurnObserverFirstUpdateEndsItsHold(t *testing.T) {
+	unavailable := worker.TurnUpdate{Err: fmt.Errorf("read: %w", runtime.ErrRuntimeUnavailable)}
+	for _, tc := range []struct {
+		name   string
+		genErr error
+		update func(*laneObsFixture) worker.TurnUpdate
+	}{
+		{"a failed read", nil, func(*laneObsFixture) worker.TurnUpdate { return unavailable }},
+		{"a failed read, generation unread", errors.New("sessions unavailable"), func(*laneObsFixture) worker.TurnUpdate { return unavailable }},
+		{"a read from before the generation", nil, func(f *laneObsFixture) worker.TurnUpdate {
+			f.since = f.clk.Now().Add(time.Second)
+			hist := laneRunning("t9")
+			hist.ObservedAt = f.clk.Now()
+			return worker.TurnUpdate{History: hist}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneObsFixture(t)
+			f.start()
+			f.genErr = tc.genErr
+			f.o.observe(context.Background(), tc.update(f))
+			if d, pending := f.o.pending(f.clk.Now()); pending {
+				t.Fatalf("pending %s after the first update, want nothing (retry %+v)", d, f.o.retry)
+			}
+			if f.o.state != laneTurnWatching {
+				t.Fatalf("observer state = %d, want watching", f.o.state)
+			}
+		})
+	}
+}
+
+// TestLaneTurnObserverIgnoredUpdatesKeepTheRetry pins that an update with
+// nothing to fold, a read from before the generation or a failed read, leaves
+// an update kept for its retry as it is, so the retry still writes it.
+func TestLaneTurnObserverIgnoredUpdatesKeepTheRetry(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		kept    worker.TurnUpdate
+		ignored func(*laneObsFixture) worker.TurnUpdate
+		check   func(*laneObsFixture)
+	}{
+		{
+			name: "a history, then a read from before the generation",
+			kept: worker.TurnUpdate{History: laneRunning("t1")},
+			ignored: func(f *laneObsFixture) worker.TurnUpdate {
+				hist := laneIdle()
+				hist.ObservedAt = f.since.Add(-time.Second)
+				return worker.TurnUpdate{History: hist}
+			},
+			check: func(f *laneObsFixture) { f.wantFacts("turn.started:t1") },
+		},
+		{
+			name: "a downgrade, then a failed read",
+			kept: worker.TurnUpdate{Err: fmt.Errorf("scan: %w", runtime.ErrTurnIdentityUnsupported)},
+			ignored: func(*laneObsFixture) worker.TurnUpdate {
+				return worker.TurnUpdate{Err: fmt.Errorf("read: %w", runtime.ErrRuntimeUnavailable)}
+			},
+			check: func(f *laneObsFixture) {
+				if got := f.row().Turn.Caps.String(); !strings.HasPrefix(got, "start=boundary,") {
+					t.Fatalf("caps = %q, want the kept downgrade written", got)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			f := newLaneObsFixture(t)
+			f.since = f.clk.Now()
+			f.start()
+			f.genErr = errors.New("sessions unavailable")
+			kept := tc.kept
+			kept.History.ObservedAt = f.clk.Now()
+			f.o.observe(context.Background(), kept)
+			f.genErr = nil
+			f.o.observe(context.Background(), tc.ignored(f))
+			if f.o.retry == nil || (f.o.retry.Err == nil) != (kept.Err == nil) {
+				t.Fatalf("kept %+v after an update with nothing to fold, want %+v", f.o.retry, kept)
+			}
+			f.o.retryNow(context.Background())
+			if f.o.retry != nil {
+				t.Fatalf("the retry did not fold; notes %v", f.notes.all())
+			}
+			tc.check(f)
+		})
+	}
+}
+
+// TestLaneTurnObserverSpendsARetryFromAnEarlierGeneration pins that a kept
+// history read before a generation that began meanwhile is spent when it is
+// retried, not retried for good.
+func TestLaneTurnObserverSpendsARetryFromAnEarlierGeneration(t *testing.T) {
+	f := newLaneObsFixture(t)
+	f.start()
+	f.see(laneIdle())
+	f.genErr = errors.New("sessions unavailable")
+	hist := laneRunning("t1")
+	hist.ObservedAt = f.clk.Now()
+	f.o.observe(context.Background(), worker.TurnUpdate{History: hist})
+	if f.o.retry == nil {
+		t.Fatal("the history was not kept for its retry")
+	}
+	f.genErr = nil
+	f.gen, f.since = 2, f.clk.Now().Add(time.Minute)
+	f.o.retryNow(context.Background())
+	if f.o.retry != nil || f.o.retries != 0 {
+		t.Fatalf("retry %+v (%d attempts) after its generation passed, want it spent", f.o.retry, f.o.retries)
+	}
+	if _, pending := f.o.pending(f.clk.Now()); pending {
+		t.Fatal("pending after the stale retry was spent")
+	}
+	f.wantFacts()
 }
 
 // TestLaneTurnObserverRunningHoldEndsWithTheRuntime pins the bound on the
@@ -1814,5 +2019,124 @@ func TestLaneHostExpectsATurnStartedDuringItsPass(t *testing.T) {
 	l.batch(t, "the delivered turn")
 	if l.hh.nextExit(t) != l.f.id {
 		t.Fatal("the worker did not exit once the turn its pass started ended")
+	}
+}
+
+// TestLaneHostKeepsTheDeliveredTurnPastALongPass pins where the expectation's
+// window starts: when the take's pass returns, so a delivery that held its
+// pass for longer than laneTurnExpectFor still keeps the worker for the turn
+// it started.
+func TestLaneHostKeepsTheDeliveredTurnPastALongPass(t *testing.T) {
+	l := newLaneHostTurns(t)
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
+	ready := new(atomic.Bool)
+	ready.Store(true)
+	took := laneTurnExpectFor + 10*time.Second
+	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+		return laneSlowDeliverExec{laneReadyExec: laneReadyExec{clk: l.f.clk, ready: ready}, took: took}
+	}
+	began := l.f.clk.Now()
+	l.hh.start()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the delivery accepted", p.out.res)
+	}
+	l.hh.nextPass(t)
+	l.send(laneIdle())
+	l.batch(t, "the first read")
+	l.noExit(t, "as soon as its long pass returned")
+	l.send(laneRunningAt("t1", began.Add(took)))
+	l.batch(t, "the delivered turn's start")
+	l.send(laneIdle(laneCompletedAt("t1", began.Add(took))))
+	l.batch(t, "the delivered turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the delivered turn ended")
+	}
+}
+
+// TestLaneHostJournalsTheTurnItDeliversAfterAWake pins DES-O1 §7.7 for a
+// message to a sleeping session whose turns a protocol runtime reports, which
+// answers not found until it runs: that answer, read while the session is
+// woken, leaves the watch running, so the turn the delivery starts is
+// journaled.
+func TestLaneHostJournalsTheTurnItDeliversAfterAWake(t *testing.T) {
+	l := newLaneHostTurns(t)
+	if err := l.f.store.SetMetadata(l.f.id, "state", string(session.StateAsleep)); err != nil {
+		t.Fatal(err)
+	}
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "wake up", func(r *opjournal.Request) {
+		r.Policy.Message.Wake = opjournal.WakeIfNeeded
+	}))
+	l.hh.start()
+	if p := l.hh.nextPass(t); !p.out.res.Wake || p.out.wake != session.WakeRecorded {
+		t.Fatalf("pass = %+v, want a recorded wake", p.out)
+	}
+	tm := l.hh.nextTimer(t)
+	l.turns.ch <- worker.TurnUpdate{Err: fmt.Errorf("no ACP control socket: %w", runtime.ErrSessionNotFound)}
+	l.updates(t, 1)
+	if err := l.f.store.SetMetadata(l.f.id, "state", string(session.StateAwake)); err != nil {
+		t.Fatal(err)
+	}
+	tm.c <- l.f.clk.Now()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass after the wake = %+v, want the delivery accepted", p.out.res)
+	}
+	take := l.f.clk.Now()
+	l.hh.nextPass(t)
+	l.noExit(t, "after delivering to the woken session")
+	l.f.clk.Advance(2 * time.Second)
+	l.send(laneRunningAt("t1", take.Add(time.Second)))
+	l.batch(t, "the delivered turn's start")
+	l.send(laneIdle(laneCompletedAt("t1", take.Add(time.Second))))
+	l.batch(t, "the delivered turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the delivered turn ended")
+	}
+	if got, want := laneFactList(t, l.store, l.f.id, 1), []string{"turn.started:t1", "turn.ended:t1:completed"}; !slices.Equal(got, want) {
+		t.Fatalf("facts = %q, want %q", got, want)
+	}
+	if l.watches() != 1 {
+		t.Fatalf("watches = %d, want one", l.watches())
+	}
+}
+
+// updates waits until the observers took n turn updates.
+func (l *laneHostTurns) updates(t *testing.T, n int64) {
+	t.Helper()
+	deadline := time.After(laneWaitBudget)
+	for {
+		if s := l.hh.h.status(l.f.clk.Now()).Turns; s != nil && s.Updates >= n {
+			return
+		}
+		select {
+		case <-deadline:
+			t.Fatalf("the observer took fewer than %d turn updates (turns status %+v)", n, l.hh.h.status(l.f.clk.Now()).Turns)
+		case <-time.After(time.Millisecond):
+		}
+	}
+}
+
+// TestLaneHostReleasesAfterAQuiescentFailedFirstUpdate pins that a first
+// turn update with nothing to keep, a failed read arriving while the city is
+// quiescent, ends the hold for it: a worker with no op work exits rather than
+// hold its slot until its source reads.
+func TestLaneHostReleasesAfterAQuiescentFailedFirstUpdate(t *testing.T) {
+	l := newLaneHostTurns(t, string(opjournal.KindMessage))
+	l.hh.start()
+	if !l.hh.h.Poke(l.f.id) {
+		t.Fatal("Poke refused")
+	}
+	l.hh.nextPass(t)
+	if tm := l.hh.nextTimer(t); tm.d != laneTurnHold {
+		t.Fatalf("wait = %s, want the observer's hold %s", tm.d, laneTurnHold)
+	}
+	l.hh.env.quiescent.Store(true)
+	l.turns.ch <- worker.TurnUpdate{Err: fmt.Errorf("transcript not written yet: %w", runtime.ErrRuntimeUnavailable)}
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker kept its slot for a first update it could not fold")
+	}
+	if l.watches() != 1 {
+		t.Fatalf("watches = %d, want one", l.watches())
 	}
 }

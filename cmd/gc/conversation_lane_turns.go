@@ -42,8 +42,9 @@ import (
 )
 
 const (
-	// laneTurnStage names the observer's failures in the host's log.
-	laneTurnStage = "turns"
+	// laneTurnStage names the observer's failures in the host's log, apart
+	// from the lane executor's turn-evidence degradations ("turns").
+	laneTurnStage = "turn-observer"
 	// laneTurnWriteAttempts bounds one observation's write: a batch a
 	// guard refused, or whose commit is unknown, is re-read and refolded.
 	laneTurnWriteAttempts = 4
@@ -54,8 +55,9 @@ const (
 	// laneParkAfter, so with no conversation queued the worker keeps its
 	// slot, and with one queued it parks for this long.
 	laneTurnHold = laneParkAfter
-	// laneTurnExpectFor is how long after a take the observer expects the
-	// turn the effect starts.
+	// laneTurnExpectFor is how long the observer expects the turn a take's
+	// effect starts: from the take's pass's return, and again from the end of
+	// a turn the take found running.
 	laneTurnExpectFor = time.Minute
 	// A fold that could not be written is retried after laneTurnRetryStart,
 	// doubling up to laneTurnRetryCap.
@@ -215,8 +217,10 @@ type laneTurnObserver struct {
 	// generation adopts without reading them again.
 	startCaps bool
 
-	// folded: an update of this watch was folded; cells are the turn cells
-	// as the last fold read or wrote them.
+	// heard: the watch sent its first update, whatever became of it.
+	heard bool
+	// folded: a fold of this watch read or wrote the turn cells, which cells
+	// are as the last one left them.
 	folded bool
 	cells  opjournal.TurnCells
 	// expected is the turn a content take is expected to start, zero when
@@ -274,7 +278,7 @@ func (o *laneTurnObserver) start(ctx context.Context) {
 			var ch <-chan worker.TurnUpdate
 			if ch, err = h.WatchTurns(wctx); err == nil {
 				o.handle, o.ch, o.cancel, o.state = h, ch, cancel, laneTurnWatching
-				o.caps, o.startCaps, o.folded = caps, true, false
+				o.caps, o.startCaps, o.heard, o.folded = caps, true, false, false
 				o.counted = true
 				o.deps.stats.watching.Add(1)
 				return
@@ -324,30 +328,54 @@ func (o *laneTurnObserver) closed() {
 
 // laneTurnExpect is the turn a content take is expected to start (DES-O1
 // §7.7): one the source started from From, or, when the source records no
-// start, one not in Known, the turns the cells named at the take.
+// start, one not in Known, the turns the cells named at the take. A take made
+// before any fold of the watch is Blind: the cells it found are unknown until
+// a fold names them.
 type laneTurnExpect struct {
 	From, Until time.Time
 	Known       []string
+	Blind       bool
 }
 
 // started reports whether turn id, which the source started at start (zero
-// when it records none), could be the one the take started.
+// when it records none), could be the one the take started. A blind
+// expectation tells no turn without a start from one the take found.
 func (e laneTurnExpect) started(id string, start time.Time) bool {
 	if !start.IsZero() {
 		return !start.Before(e.From)
 	}
-	return !slices.Contains(e.Known, id)
+	return !e.Blind && !slices.Contains(e.Known, id)
+}
+
+// metBy reports whether the fold of obs, which left the cells next and
+// journaled facts, shows a turn the take could have started: running in
+// next, or journaled by facts.
+func (e laneTurnExpect) metBy(obs opjournal.TurnObservation, next opjournal.TurnCells, facts []opjournal.Fact) bool {
+	start := func(id string) time.Time {
+		if id == obs.Current {
+			return obs.CurrentStart
+		}
+		if i := slices.IndexFunc(obs.Recent, func(t opjournal.ObservedTurnEnd) bool { return t.ID == id }); i >= 0 {
+			return obs.Recent[i].StartedAt
+		}
+		return time.Time{}
+	}
+	met := next.State == opjournal.TurnStateRunning && e.started(next.ID, start(next.ID))
+	for _, f := range facts {
+		met = met || e.started(f.Turn, start(f.Turn))
+	}
+	return met
 }
 
 // expect records that a content take whose pass began at from ran an effect,
 // whose turn the observer waits for (DES-O1 §7.7): the worker keeps serving
 // until a read made from from shows a turn the take could have started
-// running or journaled (laneTurnExpect.started), or for laneTurnExpectFor.
-// A turn the cells already named is no such turn, nor one the source started
-// before from, so an earlier turn's end read after the take does not end the
-// wait.
+// running or journaled (laneTurnExpect.started), or for laneTurnExpectFor
+// after the pass returned, now. A turn the cells already named is no such
+// turn, nor one the source started before from, so an earlier turn's end read
+// after the take does not end the wait.
 func (o *laneTurnObserver) expect(from time.Time) {
-	o.expected = laneTurnExpect{From: from, Until: from.Add(laneTurnExpectFor)}
+	o.expected = laneTurnExpect{From: from, Until: o.deps.now().Add(laneTurnExpectFor), Blind: !o.folded}
 	if o.folded {
 		o.expected.Known = laneTurnKnown(o.cells)
 	}
@@ -368,29 +396,30 @@ func laneTurnKnown(cells opjournal.TurnCells) []string {
 	return ids
 }
 
-// meetExpected ends the expectation when the fold of obs, which landed next
-// and facts, shows a turn the take could have started: running in next, or
-// journaled by facts.
-func (o *laneTurnObserver) meetExpected(obs opjournal.TurnObservation, next opjournal.TurnCells, facts []opjournal.Fact) {
-	e := o.expected
-	if e.From.IsZero() || obs.ObservedAt.Before(e.From) {
-		return
+// folds records the cells a fold of obs left, at now, and the facts it
+// journaled; landed says its batch landed, which clears stopped. The fold
+// ends the expectation when it shows the take's turn. Otherwise, when it ends
+// the hold for a turn the cells showed running, the expectation's window
+// starts again, since the take's turn begins only after that one; and a blind
+// expectation takes the turns the cells name as those the take found.
+func (o *laneTurnObserver) folds(obs opjournal.TurnObservation, cells opjournal.TurnCells, facts []opjournal.Fact, landed bool, now time.Time) {
+	held := o.holdsRunning()
+	o.cells, o.folded = cells, true
+	if landed {
+		o.stopped = false
 	}
-	start := func(id string) time.Time {
-		if id == obs.Current {
-			return obs.CurrentStart
+	e := &o.expected
+	switch {
+	case e.From.IsZero():
+	case !obs.ObservedAt.Before(e.From) && e.metBy(obs, cells, facts):
+		*e = laneTurnExpect{}
+	default:
+		if until := now.Add(laneTurnExpectFor); held && !o.holdsRunning() && until.After(e.Until) {
+			e.Until = until
 		}
-		if i := slices.IndexFunc(obs.Recent, func(t opjournal.ObservedTurnEnd) bool { return t.ID == id }); i >= 0 {
-			return obs.Recent[i].StartedAt
+		if e.Blind {
+			e.Known, e.Blind = laneTurnKnown(cells), false
 		}
-		return time.Time{}
-	}
-	met := next.State == opjournal.TurnStateRunning && e.started(next.ID, start(next.ID))
-	for _, f := range facts {
-		met = met || e.started(f.Turn, start(f.Turn))
-	}
-	if met {
-		o.expected = laneTurnExpect{}
 	}
 }
 
@@ -404,7 +433,7 @@ func (o *laneTurnObserver) pending(now time.Time) (time.Duration, bool) {
 	if o.retry != nil {
 		return min(laneTurnRetryStart<<min(o.retries-1, 10), laneTurnRetryCap), true
 	}
-	if !o.folded || o.holdsRunning() {
+	if !o.heard || o.holdsRunning() {
 		return laneTurnHold, true
 	}
 	if now.Before(o.expected.Until) {
@@ -474,22 +503,47 @@ func (o *laneTurnObserver) creditedEnd(cells opjournal.TurnCells) {
 	}
 }
 
+// laneTurnFold is what became of one update the observer took.
+type laneTurnFold int
+
+const (
+	// laneTurnFolded: the update was folded, and its batch landed or it
+	// left nothing to write.
+	laneTurnFolded laneTurnFold = iota
+	// laneTurnIgnored: the update holds nothing to fold: a failed read, a
+	// read from before the generation began, or one the watch ended at.
+	laneTurnIgnored
+	// laneTurnFailed: the update could not be folded and is owed a retry.
+	laneTurnFailed
+)
+
 // observe folds one update and writes what changed. A history is folded; an
 // Err update leaves the cells as they are, except that a source that cannot
-// identify the session's turns downgrades the generation's capabilities, and
-// a session that is gone ends the watch (its open turn is left to
-// session.ended, X11 D8). An update that could not be folded is kept for its
-// retry.
+// identify the session's turns downgrades the generation's capabilities. A
+// generation read that finds the session gone or closed ends the watch (its
+// open turn is left to session.ended, X11 D8). An update that could not be
+// folded is kept for its retry; one with nothing to fold leaves a kept one
+// as it is.
 func (o *laneTurnObserver) observe(ctx context.Context, u worker.TurnUpdate) {
 	o.deps.stats.updates.Add(1)
-	if !o.apply(ctx, u) {
+	o.heard = true
+	switch o.apply(ctx, u) {
+	case laneTurnFailed:
 		o.keep(u)
-		return
+	case laneTurnFolded:
+		if u.Err == nil || (o.retry != nil && o.retry.Err != nil) {
+			o.retry, o.retries = nil, 0
+		}
+	case laneTurnIgnored:
 	}
-	o.folded = true
-	if u.Err == nil || (o.retry != nil && o.retry.Err != nil) {
-		o.retry, o.retries = nil, 0
-	}
+}
+
+// postpone takes u without folding it, the city being quiescent: it is kept
+// for its retry as an update that could not be folded is.
+func (o *laneTurnObserver) postpone(u worker.TurnUpdate) {
+	o.deps.stats.updates.Add(1)
+	o.heard = true
+	o.keep(u)
 }
 
 // keep holds u for its retry: the newest history wins, and an Err update
@@ -505,24 +559,30 @@ func (o *laneTurnObserver) keep(u worker.TurnUpdate) {
 	o.retries++
 }
 
-// retryNow folds the kept update again.
+// retryNow folds the kept update again. The retry is spent: a fold that fails
+// keeps it again, with one attempt more.
 func (o *laneTurnObserver) retryNow(ctx context.Context) {
 	if o.retry == nil || o.state != laneTurnWatching {
 		return
 	}
-	o.observe(ctx, *o.retry)
+	u := *o.retry
+	o.retry = nil
+	o.observe(ctx, u)
+	if o.retry == nil {
+		o.retries = 0
+	}
 }
 
-// apply folds u, reporting false when it could not and a retry is owed.
-func (o *laneTurnObserver) apply(ctx context.Context, u worker.TurnUpdate) bool {
+// apply folds u, reporting what became of it.
+func (o *laneTurnObserver) apply(ctx context.Context, u worker.TurnUpdate) laneTurnFold {
 	g, err := o.deps.generation()
 	if err != nil {
 		o.noteErr(fmt.Errorf("reading conversation %s's generation for its turns: %w", o.conv, err))
-		return false
+		return laneTurnFailed
 	}
 	if !g.Live || g.Gen < 1 {
 		o.stop()
-		return true
+		return laneTurnIgnored
 	}
 	switch {
 	case g.Gen == o.gen:
@@ -531,7 +591,7 @@ func (o *laneTurnObserver) apply(ctx context.Context, u worker.TurnUpdate) bool 
 	default:
 		if err := o.readCaps(ctx, g.Gen); err != nil {
 			o.noteErr(err)
-			return false
+			return laneTurnFailed
 		}
 	}
 	switch {
@@ -540,21 +600,22 @@ func (o *laneTurnObserver) apply(ctx context.Context, u worker.TurnUpdate) bool 
 			// Read before this generation began: the history is an
 			// earlier generation's, and folding it would journal that
 			// generation's turns under this one.
-			return true
+			return laneTurnIgnored
 		}
 		hist := u.History
 		return o.write(ctx, g, &hist)
-	case laneSessionGone(u.Err):
-		o.stop()
-		return true
-	case errors.Is(u.Err, runtime.ErrTurnIdentityUnsupported):
+	case errors.Is(u.Err, runtime.ErrTurnIdentityUnsupported) && !laneSessionGone(u.Err):
 		if !o.downgraded {
 			o.downgraded = true
 			o.deps.stats.downgrades.Add(1)
 		}
 		return o.write(ctx, g, nil)
 	default:
-		return true
+		// A failed read leaves the cells as they stand until the next one.
+		// So does a not-found one: the row is live (read above), and a
+		// protocol runtime answers not found until it runs, as while its
+		// session is woken.
+		return laneTurnIgnored
 	}
 }
 
@@ -580,21 +641,21 @@ func (o *laneTurnObserver) declared() worker.TurnCapabilities {
 
 // write folds hist, or with hist nil only the capabilities stamp, into the
 // runtime row of generation g and writes the cells and facts as one guarded
-// batch, reporting false when a retry is owed. A batch a guard refused, or
-// whose commit is unknown, is read and folded again; facts already recorded
-// are dropped from it, since facts are created if absent.
-func (o *laneTurnObserver) write(ctx context.Context, g laneTurnGeneration, hist *runtime.TurnHistory) bool {
+// batch, reporting laneTurnFailed when a retry is owed. A batch a guard
+// refused, or whose commit is unknown, is read and folded again; facts
+// already recorded are dropped from it, since facts are created if absent.
+func (o *laneTurnObserver) write(ctx context.Context, g laneTurnGeneration, hist *runtime.TurnHistory) laneTurnFold {
 	rows, err := o.deps.rows()
 	if err != nil {
 		o.noteErr(fmt.Errorf("opening conversation %s's runtime row for its turns: %w", o.conv, err))
-		return false
+		return laneTurnFailed
 	}
 	recorded := map[string]bool{}
 	var last error
 	for range laneTurnWriteAttempts {
 		done, err := o.writeOnce(ctx, rows, g, hist, recorded)
 		if done {
-			return true
+			return laneTurnFolded
 		}
 		last = err
 		if ctx.Err() != nil {
@@ -602,7 +663,7 @@ func (o *laneTurnObserver) write(ctx context.Context, g laneTurnGeneration, hist
 		}
 	}
 	o.noteErr(fmt.Errorf("writing conversation %s's turns: %w", o.conv, last))
-	return false
+	return laneTurnFailed
 }
 
 // writeOnce is one read, fold and batch. It reports done when nothing is
@@ -648,7 +709,7 @@ func (o *laneTurnObserver) writeOnce(ctx context.Context, rows laneTurnRows, g l
 		}
 	}
 	if !write {
-		o.cells = prev
+		o.folds(obs, prev, nil, false, now)
 		return true, nil
 	}
 	if !found {
@@ -678,11 +739,9 @@ func (o *laneTurnObserver) writeOnce(ctx context.Context, rows laneTurnRows, g l
 		}
 		return false, err
 	}
-	o.cells = next
 	o.noteWrite(facts, now, hist)
 	o.creditedEnd(next)
-	o.stopped = false
-	o.meetExpected(obs, next, facts)
+	o.folds(obs, next, facts, true, now)
 	return true, nil
 }
 
@@ -1139,8 +1198,7 @@ func (h *conversationLaneHost) observeTurn(conv string, o *laneTurnObserver, u w
 	defer h.env.beginStoreWork()()
 	defer h.recoverTurns(conv)
 	if h.env.storesQuiescent() {
-		o.deps.stats.updates.Add(1)
-		o.keep(u)
+		o.postpone(u)
 		return
 	}
 	o.observe(h.ctx, u)
