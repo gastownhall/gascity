@@ -226,3 +226,26 @@ func TestLaneFailpointStages(t *testing.T) {
 		}
 	})
 }
+
+// The controller's lane host consults the failpoints: take and effect
+// through the lane its store opens, done after each pass.
+func TestLaneHostRunsItsFailpoints(t *testing.T) {
+	for _, raw := range []string{"ctl:take", "ctl:effect", "ctl:done"} {
+		t.Run(raw, func(t *testing.T) {
+			h := withLaneFailpoint(t, raw, true)
+			h.crash = false
+			f := newLaneFixture(t)
+			hh := newLaneHostHarness(t, f)
+			hh.start()
+			st := f.laneStore(t)
+			f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+			hh.h.Poke(f.id)
+			if p := hh.nextPass(t); p.out.err != nil || p.out.res.Done != opjournal.DoneAccepted {
+				t.Fatalf("pass = %+v, want accepted", p.out)
+			}
+			if h.kills != 1 {
+				t.Fatalf("%d kills at %s, want one", h.kills, raw)
+			}
+		})
+	}
+}
