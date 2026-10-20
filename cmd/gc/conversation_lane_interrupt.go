@@ -42,7 +42,9 @@ const laneInterruptReadBudget = 10 * time.Second
 // conversation's InterruptRef is recorded before the effect (laneInterrupts),
 // so a retry of a session-scoped op stays on the turn this attempt aimed at,
 // unless the effect definitely sent nothing, when the ref it replaced is
-// restored.
+// restored. A deliver-now unit's replacement step (c.ForReplacement) asks
+// the worker to prepare the session for the message once the turn settles,
+// and reports where that left the session (replacementResult).
 func (e *conversationLaneExec) Interrupt(ctx context.Context, c opjournal.InterruptCall) opjournal.ControlResult {
 	turn, stop := e.interruptTarget(ctx, c)
 	if stop != nil {
@@ -55,7 +57,7 @@ func (e *conversationLaneExec) Interrupt(ctx context.Context, c opjournal.Interr
 	case err != nil:
 		return opjournal.NotDelivered{Transient: true, Cause: fmt.Errorf("resolving session %s's handle, nothing sent: %w", e.info.ID, err)}
 	}
-	req := worker.InterruptRequest{Turn: turn}
+	req := worker.InterruptRequest{Turn: turn, ForReplacement: c.ForReplacement}
 	if c.Op.Policy.Interrupt.OnFailure == opjournal.OnFailureRestart {
 		req.OnFailure = worker.InterruptOnFailureRestart
 	}
@@ -71,6 +73,9 @@ func (e *conversationLaneExec) Interrupt(ctx context.Context, c opjournal.Interr
 	// unmarked.
 	exact := turn != "" && e.turnCaps.Fence == runtime.TurnFenceAtomic && !req.Fence.IsZero() && !res.Unfenced
 	out := laneInterruptResult(ctx, res, err, turn, exact)
+	if c.ForReplacement {
+		out = e.replacementResult(ctx, out, err, turn)
+	}
 	if laneInterruptSentNothing(out) {
 		e.deps.interrupts.restore(c.Fence.Conversation, ref, prev)
 	}

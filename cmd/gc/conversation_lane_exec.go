@@ -474,10 +474,12 @@ var errLaneNoProbedHandle = errors.New("conversation lane: delivery without a ha
 // probe resolved. A steer goes out with immediate delivery, into the running
 // turn without waiting for idle (a keystroke runtime types it; a protocol
 // runtime's immediate nudge is its steer, runtime.SteerProtocol), and is
-// recorded via steer. A redelivery (d.Redelivery) asks a runtime that keeps
-// keyed deliveries first, and one it already holds is replayed: nothing is
-// sent, nothing is stamped and no turn is read. A delivery the runtime took
-// now records the runtime's receipt and gathers its turn evidence within the
+// recorded via steer. A deliver-now unit's message after its replacement
+// step (d.Replacement) goes immediate too, on a runtime that does not
+// deduplicate. A redelivery (d.Redelivery) asks a runtime that keeps keyed
+// deliveries first, and one it already holds is replayed: nothing is sent,
+// nothing is stamped and no turn is read. A delivery the runtime took now
+// records the runtime's receipt and gathers its turn evidence within the
 // link wait (linkEvidence).
 func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
 	h := e.live
@@ -489,7 +491,15 @@ func (e *conversationLaneExec) Deliver(ctx context.Context, d opjournal.Delivery
 		fence = runtime.InputFence{Generation: d.Fence.Generation, Epoch: d.Fence.Epoch, Token: d.Fence.Token}
 	}
 	delivery := worker.NudgeDeliveryDefault
-	if d.Steer {
+	switch {
+	case d.Steer:
+		delivery = worker.NudgeDeliveryImmediate
+	case d.Replacement && !e.lastCaps.Dedup:
+		// A deliver-now message after its settled replacement step goes at
+		// once, as interrupt_now's does, without the idle wait. A
+		// deduplicating runtime keeps its keyed default send, which
+		// dispatches at once and replays on a retry; an immediate nudge is
+		// unkeyed (laneSteerCap).
 		delivery = worker.NudgeDeliveryImmediate
 	}
 	at := e.deps.clk.Now()
