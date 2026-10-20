@@ -210,9 +210,13 @@ type TurnObservation struct {
 	// no ended turn newer than Seen, ended normally: the fold journals an
 	// inferred end (InferredIdleEnd), not an unobserved one. A newer turn,
 	// current or in Recent, while the running turn's end was never seen is
-	// still a gap. Residual: an inferred end never enters Recent, so Seen
-	// never anchors on it; if the source restores that turn to Recent only
-	// after the next turn has run, the next turn's idle end reads as a gap.
+	// still a gap. The caller sets it only when its own observation of the
+	// source saw that turn running; a reader that did not (a restarted or
+	// successor observer) cannot tell a normal end from a gap, so it leaves
+	// it unset and the end is unobserved. Residual: an inferred end never
+	// enters Recent, so Seen never anchors on it; if the source restores
+	// that turn to Recent only after the next turn has run, the next
+	// turn's idle end reads as a gap.
 	InferIdleEnds bool
 	// ObservedAt is the observer's clock at the read. It is required and
 	// non-zero: it dates every cell write and every fact without a source

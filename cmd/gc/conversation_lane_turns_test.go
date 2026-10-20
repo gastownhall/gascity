@@ -1284,12 +1284,12 @@ func TestLaneHostRetriesATurnUpdateDroppedWhileQuiescent(t *testing.T) {
 	}
 }
 
-// TestLaneHostParkedObservationsResume pins the observer under slot
-// contention: a worker holding its slot only for a running turn parks once
-// another conversation queues, and the worker its park starts watches again
-// even though its pass finds no lane work, so the turn's end is journaled.
-func TestLaneHostParkedObservationsResume(t *testing.T) {
-	l := newLaneHostTurns(t)
+// laneHostParkWatchedTurn delivers a prompt to l's conversation on a host of
+// one slot, journals its turn t1 running, and parks the observing worker for
+// another queued conversation; it returns once the worker the park starts
+// has passed, watching again.
+func laneHostParkWatchedTurn(t *testing.T, l *laneHostTurns) {
+	t.Helper()
 	other := addSession(t, l.f, "b")
 	st := l.f.laneStore(t)
 	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
@@ -1328,6 +1328,15 @@ func TestLaneHostParkedObservationsResume(t *testing.T) {
 	if p := l.hh.nextPass(t); p.conv != l.f.id || p.out.res.Took != opjournal.TakeNone {
 		t.Fatalf("pass = %+v, want the parked conversation's, with nothing to take", p)
 	}
+}
+
+// TestLaneHostParkedObservationsResume pins the observer under slot
+// contention: a worker holding its slot only for a running turn parks once
+// another conversation queues, and the worker its park starts watches again
+// even though its pass finds no lane work, so the turn's end is journaled.
+func TestLaneHostParkedObservationsResume(t *testing.T) {
+	l := newLaneHostTurns(t)
+	laneHostParkWatchedTurn(t, l)
 	l.send(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
 	l.batch(t, "the delivered turn's end")
 	if l.hh.nextExit(t) != l.f.id {
@@ -2236,7 +2245,6 @@ func TestLaneTurnObserverV1InferredEndCreditsInterrupt(t *testing.T) {
 	f.o.setInterrupting(opjournal.InterruptRef{Op: laneObsInterruptOp, Turn: "t1"})
 	f.see(laneIdle())
 	f.see(laneRunning("t2"))
-	f.restart()
 	f.credits = []opjournal.InterruptRef{{Op: laneObsInterruptOp, Turn: "t2"}}
 	f.see(laneIdle())
 	if f.creditReads != 1 {
@@ -2291,5 +2299,88 @@ func TestLaneTurnObserverIdleWithTheTurnMissingIsAGapElsewhere(t *testing.T) {
 				t.Fatalf("gaps = %d, want 1", st.Gaps)
 			}
 		})
+	}
+}
+
+// TestLaneTurnObserverV1InfersOnlyWhatItsWatchSawRun pins the maintainer
+// ruling of 2026-10-20 (review finding 3): V1's normal end is inferred only
+// when the watch reading the idle snapshot saw the turn run itself. A
+// successor worker's observer, or the same observer's next watch, that
+// first reads idle with the running turn missing from Recent ends it
+// unobserved and counts a gap (X11 §8), crediting no interrupt, whether the
+// observer was told of one or an op row names it; once that watch sees a
+// turn run, its idle end is inferred again.
+func TestLaneTurnObserverV1InfersOnlyWhatItsWatchSawRun(t *testing.T) {
+	for _, c := range []struct {
+		name  string
+		renew func(f *laneObsFixture)
+	}{
+		{"successor observer", (*laneObsFixture).restart},
+		{"next watch", func(f *laneObsFixture) { f.o.closed(); f.start() }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			f := newLaneObsV1Fixture(t)
+			f.start()
+			f.see(laneRunning("t1"))
+			c.renew(f)
+			f.o.setInterrupting(opjournal.InterruptRef{Op: laneObsInterruptOp, Turn: "t1"})
+			f.credits = []opjournal.InterruptRef{{Op: laneObsInterruptOp, Turn: "t1"}}
+			f.see(laneIdle())
+			f.wantFacts("turn.started:t1", "turn.ended:t1:unobserved")
+			if st := f.stats.status(); st.Gaps != 1 {
+				t.Fatalf("gaps = %d, want 1 for the end no watch saw", st.Gaps)
+			}
+			if f.creditReads != 0 {
+				t.Fatalf("credit reads = %d, want none for an unobserved end", f.creditReads)
+			}
+			f.see(laneRunning("t2"))
+			f.see(laneIdle())
+			f.wantFacts("turn.started:t1", "turn.ended:t1:unobserved", "turn.started:t2", "turn.ended:t2:ended")
+			f.wantTurnEndedBasis("t2", opjournal.FactBasisObserved)
+			if st := f.stats.status(); st.Gaps != 1 {
+				t.Fatalf("gaps = %d, want t2's inferred end to count none", st.Gaps)
+			}
+		})
+	}
+}
+
+// TestLaneTurnObserverV1InfersWhatItsWatchSawRunAfterARestart pins the other
+// side of the ruling: a successor whose watch reads the turn the row shows
+// running as current, then idle with it missing, saw it run and infers its
+// end.
+func TestLaneTurnObserverV1InfersWhatItsWatchSawRunAfterARestart(t *testing.T) {
+	f := newLaneObsV1Fixture(t)
+	f.start()
+	f.see(laneRunning("t1"))
+	f.restart()
+	f.see(laneRunning("t1"))
+	f.see(laneIdle())
+	f.wantFacts("turn.started:t1", "turn.ended:t1:ended")
+	if st := f.stats.status(); st.Gaps != 0 {
+		t.Fatalf("gaps = %d, want 0", st.Gaps)
+	}
+}
+
+// TestLaneHostV1ParkedTurnMissingAtIdleIsAGap pins the ruling under slot
+// contention: the worker a park starts watches anew, so on T3 V1 its first
+// read of idle with the parked worker's running turn missing from Recent
+// ends that turn unobserved, one gap.
+func TestLaneHostV1ParkedTurnMissingAtIdleIsAGap(t *testing.T) {
+	l := newLaneHostTurns(t)
+	l.turns.caps = laneObsV1Caps
+	laneHostParkWatchedTurn(t, l)
+	l.send(laneIdle())
+	l.batch(t, "the parked turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the resumed worker did not exit once the turn ended")
+	}
+	if got, want := laneFactList(t, l.store, l.f.id, 1), []string{"turn.started:t1", "turn.ended:t1:unobserved"}; !slices.Equal(got, want) {
+		t.Fatalf("facts = %q, want %q", got, want)
+	}
+	if st := l.hh.h.status(l.f.clk.Now()).Turns; st == nil || st.Gaps != 1 {
+		t.Fatalf("turns status = %+v, want one gap", st)
+	}
+	if l.watches() != 2 {
+		t.Fatalf("watches = %d, want one per worker of %s", l.watches(), l.f.id)
 	}
 }
