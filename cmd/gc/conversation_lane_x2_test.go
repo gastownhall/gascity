@@ -41,10 +41,11 @@ func (d *dedupFake) once(key, text string) bool {
 	return true
 }
 
-// NudgeKeyed implements runtime.KeyedNudgeProvider, applying a key once.
-func (d *dedupFake) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+// NudgeKeyed implements runtime.KeyedNudgeProvider, applying a key once; a
+// repeated key answers with the receipt held for its first delivery.
+func (d *dedupFake) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	if !d.once(key, runtime.FlattenText(content)) {
-		return nil
+		return d.LookupDelivery(context.Background(), name, key)
 	}
 	return d.FullFake.NudgeKeyed(name, content, key)
 }
