@@ -89,8 +89,11 @@ type conversationLaneWorker struct {
 	clk      clock.Clock
 	newTimer func(time.Duration) (<-chan time.Time, func())
 	poke     <-chan struct{}
-	hooks    laneWorkerHooks
-	state    laneWorkerState
+	// queued wakes a wait for the observer alone when a conversation
+	// queued for a slot, so the worker weighs its slot again (hooks.yield).
+	queued <-chan struct{}
+	hooks  laneWorkerHooks
+	state  laneWorkerState
 	// startFor is how long a woken session may take to start: the city's
 	// [session] startup_timeout.
 	startFor time.Duration
@@ -106,6 +109,9 @@ const (
 	// laneWaitSettled: a turn update changed what the observer waits for:
 	// nothing is pending any more, or it wants to look sooner.
 	laneWaitSettled
+	// laneWaitQueued: a conversation queued for a slot while the worker
+	// waited for its observer alone.
+	laneWaitQueued
 )
 
 // run passes over the conversation until it is idle, with no observation
@@ -151,7 +157,7 @@ func (w *conversationLaneWorker) await(out lanePassOutcome) bool {
 			// A poke that arrived since the pass keeps the slot: pass again.
 			return !w.hooks.release(false, park)
 		}
-		switch w.wait(d, idle && forTurns) {
+		switch w.wait(d, idle && forTurns, forTurns) {
 		case laneWaitEnded:
 			w.hooks.release(true, nil)
 			return false
@@ -219,12 +225,13 @@ func (w *conversationLaneWorker) reprobeDue(out lanePassOutcome) bool {
 	return next.IsZero() || w.clk.Now().Before(next)
 }
 
-// wait sleeps for d, or until a poke or the host's end. A turn update that
-// arrives meanwhile is handed to the observer and the wait goes on, on the
-// same timer, unless the observer now wants to look sooner (a retry), or,
-// with settle set, no observation is pending any more: the wait then ends
+// wait sleeps for d, or until a poke or the host's end, or, with yieldable
+// set, until a conversation queues for a slot. A turn update that arrives
+// meanwhile is handed to the observer and the wait goes on, on the same
+// timer, unless the observer now wants to look sooner (a retry), or, with
+// settle set, no observation is pending any more: the wait then ends
 // settled, for the worker to plan again.
-func (w *conversationLaneWorker) wait(d time.Duration, settle bool) laneWaitEnd {
+func (w *conversationLaneWorker) wait(d time.Duration, settle, yieldable bool) laneWaitEnd {
 	if d <= 0 {
 		if w.ctx.Err() != nil {
 			return laneWaitEnded
@@ -234,12 +241,18 @@ func (w *conversationLaneWorker) wait(d time.Duration, settle bool) laneWaitEnd 
 	deadline := w.clk.Now().Add(d)
 	fire, stop := w.newTimer(d)
 	defer stop()
+	var queued <-chan struct{}
+	if yieldable {
+		queued = w.queued
+	}
 	for {
 		select {
 		case <-w.ctx.Done():
 			return laneWaitEnded
 		case <-w.poke:
 			return laneWaitPoked
+		case <-queued:
+			return laneWaitQueued
 		case <-fire:
 			return laneWaitFired
 		case u, ok := <-w.turnUpdates():

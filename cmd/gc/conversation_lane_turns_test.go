@@ -591,11 +591,22 @@ func TestLaneHostObservesTurnsOnTheWorker(t *testing.T) {
 		t.Fatalf("the worker of %s exited while its cells show t1 running", c)
 	case <-time.After(50 * time.Millisecond):
 	}
-	turns.ch <- worker.TurnUpdate{History: runtime.TurnHistory{
-		Recent: []runtime.EndedTurn{{TurnID: "t1", EndedAt: f.clk.Now(), Status: runtime.TurnStatusCompleted}}, ObservedAt: f.clk.Now(),
-	}}
+	t1 := runtime.EndedTurn{TurnID: "t1", EndedAt: f.clk.Now(), Status: runtime.TurnStatusCompleted}
+	turns.ch <- worker.TurnUpdate{History: runtime.TurnHistory{Recent: []runtime.EndedTurn{t1}, ObservedAt: f.clk.Now()}}
+	select {
+	case <-store.turnBatches:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the observer wrote no batch for t1's end")
+	}
+	select {
+	case c := <-hh.exits:
+		t.Fatalf("the worker of %s exited at the end of t1, which ran before its delivery", c)
+	case <-time.After(50 * time.Millisecond):
+	}
+	t2 := runtime.EndedTurn{TurnID: "t2", EndedAt: f.clk.Now(), Status: runtime.TurnStatusCompleted}
+	turns.ch <- worker.TurnUpdate{History: runtime.TurnHistory{Recent: []runtime.EndedTurn{t2, t1}, ObservedAt: f.clk.Now()}}
 	if hh.nextExit(t) != f.id {
-		t.Fatal("the worker did not exit once t1 ended")
+		t.Fatal("the worker did not exit once the delivered turn t2 ended")
 	}
 	select {
 	case <-ctx.Done():
@@ -605,8 +616,8 @@ func TestLaneHostObservesTurnsOnTheWorker(t *testing.T) {
 	if turns.watches != 1 {
 		t.Fatalf("watches = %d, want one per worker", turns.watches)
 	}
-	if s := hh.h.status(f.clk.Now()); s.Turns == nil || s.Turns.Writes != 2 || s.Turns.Watching != 0 {
-		t.Fatalf("status turns = %+v, want two writes and no watch", s.Turns)
+	if s := hh.h.status(f.clk.Now()); s.Turns == nil || s.Turns.Writes != 3 || s.Turns.Watching != 0 {
+		t.Fatalf("status turns = %+v, want three writes and no watch", s.Turns)
 	}
 }
 
@@ -928,7 +939,7 @@ func TestLaneTurnObserverPending(t *testing.T) {
 	if _, pending := f.o.pending(f.clk.Now()); !pending {
 		t.Fatal("a read with no turn yet ended the expectation")
 	}
-	f.see(laneRunning("t1"))
+	f.see(laneRunningAt("t1", f.clk.Now()))
 	if d, pending := f.o.pending(f.clk.Now()); !pending || d != laneTurnHold {
 		t.Fatalf("t1 running: %s, %v; want pending for %s", d, pending, laneTurnHold)
 	}
@@ -1083,11 +1094,12 @@ func TestLaneHostJournalsBusyThenDelivered(t *testing.T) {
 	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
 		t.Fatalf("pass at the boundary = %+v, want the delivery accepted", p.out.res)
 	}
+	take := l.f.clk.Now()
 	l.hh.nextPass(t)
 	l.noExit(t, "with t0 running in its cells")
-	l.send(laneRunning("t1", laneEnded("t0", runtime.TurnStatusCompleted)))
+	l.send(laneRunningAt("t1", take, laneEnded("t0", runtime.TurnStatusCompleted)))
 	l.batch(t, "the delivered turn's start")
-	l.send(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted), laneEnded("t0", runtime.TurnStatusCompleted)))
+	l.send(laneIdle(laneCompletedAt("t1", take), laneEnded("t0", runtime.TurnStatusCompleted)))
 	l.batch(t, "the delivered turn's end")
 	if l.hh.nextExit(t) != l.f.id {
 		t.Fatal("the worker did not exit once the delivered turn ended")
@@ -1315,5 +1327,492 @@ func TestLaneHostParkedObservationsResume(t *testing.T) {
 	}
 	if l.watches() != 2 {
 		t.Fatalf("watches = %d, want one per worker of %s", l.watches(), l.f.id)
+	}
+}
+
+// laneRunningAt is turn id running, started by the source at start.
+func laneRunningAt(id string, start time.Time, recent ...runtime.EndedTurn) runtime.TurnHistory {
+	return runtime.TurnHistory{Current: runtime.TurnState{TurnID: id}, CurrentStart: start, Recent: recent}
+}
+
+// TestLaneTurnObserverExpectsTheTakesOwnTurn pins DES-O1 §7.7's expectation
+// to the turn the take could have started: a turn the source started before
+// the take, or one the cells named at the take, does not end it, even read
+// after the take; a turn started from the take does, running or ended.
+func TestLaneTurnObserverExpectsTheTakesOwnTurn(t *testing.T) {
+	t.Run("busy then delivered", func(t *testing.T) {
+		f := newLaneObsFixture(t)
+		f.start()
+		f.see(laneRunning("t0"))
+		take := f.clk.Now()
+		f.o.expect(take)
+		f.see(laneIdle(laneEnded("t0", runtime.TurnStatusCompleted)))
+		if _, pending := f.o.pending(f.clk.Now()); !pending {
+			t.Fatal("the busy turn's end, read after the take, ended the expectation")
+		}
+		f.see(laneIdle(laneCompletedAt("t1", take.Add(time.Second)), laneEnded("t0", runtime.TurnStatusCompleted)))
+		if _, pending := f.o.pending(f.clk.Now()); pending {
+			t.Fatal("still pending after the delivered turn ended")
+		}
+	})
+	t.Run("idle with an earlier unjournaled turn", func(t *testing.T) {
+		f := newLaneObsFixture(t)
+		f.clk.Advance(time.Hour)
+		f.start()
+		take := f.clk.Now()
+		f.o.expect(take)
+		f.see(laneIdle(laneCompletedAt("t0", take.Add(-10*time.Minute))))
+		if _, pending := f.o.pending(f.clk.Now()); !pending {
+			t.Fatal("an earlier turn the source started before the take ended the expectation")
+		}
+		f.see(laneRunningAt("t1", take.Add(time.Second), laneCompletedAt("t0", take.Add(-10*time.Minute))))
+		f.see(laneIdle(laneCompletedAt("t1", take.Add(time.Second)), laneCompletedAt("t0", take.Add(-10*time.Minute))))
+		if _, pending := f.o.pending(f.clk.Now()); pending {
+			t.Fatal("still pending after the delivered turn ended")
+		}
+		f.wantFacts("turn.started:t0", "turn.ended:t0:completed", "turn.started:t1", "turn.ended:t1:completed")
+	})
+	t.Run("no recorded start", func(t *testing.T) {
+		f := newLaneObsFixture(t)
+		f.start()
+		f.see(runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t0"}})
+		f.o.expect(f.clk.Now())
+		f.see(laneIdle(runtime.EndedTurn{TurnID: "t0", Status: runtime.TurnStatusCompleted}))
+		if _, pending := f.o.pending(f.clk.Now()); !pending {
+			t.Fatal("the end of a turn the cells named at the take ended the expectation")
+		}
+		f.see(laneIdle(runtime.EndedTurn{TurnID: "t1", Status: runtime.TurnStatusCompleted}, runtime.EndedTurn{TurnID: "t0", Status: runtime.TurnStatusCompleted}))
+		if _, pending := f.o.pending(f.clk.Now()); pending {
+			t.Fatal("a turn the cells did not name at the take, journaled after it, left the expectation")
+		}
+	})
+	t.Run("read before the take", func(t *testing.T) {
+		f := newLaneObsFixture(t)
+		f.start()
+		f.see(laneIdle())
+		read := f.clk.Now()
+		f.clk.Advance(time.Second)
+		f.o.expect(f.clk.Now())
+		hist := laneIdle(runtime.EndedTurn{TurnID: "t1", Status: runtime.TurnStatusCompleted})
+		hist.ObservedAt = read
+		f.o.observe(context.Background(), worker.TurnUpdate{History: hist})
+		f.wantFacts("turn.started:t1", "turn.ended:t1:completed")
+		if _, pending := f.o.pending(f.clk.Now()); !pending {
+			t.Fatal("a read made before the take ended the expectation")
+		}
+	})
+}
+
+// TestLaneTurnObserverRunningHoldEndsWithTheRuntime pins the bound on the
+// hold for a turn the cells show running: when the worker's hold ends on its
+// timer the observer looks at the runtime, and one that is not running ends
+// the hold, its open turn left to session.ended (X11 D8); a failed look
+// keeps it, and the next batch that lands holds again.
+func TestLaneTurnObserverRunningHoldEndsWithTheRuntime(t *testing.T) {
+	f := newLaneObsFixture(t)
+	var up atomic.Bool
+	var upErr error
+	looks := 0
+	f.o.deps.running = func(context.Context) (bool, error) {
+		looks++
+		return up.Load(), upErr
+	}
+	f.start()
+	f.see(laneRunning("t1"))
+	up.Store(true)
+	f.o.timerFired(context.Background())
+	if _, pending := f.o.pending(f.clk.Now()); !pending || looks != 1 {
+		t.Fatalf("pending %v after %d looks, want held while the runtime runs", pending, looks)
+	}
+	up.Store(false)
+	upErr = errors.New("store unavailable")
+	f.o.timerFired(context.Background())
+	if _, pending := f.o.pending(f.clk.Now()); !pending {
+		t.Fatal("a failed look ended the hold")
+	}
+	if n := f.notes.all(); len(n) != 1 || !strings.Contains(n[0], "store unavailable") {
+		t.Fatalf("notes = %v, want the failed look", n)
+	}
+	f.notes = &laneNotes{}
+	f.o.deps.note = f.notes.note
+	upErr = nil
+	f.o.timerFired(context.Background())
+	if _, pending := f.o.pending(f.clk.Now()); pending {
+		t.Fatal("a stopped runtime's open turn still holds the worker")
+	}
+	f.see(laneRunningAt("t2", f.clk.Now(), laneEnded("t1", runtime.TurnStatusCompleted)))
+	if _, pending := f.o.pending(f.clk.Now()); !pending {
+		t.Fatal("a new running turn does not hold the worker")
+	}
+	f.see(laneRunning("t2", laneEnded("t1", runtime.TurnStatusCompleted)))
+	if looks != 3 {
+		t.Fatalf("looks = %d, want one per hold timer", looks)
+	}
+}
+
+// laneFactGetFailStore fails Get of one fact id, as a transient read.
+type laneFactGetFailStore struct {
+	laneTestStore
+	failID string
+}
+
+func (s laneFactGetFailStore) Get(id string) (beads.Bead, error) {
+	if id == s.failID {
+		return beads.Bead{}, errors.New("store unavailable")
+	}
+	return s.laneTestStore.Get(id)
+}
+
+// TestLaneTurnObserverRetriesAnUnreadRecordedFact pins that a fold whose
+// batch was refused for a fact another writer recorded, and whose read-back
+// of that fact fails, is kept for its retry rather than dropped.
+func TestLaneTurnObserverRetriesAnUnreadRecordedFact(t *testing.T) {
+	f := newLaneObsFixture(t)
+	fact := opjournal.Fact{Kind: opjournal.FactTurnStarted, Conversation: laneObsConv, Generation: 1, Turn: "t1", Basis: opjournal.FactBasisRuntime, At: laneT0}
+	item, err := opjournal.FactCreateItem("gc", fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.store.Create(*item.Create); err != nil {
+		t.Fatal(err)
+	}
+	failing := laneFactGetFailStore{laneTestStore: f.store, failID: item.Create.ID}
+	rows := laneTurnRows{store: failing, batcher: f.batcher, prefix: "gc"}
+	f.o.deps.rows = func() (laneTurnRows, error) { return rows, nil }
+	f.start()
+	hist := laneRunning("t1")
+	hist.ObservedAt = f.clk.Now()
+	f.o.observe(context.Background(), worker.TurnUpdate{History: hist})
+	if f.o.retry == nil {
+		t.Fatalf("dropped without a retry: cells %+v, notes %v", f.o.cells, f.notes.all())
+	}
+	if n := f.notes.all(); len(n) != 1 || !strings.Contains(n[0], "store unavailable") {
+		t.Fatalf("notes = %v, want the failed read", n)
+	}
+	rows.store = f.store
+	f.o.retryNow(context.Background())
+	if f.o.retry != nil {
+		t.Fatalf("the retry did not fold; notes %v", f.notes.all())
+	}
+	if row := f.row(); row.Turn.State != opjournal.TurnStateRunning || row.Turn.ID != "t1" {
+		t.Fatalf("cells = %+v, want t1 running", row.Turn)
+	}
+	f.wantFacts("turn.started:t1")
+}
+
+// TestLaneTurnObserverResetLeavesOutTheAnchor pins laneTurnPrior at a reset
+// whose prior generation journaled no end of its own: the boundary it kept in
+// Seen is the prior's, so the next generation journals it neither.
+func TestLaneTurnObserverResetLeavesOutTheAnchor(t *testing.T) {
+	f := newLaneObsFixture(t)
+	f.start()
+	f.see(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
+	f.gen = 2
+	f.see(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
+	if row := f.row(); row.Turn.Generation != 2 || row.Turn.LastID != "" || row.Turn.Seen != "t1" {
+		t.Fatalf("cells = %+v, want generation 2 anchored at t1 with no end of its own", row.Turn)
+	}
+	f.gen = 3
+	f.see(laneIdle(laneEnded("t1", runtime.TurnStatusCompleted)))
+	f.wantFacts("turn.started:t1@g1", "turn.ended:t1@g1:completed")
+}
+
+// TestLaneTurnObserverUnsupportedKeepsTheHistory pins keep: an update that
+// says the source cannot identify turns, failing while a history waits for
+// its retry, does not displace that history, so the retry journals it.
+func TestLaneTurnObserverUnsupportedKeepsTheHistory(t *testing.T) {
+	f := newLaneObsFixture(t)
+	f.start()
+	f.genErr = errors.New("sessions unavailable")
+	hist := laneRunning("t1")
+	hist.ObservedAt = f.clk.Now()
+	f.o.observe(context.Background(), worker.TurnUpdate{History: hist})
+	f.o.observe(context.Background(), worker.TurnUpdate{Err: fmt.Errorf("reading turns: %w", runtime.ErrTurnIdentityUnsupported)})
+	if f.o.retry == nil || f.o.retry.Err != nil {
+		t.Fatalf("kept %+v, want the history", f.o.retry)
+	}
+	f.genErr = nil
+	f.o.retryNow(context.Background())
+	f.wantFacts("turn.started:t1")
+}
+
+// TestLaneTurnObserverStopsForAClosedConversation pins that a generation read
+// that finds the session gone or closed ends the watch, so the observer holds
+// its worker no longer.
+func TestLaneTurnObserverStopsForAClosedConversation(t *testing.T) {
+	f := newLaneObsFixture(t)
+	f.start()
+	f.see(laneRunning("t1"))
+	f.live = false
+	hist := laneRunning("t1")
+	hist.ObservedAt = f.clk.Now()
+	f.o.observe(context.Background(), worker.TurnUpdate{History: hist})
+	if f.o.state != laneTurnDone {
+		t.Fatalf("observer state = %d, want done", f.o.state)
+	}
+	if _, pending := f.o.pending(f.clk.Now()); pending {
+		t.Fatal("an observer of a closed conversation is pending")
+	}
+	if f.stats.watching.Load() != 0 {
+		t.Fatalf("watching = %d, want 0", f.stats.watching.Load())
+	}
+}
+
+// TestLaneTurnsWatchAfterAFailedPass pins that no pass that failed or was
+// skipped starts the watch, with a kind listed in [ops] authoritative too.
+func TestLaneTurnsWatchAfterAFailedPass(t *testing.T) {
+	for _, out := range []lanePassOutcome{{err: errors.New("list unavailable")}, {skipped: true}} {
+		if laneTurnsWatchAfter(out, true) {
+			t.Errorf("laneTurnsWatchAfter(%+v, true) = true, want false", out)
+		}
+	}
+	if !laneTurnsWatchAfter(lanePassOutcome{}, true) {
+		t.Error("a pass that succeeded with a kind listed starts no watch")
+	}
+}
+
+// laneWorkerRig drives a conversationLaneWorker over scripted hooks.
+type laneWorkerRig struct {
+	clk     *laneTestClock
+	timers  chan laneTimer
+	turns   chan worker.TurnUpdate
+	folded  []worker.TurnUpdate
+	pending func() (time.Duration, bool)
+	pass    func() lanePassOutcome
+	release chan *lanePark
+}
+
+func newLaneWorkerRig() *laneWorkerRig {
+	return &laneWorkerRig{
+		clk: &laneTestClock{now: laneT0}, timers: make(chan laneTimer, 16),
+		turns: make(chan worker.TurnUpdate, 4), release: make(chan *lanePark, 4),
+		pending: func() (time.Duration, bool) { return 0, false },
+		pass:    func() lanePassOutcome { return lanePassOutcome{} },
+	}
+}
+
+// run runs the worker in the background until it releases its slot.
+func (r *laneWorkerRig) run(ctx context.Context) {
+	w := &conversationLaneWorker{
+		ctx: ctx, clk: r.clk, poke: make(chan struct{}), queued: make(chan struct{}),
+		newTimer: func(d time.Duration) (<-chan time.Time, func()) {
+			tm := laneTimer{d: d, c: make(chan time.Time, 1)}
+			r.timers <- tm
+			return tm.c, func() {}
+		},
+		hooks: laneWorkerHooks{
+			pass:         func() lanePassOutcome { return r.pass() },
+			yield:        func(time.Duration) bool { return false },
+			release:      func(_ bool, park *lanePark) bool { r.release <- park; return true },
+			turns:        func() <-chan worker.TurnUpdate { return r.turns },
+			onTurn:       func(u worker.TurnUpdate, _ bool) { r.folded = append(r.folded, u) },
+			turnsPending: func() (time.Duration, bool) { return r.pending() },
+		},
+	}
+	go w.run()
+}
+
+// TestLaneWorkerDrainsTurnsBeforeItReleases pins that a worker going idle
+// hands every turn update already queued to its observer before it gives
+// up its slot, so none is left unfolded.
+func TestLaneWorkerDrainsTurnsBeforeItReleases(t *testing.T) {
+	r := newLaneWorkerRig()
+	r.turns <- worker.TurnUpdate{History: laneRunning("t1")}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.run(ctx)
+	select {
+	case <-r.release:
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the idle worker did not release its slot")
+	}
+	if len(r.folded) != 1 || r.folded[0].History.Current.TurnID != "t1" {
+		t.Fatalf("folded %+v before the release, want the queued update", r.folded)
+	}
+}
+
+// TestLaneWorkerWaitsForTheSoonerOfOpsAndObserver pins that a worker with op
+// work waits for its observer's look when that comes before the ops' next
+// change.
+func TestLaneWorkerWaitsForTheSoonerOfOpsAndObserver(t *testing.T) {
+	r := newLaneWorkerRig()
+	r.pass = func() lanePassOutcome {
+		return lanePassOutcome{res: opjournal.PassResult{Next: r.clk.Now().Add(30 * time.Second)}}
+	}
+	r.pending = func() (time.Duration, bool) { return time.Second, true }
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	r.run(ctx)
+	select {
+	case tm := <-r.timers:
+		if tm.d != time.Second {
+			t.Fatalf("wait = %s, want the observer's sooner %s", tm.d, time.Second)
+		}
+	case <-time.After(laneWaitBudget):
+		t.Fatal("the worker set no timer")
+	}
+}
+
+// TestLaneHostKeepsTheDeliveredTurnPastAnOldEnd pins DES-O1 §7.7 for a
+// message to a busy session whose first read after the take shows only the
+// busy turn's end: the worker stays for the turn the delivery started.
+func TestLaneHostKeepsTheDeliveredTurnPastAnOldEnd(t *testing.T) {
+	l := newLaneHostTurns(t)
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
+	var ready atomic.Bool
+	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+		return laneReadyExec{clk: l.f.clk, ready: &ready}
+	}
+	l.hh.start()
+	if p := l.hh.nextPass(t); !p.out.res.Busy {
+		t.Fatalf("first pass = %+v, want busy", p.out.res)
+	}
+	tm := l.hh.nextTimer(t)
+	l.send(laneRunning("t0"))
+	l.batch(t, "the busy turn")
+	ready.Store(true)
+	l.f.clk.Advance(tm.d)
+	tm.c <- l.f.clk.Now()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass at the boundary = %+v, want the delivery accepted", p.out.res)
+	}
+	take := l.f.clk.Now()
+	l.hh.nextPass(t)
+	l.f.clk.Advance(500 * time.Millisecond)
+	t0 := laneEnded("t0", runtime.TurnStatusCompleted)
+	l.send(laneIdle(t0))
+	l.batch(t, "t0's end, read after the take")
+	l.noExit(t, "before the turn its delivery started was seen")
+	l.send(laneRunningAt("t1", take.Add(time.Second), t0))
+	l.batch(t, "the delivered turn's start")
+	l.send(laneIdle(laneCompletedAt("t1", take.Add(time.Second)), t0))
+	l.batch(t, "the delivered turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the delivered turn ended")
+	}
+}
+
+// TestLaneHostKeepsTheDeliveredTurnPastAnEarlierTurn pins DES-O1 §7.7 for a
+// message to an idle session whose source still shows an earlier turn the
+// cells never journaled: journaling that turn does not end the worker's wait
+// for the delivered one.
+func TestLaneHostKeepsTheDeliveredTurnPastAnEarlierTurn(t *testing.T) {
+	l := newLaneHostTurns(t)
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
+	l.hh.start()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the delivery accepted", p.out.res)
+	}
+	take := l.f.clk.Now()
+	l.hh.nextPass(t)
+	l.f.clk.Advance(100 * time.Millisecond)
+	t0 := laneCompletedAt("t0", take.Add(-10*time.Minute))
+	l.send(laneIdle(t0))
+	l.batch(t, "the earlier turn, read after the take")
+	l.noExit(t, "before the turn its delivery started was seen")
+	l.send(laneRunningAt("t1", take.Add(time.Second), t0))
+	l.batch(t, "the delivered turn's start")
+	l.send(laneIdle(laneCompletedAt("t1", take.Add(time.Second)), t0))
+	l.batch(t, "the delivered turn's end")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the delivered turn ended")
+	}
+}
+
+// TestLaneHostObservingWorkerYieldsToAQueuedConversation pins the host's slot
+// policy for a worker that waits only for its observer: a conversation that
+// queues for a slot wakes it, and it parks at once instead of at its hold's
+// end.
+func TestLaneHostObservingWorkerYieldsToAQueuedConversation(t *testing.T) {
+	l := newLaneHostTurns(t)
+	other := addSession(t, l.f, "b")
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
+	l.hh.h.maxWorkers = 1
+	l.hh.start()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the delivery accepted", p.out.res)
+	}
+	l.hh.nextPass(t)
+	hold := l.hh.nextTimer(t)
+	l.send(laneRunning("t1"))
+	l.batch(t, "the delivered turn's start")
+	l.f.propose(t, st, l.f.msg("k2", opjournal.RolePrompt, "hi", func(r *opjournal.Request) { r.Conversation = other }))
+	if !l.hh.h.Poke(other) {
+		t.Fatal("Poke refused")
+	}
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatalf("the observing worker kept its slot until its %s hold ends", hold.d)
+	}
+	if p := l.hh.nextPass(t); p.conv != other {
+		t.Fatalf("pass over %s, want the queued %s", p.conv, other)
+	}
+}
+
+// TestLaneHostReleasesARunningTurnOfAStoppedRuntime pins the bound on the
+// running-turn hold end to end: a session stopped mid-turn, whose source
+// keeps the turn open, holds its worker until the hold's first timer.
+func TestLaneHostReleasesARunningTurnOfAStoppedRuntime(t *testing.T) {
+	l := newLaneHostTurns(t)
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
+	l.hh.start()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the delivery accepted", p.out.res)
+	}
+	l.hh.nextPass(t)
+	hold := l.hh.nextTimer(t)
+	l.send(laneRunning("t1"))
+	l.batch(t, "the delivered turn's start")
+	l.f.clk.Advance(hold.d)
+	hold.c <- l.f.clk.Now()
+	next := l.hh.nextTimer(t)
+	l.noExit(t, "while its runtime runs")
+	if err := l.f.sp.Stop(l.f.name); err != nil {
+		t.Fatal(err)
+	}
+	l.f.clk.Advance(next.d)
+	next.c <- l.f.clk.Now()
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker kept its slot for a stopped runtime's open turn")
+	}
+}
+
+// laneSlowDeliverExec is a ready executor whose delivery takes took on the
+// test clock, as a prompt written partway through its pass does.
+type laneSlowDeliverExec struct {
+	laneReadyExec
+	took time.Duration
+}
+
+func (e laneSlowDeliverExec) Deliver(ctx context.Context, d opjournal.Delivery) opjournal.DeliveryResult {
+	e.clk.Advance(e.took)
+	return e.laneReadyExec.Deliver(ctx, d)
+}
+
+// TestLaneHostExpectsATurnStartedDuringItsPass pins where the expectation
+// starts: at the pass's start, so a turn the source started while the pass
+// delivered, before the pass ended, is the take's.
+func TestLaneHostExpectsATurnStartedDuringItsPass(t *testing.T) {
+	l := newLaneHostTurns(t)
+	st := l.f.laneStore(t)
+	l.f.propose(t, st, l.f.msg("k1", opjournal.RolePrompt, "hello"))
+	ready := new(atomic.Bool)
+	ready.Store(true)
+	l.hh.h.newExec = func(laneExecDeps, session.Info) opjournal.Executor {
+		return laneSlowDeliverExec{laneReadyExec: laneReadyExec{clk: l.f.clk, ready: ready}, took: 2 * time.Second}
+	}
+	began := l.f.clk.Now()
+	l.hh.start()
+	if p := l.hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass = %+v, want the delivery accepted", p.out.res)
+	}
+	l.hh.nextPass(t)
+	l.send(laneIdle(laneCompletedAt("t1", began.Add(time.Second))))
+	l.batch(t, "the delivered turn")
+	if l.hh.nextExit(t) != l.f.id {
+		t.Fatal("the worker did not exit once the turn its pass started ended")
 	}
 }

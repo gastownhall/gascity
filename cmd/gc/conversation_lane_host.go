@@ -322,9 +322,12 @@ type conversationLaneHost struct {
 	noticeFailures map[string]*laneNoticeFailures
 }
 
-// laneWorker is one conversation's slot; poke wakes its worker.
+// laneWorker is one conversation's slot; poke wakes its worker for a pass,
+// and queued wakes it, while it waits only for its observer, to weigh its
+// slot again because a conversation queued for one.
 type laneWorker struct {
-	poke chan struct{}
+	poke   chan struct{}
+	queued chan struct{}
 }
 
 // laneParked is one parked conversation.
@@ -550,6 +553,12 @@ func (h *conversationLaneHost) pokeLocked(conv string) bool {
 		if !h.inQueue[conv] {
 			h.inQueue[conv] = true
 			h.queued = append(h.queued, conv)
+			for _, w := range h.workers {
+				select {
+				case w.queued <- struct{}{}:
+				default:
+				}
+			}
 		}
 		return true
 	}
@@ -566,7 +575,7 @@ func (h *conversationLaneHost) startWorkerLocked(conv string) {
 		delete(h.parked, conv)
 		state = p.state
 	}
-	w := &laneWorker{poke: make(chan struct{}, 1)}
+	w := &laneWorker{poke: make(chan struct{}, 1), queued: make(chan struct{}, 1)}
 	h.workers[conv] = w
 	h.wg.Add(1)
 	go h.runWorker(conv, w, state)
@@ -661,22 +670,25 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 	// watch, whatever the successor's first pass finds.
 	resumeTurns := state.turns
 	cw := &conversationLaneWorker{
-		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state, startFor: h.wakeStartFor(),
+		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, queued: w.queued, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
 			pass: func() lanePassOutcome {
+				// The turn a content take starts begins after the pass
+				// does, never before.
+				began := h.clk.Now()
 				out := h.pass(conv)
 				if laneTurnsWatchAfter(out, len(h.kinds) > 0 || resumeTurns) {
 					h.watchTurns(conv, turns)
 				}
-				if out.err == nil && out.res.Took != opjournal.TakeNone {
-					turns.expect(h.clk.Now())
+				if out.err == nil && out.res.Took == opjournal.TakeContent {
+					turns.expect(began)
 				}
 				return out
 			},
 			turns:        turns.updates,
 			onTurn:       func(u worker.TurnUpdate, ok bool) { h.observeTurn(conv, turns, u, ok) },
 			turnsPending: func() (time.Duration, bool) { return turns.pending(h.clk.Now()) },
-			onTurnTimer:  func() { h.retryTurns(conv, turns) },
+			onTurnTimer:  func() { h.turnTimer(conv, turns) },
 			yield:        h.yield,
 			release:      func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
 			onPass: func(out lanePassOutcome) {
