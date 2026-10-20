@@ -377,6 +377,7 @@ func (cs *controllerState) startConversationLaneHost(ctx context.Context) *conve
 	h := newConversationLaneHost(cs, kinds)
 	h.start(ctx)
 	cs.ledgerFeeds.setRowsChanged(h.pokeChangedRows)
+	cs.setConversationLanePoke(h.Poke)
 	return h
 }
 

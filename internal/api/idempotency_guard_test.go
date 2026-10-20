@@ -72,7 +72,15 @@ var exemptFromIdempotency = map[string]bool{
 	// Accepted trade-off: the ExtMsgGroupCreated event fires on every ensure,
 	// so a retry can double-emit it — tolerable for an ensure endpoint; move
 	// this opid to requireIdempotency if that ever matters.
-	"ensure-extmsg-group":                                      true,
+	"ensure-extmsg-group": true,
+	// propose-session-op is keyed by the operation journal itself: the op id
+	// derives from the session, the principal and the client key (the body's
+	// or the Idempotency-Key header's), and a retry returns the stored op
+	// (200) or key-reuse (409) across restarts, which the LRU cannot.
+	"propose-session-op": true,
+	// cancel-session-op is idempotent by state: the first recorded cancel
+	// wins and a retry answers already_terminal or requested.
+	"cancel-session-op": true,
 	"post-v0-city-by-city-name-agent-by-base-by-action":        true,
 	"post-v0-city-by-city-name-agent-by-dir-by-base-by-action": true,
 	"post-v0-city-by-city-name-bead-by-id-assign":              true,

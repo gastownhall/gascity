@@ -434,6 +434,43 @@ func (sm *SupervisorMux) registerCityRoutes() {
 	cityPost(sm, "/session/{id}/unpin", (*Server).humaHandleSessionUnpin, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable),
 		describes("Clears the session's pin (pin_awake), as gc session unpin does. 409 on a closed session."))
 	cityPost(sm, "/session/{id}/rename", (*Server).humaHandleSessionRename, errorStatuses(http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
+	// The producer API over a session's conversation lane (DES-O1 §11).
+	cityRegister(sm, huma.Operation{
+		OperationID:   "propose-session-op",
+		Method:        http.MethodPost,
+		Path:          "/session/{id}/ops",
+		Summary:       "Propose an operation to a session's conversation lane",
+		DefaultStatus: http.StatusCreated,
+		Errors:        []int{http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
+		Description: "Writes a conversation-lane operation, create-if-absent under its id, which derives from the session, the principal and the client key. " +
+			"201 when this request wrote it, 200 with the stored operation when the same request was proposed before. " +
+			"Only kinds listed in [ops] authoritative are accepted; any other is refused 409 kind-not-enabled and nothing is written. " +
+			"A client key that already names a different request from the same principal is refused 409 key-reuse, naming the existing op_id. " +
+			"Watch op.changed and fact.recorded on the city event stream from the returned cursor; after reconnecting, read a non-terminal operation again with GET .../ops/{op}, whose row is authoritative.",
+	}, (*Server).humaHandleConversationOpPropose)
+	cityRegister(sm, huma.Operation{
+		OperationID: "list-session-ops",
+		Method:      http.MethodGet,
+		Path:        "/session/{id}/ops",
+		Summary:     "List a session's open operations",
+		Errors:      []int{http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
+		Description: "Lists the session's open operations, legacy and lane, in the conversation lane's order. A row this server cannot read is left out and named in partial_errors.",
+	}, (*Server).humaHandleConversationOpList)
+	cityRegister(sm, huma.Operation{
+		OperationID: "get-session-op",
+		Method:      http.MethodGet,
+		Path:        "/session/{id}/ops/{op}",
+		Summary:     "Get one of a session's operations",
+		Errors:      []int{http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
+	}, (*Server).humaHandleConversationOpGet)
+	cityRegister(sm, huma.Operation{
+		OperationID: "cancel-session-op",
+		Method:      http.MethodPost,
+		Path:        "/session/{id}/ops/{op}/cancel",
+		Summary:     "Cancel one of a session's operations",
+		Errors:      []int{http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable},
+		Description: "Cancels a lane operation. One that has not started closes canceled; one executing records the cancel, and its outcome says who won. A legacy operation is closed only by its legacy path and is refused 409.",
+	}, (*Server).humaHandleConversationOpCancel)
 	cityGet(sm, "/session/{id}/agents", (*Server).humaHandleSessionAgentList, errorStatuses(http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 	cityGet(sm, "/session/{id}/agents/{agentId}", (*Server).humaHandleSessionAgentGet, errorStatuses(http.StatusBadRequest, http.StatusNotFound, http.StatusConflict, http.StatusServiceUnavailable))
 

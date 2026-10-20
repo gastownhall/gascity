@@ -823,10 +823,44 @@ export type ConversationGroupRecord = {
     SchemaVersion: number;
 };
 
+export type ConversationInterruptPolicyBody = {
+    /**
+     * What the interrupt does when no boundary is observed: fail or restart.
+     */
+    on_failure?: 'fail' | 'restart';
+};
+
 /**
  * Shape of a conversation.
  */
 export type ConversationKind = 'dm' | 'room' | 'thread';
+
+export type ConversationMessagePolicyBody = {
+    /**
+     * With when now: the session generation the requester saw.
+     */
+    now_generation?: number;
+    /**
+     * With when now: the turn the requester saw.
+     */
+    now_turn?: string;
+    /**
+     * What a steer does on a runtime that cannot steer: boundary or fail.
+     */
+    on_unsupported?: 'boundary' | 'fail';
+    /**
+     * How the agent sees it: prompt (a turn of its own) or notice (a reminder).
+     */
+    role?: 'prompt' | 'notice';
+    /**
+     * Whether the message may wake its session: if_needed or live_only.
+     */
+    wake?: 'if_needed' | 'live_only';
+    /**
+     * When to deliver: boundary (the next turn boundary), after_turn (ride the next turn, never start one), interrupt, if_idle (skipped when the session is mid-turn), now (deliver now) or steer (into the running turn, where the runtime can steer).
+     */
+    when?: 'boundary' | 'after_turn' | 'interrupt' | 'if_idle' | 'now' | 'steer';
+};
 
 export type ConversationOp = {
     /**
@@ -903,6 +937,28 @@ export type ConversationOp = {
     status: 'submitted' | 'accepted' | 'executing' | 'settling' | 'closed';
 };
 
+export type ConversationOpCancelBody = {
+    /**
+     * The asserted principal recorded as the canceler: operator (the default) or t3:<environment id>.
+     */
+    principal?: string;
+    /**
+     * Why the producer cancels.
+     */
+    reason?: string;
+};
+
+export type ConversationOpCancelResult = {
+    /**
+     * The operation after the cancel.
+     */
+    op: ConversationOp;
+    /**
+     * What the cancel did: closed (the operation had not started and is now closed canceled), requested (it is executing; the cancel is recorded and its outcome says who won), already_decided (it is settling; nothing was written) or already_terminal (it was closed).
+     */
+    result: 'closed' | 'requested' | 'already_decided' | 'already_terminal';
+};
+
 export type ConversationOpDelivery = {
     /**
      * The runtime's answer (open vocabulary, e.g. delivered, delivered_unobserved, in_band).
@@ -949,6 +1005,107 @@ export type ConversationOpOutcome = {
     via?: string;
 };
 
+export type ConversationOpPolicyBody = {
+    /**
+     * Execution guarantee: at_least_once (the default; a delivery is repeated only after an ambiguous attempt) or at_most_once (never repeated).
+     */
+    guarantee?: 'at_least_once' | 'at_most_once';
+    /**
+     * The interrupt policy.
+     */
+    interrupt?: ConversationInterruptPolicyBody;
+    /**
+     * The message policy.
+     */
+    message?: ConversationMessagePolicyBody;
+};
+
+export type ConversationOpProposeBody = {
+    /**
+     * The actor class within the principal, e.g. user, system or mcp. Defaults to operator for the operator principal; required with a t3 principal.
+     */
+    actor?: string;
+    /**
+     * An operation id of the same session this one runs after.
+     */
+    after?: string;
+    /**
+     * What caused the operation.
+     */
+    causation?: string;
+    /**
+     * The producer's idempotency key (e.g. T3's message id). The Idempotency-Key header may carry it instead; when both are set they must be equal. Minted and returned when both are absent.
+     */
+    client_key?: string;
+    /**
+     * The producer's own sequence number: it keeps two quick proposals in their order even when relayed concurrently.
+     */
+    client_seq?: number;
+    /**
+     * The producer's correlation id.
+     */
+    correlation?: string;
+    /**
+     * The deadline for the operation to finish.
+     */
+    finish_by?: string;
+    /**
+     * Operation kind. Only kinds listed in [ops] authoritative are accepted (409 kind-not-enabled otherwise).
+     */
+    kind: 'message' | 'interrupt' | 'respond' | 'create' | 'wake' | 'suspend' | 'resume' | 'restart' | 'kill' | 'close';
+    /**
+     * Do not start before this time.
+     */
+    not_before?: string;
+    /**
+     * The operation's payload: a message's text.
+     */
+    payload?: string;
+    /**
+     * The operation's policy; omitted fields take the kind's defaults.
+     */
+    policy?: ConversationOpPolicyBody;
+    /**
+     * The asserted principal: operator (the default) or t3:<environment id> for a T3 Code environment. Until the front door exists it is asserted, not authenticated, like the operator identity of every API mutation; conversation:<id> and gc:<producer> stay reserved to gc's own producers. It keys the operation with the client key, so a retry must send the same one.
+     */
+    principal?: string;
+    /**
+     * The operation's validity scope; omitted takes the kind's default.
+     */
+    scope?: ConversationOpScopeBody;
+    /**
+     * Close the operation failed if it has not started by this time.
+     */
+    start_by?: string;
+};
+
+export type ConversationOpProposeResult = {
+    /**
+     * The client key the operation is recorded under: the producer's, or the one the server minted. Retry with it to get this operation back.
+     */
+    client_key: string;
+    /**
+     * True when this request wrote the operation (201), false when it already existed (200).
+     */
+    created: boolean;
+    /**
+     * City event-stream sequence captured before the proposal. Pass it as after_seq to /v0/city/{cityName}/events/stream to receive this operation's op.changed events.
+     */
+    cursor: string;
+    /**
+     * The operation.
+     */
+    op: ConversationOp;
+    /**
+     * The operation id, derived from the session, the principal and the client key.
+     */
+    op_id: string;
+    /**
+     * The operation's status now.
+     */
+    status: 'submitted' | 'accepted' | 'executing' | 'settling' | 'closed';
+};
+
 export type ConversationOpResult = {
     /**
      * The operation this one was delivered with, when coalesced.
@@ -978,6 +1135,29 @@ export type ConversationOpResult = {
      * Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
      */
     turn_link?: 'exact' | 'correlated' | 'ambiguous' | 'none';
+};
+
+export type ConversationOpScopeBody = {
+    /**
+     * The context epoch of a context scope.
+     */
+    epoch?: number;
+    /**
+     * The session generation of a session scope.
+     */
+    generation?: number;
+    /**
+     * The interaction occurrence a respond answers.
+     */
+    interaction?: string;
+    /**
+     * conversation (any session), context (one context epoch) or session (one session generation).
+     */
+    kind: 'conversation' | 'context' | 'session';
+    /**
+     * The turn an interrupt targets.
+     */
+    turn?: string;
 };
 
 export type ConversationRef = {
@@ -1810,6 +1990,29 @@ export type ListBodyCityPendingEntry = {
      * The list of items.
      */
     items: Array<CityPendingEntry> | null;
+    /**
+     * Cursor for the next page of results.
+     */
+    next_cursor?: string;
+    /**
+     * True when one or more backends failed and the list is incomplete.
+     */
+    partial?: boolean;
+    /**
+     * Human-readable errors from backends that failed during aggregation.
+     */
+    partial_errors?: Array<string> | null;
+    /**
+     * Total number of items matching the query.
+     */
+    total: number;
+};
+
+export type ListBodyConversationOp = {
+    /**
+     * The list of items.
+     */
+    items: Array<ConversationOp> | null;
     /**
      * Cursor for the next page of results.
      */
@@ -3922,6 +4125,10 @@ export type SessionResponse = {
     submission_capabilities?: SubmissionCapabilities;
     template: string;
     title: string;
+    /**
+     * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while [ops] authoritative lists a kind.
+     */
+    turn?: SessionTurn;
     work_dir?: string;
 };
 
@@ -5136,6 +5343,56 @@ export type SessionTranscriptStructuredResponse = {
      */
     structured_messages: Array<SessionStructuredMessage>;
     template: string;
+};
+
+export type SessionTurn = {
+    /**
+     * When the observer saw the current state begin.
+     */
+    at?: string;
+    /**
+     * The runtime's turn capabilities (gc.rt.turn.caps): the turn axes, then source, interrupt and replace.
+     */
+    caps?: Array<SessionTurnCapPair> | null;
+    /**
+     * The session generation the turn cells describe.
+     */
+    generation: number;
+    /**
+     * The running turn's id, as the runtime names it.
+     */
+    id?: string;
+    /**
+     * When the observer saw the last turn end.
+     */
+    last_at?: string;
+    /**
+     * Why the last turn ended (completed, interrupted, superseded, ...).
+     */
+    last_end?: string;
+    /**
+     * The last turn seen to end.
+     */
+    last_id?: string;
+    /**
+     * The observer's clock at the observation that last changed the cells.
+     */
+    observed_at?: string;
+    /**
+     * running, ended, or unknown (never observed, or the cells describe another generation). Open: a newer build may add values.
+     */
+    state: string;
+};
+
+export type SessionTurnCapPair = {
+    /**
+     * Capability name, e.g. start, end, fence, link, source, interrupt, replace.
+     */
+    key: string;
+    /**
+     * Capability value.
+     */
+    value: string;
 };
 
 export type SessionUnknownStatePayload = {
@@ -19305,6 +19562,230 @@ export type SendSessionMessageResponses = {
 };
 
 export type SendSessionMessageResponse = SendSessionMessageResponses[keyof SendSessionMessageResponses];
+
+export type ListSessionOpsData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops';
+};
+
+export type ListSessionOpsErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ListSessionOpsError = ListSessionOpsErrors[keyof ListSessionOpsErrors];
+
+export type ListSessionOpsResponses = {
+    /**
+     * OK
+     */
+    200: ListBodyConversationOp;
+};
+
+export type ListSessionOpsResponse = ListSessionOpsResponses[keyof ListSessionOpsResponses];
+
+export type ProposeSessionOpData = {
+    body: ConversationOpProposeBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * The client key, when the body does not carry one.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops';
+};
+
+export type ProposeSessionOpErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ProposeSessionOpError = ProposeSessionOpErrors[keyof ProposeSessionOpErrors];
+
+export type ProposeSessionOpResponses = {
+    /**
+     * Created
+     */
+    201: ConversationOpProposeResult;
+};
+
+export type ProposeSessionOpResponse = ProposeSessionOpResponses[keyof ProposeSessionOpResponses];
+
+export type GetSessionOpData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+        /**
+         * Operation id.
+         */
+        op: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops/{op}';
+};
+
+export type GetSessionOpErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetSessionOpError = GetSessionOpErrors[keyof GetSessionOpErrors];
+
+export type GetSessionOpResponses = {
+    /**
+     * OK
+     */
+    200: ConversationOp;
+};
+
+export type GetSessionOpResponse = GetSessionOpResponses[keyof GetSessionOpResponses];
+
+export type CancelSessionOpData = {
+    body?: ConversationOpCancelBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+        /**
+         * Operation id.
+         */
+        op: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops/{op}/cancel';
+};
+
+export type CancelSessionOpErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type CancelSessionOpError = CancelSessionOpErrors[keyof CancelSessionOpErrors];
+
+export type CancelSessionOpResponses = {
+    /**
+     * OK
+     */
+    200: ConversationOpCancelResult;
+};
+
+export type CancelSessionOpResponse = CancelSessionOpResponses[keyof CancelSessionOpResponses];
 
 export type GetV0CityByCityNameSessionByIdPendingData = {
     body?: never;
