@@ -1356,6 +1356,12 @@ resource = "subprocess"
 calls = 2
 
 [[count]]
+path = "examples/bd/dolt/stale_db_close_reason_real_bd_test.go"
+resource = "subprocess"
+calls = 2
+tagged = true
+
+[[count]]
 path = "examples/bd/dolt/stale_db_formula_test.go"
 resource = "subprocess"
 calls = 11

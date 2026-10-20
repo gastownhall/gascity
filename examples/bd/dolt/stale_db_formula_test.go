@@ -134,7 +134,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -232,7 +232,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -306,7 +306,7 @@ case "${1:-} ${2:-}" in
     cat "$GC_TEST_SCAN_JSON"
     exit 42
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -390,7 +390,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -450,10 +450,12 @@ esac
 // no longer depends on the session's identity env. It used to be `bd close
 // --actor <chain>`, because bd fences a close on actor == assignee byte for
 // byte and an unaliased pool dog claims under its session bead ID (the #5716
-// shape). The close is now the status-closed `gc bd update`, which bd does
-// not fence on the actor and which gc serves in process for a relocated wisp,
-// so every identity env below must produce the same close and none may
-// smuggle an --actor back in.
+// shape). The close is now `gc bd close --reason` with no --actor: on a
+// single-store city gc runs bd's close as the identity that claimed the wisp
+// (the session's BEADS_ACTOR is that identity, and gc re-pins it for a close
+// of the session's own claim), and for a relocated wisp gc serves the close in
+// process, which refuses --actor. So every identity env below must produce the
+// same close and none may smuggle an --actor back in.
 func TestStaleDBFormulaCloseIsIndependentOfIdentityEnv(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -513,7 +515,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -613,7 +615,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -744,7 +746,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -832,7 +834,7 @@ case "${1:-} ${2:-}" in
       *) cat "$GC_TEST_SCAN_JSON" ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     echo "gc $*" >> "$GC_TEST_LOG"
     ;;
   *)
@@ -971,23 +973,37 @@ func TestStaleDBFormulaDryRunForceBlockersLeaveWorkOpenBeforeApply(t *testing.T)
 // a relocated class store.
 const staleDBReportWrite = "gc bd update bead-1 --set-metadata gc.dolt_cleanup."
 
-// staleDBCloseWrite is the logged prefix of the successful close: the
-// step-completion update (`--set-metadata gc.outcome=pass ... --status=closed`)
-// rather than `bd close --reason`, which a relocated wisp cannot take.
+// staleDBCloseWrite is the logged prefix of the successful close, `gc bd close
+// --reason`: the one spelling that keeps the reason as the wisp's close reason
+// both on a single-store city (bd's close_reason column) and where gc serves the
+// wisp in process from a relocated class store.
 func staleDBCloseWrite(bead string) string {
-	return "gc bd update " + bead + " --set-metadata gc.outcome=pass --set-metadata close_reason=Stale DB scan complete"
+	return "gc bd close " + bead + " --reason Stale DB scan complete"
 }
 
-// TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts pins the split-store
-// fix. On a city whose coordination classes live in their own store, the
-// order wisp this formula works is held by that store: bare `bd` cannot see
-// it (it reports the wisp missing), and gc serves `gc bd update` in process
-// but refuses `--append-notes` (the class store has no notes field) and
-// `close --reason`. Every write to the work bead must therefore be a `gc bd
-// update` carrying only flags the in-process door serves.
+// staleDBOutcomeWrite is the logged outcome write the successful close follows.
+func staleDBOutcomeWrite(bead string) string {
+	return "gc bd update " + bead + " --set-metadata gc.outcome=pass"
+}
+
+// staleDBOutcomeWithdrawal is the logged write that takes the outcome back
+// after a failed close, so the wisp left open carries no outcome.
+func staleDBOutcomeWithdrawal(bead string) string {
+	return "gc bd update " + bead + " --unset-metadata gc.outcome"
+}
+
+// TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts pins the work-bead
+// writes to the shapes both topologies take. On a city whose coordination
+// classes live in their own store, the order wisp this formula works is held by
+// that store: bare `bd` cannot see it (it reports the wisp missing), and gc
+// serves `gc bd update` and `gc bd close --reason` in process but refuses
+// `--append-notes` (the class store has no notes field) and `--actor`. On a
+// single-store city a status-closed update would close the wisp with bd's
+// close_reason column emptied, so the close must be the reasoned close and no
+// update may carry a status.
 func TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts(t *testing.T) {
 	script := renderStaleDBFormulaShell(t)
-	writes := 0
+	updates, closes := 0, 0
 	for _, line := range strings.Split(script, "\n") {
 		trimmed := strings.TrimSpace(line)
 		if strings.HasPrefix(trimmed, "#") || !strings.Contains(line, `"$WORK_BEAD"`) {
@@ -996,18 +1012,56 @@ func TestStaleDBFormulaUsesOnlyShapesARelocatedWispAccepts(t *testing.T) {
 		if !strings.Contains(line, "bd ") {
 			continue
 		}
-		writes++
-		if !strings.Contains(line, `gc bd update "$WORK_BEAD"`) {
-			t.Errorf("work-bead write is not `gc bd update`: %s", trimmed)
+		switch {
+		case strings.Contains(line, `gc bd update "$WORK_BEAD"`):
+			updates++
+		case strings.Contains(line, `gc bd close "$WORK_BEAD" --reason "`):
+			closes++
+		default:
+			t.Errorf("work-bead write is neither `gc bd update` nor `gc bd close --reason`: %s", trimmed)
 		}
-		for _, refused := range []string{"--append-notes", "--notes", "--reason", "--actor", "bd close"} {
+		if strings.Count(line, "bd ") != strings.Count(line, "gc bd ") {
+			t.Errorf("work-bead write runs bare bd, which cannot see a relocated wisp: %s", trimmed)
+		}
+		for _, refused := range []string{"--append-notes", "--notes", "--actor", "--force", "--status", " -s "} {
 			if strings.Contains(line, refused) {
-				t.Errorf("work-bead write uses %s, which a relocated wisp refuses: %s", refused, trimmed)
+				t.Errorf("work-bead write uses %q, which one of the two topologies refuses or loses the close reason on: %s", refused, trimmed)
 			}
 		}
 	}
-	if writes < 2 {
-		t.Fatalf("found %d work-bead writes; want the report write and the close", writes)
+	if updates < 2 || closes != 1 {
+		t.Fatalf("found %d work-bead updates and %d closes; want the report and outcome updates and one reasoned close", updates, closes)
+	}
+}
+
+// TestStaleDBFormulaRecordsTheOutcomeBeforeTheReasonedClose pins the success
+// close end to end: the outcome is written first, so the wisp is never closed
+// with no outcome, the close carries the scan summary as its reason, and only a
+// failed close takes the outcome back (TestStaleDBFormulaSuccessPathFailuresDrainAck).
+func TestStaleDBFormulaRecordsTheOutcomeBeforeTheReasonedClose(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skipf("bash not found: %v", err)
+	}
+	if _, err := exec.LookPath("jq"); err != nil {
+		t.Skipf("jq not found: %v", err)
+	}
+
+	log, out, err := runStaleDBFormulaFailureCase(t, staleDBFailureCase{
+		scanJSON: `{"schema":"gc.dolt.cleanup.v1","dropped":{"count":0,"failed":[],"skipped":[]},"purge":{"bytes_reclaimed":0},"reaped":{"count":0,"targets":[]},"summary":{"bytes_freed_disk":0,"bytes_freed_rss":0,"errors_total":0}}`,
+	})
+	if err != nil {
+		t.Fatalf("rendered script failed: %v\nlog:\n%s\noutput:\n%s", err, log, out)
+	}
+	outcome := strings.Index(log, staleDBOutcomeWrite("bead-1")+"\n")
+	closeAt := strings.Index(log, "gc bd close bead-1 --reason Stale DB scan complete (orphans=0, applied=0, escalated=0)\n")
+	if outcome < 0 || closeAt < 0 {
+		t.Fatalf("command log is missing the outcome write (at %d) or the reasoned close (at %d)\nlog:\n%s\noutput:\n%s", outcome, closeAt, log, out)
+	}
+	if outcome > closeAt {
+		t.Fatalf("the close ran before the outcome write\nlog:\n%s\noutput:\n%s", log, out)
+	}
+	if strings.Contains(log, staleDBOutcomeWithdrawal("bead-1")) {
+		t.Fatalf("a close that succeeded took its outcome back\nlog:\n%s\noutput:\n%s", log, out)
 	}
 }
 
@@ -1110,8 +1164,8 @@ func TestStaleDBFormulaFailurePathsDrainAck(t *testing.T) {
 			if tc.spec.forbidOutput != "" && strings.Contains(string(out), tc.spec.forbidOutput) {
 				t.Fatalf("failure path output still contains unsupported copy %q\nlog:\n%s\noutput:\n%s", tc.spec.forbidOutput, log, out)
 			}
-			if strings.Contains(log, staleDBCloseWrite("bead-1")) {
-				t.Fatalf("failure path closed bead despite non-zero outcome\nlog:\n%s\noutput:\n%s", log, out)
+			if strings.Contains(log, staleDBCloseWrite("bead-1")) || strings.Contains(log, staleDBOutcomeWrite("bead-1")) {
+				t.Fatalf("failure path recorded a pass outcome or closed bead despite non-zero outcome\nlog:\n%s\noutput:\n%s", log, out)
 			}
 		})
 	}
@@ -1130,6 +1184,9 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 		name        string
 		fail        string
 		wantFailure bool
+		forbid      string
+		// then is a write that must follow the failed one.
+		then string
 	}{
 		{
 			name: "scan event failure",
@@ -1140,9 +1197,16 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			fail: staleDBReportWrite,
 		},
 		{
+			name:        "outcome write failure",
+			fail:        staleDBOutcomeWrite("bead-1"),
+			wantFailure: true,
+			forbid:      staleDBCloseWrite("bead-1"),
+		},
+		{
 			name:        "close failure",
 			fail:        staleDBCloseWrite("bead-1"),
 			wantFailure: true,
+			then:        staleDBOutcomeWithdrawal("bead-1"),
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -1150,6 +1214,9 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 				scanJSON:     cleanScan,
 				failContains: tc.fail,
 			})
+			if tc.forbid != "" && strings.Contains(log, tc.forbid) {
+				t.Fatalf("%q ran after the failed %q\nlog:\n%s\noutput:\n%s", tc.forbid, tc.fail, log, out)
+			}
 			if tc.wantFailure && err == nil {
 				t.Fatalf("rendered script exited successfully; want %q failure to preserve non-zero status\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
 			}
@@ -1161,6 +1228,9 @@ func TestStaleDBFormulaSuccessPathFailuresDrainAck(t *testing.T) {
 			}
 			if !strings.Contains(log, tc.fail) {
 				t.Fatalf("command log missing injected failure %q\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
+			}
+			if tc.then != "" && strings.Index(log, tc.then) < strings.Index(log, tc.fail) {
+				t.Fatalf("%q did not follow the failed %q\nlog:\n%s\noutput:\n%s", tc.then, tc.fail, log, out)
 			}
 			if !tc.wantFailure && !strings.Contains(log, staleDBCloseWrite("bead-1")) {
 				t.Fatalf("%q path did not close work after nonessential failure\nlog:\n%s\noutput:\n%s", tc.fail, log, out)
@@ -1208,7 +1278,7 @@ case "${1:-} ${2:-}" in
         ;;
     esac
     ;;
-  "bd update"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
+  "bd update"|"bd close"|"event emit"|"session nudge"|"runtime drain-ack"|"mail send")
     rendered="gc $*"
     echo "$rendered" >> "$GC_TEST_LOG"
     maybe_fail "$rendered"

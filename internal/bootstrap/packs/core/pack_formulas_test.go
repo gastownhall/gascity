@@ -389,9 +389,10 @@ var graphBeadVars = []string{"GC_BEAD_ID", "DRAIN_BEAD_ID", "ROOT_BEAD_ID", "STE
 
 // graphBeadRefusedShapes are the spellings the in-process door refuses on such
 // a bead, because the class store has nothing to write them into (notes, a
-// close reason, a heartbeat lease, an audit actor). A core formula that uses
-// one breaks on gc's own split store.
-var graphBeadRefusedShapes = []string{"--notes", "--append-notes", "--reason", "--actor", "heartbeat"}
+// heartbeat lease, an audit actor). A close reason is not among them: the door
+// records `close --reason` as the bead's close reason. A core formula that uses
+// one of these breaks on gc's own split store.
+var graphBeadRefusedShapes = []string{"--notes", "--append-notes", "--actor", "heartbeat"}
 
 // TestCoreFormulasUseNoRefusedShapeOnGraphBeads scans every core formula for a
 // `bd` write naming a graph-bead variable and fails on a refused shape, or on a

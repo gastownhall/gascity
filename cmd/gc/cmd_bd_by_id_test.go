@@ -1309,6 +1309,11 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"update", "gcg-1", "--unset-metadata=a", "--unset-metadata", "b", "--set-metadata", "c=1"},
 		{"close", "gcg-1"},
 		{"close", "gcg-1", "--json"},
+		{"close", "gcg-1", "--reason", "done"},
+		{"close", "--reason=done", "gcg-1"},
+		{"close", "gcg-1", "-r", "done", "--json"},
+		{"close", "gcg-1", "--reason", ""},
+		{"close", "gcg-1", "--reason", " "},
 		{"reopen", "gcg-1"},
 		{"reopen", "gcg-1", "--json"},
 	} {
@@ -1345,7 +1350,10 @@ func TestBdByIDSurfaceServesAClosedVerbSet(t *testing.T) {
 		{"dep", "tree", "gcg-1", "--max-depth", "0"},
 		{"close"},
 		{"close", "gcg-1", "gcg-2"},
-		{"close", "gcg-1", "--reason", "done"},
+		{"close", "gcg-1", "--reason"},
+		{"close", "gcg-1", "--reason", "one", "-r", "two"},
+		{"close", "gcg-1", "--reason", " ", "-r", "two"},
+		{"close", "gcg-1", "-m", "done"},
 		{"close", "gcg-1", "--force"},
 		{"reopen", "gcg-1", "-r", "wrong call"},
 		{"delete", "gcg-1"},
@@ -1391,7 +1399,7 @@ func TestBdByIDRefusesUnservedSpellingsOfAClassOwnedBead(t *testing.T) {
 		{"dep", "tree", bead.ID, "--direction=both"},
 		{"delete", bead.ID},
 		{"update", bead.ID, "--notes", "a note"},
-		{"close", bead.ID, "--reason", "done"},
+		{"close", bead.ID, "--suggest-next"},
 		// A root flag BEFORE the verb is bd's own spelling and gc forwards argv
 		// verbatim, so the served parsers — which key on argv[0] — do not
 		// recognize it. Ownership still does, which is the whole point of
@@ -1669,12 +1677,14 @@ func TestBdCloseReservedPrefixServedInProcess(t *testing.T) {
 
 // TestBdCloseUnrepresentableFlagStaysOffTheDoor pins the closed-contract floor.
 //
-// storebinding.GraphStore.Close takes an id and nothing else, so bd's
-// --reason/--reason-file/--session carry text the store has nowhere to put, and
-// --claim-next/--continue/--force/--no-auto/--suggest-next name workflow this
-// arm does not run. Serving any of them by dropping it would report a command
-// as executed after silently changing what it meant — the partial-write failure
-// this whole surface exists to remove.
+// The closed contract can record one close reason
+// (TestBdCloseWithReasonRecordsTheCloseReason) and nothing else about a close.
+// bd's
+// --reason-file/--session and its reason aliases carry text this arm does not
+// read, and --claim-next/--continue/--force/--no-auto/--suggest-next name
+// workflow it does not run. Serving any of them by dropping it would report a
+// command as executed after silently changing what it meant — the
+// partial-write failure this whole surface exists to remove.
 //
 // Unserved is not forwarded. Residency proves ownership for these too, so each
 // one is refused with the offending spelling named rather than handed to a
@@ -1687,14 +1697,18 @@ func TestBdCloseUnrepresentableFlagStaysOffTheDoor(t *testing.T) {
 		args []string
 		flag string
 	}{
-		{[]string{"close", "--reason", "done", relic.ID}, "--reason"},
 		{[]string{"close", relic.ID, "--reason-file", "/tmp/why"}, "--reason-file"},
+		{[]string{"close", relic.ID, "--session", "s-1"}, "--session"},
 		{[]string{"close", relic.ID, "--claim-next"}, "--claim-next"},
 		{[]string{"close", relic.ID, "--force"}, "--force"},
 		{[]string{"reopen", relic.ID, "-r", "wrong call"}, "-r"},
 		// A batch names no flag: the shape is what kept it off the surface, and
 		// naming an id there would read as a claim about that id.
 		{[]string{"close", relic.ID, "gc-relic2"}, ""},
+		// Two reasons for one id is bd's own refusal. The refusal names the
+		// second reason, which bd counts even when the first is blank.
+		{[]string{"close", "--reason", "one", relic.ID, "--reason", "two"}, "a second --reason"},
+		{[]string{"close", relic.ID, "-r", " ", "-r", "two"}, "a second -r"},
 	} {
 		t.Run(strings.Join(tc.args, " "), func(t *testing.T) {
 			if op, ok := parseBdByIDOp(tc.args); ok {
@@ -1778,6 +1792,161 @@ func TestBdCloseAlreadyClosedIsStoreContractNoOp(t *testing.T) {
 			t.Fatalf("status after close #%d = %q, want closed (no status regression)", i, after.Status)
 		}
 	}
+}
+
+// TestBdCloseWithReasonRecordsTheCloseReason pins the reasoned close on a class
+// resident. bd records `close --reason` in its close_reason column; the door
+// records it through the contract's CloseAll stamping metadata.close_reason,
+// which the store turns into the bead's close reason. While the door refused
+// the reason, nothing that closes a bead with one — the stale-db order closing
+// its wisp — had a spelling that kept the reason on both a single-store city
+// and a split one.
+func TestBdCloseWithReasonRecordsTheCloseReason(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+	const reason = "Stale DB scan complete (orphans=1, applied=1, escalated=0)"
+
+	for _, tc := range []struct {
+		name string
+		args func(id string) []string
+	}{
+		{"long flag", func(id string) []string { return []string{"close", id, "--reason", reason} }},
+		{"inline long flag before the id", func(id string) []string { return []string{"close", "--reason=" + reason, id} }},
+		{"short flag with json", func(id string) []string { return []string{"close", id, "-r", reason, "--json"} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "an order wisp", Type: "task"})
+
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", tc.args(bead.ID), &stdout, &stderr)
+			if !handled {
+				t.Fatalf("the reasoned close of %s fell through to the bd subprocess: %q", bead.ID, stderr.String())
+			}
+			if code != 0 {
+				t.Fatalf("closing %s with a reason exited %d: %s", bead.ID, code, stderr.String())
+			}
+			after, err := classStore.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading %s: %v", bead.ID, err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.CloseReason != reason {
+				t.Errorf("CloseReason = %q, want %q", after.CloseReason, reason)
+			}
+			if got := after.Metadata["close_reason"]; got != reason {
+				t.Errorf("metadata.close_reason = %q, want %q", got, reason)
+			}
+			if !strings.Contains(stdout.String(), reason) {
+				t.Errorf("the rendered row does not carry the recorded reason: %q", stdout.String())
+			}
+		})
+	}
+}
+
+// TestBdCloseRecordsTheReasonTrimmed pins the door's reason to the one the
+// stores record. Every store records a close reason trimmed (recordCloseReason,
+// BdStore.CloseAll's --reason), so the door trims it too: a padded reason loses
+// its padding, and a blank one is a bare close rather than a stamped
+// metadata.close_reason the bead's CloseReason reads as empty.
+func TestBdCloseRecordsTheReasonTrimmed(t *testing.T) {
+	cityPath, classStore := foreignProviderCity(t)
+
+	for _, tc := range []struct {
+		name   string
+		reason string
+		want   string
+	}{
+		{"padded reason", "  scan complete \n", "scan complete"},
+		{"blank reason", " \t ", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "an order wisp", Type: "task"})
+
+			var stdout, stderr bytes.Buffer
+			code, handled := maybeRouteBdByID(cityPath, "", []string{"close", bead.ID, "--reason", tc.reason}, &stdout, &stderr)
+			if !handled || code != 0 {
+				t.Fatalf("closing %s with reason %q = (%d, %t): %s", bead.ID, tc.reason, code, handled, stderr.String())
+			}
+			after, err := classStore.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading %s: %v", bead.ID, err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.CloseReason != tc.want {
+				t.Errorf("CloseReason = %q, want %q", after.CloseReason, tc.want)
+			}
+			stamped, ok := after.Metadata["close_reason"]
+			if tc.want == "" && ok {
+				t.Errorf("metadata.close_reason = %q; a blank reason must close bare", stamped)
+			}
+			if tc.want != "" && stamped != tc.want {
+				t.Errorf("metadata.close_reason = %q, want %q", stamped, tc.want)
+			}
+		})
+	}
+}
+
+// TestBdCloseWithReasonOfAClosedBeadChangesNothing pins the already-closed half
+// of the reasoned close. bd's close of a closed issue changes nothing, and the
+// door's bare close is the store's no-op, so a second close with a different
+// reason must not rewrite the reason the first close recorded. It holds on a
+// store whose CloseAll skips closed beads and on one whose CloseAll stamps the
+// metadata first, which beads.Store.CloseAll leaves to its caller to prevent.
+func TestBdCloseWithReasonOfAClosedBeadChangesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		wrap func(beads.Store) beads.Store
+	}{
+		{"store that skips closed beads", nil},
+		{"store that stamps metadata before closing", func(s beads.Store) beads.Store { return metadataFirstCloseAllStore{Store: s} }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityPath, classStore := foreignProviderCity(t)
+			bead := mustCreateClassBead(t, classStore, beads.Bead{Title: "closed twice", Type: "task"})
+			if tc.wrap != nil {
+				stubClassBindingStore(t, cityPath, tc.wrap(classStore))
+			}
+
+			for i, reason := range []string{"the first close", "a second close"} {
+				var stdout, stderr bytes.Buffer
+				code, handled := maybeRouteBdByID(cityPath, "", []string{"close", bead.ID, "--reason", reason}, &stdout, &stderr)
+				if !handled || code != 0 {
+					t.Fatalf("close #%d of %s = (%d, %t): %s", i+1, bead.ID, code, handled, stderr.String())
+				}
+			}
+			after, err := classStore.Get(bead.ID)
+			if err != nil {
+				t.Fatalf("re-reading %s: %v", bead.ID, err)
+			}
+			if after.Status != "closed" {
+				t.Errorf("status = %q, want closed", after.Status)
+			}
+			if after.CloseReason != "the first close" || after.Metadata["close_reason"] != "the first close" {
+				t.Errorf("close reason = %q (metadata %q), want the first close's, untouched by the second", after.CloseReason, after.Metadata["close_reason"])
+			}
+		})
+	}
+}
+
+// metadataFirstCloseAllStore is a class store whose CloseAll writes the
+// metadata and then closes, without reading each status first, as bd, exec and
+// the native Dolt store do: an already-closed bead stays closed but takes the
+// metadata.
+type metadataFirstCloseAllStore struct{ beads.Store }
+
+func (s metadataFirstCloseAllStore) CloseAll(ids []string, metadata map[string]string) (int, error) {
+	for _, id := range ids {
+		if err := s.SetMetadataBatch(id, metadata); err != nil {
+			return 0, err
+		}
+		if err := s.Close(id); err != nil {
+			return 0, err
+		}
+	}
+	return len(ids), nil
 }
 
 // TestBdCloseDualResidentWritesServingCopy pins the multi-residency rule: a

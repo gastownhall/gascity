@@ -1452,6 +1452,11 @@ func TestUnsetMetadataOnPathsThatCannotRemoveAKey(t *testing.T) {
 	if err := tx.Update("gc-1", UpdateOpts{UnsetMetadata: []string{"k"}}); !errors.Is(err, ErrUnsetMetadataUnsupported) {
 		t.Errorf("bd store Tx update = %v, want ErrUnsetMetadataUnsupported", err)
 	}
+	// The native Tx writes through applyUpdateInTx, which never reaches the
+	// patch builder above, so it carries its own refusal.
+	if err := (&nativeDoltTx{}).Update("gc-1", UpdateOpts{UnsetMetadata: []string{"k"}}); !errors.Is(err, ErrUnsetMetadataUnsupported) {
+		t.Errorf("native dolt Tx update = %v, want ErrUnsetMetadataUnsupported", err)
+	}
 }
 
 // TestBdUpdateArgsRenderUnsetMetadataAfterSets pins the BdStore spelling: one

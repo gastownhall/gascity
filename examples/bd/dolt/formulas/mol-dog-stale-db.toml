@@ -341,14 +341,20 @@ if [ "$APPLIED" -eq 1 ] && [ "$MISSED_PURGE_BYTES" -gt 0 ]; then
   fail_open_after_drain "gc dolt-cleanup apply missed ${MISSED_PURGE_BYTES} reclaimable bytes; leaving work bead open"
 fi
 
-# Close with the step-completion update rather than `bd close --reason`: gc
-# serves this exact shape in process when the wisp lives in a relocated class
-# store, where `close --reason` is refused and bare `bd` reports the wisp
-# missing. A status-closed update is not fenced on actor == assignee the way
-# `bd close` is, so it needs no --actor on a single-store city either.
-# The reason rides metadata close_reason, which gc's split store turns into
-# the bead's close reason when the same write closes it.
-gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass --set-metadata "close_reason=Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})" --status=closed
+# Record the outcome, then close with the reason. `gc bd close --reason` is the
+# one spelling that keeps the reason as the wisp's close reason on every
+# topology: a single-store city hands it to `bd close --reason`, which writes
+# bd's close_reason column (a status-closed `bd update` empties that column),
+# and a city whose coordination classes live in their own store serves it in
+# process, where bare `bd` cannot see the wisp. Neither write needs --actor:
+# gc closes a session's own claim under the identity that claimed it. A failed
+# close withdraws the outcome, so the wisp it leaves open carries none, as on
+# every other fail-open path.
+gc bd update "$WORK_BEAD" --set-metadata gc.outcome=pass
+if ! gc bd close "$WORK_BEAD" --reason "Stale DB scan complete (orphans=${ORPHAN_TOTAL}, applied=${APPLIED}, escalated=${ESCALATED})"; then
+  run_or_warn "withdraw pass outcome" gc bd update "$WORK_BEAD" --unset-metadata gc.outcome
+  fail_open_after_drain "gc bd close failed; leaving work bead open"
+fi
 drain_ack_once # drain-ack before normal exit
 exit
 ```
