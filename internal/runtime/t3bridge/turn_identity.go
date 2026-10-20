@@ -11,23 +11,24 @@ import (
 var _ runtime.TurnObservationProvider = (*Provider)(nil)
 
 // v1TurnCapabilities is what T3 protocol V1 tells about every session's
-// turns (X11 §5.1): starts are recorded by T3 and polled, and ends are rated
-// recorded too, with the residual below; the fence is a fresh read before an
-// untargeted interrupt; a delivery is linked to its turn only by correlating
-// requestedAt with the message's createdAt; and latestTurn holds one turn,
-// so a short turn between polls can be missed.
+// turns (X11 §5.1): starts are recorded by T3 and polled; ends are inferred;
+// the fence is a fresh read before an untargeted interrupt; a delivery is
+// linked to its turn only by correlating requestedAt with the message's
+// createdAt; and latestTurn holds one turn, so a short turn between polls
+// can be missed.
 //
-// Residual the static row does not express: on the bridge's T3 fork, the
+// End is inferred (maintainer ruling 2026-10-20): on the bridge's T3 fork the
 // snapshot does not keep every end. T3 clears latestTurn at most turn ends
-// and, short of a thread revert, restores it only when a turn's diff
-// completes, which happens only in a git workspace; that restore records an
-// interrupted turn, or a failed one whose diff was already captured, as
-// completed. A reader must therefore take a turn that was Current and is
-// then neither Current nor in Recent as ended, without knowing how, and must
-// not read a Recent status of completed as success.
+// (turn.completed, session.exited) and, short of a thread revert, restores it
+// only when a turn's diff completes, which happens only in a git workspace;
+// that restore records an interrupted turn, or a failed one whose diff was
+// already captured, as completed. A turn that was Current and is then, idle,
+// neither Current nor in Recent is V1's normal end, which a reader infers
+// without knowing how it ended; a reader must not read a Recent status of
+// completed as success.
 var v1TurnCapabilities = runtime.TurnCapabilities{
 	Start:    runtime.TurnStartRecorded,
-	End:      runtime.TurnEndRecorded,
+	End:      runtime.TurnEndInferred,
 	Fence:    runtime.TurnFenceChecked,
 	Link:     runtime.TurnLinkCorrelated,
 	Lossless: false,

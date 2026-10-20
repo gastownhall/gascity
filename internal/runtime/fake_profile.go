@@ -275,7 +275,7 @@ func (t3bridgeProfile) InputFencing(string) InputFencing { return InputFencingCh
 // trait the profile answers itself; a test pins it to production.
 var t3bridgeTurnCapabilities = TurnCapabilities{
 	Start:    TurnStartRecorded,
-	End:      TurnEndRecorded,
+	End:      TurnEndInferred,
 	Fence:    TurnFenceChecked,
 	Link:     TurnLinkCorrelated,
 	Lossless: false,

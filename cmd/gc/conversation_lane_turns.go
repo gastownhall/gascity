@@ -19,7 +19,9 @@ package main
 // [ops] authoritative, so with the list empty a conversation with no lane op
 // gets no observer. A new worker's observer rebuilds its tracking from the
 // row's cells plus the source's Recent window (X11 §8); a turn that left the
-// window meanwhile ends unobserved.
+// window meanwhile ends unobserved, unless the source keeps no record of its
+// normal ends (T3 V1) and reads idle with no later turn, when the turn's end
+// is inferred (laneInfersIdleEnds).
 
 import (
 	"context"
@@ -692,7 +694,8 @@ func (o *laneTurnObserver) writeOnce(ctx context.Context, rows laneTurnRows, g l
 	prev := row.Turn
 	now := o.deps.now()
 	obs, cut := laneTurnObservationOf(o.conv, g, prev, hist, now)
-	obs.Caps = laneTurnCapsStamp(laneEffectiveTurnCaps(o.declared(), prev, g.Gen))
+	caps := laneEffectiveTurnCaps(o.declared(), prev, g.Gen)
+	obs.Caps, obs.InferIdleEnds = laneTurnCapsStamp(caps), laneInfersIdleEnds(caps)
 	ref, err := o.creditFor(prev, obs)
 	if err != nil {
 		return false, err
@@ -775,7 +778,8 @@ func (o *laneTurnObserver) creditFor(prev opjournal.TurnCells, obs opjournal.Tur
 // laneTurnCreditCandidates are the turns whose end the fold of obs over prev
 // may credit to a gc interrupt: ended turns of Recent the fold has not
 // journaled, newer than the cells' anchor or running in the cells, whose
-// source records a cancel or whose end is inferred (FoldTurn's reasons).
+// source records a cancel or whose end is inferred (FoldTurn's reasons),
+// and the running turn whose end the fold infers at idle.
 func laneTurnCreditCandidates(prev opjournal.TurnCells, obs opjournal.TurnObservation) []string {
 	if prev.Generation != obs.Generation {
 		prev = opjournal.TurnCells{}
@@ -803,7 +807,20 @@ func laneTurnCreditCandidates(prev opjournal.TurnCells, obs opjournal.TurnObserv
 			out = append(out, e.ID)
 		}
 	}
+	if turn := obs.InferredIdleEnd(prev); turn != "" {
+		out = append(out, turn)
+	}
 	return out
+}
+
+// laneInfersIdleEnds reports whether the fold infers, at the idle boundary,
+// the end of a running turn the source shows neither current nor in Recent
+// (opjournal.TurnObservation.InferIdleEnds): a protocol source whose End is
+// inferred, as T3 V1, which keeps no record of the ends it clears. A
+// transcript source's inferred ends reach Recent through the worker's idle
+// overlay, so a turn missing there is a gap.
+func laneInfersIdleEnds(caps worker.TurnCapabilities) bool {
+	return caps.Source == worker.TurnSourceProtocol && caps.Normalized().End == runtime.TurnEndInferred
 }
 
 // noteWrite counts a batch that landed.

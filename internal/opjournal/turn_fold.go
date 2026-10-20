@@ -203,6 +203,15 @@ type TurnObservation struct {
 	Recent []ObservedTurnEnd
 	// SessionGone reports that the runtime exited.
 	SessionGone bool
+	// InferIdleEnds reports a source that keeps no record of some ends, so
+	// they are inferred at the idle boundary: T3 V1, which clears latestTurn
+	// at most turn ends, so a turn reads as running and then, idle, as in
+	// neither Current nor Recent. For such a source a running turn the
+	// observation shows idle with that turn missing, and no ended turn
+	// newer than Seen, ended normally: the fold journals an inferred end
+	// (InferredIdleEnd), not an unobserved one. A newer turn, current or in
+	// Recent, while the running turn's end was never seen is still a gap.
+	InferIdleEnds bool
 	// ObservedAt is the observer's clock at the read. It is required and
 	// non-zero: it dates every cell write and every fact without a source
 	// time. FoldTurn does not check it; a zero time leaves the time cells
@@ -238,7 +247,9 @@ func (r InterruptRef) names(turn string) bool { return r.Op != "" && r.Turn != "
 //     session.ended.
 //   - The running turn T ends when the observation no longer shows it
 //     current: with its recorded reason when T is in Recent; session_gone
-//     when the session is gone; else unobserved.
+//     when the session is gone; as an inferred end when the source infers
+//     idle ends and the observation is idle with no turn newer than Seen
+//     (InferredIdleEnd); else unobserved.
 //   - Turns in Recent newer than the cells' Seen anchor and never seen
 //     running get both facts, oldest first. When Seen has left the window
 //     all of Recent is new; when Seen is the current turn again none is.
@@ -292,6 +303,8 @@ func FoldTurn(prev TurnCells, obs TurnObservation, interrupting InterruptRef) (n
 			unseen = unseen[i+1:]
 		} else if e, ok := obs.recent(runningTurn); ok {
 			f.end(e)
+		} else if obs.InferredIdleEnd(next) == runningTurn {
+			f.end(ObservedTurnEnd{ID: runningTurn, EndedAt: obs.ObservedAt, Inferred: true})
 		} else {
 			f.endMissing(runningTurn)
 		}
@@ -318,6 +331,22 @@ func FoldTurn(prev TurnCells, obs TurnObservation, interrupting InterruptRef) (n
 	}
 	next.ObservedAt = obs.ObservedAt
 	return next, f.facts, true
+}
+
+// InferredIdleEnd is the turn the cells prev show running whose end the
+// fold of o infers at the idle boundary (InferIdleEnds), or "": o is of
+// prev's generation from a source that infers idle ends, idle with the
+// session not gone, and shows neither that turn nor any ended turn newer
+// than prev's Seen anchor.
+func (o TurnObservation) InferredIdleEnd(prev TurnCells) string {
+	turn := prev.running()
+	if !o.InferIdleEnds || turn == "" || o.Generation != prev.Generation || o.Current != "" || o.SessionGone {
+		return ""
+	}
+	if _, ok := o.recent(turn); ok || len(o.endedAfter(prev.Seen)) > 0 {
+		return ""
+	}
+	return turn
 }
 
 // recent returns the ended turn id from Recent.
