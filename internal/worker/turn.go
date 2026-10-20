@@ -714,11 +714,21 @@ func turnInterruptRefusal(caps TurnCapabilities, session, turn string) error {
 	switch {
 	case caps.Interrupt == runtime.TurnInterruptUnsupported:
 		return fmt.Errorf("interrupting turn %q of %s: %w", turn, session, sessionpkg.ErrTurnInterruptUnsupported)
-	case !caps.Start.AtLeast(runtime.TurnStartRecorded) || !caps.Fence.AtLeast(runtime.TurnFenceChecked) || !caps.End.AtLeast(runtime.TurnEndInferred):
+	case !caps.InterruptsTurns():
 		return fmt.Errorf("interrupting turn %q of %s (start %s, end %s, fence %s): %w",
 			turn, session, caps.Start, caps.End, caps.Fence, runtime.ErrTurnIdentityUnsupported)
 	}
 	return nil
+}
+
+// InterruptsTurns reports whether c can carry an interrupt of a named turn
+// (InterruptRequest.Turn): the runtime can interrupt, and the source records
+// starts, fences at least by a check and sees ends at least by inference, so
+// a read can confirm the turn settled (X11 §3.3). Otherwise a turn-scoped
+// interrupt is refused, nothing sent.
+func (c TurnCapabilities) InterruptsTurns() bool {
+	return c.Interrupt != runtime.TurnInterruptUnsupported && c.Start.AtLeast(runtime.TurnStartRecorded) &&
+		c.Fence.AtLeast(runtime.TurnFenceChecked) && c.End.AtLeast(runtime.TurnEndInferred)
 }
 
 // protocolTurnInterruptFenceRefusal refuses an input fence on a protocol

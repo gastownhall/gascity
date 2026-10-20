@@ -114,12 +114,12 @@ func (l laneTurnLook) boundary() opjournal.Tri {
 // keystroke-mode one, whose boundary is the quiescence rule, no turn source
 // for this executor, noted.
 func (e *conversationLaneExec) readTurnTraits(ctx context.Context) error {
-	e.turnHandle, e.traits = nil, laneTurnTraits{}
+	e.turnHandle, e.traits, e.turnCaps = nil, laneTurnTraits{}, worker.TurnCapabilities{}
 	h, err := e.turns()
 	if err == nil {
 		var caps worker.TurnCapabilities
 		if caps, err = h.TurnCapabilities(ctx); err == nil {
-			e.turnHandle = h
+			e.turnHandle, e.turnCaps = h, caps
 			e.traits = laneTurnTraitsOf(caps, e.target.sessionTransport())
 			return nil
 		}

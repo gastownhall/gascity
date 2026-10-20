@@ -63,6 +63,9 @@ type laneExecDeps struct {
 	// note records a degradation the executor fell back from, by stage:
 	// the host's noteError. Nil notes nothing.
 	note func(stage string, err error)
+	// interrupts records the interrupt each conversation runs, for its turn
+	// observer (laneInterrupts). Nil records nothing.
+	interrupts *laneInterrupts
 }
 
 // conversationLaneExec is the live opjournal.Executor for one conversation
@@ -110,6 +113,13 @@ type conversationLaneExec struct {
 	turnHandle   worker.TurnHandle
 	traits       laneTurnTraits
 	protocol     bool
+	// turnCaps are the session's turn capabilities as the first Probe read
+	// them, the zero value when none were read; the interrupt's tier.
+	turnCaps worker.TurnCapabilities
+	// interruptHandle resolves the handle an interrupt goes through: the
+	// session's own by its row's bead id, which can read its transcript,
+	// else the runtime's.
+	interruptHandle func() (worker.Handle, error)
 	// lastTurn is the last probe's look at the session's turns, which
 	// Deliver's link evidence starts from.
 	lastTurn laneTurnLook
@@ -182,6 +192,12 @@ func newConversationLaneExec(deps laneExecDeps, info session.Info) *conversation
 		return workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, id)
 	}
 	e.turns = e.resolveTurns
+	e.interruptHandle = func() (worker.Handle, error) {
+		if e.info.ID == "" {
+			return e.handle(e.target)
+		}
+		return workerHandleForSessionWithConfig(e.deps.cityPath, e.deps.sessions, e.deps.sp, e.deps.cfg, e.info.ID)
+	}
 	e.now, e.wait = time.Now, laneLinkWait
 	return e
 }
@@ -556,11 +572,6 @@ func laneDeliveryResult(res worker.NudgeResult, err error, at time.Time, unfence
 	default:
 		return opjournal.Unknown{Cause: err}
 	}
-}
-
-// Interrupt implements opjournal.Executor: unsupported until OJ-15.
-func (e *conversationLaneExec) Interrupt(context.Context, opjournal.InterruptCall) opjournal.ControlResult {
-	return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 }
 
 // laneFence is the fence of view conv.

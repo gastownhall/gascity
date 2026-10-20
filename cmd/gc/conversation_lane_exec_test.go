@@ -466,16 +466,6 @@ func TestLaneExecDeliveryResultMapping(t *testing.T) {
 	}
 }
 
-// TestLaneExecControlUnsupported proves interrupt is refused until its slice
-// lands.
-func TestLaneExecControlUnsupported(t *testing.T) {
-	e := &conversationLaneExec{}
-	want := opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
-	if got := e.Interrupt(context.Background(), opjournal.InterruptCall{}); got != want {
-		t.Fatalf("Interrupt = %#v, want %#v", got, want)
-	}
-}
-
 // TestLaneExecDeliversFencedRequest proves a delivery carries the Take's
 // fence, the gc:-scoped delivery key, live-only default delivery and
 // AllowUnfenced, closes succeeded with link none (no turn source), and stamps
