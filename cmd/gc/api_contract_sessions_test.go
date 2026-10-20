@@ -183,7 +183,8 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 		return h.sp.IsRunning(sess.SessionName), fmt.Sprintf("state=%q running=%v", got.State, got.Running)
 	})
 	stopped, err := c.PostV0CityByCityNameSessionByIdStopWithResponse(ctx, city, sess.Id,
-		&genclient.PostV0CityByCityNameSessionByIdStopParams{XGCRequest: contractCSRF})
+		&genclient.PostV0CityByCityNameSessionByIdStopParams{XGCRequest: contractCSRF},
+		genclient.PostV0CityByCityNameSessionByIdStopJSONRequestBody{})
 	expectStatus(t, "stop session", stopped, err, http.StatusOK)
 	killed, err := c.PostV0CityByCityNameSessionByIdKillWithResponse(ctx, city, sess.Id,
 		&genclient.PostV0CityByCityNameSessionByIdKillParams{XGCRequest: contractCSRF})

@@ -3074,6 +3074,13 @@ type OKWithIDResponseBody struct {
 	// Id Resource ID.
 	Id *string `json:"id,omitempty"`
 
+	// IdempotencyKey The key the request was recorded under: the client's Idempotency-Key, one the server minted when the request carried none, or, for a stop of a known turn, stop:<generation>:<turn>, so two stops of one turn are one operation. Retry with the Idempotency-Key to get this request's outcome instead of acting again.
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+	Op             *ConversationOp `json:"op,omitempty"`
+
+	// Replayed True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome. A replayed stop never interrupts a later turn.
+	Replayed *bool `json:"replayed,omitempty"`
+
 	// Status Operation result.
 	Status string `json:"status"`
 }
@@ -4120,6 +4127,19 @@ type SessionBindingRecord struct {
 	Status BindingStatus `json:"Status"`
 }
 
+// SessionCommandStatusBody defines model for SessionCommandStatusBody.
+type SessionCommandStatusBody struct {
+	// IdempotencyKey The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of acting again.
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+	Op             *ConversationOp `json:"op,omitempty"`
+
+	// Replayed True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome.
+	Replayed *bool `json:"replayed,omitempty"`
+
+	// Status Operation result.
+	Status string `json:"status"`
+}
+
 // SessionCreateBody defines model for SessionCreateBody.
 type SessionCreateBody struct {
 	// Alias Optional session alias.
@@ -4366,6 +4386,13 @@ type SessionRespondOutputBody struct {
 	// Id Session ID.
 	Id string `json:"id"`
 
+	// IdempotencyKey The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second response.
+	IdempotencyKey *string         `json:"idempotency_key,omitempty"`
+	Op             *ConversationOp `json:"op,omitempty"`
+
+	// Replayed True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome.
+	Replayed *bool `json:"replayed,omitempty"`
+
 	// Status Operation result.
 	Status string `json:"status"`
 }
@@ -4401,6 +4428,12 @@ type SessionResponse struct {
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
+}
+
+// SessionStopBody defines model for SessionStopBody.
+type SessionStopBody struct {
+	// Turn The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running.
+	Turn *string `json:"turn,omitempty"`
 }
 
 // SessionStrandedClaimsPayload defines model for SessionStrandedClaimsPayload.
@@ -11181,17 +11214,23 @@ type PatchV0CityByCityNameSessionByIdParams struct {
 
 // PostV0CityByCityNameSessionByIdCloseParams defines parameters for PostV0CityByCityNameSessionByIdClose.
 type PostV0CityByCityNameSessionByIdCloseParams struct {
-	// Delete Permanently delete bead after closing.
+	// Delete Permanently delete bead after closing. Outside the recorded operation: a same-key retry that changes it gets the first request's outcome.
 	Delete *bool `form:"delete,omitempty" json:"delete,omitempty"`
 
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // PostV0CityByCityNameSessionByIdKillParams defines parameters for PostV0CityByCityNameSessionByIdKill.
 type PostV0CityByCityNameSessionByIdKillParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // SendSessionMessageParams defines parameters for SendSessionMessage.
@@ -11225,6 +11264,9 @@ type PostV0CityByCityNameSessionByIdRenameParams struct {
 type PostV0CityByCityNameSessionByIdResetParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // RespondSessionParams defines parameters for RespondSession.
@@ -11276,6 +11318,9 @@ type SubmitSessionParams struct {
 type PostV0CityByCityNameSessionByIdSuspendParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
 	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey Idempotency key for safe retries.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
 // GetV0CityByCityNameSessionByIdTranscriptParams defines parameters for GetV0CityByCityNameSessionByIdTranscript.
@@ -11607,6 +11652,9 @@ type PostV0CityByCityNameSessionByIdRenameJSONRequestBody = SessionRenameInputBo
 
 // RespondSessionJSONRequestBody defines body for RespondSession for application/json ContentType.
 type RespondSessionJSONRequestBody = SessionRespondInputBody
+
+// PostV0CityByCityNameSessionByIdStopJSONRequestBody defines body for PostV0CityByCityNameSessionByIdStop for application/json ContentType.
+type PostV0CityByCityNameSessionByIdStopJSONRequestBody = SessionStopBody
 
 // SubmitSessionJSONRequestBody defines body for SubmitSession for application/json ContentType.
 type SubmitSessionJSONRequestBody = SessionSubmitInputBody
@@ -22593,8 +22641,10 @@ type ClientInterface interface {
 
 	RespondSession(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
-	// PostV0CityByCityNameSessionByIdStop request
-	PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*http.Response, error)
+	// PostV0CityByCityNameSessionByIdStopWithBody request with any body
+	PostV0CityByCityNameSessionByIdStopWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, body PostV0CityByCityNameSessionByIdStopJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// StreamSession request
 	StreamSession(ctx context.Context, cityName string, id string, params *StreamSessionParams, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -24913,8 +24963,20 @@ func (c *Client) RespondSession(ctx context.Context, cityName string, id string,
 	return c.Client.Do(req)
 }
 
-func (c *Client) PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*http.Response, error) {
-	req, err := NewPostV0CityByCityNameSessionByIdStopRequest(c.Server, cityName, id, params)
+func (c *Client) PostV0CityByCityNameSessionByIdStopWithBody(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdStopRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) PostV0CityByCityNameSessionByIdStop(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, body PostV0CityByCityNameSessionByIdStopJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewPostV0CityByCityNameSessionByIdStopRequest(c.Server, cityName, id, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -33826,6 +33888,17 @@ func NewPostV0CityByCityNameSessionByIdCloseRequest(server string, cityName stri
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -33879,6 +33952,17 @@ func NewPostV0CityByCityNameSessionByIdKillRequest(server string, cityName strin
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -34241,6 +34325,17 @@ func NewPostV0CityByCityNameSessionByIdResetRequest(server string, cityName stri
 
 		req.Header.Set("X-GC-Request", headerParam0)
 
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
 	}
 
 	return req, nil
@@ -34324,8 +34419,19 @@ func NewRespondSessionRequestWithBody(server string, cityName string, id string,
 	return req, nil
 }
 
-// NewPostV0CityByCityNameSessionByIdStopRequest generates requests for PostV0CityByCityNameSessionByIdStop
-func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams) (*http.Request, error) {
+// NewPostV0CityByCityNameSessionByIdStopRequest calls the generic PostV0CityByCityNameSessionByIdStop builder with application/json body
+func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, body PostV0CityByCityNameSessionByIdStopJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewPostV0CityByCityNameSessionByIdStopRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewPostV0CityByCityNameSessionByIdStopRequestWithBody generates requests for PostV0CityByCityNameSessionByIdStop with any type of body
+func NewPostV0CityByCityNameSessionByIdStopRequestWithBody(server string, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, contentType string, body io.Reader) (*http.Request, error) {
 	var err error
 
 	var pathParam0 string
@@ -34357,10 +34463,12 @@ func NewPostV0CityByCityNameSessionByIdStopRequest(server string, cityName strin
 		return nil, err
 	}
 
-	req, err := http.NewRequest("POST", queryURL.String(), nil)
+	req, err := http.NewRequest("POST", queryURL.String(), body)
 	if err != nil {
 		return nil, err
 	}
+
+	req.Header.Add("Content-Type", contentType)
 
 	if params != nil {
 
@@ -34625,6 +34733,17 @@ func NewPostV0CityByCityNameSessionByIdSuspendRequest(server string, cityName st
 		}
 
 		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
 
 	}
 
@@ -36702,8 +36821,10 @@ type ClientWithResponsesInterface interface {
 
 	RespondSessionWithResponse(ctx context.Context, cityName string, id string, params *RespondSessionParams, body RespondSessionJSONRequestBody, reqEditors ...RequestEditorFn) (*RespondSessionResponse, error)
 
-	// PostV0CityByCityNameSessionByIdStopWithResponse request
-	PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
+	// PostV0CityByCityNameSessionByIdStopWithBodyWithResponse request with any body
+	PostV0CityByCityNameSessionByIdStopWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
+
+	PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, body PostV0CityByCityNameSessionByIdStopJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error)
 
 	// StreamSessionWithResponse request
 	StreamSessionWithResponse(ctx context.Context, cityName string, id string, params *StreamSessionParams, reqEditors ...RequestEditorFn) (*StreamSessionResponse, error)
@@ -40495,7 +40616,7 @@ func (r GetV0CityByCityNameSessionByIdAgentsByAgentIdResponse) StatusCode() int 
 type PostV0CityByCityNameSessionByIdCloseResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
-	JSON200                   *OKResponseBody
+	JSON200                   *SessionCommandStatusBody
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
@@ -40840,7 +40961,7 @@ func (r SubmitSessionResponse) StatusCode() int {
 type PostV0CityByCityNameSessionByIdSuspendResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
-	JSON200                   *OKResponseBody
+	JSON200                   *SessionCommandStatusBody
 	ApplicationproblemJSON401 *ErrorModel
 	ApplicationproblemJSON403 *ErrorModel
 	ApplicationproblemJSON404 *ErrorModel
@@ -43006,9 +43127,17 @@ func (c *ClientWithResponses) RespondSessionWithResponse(ctx context.Context, ci
 	return ParseRespondSessionResponse(rsp)
 }
 
-// PostV0CityByCityNameSessionByIdStopWithResponse request returning *PostV0CityByCityNameSessionByIdStopResponse
-func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
-	rsp, err := c.PostV0CityByCityNameSessionByIdStop(ctx, cityName, id, params, reqEditors...)
+// PostV0CityByCityNameSessionByIdStopWithBodyWithResponse request with arbitrary body returning *PostV0CityByCityNameSessionByIdStopResponse
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithBodyWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdStopWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParsePostV0CityByCityNameSessionByIdStopResponse(rsp)
+}
+
+func (c *ClientWithResponses) PostV0CityByCityNameSessionByIdStopWithResponse(ctx context.Context, cityName string, id string, params *PostV0CityByCityNameSessionByIdStopParams, body PostV0CityByCityNameSessionByIdStopJSONRequestBody, reqEditors ...RequestEditorFn) (*PostV0CityByCityNameSessionByIdStopResponse, error) {
+	rsp, err := c.PostV0CityByCityNameSessionByIdStop(ctx, cityName, id, params, body, reqEditors...)
 	if err != nil {
 		return nil, err
 	}
@@ -51714,7 +51843,7 @@ func ParsePostV0CityByCityNameSessionByIdCloseResponse(rsp *http.Response) (*Pos
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OKResponseBody
+		var dest SessionCommandStatusBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}
@@ -52593,7 +52722,7 @@ func ParsePostV0CityByCityNameSessionByIdSuspendResponse(rsp *http.Response) (*P
 
 	switch {
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
-		var dest OKResponseBody
+		var dest SessionCommandStatusBody
 		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
 			return nil, err
 		}

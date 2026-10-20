@@ -119,6 +119,12 @@ var (
 	// PayloadTooLarge is a request payload over the operation journal's
 	// 16 KiB inline limit.
 	PayloadTooLarge = Register(ProblemType{Code: "payload-too-large", Status: http.StatusUnprocessableEntity, Title: "Payload Too Large"})
+	// OpAlreadyFailed answers a same-key retry of a session command whose
+	// recorded operation already closed failed for a reason the request
+	// cannot be rebuilt from (its deadline passed, its turn did not end, an
+	// unclassified error; DES-O0API §7.3). Nothing ran; the client resends
+	// with a new Idempotency-Key to act again.
+	OpAlreadyFailed = Register(ProblemType{Code: "op-already-failed", Status: http.StatusConflict, Title: "Operation Already Failed"})
 
 	// Backend availability. store-unavailable is the bead-store-not-live 503 emitted
 	// by the shared cacheLiveOr503 helper; service-unavailable is the generic 503

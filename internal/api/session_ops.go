@@ -354,12 +354,16 @@ func (c *cityOps) shutdown() {
 	})
 }
 
-// serverOps is one Server's operation-journal state: the content recorder
-// over its city's shared state and the lazily opened op store.
+// serverOps is one Server's operation-journal state: a recorder per ops
+// gate over its city's shared state (content for /submit and /messages,
+// control for /stop and /respond, lifecycle for /wake, /suspend, /kill,
+// /close and /reset; session_control_ops.go) and the lazily opened op store.
 type serverOps struct {
-	city    *cityOps
-	content *legacyop.Recorder
-	clk     clock.Clock
+	city      *cityOps
+	content   *legacyop.Recorder
+	control   *legacyop.Recorder
+	lifecycle *legacyop.Recorder
+	clk       clock.Clock
 	// openStore opens the op store over a sessions-class store; tests
 	// substitute it.
 	openStore func(beads.SessionStore, clock.Clock) (*opjournal.Store, error)
@@ -395,17 +399,27 @@ func newServerOps(s *Server, city *cityOps) *serverOps {
 		logf:     log.Printf,
 		recordOp: telemetry.RecordOpRecord,
 	}
-	o.content = &legacyop.Recorder{
-		Mode:     s.bootFlags.OpsContent(),
+	o.content = o.newRecorder(s, rollout.KeyOpsContent, s.bootFlags.OpsContent())
+	o.control = o.newRecorder(s, rollout.KeyOpsControl, s.bootFlags.OpsControl())
+	o.lifecycle = o.newRecorder(s, rollout.KeyOpsLifecycle, s.bootFlags.OpsLifecycle())
+	return o
+}
+
+// newRecorder is the API's recorder for the ops gate gateKey under mode: it
+// records through s's op store and its city's in-flight registry, and reports
+// degrades and health to its city's reporter under gateKey.
+func (o *serverOps) newRecorder(s *Server, gateKey string, mode gate.Mode) *legacyop.Recorder {
+	city := o.city
+	return &legacyop.Recorder{
+		Mode:     mode,
 		Executor: legacyop.ExecutorAPI,
 		Open:     s.openOpStore,
 		Inflight: city.inflight,
 		Clock:    o.clk,
-		Degraded: func(d legacyop.Degrade) { city.degraded.Report(rollout.KeyOpsContent, d) },
-		Healthy:  func(stage string) { o.healthy(stage) },
+		Degraded: func(d legacyop.Degrade) { city.degraded.Report(gateKey, d) },
+		Healthy:  func(stage string) { o.healthyGate(gateKey, stage) },
 		Done:     city.done,
 	}
-	return o
 }
 
 // publishOps makes s its city's live Server; a Server with no op state has
@@ -457,7 +471,13 @@ func (s *Server) openOpStore() (*opjournal.Store, error) {
 // healthy tells the degrade reporter that stages of the content gate just
 // worked, so the next failure there raises a fresh event (§5.5).
 func (o *serverOps) healthy(stages ...string) {
-	o.city.degraded.Healthy(rollout.KeyOpsContent, legacyop.SurfaceAPI, stages...)
+	o.healthyGate(rollout.KeyOpsContent, stages...)
+}
+
+// healthyGate tells the degrade reporter that stages of the ops gate gateKey
+// just worked, so the next failure there raises a fresh event (§5.5).
+func (o *serverOps) healthyGate(gateKey string, stages ...string) {
+	o.city.degraded.Healthy(gateKey, legacyop.SurfaceAPI, stages...)
 }
 
 // store returns the cached op store, opening it over over when none is cached

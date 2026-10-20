@@ -1093,7 +1093,14 @@ export const respondSession = <ThrowOnError extends boolean = false>(options: Op
 /**
  * Post v0 city by city name session by ID stop
  */
-export const postV0CityByCityNameSessionByIdStop = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdStopData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdStopResponses, PostV0CityByCityNameSessionByIdStopErrors, ThrowOnError>({ url: '/v0/city/{cityName}/session/{id}/stop', ...options });
+export const postV0CityByCityNameSessionByIdStop = <ThrowOnError extends boolean = false>(options: Options<PostV0CityByCityNameSessionByIdStopData, ThrowOnError>) => (options.client ?? client).post<PostV0CityByCityNameSessionByIdStopResponses, PostV0CityByCityNameSessionByIdStopErrors, ThrowOnError>({
+    url: '/v0/city/{cityName}/session/{id}/stop',
+    ...options,
+    headers: {
+        'Content-Type': 'application/json',
+        ...options.headers
+    }
+});
 
 /**
  * Stream session output in real time

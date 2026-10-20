@@ -965,6 +965,9 @@ export const zOkResponseBody = z.object({
 
 export const zOkWithIdResponseBody = z.object({
     id: z.string().optional(),
+    idempotency_key: z.string().optional(),
+    op: zConversationOp.optional(),
+    replayed: z.boolean().optional(),
     status: z.string()
 });
 
@@ -1786,6 +1789,13 @@ export const zListBodySessionBindingRecord = z.object({
     total: z.coerce.bigint().min(BigInt('-9223372036854775808'), { error: 'Invalid value: Expected int64 to be >= -9223372036854775808' }).max(BigInt('9223372036854775807'), { error: 'Invalid value: Expected int64 to be <= 9223372036854775807' })
 });
 
+export const zSessionCommandStatusBody = z.object({
+    idempotency_key: z.string().optional(),
+    op: zConversationOp.optional(),
+    replayed: z.boolean().optional(),
+    status: z.string()
+});
+
 export const zSessionCreateBody = z.object({
     alias: z.string().optional(),
     async: z.boolean().optional(),
@@ -1950,7 +1960,14 @@ export const zSessionRespondInputBody = z.object({
 
 export const zSessionRespondOutputBody = z.object({
     id: z.string(),
+    idempotency_key: z.string().optional(),
+    op: zConversationOp.optional(),
+    replayed: z.boolean().optional(),
     status: z.string()
+});
+
+export const zSessionStopBody = z.object({
+    turn: z.string().max(128).optional()
 });
 
 export const zSessionStrandedPayload = z.object({
@@ -10267,7 +10284,8 @@ export const zGetV0CityByCityNameSessionByIdAgentsByAgentIdPath = z.object({
 export const zGetV0CityByCityNameSessionByIdAgentsByAgentIdResponse = zSessionAgentGetResponse;
 
 export const zPostV0CityByCityNameSessionByIdCloseHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdClosePath = z.object({
@@ -10282,10 +10300,11 @@ export const zPostV0CityByCityNameSessionByIdCloseQuery = z.object({
 /**
  * OK
  */
-export const zPostV0CityByCityNameSessionByIdCloseResponse = zOkResponseBody;
+export const zPostV0CityByCityNameSessionByIdCloseResponse = zSessionCommandStatusBody;
 
 export const zPostV0CityByCityNameSessionByIdKillHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdKillPath = z.object({
@@ -10372,7 +10391,8 @@ export const zPostV0CityByCityNameSessionByIdRenamePath = z.object({
 export const zPostV0CityByCityNameSessionByIdRenameResponse = zSessionResponse;
 
 export const zPostV0CityByCityNameSessionByIdResetHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdResetPath = z.object({
@@ -10401,6 +10421,8 @@ export const zRespondSessionPath = z.object({
  * Accepted
  */
 export const zRespondSessionResponse = zSessionRespondOutputBody;
+
+export const zPostV0CityByCityNameSessionByIdStopBody = zSessionStopBody;
 
 export const zPostV0CityByCityNameSessionByIdStopHeaders = z.object({
     'X-GC-Request': z.string().min(1),
@@ -10504,7 +10526,8 @@ export const zSubmitSessionPath = z.object({
 export const zSubmitSessionResponse = zAsyncAcceptedBody;
 
 export const zPostV0CityByCityNameSessionByIdSuspendHeaders = z.object({
-    'X-GC-Request': z.string().min(1)
+    'X-GC-Request': z.string().min(1),
+    'Idempotency-Key': z.string().optional()
 });
 
 export const zPostV0CityByCityNameSessionByIdSuspendPath = z.object({
@@ -10515,7 +10538,7 @@ export const zPostV0CityByCityNameSessionByIdSuspendPath = z.object({
 /**
  * OK
  */
-export const zPostV0CityByCityNameSessionByIdSuspendResponse = zOkResponseBody;
+export const zPostV0CityByCityNameSessionByIdSuspendResponse = zSessionCommandStatusBody;
 
 export const zGetV0CityByCityNameSessionByIdTranscriptPath = z.object({
     cityName: z.string().min(1).regex(/\S/),

@@ -14,8 +14,11 @@ import (
 // Idempotency-Key header: resource creates, and the session actions a client
 // cannot safely retry without a key (a retried submit or message is delivered
 // twice, a retried stop can interrupt a later turn, a retried wake records a
-// second wake, and a retried respond fails once the first one cleared the
-// interaction). This set grows as each wiring slice (audit P0 #4) lands; a
+// second wake, a retried respond fails once the first one cleared the
+// interaction, and a retried kill or reset can kill or reset the session the
+// controller restarted after the first). Suspend and close take one too: the
+// operation journal records every session lifecycle command under its key
+// (DES-O0API §7.4). This set grows as each wiring slice (audit P0 #4) lands; a
 // regression that drops the header fails
 // TestCreateEndpointsAreTriagedForIdempotency.
 var requireIdempotency = map[string]bool{
@@ -33,8 +36,12 @@ var requireIdempotency = map[string]bool{
 	"submit-session":          true,
 	"send-session-message":    true,
 	"respond-session":         true,
-	"post-v0-city-by-city-name-session-by-id-stop": true,
-	"post-v0-city-by-city-name-session-by-id-wake": true,
+	"post-v0-city-by-city-name-session-by-id-stop":    true,
+	"post-v0-city-by-city-name-session-by-id-wake":    true,
+	"post-v0-city-by-city-name-session-by-id-kill":    true,
+	"post-v0-city-by-city-name-session-by-id-close":   true,
+	"post-v0-city-by-city-name-session-by-id-suspend": true,
+	"post-v0-city-by-city-name-session-by-id-reset":   true,
 }
 
 // pendingIdempotency lists known create operations that are deliberately NOT
@@ -55,12 +62,9 @@ var pendingIdempotency = map[string]bool{
 // must be classified, so a new create at ANY status (201, 202, …) that is
 // neither wired nor triaged fails the test.
 //
-// Of the session actions here, close, permission-mode, pin, rename, suspend and
-// unpin set a state: with no other request in between, a retry sets the same
-// state again or is refused. kill and reset are the exception: the controller
-// may restart the session after either, so a late retry kills or resets the
-// restarted session, the same exposure as a retried stop interrupting a later
-// turn. They stay here until ga-q0gyz3 decides whether to wire them.
+// The session actions here, permission-mode, pin, rename and unpin, set a
+// state: with no other request in between, a retry sets the same state again
+// or is refused.
 var exemptFromIdempotency = map[string]bool{
 	// ensure-extmsg-group is identity-idempotent by design: the ensure
 	// semantics (same group in → same group out) make a retry safe without a
@@ -95,13 +99,9 @@ var exemptFromIdempotency = map[string]bool{
 	"post-v0-city-by-city-name-rig-by-name-by-action":          true,
 	"post-v0-city-by-city-name-runs-by-run-id-cancel":          true,
 	"post-v0-city-by-city-name-service-by-name-restart":        true,
-	"post-v0-city-by-city-name-session-by-id-close":            true,
-	"post-v0-city-by-city-name-session-by-id-kill":             true,
 	"post-v0-city-by-city-name-session-by-id-permission-mode":  true,
 	"post-v0-city-by-city-name-session-by-id-pin":              true,
 	"post-v0-city-by-city-name-session-by-id-rename":           true,
-	"post-v0-city-by-city-name-session-by-id-reset":            true,
-	"post-v0-city-by-city-name-session-by-id-suspend":          true,
 	"post-v0-city-by-city-name-session-by-id-unpin":            true,
 	"post-v0-city-by-city-name-sling":                          true,
 	"post-v0-city-by-city-name-unregister":                     true,
