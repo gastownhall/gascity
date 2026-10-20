@@ -124,6 +124,18 @@ func TestWorkStartedRespelled(t *testing.T) {
 	if got, changed := wild.Respelled("city", "gcg-1", 2); changed || got.Claims[0] != wild.Claims[0] {
 		t.Fatalf("a storeless entry was re-spelled: %+v", got.Claims)
 	}
+	// Two leg spellings of one claim at this generation (an 8d6r4 cell
+	// written through two legs) become one resident entry, not two.
+	twoLegs := WorkStarted{Claims: []WorkStartedEntry{legacyEntry("rig:a", "gcg-1", 2), legacyEntry("rig:b", "gcg-1", 2)}}
+	if got, changed := twoLegs.Respelled("city", "gcg-1", 2); !changed || len(got.Claims) != 1 || got.Claims[0] != residentEntry("city", "gcg-1", 2) {
+		t.Fatalf("Respelled over two leg spellings = %+v, %v; want one resident entry", got.Claims, changed)
+	}
+	// A resident entry of another generation is no record of this one: the
+	// leg spelling at this generation is re-spelled, not dropped.
+	olderResident := WorkStarted{Claims: []WorkStartedEntry{residentEntry("city", "gcg-1", 1), legacyEntry("rig:gascity", "gcg-1", 2)}}
+	if got, changed := olderResident.Respelled("city", "gcg-1", 2); !changed || len(got.Claims) != 2 || got.Claims[1] != residentEntry("city", "gcg-1", 2) {
+		t.Fatalf("Respelled beside an older resident entry = %+v, %v; want this generation's entry kept, re-spelled", got.Claims, changed)
+	}
 	// A resident entry already names the claim: the leg spelling beside it is
 	// dropped, not re-spelled into a duplicate.
 	both := WorkStarted{Claims: []WorkStartedEntry{residentEntry("city", "gcg-1", 2), legacyEntry("rig:gascity", "gcg-1", 2)}}

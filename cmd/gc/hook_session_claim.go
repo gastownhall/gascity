@@ -253,7 +253,7 @@ var errWorkStartedReset = errors.New("work_started was unreadable and was reset 
 // errWorkStartedRespell marks a re-spelling write that failed on a claim the
 // cell already records: the claim is recorded (under the leg's spelling, which
 // the readers still match at its generation), so it is not unrecorded.
-var errWorkStartedRespell = errors.New("re-spelling the claim's work_started entry as the store it resides in failed; it stays recorded as the leg it ran in")
+var errWorkStartedRespell = errors.New("migrating the claim's work_started entry to the store it resides in failed; it stays recorded as it was, under the leg the hook ran in")
 
 // decideWorkStarted is the started write's decision on a fresh read of the
 // row: refuse a closed row and another incarnation's (stale), refuse a claim

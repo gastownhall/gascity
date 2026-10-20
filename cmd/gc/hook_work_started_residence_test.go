@@ -396,7 +396,7 @@ func TestHookRespellFailureIsNotUnrecorded(t *testing.T) {
 	if got := recordHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, "/rig", false, &stderr); got != hookStartedAlreadyRecorded {
 		t.Fatalf("recordHookWorkStarted = %v, want already recorded", got)
 	}
-	if len(l.unrecorded) != 0 || !strings.Contains(stderr.String(), "re-spelling") {
+	if len(l.unrecorded) != 0 || !strings.Contains(stderr.String(), "migrating") {
 		t.Fatalf("unrecorded %v, stderr %q; want no work.started_unrecorded and one note", l.unrecorded, stderr.String())
 	}
 }
@@ -465,5 +465,24 @@ func TestRoutedHookClaimOpsMarksARelocatedCity(t *testing.T) {
 				t.Fatalf("an adoption's key %+v on relocated=%v: want unmarked exactly when the city relocates", key, c.relocated)
 			}
 		})
+	}
+}
+
+// TestHookResidenceKeyIsExactOverAnotherStoresEntry: a proven residence key
+// is never matched by bead alone. Over a resident entry of another store for
+// the same id (a co-resident copy on a migrated city, a generation ago), the
+// hook records the claim under its residence rather than taking that entry
+// for it; otherwise the ladder's city key would read the claim unstarted.
+func TestHookResidenceKeyIsExactOverAnotherStoresEntry(t *testing.T) {
+	other := session.WorkStartedEntry{Store: startedStoreRef, Bead: residenceStep, Gen: 5, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}
+	fresh := session.Info{InstanceToken: "tok", Generation: "7", WorkStartedRaw: session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{other}})}
+	res, patch, err := decideWorkStarted(fresh, hookStartedFence{Token: "tok", Gen: 7, HasGen: true},
+		hookStartedKey{Store: "city", Bead: residenceStep, Resident: true}, session.WorkStartedViaClaim, stepsTestNow)
+	if err != nil || res != hookStartedRecorded {
+		t.Fatalf("decide = %v, %v; want the claim recorded", res, err)
+	}
+	cell, err := session.DecodeWorkStarted(patch[session.WorkStartedKey])
+	if err != nil || len(cell.Claims) != 2 || cell.Claims[0] != (session.WorkStartedEntry{Store: "city", Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}) {
+		t.Fatalf("cell %+v, %v: want the residence recorded first, the other store's entry kept", cell.Claims, err)
 	}
 }

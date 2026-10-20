@@ -393,9 +393,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   resides in, the spelling every reader uses, and marks the entry
   `resident`. An unmarked entry (one an older `gc` wrote, or an adoption
   whose store the hook could not prove) is read by bead alone, and only at
-  the session generation it was recorded in; the hook rewrites it to the
-  resident spelling the next time it proves the claim's store. A rollback
-  still reads the new entries.
+  the session generation it was recorded in; the hook rewrites an entry of
+  the current generation to the resident spelling the next time it proves the
+  claim's store. A rollback still reads the new entries.
 
 - **A config reload no longer creates or rebinds a city's bead store.** When a
   city's `.beads/metadata.json` went missing (for example, a `git` checkout

@@ -165,16 +165,18 @@ func (w WorkStarted) Without(store, bead string, gen int64) WorkStarted {
 // older hook's, or this one's unproven adoption). An entry of another
 // generation, and a storeless one (which already names the bead in every
 // store), are left as they are; an unknown store ("") is never written as a
-// residence. A resident entry already naming the claim makes a re-spelled
-// duplicate redundant, so the leg spelling is dropped instead. changed
-// reports whether the cell changed.
+// residence. A resident entry already naming the claim at gen makes a
+// re-spelled duplicate redundant, so the leg spelling is dropped instead (one
+// of another generation does not: it is no record of this incarnation, and
+// the #8133 backstop needs one at gen). changed reports whether the cell
+// changed.
 func (w WorkStarted) Respelled(store, bead string, gen int64) (out WorkStarted, changed bool) {
 	out = WorkStarted{V: workCellVersion, Claims: append([]WorkStartedEntry(nil), w.Claims...)}
 	if strings.TrimSpace(store) == "" {
 		return out, false
 	}
 	resident := slices.ContainsFunc(w.Claims, func(c WorkStartedEntry) bool {
-		return c.Resident && sameClaim(c.Store, c.Bead, store, bead)
+		return c.Resident && c.Gen == gen && sameClaim(c.Store, c.Bead, store, bead)
 	})
 	kept := out.Claims[:0]
 	for _, c := range out.Claims {
