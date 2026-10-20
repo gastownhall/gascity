@@ -56,5 +56,21 @@ export GC_K8S_IMAGE=myregistry/gc-agent:latest
 gc start my-city
 ```
 
+The native provider creates agent pods with Restricted-compatible security
+settings by default and leaves UID, primary GID, and `fsGroup` unset. Kubernetes
+admission can assign an identity; otherwise the image uses numeric fallback
+UID:GID `1001:0`. Image `HOME` and baked workspace paths are writable by the
+root group. Staged `emptyDir` workspaces need a cluster-assigned `fsGroup` or
+an explicit `[session.k8s] fs_group`, so kubelet can set volume ownership.
+Optional `[session.k8s] run_as_user`, `run_as_group`, and `fs_group` values
+configure those Pod fields directly; corresponding `GC_K8S_RUN_AS_USER`,
+`GC_K8S_RUN_AS_GROUP`, and `GC_K8S_FS_GROUP` environment variables override
+the TOML values. Gas City does not allocate UIDs.
+
+The legacy `LINUX_USERNAME` path is preserved: it starts the main container as
+root to create the account and chown its work directory before switching with
+`su`. Such pods are not admitted under Restricted Pod Security; use that
+compatibility path only in namespaces whose policy permits it.
+
 See [docs/k8s-guide.md](../../docs/k8s-guide.md) for the full setup guide,
 K8s manifests, and agent Dockerfile.

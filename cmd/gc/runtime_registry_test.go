@@ -64,6 +64,19 @@ func TestRuntimeRegistryRegistersAllBuiltinNames(t *testing.T) {
 	}
 }
 
+func TestRuntimeRegistryK8sPassesPodIdentityConfig(t *testing.T) {
+	t.Setenv("GC_K8S_RUN_AS_USER", "")
+	t.Setenv("GC_K8S_RUN_AS_GROUP", "")
+	t.Setenv("GC_K8S_FS_GROUP", "")
+	rootUID := int64(0)
+	_, err := newSessionProviderForCityByName(nil, "k8s", config.SessionConfig{
+		K8s: config.K8sConfig{RunAsUser: &rootUID},
+	}, "city", t.TempDir())
+	if err == nil || !strings.Contains(err.Error(), "session.k8s.run_as_user must be greater than zero") {
+		t.Fatalf("K8s provider config error = %v, want configured non-root UID validation before client setup", err)
+	}
+}
+
 func TestCloudflareIsNoLongerABuiltin(t *testing.T) {
 	// cloudflare moved to the runtime-cloudflare pack (RUNTIME-PLAN-004
 	// delivery independence). Without the pack, the name is unregistered and

@@ -220,9 +220,9 @@ func Catalog() []Entry {
 		builtin(
 			"k8s", "exact:k8s", nil,
 			waivedRuntime(
-				repoSymbol("internal/runtime/k8s", "NewSeamBacked"),
+				repoSymbol("internal/runtime/k8s", "NewSeamBackedWithSecurityConfig"),
 				time.Date(2026, time.November, 12, 0, 0, 0, 0, time.UTC),
-				"no runnable harness proves NewSeamBacked() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
+				"no runnable harness proves NewSeamBackedWithSecurityConfig() against a live Kubernetes API plus pod exec lifecycle; every k8s package test drives newProviderWithOps(fake) instead of the real constructor, and no kind/integration-tagged harness exists in internal/runtime/k8s",
 			),
 		),
 		builtin(
