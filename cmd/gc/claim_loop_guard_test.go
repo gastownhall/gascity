@@ -129,6 +129,11 @@ func TestClaimLoopGuardHoldsABeadAfterRepeatedIdenticalFailures(t *testing.T) {
 	if alert.Type != events.BeadClaimLoopHeld || alert.Subject != loopWisp || !reflect.DeepEqual(payload, want) {
 		t.Fatalf("alert = %s subject=%s payload=%+v, want %s subject=%s payload=%+v", alert.Type, alert.Subject, payload, events.BeadClaimLoopHeld, loopWisp, want)
 	}
+	// The guard can withhold only the demand it builds bead by bead, and the
+	// alert must not promise more.
+	if !strings.Contains(alert.Message, "default routed-work demand") || !strings.Contains(alert.Message, "custom scale_check") {
+		t.Fatalf("alert message = %q, want it to name what is withheld and what is not", alert.Message)
+	}
 	if !strings.Contains(h.stderr.String(), "holding "+loopWisp+" for "+loopTemplate) {
 		t.Fatalf("stderr = %q, want the hold named", h.stderr.String())
 	}
@@ -201,12 +206,52 @@ func TestClaimLoopGuardRequiresTheSameError(t *testing.T) {
 	if err := json.Unmarshal(h.alerts[0].Payload, &payload); err != nil || strings.Contains(payload.Error, "request_id") {
 		t.Fatalf("alert error = %q (%v), want it without the request id", payload.Error, err)
 	}
-	// The failure event itself keeps the id: it is how an operator finds the
-	// server's log line.
+	// The failure event's message keeps the id: it is how an operator finds the
+	// server's log line. Its payload, the form the guard compares, does not.
 	e, ok := claimFailedEvent(loopWisp, hookClaimOptions{Env: []string{"GC_TEMPLATE=" + loopTemplate}}, errors.New("answered 500 internal: internal error (request_id req-9)"))
 	var failed events.BeadClaimFailedPayload
-	if !ok || json.Unmarshal(e.Payload, &failed) != nil || !strings.Contains(failed.Error, "(request_id req-9)") {
-		t.Fatalf("bead.claim_failed error = %q, want the request id kept", failed.Error)
+	if !ok || json.Unmarshal(e.Payload, &failed) != nil || !strings.Contains(e.Message, "(request_id req-9)") || failed.Error != "answered 500 internal: internal error" {
+		t.Fatalf("bead.claim_failed message = %q, error = %q; want the request id in the message only", e.Message, failed.Error)
+	}
+}
+
+// TestClaimLoopGuardTripsOnALongErrorWhoseRequestIDsDiffer round-trips the
+// guard's input from its source, claimFailedEvent, for a repeating server
+// error longer than the bound. Bounding the text before removing the request
+// id would leave each seat a different partial id, or, when ids differ in
+// length, a different amount of the text after the id, and the guard would
+// never see the same error twice.
+func TestClaimLoopGuardTripsOnALongErrorWhoseRequestIDsDiffer(t *testing.T) {
+	for name, render := range map[string]func(seat int) string{
+		// The bound cuts the id's closing paren off and keeps its digits.
+		"id cut by the bound": func(seat int) string {
+			id := fmt.Sprintf(" (request_id srv-%06d)", seat*111111)
+			return strings.Repeat("e", claimLoopErrorMax-len(id)+1) + id
+		},
+		// The id fits, but its length decides how much of the text after it
+		// the bound keeps.
+		"text after an id of varying length": func(seat int) string {
+			return "answered 500 internal: internal error (request_id srv-" + strings.Repeat("7", seat) + ") " + strings.Repeat("h", claimLoopErrorMax)
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newClaimLoopHarness(t)
+			for seat := 1; seat <= claimLoopTripFailures; seat++ {
+				opts := hookClaimOptions{Env: []string{"GC_TEMPLATE=" + loopTemplate, fmt.Sprintf("GC_SESSION_ID=gcg-session-%d", seat)}}
+				e, ok := claimFailedEvent(loopWisp, opts, errors.New(render(seat)))
+				if !ok {
+					t.Fatal("no event for a templated seat's claim failure")
+				}
+				if !strings.Contains(e.Message, "(request_id srv-") {
+					t.Fatalf("message = %q, want the request id kept for the operator", e.Message)
+				}
+				e.Ts = h.now
+				h.guard.observe(e)
+			}
+			if !h.held(loopTemplate) {
+				t.Fatalf("not held after %d seats failed with one error differing only by request id", claimLoopTripFailures)
+			}
+		})
 	}
 }
 
@@ -248,6 +293,47 @@ func TestClaimLoopGuardSeatsInFlightDoNotLengthenTheHold(t *testing.T) {
 	if h.held(loopTemplate) {
 		t.Fatalf("still withheld %s after the trip: in-flight seats lengthened the hold", claimLoopHoldBase)
 	}
+	if len(h.alerts) != 1 {
+		t.Fatalf("alerts = %d, want only the trip's: in-flight seats change nothing to report", len(h.alerts))
+	}
+}
+
+// TestClaimLoopGuardHoldOutlastsADifferentError: a hold is about the bead, not
+// the error. A seat that fails another way while the bead is held (one already
+// running when the hold began, a probe timing out under load) neither ends the
+// hold nor resets its backoff, and a probe that fails another way extends it
+// like any failed probe. Releasing the hold on a changed error would let a loop
+// whose error alternates between two texts trip once and never again.
+func TestClaimLoopGuardHoldOutlastsADifferentError(t *testing.T) {
+	const otherErr = "claimIssue: timed out after 10s (caller deadline)"
+	h := newClaimLoopHarness(t)
+	h.trip()
+	h.advance(time.Minute)
+	h.fail(loopTemplate, loopWisp, otherErr) // a seat already running
+	if !h.held(loopTemplate) {
+		t.Fatal("a seat failing another way released the hold")
+	}
+	h.advance(claimLoopHoldBase - time.Minute)
+	if h.held(loopTemplate) {
+		t.Fatal("the probe was not admitted when the hold ran out")
+	}
+	h.advance(time.Minute)
+	h.fail(loopTemplate, loopWisp, otherErr) // the probe fails another way
+	end := h.now.Add(claimLoopHold(2))
+	h.now = end.Add(-time.Second)
+	if !h.held(loopTemplate) {
+		t.Fatal("a probe failing another way did not hold the bead again, longer")
+	}
+	if len(h.alerts) != 2 {
+		t.Fatalf("alerts = %d, want the trip's and the failed probe's", len(h.alerts))
+	}
+	var payload events.BeadClaimLoopHeldPayload
+	if err := json.Unmarshal(h.alerts[1].Payload, &payload); err != nil || payload.Error != otherErr || !payload.HeldUntil.Equal(end) {
+		t.Fatalf("probe alert = %+v (%v), want error %q held until %s", payload, err, otherErr, end)
+	}
+	if !strings.Contains(h.stderr.String(), "probe of "+loopWisp+" for "+loopTemplate+" failed") {
+		t.Fatalf("stderr = %q, want the failed probe named", h.stderr.String())
+	}
 }
 
 // TestClaimLoopGuardOnlyTheProbeLengthensAHold: once a probe's failure has
@@ -277,7 +363,8 @@ func TestClaimLoopGuardOnlyTheProbeLengthensAHold(t *testing.T) {
 
 // TestClaimLoopGuardBacksOffWithOneProbePerHold: a hold that runs out admits
 // the bead for one demand pass and then withholds it again while the probe
-// reports; a probe that fails the same way doubles the hold, up to the cap.
+// reports; a probe that fails the same way doubles the hold, up to the cap,
+// and raises the alert again with the hold's new end.
 func TestClaimLoopGuardBacksOffWithOneProbePerHold(t *testing.T) {
 	h := newClaimLoopHarness(t)
 	h.trip()
@@ -297,9 +384,13 @@ func TestClaimLoopGuardBacksOffWithOneProbePerHold(t *testing.T) {
 		h.advance(time.Minute)
 		h.fail(loopTemplate, loopWisp, loopErr) // the probe failed the same way
 		hold = min(hold*2, claimLoopHoldMax)
-	}
-	if len(h.alerts) != 1 {
-		t.Fatalf("alerts = %d, want one: a failed probe extends the hold without a new alert", len(h.alerts))
+		if len(h.alerts) != round+2 {
+			t.Fatalf("round %d: alerts = %d, want one more for the extended hold", round, len(h.alerts))
+		}
+		var payload events.BeadClaimLoopHeldPayload
+		if err := json.Unmarshal(h.alerts[round+1].Payload, &payload); err != nil || !payload.HeldUntil.Equal(h.now.Add(hold)) {
+			t.Fatalf("round %d: alert held_until = %s (%v), want %s", round, payload.HeldUntil, err, h.now.Add(hold))
+		}
 	}
 }
 
@@ -617,7 +708,7 @@ func TestClaimFailedEventNamesTheSeatTemplateAndTheError(t *testing.T) {
 	if err := json.Unmarshal(e.Payload, &payload); err != nil {
 		t.Fatal(err)
 	}
-	if e.Type != events.BeadClaimFailed || e.Subject != loopWisp || e.SessionID != "gcg-session-1" || e.Actor != "bd.dog-1" ||
+	if e.Type != events.BeadClaimFailed || e.Subject != loopWisp || e.SessionID != "gcg-session-1" || e.Actor != "bd.dog-1" || e.Message != long[:claimLoopErrorMax] ||
 		payload.Template != "bd.dog" || payload.SessionID != "gcg-session-1" || payload.RuntimeEpoch != 7 || payload.Error != long[:claimLoopErrorMax] {
 		t.Fatalf("event = %+v payload = %+v, want bead.claim_failed for %s by bd.dog with the bounded error", e, payload, loopWisp)
 	}

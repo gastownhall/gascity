@@ -99,9 +99,10 @@ func (BeadClaimReleasedPayload) IsEventPayload() {}
 // envelope's Subject is the routed bead a seat of Template could not claim.
 // SessionID and RuntimeEpoch name the seat: a session bead keeps its id across
 // restarts, and the epoch advances on each one, so together they tell a seat
-// retrying from a new seat. Error is the claim write's own error text, bounded
-// in length, which the claim-loop guard compares to tell one failure repeating
-// from unrelated ones.
+// retrying from a new seat. Error is the claim write's own error text without a
+// server request id, bounded in length: the form the claim-loop guard compares
+// to tell one failure repeating from unrelated ones. The envelope's Message
+// keeps the request id, an operator's handle on the server's log line.
 type BeadClaimFailedPayload struct {
 	Template     string `json:"template"`
 	SessionID    string `json:"session_id,omitempty"`
@@ -114,9 +115,10 @@ func (BeadClaimFailedPayload) IsEventPayload() {}
 
 // BeadClaimLoopHeldPayload is the typed payload for bead.claim_loop_held
 // events. The envelope's Subject is the held bead. Failures is how many
-// distinct seats of Template in a row failed to claim it with Error (a server
-// request id removed); HeldUntil is when the next probe seat may be spawned for
-// the bead if nothing changes before then.
+// distinct seats of Template have failed to claim it in this streak; Error (a
+// server request id removed) is the error they repeated when the hold began,
+// or the probe's when a failed probe extended it. HeldUntil is when the next
+// probe seat may be spawned for the bead if nothing changes before then.
 type BeadClaimLoopHeldPayload struct {
 	Template  string    `json:"template"`
 	Error     string    `json:"error"`

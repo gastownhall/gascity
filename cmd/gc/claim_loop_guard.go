@@ -20,17 +20,20 @@ package main
 //     woken again for the same bead counts again.
 //   - Trip: claimLoopTripFailures distinct seats of one template failing to
 //     claim one bead with the SAME error text, the first and the last within
-//     claimLoopWindow. A different error starts a new streak: only a failure
-//     that repeats exactly is a loop. A seat failing twice counts once.
+//     claimLoopWindow. Until a hold begins, a different error starts a new
+//     streak: only a failure that repeats exactly is a loop. A seat failing
+//     twice counts once.
 //   - Hold: the default routed-work demand count stops counting the bead for
 //     that template (withhold), so no seat is spawned for it, and
 //     bead.claim_loop_held names the template, the bead and the error for the
-//     operator. Seats already running when the hold begins may still fail; they
-//     do not lengthen it.
+//     operator. A hold is about the bead, not the error: seats already running
+//     when it begins may still fail, the same way or another, and they neither
+//     lengthen it nor end it.
 //   - Back off: when a hold runs out, the bead counts for one demand pass, so a
 //     probe seat can be spawned, and is withheld again for claimLoopProbeGrace
-//     while the probe reports. A probe that fails the same way doubles the hold,
-//     up to claimLoopHoldMax; one that never reports is followed by another.
+//     while the probe reports. A probe that fails, whatever its error, doubles
+//     the hold, up to claimLoopHoldMax, and raises bead.claim_loop_held again
+//     with the hold's new end; one that never reports is followed by another.
 //   - Resume: any journal event naming the bead (created, updated, closed,
 //     deleted) drops its records, and a config reload that changes the revision
 //     drops every record. A successful claim is itself a bead update. So is any
@@ -105,7 +108,7 @@ type claimLoopKey struct {
 
 // claimLoopRecord is the streak of identical claim failures for one key.
 type claimLoopRecord struct {
-	err      string              // the error text the streak repeats
+	err      string              // the error text the streak repeats; after a failed probe, the probe's
 	seats    map[string]struct{} // the seats (claimLoopSeat) counted in the streak
 	failures int                 // distinct failing seats; one without a session id counts on its own
 	first    time.Time           // the streak's first failure
@@ -134,7 +137,7 @@ func newClaimLoopGuard(record func(events.Event), stderr io.Writer) *claimLoopGu
 }
 
 // claimLoopErrorText is the bounded form of a claim error's text: trimmed and
-// cut on a rune boundary. bead.claim_failed carries it whole, request id
+// cut on a rune boundary. It is bead.claim_failed's message, request id
 // included, because that id is an operator's handle on the server's log line.
 func claimLoopErrorText(text string) string {
 	text = strings.TrimSpace(text)
@@ -148,8 +151,11 @@ func claimLoopErrorText(text string) string {
 	return text[:cut]
 }
 
-// claimLoopComparable is the form the guard compares: the bounded text without
-// a server request id.
+// claimLoopComparable is the form the guard compares, which bead.claim_failed's
+// payload carries: the text without a server request id, then bounded. The id
+// goes first because the bound can fall inside it, leaving each answer's own
+// partial id, or after an id whose length varies, keeping a different amount
+// of the text that follows it; either way no two seats would match.
 func claimLoopComparable(text string) string {
 	return claimLoopErrorText(claimLoopRequestID.ReplaceAllString(text, ""))
 }
@@ -209,7 +215,7 @@ func (g *claimLoopGuard) observeFailure(evt events.Event) {
 	g.mu.Lock()
 	g.sweep(at)
 	rec := g.records[key]
-	if rec == nil || rec.err != text || (rec.holds == 0 && at.Sub(rec.first) > claimLoopWindow) {
+	if rec == nil || (rec.holds == 0 && (rec.err != text || at.Sub(rec.first) > claimLoopWindow)) {
 		rec = &claimLoopRecord{err: text, seats: map[string]struct{}{}, first: at}
 		g.records[key] = rec
 	}
@@ -227,15 +233,18 @@ func (g *claimLoopGuard) observeFailure(evt events.Event) {
 		rec.holds = 1
 		rec.until = at.Add(claimLoopHold(rec.holds))
 		alert = g.heldEvent(key, rec, at)
-		fmt.Fprintf(g.stderr, "claim-loop guard: holding %s for %s: %d seats in a row failed to claim it with %q; not counted as spawn demand until %s\n", //nolint:errcheck // best-effort stderr
+		fmt.Fprintf(g.stderr, "claim-loop guard: holding %s for %s: %d seats in a row failed to claim it with %q; withheld from default routed-work demand until %s\n", //nolint:errcheck // best-effort stderr
 			key.beadID, key.template, rec.failures, rec.err, rec.until.UTC().Format(time.RFC3339))
 	case rec.probing:
-		// The probe failed the same way: hold again, longer.
+		// The probe failed, whatever its error: the bead still does not
+		// claim. Hold again, longer.
 		rec.probing = false
 		rec.holds++
+		rec.err = text
 		rec.until = at.Add(claimLoopHold(rec.holds))
-		fmt.Fprintf(g.stderr, "claim-loop guard: probe of %s for %s failed the same way (%d seats); holding until %s\n", //nolint:errcheck // best-effort stderr
-			key.beadID, key.template, rec.failures, rec.until.UTC().Format(time.RFC3339))
+		alert = g.heldEvent(key, rec, at)
+		fmt.Fprintf(g.stderr, "claim-loop guard: probe of %s for %s failed with %q (%d seats); holding until %s\n", //nolint:errcheck // best-effort stderr
+			key.beadID, key.template, rec.err, rec.failures, rec.until.UTC().Format(time.RFC3339))
 	}
 	g.mu.Unlock()
 	if alert != nil && g.record != nil {
@@ -243,7 +252,8 @@ func (g *claimLoopGuard) observeFailure(evt events.Event) {
 	}
 }
 
-// heldEvent is the bead.claim_loop_held alert for a hold that just began.
+// heldEvent is the bead.claim_loop_held alert for a hold that just began or,
+// after a probe failed, was extended.
 func (g *claimLoopGuard) heldEvent(key claimLoopKey, rec *claimLoopRecord, at time.Time) *events.Event {
 	payload, err := json.Marshal(events.BeadClaimLoopHeldPayload{
 		Template:  key.template,
@@ -254,12 +264,16 @@ func (g *claimLoopGuard) heldEvent(key claimLoopKey, rec *claimLoopRecord, at ti
 	if err != nil {
 		return nil
 	}
+	cause := fmt.Sprintf("%d %s seats in a row failed to claim %s with the same error", rec.failures, key.template, key.beadID)
+	if rec.holds > 1 {
+		cause = fmt.Sprintf("the probe seat of %s failed to claim %s too (%d seats in all)", key.template, key.beadID, rec.failures)
+	}
 	return &events.Event{
 		Type:    events.BeadClaimLoopHeld,
 		Ts:      at.UTC(),
 		Actor:   "controller",
 		Subject: key.beadID,
-		Message: fmt.Sprintf("%d %s seats in a row failed to claim %s with the same error; it is not counted as spawn demand until %s or until it changes", rec.failures, key.template, key.beadID, rec.until.UTC().Format(time.RFC3339)),
+		Message: fmt.Sprintf("%s; it is withheld from %s's default routed-work demand until %s or until it changes (a custom scale_check count is not withheld)", cause, key.template, rec.until.UTC().Format(time.RFC3339)),
 		Payload: payload,
 	}
 }

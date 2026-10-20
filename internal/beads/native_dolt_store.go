@@ -3577,9 +3577,11 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 // answered 404 not_found: no issue or wisp with that id") and keeps the
 // sentinel in the chain. The message match below is for raw doors whose
 // engines spell a miss without the sentinel. Reading only the message left a
-// claim over the wire unclassified, so `gc hook --claim`'s class route never
-// went looking in the relocated binding for a bead the work store does not
-// hold (ga-ylpbsy.30).
+// native door's claim over the wire unclassified (ga-ylpbsy.30). This covers
+// the in-process doors only: `gc hook --claim` claims through a bd
+// subprocess, which no sentinel crosses, and its class route settles such an
+// error by reading the same work leg (cmd/gc claim_class_route.go,
+// legProvedAbsent).
 func nativeStoreError(id string, err error) error {
 	if err == nil || errors.Is(err, ErrNotFound) {
 		return err

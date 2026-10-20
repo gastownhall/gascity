@@ -112,13 +112,10 @@ func TestClassRoutedClaimEscalatesOnlyOnNotFound(t *testing.T) {
 // retried against a second store — retrying it is how one bead gets claimed
 // twice. The read of the same leg that settles such an error proves absence
 // only when it answers not-found: a leg that reads the bead back, or whose read
-// fails too, keeps the work store's error as the answer.
+// fails too, keeps the work store's error as the answer. A store that did not
+// answer the write is not asked again, so only an error the store answered with
+// reaches that read.
 func TestClassRoutedClaimFailsClosedOnEveryOtherError(t *testing.T) {
-	class := newClaimRouteClassStore(t)
-	// The binding DOES hold the bead, so the only thing keeping the claim off it
-	// is the classification of the work store's error.
-	mintClaimRouteBead(t, class, "gcg-200", nil)
-
 	for _, read := range []struct {
 		name string
 		bead beads.Bead
@@ -128,21 +125,32 @@ func TestClassRoutedClaimFailsClosedOnEveryOtherError(t *testing.T) {
 		{name: "the leg's read fails too", err: errors.New("bd show: database is locked")},
 	} {
 		for _, tt := range []struct {
-			name string
-			err  error
+			name  string
+			err   error
+			reads int // settling reads of the leg the write ran against
 		}{
-			{"write timeout", context.DeadlineExceeded},
-			{"store contention", errors.New("bd update --claim: database is locked")},
-			{"controller socket flap", errors.New("dial unix .gc/controller.sock: connect: connection refused")},
+			// The store did not answer the write.
+			{"write timeout", context.DeadlineExceeded, 0},
+			{"store contention", errors.New("bd update --claim: database is locked"), 0},
+			{"controller socket flap", errors.New("dial unix .gc/controller.sock: connect: connection refused"), 0},
+			// The store answered with an error that names no miss.
+			{"write conflict", errors.New("claimIssue: bd serve at https://bdserve.example.test:30635 answered 409 conflict: row version changed"), 1},
+			{"write refused", errors.New("bd update --claim: exit status 1: Error: gcg-200 failed validation: status transition not allowed"), 1},
 		} {
 			t.Run(read.name+"/"+tt.name, func(t *testing.T) {
+				class := newClaimRouteClassStore(t)
+				// The binding DOES hold the bead, so the only thing keeping the
+				// claim off it is the classification of the work store's error.
+				mintClaimRouteBead(t, class, "gcg-200", nil)
 				route := newClaimRouteFor(t, class)
 				workErr, readBead, readErr := tt.err, read.bead, read.err
+				reads := 0
 				ops := classRoutedHookClaimOps(hookClaimOps{
 					Claim: func(context.Context, string, []string, string, string) (beads.Bead, bool, error) {
 						return beads.Bead{}, false, workErr
 					},
 					ReadWorkMeta: func(context.Context, string, []string, string, string) (beads.Bead, error) {
+						reads++
 						return readBead, readErr
 					},
 				}, route)
@@ -152,6 +160,9 @@ func TestClassRoutedClaimFailsClosedOnEveryOtherError(t *testing.T) {
 				}
 				if held, getErr := class.Get("gcg-200"); getErr != nil || strings.TrimSpace(held.Assignee) != "" {
 					t.Fatalf("the binding's copy of gcg-200 was claimed for %q after a %s; an unresolved work-store mutation must not be retried elsewhere", held.Assignee, tt.name)
+				}
+				if reads != tt.reads {
+					t.Fatalf("the leg the write ran against was read %d time(s), want %d", reads, tt.reads)
 				}
 			})
 		}

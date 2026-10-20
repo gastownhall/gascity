@@ -3287,19 +3287,21 @@ func emitClaimFailedTo(open func() events.Recorder, beadID string, opts hookClai
 // claimFailedEvent is the bead.claim_failed record for one skipped candidate,
 // or false when there is nothing to record. Only a seat of a template has
 // anything for the claim-loop guard to count, so a hook run outside one
-// records nothing.
+// records nothing. The payload's error is the form the guard compares
+// (claimLoopComparable), made here from the whole text; the message keeps the
+// server request id for the operator.
 func claimFailedEvent(beadID string, opts hookClaimOptions, err error) (events.Event, bool) {
 	template := strings.TrimSpace(hookClaimEnvValue(opts.Env, "GC_TEMPLATE"))
 	if err == nil || template == "" || strings.TrimSpace(beadID) == "" {
 		return events.Event{}, false
 	}
 	sessionID := hookClaimSessionID(opts.Env)
-	text := claimLoopErrorText(err.Error())
+	text := err.Error()
 	var epoch int64
 	if opts.StartedFence.HasGen {
 		epoch = opts.StartedFence.Gen
 	}
-	payload, marshalErr := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: sessionID, RuntimeEpoch: epoch, Error: text})
+	payload, marshalErr := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: sessionID, RuntimeEpoch: epoch, Error: claimLoopComparable(text)})
 	if marshalErr != nil {
 		return events.Event{}, false
 	}
@@ -3308,7 +3310,7 @@ func claimFailedEvent(beadID string, opts hookClaimOptions, err error) (events.E
 		Actor:     opts.Assignee,
 		Subject:   beadID,
 		SessionID: sessionID,
-		Message:   text,
+		Message:   claimLoopErrorText(text),
 		Payload:   payload,
 	}, true
 }

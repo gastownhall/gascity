@@ -63,12 +63,14 @@ const (
 	// every seat a template spawns is a spawn loop, not a slow claim.
 	BeadClaimFailed = "bead.claim_failed"
 	// BeadClaimLoopHeld fires when the controller's claim-loop guard stops
-	// counting a bead as spawn demand for a template, because the template's
-	// seats failed to claim it with the same error enough times in a row. It is
-	// an operator alert: the payload names the template, the bead (Subject), the
-	// error, the failure count and when the next probe seat may spawn. The bead
-	// counts as demand again when it changes, when the city config changes, or
-	// for one probe seat each time the hold's backoff runs out.
+	// counting a bead in a template's default routed-work demand, because the
+	// template's seats failed to claim it with the same error enough times in a
+	// row, and again, with the hold's new end, each time a probe seat fails to
+	// claim it. A custom scale_check count is not withheld. It is an operator
+	// alert: the payload names the template, the bead (Subject), the error, the
+	// failure count and when the next probe seat may spawn. The bead counts as
+	// demand again when it changes, when the city config changes, or for one
+	// probe seat each time the hold's backoff runs out.
 	BeadClaimLoopHeld = "bead.claim_loop_held"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
