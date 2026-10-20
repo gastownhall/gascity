@@ -285,30 +285,71 @@ func doConvoyCreateWithOptionsJSON(store beads.Store, cfg *config.City, cityPath
 }
 
 func newConvoyListCmd(stdout, stderr io.Writer) *cobra.Command {
-	var jsonOut bool
+	var opts convoyListOptions
 	cmd := &cobra.Command{
 		Use:   "list",
 		Short: "List open convoys with progress",
 		Long: `List all open convoys with completion progress.
 
 Shows each convoy's ID, title, and the number of closed vs total
-child issues.`,
+child issues.
+
+Synthetic convoys (metadata gc.synthetic=true) are hidden by default:
+the system mints one per formula launch on a single bead and per
+drained work unit, so a busy city holds thousands of them. The output
+says how many were hidden; --include-synthetic lists them too.`,
 		Args: cobra.NoArgs,
 		RunE: func(_ *cobra.Command, _ []string) error {
-			if cmdConvoyList(jsonOut, stdout, stderr) != 0 {
+			if cmdConvoyList(opts, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
 		},
 	}
-	cmd.Flags().BoolVar(&jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().BoolVar(&opts.jsonOut, "json", false, "emit JSONL result")
+	cmd.Flags().BoolVar(&opts.includeSynthetic, "include-synthetic", false, "also list synthetic convoys (gc.synthetic=true), minted for formula launches and drained work units")
 	return cmd
 }
 
+// convoyListOptions carries gc convoy list's flags.
+type convoyListOptions struct {
+	jsonOut          bool
+	includeSynthetic bool
+}
+
+// withoutSyntheticConvoys drops the synthetic convoys (convoycore.IsSynthetic)
+// from convoys unless include is set, and reports how many it dropped. Callers
+// filter before reading any convoy's members, so a hidden convoy costs no
+// membership read.
+func withoutSyntheticConvoys[T any](convoys []T, beadOf func(T) beads.Bead, include bool) (kept []T, hidden int) {
+	if include {
+		return convoys, 0
+	}
+	kept = make([]T, 0, len(convoys))
+	for _, c := range convoys {
+		if convoycore.IsSynthetic(beadOf(c)) {
+			hidden++
+			continue
+		}
+		kept = append(kept, c)
+	}
+	return kept, hidden
+}
+
+// writeHiddenSyntheticNote tells a human reader how many synthetic convoys
+// the listing left out, so a short or empty table is not mistaken for every
+// open convoy in the city.
+func writeHiddenSyntheticNote(stdout io.Writer, hidden int) {
+	if hidden == 0 {
+		return
+	}
+	fmt.Fprintf(stdout, "(%d synthetic convoy(s) hidden; --include-synthetic lists them)\n", hidden) //nolint:errcheck // best-effort stdout
+}
+
 // cmdConvoyList is the CLI entry point for listing convoys.
-func cmdConvoyList(jsonOut bool, stdout, stderr io.Writer) int {
+func cmdConvoyList(opts convoyListOptions, stdout, stderr io.Writer) int {
 	return routeReadCmd("convoy list", stderr, convoyListAPIClient, func(cityPath string, c *api.Client, nilReason string) int {
-		return routeConvoyList(cityPath, c, nilReason, jsonOut, stdout, stderr)
+		return routeConvoyList(cityPath, c, nilReason, opts, stdout, stderr)
 	})
 }
 
@@ -327,12 +368,14 @@ var convoyListAPIClient = func(cityPath string) (*api.Client, string) {
 // controller is up; otherwise falls back to the local multi-store iterator.
 // Emits exactly one route=... log line per exit path (gated on GC_DEBUG).
 //
-// The API path queries /convoys for the convoy list and /convoy/{id}/check
-// for each convoy's progress counts. If the per-convoy check returns a
+// The API path queries every page of /convoys for the convoy list and
+// /convoy/{id}/check for the progress counts of each convoy it lists (not of
+// the synthetic convoys it hides). If the per-convoy check returns a
 // fallbackable error, the whole operation falls back to local reads so
 // output is consistent (partial failure would produce surprising gaps).
-func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut bool, stdout, stderr io.Writer) int {
+func routeConvoyList(cityPath string, c *api.Client, nilReason string, opts convoyListOptions, stdout, stderr io.Writer) int {
 	var cr api.CachedRead[[]beads.Bead]
+	var hidden int
 	var progress []api.ConvoyCheckView
 	return routeRead(c, "convoy list", nilReason, stderr,
 		func() error {
@@ -340,11 +383,12 @@ func routeConvoyList(cityPath string, c *api.Client, nilReason string, jsonOut b
 			if cr, err = c.ListConvoys(); err != nil {
 				return err
 			}
+			cr.Body, hidden = withoutSyntheticConvoys(cr.Body, func(b beads.Bead) beads.Bead { return b }, opts.includeSynthetic)
 			progress, err = fetchConvoyProgress(c, cr.Body)
 			return err
 		},
-		func() int { return renderConvoyListFromAPI(cr, progress, jsonOut, stdout, stderr) },
-		func() int { return doConvoyListFallback(cityPath, jsonOut, stdout, stderr) },
+		func() int { return renderConvoyListFromAPI(cr, progress, hidden, opts.jsonOut, stdout, stderr) },
+		func() int { return doConvoyListFallback(cityPath, opts, stdout, stderr) },
 	)
 }
 
@@ -364,8 +408,9 @@ func fetchConvoyProgress(c *api.Client, convoys []beads.Bead) ([]api.ConvoyCheck
 }
 
 // renderConvoyListFromAPI formats the API-sourced convoy list to match
-// doConvoyListAcrossStores output. Stale banner appends when cache age > 30s.
-func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, jsonOut bool, stdout, stderr io.Writer) int {
+// doConvoyListAcrossStores output. hidden is the number of synthetic convoys
+// left out. Stale banner appends when cache age > 30s.
+func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.ConvoyCheckView, hidden int, jsonOut bool, stdout, stderr io.Writer) int {
 	if jsonOut {
 		items := make([]convoySummaryJSON, 0, len(cr.Body))
 		for i, convoy := range cr.Body {
@@ -374,7 +419,7 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 		if err := writeCLIJSONLine(stdout, convoyListResultJSON{
 			SchemaVersion: "1",
 			Convoys:       items,
-			Summary:       convoyListSummaryJSON{Total: len(items)},
+			Summary:       convoyListSummaryJSON{Total: len(items), HiddenSynthetic: hidden},
 		}); err != nil {
 			fmt.Fprintf(stderr, "gc convoy list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
@@ -383,6 +428,7 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 	}
 	if len(cr.Body) == 0 {
 		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
+		writeHiddenSyntheticNote(stdout, hidden)
 		return 0
 	}
 	tw := tabwriter.NewWriter(stdout, 0, 0, 2, ' ', 0)
@@ -392,6 +438,7 @@ func renderConvoyListFromAPI(cr api.CachedRead[[]beads.Bead], progress []api.Con
 		fmt.Fprintf(tw, "%s\t%s\t%d/%d closed\n", convoy.ID, convoy.Title, p.Closed, p.Total) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
+	writeHiddenSyntheticNote(stdout, hidden)
 	if cr.AgeSeconds > cacheAgeBannerThresholdSeconds {
 		fmt.Fprintf(stdout, "(cache age: %.0fs — reconciler may be lagging)\n", cr.AgeSeconds) //nolint:errcheck
 	}
@@ -417,13 +464,13 @@ func convoyProgressFromAPI(progress api.ConvoyCheckView) convoyProgressJSON {
 }
 
 // doConvoyListFallback is the direct-bd path for "gc convoy list".
-func doConvoyListFallback(cityPath string, jsonOut bool, stdout, stderr io.Writer) int {
+func doConvoyListFallback(cityPath string, opts convoyListOptions, stdout, stderr io.Writer) int {
 	stores, code := openAllConvoyStoresAt(cityPath, stderr, "gc convoy list")
 	if stores == nil {
 		return code
 	}
 	stores = convoyStoreViewsForRead(cityPath, stores, stderr, "gc convoy list")
-	return doConvoyListAcrossStores(stores, jsonOut, stdout, stderr)
+	return doConvoyListAcrossStores(stores, opts, stdout, stderr)
 }
 
 func convoyStoreCandidates(cfg *config.City, cityPath, beadID string) []string {
@@ -585,8 +632,9 @@ func convoyStoreViewsWithBinding(cityPath string, views []convoyStoreView) ([]co
 		// Both operands are pointer-typed HERE, which is what keeps the `==`
 		// away from the non-comparable dynamic type that panics an interface
 		// compare: the scan side is whatever opener openConvoyStores was handed,
-		// and both production openers end in a pointer store — openStoreAtForCity
-		// through wrapStoreWithBeadPolicies, openControlStoreAtForCity through
+		// and every production opener ends in a pointer store —
+		// openStoreAtForCity and openOneShotStoreAtForCityWithConfig through
+		// wrapStoreWithBeadPolicies, openControlStoreAtForCity through
 		// that or the *beads.BdStore control factory — while the binding side is
 		// constructor-opened and its one value-typed route, refusedClassStore,
 		// already returned above. relocatedGraphLegFrom carries the same
@@ -917,8 +965,10 @@ func openAllConvoyStoresAt(cityPath string, stderr io.Writer, cmdName string) ([
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
+	// Each open reuses this invocation's cfg rather than reloading city.toml
+	// and every pack include once per store.
 	stores, err := openConvoyStores(cfg, cityPath, "", func(storeDir string) (beads.Store, error) {
-		return openStoreAtForCity(storeDir, cityPath)
+		return openOneShotStoreAtForCityWithConfig(storeDir, cityPath, cfg)
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -1025,6 +1075,9 @@ type convoySummaryJSON struct {
 
 type convoyListSummaryJSON struct {
 	Total int `json:"total"`
+	// HiddenSynthetic counts the synthetic convoys left out of Convoys;
+	// --include-synthetic lists them.
+	HiddenSynthetic int `json:"hidden_synthetic,omitempty"`
 }
 
 type convoyListResultJSON struct {
@@ -1158,8 +1211,9 @@ func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName 
 		return nil, 1
 	}
 	emitLoadCityConfigWarnings(stderr, prov)
+	// Each probed store reuses this invocation's cfg; see openAllConvoyStoresAt.
 	store, err := resolveConvoyStore(convoyID, cfg, cityPath, func(storeDir string) (beads.Store, error) {
-		return openStoreAtForCity(storeDir, cityPath)
+		return openOneShotStoreAtForCityWithConfig(storeDir, cityPath, cfg)
 	})
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", cmdName, err)                   //nolint:errcheck // best-effort stderr
@@ -1171,26 +1225,28 @@ func openConvoyStoreByIDAt(convoyID, cityPath string, stderr io.Writer, cmdName 
 
 // doConvoyList lists open convoys with progress counts.
 func doConvoyList(store beads.Store, stdout, stderr io.Writer) int {
-	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, false, stdout, stderr)
+	return doConvoyListAcrossStores([]convoyStoreView{{store: store}}, convoyListOptions{}, stdout, stderr)
 }
 
 func listConvoyChildren(store beads.Store, convoyID string, includeClosed bool) ([]beads.Bead, error) {
 	return convoycore.Members(store, convoyID, includeClosed)
 }
 
-func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, stderr io.Writer) int {
-	convoys, err := collectOpenConvoys(stores)
+func doConvoyListAcrossStores(stores []convoyStoreView, opts convoyListOptions, stdout, stderr io.Writer) int {
+	openConvoys, err := collectOpenConvoys(stores)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc convoy list: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
+	convoys, hidden := withoutSyntheticConvoys(openConvoys, func(c convoyWithStore) beads.Bead { return c.bead }, opts.includeSynthetic)
 
-	if jsonOut {
-		return writeConvoyListJSON(convoys, stdout, stderr)
+	if opts.jsonOut {
+		return writeConvoyListJSON(convoys, hidden, stdout, stderr)
 	}
 
 	if len(convoys) == 0 {
 		fmt.Fprintln(stdout, "No open convoys") //nolint:errcheck // best-effort stdout
+		writeHiddenSyntheticNote(stdout, hidden)
 		return 0
 	}
 
@@ -1206,10 +1262,11 @@ func doConvoyListAcrossStores(stores []convoyStoreView, jsonOut bool, stdout, st
 		fmt.Fprintf(tw, "%s\t%s\t%s\n", c.bead.ID, c.bead.Title, formatConvoyProgress(progress)) //nolint:errcheck // best-effort stdout
 	}
 	tw.Flush() //nolint:errcheck // best-effort stdout
+	writeHiddenSyntheticNote(stdout, hidden)
 	return 0
 }
 
-func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) int {
+func writeConvoyListJSON(convoys []convoyWithStore, hidden int, stdout, stderr io.Writer) int {
 	items := make([]convoySummaryJSON, 0, len(convoys))
 	for _, c := range convoys {
 		children, err := listConvoyChildren(c.store, c.bead.ID, true)
@@ -1223,7 +1280,7 @@ func writeConvoyListJSON(convoys []convoyWithStore, stdout, stderr io.Writer) in
 	if err := writeCLIJSONLine(stdout, convoyListResultJSON{
 		SchemaVersion: "1",
 		Convoys:       items,
-		Summary:       convoyListSummaryJSON{Total: len(items)},
+		Summary:       convoyListSummaryJSON{Total: len(items), HiddenSynthetic: hidden},
 	}); err != nil {
 		fmt.Fprintf(stderr, "gc convoy list: writing JSON: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1

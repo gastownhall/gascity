@@ -1331,12 +1331,18 @@ List all open convoys with completion progress.
 Shows each convoy's ID, title, and the number of closed vs total
 child issues.
 
+Synthetic convoys (metadata gc.synthetic=true) are hidden by default:
+the system mints one per formula launch on a single bead and per
+drained work unit, so a busy city holds thousands of them. The output
+says how many were hidden; --include-synthetic lists them too.
+
 ```
 gc convoy list [flags]
 ```
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
+| `--include-synthetic` | bool |  | also list synthetic convoys (gc.synthetic=true), minted for formula launches and drained work units |
 | `--json` | bool |  | emit JSONL result |
 
 ## gc convoy reopen-source

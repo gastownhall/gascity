@@ -207,7 +207,7 @@ calls = 1
 [[count]]
 path = "cmd/gc/cmd_convoy_test.go"
 resource = "http_test_server"
-calls = 8
+calls = 10
 
 [[count]]
 path = "cmd/gc/cmd_doctor_test.go"
@@ -1490,7 +1490,7 @@ calls = 3
 [[count]]
 path = "internal/api/client_test.go"
 resource = "http_test_server"
-calls = 66
+calls = 68
 
 [[count]]
 path = "internal/api/client_waits_test.go"

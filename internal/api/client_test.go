@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -1223,6 +1225,92 @@ func TestClientListConvoys_ConnErrorFallback(t *testing.T) {
 	}
 }
 
+// TestClientListConvoysFollowsNextCursor proves ListConvoys drains every page
+// by following next_cursor. It used to make one cursor-less request, so the
+// server's default page (100) silently truncated a larger city's convoy list.
+// The fake serves 250 convoys in pages of at most 100 whatever limit is asked
+// for, the way a server with a lower cap would.
+func TestClientListConvoysFollowsNextCursor(t *testing.T) {
+	const total, pageSize = 250, 100
+	var reqs int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&reqs, 1)
+		if r.URL.Path != "/v0/city/alpha/convoys" {
+			t.Errorf("path = %q, want /v0/city/alpha/convoys", r.URL.Path)
+		}
+		if got := r.URL.Query().Get("limit"); got != "1000" {
+			t.Errorf("page limit = %q, want 1000", got)
+		}
+		start := 0
+		if cursor := r.URL.Query().Get("cursor"); cursor != "" {
+			n, err := strconv.Atoi(strings.TrimPrefix(cursor, "after-"))
+			if err != nil {
+				t.Errorf("unexpected cursor %q", cursor)
+			}
+			start = n
+		}
+		end := min(start+pageSize, total)
+		items := make([]map[string]any, 0, end-start)
+		for i := start; i < end; i++ {
+			items = append(items, map[string]any{"id": fmt.Sprintf("gc-%d", i+1), "title": "c", "issue_type": "convoy", "status": "open"})
+		}
+		body := map[string]any{"items": items, "total": total}
+		if end < total {
+			body["next_cursor"] = fmt.Sprintf("after-%d", end)
+		}
+		if start == 0 {
+			w.Header().Set("X-GC-Cache-Age-S", "2.5")
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(body)
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	got, err := c.ListConvoys()
+	if err != nil {
+		t.Fatalf("ListConvoys: %v", err)
+	}
+	if len(got.Body) != total {
+		t.Fatalf("got %d convoys, want %d (pagination not followed)", len(got.Body), total)
+	}
+	for i, b := range got.Body {
+		if want := fmt.Sprintf("gc-%d", i+1); b.ID != want {
+			t.Fatalf("Body[%d].ID = %q, want %q", i, b.ID, want)
+		}
+	}
+	if n := atomic.LoadInt32(&reqs); n != 3 {
+		t.Fatalf("requests = %d, want 3", n)
+	}
+	if got.AgeSeconds != 2.5 {
+		t.Errorf("AgeSeconds = %v, want 2.5 (taken from the first page)", got.AgeSeconds)
+	}
+}
+
+// TestClientListConvoysRepeatedCursorErrors proves a server that never
+// advances next_cursor makes ListConvoys fail loudly instead of spinning.
+func TestClientListConvoysRepeatedCursorErrors(t *testing.T) {
+	var reqs int32
+	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&reqs, 1)
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"items":       []map[string]any{{"id": "gc-1", "title": "c", "issue_type": "convoy", "status": "open"}},
+			"next_cursor": "stuck",
+		})
+	}))
+	defer ts.Close()
+
+	c := NewCityScopedClient(ts.URL, "alpha")
+	_, err := c.ListConvoys()
+	if err == nil || !strings.Contains(err.Error(), "repeated") {
+		t.Fatalf("err = %v, want 'repeated'", err)
+	}
+	if n := atomic.LoadInt32(&reqs); n != 2 {
+		t.Fatalf("requests = %d, want 2 (bounded)", n)
+	}
+}
+
 func TestClientGetConvoy(t *testing.T) {
 	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/v0/city/alpha/convoy/gc-1" {
@@ -1884,7 +1972,7 @@ func TestDrainBeadPagesHardPageCap(t *testing.T) {
 	defer ts.Close()
 
 	c := NewCityScopedClient(ts.URL, "alpha")
-	_, err := c.drainBeadPages(listBeadsParams(ListBeadsOpts{}), 0, 3)
+	_, err := drainBeadPages(c.beadsPage(listBeadsParams(ListBeadsOpts{})), 0, 3)
 	if err == nil || !strings.Contains(err.Error(), "exceeded 3 pages") {
 		t.Fatalf("err = %v, want 'exceeded 3 pages'", err)
 	}

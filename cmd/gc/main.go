@@ -1774,7 +1774,9 @@ func openStoreResultAtForCityWithConfig(storePath, cityPath string, cfg *config.
 // those is deliberately out of scope here, so do not read the shared path's
 // remaining callers as long-lived-only.
 // Nothing enforces that cfg is fresh; the one-shot entry points
-// (openCityStoreAtWithConfig, oneShotRigStoreOpener) are the only callers.
+// (openCityStoreAtWithConfig, oneShotRigStoreOpener) and the one-shot convoy
+// store openers (openAllConvoyStoresAt, openConvoyStoreByIDAt) are the only
+// callers.
 func openOneShotStoreAtForCityWithConfig(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
 	result, err := openStoreResultAtForCityScoped(storePath, cityPath, cfg, gate.ModeUnset, false, false, false, true, nil)
 	if err != nil {
