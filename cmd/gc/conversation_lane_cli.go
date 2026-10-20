@@ -120,7 +120,8 @@ func cliLaneUnavailable(cause any) string {
 
 // cliLaneNudgePreflight refuses, before the target resolves, a lane nudge
 // whose op cannot be written: no nudge store, a sessions store that cannot
-// host lanes, an invalid key or a payload the journal refuses. It reports
+// host lanes or open as a lane store, an invalid key or a payload the
+// journal refuses. It reports
 // the refusal and answers errMessageOpRefused.
 func cliLaneNudgePreflight(cityPath string, cfg *config.City, store beads.NudgesStore, req cliOpRequest) error {
 	refusal := &cliOp{req: req}
@@ -128,8 +129,13 @@ func cliLaneNudgePreflight(cityPath string, cfg *config.City, store beads.Nudges
 		refusal.refuse(cliOpCodeUnavailable, cliLaneUnavailable("the nudge store did not open"), "", req.key)
 		return errMessageOpRefused
 	}
-	if err := laneStoreCapability(cliSessionStore(store.Store, cfg, cityPath)); err != nil {
+	sessions := cliSessionStore(store.Store, cfg, cityPath)
+	if err := laneStoreCapability(sessions); err != nil {
 		refusal.refuse(cliOpCodeUnavailable, err.Error(), "", req.key)
+		return errMessageOpRefused
+	}
+	if _, err := opjournal.NewLaneStore(beads.SessionStore{Store: sessions}, cliOpClock); err != nil {
+		refusal.refuse(cliOpCodeUnavailable, cliLaneUnavailable(err), "", req.key)
 		return errMessageOpRefused
 	}
 	if code, message, ok := cliLaneCheckRequest(req.key, req.payload); !ok {

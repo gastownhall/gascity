@@ -5,6 +5,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -732,5 +734,34 @@ func TestLaneServesSessionMatchesServesNotice(t *testing.T) {
 				t.Fatalf("servesNotice = %v, %v; laneServesSession %v", notice, err, got)
 			}
 		})
+	}
+}
+
+// gc session nudge, with message listed, refuses a lane op it cannot write
+// before the configured named session's row materializes: the lane
+// preflight runs ahead of the resolution (resolveSessionNudgeTarget).
+func TestCmdSessionNudgeLaneRefusesBeforeMaterializing(t *testing.T) {
+	newCLIOpHarness(t, nil)
+	dir := newCLIOpNamedCityWithoutRow(t)
+	cityTOML := filepath.Join(dir, "city.toml")
+	data, err := os.ReadFile(cityTOML)
+	if err != nil {
+		t.Fatalf("reading city.toml: %v", err)
+	}
+	if err := os.WriteFile(cityTOML, append(data, []byte("\n[ops]\nauthoritative = [\"message\"]\n")...), 0o644); err != nil {
+		t.Fatalf("writing city.toml: %v", err)
+	}
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryWaitIdle, "", true, &stdout, &stderr)
+	// The file store a test city opens applies guarded batches but names no
+	// id prefix, so it cannot open as a lane store.
+	if code != 1 || !strings.Contains(stderr.String(), "op journal cannot record this request (opening op store") {
+		t.Fatalf("nudge = %d, stderr %q; want the lane refusal", code, stderr.String())
+	}
+	if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeUnavailable {
+		t.Fatalf("failure code %q, want %s", got, cliOpCodeUnavailable)
+	}
+	if n := cliOpSessionRows(t, dir); n != 0 {
+		t.Fatalf("session rows = %d, want none: the refusal comes before the resolution", n)
 	}
 }
