@@ -45,8 +45,9 @@ package main
 // conversation holds an open lane op. The hook writes op rows, the runtime
 // row's lane cells and, after an accepted lane-only delivery, the session's
 // last-nudge-delivered stamp; never turn facts. The drain rings the
-// controller's lane host after a Done, last of all, once its own output and
-// bookkeeping are done (hookLaneRing).
+// controller for the journal rows the pass wrote, and its lane host after a
+// Done, last of all, once its own output and bookkeeping are done
+// (hookLaneRing): the pass's own writes ring nothing (deferJournalRings).
 
 import (
 	"context"
@@ -407,11 +408,17 @@ func hookLanePokeLeg(now time.Time) time.Duration {
 	return leg
 }
 
-// hookLaneRing rings the lane host for conv after a pass that recorded a
-// Done. The drain calls it last, after its own output, acks and stamps, so
-// the doorbell never spends the time those need.
-func hookLaneRing(cityPath, conv string, out hookLaneOutcome) {
-	if !out.done || conv == "" {
+// hookLaneRing rings the controller for the journal rows the pass wrote,
+// rows (deferJournalRings; nil when its store does not ring), whether or not
+// it recorded a Done: each such ring refreshes the rows and pokes their
+// conversation. After a Done it also rings the lane host for conv, unless a
+// row ring's doorbell answered that it poked conv: a ring no controller
+// answered, or one it refused, is followed by the plain doorbell. The drain
+// calls it last, after its own output, acks and stamps, so the doorbells
+// never spend the time those need.
+func hookLaneRing(cityPath, conv string, out hookLaneOutcome, rows *journalRingQueue) {
+	poked := rows.ring(cityPath)
+	if !out.done || conv == "" || poked[conv] {
 		return
 	}
 	if leg := hookLanePokeLeg(time.Now()); leg > 0 {
@@ -562,7 +569,9 @@ func openHookLaneSessionStore(cityPath string, cfg *config.City, stderr io.Write
 // (hookLaneRecordTime), and records its delivery by hookLaneSettleBy, which
 // leaves the drain the archive margin to ack or release the legacy nudges.
 // With nothing due it costs the one keyed probe and writes nothing. The drain
-// rings the lane host itself (hookLaneRing) when it is done.
+// rings the lane host itself (hookLaneRing) when it is done, and rings for
+// the journal rows the pass wrote then too: sessions' emitter defers them
+// (deferJournalRings).
 func hookDrainLane(sessions beads.Store, conv string, knownDue bool, payload []byte, legacy, room int, write func(laneText string) error, stderr io.Writer) hookLaneOutcome {
 	if !knownDue && !hookLaneDue(sessions, conv, stderr) {
 		return hookLaneOutcome{}

@@ -262,7 +262,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		case op.RetryAt.After(now):
 			waitOp(op, WaitRetryBackoff, op.RetryAt)
 			e.wait, e.blocks = WaitRetryBackoff, true
-		case spec.Class == ClassContent && (op.Policy.Message.When == WhenNow || op.Policy.Message.When == WhenInterrupt):
+		case spec.Class == ClassContent && !op.Policy.Message.When.LaneLowered():
 			waitOp(op, WaitNowUnlowered, time.Time{})
 			continue
 		case spec.Class == ClassContent && !e.urgent && conv.ContentHold:

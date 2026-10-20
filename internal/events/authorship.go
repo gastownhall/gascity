@@ -126,6 +126,10 @@ var builtinAuthorship = map[string]Authorship{
 	BeadUpdated: AuthorLedger,
 	BeadClosed:  AuthorLedger,
 	BeadDeleted: AuthorLedger,
+	// The controller's cache-notification bridge derives both from journal
+	// rows' post-images (DES-O1 D18), never the writer.
+	OpChanged:    AuthorLedger,
+	FactRecorded: AuthorLedger,
 
 	// Worker: emitted by session and agent-facing command processes (the
 	// claim hook, mail, handoff, runtime drain, the control-dispatcher

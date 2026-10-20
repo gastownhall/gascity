@@ -111,6 +111,12 @@ const (
 
 var whens = []When{WhenBoundary, WhenAfterTurn, WhenInterrupt, WhenIfIdle, WhenNow, WhenSteer}
 
+// LaneLowered reports whether this build's conversation lane lowers a
+// message of mode w to a delivery. now and interrupt are not lowered yet: a
+// lane parks such a message (WaitNowUnlowered) until it expires, so a
+// producer that cannot tell its caller so refuses them before writing.
+func (w When) LaneLowered() bool { return w != WhenNow && w != WhenInterrupt }
+
 // Wake says whether a message may wake its conversation.
 type Wake string
 

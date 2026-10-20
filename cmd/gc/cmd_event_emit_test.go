@@ -508,6 +508,8 @@ func TestEventEmitRefusesCacheActorsAndBeadPayloads(t *testing.T) {
 		{name: "bead payload with bead-payload too", args: []string{"bead.updated", "--subject", "gc-1", "--payload", `{"id":"gc-1"}`, "--bead-payload", "gc-1"}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
 		{name: "created payload", args: []string{"bead.created", "--payload", `{"id":"gc-1"}`}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
 		{name: "deleted payload", args: []string{"bead.deleted", "--payload", `{"id":"gc-1"}`}, want: "--bead-payload", code: eventEmitBeadPayloadCode},
+		{name: "op.changed", args: []string{"op.changed", "--subject", "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa", "--payload", `{"op":{"status":"closed"}}`}, want: "operation-journal row", code: eventEmitJournalDerivedCode},
+		{name: "fact.recorded without a payload", args: []string{"fact.recorded", "--subject", "gc-fact-1"}, want: "operation-journal row", code: eventEmitJournalDerivedCode},
 	} {
 		for _, jsonOut := range []bool{false, true} {
 			name := tc.name

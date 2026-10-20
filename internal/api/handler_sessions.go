@@ -76,6 +76,11 @@ type sessionResponse struct {
 
 	// Metadata exposes real_world_app_-prefixed bead metadata for external consumers.
 	Metadata map[string]string `json:"metadata,omitempty"`
+
+	// Turn is the turn the session's conversation-lane observer last
+	// recorded (X11 §5.3). Set on GET /session/{id} only, and only while
+	// the city's lane host runs with a kind to execute.
+	Turn *SessionTurn `json:"turn,omitempty" doc:"The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row."`
 }
 
 type sessionResponseHandle interface {

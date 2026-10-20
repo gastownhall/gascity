@@ -251,3 +251,62 @@ once closed, and never stops the turn running then. Its reads of the
 session's turns refuse only an adopted op, which runs, so a closed stop
 replays after its session closed or its runtime stopped answering too. One
 naming another turn is 422 `idempotency_mismatch`.
+
+## The producer API and journal-row events
+
+`POST`/`GET .../session/{id}/ops`, `GET .../ops/{op}` and
+`POST .../ops/{op}/cancel` (`conversation_ops.go`; DES-O1 §11) write and read
+conversation-lane ops directly. They do not go through `legacyop` or the
+`ops.*` gates: a proposal is a lane op (`executor = lane`) or nothing. The
+kind gate is the running lane host's, read through the optional
+`ConversationLaneHost` State extension: the kinds `[ops] authoritative`
+listed when the controller started, while its host runs, never the live
+config, which a reload replaces without changing what the host executes.
+Any other kind, or any kind while no host runs, is refused 409
+`kind-not-enabled`; a message whose `when` the lane does not lower
+(`opjournal.When.LaneLowered`: `now`, `interrupt`) is refused 409
+`when-not-supported`. Every refusal, the request's own validation included
+(`opjournal.Store.Preview`), and the read of the event cursor the answer
+carries come before the session is resolved, so a refused request, or one
+whose cursor cannot be read, writes nothing and materializes no named
+session, and no proposal is ever silently shadowed or parked. A replay
+answers 200 with the same body as the first answer's 201; both are
+declared. The op id, not
+the `Idempotency-Key` LRU, is the idempotency: it derives from the session,
+the asserted principal (`operator` or `t3:<environment id>`) and the client
+key, so a retry across restarts returns the stored op and a different
+request under the key is 409 `key-reuse`. `conversation:<id>` and
+`gc:<producer>` principals stay reserved to gc's own producers.
+
+Journal rows (bead type `op`) record no `bead.*` event. The controller's
+cache-notification bridge (`cmd/gc/cache_notification.go`) derives
+`op.changed` from an op row's post-image and `fact.recorded` from a fact
+row's, and records nothing for runtime rows or DES-BX's `gc:event-fact` and
+`gc:event-projector` rows. A one-shot CLI's write to a journal row (the
+in-band hook pass, the CLI's shadow ops) journals nothing either: its
+emitter (`cmd/gc/class_store_emit_oprows.go`) rings the controller's lane
+doorbell with the row ids, `lane:<conversation>:<id>[,<id>...]`, whose
+handler refreshes each row through the controller's sessions cache, so the
+same bridge derives the event, for a close of a row the cache did not hold
+too. A refresh a local write of the cache holds off (a graph apply holds its
+fence for seconds), or that fails, the lane host retries off the socket
+handler until the row is installed, for up to a minute; one a quiescent
+city skips waits until a retry reads it, the quiescence not counted against
+the minute. lane-status counts the rows waiting and those it gave up, and
+the doorbell's answer counts the rows waiting. The in-band hook pass rings
+once, at the end of the drain, after its output and bookkeeping, and adds
+the plain doorbell after a Done only when no row ring's answer says it
+poked the conversation; a ring the hook's deadline leaves no time for is
+warned of. A row a CLI's write could not read back is known by its pinned id
+(`opjournal.IsPinnedID`) and journals nothing either. A write no controller
+answers is announced only partly: a running controller's next reconcile
+announces a row it finds open and changed, but not a close of a row it did
+not hold, and a controller started later primes silently; the row stays
+authoritative, so a consumer that reconnects reads it. A row deleted out of
+process that the cache held open is announced closed
+(`failed{closed_externally}` for an op), as the next reconcile would announce it. No writer may author either event: `POST /v0/events`
+and `gc event emit` refuse them (`events.IsJournalDerived`). Both payloads are pure functions of the row
+(`OpChangedPayloadFor`, `FactRecordedPayloadFor`) and never carry the op's
+payload text. The fields `conversationOpRecord` adds to `ConversationOp` are
+set only on the op routes and `op.changed`; a session command's answer keeps
+`conversationOpWire`.

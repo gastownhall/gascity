@@ -481,11 +481,7 @@ func plannerNoticeTallyKey(conv string, n plannerNotice, action ...string) strin
 // executesMessages reports whether the host is running and latched message
 // in [ops] authoritative, so planner notices go to its lane.
 func (h *conversationLaneHost) executesMessages() bool {
-	if !slices.Contains(h.kinds, string(opjournal.KindMessage)) {
-		return false
-	}
-	state, _ := h.stateReason()
-	return state == laneHostStateRunning
+	return slices.Contains(h.runningKinds(), string(opjournal.KindMessage))
 }
 
 // noticeStore is the host's op store, opened over its sessions store.

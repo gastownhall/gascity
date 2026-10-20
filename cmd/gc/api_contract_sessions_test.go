@@ -113,6 +113,31 @@ func contractSessionsFamily(t *testing.T, h *contractHarness) {
 		&genclient.PostV0CityByCityNameSessionByIdUnpinParams{XGCRequest: contractCSRF})
 	expectStatus(t, "unpin session", unpinned, err, http.StatusOK)
 
+	// The producer API (DES-O1 §11). The contract city lists no kind in
+	// [ops] authoritative, so a proposal is refused before anything is
+	// written, and the session has no open operation to read or cancel.
+	proposed, err := c.ProposeSessionOpWithResponse(ctx, city, sess.Id,
+		&genclient.ProposeSessionOpParams{XGCRequest: contractCSRF},
+		genclient.ProposeSessionOpJSONRequestBody{Kind: genclient.ConversationOpProposeBodyKindMessage, Payload: ptr("hello")})
+	expectStatus(t, "propose session op", proposed, err, http.StatusConflict)
+	if !strings.Contains(string(proposed.Body), "kind-not-enabled") {
+		t.Fatalf("propose refusal = %s", proposed.Body)
+	}
+	// The harness's session store mints ids without a prefix, which an op
+	// store needs, so the reads may answer the declared 503
+	// op-journal-unavailable instead.
+	ops, err := c.ListSessionOpsWithResponse(ctx, city, sess.Id)
+	expectStatus(t, "list session ops", ops, err, http.StatusOK, http.StatusServiceUnavailable)
+	if ops.JSON200 != nil && ops.JSON200.Total != 0 {
+		t.Fatalf("open ops = %s", contractBody(ops))
+	}
+	const missingOp = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	op, err := c.GetSessionOpWithResponse(ctx, city, sess.Id, missingOp)
+	expectStatus(t, "get session op", op, err, http.StatusNotFound, http.StatusServiceUnavailable)
+	canceled, err := c.CancelSessionOpWithResponse(ctx, city, sess.Id, missingOp,
+		&genclient.CancelSessionOpParams{XGCRequest: contractCSRF}, genclient.CancelSessionOpJSONRequestBody{})
+	expectStatus(t, "cancel session op", canceled, err, http.StatusNotFound, http.StatusServiceUnavailable)
+
 	transcript, err := c.GetV0CityByCityNameSessionByIdTranscriptWithResponse(ctx, city, sess.Id, nil)
 	expectStatus(t, "session transcript", transcript, err, http.StatusOK)
 	agents, err := c.GetV0CityByCityNameSessionByIdAgentsWithResponse(ctx, city, sess.Id)

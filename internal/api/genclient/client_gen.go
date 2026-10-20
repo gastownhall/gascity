@@ -78,6 +78,54 @@ func (e CityCreateRequestBootstrapProfile) Valid() bool {
 	}
 }
 
+// Defines values for ConversationFactKind.
+const (
+	InteractionRaised   ConversationFactKind = "interaction.raised"
+	InteractionResolved ConversationFactKind = "interaction.resolved"
+	SessionEnded        ConversationFactKind = "session.ended"
+	SessionStarted      ConversationFactKind = "session.started"
+	TurnEnded           ConversationFactKind = "turn.ended"
+	TurnStarted         ConversationFactKind = "turn.started"
+)
+
+// Valid indicates whether the value is a known member of the ConversationFactKind enum.
+func (e ConversationFactKind) Valid() bool {
+	switch e {
+	case InteractionRaised:
+		return true
+	case InteractionResolved:
+		return true
+	case SessionEnded:
+		return true
+	case SessionStarted:
+		return true
+	case TurnEnded:
+		return true
+	case TurnStarted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationInterruptPolicyBodyOnFailure.
+const (
+	ConversationInterruptPolicyBodyOnFailureFail    ConversationInterruptPolicyBodyOnFailure = "fail"
+	ConversationInterruptPolicyBodyOnFailureRestart ConversationInterruptPolicyBodyOnFailure = "restart"
+)
+
+// Valid indicates whether the value is a known member of the ConversationInterruptPolicyBodyOnFailure enum.
+func (e ConversationInterruptPolicyBodyOnFailure) Valid() bool {
+	switch e {
+	case ConversationInterruptPolicyBodyOnFailureFail:
+		return true
+	case ConversationInterruptPolicyBodyOnFailureRestart:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ConversationKind.
 const (
 	Dm     ConversationKind = "dm"
@@ -93,6 +141,114 @@ func (e ConversationKind) Valid() bool {
 	case Room:
 		return true
 	case Thread:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationMessagePolicyBodyOnUnsupported.
+const (
+	ConversationMessagePolicyBodyOnUnsupportedBoundary ConversationMessagePolicyBodyOnUnsupported = "boundary"
+	ConversationMessagePolicyBodyOnUnsupportedFail     ConversationMessagePolicyBodyOnUnsupported = "fail"
+)
+
+// Valid indicates whether the value is a known member of the ConversationMessagePolicyBodyOnUnsupported enum.
+func (e ConversationMessagePolicyBodyOnUnsupported) Valid() bool {
+	switch e {
+	case ConversationMessagePolicyBodyOnUnsupportedBoundary:
+		return true
+	case ConversationMessagePolicyBodyOnUnsupportedFail:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationMessagePolicyBodyRole.
+const (
+	Notice ConversationMessagePolicyBodyRole = "notice"
+	Prompt ConversationMessagePolicyBodyRole = "prompt"
+)
+
+// Valid indicates whether the value is a known member of the ConversationMessagePolicyBodyRole enum.
+func (e ConversationMessagePolicyBodyRole) Valid() bool {
+	switch e {
+	case Notice:
+		return true
+	case Prompt:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationMessagePolicyBodyWake.
+const (
+	IfNeeded ConversationMessagePolicyBodyWake = "if_needed"
+	LiveOnly ConversationMessagePolicyBodyWake = "live_only"
+)
+
+// Valid indicates whether the value is a known member of the ConversationMessagePolicyBodyWake enum.
+func (e ConversationMessagePolicyBodyWake) Valid() bool {
+	switch e {
+	case IfNeeded:
+		return true
+	case LiveOnly:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationMessagePolicyBodyWhen.
+const (
+	ConversationMessagePolicyBodyWhenAfterTurn ConversationMessagePolicyBodyWhen = "after_turn"
+	ConversationMessagePolicyBodyWhenBoundary  ConversationMessagePolicyBodyWhen = "boundary"
+	ConversationMessagePolicyBodyWhenIfIdle    ConversationMessagePolicyBodyWhen = "if_idle"
+	ConversationMessagePolicyBodyWhenInterrupt ConversationMessagePolicyBodyWhen = "interrupt"
+	ConversationMessagePolicyBodyWhenNow       ConversationMessagePolicyBodyWhen = "now"
+	ConversationMessagePolicyBodyWhenSteer     ConversationMessagePolicyBodyWhen = "steer"
+)
+
+// Valid indicates whether the value is a known member of the ConversationMessagePolicyBodyWhen enum.
+func (e ConversationMessagePolicyBodyWhen) Valid() bool {
+	switch e {
+	case ConversationMessagePolicyBodyWhenAfterTurn:
+		return true
+	case ConversationMessagePolicyBodyWhenBoundary:
+		return true
+	case ConversationMessagePolicyBodyWhenIfIdle:
+		return true
+	case ConversationMessagePolicyBodyWhenInterrupt:
+		return true
+	case ConversationMessagePolicyBodyWhenNow:
+		return true
+	case ConversationMessagePolicyBodyWhenSteer:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpExecutor.
+const (
+	Lane      ConversationOpExecutor = "lane"
+	Legacy    ConversationOpExecutor = "legacy"
+	LegacyApi ConversationOpExecutor = "legacy:api"
+	LegacyCli ConversationOpExecutor = "legacy:cli"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpExecutor enum.
+func (e ConversationOpExecutor) Valid() bool {
+	switch e {
+	case Lane:
+		return true
+	case Legacy:
+		return true
+	case LegacyApi:
+		return true
+	case LegacyCli:
 		return true
 	default:
 		return false
@@ -168,6 +324,30 @@ func (e ConversationOpStatus) Valid() bool {
 	}
 }
 
+// Defines values for ConversationOpCancelResultResult.
+const (
+	ConversationOpCancelResultResultAlreadyDecided  ConversationOpCancelResultResult = "already_decided"
+	ConversationOpCancelResultResultAlreadyTerminal ConversationOpCancelResultResult = "already_terminal"
+	ConversationOpCancelResultResultClosed          ConversationOpCancelResultResult = "closed"
+	ConversationOpCancelResultResultRequested       ConversationOpCancelResultResult = "requested"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpCancelResultResult enum.
+func (e ConversationOpCancelResultResult) Valid() bool {
+	switch e {
+	case ConversationOpCancelResultResultAlreadyDecided:
+		return true
+	case ConversationOpCancelResultResultAlreadyTerminal:
+		return true
+	case ConversationOpCancelResultResultClosed:
+		return true
+	case ConversationOpCancelResultResultRequested:
+		return true
+	default:
+		return false
+	}
+}
+
 // Defines values for ConversationOpOutcomeArm.
 const (
 	ConversationOpOutcomeArmCanceled  ConversationOpOutcomeArm = "canceled"
@@ -186,6 +366,138 @@ func (e ConversationOpOutcomeArm) Valid() bool {
 	case ConversationOpOutcomeArmSkipped:
 		return true
 	case ConversationOpOutcomeArmSucceeded:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpPolicyBodyGuarantee.
+const (
+	AtLeastOnce ConversationOpPolicyBodyGuarantee = "at_least_once"
+	AtMostOnce  ConversationOpPolicyBodyGuarantee = "at_most_once"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpPolicyBodyGuarantee enum.
+func (e ConversationOpPolicyBodyGuarantee) Valid() bool {
+	switch e {
+	case AtLeastOnce:
+		return true
+	case AtMostOnce:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpProposeBodyKind.
+const (
+	ConversationOpProposeBodyKindClose     ConversationOpProposeBodyKind = "close"
+	ConversationOpProposeBodyKindCreate    ConversationOpProposeBodyKind = "create"
+	ConversationOpProposeBodyKindInterrupt ConversationOpProposeBodyKind = "interrupt"
+	ConversationOpProposeBodyKindKill      ConversationOpProposeBodyKind = "kill"
+	ConversationOpProposeBodyKindMessage   ConversationOpProposeBodyKind = "message"
+	ConversationOpProposeBodyKindRespond   ConversationOpProposeBodyKind = "respond"
+	ConversationOpProposeBodyKindRestart   ConversationOpProposeBodyKind = "restart"
+	ConversationOpProposeBodyKindResume    ConversationOpProposeBodyKind = "resume"
+	ConversationOpProposeBodyKindSuspend   ConversationOpProposeBodyKind = "suspend"
+	ConversationOpProposeBodyKindWake      ConversationOpProposeBodyKind = "wake"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpProposeBodyKind enum.
+func (e ConversationOpProposeBodyKind) Valid() bool {
+	switch e {
+	case ConversationOpProposeBodyKindClose:
+		return true
+	case ConversationOpProposeBodyKindCreate:
+		return true
+	case ConversationOpProposeBodyKindInterrupt:
+		return true
+	case ConversationOpProposeBodyKindKill:
+		return true
+	case ConversationOpProposeBodyKindMessage:
+		return true
+	case ConversationOpProposeBodyKindRespond:
+		return true
+	case ConversationOpProposeBodyKindRestart:
+		return true
+	case ConversationOpProposeBodyKindResume:
+		return true
+	case ConversationOpProposeBodyKindSuspend:
+		return true
+	case ConversationOpProposeBodyKindWake:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpProposeResultStatus.
+const (
+	ConversationOpProposeResultStatusAccepted  ConversationOpProposeResultStatus = "accepted"
+	ConversationOpProposeResultStatusClosed    ConversationOpProposeResultStatus = "closed"
+	ConversationOpProposeResultStatusExecuting ConversationOpProposeResultStatus = "executing"
+	ConversationOpProposeResultStatusSettling  ConversationOpProposeResultStatus = "settling"
+	ConversationOpProposeResultStatusSubmitted ConversationOpProposeResultStatus = "submitted"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpProposeResultStatus enum.
+func (e ConversationOpProposeResultStatus) Valid() bool {
+	switch e {
+	case ConversationOpProposeResultStatusAccepted:
+		return true
+	case ConversationOpProposeResultStatusClosed:
+		return true
+	case ConversationOpProposeResultStatusExecuting:
+		return true
+	case ConversationOpProposeResultStatusSettling:
+		return true
+	case ConversationOpProposeResultStatusSubmitted:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpResultTurnLink.
+const (
+	Ambiguous  ConversationOpResultTurnLink = "ambiguous"
+	Correlated ConversationOpResultTurnLink = "correlated"
+	Exact      ConversationOpResultTurnLink = "exact"
+	None       ConversationOpResultTurnLink = "none"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpResultTurnLink enum.
+func (e ConversationOpResultTurnLink) Valid() bool {
+	switch e {
+	case Ambiguous:
+		return true
+	case Correlated:
+		return true
+	case Exact:
+		return true
+	case None:
+		return true
+	default:
+		return false
+	}
+}
+
+// Defines values for ConversationOpScopeBodyKind.
+const (
+	ConversationOpScopeBodyKindContext      ConversationOpScopeBodyKind = "context"
+	ConversationOpScopeBodyKindConversation ConversationOpScopeBodyKind = "conversation"
+	ConversationOpScopeBodyKindSession      ConversationOpScopeBodyKind = "session"
+)
+
+// Valid indicates whether the value is a known member of the ConversationOpScopeBodyKind enum.
+func (e ConversationOpScopeBodyKind) Valid() bool {
+	switch e {
+	case ConversationOpScopeBodyKindContext:
+		return true
+	case ConversationOpScopeBodyKindConversation:
+		return true
+	case ConversationOpScopeBodyKindSession:
 		return true
 	default:
 		return false
@@ -1154,19 +1466,19 @@ func (e StreamSessionParamsFormat) Valid() bool {
 
 // Defines values for GetV0CityByCityNameSessionByIdTranscriptParamsFormat.
 const (
-	GetV0CityByCityNameSessionByIdTranscriptParamsFormatConversation GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "conversation"
-	GetV0CityByCityNameSessionByIdTranscriptParamsFormatRaw          GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "raw"
-	GetV0CityByCityNameSessionByIdTranscriptParamsFormatStructured   GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "structured"
+	Conversation GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "conversation"
+	Raw          GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "raw"
+	Structured   GetV0CityByCityNameSessionByIdTranscriptParamsFormat = "structured"
 )
 
 // Valid indicates whether the value is a known member of the GetV0CityByCityNameSessionByIdTranscriptParamsFormat enum.
 func (e GetV0CityByCityNameSessionByIdTranscriptParamsFormat) Valid() bool {
 	switch e {
-	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatConversation:
+	case Conversation:
 		return true
-	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatRaw:
+	case Raw:
 		return true
-	case GetV0CityByCityNameSessionByIdTranscriptParamsFormatStructured:
+	case Structured:
 		return true
 	default:
 		return false
@@ -1902,6 +2214,45 @@ type ControlStalledPayload struct {
 	StorePath  *string `json:"store_path,omitempty"`
 }
 
+// ConversationFact defines model for ConversationFact.
+type ConversationFact struct {
+	// At When it happened: the source's time, or the observer's clock when the source gives none.
+	At time.Time `json:"at"`
+
+	// Basis How the fact is known: runtime (the provider recorded it), observed (gc inferred it) or lane. Open: a newer build may add values.
+	Basis *string `json:"basis,omitempty"`
+
+	// CauseOps Operations that caused the fact.
+	CauseOps *[]string `json:"cause_ops,omitempty"`
+
+	// Conversation Session (conversation) id the fact belongs to.
+	Conversation string `json:"conversation"`
+
+	// Detail The source's own word for the occurrence, e.g. a provider stop reason.
+	Detail *string `json:"detail,omitempty"`
+
+	// Generation Session generation the fact happened in.
+	Generation int64 `json:"generation"`
+
+	// Id Fact id, keyed by the occurrence.
+	Id string `json:"id"`
+
+	// Interaction The occurrence of an interaction.* fact.
+	Interaction *string `json:"interaction,omitempty"`
+
+	// Kind Fact kind.
+	Kind ConversationFactKind `json:"kind"`
+
+	// Reason Open reason token, e.g. a turn.ended reason (completed, interrupted, superseded).
+	Reason *string `json:"reason,omitempty"`
+
+	// Turn The turn of a turn.* fact, as its runtime names it.
+	Turn *string `json:"turn,omitempty"`
+}
+
+// ConversationFactKind Fact kind.
+type ConversationFactKind string
+
 // ConversationGroupParticipant defines model for ConversationGroupParticipant.
 type ConversationGroupParticipant struct {
 	GroupID     string            `json:"GroupID"`
@@ -1925,33 +2276,152 @@ type ConversationGroupRecord struct {
 	SchemaVersion       int64             `json:"SchemaVersion"`
 }
 
+// ConversationInterruptPolicyBody defines model for ConversationInterruptPolicyBody.
+type ConversationInterruptPolicyBody struct {
+	// OnFailure What the interrupt does when no boundary is observed: fail or restart.
+	OnFailure *ConversationInterruptPolicyBodyOnFailure `json:"on_failure,omitempty"`
+}
+
+// ConversationInterruptPolicyBodyOnFailure What the interrupt does when no boundary is observed: fail or restart.
+type ConversationInterruptPolicyBodyOnFailure string
+
 // ConversationKind Shape of a conversation.
 type ConversationKind string
 
+// ConversationMessagePolicyBody defines model for ConversationMessagePolicyBody.
+type ConversationMessagePolicyBody struct {
+	// NowGeneration With when now: the session generation the requester saw.
+	NowGeneration *int64 `json:"now_generation,omitempty"`
+
+	// NowTurn With when now: the turn the requester saw.
+	NowTurn *string `json:"now_turn,omitempty"`
+
+	// OnUnsupported What a steer does on a runtime that cannot steer: boundary or fail.
+	OnUnsupported *ConversationMessagePolicyBodyOnUnsupported `json:"on_unsupported,omitempty"`
+
+	// Role How the agent sees it: prompt (a turn of its own) or notice (a reminder).
+	Role *ConversationMessagePolicyBodyRole `json:"role,omitempty"`
+
+	// Wake Whether the message may wake its session: if_needed or live_only.
+	Wake *ConversationMessagePolicyBodyWake `json:"wake,omitempty"`
+
+	// When When to deliver: boundary (the next turn boundary), after_turn (ride the next turn, never start one), interrupt, if_idle (skipped when the session is mid-turn), now (deliver now) or steer (into the running turn, where the runtime can steer).
+	When *ConversationMessagePolicyBodyWhen `json:"when,omitempty"`
+}
+
+// ConversationMessagePolicyBodyOnUnsupported What a steer does on a runtime that cannot steer: boundary or fail.
+type ConversationMessagePolicyBodyOnUnsupported string
+
+// ConversationMessagePolicyBodyRole How the agent sees it: prompt (a turn of its own) or notice (a reminder).
+type ConversationMessagePolicyBodyRole string
+
+// ConversationMessagePolicyBodyWake Whether the message may wake its session: if_needed or live_only.
+type ConversationMessagePolicyBodyWake string
+
+// ConversationMessagePolicyBodyWhen When to deliver: boundary (the next turn boundary), after_turn (ride the next turn, never start one), interrupt, if_idle (skipped when the session is mid-turn), now (deliver now) or steer (into the running turn, where the runtime can steer).
+type ConversationMessagePolicyBodyWhen string
+
 // ConversationOp defines model for ConversationOp.
 type ConversationOp struct {
-	// Attempt Executions after the first (an adopted orphan).
+	// Actor The producer's actor class, an open token. Set on the op routes and op.changed only.
+	Actor *string `json:"actor,omitempty"`
+
+	// At When the operation last changed status. Set on the op routes and op.changed only.
+	At *time.Time `json:"at,omitempty"`
+
+	// Attempt How many times the operation was executed, counted by its executor. A legacy-executed operation counts executions after the first (an adopted orphan), so its first run reads 0. A lane operation counts the lane's takes, its first included, so one delivered once reads 1 and a redelivery 2; maybe_delivered says whether an earlier take may have reached the agent.
 	Attempt *int64 `json:"attempt,omitempty"`
+
+	// CancelRequested True once a cancel is recorded on an operation that was already executing; its outcome says whether the cancel won. Set on the op routes and op.changed only.
+	CancelRequested *bool `json:"cancel_requested,omitempty"`
+
+	// Causation What caused the operation, as the producer named it. Set on the op routes and op.changed only.
+	Causation *string `json:"causation,omitempty"`
+
+	// ClientKey The producer's client key: the Idempotency-Key, or the key the server minted. Set on the op routes and op.changed only.
+	ClientKey *string `json:"client_key,omitempty"`
+
+	// ClientSeq The producer's own sequence number, which orders its operations of equal precedence. Set on the op routes and op.changed only.
+	ClientSeq *int64 `json:"client_seq,omitempty"`
 
 	// Conversation Session (conversation) id the operation targets.
 	Conversation string `json:"conversation"`
+
+	// Correlation The producer's correlation id. Set on the op routes and op.changed only.
+	Correlation *string `json:"correlation,omitempty"`
+
+	// CreatedAt When the operation was proposed. Set on the op routes and op.changed only.
+	CreatedAt *time.Time `json:"created_at,omitempty"`
+
+	// Executor Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.
+	Executor *ConversationOpExecutor `json:"executor,omitempty"`
 
 	// Id Operation id. Equals request_id on async responses.
 	Id string `json:"id"`
 
 	// Kind Operation kind.
-	Kind    ConversationOpKind     `json:"kind"`
-	Outcome *ConversationOpOutcome `json:"outcome,omitempty"`
+	Kind ConversationOpKind `json:"kind"`
+
+	// LaneSeq The conversation lane's sequence number of the operation's last take. Set on the op routes and op.changed only.
+	LaneSeq *int64 `json:"lane_seq,omitempty"`
+
+	// MaybeDelivered The last attempt that may have reached the agent (a redelivery after an ambiguous attempt), 0 when none may have. Set on the op routes and op.changed only.
+	MaybeDelivered *int64                 `json:"maybe_delivered,omitempty"`
+	Outcome        *ConversationOpOutcome `json:"outcome,omitempty"`
+
+	// Principal The producer's principal: operator, conversation:<id>, t3:<environment id>, or gc:<producer> for gc's own producers. Asserted, not authenticated. Set on the op routes and op.changed only.
+	Principal *string `json:"principal,omitempty"`
 
 	// Status Operation status. A legacy-executed operation stays submitted until it closes.
 	Status ConversationOpStatus `json:"status"`
 }
+
+// ConversationOpExecutor Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.
+type ConversationOpExecutor string
 
 // ConversationOpKind Operation kind.
 type ConversationOpKind string
 
 // ConversationOpStatus Operation status. A legacy-executed operation stays submitted until it closes.
 type ConversationOpStatus string
+
+// ConversationOpCancelBody defines model for ConversationOpCancelBody.
+type ConversationOpCancelBody struct {
+	// Principal The asserted principal recorded as the canceler: operator (the default) or t3:<environment id>.
+	Principal *string `json:"principal,omitempty"`
+
+	// Reason Why the producer cancels.
+	Reason *string `json:"reason,omitempty"`
+}
+
+// ConversationOpCancelResult defines model for ConversationOpCancelResult.
+type ConversationOpCancelResult struct {
+	Op ConversationOp `json:"op"`
+
+	// Result What the cancel did: closed (the operation had not started and is now closed canceled), requested (it is executing; the cancel is recorded and its outcome says who won), already_decided (it is settling; nothing was written) or already_terminal (it was closed).
+	Result ConversationOpCancelResultResult `json:"result"`
+}
+
+// ConversationOpCancelResultResult What the cancel did: closed (the operation had not started and is now closed canceled), requested (it is executing; the cancel is recorded and its outcome says who won), already_decided (it is settling; nothing was written) or already_terminal (it was closed).
+type ConversationOpCancelResultResult string
+
+// ConversationOpDelivery defines model for ConversationOpDelivery.
+type ConversationOpDelivery struct {
+	// Ack The runtime's answer (open vocabulary, e.g. delivered, delivered_unobserved, in_band).
+	Ack *string `json:"ack,omitempty"`
+
+	// At The lane's clock just before the delivery's first input.
+	At *time.Time `json:"at,omitempty"`
+
+	// MessageAt The runtime's creation time for the delivered message, when it reports one.
+	MessageAt *time.Time `json:"message_at,omitempty"`
+
+	// MessageId The runtime's id for the delivered message, when it reports one.
+	MessageId *string `json:"message_id,omitempty"`
+
+	// Seq lane_seq of the delivery's head operation.
+	Seq *int64 `json:"seq,omitempty"`
+}
 
 // ConversationOpOutcome defines model for ConversationOpOutcome.
 type ConversationOpOutcome struct {
@@ -1962,7 +2432,8 @@ type ConversationOpOutcome struct {
 	Degradation *string `json:"degradation,omitempty"`
 
 	// Reason Why a failed or skipped operation ended (open vocabulary; refused:<why> names a refusal).
-	Reason *string `json:"reason,omitempty"`
+	Reason *string               `json:"reason,omitempty"`
+	Result *ConversationOpResult `json:"result,omitempty"`
 
 	// Via How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).
 	Via *string `json:"via,omitempty"`
@@ -1970,6 +2441,129 @@ type ConversationOpOutcome struct {
 
 // ConversationOpOutcomeArm Outcome arm.
 type ConversationOpOutcomeArm string
+
+// ConversationOpPolicyBody defines model for ConversationOpPolicyBody.
+type ConversationOpPolicyBody struct {
+	// Guarantee Execution guarantee: at_least_once (the default; a delivery is repeated only after an ambiguous attempt) or at_most_once (never repeated).
+	Guarantee *ConversationOpPolicyBodyGuarantee `json:"guarantee,omitempty"`
+	Interrupt *ConversationInterruptPolicyBody   `json:"interrupt,omitempty"`
+	Message   *ConversationMessagePolicyBody     `json:"message,omitempty"`
+}
+
+// ConversationOpPolicyBodyGuarantee Execution guarantee: at_least_once (the default; a delivery is repeated only after an ambiguous attempt) or at_most_once (never repeated).
+type ConversationOpPolicyBodyGuarantee string
+
+// ConversationOpProposeBody defines model for ConversationOpProposeBody.
+type ConversationOpProposeBody struct {
+	// Actor The actor class within the principal, e.g. user, system or mcp. Defaults to operator for the operator principal; required with a t3 principal.
+	Actor *string `json:"actor,omitempty"`
+
+	// After An operation id of the same session this one runs after.
+	After *string `json:"after,omitempty"`
+
+	// Causation What caused the operation.
+	Causation *string `json:"causation,omitempty"`
+
+	// ClientKey The producer's idempotency key (e.g. T3's message id). The Idempotency-Key header may carry it instead; when both are set they must be equal. Minted and returned when both are absent.
+	ClientKey *string `json:"client_key,omitempty"`
+
+	// ClientSeq The producer's own sequence number: it keeps two quick proposals in their order even when relayed concurrently.
+	ClientSeq *int64 `json:"client_seq,omitempty"`
+
+	// Correlation The producer's correlation id.
+	Correlation *string `json:"correlation,omitempty"`
+
+	// FinishBy The deadline for the operation to finish.
+	FinishBy *time.Time `json:"finish_by,omitempty"`
+
+	// Kind Operation kind. Only kinds listed in [ops] authoritative are accepted (409 kind-not-enabled otherwise).
+	Kind ConversationOpProposeBodyKind `json:"kind"`
+
+	// NotBefore Do not start before this time.
+	NotBefore *time.Time `json:"not_before,omitempty"`
+
+	// Payload The operation's payload: a message's text.
+	Payload *string                   `json:"payload,omitempty"`
+	Policy  *ConversationOpPolicyBody `json:"policy,omitempty"`
+
+	// Principal The asserted principal: operator (the default) or t3:<environment id> for a T3 Code environment. Until the front door exists it is asserted, not authenticated, like the operator identity of every API mutation; conversation:<id> and gc:<producer> stay reserved to gc's own producers. It keys the operation with the client key, so a retry must send the same one.
+	Principal *string                  `json:"principal,omitempty"`
+	Scope     *ConversationOpScopeBody `json:"scope,omitempty"`
+
+	// StartBy Close the operation failed if it has not started by this time.
+	StartBy *time.Time `json:"start_by,omitempty"`
+}
+
+// ConversationOpProposeBodyKind Operation kind. Only kinds listed in [ops] authoritative are accepted (409 kind-not-enabled otherwise).
+type ConversationOpProposeBodyKind string
+
+// ConversationOpProposeResult defines model for ConversationOpProposeResult.
+type ConversationOpProposeResult struct {
+	// ClientKey The client key the operation is recorded under: the producer's, or the one the server minted. Retry with it to get this operation back.
+	ClientKey string `json:"client_key"`
+
+	// Created True when this request wrote the operation (201), false when it already existed (200).
+	Created bool `json:"created"`
+
+	// Cursor City event-stream sequence captured before the proposal. Pass it as after_seq to /v0/city/{cityName}/events/stream to receive this operation's op.changed events.
+	Cursor string         `json:"cursor"`
+	Op     ConversationOp `json:"op"`
+
+	// OpId The operation id, derived from the session, the principal and the client key.
+	OpId string `json:"op_id"`
+
+	// Status The operation's status now.
+	Status ConversationOpProposeResultStatus `json:"status"`
+}
+
+// ConversationOpProposeResultStatus The operation's status now.
+type ConversationOpProposeResultStatus string
+
+// ConversationOpResult defines model for ConversationOpResult.
+type ConversationOpResult struct {
+	// CoalescedInto The operation this one was delivered with, when coalesced.
+	CoalescedInto *string `json:"coalesced_into,omitempty"`
+
+	// ContextEpoch Context epoch the operation ran in.
+	ContextEpoch *int64                  `json:"context_epoch,omitempty"`
+	Delivery     *ConversationOpDelivery `json:"delivery,omitempty"`
+
+	// Generation Session generation the operation ran in.
+	Generation *int64 `json:"generation,omitempty"`
+
+	// Turn The turn the operation ran in or was linked to; empty when the link is none.
+	Turn *string `json:"turn,omitempty"`
+
+	// TurnBasis The rule that decided the turn link (open vocabulary, e.g. runtime_turn, history_diff, no_source).
+	TurnBasis *string `json:"turn_basis,omitempty"`
+
+	// TurnLink Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
+	TurnLink *ConversationOpResultTurnLink `json:"turn_link,omitempty"`
+}
+
+// ConversationOpResultTurnLink Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
+type ConversationOpResultTurnLink string
+
+// ConversationOpScopeBody defines model for ConversationOpScopeBody.
+type ConversationOpScopeBody struct {
+	// Epoch The context epoch of a context scope.
+	Epoch *int64 `json:"epoch,omitempty"`
+
+	// Generation The session generation of a session scope.
+	Generation *int64 `json:"generation,omitempty"`
+
+	// Interaction The interaction occurrence a respond answers.
+	Interaction *string `json:"interaction,omitempty"`
+
+	// Kind conversation (any session), context (one context epoch) or session (one session generation).
+	Kind ConversationOpScopeBodyKind `json:"kind"`
+
+	// Turn The turn an interrupt targets.
+	Turn *string `json:"turn,omitempty"`
+}
+
+// ConversationOpScopeBodyKind conversation (any session), context (one context epoch) or session (one session generation).
+type ConversationOpScopeBodyKind string
 
 // ConversationRef defines model for ConversationRef.
 type ConversationRef struct {
@@ -2415,6 +3009,11 @@ type ExtmsgAdapterInfo struct {
 	Provider string `json:"provider"`
 }
 
+// FactRecordedPayload defines model for FactRecordedPayload.
+type FactRecordedPayload struct {
+	Fact ConversationFact `json:"fact"`
+}
+
 // FanoutPolicy defines model for FanoutPolicy.
 type FanoutPolicy struct {
 	AllowUntargetedPublication bool  `json:"AllowUntargetedPublication"`
@@ -2683,6 +3282,24 @@ type ListBodyBead struct {
 type ListBodyCityPendingEntry struct {
 	// Items The list of items.
 	Items *[]CityPendingEntry `json:"items"`
+
+	// NextCursor Cursor for the next page of results.
+	NextCursor *string `json:"next_cursor,omitempty"`
+
+	// Partial True when one or more backends failed and the list is incomplete.
+	Partial *bool `json:"partial,omitempty"`
+
+	// PartialErrors Human-readable errors from backends that failed during aggregation.
+	PartialErrors *[]string `json:"partial_errors,omitempty"`
+
+	// Total Total number of items matching the query.
+	Total int64 `json:"total"`
+}
+
+// ListBodyConversationOp defines model for ListBodyConversationOp.
+type ListBodyConversationOp struct {
+	// Items The list of items.
+	Items *[]ConversationOp `json:"items"`
 
 	// NextCursor Cursor for the next page of results.
 	NextCursor *string `json:"next_cursor,omitempty"`
@@ -3099,6 +3716,11 @@ type OKWithIDResponseBody struct {
 
 	// Status Operation result.
 	Status string `json:"status"`
+}
+
+// OpChangedPayload defines model for OpChangedPayload.
+type OpChangedPayload struct {
+	Op ConversationOp `json:"op"`
 }
 
 // OpsRecordingDegradedPayload defines model for OpsRecordingDegradedPayload.
@@ -4443,6 +5065,7 @@ type SessionResponse struct {
 	SubmissionCapabilities *SubmissionCapabilities `json:"submission_capabilities,omitempty"`
 	Template               string                  `json:"template"`
 	Title                  string                  `json:"title"`
+	Turn                   *SessionTurn            `json:"turn,omitempty"`
 	WorkDir                *string                 `json:"work_dir,omitempty"`
 }
 
@@ -5438,6 +6061,45 @@ type SessionTranscriptStructuredResponse struct {
 	// StructuredMessages Provider-normalized structured messages.
 	StructuredMessages []SessionStructuredMessage `json:"structured_messages"`
 	Template           string                     `json:"template"`
+}
+
+// SessionTurn defines model for SessionTurn.
+type SessionTurn struct {
+	// At When the observer saw the current state begin.
+	At *time.Time `json:"at,omitempty"`
+
+	// Caps The runtime's turn capabilities (gc.rt.turn.caps): the turn axes, then source, interrupt and replace.
+	Caps *[]SessionTurnCapPair `json:"caps,omitempty"`
+
+	// Generation The session generation the turn cells describe.
+	Generation int64 `json:"generation"`
+
+	// Id The running turn's id, as the runtime names it.
+	Id *string `json:"id,omitempty"`
+
+	// LastAt When the observer saw the last turn end.
+	LastAt *time.Time `json:"last_at,omitempty"`
+
+	// LastEnd Why the last turn ended (completed, interrupted, superseded, ...).
+	LastEnd *string `json:"last_end,omitempty"`
+
+	// LastId The last turn seen to end.
+	LastId *string `json:"last_id,omitempty"`
+
+	// ObservedAt The observer's clock at the observation that last changed the cells.
+	ObservedAt *time.Time `json:"observed_at,omitempty"`
+
+	// State running, ended, or unknown (never observed, or the cells describe another generation). Open: a newer build may add values.
+	State string `json:"state"`
+}
+
+// SessionTurnCapPair defines model for SessionTurnCapPair.
+type SessionTurnCapPair struct {
+	// Key Capability name, e.g. start, end, fence, link, source, interrupt, replace.
+	Key string `json:"key"`
+
+	// Value Capability value.
+	Value string `json:"value"`
 }
 
 // SessionUnknownStatePayload defines model for SessionUnknownStatePayload.
@@ -6853,6 +7515,22 @@ type TypedEventStreamEnvelopeExtmsgUnbound struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeFactRecorded defines model for TypedEventStreamEnvelopeFactRecorded.
+type TypedEventStreamEnvelopeFactRecorded struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          FactRecordedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedEventStreamEnvelopeGcStoreDiskCritical struct {
 	Actor            string                   `json:"actor"`
@@ -7051,6 +7729,22 @@ type TypedEventStreamEnvelopeMoleculeResolved struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          MoleculeResolvedPayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedEventStreamEnvelopeOpChanged defines model for TypedEventStreamEnvelopeOpChanged.
+type TypedEventStreamEnvelopeOpChanged struct {
+	Actor            string                   `json:"actor"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OpChangedPayload         `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -8790,6 +9484,23 @@ type TypedTaggedEventStreamEnvelopeExtmsgUnbound struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedTaggedEventStreamEnvelopeFactRecorded defines model for TypedTaggedEventStreamEnvelopeFactRecorded.
+type TypedTaggedEventStreamEnvelopeFactRecorded struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          FactRecordedPayload      `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
 // TypedTaggedEventStreamEnvelopeGcStoreDiskCritical defines model for TypedTaggedEventStreamEnvelopeGcStoreDiskCritical.
 type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical struct {
 	Actor            string                   `json:"actor"`
@@ -9001,6 +9712,23 @@ type TypedTaggedEventStreamEnvelopeMoleculeResolved struct {
 	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
 	Message          *string                  `json:"message,omitempty"`
 	Payload          MoleculeResolvedPayload  `json:"payload"`
+	RunId            *string                  `json:"run_id,omitempty"`
+	Seq              int64                    `json:"seq"`
+	SessionId        *string                  `json:"session_id,omitempty"`
+	StepId           *string                  `json:"step_id,omitempty"`
+	Subject          *string                  `json:"subject,omitempty"`
+	Ts               time.Time                `json:"ts"`
+	Type             string                   `json:"type"`
+	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeOpChanged defines model for TypedTaggedEventStreamEnvelopeOpChanged.
+type TypedTaggedEventStreamEnvelopeOpChanged struct {
+	Actor            string                   `json:"actor"`
+	City             string                   `json:"city"`
+	DependsOnStepIds *[]string                `json:"depends_on_step_ids,omitempty"`
+	Message          *string                  `json:"message,omitempty"`
+	Payload          OpChangedPayload         `json:"payload"`
 	RunId            *string                  `json:"run_id,omitempty"`
 	Seq              int64                    `json:"seq"`
 	SessionId        *string                  `json:"session_id,omitempty"`
@@ -11325,6 +12053,21 @@ type SendSessionMessageParams struct {
 	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
 }
 
+// ProposeSessionOpParams defines parameters for ProposeSessionOp.
+type ProposeSessionOpParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+
+	// IdempotencyKey The client key, when the body does not carry one.
+	IdempotencyKey *string `json:"Idempotency-Key,omitempty"`
+}
+
+// CancelSessionOpParams defines parameters for CancelSessionOp.
+type CancelSessionOpParams struct {
+	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+	XGCRequest string `json:"X-GC-Request"`
+}
+
 // PostV0CityByCityNameSessionByIdPermissionModeParams defines parameters for PostV0CityByCityNameSessionByIdPermissionMode.
 type PostV0CityByCityNameSessionByIdPermissionModeParams struct {
 	// XGCRequest Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -11726,6 +12469,12 @@ type PatchV0CityByCityNameSessionByIdJSONRequestBody = SessionPatchBody
 
 // SendSessionMessageJSONRequestBody defines body for SendSessionMessage for application/json ContentType.
 type SendSessionMessageJSONRequestBody = SessionMessageInputBody
+
+// ProposeSessionOpJSONRequestBody defines body for ProposeSessionOp for application/json ContentType.
+type ProposeSessionOpJSONRequestBody = ConversationOpProposeBody
+
+// CancelSessionOpJSONRequestBody defines body for CancelSessionOp for application/json ContentType.
+type CancelSessionOpJSONRequestBody = ConversationOpCancelBody
 
 // PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody defines body for PostV0CityByCityNameSessionByIdPermissionMode for application/json ContentType.
 type PostV0CityByCityNameSessionByIdPermissionModeJSONRequestBody = SessionPermissionModeBody
@@ -12362,6 +13111,32 @@ func (t *EventPayload) MergeExecutionStepStalledPayload(v ExecutionStepStalledPa
 	return err
 }
 
+// AsFactRecordedPayload returns the union data inside the EventPayload as a FactRecordedPayload
+func (t EventPayload) AsFactRecordedPayload() (FactRecordedPayload, error) {
+	var body FactRecordedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromFactRecordedPayload overwrites any union data inside the EventPayload as the provided FactRecordedPayload
+func (t *EventPayload) FromFactRecordedPayload(v FactRecordedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeFactRecordedPayload performs a merge with any union data inside the EventPayload, using the provided FactRecordedPayload
+func (t *EventPayload) MergeFactRecordedPayload(v FactRecordedPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsGroupCreatedEventPayload returns the union data inside the EventPayload as a GroupCreatedEventPayload
 func (t EventPayload) AsGroupCreatedEventPayload() (GroupCreatedEventPayload, error) {
 	var body GroupCreatedEventPayload
@@ -12508,6 +13283,32 @@ func (t *EventPayload) FromNoPayload(v NoPayload) error {
 
 // MergeNoPayload performs a merge with any union data inside the EventPayload, using the provided NoPayload
 func (t *EventPayload) MergeNoPayload(v NoPayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsOpChangedPayload returns the union data inside the EventPayload as a OpChangedPayload
+func (t EventPayload) AsOpChangedPayload() (OpChangedPayload, error) {
+	var body OpChangedPayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromOpChangedPayload overwrites any union data inside the EventPayload as the provided OpChangedPayload
+func (t *EventPayload) FromOpChangedPayload(v OpChangedPayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeOpChangedPayload performs a merge with any union data inside the EventPayload, using the provided OpChangedPayload
+func (t *EventPayload) MergeOpChangedPayload(v OpChangedPayload) error {
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -16437,6 +17238,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeExtmsgUnbound(v 
 	return err
 }
 
+// AsTypedEventStreamEnvelopeFactRecorded returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeFactRecorded
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeFactRecorded() (TypedEventStreamEnvelopeFactRecorded, error) {
+	var body TypedEventStreamEnvelopeFactRecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeFactRecorded overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeFactRecorded
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeFactRecorded(v TypedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeFactRecorded performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeFactRecorded
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeFactRecorded(v TypedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeGcStoreDiskCritical
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeGcStoreDiskCritical() (TypedEventStreamEnvelopeGcStoreDiskCritical, error) {
 	var body TypedEventStreamEnvelopeGcStoreDiskCritical
@@ -16791,6 +17620,34 @@ func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeMoleculeResolved(
 // MergeTypedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeMoleculeResolved
 func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeMoleculeResolved(v TypedEventStreamEnvelopeMoleculeResolved) error {
 	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedEventStreamEnvelopeOpChanged returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeOpChanged
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeOpChanged() (TypedEventStreamEnvelopeOpChanged, error) {
+	var body TypedEventStreamEnvelopeOpChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeOpChanged overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeOpChanged
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeOpChanged(v TypedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeOpChanged performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeOpChanged
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeOpChanged(v TypedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -18639,6 +19496,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedEventStreamEnvelopeExtmsgUnbound()
+	case "fact.recorded":
+		return t.AsTypedEventStreamEnvelopeFactRecorded()
 	case "gc.store.disk_critical":
 		return t.AsTypedEventStreamEnvelopeGcStoreDiskCritical()
 	case "gc.store.disk_warn":
@@ -18665,6 +19524,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedEventStreamEnvelopeMoleculeResolved()
+	case "op.changed":
+		return t.AsTypedEventStreamEnvelopeOpChanged()
 	case "ops.recording_degraded":
 		return t.AsTypedEventStreamEnvelopeOpsRecordingDegraded()
 	case "order.completed":
@@ -20006,6 +20867,34 @@ func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeExtm
 	return err
 }
 
+// AsTypedTaggedEventStreamEnvelopeFactRecorded returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeFactRecorded
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeFactRecorded() (TypedTaggedEventStreamEnvelopeFactRecorded, error) {
+	var body TypedTaggedEventStreamEnvelopeFactRecorded
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeFactRecorded overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeFactRecorded
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeFactRecorded(v TypedTaggedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeFactRecorded performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeFactRecorded
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeFactRecorded(v TypedTaggedEventStreamEnvelopeFactRecorded) error {
+	v.Type = "fact.recorded"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
 func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical() (TypedTaggedEventStreamEnvelopeGcStoreDiskCritical, error) {
 	var body TypedTaggedEventStreamEnvelopeGcStoreDiskCritical
@@ -20360,6 +21249,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeMolec
 // MergeTypedTaggedEventStreamEnvelopeMoleculeResolved performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeMoleculeResolved
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeMoleculeResolved(v TypedTaggedEventStreamEnvelopeMoleculeResolved) error {
 	v.Type = "molecule.resolved"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeOpChanged returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeOpChanged
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeOpChanged() (TypedTaggedEventStreamEnvelopeOpChanged, error) {
+	var body TypedTaggedEventStreamEnvelopeOpChanged
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeOpChanged overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeOpChanged
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeOpChanged(v TypedTaggedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeOpChanged performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeOpChanged
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeOpChanged(v TypedTaggedEventStreamEnvelopeOpChanged) error {
+	v.Type = "op.changed"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -22208,6 +23125,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch()
 	case "extmsg.unbound":
 		return t.AsTypedTaggedEventStreamEnvelopeExtmsgUnbound()
+	case "fact.recorded":
+		return t.AsTypedTaggedEventStreamEnvelopeFactRecorded()
 	case "gc.store.disk_critical":
 		return t.AsTypedTaggedEventStreamEnvelopeGcStoreDiskCritical()
 	case "gc.store.disk_warn":
@@ -22234,6 +23153,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeMailSent()
 	case "molecule.resolved":
 		return t.AsTypedTaggedEventStreamEnvelopeMoleculeResolved()
+	case "op.changed":
+		return t.AsTypedTaggedEventStreamEnvelopeOpChanged()
 	case "ops.recording_degraded":
 		return t.AsTypedTaggedEventStreamEnvelopeOpsRecordingDegraded()
 	case "order.completed":
@@ -22939,6 +23860,22 @@ type ClientInterface interface {
 	SendSessionMessageWithBody(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ListSessionOps request
+	ListSessionOps(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// ProposeSessionOpWithBody request with any body
+	ProposeSessionOpWithBody(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	ProposeSessionOp(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, body ProposeSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// GetSessionOp request
+	GetSessionOp(ctx context.Context, cityName string, id string, op string, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	// CancelSessionOpWithBody request with any body
+	CancelSessionOpWithBody(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error)
+
+	CancelSessionOp(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, body CancelSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error)
 
 	// GetV0CityByCityNameSessionByIdPending request
 	GetV0CityByCityNameSessionByIdPending(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error)
@@ -25168,6 +26105,78 @@ func (c *Client) SendSessionMessageWithBody(ctx context.Context, cityName string
 
 func (c *Client) SendSessionMessage(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
 	req, err := NewSendSessionMessageRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ListSessionOps(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewListSessionOpsRequest(c.Server, cityName, id)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ProposeSessionOpWithBody(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewProposeSessionOpRequestWithBody(c.Server, cityName, id, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) ProposeSessionOp(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, body ProposeSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewProposeSessionOpRequest(c.Server, cityName, id, params, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) GetSessionOp(ctx context.Context, cityName string, id string, op string, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewGetSessionOpRequest(c.Server, cityName, id, op)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelSessionOpWithBody(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelSessionOpRequestWithBody(c.Server, cityName, id, op, params, contentType, body)
+	if err != nil {
+		return nil, err
+	}
+	req = req.WithContext(ctx)
+	if err := c.applyEditors(ctx, req, reqEditors); err != nil {
+		return nil, err
+	}
+	return c.Client.Do(req)
+}
+
+func (c *Client) CancelSessionOp(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, body CancelSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*http.Response, error) {
+	req, err := NewCancelSessionOpRequest(c.Server, cityName, id, op, params, body)
 	if err != nil {
 		return nil, err
 	}
@@ -34370,6 +35379,247 @@ func NewSendSessionMessageRequestWithBody(server string, cityName string, id str
 	return req, nil
 }
 
+// NewListSessionOpsRequest generates requests for ListSessionOps
+func NewListSessionOpsRequest(server string, cityName string, id string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/ops", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewProposeSessionOpRequest calls the generic ProposeSessionOp builder with application/json body
+func NewProposeSessionOpRequest(server string, cityName string, id string, params *ProposeSessionOpParams, body ProposeSessionOpJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewProposeSessionOpRequestWithBody(server, cityName, id, params, "application/json", bodyReader)
+}
+
+// NewProposeSessionOpRequestWithBody generates requests for ProposeSessionOp with any type of body
+func NewProposeSessionOpRequestWithBody(server string, cityName string, id string, params *ProposeSessionOpParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/ops", pathParam0, pathParam1)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+		if params.IdempotencyKey != nil {
+			var headerParam1 string
+
+			headerParam1, err = runtime.StyleParamWithOptions("simple", false, "Idempotency-Key", *params.IdempotencyKey, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+			if err != nil {
+				return nil, err
+			}
+
+			req.Header.Set("Idempotency-Key", headerParam1)
+		}
+
+	}
+
+	return req, nil
+}
+
+// NewGetSessionOpRequest generates requests for GetSessionOp
+func NewGetSessionOpRequest(server string, cityName string, id string, op string) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "op", op, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/ops/%s", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("GET", queryURL.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+
+	return req, nil
+}
+
+// NewCancelSessionOpRequest calls the generic CancelSessionOp builder with application/json body
+func NewCancelSessionOpRequest(server string, cityName string, id string, op string, params *CancelSessionOpParams, body CancelSessionOpJSONRequestBody) (*http.Request, error) {
+	var bodyReader io.Reader
+	buf, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	bodyReader = bytes.NewReader(buf)
+	return NewCancelSessionOpRequestWithBody(server, cityName, id, op, params, "application/json", bodyReader)
+}
+
+// NewCancelSessionOpRequestWithBody generates requests for CancelSessionOp with any type of body
+func NewCancelSessionOpRequestWithBody(server string, cityName string, id string, op string, params *CancelSessionOpParams, contentType string, body io.Reader) (*http.Request, error) {
+	var err error
+
+	var pathParam0 string
+
+	pathParam0, err = runtime.StyleParamWithOptions("simple", false, "cityName", cityName, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam1 string
+
+	pathParam1, err = runtime.StyleParamWithOptions("simple", false, "id", id, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	var pathParam2 string
+
+	pathParam2, err = runtime.StyleParamWithOptions("simple", false, "op", op, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationPath, Type: "string", Format: ""})
+	if err != nil {
+		return nil, err
+	}
+
+	serverURL, err := url.Parse(server)
+	if err != nil {
+		return nil, err
+	}
+
+	operationPath := fmt.Sprintf("/v0/city/%s/session/%s/ops/%s/cancel", pathParam0, pathParam1, pathParam2)
+	if operationPath[0] == '/' {
+		operationPath = "." + operationPath
+	}
+
+	queryURL, err := serverURL.Parse(operationPath)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", queryURL.String(), body)
+	if err != nil {
+		return nil, err
+	}
+
+	req.Header.Add("Content-Type", contentType)
+
+	if params != nil {
+
+		var headerParam0 string
+
+		headerParam0, err = runtime.StyleParamWithOptions("simple", false, "X-GC-Request", params.XGCRequest, runtime.StyleParamOptions{ParamLocation: runtime.ParamLocationHeader, Type: "string", Format: ""})
+		if err != nil {
+			return nil, err
+		}
+
+		req.Header.Set("X-GC-Request", headerParam0)
+
+	}
+
+	return req, nil
+}
+
 // NewGetV0CityByCityNameSessionByIdPendingRequest generates requests for GetV0CityByCityNameSessionByIdPending
 func NewGetV0CityByCityNameSessionByIdPendingRequest(server string, cityName string, id string) (*http.Request, error) {
 	var err error
@@ -37119,6 +38369,22 @@ type ClientWithResponsesInterface interface {
 	SendSessionMessageWithBodyWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
 
 	SendSessionMessageWithResponse(ctx context.Context, cityName string, id string, params *SendSessionMessageParams, body SendSessionMessageJSONRequestBody, reqEditors ...RequestEditorFn) (*SendSessionMessageResponse, error)
+
+	// ListSessionOpsWithResponse request
+	ListSessionOpsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*ListSessionOpsResponse, error)
+
+	// ProposeSessionOpWithBodyWithResponse request with any body
+	ProposeSessionOpWithBodyWithResponse(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ProposeSessionOpResponse, error)
+
+	ProposeSessionOpWithResponse(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, body ProposeSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*ProposeSessionOpResponse, error)
+
+	// GetSessionOpWithResponse request
+	GetSessionOpWithResponse(ctx context.Context, cityName string, id string, op string, reqEditors ...RequestEditorFn) (*GetSessionOpResponse, error)
+
+	// CancelSessionOpWithBodyWithResponse request with any body
+	CancelSessionOpWithBodyWithResponse(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CancelSessionOpResponse, error)
+
+	CancelSessionOpWithResponse(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, body CancelSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*CancelSessionOpResponse, error)
 
 	// GetV0CityByCityNameSessionByIdPendingWithResponse request
 	GetV0CityByCityNameSessionByIdPendingWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*GetV0CityByCityNameSessionByIdPendingResponse, error)
@@ -41023,6 +42289,119 @@ func (r SendSessionMessageResponse) StatusCode() int {
 	return 0
 }
 
+type ListSessionOpsResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *ListBodyConversationOp
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ListSessionOpsResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ListSessionOpsResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type ProposeSessionOpResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *ConversationOpProposeResult
+	JSON201                   *ConversationOpProposeResult
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r ProposeSessionOpResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r ProposeSessionOpResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type GetSessionOpResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *ConversationOp
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r GetSessionOpResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r GetSessionOpResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
+type CancelSessionOpResponse struct {
+	Body                      []byte
+	HTTPResponse              *http.Response
+	JSON200                   *ConversationOpCancelResult
+	ApplicationproblemJSON401 *ErrorModel
+	ApplicationproblemJSON403 *ErrorModel
+	ApplicationproblemJSON404 *ErrorModel
+	ApplicationproblemJSON409 *ErrorModel
+	ApplicationproblemJSON422 *ErrorModel
+	ApplicationproblemJSON500 *ErrorModel
+	ApplicationproblemJSON503 *ErrorModel
+}
+
+// Status returns HTTPResponse.Status
+func (r CancelSessionOpResponse) Status() string {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.Status
+	}
+	return http.StatusText(0)
+}
+
+// StatusCode returns HTTPResponse.StatusCode
+func (r CancelSessionOpResponse) StatusCode() int {
+	if r.HTTPResponse != nil {
+		return r.HTTPResponse.StatusCode
+	}
+	return 0
+}
+
 type GetV0CityByCityNameSessionByIdPendingResponse struct {
 	Body                      []byte
 	HTTPResponse              *http.Response
@@ -43370,6 +44749,58 @@ func (c *ClientWithResponses) SendSessionMessageWithResponse(ctx context.Context
 		return nil, err
 	}
 	return ParseSendSessionMessageResponse(rsp)
+}
+
+// ListSessionOpsWithResponse request returning *ListSessionOpsResponse
+func (c *ClientWithResponses) ListSessionOpsWithResponse(ctx context.Context, cityName string, id string, reqEditors ...RequestEditorFn) (*ListSessionOpsResponse, error) {
+	rsp, err := c.ListSessionOps(ctx, cityName, id, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseListSessionOpsResponse(rsp)
+}
+
+// ProposeSessionOpWithBodyWithResponse request with arbitrary body returning *ProposeSessionOpResponse
+func (c *ClientWithResponses) ProposeSessionOpWithBodyWithResponse(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*ProposeSessionOpResponse, error) {
+	rsp, err := c.ProposeSessionOpWithBody(ctx, cityName, id, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseProposeSessionOpResponse(rsp)
+}
+
+func (c *ClientWithResponses) ProposeSessionOpWithResponse(ctx context.Context, cityName string, id string, params *ProposeSessionOpParams, body ProposeSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*ProposeSessionOpResponse, error) {
+	rsp, err := c.ProposeSessionOp(ctx, cityName, id, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseProposeSessionOpResponse(rsp)
+}
+
+// GetSessionOpWithResponse request returning *GetSessionOpResponse
+func (c *ClientWithResponses) GetSessionOpWithResponse(ctx context.Context, cityName string, id string, op string, reqEditors ...RequestEditorFn) (*GetSessionOpResponse, error) {
+	rsp, err := c.GetSessionOp(ctx, cityName, id, op, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseGetSessionOpResponse(rsp)
+}
+
+// CancelSessionOpWithBodyWithResponse request with arbitrary body returning *CancelSessionOpResponse
+func (c *ClientWithResponses) CancelSessionOpWithBodyWithResponse(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, contentType string, body io.Reader, reqEditors ...RequestEditorFn) (*CancelSessionOpResponse, error) {
+	rsp, err := c.CancelSessionOpWithBody(ctx, cityName, id, op, params, contentType, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelSessionOpResponse(rsp)
+}
+
+func (c *ClientWithResponses) CancelSessionOpWithResponse(ctx context.Context, cityName string, id string, op string, params *CancelSessionOpParams, body CancelSessionOpJSONRequestBody, reqEditors ...RequestEditorFn) (*CancelSessionOpResponse, error) {
+	rsp, err := c.CancelSessionOp(ctx, cityName, id, op, params, body, reqEditors...)
+	if err != nil {
+		return nil, err
+	}
+	return ParseCancelSessionOpResponse(rsp)
 }
 
 // GetV0CityByCityNameSessionByIdPendingWithResponse request returning *GetV0CityByCityNameSessionByIdPendingResponse
@@ -52321,6 +53752,285 @@ func ParseSendSessionMessageResponse(rsp *http.Response) (*SendSessionMessageRes
 			return nil, err
 		}
 		response.JSON202 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseListSessionOpsResponse parses an HTTP response from a ListSessionOpsWithResponse call
+func ParseListSessionOpsResponse(rsp *http.Response) (*ListSessionOpsResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ListSessionOpsResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ListBodyConversationOp
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseProposeSessionOpResponse parses an HTTP response from a ProposeSessionOpWithResponse call
+func ParseProposeSessionOpResponse(rsp *http.Response) (*ProposeSessionOpResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &ProposeSessionOpResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConversationOpProposeResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 201:
+		var dest ConversationOpProposeResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON201 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON401 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 403:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON403 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseGetSessionOpResponse parses an HTTP response from a GetSessionOpWithResponse call
+func ParseGetSessionOpResponse(rsp *http.Response) (*GetSessionOpResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &GetSessionOpResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConversationOp
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 404:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON404 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 409:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON409 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 422:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON422 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 500:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON500 = &dest
+
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 503:
+		var dest ErrorModel
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.ApplicationproblemJSON503 = &dest
+
+	}
+
+	return response, nil
+}
+
+// ParseCancelSessionOpResponse parses an HTTP response from a CancelSessionOpWithResponse call
+func ParseCancelSessionOpResponse(rsp *http.Response) (*CancelSessionOpResponse, error) {
+	bodyBytes, err := io.ReadAll(rsp.Body)
+	defer func() { _ = rsp.Body.Close() }()
+	if err != nil {
+		return nil, err
+	}
+
+	response := &CancelSessionOpResponse{
+		Body:         bodyBytes,
+		HTTPResponse: rsp,
+	}
+
+	switch {
+	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 200:
+		var dest ConversationOpCancelResult
+		if err := json.Unmarshal(bodyBytes, &dest); err != nil {
+			return nil, err
+		}
+		response.JSON200 = &dest
 
 	case strings.Contains(rsp.Header.Get("Content-Type"), "json") && rsp.StatusCode == 401:
 		var dest ErrorModel

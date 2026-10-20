@@ -86,6 +86,10 @@ type controllerState struct {
 	// reconcile from the next tick on, with no reload: any bd read restarts
 	// the rig's retired proxy.
 	suspendedRigs atomic.Pointer[map[string]bool]
+	// laneHost is the conversation lane host the API's producer routes
+	// reach; nil when no host was started (conversation_lane_api.go).
+	laneHost atomic.Pointer[conversationLaneHost]
+
 	// pendingPoke pokes the city runtime's pending-interaction lane; nil
 	// when the lane is not running (pending_interaction_lane.go).
 	pendingPoke atomic.Pointer[func(sessionID string)]

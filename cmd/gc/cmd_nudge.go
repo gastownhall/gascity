@@ -708,10 +708,13 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 	var laneConv, laneCity string
 	var laneDue bool
 	var lane hookLaneOutcome
+	// laneRows are the journal rows the pass wrote, rung with the drain's
+	// last doorbell rather than as the pass writes them.
+	var laneRows *journalRingQueue
 	if inject {
 		// Registered first so it runs last: after the fallback hook context
 		// below and after every ack and stamp of the drain.
-		defer func() { hookLaneRing(laneCity, laneConv, lane) }()
+		defer func() { hookLaneRing(laneCity, laneConv, lane, laneRows) }()
 		// Read the provider hook input once (UserPromptSubmit JSON on stdin,
 		// pipe-only — see readHookStdin) and build the shared inject prefix:
 		// the clock line plus, when context pressure crosses its threshold,
@@ -820,6 +823,7 @@ func cmdNudgeDrainWithFormat(args []string, inject bool, hookFormat string, stdo
 		}
 		laneCity = target.cityPath
 		sessions := hookLaneSessionStore(target.cityPath, target.cfg, stderr)
+		laneRows = deferJournalRings(sessions)
 		return hookDrainLane(sessions, laneConv, laneDue, hookInput, legacy, hookLaneTextRoom(injectPrefix, out, wispExtra), func(laneText string) error {
 			emittedHookContext = true
 			return writeProviderHookContextForEvent(stdout, hookFormat, "UserPromptSubmit", injectPrefix+out+laneText+wispExtra)

@@ -126,6 +126,24 @@ var (
 	// with a new Idempotency-Key to act again.
 	OpAlreadyFailed = Register(ProblemType{Code: "op-already-failed", Status: http.StatusConflict, Title: "Operation Already Failed"})
 
+	// The producer API (POST and GET .../session/{id}/ops, DES-O1 §11).
+	//
+	// KindNotEnabled refuses a proposal whose kind [ops] authoritative does
+	// not list: the conversation lane would never execute it, and a proposal
+	// is never silently shadowed. Nothing was written.
+	KindNotEnabled = Register(ProblemType{Code: "kind-not-enabled", Status: http.StatusConflict, Title: "Operation Kind Not Enabled"})
+	// WhenNotSupported refuses a message proposal whose delivery mode
+	// (policy.message.when) this build's conversation lane does not lower to
+	// a delivery: the lane would park the op until it expires. Nothing was
+	// written.
+	WhenNotSupported = Register(ProblemType{Code: "when-not-supported", Status: http.StatusConflict, Title: "Delivery Mode Not Supported"})
+	// OpKeyReuse refuses a proposal whose client key already names another
+	// request from the same principal on the same session. The first
+	// request wins; errors[0] carries the existing op id at location op_id.
+	OpKeyReuse = Register(ProblemType{Code: "key-reuse", Status: http.StatusConflict, Title: "Client Key Reused"})
+	// OpNotFound is an op id that names no operation of the session.
+	OpNotFound = Register(ProblemType{Code: "op-not-found", Status: http.StatusNotFound, Title: "Operation Not Found"})
+
 	// Backend availability. store-unavailable is the bead-store-not-live 503 emitted
 	// by the shared cacheLiveOr503 helper; service-unavailable is the generic 503
 	// that every other converted plain 503 uses — its title matches http.StatusText
