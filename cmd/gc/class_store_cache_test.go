@@ -845,6 +845,61 @@ func TestEmitterWritesAnExplicitEmptyDependenciesArray(t *testing.T) {
 	}
 }
 
+// Unsetting a bead's LAST metadata key leaves an empty map, which the Bead
+// encoding omits. A peer cache reading that event as "metadata not reported"
+// keeps the removed key until its next refresh. The emitter therefore writes an
+// explicit "metadata":{} on a row with no metadata. Kills: an emitter that lets
+// omitempty drop the key, so another process's cache keeps the unset key.
+func TestEmitterUnsetOfTheLastMetadataKeyReachesAPeerCache(t *testing.T) {
+	cityPath := t.TempDir()
+	engine := openBindingEngineForTest(t)
+	store := splitClassRoutes(engine).withCLIEmission(cityPath).stores[coordclass.ClassGraph]
+	row, err := store.Create(beads.Bead{Title: "one key", Type: "task"})
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if err := store.SetMetadata(row.ID, "only", "v"); err != nil {
+		t.Fatalf("SetMetadata: %v", err)
+	}
+	// The peer is another process's cache over the same engine, primed while
+	// the key is still there. An event that names metadata makes it verify
+	// against the engine; one that omits metadata is merged as "unchanged".
+	peer := beads.NewCachingStoreForTest(engine, nil)
+	if err := peer.Prime(context.Background()); err != nil {
+		t.Fatalf("Prime: %v", err)
+	}
+	before := len(readCityJournal(t, cityPath))
+	if err := store.Update(row.ID, beads.UpdateOpts{UnsetMetadata: []string{"only"}}); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	journal := readCityJournal(t, cityPath)
+	applied := 0
+	for _, evt := range journal[before:] {
+		if evt.Subject != row.ID || evt.Type != events.BeadUpdated {
+			continue
+		}
+		var fields map[string]json.RawMessage
+		if err := json.Unmarshal(evt.Payload, &fields); err != nil {
+			t.Fatalf("decoding: %v", err)
+		}
+		if meta, ok := fields["metadata"]; !ok || string(meta) != "{}" {
+			t.Errorf("payload metadata = %q (present %v), want an explicit {}", meta, ok)
+		}
+		peer.ApplyEventSnapshot(evt.Type, evt.Payload)
+		applied++
+	}
+	if applied == 0 {
+		t.Fatal("the emitter wrote no bead.updated for the unset")
+	}
+	got, err := peer.Get(row.ID)
+	if err != nil {
+		t.Fatalf("peer Get: %v", err)
+	}
+	if _, kept := got.Metadata["only"]; kept {
+		t.Fatalf("peer cache kept the unset last key after the event: %v", got.Metadata)
+	}
+}
+
 // Every class the binding serves shares one cache. Kills (M29): a cache per
 // class, which turns one binding into five legs (callers dedup by store
 // identity), primes and re-scans the engine five times, and lets a write
