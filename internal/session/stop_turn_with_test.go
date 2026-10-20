@@ -211,8 +211,9 @@ func (f ctxStartFake) Stop(name string) error {
 
 // A caller whose context ended while the interrupted turn settled (a city
 // stop, a lease budget) gets no restart: the runtime is not stopped, and the
-// error wraps runtime.ErrRuntimeUnavailable, not ErrTurnNotEnded, so the
-// caller releases the op rather than closing it failed.
+// error wraps runtime.ErrRuntimeUnavailable and ErrInterruptOutcomeUnknown,
+// not ErrTurnNotEnded: the interrupt was sent, and whether it ended the turn
+// is unknown.
 func TestStopTurnWithRestartNeverRunsUnderAnEndedContext(t *testing.T) {
 	for _, tc := range []struct {
 		name string
@@ -233,8 +234,8 @@ func TestStopTurnWithRestartNeverRunsUnderAnEndedContext(t *testing.T) {
 				return TurnNotEndedError("interrupted turn", ctx.Err())
 			}
 			report, err := mgr.StopTurnWith(ctx, info.ID, StopTurnOptions{Settle: settle, Restart: stopTurnRestart(mgr, info, ActorController)})
-			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
-				t.Fatalf("StopTurnWith(ctx ended) = %+v, %v; want ErrRuntimeUnavailable alone and no restart", report, err)
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, ErrInterruptOutcomeUnknown) || errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
+				t.Fatalf("StopTurnWith(ctx ended) = %+v, %v; want ErrRuntimeUnavailable and ErrInterruptOutcomeUnknown, and no restart", report, err)
 			}
 			if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 0 || !sp.IsRunning(info.SessionName) {
 				t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
@@ -290,17 +291,22 @@ func TestStopTurnWithBoundsTheLockWaitByTheDeadline(t *testing.T) {
 		_ = withSessionMutationLock(info.ID, func() error { close(held); <-release; return nil })
 	}()
 	<-held
+	// The holder lets go on its own well after the deadline, so a stop that
+	// ignores the deadline returns late instead of hanging the suite.
+	releaser := time.AfterFunc(2*time.Second, func() { close(release) })
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	start := time.Now()
 	err := mgr.StopTurnFenced(ctx, info.ID, f)
 	took := time.Since(start)
-	close(release)
+	if releaser.Stop() {
+		close(release)
+	}
 	<-done
 	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, ErrSessionMutationBusy) {
 		t.Fatalf("StopTurnFenced(lock held past the deadline) = %v, want ErrRuntimeUnavailable and ErrSessionMutationBusy", err)
 	}
-	if took > 5*time.Second {
+	if took > time.Second {
 		t.Fatalf("the stop waited %s for the lock past its 50ms deadline", took)
 	}
 	if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
@@ -339,5 +345,39 @@ func TestStopTurnWithFailedReplacementSaysTheTurnSettled(t *testing.T) {
 	_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{ForReplacement: true})
 	if !errors.Is(err, ErrReplacementNotPrepared) {
 		t.Fatalf("StopTurnWith(replacement, reset misses) = %v, want ErrReplacementNotPrepared", err)
+	}
+}
+
+// failingInterruptFake is the fake runtime whose interrupt fails after it
+// may have reached the agent, as a broken tmux pipe does.
+type failingInterruptFake struct{ *runtime.Fake }
+
+func (f failingInterruptFake) Interrupt(name string) error {
+	_ = f.Fake.Interrupt(name)
+	return errors.New("tmux: broken pipe")
+}
+
+func (f failingInterruptFake) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
+	if err := f.Fake.InterruptFenced(ctx, name, fence); err != nil {
+		return err
+	}
+	return errors.New("tmux: broken pipe")
+}
+
+// A checked stop whose send fails after its check passed may have reached
+// the agent: the error wraps ErrInterruptOutcomeUnknown (and, as before,
+// runtime.ErrRuntimeUnavailable). A check that refuses sends nothing and
+// does not.
+func TestStopTurnWithSaysWhenASentInterruptsOutcomeIsUnknown(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr, info, _ := newFencedStopSessionOn(t, failingInterruptFake{sp}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
+	_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: func() error { return nil }})
+	if !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("StopTurnWith(send fails after the check) = %v, want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable", err)
+	}
+	refused := errors.New("not the current turn")
+	_, err = mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: func() error { return refused }})
+	if !errors.Is(err, refused) || errors.Is(err, ErrInterruptOutcomeUnknown) {
+		t.Fatalf("StopTurnWith(check refuses) = %v, want the refusal and not ErrInterruptOutcomeUnknown", err)
 	}
 }

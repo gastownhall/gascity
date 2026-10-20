@@ -45,7 +45,8 @@ type StopTurnOptions struct {
 	// A row whose drain-ack stop is pending refuses it, nothing sent, with
 	// ErrSessionStopping. A caller whose ctx ended by the time the turn was
 	// not seen to end gets no restart, the runtime left as it is, but an
-	// error wrapping runtime.ErrRuntimeUnavailable and not ErrTurnNotEnded;
+	// error wrapping ErrInterruptOutcomeUnknown and
+	// runtime.ErrRuntimeUnavailable, and not ErrTurnNotEnded;
 	// a restart once decided runs apart from ctx, within
 	// stopTurnRestartBound.
 	Restart *StopTurnRestart
@@ -150,11 +151,12 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 			return fmt.Errorf("stopping the turn of %s: the runtime or its agent stopped after the check, nothing sent: %w", id, runtime.ErrSessionNotFound)
 		case none, errors.Is(err, runtime.ErrFenceMismatch), errors.Is(err, runtime.ErrInputFenceUnsupported),
 			errors.Is(err, ErrTurnInterruptUnsupported), errors.Is(err, runtime.ErrRuntimeUnavailable):
-			// Nothing was sent (a miss, a refusal), or the error already
-			// says the outcome is unknown.
+			// Nothing was sent (a miss, a refusal), or the runtime's own
+			// error says it could not tell, as a fenced send's liveness
+			// read that cannot answer before its key does.
 			return err
 		case err != nil:
-			return fmt.Errorf("stopping the turn of %s: %w: %w", id, runtime.ErrRuntimeUnavailable, err)
+			return fmt.Errorf("stopping the turn of %s: %w: %w: %w", id, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, err)
 		}
 		waitErr := m.waitForInterruptSettleLocked(ctx, b, sessName, mode, still, interruptStartedAt)
 		if opts.Settle != nil {
@@ -168,7 +170,7 @@ func (m *Manager) StopTurnWith(ctx context.Context, id string, opts StopTurnOpti
 				// The caller gave up (a city stop, its lease budget): its
 				// end reads as a turn not seen to end, which is no reason
 				// to stop the runtime. Nothing more is sent.
-				return fmt.Errorf("stopping the turn of %s: the caller's context ended before its interrupted turn was seen to end, not restarting it: %w: %w (%s)", id, runtime.ErrRuntimeUnavailable, cerr, waitErr.Error())
+				return fmt.Errorf("stopping the turn of %s: the caller's context ended before its interrupted turn was seen to end, not restarting it: %w: %w: %w (%s)", id, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, cerr, waitErr.Error())
 			}
 			// A restart once decided runs to the end under its own bound: a
 			// caller that gives up between the stop and the start would
@@ -251,6 +253,15 @@ func (m *Manager) prepareReplacementLocked(ctx context.Context, b beads.Bead, id
 // else the error wraps (a fence miss on the input clear, say) is the
 // preparation's, not the interrupt's: the interrupt was not "nothing sent".
 var ErrReplacementNotPrepared = errors.New("the interrupted turn settled but the session could not be prepared for its replacement")
+
+// ErrInterruptOutcomeUnknown reports a stop whose interrupt was sent, or may
+// have been, but whose outcome it cannot tell: a checked stop's
+// (StopTurnOptions.Still) send that failed after the check passed, or a stop
+// with a restart on failure whose caller's context ended before the
+// interrupted turn was seen to end (no restart then). The
+// error also wraps runtime.ErrRuntimeUnavailable. Unlike that sentinel
+// alone, it is never "nothing sent": the interrupt may have ended the turn.
+var ErrInterruptOutcomeUnknown = errors.New("the interrupt was sent but its outcome is unknown")
 
 // stopTurnRestartBound bounds a restart after a failed interrupt
 // (StopTurnOptions.Restart) once it is decided; it runs apart from the

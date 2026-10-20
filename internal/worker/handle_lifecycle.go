@@ -439,7 +439,13 @@ func (h *SessionHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req
 	case !req.Fence.IsZero():
 		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
 	default:
-		err = h.manager.StopTurn(id)
+		if _, bounded := ctx.Deadline(); bounded {
+			// A caller with a deadline (the lane's effect budget) waits for
+			// the session mutation lock only until it.
+			err = h.manager.StopTurnIf(ctx, id, nil)
+		} else {
+			err = h.manager.StopTurn(id)
+		}
 	}
 	return result, err
 }

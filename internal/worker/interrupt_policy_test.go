@@ -3,6 +3,7 @@ package worker
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
@@ -368,5 +369,125 @@ func TestInterruptPreSendFailureIsNotSent(t *testing.T) {
 	}
 	if got := sp.SnapshotCalls(); len(got) != 0 {
 		t.Fatalf("an interrupt that failed before sending made calls %+v", got)
+	}
+}
+
+// A turn-scoped interrupt on a transcript source whose runtime cannot fence
+// the session (herdr Codex: turns read from its transcript, no input
+// fencing) goes out without its fence where the request allows it, and
+// reports Unfenced; without AllowUnfenced it is refused, nothing sent.
+func TestTranscriptTurnInterruptOnAnUnfenceableRuntime(t *testing.T) {
+	f := runtime.InputFence{Generation: 1, Epoch: 1, Token: "tok"}
+	for _, allow := range []bool{true, false} {
+		t.Run(map[bool]string{true: "allow unfenced", false: "fenced only"}[allow], func(t *testing.T) {
+			idle := newIdleScript(idleAnswer{idle: false}, idleAnswer{idle: true}, idleAnswer{idle: true})
+			fake := idle.Fake
+			s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+			timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+			s.handle.turns.timing = timing
+			path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+			ageTranscript(t, path, clock.now().Add(-time.Minute))
+			fake.InputFencingValue = runtime.InputFencingNone
+			fake.Calls = nil
+			res, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+				InterruptRequest{Turn: claudeTurn1, Fence: f, AllowUnfenced: allow})
+			if !allow {
+				if !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+					t.Fatalf("InterruptAs(turn, fence, unfenceable) = %+v, %v; want ErrInputFenceUnsupported", res, err)
+				}
+				if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+					t.Fatalf("a refused interrupt sent %v", got)
+				}
+				return
+			}
+			if err != nil || !res.Unfenced {
+				t.Fatalf("InterruptAs(turn, fence, allow unfenced, unfenceable) = %+v, %v; want sent unfenced", res, err)
+			}
+			for _, c := range fake.SnapshotCalls() {
+				if c.Name == s.info.SessionName && !c.Fence.IsZero() {
+					t.Fatalf("%s carries %v on an unfenceable runtime", c.Method, c.Fence)
+				}
+			}
+			if got := sentInputs(fake, s.info.SessionName); len(got) == 0 {
+				t.Fatal("the interrupt sent nothing")
+			}
+		})
+	}
+}
+
+// A session-scoped interrupt with no fence to carry (a row with no token,
+// or a runtime that cannot fence, AllowUnfenced) waits for the session
+// mutation lock only until a ctx deadline, as a fenced one does: a lock
+// still held then is an error wrapping runtime.ErrRuntimeUnavailable,
+// nothing sent.
+func TestUnfencedSessionInterruptBoundsTheLockWaitByTheDeadline(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		fencing runtime.InputFencing
+		fenced  bool
+	}{
+		{"fenced", "", true},
+		{"unfenceable runtime, AllowUnfenced", runtime.InputFencingNone, true},
+		{"no token", "", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, sp, name, sf := fencedSessionHandle(t)
+			if tc.fencing != "" {
+				sp.InputFencingValue = tc.fencing
+			}
+			req := InterruptRequest{}
+			if tc.fenced {
+				req = InterruptRequest{Fence: sf, AllowUnfenced: true}
+			}
+			id := h.currentSessionID()
+			held, release, done := make(chan struct{}), make(chan struct{}), make(chan struct{})
+			go func() {
+				defer close(done)
+				_ = sessionpkg.WithSessionMutationLock(id, func() error { close(held); <-release; return nil })
+			}()
+			<-held
+			releaser := time.AfterFunc(2*time.Second, func() { close(release) })
+			sp.Calls = nil
+			ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancel()
+			start := time.Now()
+			_, err := h.InterruptAs(ctx, handleActor(t, h, sessionpkg.ActorController), req)
+			took := time.Since(start)
+			if releaser.Stop() {
+				close(release)
+			}
+			<-done
+			if took > time.Second {
+				t.Fatalf("the interrupt waited %s for the session lock past its 100ms deadline", took)
+			}
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, sessionpkg.ErrSessionMutationBusy) {
+				t.Fatalf("InterruptAs(lock held past the deadline) = %v, want ErrRuntimeUnavailable and ErrSessionMutationBusy", err)
+			}
+			for _, m := range callMethodsOf(sp, name) {
+				if inputMethods[m] {
+					t.Fatalf("an interrupt that never took the lock sent %v", callMethodsOf(sp, name))
+				}
+			}
+		})
+	}
+}
+
+// A turn-scoped replacement whose preparation finds the runtime gone after
+// the turn settled (an unfenced input clear on a runtime that stopped) says
+// the replacement was not prepared: its interrupt was sent, so it is never
+// read as a turn no longer current, nothing sent.
+func TestTurnReplacementClearOnAGoneRuntimeIsNotPrepared(t *testing.T) {
+	idle := newIdleScript(idleAnswer{idle: false}, idleAnswer{idle: true}, idleAnswer{idle: true})
+	fake := idle.Fake
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, idle), "claude", "")
+	timing, clock := racingTurnTiming(time.Date(2026, 10, 13, 6, 0, 0, 0, time.UTC))
+	s.handle.turns.timing = timing
+	path := s.writeTranscript(t, "claude", claudePrompt(claudeTurn1, "2026-10-13T05:59:50.123Z"))
+	ageTranscript(t, path, clock.now().Add(-time.Minute))
+	fake.ClearInputErrors[s.info.SessionName] = fmt.Errorf("tmux: %w", runtime.ErrSessionNotFound)
+	fake.Calls = nil
+	err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: claudeTurn1, ForReplacement: true})
+	if !errors.Is(err, sessionpkg.ErrReplacementNotPrepared) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+		t.Fatalf("Interrupt(%s, replacement, clear finds the runtime gone) = %v, want ErrReplacementNotPrepared, not ErrTurnNotCurrent", claudeTurn1, err)
 	}
 }

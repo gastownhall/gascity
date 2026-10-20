@@ -1700,10 +1700,11 @@ func (m *Manager) StopTurn(id string) error {
 // sent. A checked stop that finds the turn gone when it comes to send, after
 // still passed, sends nothing and returns an error wrapping
 // runtime.ErrSessionNotFound (or, under an input fence, the miss); a send
-// that fails after still passed wraps runtime.ErrRuntimeUnavailable: it is
-// unknown whether the interrupt reached the agent. A follow-up interrupt of
-// the keystroke sequence (a soft-escape family's Ctrl-C fallback) goes only
-// once still passes again: it interrupts whatever turn runs when it lands. A
+// that fails after still passed wraps ErrInterruptOutcomeUnknown and
+// runtime.ErrRuntimeUnavailable: it is unknown whether the interrupt reached
+// the agent. A follow-up interrupt of the keystroke sequence (a soft-escape
+// family's Ctrl-C fallback) goes only once still passes again: it interrupts
+// whatever turn runs when it lands. A
 // refusal then sends nothing more, and the stop returns an error wrapping
 // runtime.ErrTurnNotEnded, since the first key was sent.
 func (m *Manager) StopTurnIf(ctx context.Context, id string, still func() error) error {

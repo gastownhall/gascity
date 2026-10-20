@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 
@@ -74,9 +75,11 @@ type interruptCase struct {
 	read    func(context.Context) (runtime.TurnHistory, error)
 	answer  func(worker.InterruptRequest) (worker.InterruptResult, error)
 	during  func(e *conversationLaneExec)
-	mu      sync.Mutex
-	reqs    []worker.InterruptRequest
-	by      []session.Actor
+	// handleErr, when set, is the interrupt handle's resolution error.
+	handleErr error
+	mu        sync.Mutex
+	reqs      []worker.InterruptRequest
+	by        []session.Actor
 }
 
 func newInterruptCase(t *testing.T, caps worker.TurnCapabilities) *interruptCase {
@@ -111,6 +114,9 @@ func (c *interruptCase) pass(t *testing.T) opjournal.PassResult {
 		return laneStubTurns{caps: c.caps, capsErr: c.capsErr, read: c.read}, nil
 	}
 	e.interruptHandle = func() (worker.Handle, error) {
+		if c.handleErr != nil {
+			return nil, c.handleErr
+		}
 		stub := interruptStub{mu: &c.mu, reqs: &c.reqs, by: &c.by, answer: c.answer, unfencedTurns: c.caps.Source == worker.TurnSourceProtocol}
 		if c.during != nil {
 			stub.during = func() { c.during(e) }
@@ -229,11 +235,13 @@ func TestLaneInterruptCheckedIsMarkedUnfenced(t *testing.T) {
 }
 
 // A session-scoped op names the turn a fresh read finds running where the
-// session's turns allow a turn-scoped interrupt; with none running it closes
-// skipped{stale}, nothing sent. A read that fails, or turn capabilities the
-// probe could not read, release it, nothing sent: it never runs without the
-// fresh read (X11 §5.4). A session whose turns cannot carry it runs it
-// session-scoped and marks it.
+// session's turns allow a turn-scoped interrupt; with none running, or the
+// session gone, it closes skipped{stale}, nothing sent. A read that cannot
+// answer (runtime.ErrRuntimeUnavailable), or turn capabilities the probe
+// could not read, release it, nothing sent: it never runs without the fresh
+// read (X11 §5.4); any other read error counts a failure, nothing sent. A
+// session whose turns cannot carry it, or whose turns carry no identity (a
+// transcript without turn ids), runs it session-scoped and marks it.
 func TestLaneInterruptSessionScope(t *testing.T) {
 	cases := []struct {
 		name     string
@@ -242,6 +250,7 @@ func TestLaneInterruptSessionScope(t *testing.T) {
 		read     func(context.Context) (runtime.TurnHistory, error)
 		wantReqs []string // the turns the requests named
 		released bool
+		failure  bool // released with a failure counted
 		arm      opjournal.Arm
 		reason   string
 		turn     string
@@ -267,6 +276,34 @@ func TestLaneInterruptSessionScope(t *testing.T) {
 			released: true,
 		},
 		{
+			name: "read finds no turn identity", caps: laneCheckedTurnCaps,
+			read: func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{}, fmt.Errorf("transcript records the open turn without an id: %w", runtime.ErrTurnIdentityUnsupported)
+			},
+			wantReqs: []string{""}, arm: opjournal.ArmSucceeded, deg: opjournal.DegradationUnfencedInterrupt,
+		},
+		{
+			name: "read finds the session gone", caps: laneCheckedTurnCaps,
+			read: func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{}, fmt.Errorf("turns of session: %w", session.ErrSessionNotFound)
+			},
+			arm: opjournal.ArmSkipped, reason: opjournal.ReasonStale,
+		},
+		{
+			name: "read finds the runtime gone", caps: laneCheckedTurnCaps,
+			read: func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{}, fmt.Errorf("turns of session: %w", runtime.ErrSessionNotFound)
+			},
+			arm: opjournal.ArmSkipped, reason: opjournal.ReasonStale,
+		},
+		{
+			name: "read fails otherwise", caps: laneCheckedTurnCaps,
+			read: func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{}, errors.New("transcript: unexpected end of JSON input")
+			},
+			released: true, failure: true,
+		},
+		{
 			name: "caps unreadable", caps: laneCheckedTurnCaps, capsErr: fmt.Errorf("caps: %w", runtime.ErrRuntimeUnavailable),
 			released: true,
 		},
@@ -287,6 +324,9 @@ func TestLaneInterruptSessionScope(t *testing.T) {
 			if got := c.f.get(t, c.st, op.ID); tc.released {
 				if got.Status != opjournal.StatusAccepted || got.MaybeDelivered != 0 {
 					t.Fatalf("op %s maybe_delivered %d, want released, nothing sent", got.Status, got.MaybeDelivered)
+				}
+				if counted := got.Failures > 0; counted != tc.failure {
+					t.Fatalf("op released with %d failures (last error %q), want a failure counted %v", got.Failures, got.LastError, tc.failure)
 				}
 			} else {
 				assertOutcome(t, got, tc.arm, tc.reason, tc.turn, tc.deg)
@@ -355,6 +395,14 @@ func TestLaneInterruptHandsItsRefToTheObserver(t *testing.T) {
 		{"unavailable", func(worker.InterruptRequest) (worker.InterruptResult, error) {
 			return worker.InterruptResult{}, runtime.ErrRuntimeUnavailable
 		}, false},
+		{"sent, outcome unknown: ctx ended, no restart", func(worker.InterruptRequest) (worker.InterruptResult, error) {
+			return worker.InterruptResult{}, fmt.Errorf("stopping the turn of gc-1: the caller's context ended, not restarting it: %w: %w: %w",
+				session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, context.Canceled)
+		}, true},
+		{"sent, outcome unknown: send failed after the check", func(worker.InterruptRequest) (worker.InterruptResult, error) {
+			return worker.InterruptResult{}, fmt.Errorf("stopping the turn of gc-1: %w: %w: %w",
+				session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, errors.New("tmux: broken pipe"))
+		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newInterruptCase(t, laneCheckedTurnCaps)
@@ -377,8 +425,12 @@ func TestLaneInterruptHandsItsRefToTheObserver(t *testing.T) {
 			if !tc.kept && after != (opjournal.InterruptRef{}) {
 				t.Fatalf("interrupt after an effect that sent nothing = %+v, want none", after)
 			}
-			if got := c.f.get(t, c.st, op.ID); got.Status == opjournal.StatusClosed && got.Outcome.Reason == opjournal.ReasonNoBoundary && got.Outcome.Result.Turn != "t1" {
+			got := c.f.get(t, c.st, op.ID)
+			if got.Status == opjournal.StatusClosed && got.Outcome.Reason == opjournal.ReasonNoBoundary && got.Outcome.Result.Turn != "t1" {
 				t.Fatalf("op closed failed{no_boundary} on turn %q, want t1", got.Outcome.Result.Turn)
+			}
+			if strings.HasPrefix(tc.name, "sent") && (got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0) {
+				t.Fatalf("op %s maybe_delivered %d after a sent interrupt of unknown outcome, want released maybe delivered", got.Status, got.MaybeDelivered)
 			}
 		})
 	}
@@ -404,9 +456,27 @@ func TestLaneInterruptsRecord(t *testing.T) {
 	if got := r.current("c"); got != (opjournal.InterruptRef{}) {
 		t.Fatalf("after its clear the record is %+v, want none", got)
 	}
+	// An executor that takes its ref back restores the one it replaced, which
+	// the observer has not folded yet.
+	r.record("c", first)
+	prev := r.record("c", second)
+	if prev != first {
+		t.Fatalf("record returned %+v as the replaced ref, want %+v", prev, first)
+	}
+	r.restore("c", second, prev)
+	if got := r.current("c"); got != first {
+		t.Fatalf("after taking back %+v the record is %+v, want %+v restored", second, got, first)
+	}
+	r.record("c", second)
+	r.record("c", opjournal.InterruptRef{Op: "op-3", Turn: "t3"})
+	r.restore("c", second, first)
+	if got := r.current("c"); got.Op != "op-3" {
+		t.Fatalf("taking back a replaced ref changed the record to %+v", got)
+	}
 	var none *laneInterrupts
 	none.record("c", first)
 	none.clear("c", first)
+	none.restore("c", first, second)
 	if got := none.current("c"); got != (opjournal.InterruptRef{}) {
 		t.Fatalf("a nil record answered %+v", got)
 	}
@@ -424,6 +494,7 @@ func TestLaneInterruptResultMapping(t *testing.T) {
 	stopping := fmt.Errorf("x: %w", session.ErrSessionStopping)
 	notPrepared := fmt.Errorf("x: %w: %w", session.ErrReplacementNotPrepared, miss)
 	skipped := opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
+	outcomeUnknown := fmt.Errorf("x: %w: %w", session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable)
 	cases := []struct {
 		name  string
 		res   worker.InterruptResult
@@ -443,6 +514,7 @@ func TestLaneInterruptResultMapping(t *testing.T) {
 		{"not sent", worker.InterruptResult{}, fmt.Errorf("x: %w: %w", worker.ErrInterruptNotSent, worker.ErrHandleConfig), "t1", false, opjournal.NotDelivered{Transient: true, Cause: notSent}},
 		{"session stopping", worker.InterruptResult{}, stopping, "", false, opjournal.NotDelivered{Transient: true, Cause: stopping}},
 		{"replacement not prepared", worker.InterruptResult{}, notPrepared, "t1", false, opjournal.Unknown{Cause: notPrepared}},
+		{"sent, outcome unknown", worker.InterruptResult{}, outcomeUnknown, "t1", false, opjournal.Unknown{Cause: outcomeUnknown}},
 		{"not current", worker.InterruptResult{}, &runtime.TurnNotCurrentError{Session: "s", TurnID: "t1"}, "t1", true, skipped},
 		{"identity unsupported", worker.InterruptResult{}, fmt.Errorf("x: %w", runtime.ErrTurnIdentityUnsupported), "t1", true, failed(opjournal.ReasonUnsupported)},
 		{"interrupt unsupported", worker.InterruptResult{}, fmt.Errorf("x: %w", session.ErrTurnInterruptUnsupported), "", false, failed(opjournal.ReasonUnsupported)},
@@ -537,5 +609,93 @@ func TestLaneInterruptACPTurnAfterACapsReadHiccup(t *testing.T) {
 			}
 			assertOutcome(t, f.get(t, st, op.ID), opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
 		})
+	}
+}
+
+// The interrupt handle's resolution sends nothing: a session gone closes
+// the op skipped{stale}, and any other error releases it, nothing sent.
+func TestLaneInterruptHandleResolution(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		err   error
+		stale bool
+	}{
+		{"session gone", fmt.Errorf("resolving: %w", session.ErrSessionNotFound), true},
+		{"other", errors.New("config: command is required"), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newInterruptCase(t, laneCheckedTurnCaps)
+			c.handleErr = tc.err
+			op := c.propose(t, "stop:1:t1", "t1", "")
+			c.pass(t)
+			got := c.f.get(t, c.st, op.ID)
+			if tc.stale {
+				assertOutcome(t, got, opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
+			} else if got.Status != opjournal.StatusAccepted || got.MaybeDelivered != 0 || got.Failures != 0 {
+				t.Fatalf("op %s maybe_delivered %d failures %d, want a transient release, nothing sent", got.Status, got.MaybeDelivered, got.Failures)
+			}
+			if after := c.ints.current(c.f.id); after != (opjournal.InterruptRef{}) {
+				t.Fatalf("a handle that never resolved left the ref %+v", after)
+			}
+		})
+	}
+}
+
+// The acceptance case end to end on an atomic fake runtime (ACP) with the
+// next turn running: an op scoped to t1, which ended while t2 runs, reaches
+// the runtime's turn interrupt naming t1, which refuses it, so it closes
+// skipped{stale} and t2 is never interrupted; an op scoped to t2 then
+// interrupts t2.
+func TestLaneInterruptAtomicFakeNeverInterruptsTheNextTurn(t *testing.T) {
+	atomic := runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact}
+	f := newTurnLaneFixture(t, runtime.ProfileACP, func(meta map[string]string) { meta["transport"] = "acp" })
+	f.laneFixture.sp.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{f.name: {atomic}}
+	f.laneFixture.sp.TurnScripts = map[string][]string{f.name: {"t2", "t2", ""}}
+	st := f.laneStore(t)
+	propose := func(turn string) opjournal.Op {
+		return f.propose(t, st, opjournal.Request{
+			Conversation: f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "stop:1:" + turn,
+			Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
+			Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1, Turn: turn},
+		})
+	}
+	pass := func() {
+		t.Helper()
+		e, v := f.exec(t, st)
+		e.turns = func() (worker.TurnHandle, error) {
+			return laneStubTurns{
+				caps: worker.TurnCapabilities{TurnCapabilities: atomic, Source: worker.TurnSourceProtocol, Interrupt: runtime.TurnInterruptKeystroke},
+				read: func(context.Context) (runtime.TurnHistory, error) {
+					return runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t2"}}, nil
+				},
+			}, nil
+		}
+		if _, err := f.lane(t, st).Pass(context.Background(), v, e); err != nil {
+			t.Fatalf("Pass: %v", err)
+		}
+	}
+	interrupts := func() []string {
+		var out []string
+		for _, c := range f.laneFixture.sp.SnapshotCalls() {
+			switch c.Method {
+			case "InterruptTurn":
+				out = append(out, c.Key+":"+c.Value)
+			case "Interrupt", "SendKeys":
+				out = append(out, c.Method)
+			}
+		}
+		return out
+	}
+	late := propose("t1")
+	pass()
+	assertOutcome(t, f.get(t, st, late.ID), opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
+	if got := interrupts(); !slices.Equal(got, []string{"t1:not_current"}) {
+		t.Fatalf("interrupts %v, want only t1's, refused not current", got)
+	}
+	onTime := propose("t2")
+	pass()
+	assertOutcome(t, f.get(t, st, onTime.ID), opjournal.ArmSucceeded, "", "t2", opjournal.DegradationUnfencedInterrupt)
+	if got := interrupts(); !slices.Contains(got, "t2:sent") {
+		t.Fatalf("interrupts %v, want t2's sent", got)
 	}
 }
