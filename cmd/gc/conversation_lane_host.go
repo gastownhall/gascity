@@ -1123,11 +1123,26 @@ func (h *conversationLaneHost) stateReason() (string, string) {
 	return h.state, h.reason
 }
 
+// laneRowRefreshTries bounds the refreshes refreshRow makes of one row a
+// local write fences, laneRowRefreshRetryDelay apart.
+const (
+	laneRowRefreshTries      = 5
+	laneRowRefreshRetryDelay = 20 * time.Millisecond
+)
+
 // refreshRow re-reads journal row id into the sessions cache, so a
 // producer's write from another process is visible to the controller's
 // readers at once and its cache announces the change (op.changed,
-// fact.recorded). A
-// quiescent city is not read; a row that is gone is nothing to refresh.
+// fact.recorded). The doorbell naming the row is the evidence it changed
+// just now, so the refresh announces the close of a row the cache did not
+// hold too (RowRefreshOptions.AnnounceUnheldClose): a fact, created closed,
+// and an op closed after a ring the controller missed. It yields to a local
+// write of the cache that may touch the row, which announces the row
+// itself, and retries a yielded or fenced refresh up to laneRowRefreshTries
+// times; a row still fenced after them is noted and left to the write that
+// owns it. A quiescent city is not read. A row that is gone is evicted: one
+// the cache held open is announced closed, as the cache's next reconcile
+// would announce it (op.changed failed{closed_externally} for an op).
 func (h *conversationLaneHost) refreshRow(id string) {
 	defer h.env.beginStoreWork()()
 	if h.env.storesQuiescent() {
@@ -1137,7 +1152,17 @@ func (h *conversationLaneHost) refreshRow(id string) {
 	if cache == nil {
 		return
 	}
-	if _, err := cache.RefreshRow(id); err != nil && !errors.Is(err, beads.ErrNotFound) {
+	opts := beads.RowRefreshOptions{AnnounceUnheldClose: true, YieldToLocalWrites: true}
+	var err error
+	for try := range laneRowRefreshTries {
+		if try > 0 {
+			time.Sleep(laneRowRefreshRetryDelay)
+		}
+		if _, err = cache.RefreshRowReport(id, opts); !errors.Is(err, beads.ErrRowRefreshFenced) {
+			break
+		}
+	}
+	if err != nil && !errors.Is(err, beads.ErrNotFound) {
 		h.noteError("refresh", fmt.Errorf("refreshing journal row %s: %w", id, err))
 	}
 }

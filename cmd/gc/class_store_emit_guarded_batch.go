@@ -31,7 +31,9 @@ import (
 // backing does with an ended ctx. Once ctx ends after the batch landed, the
 // re-reads stop and nothing is journaled, with one diagnostic: the batch
 // still succeeded, and the op-journal rows guarded batches write are read
-// live by the lane host; the controller's cache reconcile announces them.
+// live by the lane host. Nothing rings the controller for them then, so
+// they are announced only as a write no controller answered is
+// (class_store_emit_oprows.go).
 func (s *emittingClassStore) ApplyGuarded(ctx context.Context, b beads.GuardedBatch) (beads.GuardedResult, error) {
 	batcher, ok := beads.GuardedBatcherFor(s.Store)
 	if !ok {

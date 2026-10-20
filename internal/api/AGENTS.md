@@ -285,8 +285,15 @@ in-band hook pass, the CLI's shadow ops) journals nothing either: its
 emitter (`cmd/gc/class_store_emit_oprows.go`) rings the controller's lane
 doorbell with the row ids, `lane:<conversation>:<id>[,<id>...]`, whose
 handler refreshes each row through the controller's sessions cache, so the
-same bridge derives the event; with no controller to answer, the cache's
-next reconcile does. No writer may author either event: `POST /v0/events`
+same bridge derives the event, for a close of a row the cache did not hold
+too. The in-band hook pass rings once, at the end of the drain, after its
+output and bookkeeping. A write no controller answers is announced only
+partly: a running controller's next reconcile announces a row it finds open
+and changed, but not a close of a row it did not hold, and a controller
+started later primes silently; the row stays authoritative, so a consumer
+that reconnects reads it. A row deleted out of process that the cache held
+open is announced closed (`failed{closed_externally}` for an op), as the
+next reconcile would announce it. No writer may author either event: `POST /v0/events`
 and `gc event emit` refuse them (`events.IsJournalDerived`). Both payloads are pure functions of the row
 (`OpChangedPayloadFor`, `FactRecordedPayloadFor`) and never carry the op's
 payload text. The fields `conversationOpRecord` adds to `ConversationOp` are

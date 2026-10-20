@@ -538,9 +538,12 @@ const (
 	// message text. The controller derives it once from the row's post-image
 	// in its cache-notification bridge, and journal rows record no bead.*
 	// event: a one-shot CLI's write to one journals nothing and rings the
-	// controller, which refreshes the row through its cache; with no
-	// controller to answer, the cache's next reconcile announces it. No
-	// writer may record one itself (IsJournalDerived). The row is
+	// controller, which refreshes the row through its cache. A write no
+	// controller answers is announced only partly: a running controller's
+	// next reconcile announces a row it finds open and changed, but not the
+	// close of a row it did not hold, and a controller started later
+	// announces nothing for it. No writer may record one itself
+	// (IsJournalDerived). The row is
 	// authoritative: a consumer that reconnects reads a non-terminal op
 	// again with GET .../session/{id}/ops/{op}.
 	OpChanged = "op.changed"

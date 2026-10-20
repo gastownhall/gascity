@@ -2,6 +2,7 @@ package api
 
 import (
 	"encoding/json"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -725,4 +726,60 @@ func TestEventEmitRefusesJournalDerivedTypes(t *testing.T) {
 		}
 	}
 	wantStatus(t, "another type", e.post(t, "/events", "", `{"type":"deploy.completed","actor":"ci"}`), http.StatusCreated)
+}
+
+// The op reads and the cancel resolve their session without materializing a
+// configured named session: listing, getting or canceling ops of a named
+// session that has no row is 404 and creates no row. Once a proposal has
+// materialized it, its ops read by its name.
+func TestOpReadsMaterializeNoNamedSession(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	name := url.PathEscape("myrig/worker")
+	const opID = "gc-op-aaaaaaaaaaaaaaaaaaaaaaaaaa"
+	for _, tc := range []struct {
+		name string
+		do   func() *httptest.ResponseRecorder
+	}{
+		{"list", func() *httptest.ResponseRecorder { return e.get(t, "/session/"+name+"/ops") }},
+		{"get", func() *httptest.ResponseRecorder { return e.get(t, "/session/"+name+"/ops/"+opID) }},
+		{"cancel", func() *httptest.ResponseRecorder {
+			return e.post(t, "/session/"+name+"/ops/"+opID+"/cancel", "", `{"principal":"t3:env","reason":"edited"}`)
+		}},
+	} {
+		rowsBefore, _ := e.sessionRowsAndStarts(t)
+		rec := tc.do()
+		if rows, _ := e.sessionRowsAndStarts(t); rows != rowsBefore {
+			t.Fatalf("%s materialized the named session: rows %d -> %d", tc.name, rowsBefore, rows)
+		}
+		wantStatus(t, tc.name, rec, http.StatusNotFound)
+	}
+	prop := e.post(t, "/session/"+name+"/ops", "", `{"kind":"message","client_key":"k","payload":"x"}`)
+	wantStatus(t, "propose", prop, http.StatusCreated)
+	res := decodeInto[ConversationOpProposeResult](t, prop)
+	wantStatus(t, "get by name", e.get(t, "/session/"+name+"/ops/"+res.OpID), http.StatusOK)
+	rec := e.get(t, "/session/"+name+"/ops")
+	wantStatus(t, "list by name", rec, http.StatusOK)
+	if list := decodeInto[ListBody[ConversationOp]](t, rec); list.Total != 1 || list.Items[0].ID != res.OpID {
+		t.Fatalf("list = %s", rec.Body.String())
+	}
+}
+
+// client_seq is at most math.MaxInt64, what the generated client's int64
+// decodes: 2^63 is refused 422 and writes nothing, and the maximum is
+// accepted and reads back through the generated client.
+func TestProposeClientSeqCap(t *testing.T) {
+	e, _ := newLaneOpsEnv(t, "message")
+	info := e.session(t, "Seq")
+	rec := e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k-over","payload":"x","client_seq":9223372036854775808}`)
+	wantStatus(t, "2^63", rec, http.StatusUnprocessableEntity)
+	if rows := e.opRows(t); len(rows) != 0 {
+		t.Fatalf("a refused client_seq wrote %d op rows", len(rows))
+	}
+	ok, err := genclient.ParseProposeSessionOpResponse(e.post(t, "/session/"+info.ID+"/ops", "", `{"kind":"message","client_key":"k-max","payload":"x","client_seq":9223372036854775807}`).Result())
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	if ok.StatusCode() != http.StatusCreated || ok.JSON201 == nil || ok.JSON201.Op.ClientSeq == nil || *ok.JSON201.Op.ClientSeq != math.MaxInt64 {
+		t.Fatalf("max client_seq: status %d, JSON201 %+v, body %s", ok.StatusCode(), ok.JSON201, ok.Body)
+	}
 }

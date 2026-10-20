@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"net/http"
 	"slices"
 	"strconv"
@@ -190,6 +191,10 @@ func (s *Server) humaHandleConversationOpPropose(ctx context.Context, input *Con
 	body := input.Body
 	if !slices.Contains(s.conversationLaneKinds(), body.Kind) {
 		return nil, apierr.KindNotEnabled.Msgf("kind_not_enabled: no running conversation lane host executes %q (it runs the kinds [ops] authoritative listed at the controller's start), so this request wrote nothing", body.Kind)
+	}
+	if body.ClientSeq > math.MaxInt64 {
+		// The spec's maximum is a float, which admits 2^63 itself.
+		return nil, apierr.ValidationFailed.Msgf("client_seq_out_of_range: client_seq %d is over %d", body.ClientSeq, int64(math.MaxInt64))
 	}
 	producer, err := producerOf(body.ConversationProducerBody)
 	if err != nil {

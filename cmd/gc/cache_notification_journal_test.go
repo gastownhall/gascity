@@ -218,3 +218,38 @@ func TestCacheBridgeClosedOpForgetsItsRow(t *testing.T) {
 		t.Fatalf("events = %v, want the closed op.changed twice (the close forgot the row)", journalEventLog(ep))
 	}
 }
+
+// A recorded fact forgets its row, as a closed op does: a fact row is
+// closed once recorded and never changes again, so its dedup entry would
+// otherwise stay until the dedup's overflow reset. A repeat of the closed
+// fact is recorded again.
+func TestCacheBridgeRecordedFactForgetsItsRow(t *testing.T) {
+	cache, st, _ := journalCache(t)
+	ep := events.NewFake()
+	rec := cacheChangeRecorder(ep)
+	at := time.Date(2026, 10, 20, 9, 0, 0, 0, time.UTC)
+	fact := opjournal.Fact{Kind: opjournal.FactTurnStarted, Conversation: "gc-1", Generation: 2, Turn: "turn-1", Basis: opjournal.FactBasisRuntime, At: at}
+	row, err := opjournal.EncodeFact("gc", fact)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.RecordFact(fact); err != nil {
+		t.Fatalf("RecordFact: %v", err)
+	}
+	b, err := cache.Get(row.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.Status != "closed" {
+		t.Fatalf("fact row status = %q, want closed", b.Status)
+	}
+	payload, err := beads.EncodeBeadEventPayload(b)
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec(beads.ChangeLocal, events.BeadClosed, row.ID, "", "", "", nil, payload)
+	rec(beads.ChangeLocal, events.BeadClosed, row.ID, "", "", "", nil, payload)
+	if got := journalEventLog(ep); len(got) != 2 || ep.Events[0].Type != events.FactRecorded || ep.Events[1].Type != events.FactRecorded {
+		t.Fatalf("events = %v, want fact.recorded twice (the recorded fact forgot its row)", got)
+	}
+}

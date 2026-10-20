@@ -196,6 +196,9 @@ func storeEngine(store beads.Store) beads.Store {
 type emittingClassStore struct {
 	beads.Store
 	cityPath string
+	// deferredRings, when set, queues the controller doorbells for
+	// journal-row writes for the caller to ring (deferJournalRings).
+	deferredRings *journalRingQueue
 }
 
 // ---------------------------------------------------------------------------

@@ -44,7 +44,8 @@ func isCacheActor(actor string) bool {
 // op row's change is recorded as op.changed and a fact row as fact.recorded,
 // each derived from the row's post-image (journalRowEvent) and dropped like a
 // bead.updated when it repeats the last one recorded for the row; a closed
-// op's op.changed forgets the row, as a bead.closed does. A one-shot CLI's
+// op's op.changed and a closed fact's fact.recorded forget the row, as a
+// bead.closed does. A one-shot CLI's
 // write to a journal row reaches this bridge through the controller's
 // doorbell, which refreshes the row through the cache
 // (class_store_emit_oprows.go). Every other
@@ -88,8 +89,9 @@ func cacheChangeRecorder(recorder events.Recorder) func(source beads.ChangeSourc
 var journalTypeMarker = []byte(`"issue_type":"` + opjournal.BeadType + `"`)
 
 // journalRowDerived is the event a journal row's post-image derives, nil
-// when it derives none; closed says the row is a closed op, whose last event
-// this is, so the dedup forgets it as it forgets a bead.closed's bead.
+// when it derives none; closed says the row is a closed op or a recorded
+// (closed) fact, whose last event this is, so the dedup forgets it as it
+// forgets a bead.closed's bead.
 type journalRowDerived struct {
 	event  *events.Event
 	closed bool
@@ -131,6 +133,8 @@ func journalRowEvent(eventType string, payload json.RawMessage) (journalRowDeriv
 		if f, err = opjournal.DecodeFact(b); err == nil {
 			e = events.Event{Type: events.FactRecorded, Subject: f.ID, SessionID: f.Conversation}
 			p = api.FactRecordedPayloadFor(f)
+			// A fact row is closed once recorded and never changes again.
+			closed = b.Status == "closed"
 		}
 	default:
 		return journalRowDerived{}, true

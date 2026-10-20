@@ -1339,6 +1339,7 @@ go_test(
         "convergence_integration_test.go",
         "conversation_lane_api_test.go",
         "conversation_lane_exec_test.go",
+        "conversation_lane_hook_rows_test.go",
         "conversation_lane_hook_test.go",
         "conversation_lane_host_test.go",
         "conversation_lane_steer_test.go",
