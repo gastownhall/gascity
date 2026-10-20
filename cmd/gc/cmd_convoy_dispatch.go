@@ -496,6 +496,12 @@ func handleControlDispatchError(cityPath, storePath string, graphStore beads.Sto
 // A verbatim repeat is additionally marked quiet so a permanently-pending bead
 // stops resetting the serve loop's idle backoff, mirroring the Tier-B repeat
 // arm in handleControlDispatchError above.
+//
+// One drift does not need the horizon to be known: a check whose script cannot
+// be launched. It is announced on control.check_unlaunchable on its first
+// refusal and again whenever the refusal changes, so the hold is visible from
+// the first sweep instead of only after the budget; the disposition itself is
+// unchanged.
 func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Store, bead beads.Bead, beadID string, cause error, stderr io.Writer) error {
 	if strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) == "true" &&
 		dispatch.PendingControlRefusalRecorded(bead, cause) {
@@ -524,6 +530,15 @@ func handleControlDriftRefusal(cityPath, storePath string, graphStore beads.Stor
 	workflowTracef("control-pending-budget bead=%s attempts=%d first_seen=%s expired=%t repeat=%t err=%v",
 		beadID, pending.Attempts, pending.FirstSeen.UTC().Format(time.RFC3339), pending.Expired, pending.Repeat, cause)
 
+	var unlaunchable *dispatch.UnlaunchableCheckError
+	if !pending.Repeat && errors.As(cause, &unlaunchable) {
+		// A check that cannot launch will not heal by waiting, so the operator
+		// hears about it now rather than at the stall horizon. Edge-triggered
+		// on the reason the record just persisted: a first refusal or a changed
+		// one announces, a verbatim repeat (Repeat) never does, across
+		// dispatcher restarts too.
+		emitControlCheckUnlaunchable(cityPath, storePath, bead, unlaunchable, cause, stderr)
+	}
 	if pending.Expired && strings.TrimSpace(bead.Metadata[beadmeta.ControlPendingStalledMetadataKey]) != "true" {
 		// Latch BEFORE emitting, matching the quarantine path above: a crash
 		// between the two drops one event, which the persisted
@@ -653,6 +668,41 @@ func emitControlStalled(cityPath, storePath string, store beads.Store, bead bead
 			fmt.Fprintf(stderr, "warning: control dispatch: closing event recorder for %s: %v\n", bead.ID, err) //nolint:errcheck // the quarantine already succeeded
 		}
 	}
+}
+
+// emitControlCheckUnlaunchable publishes the control.check_unlaunchable record
+// for a check control held open because its script cannot be launched, plus a
+// stderr line for the dispatcher log. It changes nothing about the hold: the
+// bead stays open and keeps retrying, and the stall horizon still escalates on
+// control.stalled.
+func emitControlCheckUnlaunchable(cityPath, storePath string, bead beads.Bead, unlaunchable *dispatch.UnlaunchableCheckError, cause error, stderr io.Writer) {
+	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
+	payload := events.ControlCheckUnlaunchablePayload{
+		BeadID:     bead.ID,
+		Kind:       strings.TrimSpace(bead.Metadata[beadmeta.KindMetadataKey]),
+		RootBeadID: rootID,
+		StorePath:  storePath,
+		CheckPath:  unlaunchable.CheckPath,
+		Error:      controlQuarantineReason(cause, "check_unlaunchable"),
+	}
+
+	rec := openCityRecorderAt(cityPath, stderr)
+	rec.Record(events.Event{
+		Type:    events.ControlCheckUnlaunchable,
+		Actor:   "controller",
+		Subject: bead.ID,
+		Message: fmt.Sprintf("control bead %s held open: check %q cannot be launched: %s",
+			bead.ID, payload.CheckPath, payload.Error),
+		Payload: events.ControlCheckUnlaunchablePayloadJSON(payload),
+		RunID:   rootID,
+	})
+	if closer, ok := rec.(io.Closer); ok {
+		if err := closer.Close(); err != nil {
+			fmt.Fprintf(stderr, "warning: control dispatch: closing event recorder for %s: %v\n", bead.ID, err) //nolint:errcheck // the announcement is best-effort; the hold stands regardless
+		}
+	}
+	_, _ = fmt.Fprintf(stderr, "control dispatch: check unlaunchable bead=%s check_path=%q held open reason=%v\n",
+		bead.ID, payload.CheckPath, cause)
 }
 
 // emitControlRootSettleFailed publishes the control.root_settle_failed record

@@ -153,6 +153,7 @@ var builtinAuthorship = map[string]Authorship{
 	ConvoyCreated:                  AuthorWorker,
 	ConvoyClosed:                   AuthorWorker,
 	ControlStalled:                 AuthorWorker,
+	ControlCheckUnlaunchable:       AuthorWorker,
 	ControlRootSettleFailed:        AuthorWorker,
 	OrderFailed:                    AuthorWorker,
 	WorkerOperation:                AuthorWorker,

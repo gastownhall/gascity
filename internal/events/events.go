@@ -321,6 +321,22 @@ const (
 	// could also observe expiry and emit; consumers should tolerate a duplicate
 	// rather than assume a globally exactly-once signal.
 	ControlStalled = "control.stalled"
+	// ControlCheckUnlaunchable fires when the control dispatcher first holds a
+	// check step open because its gc.check_path names a script it cannot
+	// launch (missing, not a regular file, or not executable), and again
+	// whenever that refusal's reason changes. The hold itself is right — the
+	// repair is out of band, and closing the step would release its
+	// dependents — but until control.stalled fires at the stall horizon (15
+	// minutes by default) the hold was otherwise silent: the dispatcher
+	// re-swept every few seconds and an operator watching events saw nothing.
+	// It is edge-triggered per bead and reason, deduplicated through the
+	// bead-persisted gc.control_pending_reason, so a verbatim repeat is never
+	// re-announced, across dispatcher restarts included. It is not a stall: the
+	// step stays open and completes the moment the script can launch, and
+	// control.stalled (error_class "pending") still fires once at the horizon.
+	// A duplicate is possible under a misconfigured second dispatcher, same as
+	// ControlStalled.
+	ControlCheckUnlaunchable = "control.check_unlaunchable"
 	// ControlRootSettleFailed fires when a workflow-finalize control bead is
 	// quarantined but the store then refuses the follow-up close of the
 	// workflow root the finalizer was gating (e.g. a "blocked by" edge the
@@ -586,6 +602,7 @@ var KnownEventTypes = []string{
 	ConvoyCreated, ConvoyClosed,
 	ControllerStarted, ControllerStopped,
 	ControlStalled,
+	ControlCheckUnlaunchable,
 	ControlRootSettleFailed,
 	ControlDispatcherScopeGap,
 	CitySuspended, CityResumed,

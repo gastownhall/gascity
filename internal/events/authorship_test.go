@@ -189,7 +189,7 @@ func TestExecutionTopologyIsWorkerAndCompletionIsController(t *testing.T) {
 // site's recorder would drop it at the source. gc session close records
 // session.stranded_claims through the city recorder.
 func TestTypesAgentCommandsRecordAreWorkerAuthored(t *testing.T) {
-	for _, eventType := range []string{SessionStrandedClaims, SessionStopped, SessionDraining, ControlStalled, OrderFailed} {
+	for _, eventType := range []string{SessionStrandedClaims, SessionStopped, SessionDraining, ControlStalled, ControlCheckUnlaunchable, OrderFailed} {
 		if got := AuthorshipOf(eventType); got != AuthorWorker {
 			t.Errorf("AuthorshipOf(%q) = %s, want worker", eventType, got)
 		}

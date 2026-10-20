@@ -166,6 +166,25 @@ var ErrControlPending = errors.New("workflow control pending")
 // the one that earns a persisted budget and a one-shot stall escalation.
 var ErrControlDriftPending = fmt.Errorf("%w: awaiting config repair", ErrControlPending)
 
+// UnlaunchableCheckError is the ErrControlDriftPending refusal of a check
+// control whose gc.check_path names a script that cannot be launched: missing,
+// not a regular file, or not executable. It carries the unresolved path as
+// data so the dispatcher can announce which script to ship or chmod without
+// re-deriving it from bead metadata or parsing the message; the message and
+// the errors.Is chain are those of the wrapped refusal, unchanged.
+type UnlaunchableCheckError struct {
+	// CheckPath is gc.check_path exactly as stamped on the control bead.
+	CheckPath string
+	err       error
+}
+
+// Error returns the wrapped refusal's message.
+func (e *UnlaunchableCheckError) Error() string { return e.err.Error() }
+
+// Unwrap returns the wrapped refusal, which matches ErrControlDriftPending and
+// the underlying resolution error.
+func (e *UnlaunchableCheckError) Unwrap() error { return e.err }
+
 // ErrControlGraphMalformed reports that a control bead refers to graph state
 // that cannot become valid by waiting.
 var ErrControlGraphMalformed = errors.New("workflow control graph malformed")

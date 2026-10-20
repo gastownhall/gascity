@@ -136,6 +136,15 @@ func TestRunRalphCheckUnlaunchableScriptIsDriftPending(t *testing.T) {
 			if !errors.Is(err, tc.wantRoot) {
 				t.Fatalf("runRalphCheck error = %v, lost the underlying %v", err, tc.wantRoot)
 			}
+			// The dispatcher announces the refusal to operators; it needs the
+			// unresolved path as data, not as a substring of the message.
+			var unlaunchable *UnlaunchableCheckError
+			if !errors.As(err, &unlaunchable) {
+				t.Fatalf("runRalphCheck error = %v (%T), want an *UnlaunchableCheckError", err, err)
+			}
+			if unlaunchable.CheckPath != checkPath {
+				t.Fatalf("UnlaunchableCheckError.CheckPath = %q, want the stamped gc.check_path %q", unlaunchable.CheckPath, checkPath)
+			}
 			msg := err.Error()
 			if !strings.Contains(msg, check.ID) || !strings.Contains(msg, "resolving check path") {
 				t.Fatalf("error %q must name the bead and \"resolving check path\"", msg)
@@ -247,6 +256,9 @@ func TestRunRalphCheckSecurityRefusalsStayTerminal(t *testing.T) {
 			if errors.Is(err, ErrControlPending) {
 				t.Fatalf("runRalphCheck error = %v, a security refusal must not be pending", err)
 			}
+			if errors.As(err, new(*UnlaunchableCheckError)) {
+				t.Fatalf("runRalphCheck error = %v, a security refusal must not be announced as an unlaunchable check", err)
+			}
 		})
 	}
 }
@@ -334,6 +346,12 @@ func TestProcessRalphControlUnlaunchableCheckStaysOpen(t *testing.T) {
 	_, err := ProcessControl(store, control, opts)
 	if !errors.Is(err, ErrControlDriftPending) {
 		t.Fatalf("ProcessControl error = %v, want ErrControlDriftPending", err)
+	}
+	// The compiled lane wraps the check error ("running check: ..."); the
+	// typed refusal the dispatcher announces must survive that wrap.
+	var unlaunchable *UnlaunchableCheckError
+	if !errors.As(err, &unlaunchable) || unlaunchable.CheckPath != checkPath {
+		t.Fatalf("ProcessControl error = %v, want an *UnlaunchableCheckError naming %q", err, checkPath)
 	}
 	assertUnlaunchableRalphControlHeldOpen(t, store, control.ID, beadsBefore)
 

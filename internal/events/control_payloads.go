@@ -41,6 +41,32 @@ func ControlStalledPayloadJSON(p ControlStalledPayload) json.RawMessage {
 	return b
 }
 
+// ControlCheckUnlaunchablePayload is the typed payload for
+// control.check_unlaunchable events. It names the step an operator has to
+// repair without reading a trace log: which control bead is held, in which
+// workflow and store, the check path it could not launch, and why.
+type ControlCheckUnlaunchablePayload struct {
+	BeadID     string `json:"bead_id"`
+	Kind       string `json:"kind,omitempty"`
+	RootBeadID string `json:"root_bead_id,omitempty"`
+	StorePath  string `json:"store_path,omitempty"`
+	// CheckPath is gc.check_path exactly as stamped on the control bead, before
+	// resolution. Where the dispatcher looked for it is in Error.
+	CheckPath string `json:"check_path"`
+	// Error is the resolution refusal, truncated at the record site.
+	Error string `json:"error"`
+}
+
+// IsEventPayload marks ControlCheckUnlaunchablePayload as an events.Payload variant.
+func (ControlCheckUnlaunchablePayload) IsEventPayload() {}
+
+// ControlCheckUnlaunchablePayloadJSON builds the JSON wire form for attachment
+// to an Event.Payload field.
+func ControlCheckUnlaunchablePayloadJSON(p ControlCheckUnlaunchablePayload) json.RawMessage {
+	b, _ := json.Marshal(p) //nolint:errcheck // a struct of scalars cannot fail to marshal
+	return b
+}
+
 // ControlRootSettleFailedPayload is the typed payload for
 // control.root_settle_failed events. It carries what an operator needs to
 // find and reconcile the stranded root without reading a trace log: which
@@ -114,6 +140,7 @@ func ControlDispatcherScopeGapPayloadJSON(p ControlDispatcherScopeGapPayload) js
 
 func init() {
 	RegisterPayload(ControlStalled, ControlStalledPayload{})
+	RegisterPayload(ControlCheckUnlaunchable, ControlCheckUnlaunchablePayload{})
 	RegisterPayload(ControlDispatcherScopeGap, ControlDispatcherScopeGapPayload{})
 	RegisterPayload(ControlRootSettleFailed, ControlRootSettleFailedPayload{})
 }

@@ -1854,6 +1854,16 @@ type ContextAdvisoryTier struct {
 	Threshold *int64  `json:"Threshold"`
 }
 
+// ControlCheckUnlaunchablePayload defines model for ControlCheckUnlaunchablePayload.
+type ControlCheckUnlaunchablePayload struct {
+	BeadId     string  `json:"bead_id"`
+	CheckPath  string  `json:"check_path"`
+	Error      string  `json:"error"`
+	Kind       *string `json:"kind,omitempty"`
+	RootBeadId *string `json:"root_bead_id,omitempty"`
+	StorePath  *string `json:"store_path,omitempty"`
+}
+
 // ControlDispatcherScopeGapPayload defines model for ControlDispatcherScopeGapPayload.
 type ControlDispatcherScopeGapPayload struct {
 	RigContext      *string `json:"rig_context,omitempty"`
@@ -6355,6 +6365,22 @@ type TypedEventStreamEnvelopeCityUnregisterRequested struct {
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
 }
 
+// TypedEventStreamEnvelopeControlCheckUnlaunchable defines model for TypedEventStreamEnvelopeControlCheckUnlaunchable.
+type TypedEventStreamEnvelopeControlCheckUnlaunchable struct {
+	Actor            string                          `json:"actor"`
+	DependsOnStepIds *[]string                       `json:"depends_on_step_ids,omitempty"`
+	Message          *string                         `json:"message,omitempty"`
+	Payload          ControlCheckUnlaunchablePayload `json:"payload"`
+	RunId            *string                         `json:"run_id,omitempty"`
+	Seq              int64                           `json:"seq"`
+	SessionId        *string                         `json:"session_id,omitempty"`
+	StepId           *string                         `json:"step_id,omitempty"`
+	Subject          *string                         `json:"subject,omitempty"`
+	Ts               time.Time                       `json:"ts"`
+	Type             string                          `json:"type"`
+	Workflow         *WorkflowEventProjection        `json:"workflow,omitempty"`
+}
+
 // TypedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedEventStreamEnvelopeControlDispatcherScopeGap.
 type TypedEventStreamEnvelopeControlDispatcherScopeGap struct {
 	Actor            string                           `json:"actor"`
@@ -8230,6 +8256,23 @@ type TypedTaggedEventStreamEnvelopeCityUnregisterRequested struct {
 	Ts               time.Time                `json:"ts"`
 	Type             string                   `json:"type"`
 	Workflow         *WorkflowEventProjection `json:"workflow,omitempty"`
+}
+
+// TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable defines model for TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable.
+type TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable struct {
+	Actor            string                          `json:"actor"`
+	City             string                          `json:"city"`
+	DependsOnStepIds *[]string                       `json:"depends_on_step_ids,omitempty"`
+	Message          *string                         `json:"message,omitempty"`
+	Payload          ControlCheckUnlaunchablePayload `json:"payload"`
+	RunId            *string                         `json:"run_id,omitempty"`
+	Seq              int64                           `json:"seq"`
+	SessionId        *string                         `json:"session_id,omitempty"`
+	StepId           *string                         `json:"step_id,omitempty"`
+	Subject          *string                         `json:"subject,omitempty"`
+	Ts               time.Time                       `json:"ts"`
+	Type             string                          `json:"type"`
+	Workflow         *WorkflowEventProjection        `json:"workflow,omitempty"`
 }
 
 // TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap defines model for TypedTaggedEventStreamEnvelopeControlDispatcherScopeGap.
@@ -11981,6 +12024,32 @@ func (t *EventPayload) MergeConditionalWritesDegradedPayload(v ConditionalWrites
 	return err
 }
 
+// AsControlCheckUnlaunchablePayload returns the union data inside the EventPayload as a ControlCheckUnlaunchablePayload
+func (t EventPayload) AsControlCheckUnlaunchablePayload() (ControlCheckUnlaunchablePayload, error) {
+	var body ControlCheckUnlaunchablePayload
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromControlCheckUnlaunchablePayload overwrites any union data inside the EventPayload as the provided ControlCheckUnlaunchablePayload
+func (t *EventPayload) FromControlCheckUnlaunchablePayload(v ControlCheckUnlaunchablePayload) error {
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeControlCheckUnlaunchablePayload performs a merge with any union data inside the EventPayload, using the provided ControlCheckUnlaunchablePayload
+func (t *EventPayload) MergeControlCheckUnlaunchablePayload(v ControlCheckUnlaunchablePayload) error {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsControlDispatcherScopeGapPayload returns the union data inside the EventPayload as a ControlDispatcherScopeGapPayload
 func (t EventPayload) AsControlDispatcherScopeGapPayload() (ControlDispatcherScopeGapPayload, error) {
 	var body ControlDispatcherScopeGapPayload
@@ -15430,6 +15499,34 @@ func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeCityUnregisterRe
 	return err
 }
 
+// AsTypedEventStreamEnvelopeControlCheckUnlaunchable returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlCheckUnlaunchable
+func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlCheckUnlaunchable() (TypedEventStreamEnvelopeControlCheckUnlaunchable, error) {
+	var body TypedEventStreamEnvelopeControlCheckUnlaunchable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedEventStreamEnvelopeControlCheckUnlaunchable overwrites any union data inside the TypedEventStreamEnvelope as the provided TypedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedEventStreamEnvelope) FromTypedEventStreamEnvelopeControlCheckUnlaunchable(v TypedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedEventStreamEnvelopeControlCheckUnlaunchable performs a merge with any union data inside the TypedEventStreamEnvelope, using the provided TypedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedEventStreamEnvelope) MergeTypedEventStreamEnvelopeControlCheckUnlaunchable(v TypedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
 // AsTypedEventStreamEnvelopeControlDispatcherScopeGap returns the union data inside the TypedEventStreamEnvelope as a TypedEventStreamEnvelopeControlDispatcherScopeGap
 func (t TypedEventStreamEnvelope) AsTypedEventStreamEnvelopeControlDispatcherScopeGap() (TypedEventStreamEnvelopeControlDispatcherScopeGap, error) {
 	var body TypedEventStreamEnvelopeControlDispatcherScopeGap
@@ -18278,6 +18375,8 @@ func (t TypedEventStreamEnvelope) ValueByDiscriminator() (interface{}, error) {
 		return t.AsTypedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.check_unlaunchable":
+		return t.AsTypedEventStreamEnvelopeControlCheckUnlaunchable()
 	case "control.dispatcher_scope_gap":
 		return t.AsTypedEventStreamEnvelopeControlDispatcherScopeGap()
 	case "control.root_settle_failed":
@@ -18929,6 +19028,34 @@ func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeCityU
 // MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeCityUnregisterRequested
 func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeCityUnregisterRequested(v TypedTaggedEventStreamEnvelopeCityUnregisterRequested) error {
 	v.Type = "city.unregister_requested"
+	b, err := json.Marshal(v)
+	if err != nil {
+		return err
+	}
+
+	merged, err := runtime.JSONMerge(t.union, b)
+	t.union = merged
+	return err
+}
+
+// AsTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable returns the union data inside the TypedTaggedEventStreamEnvelope as a TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+func (t TypedTaggedEventStreamEnvelope) AsTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable() (TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable, error) {
+	var body TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+	err := json.Unmarshal(t.union, &body)
+	return body, err
+}
+
+// FromTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable overwrites any union data inside the TypedTaggedEventStreamEnvelope as the provided TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedTaggedEventStreamEnvelope) FromTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable(v TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
+	b, err := json.Marshal(v)
+	t.union = b
+	return err
+}
+
+// MergeTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable performs a merge with any union data inside the TypedTaggedEventStreamEnvelope, using the provided TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable
+func (t *TypedTaggedEventStreamEnvelope) MergeTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable(v TypedTaggedEventStreamEnvelopeControlCheckUnlaunchable) error {
+	v.Type = "control.check_unlaunchable"
 	b, err := json.Marshal(v)
 	if err != nil {
 		return err
@@ -21787,6 +21914,8 @@ func (t TypedTaggedEventStreamEnvelope) ValueByDiscriminator() (interface{}, err
 		return t.AsTypedTaggedEventStreamEnvelopeCitySuspended()
 	case "city.unregister_requested":
 		return t.AsTypedTaggedEventStreamEnvelopeCityUnregisterRequested()
+	case "control.check_unlaunchable":
+		return t.AsTypedTaggedEventStreamEnvelopeControlCheckUnlaunchable()
 	case "control.dispatcher_scope_gap":
 		return t.AsTypedTaggedEventStreamEnvelopeControlDispatcherScopeGap()
 	case "control.root_settle_failed":

@@ -817,9 +817,13 @@ runs it, so there is no exit status to read. The step stays open rather than
 failing: the fix is out of band (ship the script, `chmod +x` it), and closing
 the step would release the steps that need it. The orchestrator re-checks the
 step every sweep; once the script can run, the step resumes and spends attempts
-normally. If the script is still unlaunchable when the stall budget elapses (15
-minutes by default), the orchestrator emits a single `control.stalled` event
-with `error_class = "pending"` and keeps waiting. It records no `order.failed`.
+normally. On the first sweep that cannot launch the script, the orchestrator
+emits a `control.check_unlaunchable` event naming the step's bead, its
+`check.path`, and the reason. It emits the event again only when the reason
+changes, such as a missing script that ships without its execute bit. If the
+script is still unlaunchable when the stall budget elapses (15 minutes by
+default), the orchestrator emits a single `control.stalled` event with
+`error_class = "pending"` and keeps waiting. It records no `order.failed`.
 A script that is missing because the step's working directory was removed, and
 that exists nowhere else, is held open the same way. Restoring the directory
 heals it; shipping a copy under the city or store root does not. The script
