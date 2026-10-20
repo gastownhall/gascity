@@ -470,3 +470,40 @@ func TestStepReminderRereadsEdgesTheBatchDoesNotAnswer(t *testing.T) {
 		})
 	}
 }
+
+// claimedListFaultStore fails the question "what has this session claimed", the
+// in-progress listing for its identities, the way a store does while its database
+// is unreachable. Every other read, the routed-bead listing included, is answered
+// by the store under it.
+type claimedListFaultStore struct{ beads.Store }
+
+func (s claimedListFaultStore) List(q beads.ListQuery) ([]beads.Bead, error) {
+	if q.Status == "in_progress" && len(q.Assignees) > 0 {
+		return nil, errors.New("dolt: connection refused")
+	}
+	return s.Store.List(q)
+}
+
+// Claimed work wins over a routed bead, so a reminder that cannot list the
+// claimed work cannot know the routed bead is the assignment: it names nothing,
+// not planIntake, though the routed bead is one a claim could take now (its
+// blocker is closed) and the reminder does name planIntake while the listing
+// answers. In the split case only the work store fails; the graph store is asked
+// for roots and steps, and failing it would end the resolution before the bridge.
+func TestStepReminderNamesNoStepWhenItCannotListClaimedWork(t *testing.T) {
+	p := newPlanBreakdown()
+	p.row(t, planBlocker).Status = "closed"
+	assertStepReminder(t, p, planIntake)
+	for _, split := range []bool{false, true} {
+		work, graph := p.stores(split)
+		work = &claimedListFaultStore{Store: work}
+		if !split {
+			graph = work
+		}
+		// The error is the caller's to log; what the reminder owes is no step.
+		got, _ := resolveActiveWispStep(work, graph, planIdentities)
+		if got != nil {
+			t.Errorf("split=%v: the reminder names %s, want %s", split, describeStep(got), noReminder)
+		}
+	}
+}
