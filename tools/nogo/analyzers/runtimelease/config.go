@@ -109,7 +109,7 @@ var allowed = map[string]Allowance{
 	session + ":Manager.CloseDetailed":                     {Reason: "takes the lease (leaseForStop)"},
 	session + ":Manager.Kill":                              {Reason: "takes the lease (leaseForStop), or runs under its caller's (Actor.Lease)"},
 	session + ":Manager.interruptAndSubmitLocked":          {Reason: "takes the lease before it interrupts (leaseForRestartLocked)"},
-	session + ":Manager.restartAfterFailedInterruptLocked": {Reason: "an interrupt's restart on failure, under the lease StopTurnWith takes before it interrupts (leaseForRestartLocked)", Callers: []string{"Manager.StopTurnWith"}},
+	session + ":Manager.restartAfterFailedInterruptLocked": {Reason: "an interrupt's restart on failure, under the lease StopTurnWith or InterruptTurn takes before it interrupts (leaseForRestartLocked)", Callers: []string{"Manager.InterruptTurn", "Manager.StopTurnWith"}},
 	// internal/worker: runtime-only handles.
 	worker + ":RuntimeHandle.StartResolved":  {Reason: "takes the name's flock (session.LeaseRuntimeName)"},
 	worker + ":RuntimeHandle.stopUnderLease": {Reason: "takes the name's flock (session.LeaseRuntimeName)"},

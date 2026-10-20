@@ -231,7 +231,11 @@ type InterruptRequest struct {
 	Fence runtime.InputFence `json:"-"`
 	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
 	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
-	// Empty interrupts whatever runs (session scope). A turn-scoped
+	// Empty interrupts whatever runs (session scope): on a SessionHandle a
+	// row the stop finds closed, gone or not a session when it loads it
+	// under the session mutation lock is then an error wrapping
+	// runtime.ErrSessionNotFound, and one that will not load an error
+	// wrapping ErrInterruptNotSent, nothing sent either way. A turn-scoped
 	// interrupt is refused, with nothing sent, unless the session's turn
 	// capabilities record starts, fence at least checked and see ends at
 	// least inferred: runtime.ErrTurnIdentityUnsupported, or
@@ -250,9 +254,10 @@ type InterruptRequest struct {
 	// to end, which wraps no other sentinel (the last failure is in its text
 	// only), so "sent" is never misread as unknown; and an error wrapping
 	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
-	// sent, or when the turn could not be checked before ctx ended or its
-	// idle state could not be read (nothing sent then). ctx bounds the wait
-	// for the session mutation lock and the check before the keys.
+	// sent, which then wraps session.ErrInterruptOutcomeUnknown too, or when
+	// the turn could not be checked before ctx ended or its idle state could
+	// not be read (nothing sent then). ctx bounds the wait for the session
+	// mutation lock and the check before the keys.
 	Turn string `json:"turn,omitempty"`
 	// OnFailure is what the interrupt does when it was sent and its turn was
 	// not seen to end. Empty and InterruptOnFailureFail return that error
@@ -262,14 +267,19 @@ type InterruptRequest struct {
 	// then returns nil with InterruptResult.Restarted; only InterruptAs
 	// takes it, with an actor that may start the runtime, else it is
 	// refused, nothing sent, with an error wrapping session.ErrNoActor. A
-	// restart applies to a keystroke runtime on a SessionHandle: a protocol
-	// runtime's stop may leave it running, so its not-ended error is
-	// returned as with fail, and a RuntimeHandle, which has no session row
-	// to restart from, refuses it, nothing sent, with
-	// ErrInterruptRestartUnsupported. So does a turn-scoped interrupt on a
-	// protocol turn source whose runtime interrupts by keystroke (ACP):
-	// that path never restarts, and a restart policy is not dropped
-	// silently.
+	// restart whose start fails once the runtime stopped is an error
+	// wrapping session.ErrRestartNotStarted, and one withheld (the caller's
+	// ctx ended, or a check refused the follow-up interrupt) an error
+	// wrapping session.ErrInterruptOutcomeUnknown, as
+	// session.StopTurnOptions.Restart documents. A restart applies to a
+	// keystroke runtime on a SessionHandle, whatever its turn source: a
+	// turn-scoped interrupt on a protocol turn source whose runtime
+	// interrupts by keystroke (ACP) interrupts the turn by protocol first
+	// and restarts only once it is not seen to end
+	// (session.Manager.InterruptTurn). A protocol runtime's stop may leave
+	// it running, so its not-ended error is returned as with fail, and a
+	// RuntimeHandle, which has no session row to restart from, refuses it,
+	// nothing sent, with ErrInterruptRestartUnsupported.
 	OnFailure InterruptOnFailure `json:"on_failure,omitempty"`
 	// ForReplacement says a message replaces the interrupted turn
 	// (deliver-now's interrupt step, X11 D11): once the turn settled, the
@@ -310,7 +320,10 @@ var ErrInterruptRestartUnsupported = errors.New("worker: the handle cannot resta
 // ErrInterruptNotSent reports an interrupt that failed before anything was
 // sent: its policy's preparation (the restart's start command, the
 // replacement's or the turn's plan, the session's input fencing) could not
-// be read. The caller may retry it as it is.
+// be read, or a session-scoped stop's load of the session row under the
+// session mutation lock failed (session.ErrStopNotSent), and the caller may
+// retry it as it is; or the request was refused (an unknown OnFailure, a
+// restart with no actor that may start the runtime, an invalid fence).
 var ErrInterruptNotSent = errors.New("worker: the interrupt failed before anything was sent")
 
 // InterruptResult reports what one interrupt did beyond its error.
@@ -324,19 +337,22 @@ type InterruptResult struct {
 }
 
 // validate checks req's policy for by (nil for none) before anything is sent: a known
-// OnFailure, an actor for a restart, and a valid fence when one is set.
+// OnFailure, an actor for a restart, and a valid fence when one is set. A
+// refusal wraps ErrInterruptNotSent.
 func (req InterruptRequest) validate(by *sessionpkg.Actor) error {
 	switch req.OnFailure {
 	case "", InterruptOnFailureFail:
 	case InterruptOnFailureRestart:
 		if by == nil || by.Kind == 0 {
-			return fmt.Errorf("interrupt on_failure restart: %w", sessionpkg.ErrNoActor)
+			return fmt.Errorf("interrupt on_failure restart: %w: %w", ErrInterruptNotSent, sessionpkg.ErrNoActor)
 		}
 	default:
-		return fmt.Errorf("interrupt on_failure %q is not fail or restart", req.OnFailure)
+		return fmt.Errorf("interrupt on_failure %q is not fail or restart: %w", req.OnFailure, ErrInterruptNotSent)
 	}
 	if !req.Fence.IsZero() {
-		return req.Fence.Validate()
+		if err := req.Fence.Validate(); err != nil {
+			return fmt.Errorf("interrupt fence: %w: %w", ErrInterruptNotSent, err)
+		}
 	}
 	return nil
 }

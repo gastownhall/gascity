@@ -3,10 +3,13 @@ package session
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/runtime"
 )
 
@@ -68,44 +71,149 @@ func TestStopTurnWithRestartSkipsAProtocolRuntime(t *testing.T) {
 	assertProtocolInterruptOnly(t, sp)
 }
 
-// A restart that fails is sent but not seen to end, and nothing else.
-func TestStopTurnWithFailedRestartIsTurnNotEnded(t *testing.T) {
+// A restart that stopped the runtime and could not start it again says so,
+// apart from a turn not seen to end: the error wraps ErrRestartNotStarted
+// and none of the start's own sentinels, the start's error in its text. The
+// runtime stays stopped, for the controller's heal to bring back.
+func TestStopTurnWithFailedStartIsRestartNotStarted(t *testing.T) {
 	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
 	sp.WaitForIdleErrors[info.SessionName] = errors.New("still busy")
-	sp.StartErrors[info.SessionName] = errors.New("cannot start")
+	sp.StartErrors[info.SessionName] = fmt.Errorf("cannot start: %w", runtime.ErrRuntimeUnavailable)
 	report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
-	if !errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
-		t.Fatalf("StopTurnWith(failed restart) = %+v, %v; want ErrTurnNotEnded and no restart", report, err)
+	if !errors.Is(err, ErrRestartNotStarted) || report.Restarted {
+		t.Fatalf("StopTurnWith(failed start) = %+v, %v; want ErrRestartNotStarted and no restart", report, err)
 	}
-	if errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrSessionNotFound) {
-		t.Fatalf("StopTurnWith(failed restart) = %v, want ErrTurnNotEnded alone", err)
+	for _, sentinel := range []error{runtime.ErrTurnNotEnded, runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound, ErrInterruptOutcomeUnknown} {
+		if errors.Is(err, sentinel) {
+			t.Fatalf("StopTurnWith(failed start) = %v, want ErrRestartNotStarted alone, not %v", err, sentinel)
+		}
+	}
+	if !strings.Contains(err.Error(), "cannot start") {
+		t.Fatalf("StopTurnWith(failed start) = %v, want the start's error in its text", err)
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 1 || sp.IsRunning(info.SessionName) {
+		t.Fatalf("calls = %v, running %v; want the runtime stopped once and not started", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
 	}
 }
 
-// The runtime lease is taken before anything is sent: a lease held elsewhere
-// refuses the stop as unavailable, nothing sent.
+// A restart whose stop fails leaves the runtime as it was: the interrupt
+// was sent and its turn not seen to end, and nothing else.
+func TestStopTurnWithFailedRestartStopIsTurnNotEnded(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("still busy")
+	sp.StopErrors[info.SessionName] = errors.New("cannot stop")
+	report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
+	if !errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
+		t.Fatalf("StopTurnWith(failed stop) = %+v, %v; want ErrTurnNotEnded and no restart", report, err)
+	}
+	if errors.Is(err, ErrRestartNotStarted) || errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrSessionNotFound) {
+		t.Fatalf("StopTurnWith(failed stop) = %v, want ErrTurnNotEnded alone", err)
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Start"); n != 0 {
+		t.Fatalf("calls = %v, want no start after a failed stop", callMethods(sp.SnapshotCalls()))
+	}
+}
+
+// A follow-up interrupt its check refused is no ground for a restart: the
+// check saw the turn leave Current after the first key, which is the turn's
+// end (Settle gets a nil wait for it), or it could not tell. Either way
+// whatever runs now may be another turn, the ended one's successor, which a
+// restart would kill. When Settle does not see the end either (its reads
+// fail), the runtime is left running and the error wraps
+// ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
+// runtime.ErrTurnNotEnded, and none of the refusal's own sentinels.
+func TestStopTurnWithRefusedFollowUpIsNoRestart(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		refusal error
+		ended   bool // the refusal is the turn's end: Settle gets a nil wait
+	}{
+		{"the turn left current", &runtime.TurnNotCurrentError{Session: "s", TurnID: "t1", Current: runtime.TurnState{TurnID: "t2"}}, true},
+		{"the check could not answer", fmt.Errorf("checking turn %q of s before interrupting it: %w: %w", "t1", runtime.ErrRuntimeUnavailable, context.DeadlineExceeded), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			mgr, sp, info, _ := newFencedStopSession(t, "codex", nil, runtime.TurnInterruptKeystroke)
+			checks := 0
+			still := func() error {
+				if checks++; checks > 1 {
+					return tc.refusal
+				}
+				return nil
+			}
+			var waits []error
+			settle := func(waitErr error) error {
+				waits = append(waits, waitErr)
+				return TurnNotEndedError("interrupted turn \"t1\"", errors.New("reading the transcript: input/output error"))
+			}
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: still, Settle: settle, Restart: stopTurnRestart(mgr, info, ActorController)})
+			if report.Restarted || !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("StopTurnWith(follow-up refused) = %+v, %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", report, err)
+			}
+			if errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, runtime.ErrTurnNotCurrent) {
+				t.Fatalf("StopTurnWith(follow-up refused) = %v, want neither ErrTurnNotEnded nor the refusal's ErrTurnNotCurrent", err)
+			}
+			if n := countMethod(sp.SnapshotCalls(), "Stop") + countMethod(sp.SnapshotCalls(), "Start"); n != 0 || !sp.IsRunning(info.SessionName) {
+				t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
+			}
+			if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"SendKeys(Escape)"}; !slices.Equal(got, want) {
+				t.Fatalf("sent %v, want %v: no fallback after a refusal", got, want)
+			}
+			if len(waits) != 1 || (waits[0] == nil) != tc.ended {
+				t.Fatalf("Settle got %v, want one wait, nil %v", waits, tc.ended)
+			}
+			if !tc.ended && (!errors.Is(waits[0], runtime.ErrTurnNotEnded) || errors.Is(waits[0], runtime.ErrRuntimeUnavailable)) {
+				t.Fatalf("Settle got %v, want ErrTurnNotEnded alone, the refusal in its text", waits[0])
+			}
+		})
+	}
+}
+
+// The runtime lease is taken before the check and before anything is sent:
+// the check runs under it, and a lease held elsewhere refuses the stop as
+// unavailable, the check not run and nothing sent.
 func TestStopTurnWithRestartTakesTheLeaseBeforeSending(t *testing.T) {
 	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	refused := errors.New("not the current turn")
+	var leaseAtCheck error
+	_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{
+		Restart: stopTurnRestart(mgr, info, ActorController),
+		Still: func() error {
+			_, release, err := mgr.leaseRuntime(context.Background(), testActor(mgr, ActorOperator), info.ID, info.SessionName, 0)
+			if err == nil {
+				release()
+			}
+			leaseAtCheck = err
+			return refused
+		},
+	})
+	if !errors.Is(err, refused) || leaseAtCheck == nil {
+		t.Fatalf("StopTurnWith(restart, refusing check) = %v, the check's own lease attempt = %v; want the refusal, the check run under the stop's lease", err, leaseAtCheck)
+	}
 	_, release, err := mgr.leaseRuntime(context.Background(), testActor(mgr, ActorOperator), info.ID, info.SessionName, 0)
 	if err != nil {
-		t.Fatalf("holding the lease: %v", err)
+		t.Fatalf("holding the lease after the refused stop released it: %v", err)
 	}
 	defer release()
-	_, err = mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)})
-	if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		t.Fatalf("StopTurnWith(restart, lease held) = %v, want ErrRuntimeUnavailable", err)
+	checked := false
+	_, err = mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{
+		Restart: stopTurnRestart(mgr, info, ActorController),
+		Still:   func() error { checked = true; return nil },
+	})
+	if !errors.Is(err, runtime.ErrRuntimeUnavailable) || checked {
+		t.Fatalf("StopTurnWith(restart, lease held) = %v, check run %v; want ErrRuntimeUnavailable before the check", err, checked)
 	}
 	if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 {
 		t.Fatalf("a stop without its lease sent %v", callMethods(sent))
 	}
 }
 
-// An actor that may not start refuses a restart before anything is sent.
+// An actor that may not start refuses a restart before anything is sent,
+// and says nothing was (ErrStopNotSent).
 func TestStopTurnWithRestartRefusesAStopSweep(t *testing.T) {
 	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
 	_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorSweep)})
-	if !errors.Is(err, ErrSweepStarts) {
-		t.Fatalf("StopTurnWith(restart by a sweep) = %v, want ErrSweepStarts", err)
+	if !errors.Is(err, ErrSweepStarts) || !errors.Is(err, ErrStopNotSent) {
+		t.Fatalf("StopTurnWith(restart by a sweep) = %v, want ErrSweepStarts and ErrStopNotSent", err)
 	}
 	if len(sp.SnapshotCalls()) != 0 {
 		t.Fatalf("a refused restart made calls %v", callMethods(sp.SnapshotCalls()))
@@ -175,6 +283,25 @@ func TestStopTurnWithForReplacementPreparesTheSession(t *testing.T) {
 				t.Fatalf("a plain stop reset the turn: %v", callMethods(psp.SnapshotCalls()))
 			}
 		})
+	}
+}
+
+// A replacement whose turn does not settle, with a restart on failure, is
+// restarted and not prepared: the new runtime has no interrupted turn to
+// discard and no input to clear, and nothing is typed into it.
+func TestStopTurnWithRestartedReplacementIsNotPrepared(t *testing.T) {
+	mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.WaitForIdleErrors[info.SessionName] = errors.New("still busy")
+	report, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{ForReplacement: true, Restart: stopTurnRestart(mgr, info, ActorController)})
+	if err != nil || !report.Restarted {
+		t.Fatalf("StopTurnWith(replacement, restart, not settled) = %+v, %v; want a restart, nil", report, err)
+	}
+	methods := callMethods(sp.SnapshotCalls())
+	if i, j := slices.Index(methods, "Stop"), slices.Index(methods, "Start"); i < 0 || j < i {
+		t.Fatalf("calls = %v, want Stop then Start", methods)
+	}
+	if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"Interrupt"}; !slices.Equal(got, want) {
+		t.Fatalf("sent %v, want only %v: the restarted runtime is not prepared for the replacement", got, want)
 	}
 }
 
@@ -279,6 +406,160 @@ func TestStopTurnWithRestartRefusesADrainAckStopPendingRow(t *testing.T) {
 	}
 }
 
+// staleUntilRestart is a cached IsRunning that reads sp's session name not
+// running, as the tmux state cache can read a live session, until the
+// runtime is started again: a provider's own start refreshes its cache.
+func staleUntilRestart(sp *runtime.Fake, name string) func() bool {
+	return func() bool { return countMethod(sp.SnapshotCalls(), "Start") > 0 && sp.IsRunning(name) }
+}
+
+// Kills a stop with a restart on failure, or for a replacement, that takes a
+// cached "not running" for no turn. Unfenced and unchecked, as a
+// session-scoped interrupt with no token or on a runtime that cannot fence
+// sends it, whether the runtime runs, before the lease and again before the
+// keys, is a fresh liveness read's, as a checked stop's is: a stale cache
+// would send nothing and report success, so the turn runs on and its
+// restart never runs. One that finds the agent up is interrupted whatever
+// IsRunning says, then restarted when its turn does not settle, or prepared
+// for its replacement; one whose agent exited, its pane up, is sent nothing
+// and not restarted; one that cannot answer is runtime.ErrRuntimeUnavailable,
+// nothing sent, never success.
+func TestStopTurnWithPolicyDecidesTheRuntimeOnAFreshRead(t *testing.T) {
+	restart := func(mgr *Manager, info Info) StopTurnOptions {
+		return StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)}
+	}
+	for _, when := range []string{"before the lease", "at the keys"} {
+		t.Run("restart, stale cache "+when, func(t *testing.T) {
+			mgr, sp, info, cache := newCachedRunningSession(t)
+			sp.WaitForIdleErrors[info.SessionName] = errors.New("still busy")
+			stale := staleUntilRestart(sp, info.SessionName)
+			if when == "before the lease" {
+				cache.set(stale, nil)
+			} else {
+				cache.onMode = func() { cache.set(stale, nil) }
+			}
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, restart(mgr, info))
+			if err != nil || !report.Restarted {
+				t.Fatalf("StopTurnWith(restart, stale cache %s) = %+v, %v; want the turn interrupted and the runtime restarted", when, report, err)
+			}
+			methods := callMethods(sp.SnapshotCalls())
+			interrupt, stop, start := slices.Index(methods, "Interrupt"), slices.Index(methods, "Stop"), slices.Index(methods, "Start")
+			if interrupt < 0 || stop < interrupt || start < stop {
+				t.Fatalf("calls = %v, want Interrupt, then Stop, then Start", methods)
+			}
+		})
+	}
+	t.Run("replacement, stale cache", func(t *testing.T) {
+		mgr, sp, info, cache := newCachedRunningSession(t)
+		cache.set(staleUntilRestart(sp, info.SessionName), nil)
+		if _, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{ForReplacement: true}); err != nil {
+			t.Fatalf("StopTurnWith(replacement, stale cache) = %v, want nil", err)
+		}
+		if got, want := callMethods(inputCalls(sp.SnapshotCalls(), info.SessionName)), []string{"Interrupt", "ClearInput"}; !slices.Equal(got, want) {
+			t.Fatalf("sent %v, want %v: the turn interrupted and the input box cleared for its replacement", got, want)
+		}
+	})
+	t.Run("restart, agent exited", func(t *testing.T) {
+		mgr, sp, info, _ := newCachedRunningSession(t)
+		sp.WaitForIdleErrors[info.SessionName] = errors.New("still busy")
+		sp.Zombies[info.SessionName] = true // the pane lives on, its agent exited
+		report, err := mgr.StopTurnWith(context.Background(), info.ID, restart(mgr, info))
+		if err != nil || report.Restarted {
+			t.Fatalf("StopTurnWith(restart, agent exited) = %+v, %v; want nil, no turn and no restart", report, err)
+		}
+		if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 || countMethod(sp.SnapshotCalls(), "Stop") != 0 {
+			t.Fatalf("calls = %v, want nothing sent into a pane whose agent exited, and no restart", callMethods(sp.SnapshotCalls()))
+		}
+	})
+	for _, when := range []string{"before the lease", "at the keys"} {
+		t.Run("restart, unreadable "+when, func(t *testing.T) {
+			mgr, sp, info, cache := newCachedRunningSession(t)
+			sp.WaitForIdleErrors[info.SessionName] = errors.New("still busy")
+			unreadable := errors.New("tmux: list-panes failed")
+			if when == "before the lease" {
+				cache.set(nil, unreadable)
+			} else {
+				cache.onMode = func() { cache.set(nil, unreadable) }
+			}
+			report, err := mgr.StopTurnWith(context.Background(), info.ID, restart(mgr, info))
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrSessionNotFound) || errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
+				t.Fatalf("StopTurnWith(restart, unreadable %s) = %+v, %v; want ErrRuntimeUnavailable alone, no restart", when, report, err)
+			}
+			if sent := inputCalls(sp.SnapshotCalls(), info.SessionName); len(sent) != 0 || countMethod(sp.SnapshotCalls(), "Stop") != 0 {
+				t.Fatalf("calls = %v, want nothing sent on a read that could not answer", callMethods(sp.SnapshotCalls()))
+			}
+		})
+	}
+}
+
+// rowLoadStore is a store whose Get answers from load.
+type rowLoadStore struct {
+	beads.Store
+	load func(id string) (beads.Bead, error)
+}
+
+func (s rowLoadStore) Get(id string) (beads.Bead, error) { return s.load(id) }
+
+// A stop whose load of the row under the session mutation lock fails sends
+// nothing and says so, plain, checked or with a restart on failure alike:
+// the error wraps ErrStopNotSent, and the load's own sentinel for a row
+// closed, gone or not a session.
+func TestStopTurnWithRowLoadFailureIsNotSent(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		row  func(t *testing.T, mgr *Manager, info Info)
+		want error // the load's own sentinel, if any
+	}{
+		{"closed", func(t *testing.T, mgr *Manager, info Info) {
+			if err := mgr.store.Close(info.ID); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrSessionClosed},
+		{"gone", func(_ *testing.T, mgr *Manager, _ Info) {
+			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+				return beads.Bead{}, fmt.Errorf("getting bead %q: %w", id, beads.ErrNotFound)
+			}}
+		}, beads.ErrNotFound},
+		{"not a session", func(_ *testing.T, mgr *Manager, _ Info) {
+			mgr.store = rowLoadStore{Store: mgr.store, load: func(id string) (beads.Bead, error) {
+				return beads.Bead{ID: id, Type: "task", Status: "open"}, nil
+			}}
+		}, ErrNotSession},
+		{"unreadable", func(_ *testing.T, mgr *Manager, _ Info) {
+			mgr.store = rowLoadStore{Store: mgr.store, load: func(string) (beads.Bead, error) {
+				return beads.Bead{}, errors.New("store: connection reset by peer")
+			}}
+		}, nil},
+	} {
+		for _, stop := range []struct {
+			name string
+			opts func(mgr *Manager, info Info) StopTurnOptions
+		}{
+			{"plain", func(*Manager, Info) StopTurnOptions { return StopTurnOptions{} }},
+			{"checked", func(*Manager, Info) StopTurnOptions { return StopTurnOptions{Still: func() error { return nil }} }},
+			{"restart on failure", func(mgr *Manager, info Info) StopTurnOptions {
+				return StopTurnOptions{Restart: stopTurnRestart(mgr, info, ActorController)}
+			}},
+		} {
+			t.Run(tc.name+"/"+stop.name, func(t *testing.T) {
+				mgr, sp, info, _ := newFencedStopSession(t, "claude", nil, runtime.TurnInterruptKeystroke)
+				opts := stop.opts(mgr, info)
+				tc.row(t, mgr, info)
+				_, err := mgr.StopTurnWith(context.Background(), info.ID, opts)
+				if !errors.Is(err, ErrStopNotSent) || (tc.want != nil && !errors.Is(err, tc.want)) {
+					t.Fatalf("StopTurnWith(row %s) = %v, want ErrStopNotSent and %v", tc.name, err, tc.want)
+				}
+				if errors.Is(err, runtime.ErrTurnNotEnded) || errors.Is(err, ErrInterruptOutcomeUnknown) {
+					t.Fatalf("StopTurnWith(row %s) = %v, want nothing sent, not sent or unknown", tc.name, err)
+				}
+				if got := sp.SnapshotCalls(); len(got) != 0 {
+					t.Fatalf("a stop whose row would not load made calls %v", callMethods(got))
+				}
+			})
+		}
+	}
+}
+
 // A stop with a deadline waits for the session mutation lock only until it:
 // a lock still held then is an error wrapping runtime.ErrRuntimeUnavailable,
 // nothing sent. A stop with no deadline waits as before.
@@ -348,36 +629,220 @@ func TestStopTurnWithFailedReplacementSaysTheTurnSettled(t *testing.T) {
 	}
 }
 
-// failingInterruptFake is the fake runtime whose interrupt fails after it
-// may have reached the agent, as a broken tmux pipe does.
-type failingInterruptFake struct{ *runtime.Fake }
+// failingInterruptFake is the fake runtime whose interrupt fails with err,
+// by default after it may have reached the agent, as a broken tmux pipe
+// does.
+type failingInterruptFake struct {
+	*runtime.Fake
+	err error
+}
+
+func (f failingInterruptFake) fail() error {
+	if f.err != nil {
+		return f.err
+	}
+	return errors.New("tmux: broken pipe")
+}
 
 func (f failingInterruptFake) Interrupt(name string) error {
 	_ = f.Fake.Interrupt(name)
-	return errors.New("tmux: broken pipe")
+	return f.fail()
 }
 
 func (f failingInterruptFake) InterruptFenced(ctx context.Context, name string, fence runtime.InputFence) error {
 	if err := f.Fake.InterruptFenced(ctx, name, fence); err != nil {
 		return err
 	}
-	return errors.New("tmux: broken pipe")
+	return f.fail()
 }
 
 // A checked stop whose send fails after its check passed may have reached
 // the agent: the error wraps ErrInterruptOutcomeUnknown (and, as before,
-// runtime.ErrRuntimeUnavailable). A check that refuses sends nothing and
+// runtime.ErrRuntimeUnavailable). So does a runtime that lost the session
+// after its input was applied (runtime.ErrNudgeDeliveryUnconfirmed), though
+// it says unavailable too; one that could not tell before its key says
+// unavailable alone, nothing sent. A check that refuses sends nothing and
 // does not.
 func TestStopTurnWithSaysWhenASentInterruptsOutcomeIsUnknown(t *testing.T) {
-	sp := runtime.NewFake()
-	mgr, info, _ := newFencedStopSessionOn(t, failingInterruptFake{sp}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
-	_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: func() error { return nil }})
-	if !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
-		t.Fatalf("StopTurnWith(send fails after the check) = %v, want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable", err)
+	for _, tc := range []struct {
+		name      string
+		err       error
+		maybeSent bool
+	}{
+		{"send failed", nil, true},
+		{"session lost after the key", fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed,
+			fmt.Errorf("tmux server lost: %w", runtime.ErrRuntimeUnavailable)), true},
+		{"unanswered before the key", fmt.Errorf("session %q: fence read: %w", "s", runtime.ErrRuntimeUnavailable), false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			mgr, info, _ := newFencedStopSessionOn(t, failingInterruptFake{Fake: sp, err: tc.err}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
+			_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: func() error { return nil }})
+			if !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, ErrInterruptOutcomeUnknown) != tc.maybeSent {
+				t.Fatalf("StopTurnWith(%s) = %v, want ErrRuntimeUnavailable, ErrInterruptOutcomeUnknown %v", tc.name, err, tc.maybeSent)
+			}
+		})
 	}
+	sp := runtime.NewFake()
+	mgr, info, _ := newFencedStopSessionOn(t, failingInterruptFake{Fake: sp}, sp, "claude", nil, runtime.TurnInterruptKeystroke)
 	refused := errors.New("not the current turn")
-	_, err = mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: func() error { return refused }})
+	_, err := mgr.StopTurnWith(context.Background(), info.ID, StopTurnOptions{Still: func() error { return refused }})
 	if !errors.Is(err, refused) || errors.Is(err, ErrInterruptOutcomeUnknown) {
 		t.Fatalf("StopTurnWith(check refuses) = %v, want the refusal and not ErrInterruptOutcomeUnknown", err)
+	}
+}
+
+// newKeystrokeTurnFenceSession is a session on a runtime that fences turns
+// and interrupts by keystroke mode (ACP: its Interrupt is session/cancel and
+// its stop replaces the agent), on rt over sp, scripted by turns.
+func newKeystrokeTurnFenceSession(t *testing.T, rt runtime.Provider, sp *runtime.Fake, turns ...string) (*Manager, Info) {
+	t.Helper()
+	mgr, info, _ := newFencedStopSessionOn(t, rt, sp, "claude", nil, runtime.TurnInterruptKeystroke)
+	sp.TurnScripts = map[string][]string{info.SessionName: turns}
+	return mgr, info
+}
+
+// A protocol turn interrupt with a restart on failure, on a keystroke
+// runtime (ACP), interrupts the turn first and replaces the runtime only
+// once the turn is not seen to end, as a stop's restart does: the restart is
+// reported, nothing is typed into the new runtime, and a turn that ends is
+// left alone. A protocol runtime is never restarted: its stop may leave it
+// running, so its not-ended error is returned.
+func TestInterruptTurnRestartOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		mode      runtime.TurnInterruptMode
+		turns     []string
+		restarted bool
+		notEnded  bool
+	}{
+		{"keystroke runtime, turn not seen to end", runtime.TurnInterruptKeystroke, []string{"t1"}, true, false},
+		{"keystroke runtime, turn ends", runtime.TurnInterruptKeystroke, []string{"t1", ""}, false, false},
+		{"protocol runtime, turn not seen to end", runtime.TurnInterruptProtocol, []string{"t1"}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			mgr, info, _ := newFencedStopSessionOn(t, runtime.FullFake{Fake: sp}, sp, "claude", nil, tc.mode)
+			sp.TurnScripts = map[string][]string{info.SessionName: tc.turns}
+			_, report, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", stopTurnRestart(mgr, info, ActorController))
+			if report.Restarted != tc.restarted || errors.Is(err, runtime.ErrTurnNotEnded) != tc.notEnded || (err != nil) != tc.notEnded {
+				t.Fatalf("InterruptTurn(restart) = %+v, %v; want restarted %v, not ended %v", report, err, tc.restarted, tc.notEnded)
+			}
+			methods := callMethods(sp.SnapshotCalls())
+			interrupt, stop, start := slices.Index(methods, "InterruptTurn"), slices.Index(methods, "Stop"), slices.Index(methods, "Start")
+			if interrupt < 0 {
+				t.Fatalf("calls = %v, want the turn interrupt sent", methods)
+			}
+			if !tc.restarted {
+				if stop >= 0 || start >= 0 {
+					t.Fatalf("calls = %v, want no restart", methods)
+				}
+				return
+			}
+			if stop < interrupt || start < stop {
+				t.Fatalf("calls = %v, want InterruptTurn, then Stop, then Start", methods)
+			}
+			for _, m := range []string{"Nudge", "NudgeNow", "SendKeys", "Interrupt"} {
+				if slices.Contains(methods, m) {
+					t.Fatalf("calls = %v, want nothing but the turn interrupt and the restart", methods)
+				}
+			}
+			if !sp.IsRunning(info.SessionName) {
+				t.Fatal("the restarted runtime is not running")
+			}
+		})
+	}
+}
+
+// A protocol turn interrupt's restart on failure is refused before anything
+// is sent, as a stop's is: an actor that may not start the runtime, a row
+// whose drain-ack stop is pending, and a runtime lease held by another.
+func TestInterruptTurnRestartRefusalsSendNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		kind  ActorKind
+		setup func(t *testing.T, mgr *Manager, info Info)
+		want  error
+	}{
+		{"a stop sweep may not start", ActorSweep, nil, ErrSweepStarts},
+		{"a drain-ack stop is pending", ActorController, func(t *testing.T, mgr *Manager, info Info) {
+			if err := mgr.store.SetMetadataBatch(info.ID, map[string]string{"state": string(StateDraining), "state_reason": DrainAckStopPendingReason}); err != nil {
+				t.Fatal(err)
+			}
+		}, ErrSessionStopping},
+		{"the runtime lease is held", ActorController, func(t *testing.T, mgr *Manager, info Info) {
+			_, release, err := mgr.leaseRuntime(context.Background(), testActor(mgr, ActorOperator), info.ID, info.SessionName, 0)
+			if err != nil {
+				t.Fatalf("holding the lease: %v", err)
+			}
+			t.Cleanup(release)
+		}, runtime.ErrRuntimeUnavailable},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			sp := runtime.NewFake()
+			mgr, info := newKeystrokeTurnFenceSession(t, runtime.FullFake{Fake: sp}, sp, "t1")
+			if tc.setup != nil {
+				tc.setup(t, mgr, info)
+			}
+			sp.Calls = nil
+			_, report, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", stopTurnRestart(mgr, info, tc.kind))
+			if !errors.Is(err, tc.want) || errors.Is(err, ErrInterruptOutcomeUnknown) || report.Restarted {
+				t.Fatalf("InterruptTurn(restart, %s) = %+v, %v; want %v, nothing sent", tc.name, report, err, tc.want)
+			}
+			if got := turnFenceCalls(sp); len(got) != 0 || countMethod(sp.SnapshotCalls(), "Stop") != 0 {
+				t.Fatalf("a refused restart made calls %v", callMethods(sp.SnapshotCalls()))
+			}
+		})
+	}
+}
+
+// cancelingTurnWait is a turn fence whose WaitTurnEnded ends the caller's
+// context first, as a city stop or a lease budget ending mid-wait does.
+type cancelingTurnWait struct {
+	runtime.FullFake
+	cancel context.CancelFunc
+}
+
+func (p cancelingTurnWait) WaitTurnEnded(ctx context.Context, _, _ string, _ time.Duration) (runtime.TurnState, error) {
+	p.cancel()
+	return runtime.TurnState{}, ctx.Err()
+}
+
+// A caller whose context ended while the interrupted turn settled gets no
+// restart, as from a stop: the runtime is left running, and the error wraps
+// ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
+// runtime.ErrTurnNotEnded.
+func TestInterruptTurnRestartNeverRunsUnderAnEndedContext(t *testing.T) {
+	sp := runtime.NewFake()
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	mgr, info := newKeystrokeTurnFenceSession(t, cancelingTurnWait{FullFake: runtime.FullFake{Fake: sp}, cancel: cancel}, sp, "t1")
+	_, report, err := mgr.InterruptTurn(ctx, info.ID, "t1", stopTurnRestart(mgr, info, ActorController))
+	if !errors.Is(err, ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) || report.Restarted {
+		t.Fatalf("InterruptTurn(restart, ctx ended) = %+v, %v; want ErrInterruptOutcomeUnknown and no restart", report, err)
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 0 || !sp.IsRunning(info.SessionName) {
+		t.Fatalf("calls = %v, running %v; want the runtime left running", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
+	}
+}
+
+// A protocol turn interrupt's restart that stopped the runtime and could not
+// start it again says so, as a stop's does: ErrRestartNotStarted and none of
+// the start's own sentinels.
+func TestInterruptTurnFailedRestartStartIsRestartNotStarted(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr, info := newKeystrokeTurnFenceSession(t, runtime.FullFake{Fake: sp}, sp, "t1")
+	sp.StartErrors[info.SessionName] = fmt.Errorf("cannot start: %w", runtime.ErrRuntimeUnavailable)
+	_, report, err := mgr.InterruptTurn(context.Background(), info.ID, "t1", stopTurnRestart(mgr, info, ActorController))
+	if !errors.Is(err, ErrRestartNotStarted) || report.Restarted {
+		t.Fatalf("InterruptTurn(restart, failed start) = %+v, %v; want ErrRestartNotStarted and no restart", report, err)
+	}
+	for _, sentinel := range []error{runtime.ErrTurnNotEnded, runtime.ErrRuntimeUnavailable, runtime.ErrSessionNotFound, ErrInterruptOutcomeUnknown} {
+		if errors.Is(err, sentinel) {
+			t.Fatalf("InterruptTurn(restart, failed start) = %v, want ErrRestartNotStarted alone, not %v", err, sentinel)
+		}
+	}
+	if n := countMethod(sp.SnapshotCalls(), "Stop"); n != 1 || sp.IsRunning(info.SessionName) {
+		t.Fatalf("calls = %v, running %v; want the runtime stopped once and not started", callMethods(sp.SnapshotCalls()), sp.IsRunning(info.SessionName))
 	}
 }

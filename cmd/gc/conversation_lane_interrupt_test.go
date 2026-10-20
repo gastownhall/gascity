@@ -7,8 +7,11 @@ import (
 	"slices"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -31,6 +34,27 @@ var (
 		Source:           worker.TurnSourceTranscript,
 		Interrupt:        runtime.TurnInterruptKeystroke,
 	}
+)
+
+// The worker's answers for an interrupt held back on this side of the
+// runtime, nothing sent, and for a restart that could not start the runtime
+// it stopped.
+var (
+	// errLaneInterruptLockBusy is a session mutation lock still held at the
+	// effect's deadline.
+	errLaneInterruptLockBusy = fmt.Errorf("stopping the turn of gc-1: %w: %w", runtime.ErrRuntimeUnavailable,
+		fmt.Errorf("session gc-1: %w: %w", session.ErrSessionMutationBusy, context.DeadlineExceeded))
+	// errLaneInterruptLeaseBusy is the restart's runtime lease held by another.
+	errLaneInterruptLeaseBusy = fmt.Errorf("stopping the turn of gc-1: taking the runtime lease for its restart on failure, nothing sent: %w: %w",
+		runtime.ErrRuntimeUnavailable, &session.RuntimeLeaseBusyError{Name: "gc-1", Holder: "a start", Local: true})
+	// errLaneInterruptReadOutstanding is a check whose read was refused at
+	// once: an earlier check's read of its key, given up on, is still out.
+	errLaneInterruptReadOutstanding = fmt.Errorf("stopping the turn of gc-1: checking turn %q of gc-1 before interrupting it: %w: %w",
+		"t1", runtime.ErrRuntimeUnavailable, fmt.Errorf("%w: %w", worker.ErrObservationOutstanding, runtime.ErrRuntimeUnavailable))
+	// errLaneRestartNotStarted is an on_failure restart that stopped the
+	// runtime and could not start it again.
+	errLaneRestartNotStarted = fmt.Errorf("restarting session gc-1 after its interrupted turn was not seen to end: %w (resuming session: cannot start)",
+		session.ErrRestartNotStarted)
 )
 
 // interruptStub is a worker.Handle whose InterruptAs records each request
@@ -73,8 +97,11 @@ type interruptCase struct {
 	caps    worker.TurnCapabilities
 	capsErr error
 	read    func(context.Context) (runtime.TurnHistory, error)
-	answer  func(worker.InterruptRequest) (worker.InterruptResult, error)
-	during  func(e *conversationLaneExec)
+	// fresh, when set, answers the interrupt's fresh read
+	// (worker.TurnHandle.FreshTurn), else read does.
+	fresh  func(context.Context) (runtime.TurnHistory, error)
+	answer func(worker.InterruptRequest) (worker.InterruptResult, error)
+	during func(e *conversationLaneExec)
 	// handleErr, when set, is the interrupt handle's resolution error.
 	handleErr error
 	mu        sync.Mutex
@@ -104,14 +131,20 @@ func (c *interruptCase) propose(t *testing.T, key, turn string, onFailure opjour
 	})
 }
 
-func (c *interruptCase) pass(t *testing.T) opjournal.PassResult {
+func (c *interruptCase) pass(t *testing.T) {
+	t.Helper()
+	c.passWith(context.Background(), t)
+}
+
+// passWith is pass under ctx, which the effect's context derives from.
+func (c *interruptCase) passWith(ctx context.Context, t *testing.T) {
 	t.Helper()
 	deps := c.f.deps(c.st)
 	deps.interrupts = c.ints
 	v, info := c.f.view(t)
 	e := newConversationLaneExec(deps, info)
 	e.sessionTurns = func(string) (worker.TurnHandle, error) {
-		return laneStubTurns{caps: c.caps, capsErr: c.capsErr, read: c.read}, nil
+		return laneStubTurns{caps: c.caps, capsErr: c.capsErr, read: c.read, fresh: c.fresh}, nil
 	}
 	e.interruptHandle = func() (worker.Handle, error) {
 		if c.handleErr != nil {
@@ -123,11 +156,9 @@ func (c *interruptCase) pass(t *testing.T) opjournal.PassResult {
 		}
 		return stub, nil
 	}
-	res, err := c.l.Pass(context.Background(), v, e)
-	if err != nil {
+	if _, err := c.l.Pass(ctx, v, e); err != nil {
 		t.Fatalf("Pass: %v", err)
 	}
-	return res
 }
 
 func (c *interruptCase) requests() []worker.InterruptRequest {
@@ -238,23 +269,25 @@ func TestLaneInterruptCheckedIsMarkedUnfenced(t *testing.T) {
 // session's turns allow a turn-scoped interrupt; with none running, or the
 // session gone, it closes skipped{stale}, nothing sent. A read that cannot
 // answer (runtime.ErrRuntimeUnavailable), or turn capabilities the probe
-// could not read, release it, nothing sent: it never runs without the fresh
-// read (X11 §5.4); any other read error counts a failure, nothing sent. A
+// could not read, release it as unavailable, nothing sent: it never runs
+// without the fresh read (X11 §5.4); any other read error counts a failure,
+// nothing sent. A
 // session whose turns cannot carry it, or whose turns carry no identity (a
 // transcript without turn ids), runs it session-scoped and marks it.
 func TestLaneInterruptSessionScope(t *testing.T) {
 	cases := []struct {
-		name     string
-		caps     worker.TurnCapabilities
-		capsErr  error
-		read     func(context.Context) (runtime.TurnHistory, error)
-		wantReqs []string // the turns the requests named
-		released bool
-		failure  bool // released with a failure counted
-		arm      opjournal.Arm
-		reason   string
-		turn     string
-		deg      string
+		name        string
+		caps        worker.TurnCapabilities
+		capsErr     error
+		read        func(context.Context) (runtime.TurnHistory, error)
+		wantReqs    []string // the turns the requests named
+		released    bool
+		failure     bool // released with a failure counted
+		unavailable bool // released as unavailable, which start_by closes provider_unavailable
+		arm         opjournal.Arm
+		reason      string
+		turn        string
+		deg         string
 	}{
 		{
 			name: "names the running turn", caps: laneAtomicTurnCaps,
@@ -273,7 +306,7 @@ func TestLaneInterruptSessionScope(t *testing.T) {
 			read: func(context.Context) (runtime.TurnHistory, error) {
 				return runtime.TurnHistory{}, fmt.Errorf("scan: %w", runtime.ErrRuntimeUnavailable)
 			},
-			released: true,
+			released: true, unavailable: true,
 		},
 		{
 			name: "read finds no turn identity", caps: laneCheckedTurnCaps,
@@ -305,7 +338,7 @@ func TestLaneInterruptSessionScope(t *testing.T) {
 		},
 		{
 			name: "caps unreadable", caps: laneCheckedTurnCaps, capsErr: fmt.Errorf("caps: %w", runtime.ErrRuntimeUnavailable),
-			released: true,
+			released: true, unavailable: true,
 		},
 		{
 			name: "no turn identity", caps: worker.TurnCapabilities{},
@@ -328,18 +361,94 @@ func TestLaneInterruptSessionScope(t *testing.T) {
 				if counted := got.Failures > 0; counted != tc.failure {
 					t.Fatalf("op released with %d failures (last error %q), want a failure counted %v", got.Failures, got.LastError, tc.failure)
 				}
+				if marked := strings.HasPrefix(got.LastError, "unavailable"); marked != tc.unavailable {
+					t.Fatalf("op released with last error %q, want it marked unavailable %v", got.LastError, tc.unavailable)
+				}
 			} else {
 				assertOutcome(t, got, tc.arm, tc.reason, tc.turn, tc.deg)
 			}
-			var turns []string
-			for _, r := range c.requests() {
-				turns = append(turns, r.Turn)
+			reqs := c.requests()
+			for _, r := range reqs {
 				if r.Turn == "" && r.Fence != c.fence() {
 					t.Fatalf("a session-scoped interrupt carried fence %v, want %v", r.Fence, c.fence())
 				}
 			}
-			if !slices.Equal(turns, tc.wantReqs) {
+			if turns := requestTurns(reqs); !slices.Equal(turns, tc.wantReqs) {
 				t.Fatalf("requests named %q, want %q", turns, tc.wantReqs)
+			}
+		})
+	}
+}
+
+// A session-scoped op's fresh read is a read of its own
+// (worker.TurnHandle.FreshTurn), never a read already in flight: one a turn
+// watch started before t2 did still holds t1, and an interrupt aimed at t1
+// would be refused not current, leaving t2 running. The op targets t2, the
+// turn its own read finds.
+func TestLaneInterruptSessionScopeReadsTheTurnsItself(t *testing.T) {
+	for _, caps := range []worker.TurnCapabilities{laneAtomicTurnCaps, laneCheckedTurnCaps} {
+		t.Run(string(caps.Source), func(t *testing.T) {
+			c := newInterruptCase(t, caps)
+			c.read = func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t1"}}, nil
+			}
+			c.fresh = func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t2"}}, nil
+			}
+			op := c.propose(t, "click-1", "", "")
+			c.pass(t)
+			if turns := requestTurns(c.requests()); !slices.Equal(turns, []string{"t2"}) {
+				t.Fatalf("requests named %q, want [t2], the turn the op's own read finds", turns)
+			}
+			assertOutcome(t, c.f.get(t, c.st, op.ID), opjournal.ArmSucceeded, "", "t2", opjournal.DegradationUnfencedInterrupt)
+		})
+	}
+}
+
+// A session-scoped op's fresh read refused because an earlier read is still
+// out (worker.ErrObservationOutstanding) asked the runtime nothing: a read a
+// budget gave up on, wedged in a stalled store or a call that ignores its
+// context, holds its key until it returns. Whether that is the lane's own
+// read, its key held past the budget, or one the worker makes inside it,
+// the op is released held back, nothing sent, and its start_by closes it
+// expired_before_start, never provider_unavailable.
+func TestLaneInterruptReadStillOutIsHeldBack(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		hold func(t *testing.T, c *interruptCase)
+	}{
+		{"the lane's own read", func(t *testing.T, c *interruptCase) {
+			entered, release := make(chan struct{}), make(chan struct{})
+			t.Cleanup(func() { close(release) })
+			go func() {
+				_, _ = worker.ObserveBounded(context.Background(), laneInterruptReadKey(c.f.dir, c.f.id), func(context.Context) (runtime.TurnHistory, error) {
+					close(entered)
+					<-release
+					return runtime.TurnHistory{}, nil
+				})
+			}()
+			<-entered
+		}},
+		{"a read inside the worker", func(_ *testing.T, c *interruptCase) {
+			c.fresh = func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{}, fmt.Errorf("turns of session gc-1: %w: %w", worker.ErrObservationOutstanding, runtime.ErrRuntimeUnavailable)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newInterruptCase(t, laneCheckedTurnCaps)
+			tc.hold(t, c)
+			op := c.propose(t, "click-1", "", "")
+			c.pass(t)
+			got := c.f.get(t, c.st, op.ID)
+			if got.Status != opjournal.StatusAccepted || got.MaybeDelivered != 0 || got.Failures != 0 || strings.HasPrefix(got.LastError, "unavailable") {
+				t.Fatalf("op %s maybe_delivered %d failures %d last error %q, want a transient release held back, nothing sent", got.Status, got.MaybeDelivered, got.Failures, got.LastError)
+			}
+			c.f.clk.Advance(2 * time.Minute)
+			c.pass(t)
+			assertOutcome(t, c.f.get(t, c.st, op.ID), opjournal.ArmFailed, opjournal.ReasonExpiredBeforeStart, "", "")
+			if n := len(c.requests()); n != 0 {
+				t.Fatalf("%d requests, want none", n)
 			}
 		})
 	}
@@ -392,9 +501,13 @@ func TestLaneInterruptHandsItsRefToTheObserver(t *testing.T) {
 		{"not current", func(req worker.InterruptRequest) (worker.InterruptResult, error) {
 			return worker.InterruptResult{}, &runtime.TurnNotCurrentError{Session: "s", TurnID: req.Turn}
 		}, false},
-		{"unavailable", func(worker.InterruptRequest) (worker.InterruptResult, error) {
+		{"unavailable, nothing sent", func(worker.InterruptRequest) (worker.InterruptResult, error) {
 			return worker.InterruptResult{}, runtime.ErrRuntimeUnavailable
 		}, false},
+		{"sent, outcome unknown: a protocol dispatch went unanswered", func(req worker.InterruptRequest) (worker.InterruptResult, error) {
+			return worker.InterruptResult{}, fmt.Errorf("interrupting turn %q of gc-1: %w: %w", req.Turn,
+				session.ErrInterruptOutcomeUnknown, fmt.Errorf("%w: asking the owner of gc-1: i/o timeout", runtime.ErrRuntimeUnavailable))
+		}, true},
 		{"sent, outcome unknown: ctx ended, no restart", func(worker.InterruptRequest) (worker.InterruptResult, error) {
 			return worker.InterruptResult{}, fmt.Errorf("stopping the turn of gc-1: the caller's context ended, not restarting it: %w: %w: %w",
 				session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, context.Canceled)
@@ -402,6 +515,9 @@ func TestLaneInterruptHandsItsRefToTheObserver(t *testing.T) {
 		{"sent, outcome unknown: send failed after the check", func(worker.InterruptRequest) (worker.InterruptResult, error) {
 			return worker.InterruptResult{}, fmt.Errorf("stopping the turn of gc-1: %w: %w: %w",
 				session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, errors.New("tmux: broken pipe"))
+		}, true},
+		{"sent, the restart stopped the runtime and could not start it", func(worker.InterruptRequest) (worker.InterruptResult, error) {
+			return worker.InterruptResult{}, errLaneRestartNotStarted
 		}, true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -433,6 +549,216 @@ func TestLaneInterruptHandsItsRefToTheObserver(t *testing.T) {
 				t.Fatalf("op %s maybe_delivered %d after a sent interrupt of unknown outcome, want released maybe delivered", got.Status, got.MaybeDelivered)
 			}
 		})
+	}
+}
+
+// requestTurns lists the turns reqs named.
+func requestTurns(reqs []worker.InterruptRequest) []string {
+	var turns []string
+	for _, r := range reqs {
+		turns = append(turns, r.Turn)
+	}
+	return turns
+}
+
+// A retry of a session-scoped op whose first attempt may have reached the
+// runtime keeps the turn that attempt aimed at. While the op waits out its
+// backoff, t1 ends and content starts t2; the retry still names t1, so the
+// runtime refuses it, the op closes skipped{stale}, and t2 is never
+// interrupted. The ref stays the first attempt's, which may have ended t1.
+func TestLaneInterruptSessionScopedRetryKeepsItsTurn(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		first error // the first attempt's answer: it may have reached the runtime
+	}{
+		{"send failed after the check", fmt.Errorf("stopping the turn of gc-1: %w: %w: %w",
+			session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, errors.New("tmux: broken pipe"))},
+		{"protocol dispatch unanswered", fmt.Errorf("interrupting turn %q of gc-1: %w: %w", "t1",
+			session.ErrInterruptOutcomeUnknown, fmt.Errorf("%w: asking the owner of gc-1: i/o timeout", runtime.ErrRuntimeUnavailable))},
+		{"unclassified error", errors.New("boom")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newInterruptCase(t, laneAtomicTurnCaps)
+			current, attempts := "t1", 0
+			c.read = func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{Current: runtime.TurnState{TurnID: current}}, nil
+			}
+			c.answer = func(req worker.InterruptRequest) (worker.InterruptResult, error) {
+				if attempts++; attempts == 1 {
+					return worker.InterruptResult{}, tc.first
+				}
+				if req.Turn != current {
+					return worker.InterruptResult{}, &runtime.TurnNotCurrentError{Session: c.f.name, TurnID: req.Turn, Current: runtime.TurnState{TurnID: current}}
+				}
+				return worker.InterruptResult{Unfenced: true}, nil
+			}
+			op := c.propose(t, "click-1", "", "")
+			c.pass(t)
+			want := opjournal.InterruptRef{Op: op.ID, Turn: "t1"}
+			got := c.f.get(t, c.st, op.ID)
+			if got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0 || c.ints.current(c.f.id) != want {
+				t.Fatalf("after the first attempt op %s maybe_delivered %d ref %+v, want released maybe delivered with ref %+v",
+					got.Status, got.MaybeDelivered, c.ints.current(c.f.id), want)
+			}
+			current = "t2"
+			c.f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
+			c.pass(t)
+			assertOutcome(t, c.f.get(t, c.st, op.ID), opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
+			if turns := requestTurns(c.requests()); !slices.Equal(turns, []string{"t1", "t1"}) {
+				t.Fatalf("requests named %q, want t1 twice: the retry is never re-aimed at t2", turns)
+			}
+			if after := c.ints.current(c.f.id); after != want {
+				t.Fatalf("ref after the retry = %+v, want the first attempt's %+v kept", after, want)
+			}
+		})
+	}
+}
+
+// A retry of a session-scoped op whose first attempt may have reached the
+// runtime, with the record lost (a controller restart), cannot tell the turn
+// that attempt aimed at from the next one: it closes the op
+// failed{ambiguous_delivery} and sends nothing, rather than interrupt
+// whatever a fresh read finds.
+func TestLaneInterruptSessionScopedRetryWithoutItsRefIsAmbiguous(t *testing.T) {
+	c := newInterruptCase(t, laneCheckedTurnCaps)
+	current := "t1"
+	c.read = func(context.Context) (runtime.TurnHistory, error) {
+		return runtime.TurnHistory{Current: runtime.TurnState{TurnID: current}}, nil
+	}
+	c.answer = func(worker.InterruptRequest) (worker.InterruptResult, error) {
+		return worker.InterruptResult{}, errors.New("boom")
+	}
+	op := c.propose(t, "click-1", "", "")
+	c.pass(t)
+	if got := c.f.get(t, c.st, op.ID); got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0 {
+		t.Fatalf("after the first attempt op %s maybe_delivered %d, want released maybe delivered", got.Status, got.MaybeDelivered)
+	}
+	c.ints = newLaneInterrupts()
+	current = "t2"
+	c.f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
+	c.pass(t)
+	assertOutcome(t, c.f.get(t, c.st, op.ID), opjournal.ArmFailed, opjournal.ReasonAmbiguousDelivery, "", "")
+	if turns := requestTurns(c.requests()); !slices.Equal(turns, []string{"t1"}) {
+		t.Fatalf("requests named %q, want only the first attempt's t1", turns)
+	}
+}
+
+// A retry of a session-scoped op whose first attempt may have reached the
+// runtime, on a session whose turns carry no turn-scoped interrupt or no
+// identity, has no turn to keep: its first attempt named none. While it
+// waited out its backoff, content may have started the next turn, which a
+// second session-scoped interrupt would stop, so the retry closes the op
+// failed{ambiguous_delivery} and sends nothing.
+func TestLaneInterruptSessionScopedRetryWithoutATurnIsAmbiguous(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		caps worker.TurnCapabilities
+		read func(context.Context) (runtime.TurnHistory, error)
+	}{
+		{"turns carry no turn-scoped interrupt", worker.TurnCapabilities{}, nil},
+		{"turns carry no identity", laneCheckedTurnCaps, func(context.Context) (runtime.TurnHistory, error) {
+			return runtime.TurnHistory{}, fmt.Errorf("transcript records the open turn without an id: %w", runtime.ErrTurnIdentityUnsupported)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newInterruptCase(t, tc.caps)
+			if tc.read != nil {
+				c.read = tc.read
+			}
+			c.answer = func(worker.InterruptRequest) (worker.InterruptResult, error) {
+				return worker.InterruptResult{}, fmt.Errorf("interrupting session: %w", runtime.ErrNudgeDeliveryUnconfirmed)
+			}
+			op := c.propose(t, "click-1", "", "")
+			c.pass(t)
+			if got := c.f.get(t, c.st, op.ID); got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0 {
+				t.Fatalf("after the first attempt op %s maybe_delivered %d, want released maybe delivered", got.Status, got.MaybeDelivered)
+			}
+			c.answer = nil
+			c.f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
+			c.pass(t)
+			assertOutcome(t, c.f.get(t, c.st, op.ID), opjournal.ArmFailed, opjournal.ReasonAmbiguousDelivery, "", "")
+			if turns := requestTurns(c.requests()); !slices.Equal(turns, []string{""}) {
+				t.Fatalf("requests named %q, want only the first attempt's session-scoped one", turns)
+			}
+		})
+	}
+}
+
+// An interrupt released with nothing sent, and not taken again before its
+// start_by, closes by why it was released: provider_unavailable only when
+// the runtime could not answer; expired_before_start when it was held back
+// on this side of the runtime, by the session mutation lock or the
+// restart's runtime lease held by another, by a read refused because an
+// earlier one of its key is still out, or by the effect's context ending
+// before it could be sent.
+func TestLaneInterruptReleaseAtStartByNamesItsCause(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		err    error
+		cancel bool // the effect's context ends during the call
+		want   string
+	}{
+		{"the runtime could not answer", fmt.Errorf("session gc-1: fence read: %w", runtime.ErrRuntimeUnavailable), false, opjournal.ReasonProviderUnavailable},
+		{"the session mutation lock held past the deadline", errLaneInterruptLockBusy, false, opjournal.ReasonExpiredBeforeStart},
+		{"the restart's runtime lease held", errLaneInterruptLeaseBusy, false, opjournal.ReasonExpiredBeforeStart},
+		{"the effect's context ended before the dispatch", fmt.Errorf("interrupting turn %q of gc-1: nothing sent: %w: %w", "t1", runtime.ErrRuntimeUnavailable, context.Canceled), true, opjournal.ReasonExpiredBeforeStart},
+		{"an earlier check's read still out", errLaneInterruptReadOutstanding, false, opjournal.ReasonExpiredBeforeStart},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newInterruptCase(t, laneCheckedTurnCaps)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			c.answer = func(worker.InterruptRequest) (worker.InterruptResult, error) {
+				if tc.cancel {
+					cancel()
+				}
+				return worker.InterruptResult{}, tc.err
+			}
+			op := c.propose(t, "stop:1:t1", "t1", "")
+			c.passWith(ctx, t)
+			got := c.f.get(t, c.st, op.ID)
+			if got.Status != opjournal.StatusAccepted || got.MaybeDelivered != 0 || got.Failures != 0 {
+				t.Fatalf("op %s maybe_delivered %d failures %d, want a transient release, nothing sent", got.Status, got.MaybeDelivered, got.Failures)
+			}
+			unavailable := tc.want == opjournal.ReasonProviderUnavailable
+			if marked := strings.HasPrefix(got.LastError, "unavailable"); marked != unavailable {
+				t.Fatalf("op released with last error %q, want it marked unavailable %v", got.LastError, unavailable)
+			}
+			c.f.clk.Advance(2 * time.Minute)
+			c.pass(t)
+			assertOutcome(t, c.f.get(t, c.st, op.ID), opjournal.ArmFailed, tc.want, "", "")
+			if n := len(c.requests()); n != 1 {
+				t.Fatalf("%d requests, want the one released", n)
+			}
+		})
+	}
+}
+
+// A restart that stopped the runtime and could not start it again keeps its
+// cause on the op: the turn ended with the runtime, so the op is released
+// maybe delivered, the start's error its last error, and its retry, which
+// finds the turn gone, sends nothing and closes skipped{stale} with that
+// last error still on the row.
+func TestLaneInterruptFailedRestartKeepsItsCause(t *testing.T) {
+	c := newInterruptCase(t, laneCheckedTurnCaps)
+	c.answer = func(worker.InterruptRequest) (worker.InterruptResult, error) {
+		return worker.InterruptResult{}, errLaneRestartNotStarted
+	}
+	op := c.propose(t, "stop:1:t1", "t1", opjournal.OnFailureRestart)
+	c.pass(t)
+	got := c.f.get(t, c.st, op.ID)
+	if got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0 || !strings.HasPrefix(got.LastError, "unknown") || !strings.Contains(got.LastError, "cannot start") {
+		t.Fatalf("op %s maybe_delivered %d last error %q, want released maybe delivered with the start's error", got.Status, got.MaybeDelivered, got.LastError)
+	}
+	c.answer = func(req worker.InterruptRequest) (worker.InterruptResult, error) {
+		return worker.InterruptResult{}, &runtime.TurnNotCurrentError{Session: c.f.name, TurnID: req.Turn}
+	}
+	c.f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
+	c.pass(t)
+	got = c.f.get(t, c.st, op.ID)
+	assertOutcome(t, got, opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
+	if !strings.Contains(got.LastError, "cannot start") {
+		t.Fatalf("closed op's last error %q, want the failed start's cause kept", got.LastError)
 	}
 }
 
@@ -495,6 +821,10 @@ func TestLaneInterruptResultMapping(t *testing.T) {
 	notPrepared := fmt.Errorf("x: %w: %w", session.ErrReplacementNotPrepared, miss)
 	skipped := opjournal.Rejected{Arm: opjournal.ArmSkipped, Reason: opjournal.ReasonStale}
 	outcomeUnknown := fmt.Errorf("x: %w: %w", session.ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable)
+	maybeSent := fmt.Errorf("interrupting turn %q of s: %w: %w", "t1", session.ErrInterruptOutcomeUnknown,
+		fmt.Errorf("%w: asking the owner of s: i/o timeout", runtime.ErrRuntimeUnavailable))
+	lostAfterInput := fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed,
+		fmt.Errorf("tmux server lost: %w", runtime.ErrRuntimeUnavailable))
 	cases := []struct {
 		name  string
 		res   worker.InterruptResult
@@ -522,13 +852,19 @@ func TestLaneInterruptResultMapping(t *testing.T) {
 		{"fence unsupported", worker.InterruptResult{}, fmt.Errorf("x: %w", runtime.ErrInputFenceUnsupported), "", false, failed(opjournal.ReasonUnsupported)},
 		{"fence miss", worker.InterruptResult{}, miss, "", false, opjournal.NotDelivered{Transient: true, Cause: miss}},
 		{"partial fence miss", worker.InterruptResult{}, partial, "", false, opjournal.Unknown{Cause: partial}},
-		{"unavailable", worker.InterruptResult{}, runtime.ErrRuntimeUnavailable, "t1", false, opjournal.NotDelivered{Transient: true, Cause: runtime.ErrRuntimeUnavailable}},
+		{"unavailable, nothing sent", worker.InterruptResult{}, runtime.ErrRuntimeUnavailable, "t1", false, opjournal.NotDelivered{Transient: true, Unavailable: true, Cause: runtime.ErrRuntimeUnavailable}},
+		{"unavailable, maybe sent", worker.InterruptResult{}, maybeSent, "t1", false, opjournal.Unknown{Cause: maybeSent}},
+		{"unavailable, lost after input", worker.InterruptResult{}, lostAfterInput, "", false, opjournal.Unknown{Cause: lostAfterInput}},
+		{"unavailable, the session mutation lock held", worker.InterruptResult{}, errLaneInterruptLockBusy, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneInterruptLockBusy}},
+		{"unavailable, the restart's runtime lease held", worker.InterruptResult{}, errLaneInterruptLeaseBusy, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneInterruptLeaseBusy}},
+		{"unavailable, an earlier read still out", worker.InterruptResult{}, errLaneInterruptReadOutstanding, "t1", false, opjournal.NotDelivered{Transient: true, Cause: errLaneInterruptReadOutstanding}},
+		{"restart not started", worker.InterruptResult{}, errLaneRestartNotStarted, "t1", false, opjournal.Unknown{Cause: errLaneRestartNotStarted}},
 		{"session gone", worker.InterruptResult{}, session.ErrSessionNotFound, "", false, skipped},
 		{"other", worker.InterruptResult{}, boom, "", false, opjournal.Unknown{Cause: boom}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := laneInterruptResult(tc.res, tc.err, tc.turn, tc.exact)
+			got := laneInterruptResult(context.Background(), tc.res, tc.err, tc.turn, tc.exact)
 			if tc.name == "not sent" {
 				// The cause is wrapped afresh; compare its shape.
 				nd, ok := got.(opjournal.NotDelivered)
@@ -541,6 +877,18 @@ func TestLaneInterruptResultMapping(t *testing.T) {
 				t.Fatalf("result = %#v, want %#v", got, tc.want)
 			}
 		})
+	}
+	// An unavailable answer that sent nothing once the effect's context
+	// ended is the effect's budget, not the runtime: a transient release
+	// not marked unavailable. One that may have been sent stays unknown.
+	ended, cancel := context.WithCancel(context.Background())
+	cancel()
+	notAsked := fmt.Errorf("interrupting turn %q of s: nothing sent: %w: %w", "t1", runtime.ErrRuntimeUnavailable, context.Canceled)
+	if got, want := laneInterruptResult(ended, worker.InterruptResult{}, notAsked, "t1", false), (opjournal.NotDelivered{Transient: true, Cause: notAsked}); fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", want) {
+		t.Fatalf("result under an ended context = %#v, want %#v", got, want)
+	}
+	if got := laneInterruptResult(ended, worker.InterruptResult{}, maybeSent, "t1", false); fmt.Sprintf("%#v", got) != fmt.Sprintf("%#v", opjournal.Unknown{Cause: maybeSent}) {
+		t.Fatalf("a maybe-sent answer under an ended context = %#v, want it unknown", got)
 	}
 }
 
@@ -569,6 +917,175 @@ func TestLaneInterruptThroughTheSessionHandle(t *testing.T) {
 	want := runtime.InputFence{Generation: 1, Epoch: 1, Token: f.token}
 	if len(fenced) == 0 || slices.ContainsFunc(fenced, func(got runtime.InputFence) bool { return got != want }) {
 		t.Fatalf("interrupt inputs fenced %v, want each under %v", fenced, want)
+	}
+}
+
+// beforeInterruptExec runs before ahead of its executor's Interrupt.
+type beforeInterruptExec struct {
+	*conversationLaneExec
+	before func()
+}
+
+func (e beforeInterruptExec) Interrupt(ctx context.Context, c opjournal.InterruptCall) opjournal.ControlResult {
+	e.before()
+	return e.conversationLaneExec.Interrupt(ctx, c)
+}
+
+// laneStaleRunning is the fixture's fake runtime whose IsRunning reads a
+// live session not running once stale is set, as the tmux state cache can,
+// until the runtime is started again (a provider's own start refreshes its
+// cache). Its fresh liveness read (runtime.FreshLivenessObserver) is the
+// fake's own.
+type laneStaleRunning struct {
+	*runtime.Fake
+	stale *atomic.Bool
+}
+
+func (p laneStaleRunning) IsRunning(name string) bool {
+	restarted := slices.ContainsFunc(p.SnapshotCalls(), func(c runtime.Call) bool { return c.Method == "Start" })
+	if p.stale.Load() && !restarted {
+		return false
+	}
+	return p.Fake.IsRunning(name)
+}
+
+func (p laneStaleRunning) ObserveLivenessSince(name string, processNames []string, since time.Time) (runtime.Liveness, error) {
+	return runtime.FullFake{Fake: p.Fake}.ObserveLivenessSince(name, processNames, since)
+}
+
+// A session-scoped op with on_failure restart on a session whose row names
+// no token, end to end on the session's own handle, interrupts and restarts
+// a turn that does not settle even when the runtime's cache reads the live
+// session not running as the interrupt starts: the stop takes a fresh
+// liveness read, so the op closes succeeded{restarted_after_failed_interrupt},
+// never succeeded with nothing sent and the turn left running.
+func TestLaneInterruptRestartTrustsNoStaleCache(t *testing.T) {
+	f := newLaneFixture(t, noLaneToken, func(meta map[string]string) {
+		meta["provider"], meta["command"] = "claude", "claude" // an idle wait after the interrupt; the restart resumes the command
+	})
+	f.sp.WaitForIdleErrors[f.name] = errors.New("still busy")
+	st := f.laneStore(t)
+	op := f.propose(t, st, opjournal.Request{
+		Conversation: f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "click-1",
+		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
+		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
+		Policy:   opjournal.Policy{Interrupt: opjournal.InterruptPolicy{OnFailure: opjournal.OnFailureRestart}},
+	})
+	var stale atomic.Bool
+	deps := f.deps(st)
+	deps.sp = laneStaleRunning{Fake: f.sp, stale: &stale}
+	v, info := f.view(t)
+	e := newConversationLaneExec(deps, info)
+	f.sp.Calls = nil
+	if _, err := f.lane(t, st).Pass(context.Background(), v, beforeInterruptExec{e, func() { stale.Store(true) }}); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	assertOutcome(t, f.get(t, st, op.ID), opjournal.ArmSucceeded, "", "", opjournal.DegradationRestartedAfterFailedInterrupt)
+	var calls []string
+	for _, c := range f.sp.SnapshotCalls() {
+		switch c.Method {
+		case "Interrupt", "Stop", "Start":
+			calls = append(calls, c.Method)
+		}
+	}
+	if want := []string{"Interrupt", "Stop", "Start"}; !slices.Equal(calls, want) {
+		t.Fatalf("calls = %v, want %v: the turn interrupted, then the runtime restarted", calls, want)
+	}
+}
+
+// laneLockedLoadStore fails the first load of row id made under the session
+// mutation lock, the stop's own, with onLocked's error; nil lets the load
+// through. Every other read goes to the store.
+type laneLockedLoadStore struct {
+	laneTestStore
+	id       string
+	once     sync.Once
+	onLocked func() error
+}
+
+func (s *laneLockedLoadStore) Get(id string) (beads.Bead, error) {
+	var err error
+	if id == s.id && laneSessionMutationLockHeld(id) {
+		s.once.Do(func() { err = s.onLocked() })
+	}
+	if err != nil {
+		return beads.Bead{}, err
+	}
+	return s.laneTestStore.Get(id)
+}
+
+// laneSessionMutationLockHeld reports whether session id's mutation lock is
+// held now, without waiting for it.
+func laneSessionMutationLockHeld(id string) bool {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	return errors.Is(session.WithSessionMutationLockContext(ctx, id, func() error { return nil }), session.ErrSessionMutationBusy)
+}
+
+// A session-scoped op whose stop, end to end on the session's own handle,
+// cannot load the session row under the session mutation lock sent nothing,
+// so it is released, never marked maybe delivered, and its retry interrupts
+// the session and closes succeeded; one whose row was closed by then closes
+// skipped{stale}. Neither closes failed{ambiguous_delivery} with nothing
+// sent.
+func TestLaneInterruptSessionScopedRowLoadUnderTheLock(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		closed bool
+	}{
+		{"unreadable", false},
+		{"closed", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &laneLockedLoadStore{laneTestStore: newLaneTestStore()}
+			f := newLaneFixtureOver(t, store)
+			store.id = f.id
+			store.onLocked = func() error {
+				if tc.closed {
+					return store.Close(f.id)
+				}
+				return errors.New("store: connection reset by peer")
+			}
+			st := f.laneStore(t)
+			op := f.propose(t, st, opjournal.Request{
+				Conversation: f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "click-1",
+				Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
+				Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
+			})
+			interrupts := func() int {
+				n := 0
+				for _, c := range f.sp.SnapshotCalls() {
+					if c.Method == "Interrupt" || c.Method == "SendKeys" {
+						n++
+					}
+				}
+				return n
+			}
+			f.sp.Calls = nil
+			if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+				t.Fatalf("Pass: %v", err)
+			}
+			got := f.get(t, st, op.ID)
+			if tc.closed {
+				assertOutcome(t, got, opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
+				if n := interrupts(); n != 0 {
+					t.Fatalf("sent %d interrupts into a closed session, want none", n)
+				}
+				return
+			}
+			if got.Status != opjournal.StatusAccepted || got.MaybeDelivered != 0 || got.Failures != 0 || interrupts() != 0 {
+				t.Fatalf("op %s maybe_delivered %d failures %d after %d interrupts, want a transient release, nothing sent",
+					got.Status, got.MaybeDelivered, got.Failures, interrupts())
+			}
+			f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
+			if _, err := f.pass(context.Background(), t, f.lane(t, st), st, nil); err != nil {
+				t.Fatalf("Pass: %v", err)
+			}
+			assertOutcome(t, f.get(t, st, op.ID), opjournal.ArmSucceeded, "", "", opjournal.DegradationUnfencedInterrupt)
+			if n := interrupts(); n == 0 {
+				t.Fatal("the retry sent no interrupt")
+			}
+		})
 	}
 }
 
@@ -609,6 +1126,54 @@ func TestLaneInterruptACPTurnAfterACapsReadHiccup(t *testing.T) {
 			}
 			assertOutcome(t, f.get(t, st, op.ID), opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
 		})
+	}
+}
+
+// on_failure restart end to end on an atomic fake runtime (ACP), which reads
+// its turns by protocol and interrupts by keystroke: an op scoped to t1,
+// whose end the runtime does not see, has its turn interrupted by protocol
+// and then the runtime stopped and started in its place, so it closes
+// succeeded, marked restarted_after_failed_interrupt, never
+// failed{unsupported} with the turn left running.
+func TestLaneInterruptACPRestartOnFailure(t *testing.T) {
+	atomic := runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact}
+	f := newTurnLaneFixture(t, runtime.ProfileACP, func(meta map[string]string) {
+		meta["transport"], meta["command"] = "acp", "claude" // the restart's start resumes the command
+	})
+	f.laneFixture.sp.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{f.name: {atomic}}
+	f.laneFixture.sp.TurnScripts = map[string][]string{f.name: {"t1"}}
+	st := f.laneStore(t)
+	op := f.propose(t, st, opjournal.Request{
+		Conversation: f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "stop:1:t1",
+		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
+		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1, Turn: "t1"},
+		Policy:   opjournal.Policy{Interrupt: opjournal.InterruptPolicy{OnFailure: opjournal.OnFailureRestart}},
+	})
+	e, v := f.exec(t, st)
+	e.turns = func() (worker.TurnHandle, error) {
+		return laneStubTurns{
+			caps: worker.TurnCapabilities{TurnCapabilities: atomic, Source: worker.TurnSourceProtocol, Interrupt: runtime.TurnInterruptKeystroke},
+			read: func(context.Context) (runtime.TurnHistory, error) {
+				return runtime.TurnHistory{Current: runtime.TurnState{TurnID: "t1"}}, nil
+			},
+		}, nil
+	}
+	f.laneFixture.sp.Calls = nil
+	if _, err := f.lane(t, st).Pass(context.Background(), v, e); err != nil {
+		t.Fatalf("Pass: %v", err)
+	}
+	assertOutcome(t, f.get(t, st, op.ID), opjournal.ArmSucceeded, "", "t1", opjournal.DegradationRestartedAfterFailedInterrupt)
+	var calls []string
+	for _, c := range f.laneFixture.sp.SnapshotCalls() {
+		switch c.Method {
+		case "InterruptTurn":
+			calls = append(calls, c.Method+"("+c.Key+"):"+c.Value)
+		case "Stop", "Start":
+			calls = append(calls, c.Method)
+		}
+	}
+	if want := []string{"InterruptTurn(t1):sent", "Stop", "Start"}; !slices.Equal(calls, want) {
+		t.Fatalf("calls = %v, want %v: the turn interrupted, then the runtime restarted", calls, want)
 	}
 }
 
@@ -697,5 +1262,71 @@ func TestLaneInterruptAtomicFakeNeverInterruptsTheNextTurn(t *testing.T) {
 	assertOutcome(t, f.get(t, st, onTime.ID), opjournal.ArmSucceeded, "", "t2", opjournal.DegradationUnfencedInterrupt)
 	if got := interrupts(); !slices.Contains(got, "t2:sent") {
 		t.Fatalf("interrupts %v, want t2's sent", got)
+	}
+}
+
+// The retry end to end on an atomic fake runtime (ACP): a session-scoped
+// op's first attempt names t1, the turn a fresh read finds, and its
+// dispatch goes unanswered (an RPC timeout after the request left), so it
+// may have reached the runtime: the op is released maybe delivered, its ref
+// kept. By the retry t1 has ended and t2 runs; the retry still names t1,
+// which the runtime refuses, so the op closes skipped{stale} and t2 is never
+// interrupted.
+func TestLaneInterruptAtomicFakeRetryNeverInterruptsTheNextTurn(t *testing.T) {
+	atomic := runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndRecorded, Fence: runtime.TurnFenceAtomic, Link: runtime.TurnLinkExact}
+	f := newTurnLaneFixture(t, runtime.ProfileACP, func(meta map[string]string) { meta["transport"] = "acp" })
+	f.laneFixture.sp.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{f.name: {atomic}}
+	f.laneFixture.sp.TurnScripts = map[string][]string{f.name: {"t1"}}
+	f.laneFixture.sp.InterruptTurnErrors = map[string]error{f.name: fmt.Errorf("%w: asking the owner of %q: i/o timeout", runtime.ErrRuntimeUnavailable, f.name)}
+	st := f.laneStore(t)
+	ints := newLaneInterrupts()
+	op := f.propose(t, st, opjournal.Request{
+		Conversation: f.id, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane, ClientKey: "click-1",
+		Producer: opjournal.Producer{Principal: "operator", Actor: opjournal.ActorOperator},
+		Scope:    opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
+	})
+	current := "t1"
+	pass := func() {
+		t.Helper()
+		e, v := f.exec(t, st)
+		e.deps.interrupts = ints
+		e.turns = func() (worker.TurnHandle, error) {
+			return laneStubTurns{
+				caps: worker.TurnCapabilities{TurnCapabilities: atomic, Source: worker.TurnSourceProtocol, Interrupt: runtime.TurnInterruptKeystroke},
+				read: func(context.Context) (runtime.TurnHistory, error) {
+					return runtime.TurnHistory{Current: runtime.TurnState{TurnID: current}}, nil
+				},
+			}, nil
+		}
+		if _, err := f.lane(t, st).Pass(context.Background(), v, e); err != nil {
+			t.Fatalf("Pass: %v", err)
+		}
+	}
+	interrupts := func() []string {
+		var out []string
+		for _, c := range f.laneFixture.sp.SnapshotCalls() {
+			switch c.Method {
+			case "InterruptTurn":
+				out = append(out, c.Key+":"+c.Value)
+			case "Interrupt", "SendKeys":
+				out = append(out, c.Method)
+			}
+		}
+		return out
+	}
+	pass()
+	want := opjournal.InterruptRef{Op: op.ID, Turn: "t1"}
+	if got := f.get(t, st, op.ID); got.Status != opjournal.StatusAccepted || got.MaybeDelivered == 0 || ints.current(f.id) != want {
+		t.Fatalf("after an unanswered dispatch op %s maybe_delivered %d ref %+v, want released maybe delivered with ref %+v",
+			got.Status, got.MaybeDelivered, ints.current(f.id), want)
+	}
+	f.laneFixture.sp.InterruptTurnErrors = nil
+	f.laneFixture.sp.TurnScripts = map[string][]string{f.name: {"t2"}}
+	current = "t2"
+	f.clk.Advance(opjournal.ExecutorErrorBackoff + time.Second)
+	pass()
+	assertOutcome(t, f.get(t, st, op.ID), opjournal.ArmSkipped, opjournal.ReasonStale, "", "")
+	if got := interrupts(); !slices.Equal(got, []string{"t1:error", "t1:not_current"}) {
+		t.Fatalf("interrupts %v, want t1's twice, the retry refused not current", got)
 	}
 }

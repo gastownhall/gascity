@@ -1685,14 +1685,15 @@ func (m *Manager) StopTurn(id string) error {
 // session mutation lock itself, or it waits forever. A stop that finds no
 // turn (a suspended row, a runtime that is not running) returns as StopTurn
 // does without calling still, as does one whose row, loaded under the lock,
-// is closed or will not load: the load's error, nothing sent. A nil still is
-// StopTurn.
+// is closed or will not load: the load's error, wrapped with ErrStopNotSent,
+// nothing sent. A nil still is StopTurn.
 //
 // ctx bounds the waits after the interrupt, and an input fence it carries
 // (runtime.WithInputFence) fences every key, as StopTurnFenced does. With a
-// check, ctx also bounds the wait for the session mutation lock: a lock
-// still held when ctx ends is an error wrapping runtime.ErrRuntimeUnavailable,
-// nothing sent. With a check, whether the runtime runs, before still and
+// check or a ctx deadline, ctx also bounds the wait for the session mutation
+// lock: a lock still held when ctx ends is an error wrapping
+// runtime.ErrRuntimeUnavailable and ErrSessionMutationBusy, nothing sent.
+// With a check, whether the runtime runs, before still and
 // again before the first key, is a fresh liveness read's, as under a fence,
 // never the provider's IsRunning, which the tmux state cache can answer
 // stale: a read that does not find the agent alive is no turn, and one that
@@ -1704,9 +1705,11 @@ func (m *Manager) StopTurn(id string) error {
 // runtime.ErrRuntimeUnavailable: it is unknown whether the interrupt reached
 // the agent. A follow-up interrupt of the keystroke sequence (a soft-escape
 // family's Ctrl-C fallback) goes only once still passes again: it interrupts
-// whatever turn runs when it lands. A
-// refusal then sends nothing more, and the stop returns an error wrapping
-// runtime.ErrTurnNotEnded, since the first key was sent.
+// whatever turn runs when it lands. A refusal then sends nothing more. One
+// saying the turn is no longer current (runtime.ErrTurnNotCurrent) has seen
+// the turn end, and the stop returns as when its waits pass; any other makes
+// it return an error wrapping runtime.ErrTurnNotEnded and none of the
+// refusal's sentinels, since the first key was sent.
 func (m *Manager) StopTurnIf(ctx context.Context, id string, still func() error) error {
 	_, err := m.StopTurnWith(ctx, id, StopTurnOptions{Still: still})
 	return err
@@ -1728,17 +1731,40 @@ const TurnInterruptSettle = turnSettleTimeout
 // (runtime.TurnFenceProvider) runtime.ErrTurnIdentityUnsupported, and a
 // suspended row, which has no turn, a *runtime.TurnNotCurrentError. The row
 // is loaded under the lock, so a row that is closed by then, or will not
-// load, returns the load's error, as StopTurn does (ErrSessionClosed for a
-// closed one), nothing sent. Otherwise it returns what InterruptTurnOn
-// returns.
-func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string) (runtime.TurnInterrupt, error) {
+// load, returns the load's error (ErrSessionClosed for a closed one),
+// nothing sent. Otherwise it returns what InterruptTurnOn returns.
+//
+// restart, when set, is a restart on failure, run as StopTurnWith runs
+// StopTurnOptions.Restart: an actor that may not start the runtime is
+// refused before anything else, and a row whose drain-ack stop is pending
+// with ErrSessionStopping, nothing sent. On a keystroke runtime (ACP, whose
+// stop replaces the agent) it takes the runtime lease under the lock before
+// the dispatch (a lease it cannot take is runtime.ErrRuntimeUnavailable,
+// nothing sent), and when the interrupted turn is not seen to end it stops
+// the runtime and starts it again in its place under that lease, reporting
+// StopTurnReport.Restarted with a nil error; a restart whose stop or start
+// fails is the error StopTurnWith's is, and a caller whose ctx ended by then
+// gets no restart (restartWithheld). A protocol runtime is never restarted,
+// as its stop may leave it running: its not-ended error is returned.
+func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart *StopTurnRestart) (runtime.TurnInterrupt, StopTurnReport, error) {
+	var report StopTurnReport
+	if restart != nil {
+		if err := m.checkStarter(restart.By); err != nil {
+			return runtime.TurnInterrupt{}, report, fmt.Errorf("interrupting turn %q of %s, restarting it on failure: %w", turnID, id, err)
+		}
+	}
 	var ack runtime.TurnInterrupt
 	err := WithSessionMutationLockContext(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
 			return err
 		}
-		if runtime.TurnInterruptModeFor(m.sp, sessName) == runtime.TurnInterruptUnsupported {
+		if restart != nil && drainAckStopPendingMetadata(b.Metadata) {
+			// The row belongs to the controller's stop, as for StopTurnWith.
+			return fmt.Errorf("interrupting turn %q of %s, restarting it on failure: %w", turnID, id, ErrSessionStopping)
+		}
+		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
+		if mode == runtime.TurnInterruptUnsupported {
 			return fmt.Errorf("interrupting turn %q of %s: %w", turnID, id, ErrTurnInterruptUnsupported)
 		}
 		tf, ok := m.sp.(runtime.TurnFenceProvider)
@@ -1748,13 +1774,35 @@ func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string) (runtime
 		if State(b.Metadata["state"]) == StateSuspended {
 			return &runtime.TurnNotCurrentError{Session: sessName, TurnID: turnID}
 		}
+		restarts := restart != nil && mode == runtime.TurnInterruptKeystroke
+		var by Actor
+		if restarts {
+			// The lease goes before the dispatch and to the restart, as
+			// StopTurnWith's does (D8D-5).
+			leased, release, err := m.leaseForRestartLocked(ctx, restart.By, id, sessName)
+			if err != nil {
+				return fmt.Errorf("interrupting turn %q of %s: taking the runtime lease for its restart on failure, nothing sent: %w: %w", turnID, id, runtime.ErrRuntimeUnavailable, err)
+			}
+			defer release()
+			by = leased
+		}
 		ack, err = InterruptTurnOn(ctx, tf, sessName, turnID)
-		return err
+		if !restarts || !errors.Is(err, runtime.ErrTurnNotEnded) {
+			return err
+		}
+		if err := restartWithheld(ctx, fmt.Sprintf("interrupting turn %q of %s", turnID, id), nil, err); err != nil {
+			return err
+		}
+		if err := m.restartAfterFailedInterruptLocked(ctx, by, id, b, sessName, restart); err != nil {
+			return err
+		}
+		report.Restarted = true
+		return nil
 	})
 	if errors.Is(err, ErrSessionMutationBusy) {
-		return ack, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, id, runtime.ErrRuntimeUnavailable, err)
+		return ack, report, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, id, runtime.ErrRuntimeUnavailable, err)
 	}
-	return ack, err
+	return ack, report, err
 }
 
 // InterruptTurnOn interrupts sessName's turn turnID through tf and waits for
@@ -1773,15 +1821,20 @@ func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string) (runtime
 //   - an error wrapping runtime.ErrTurnNotEnded: sent, but not seen to end.
 //     It wraps no other sentinel: the wait's own error is in its text only,
 //     so ErrTurnNotEnded, "sent", is never misread as a refusal;
-//   - an error wrapping runtime.ErrRuntimeUnavailable: ctx ended before the
-//     dispatch, and nothing was sent; or the read or the dispatch failed,
-//     and it is unknown whether the request reached the runtime. A runtime
-//     error in none of the classes above, a bare ctx error included, is
-//     wrapped so. A runtime gone after a failed attempt (an error wrapping
-//     both runtime.ErrRuntimeUnavailable and runtime.ErrSessionNotFound)
-//     is unknown and only that: its not-found is in the text only, so a
-//     caller that tests not-found first never reads "maybe sent" as
-//     "nothing sent".
+//   - an error wrapping runtime.ErrRuntimeUnavailable and not
+//     ErrInterruptOutcomeUnknown: ctx ended before the dispatch, and nothing
+//     was sent;
+//   - an error wrapping ErrInterruptOutcomeUnknown and
+//     runtime.ErrRuntimeUnavailable: the read or the dispatch failed, and it
+//     is unknown whether the request reached the runtime, as
+//     TurnFenceProvider.InterruptTurn has every error outside the classes
+//     above. The runtime's own runtime.ErrRuntimeUnavailable is wrapped so,
+//     as is a runtime error in none of the classes above, a bare ctx error
+//     included. A runtime gone after a failed attempt (an error wrapping
+//     both runtime.ErrRuntimeUnavailable and runtime.ErrSessionNotFound) is
+//     unknown and only that: its not-found is in the text only, so a caller
+//     that tests not-found first never reads "maybe sent" as "nothing
+//     sent".
 func InterruptTurnOn(ctx context.Context, tf runtime.TurnFenceProvider, sessName, turnID string) (runtime.TurnInterrupt, error) {
 	if err := ctx.Err(); err != nil {
 		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: nothing sent: %w: %w", turnID, sessName, runtime.ErrRuntimeUnavailable, err)
@@ -1796,13 +1849,18 @@ func InterruptTurnOn(ctx context.Context, tf runtime.TurnFenceProvider, sessName
 		// reached the runtime: unknown, below.
 		return runtime.TurnInterrupt{}, &runtime.TurnNotCurrentError{Session: sessName, TurnID: turnID}
 	case errors.Is(err, runtime.ErrSessionNotFound):
-		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w (%s)", turnID, sessName, runtime.ErrRuntimeUnavailable, err.Error())
-	case errors.Is(err, runtime.ErrTurnNotCurrent), errors.Is(err, runtime.ErrTurnUnnamed), errors.Is(err, runtime.ErrRuntimeUnavailable):
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w (%s)", turnID, sessName, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, err.Error())
+	case errors.Is(err, runtime.ErrTurnNotCurrent), errors.Is(err, runtime.ErrTurnUnnamed):
 		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w", turnID, sessName, err)
+	case errors.Is(err, runtime.ErrRuntimeUnavailable):
+		// The runtime could not tell (an RPC whose answer never came, a
+		// re-read after a failed dispatch): unknown whether the request
+		// reached it.
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, sessName, ErrInterruptOutcomeUnknown, err)
 	case err != nil:
 		// The runtime's error names no class (an RPC that failed, a bare
 		// ctx error): unknown whether the request reached it.
-		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, sessName, runtime.ErrRuntimeUnavailable, err)
+		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w: %w", turnID, sessName, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, err)
 	}
 	if _, err := tf.WaitTurnEnded(ctx, sessName, turnID, turnSettleTimeout); err != nil {
 		return ack, TurnNotEndedError(fmt.Sprintf("interrupted turn %q of %s", turnID, sessName), err)

@@ -17,24 +17,28 @@ func laneInterrupt(key, turn string) Request {
 }
 
 // An interrupt released because the runtime was unavailable, and never taken
-// again before its start_by, closes provider_unavailable (X11 §5.4); a
-// message in the same state expires before start, as before.
+// again before its start_by, closes provider_unavailable (X11 §5.4); one
+// released transiently for another cause (a fence miss, a session the
+// controller is stopping) expires before start, as does a message released
+// as unavailable.
 func TestLaneInterruptUnavailableUntilStartByIsProviderUnavailable(t *testing.T) {
+	unavailable := NotDelivered{Transient: true, Unavailable: true, Cause: errors.New("runtime unavailable")}
 	for _, tc := range []struct {
-		name string
-		req  Request
-		want string
+		name    string
+		req     Request
+		release NotDelivered
+		want    string
 	}{
-		{"interrupt", laneInterrupt("i", "t1"), ReasonProviderUnavailable},
-		{"message", laneMsg("m", RolePrompt, "x", func(r *Request) { r.StartBy = t0.Add(time.Minute) }), ReasonExpiredBeforeStart},
+		{"interrupt", laneInterrupt("i", "t1"), unavailable, ReasonProviderUnavailable},
+		{"interrupt, another transient cause", laneInterrupt("i", "t1"), NotDelivered{Transient: true, Cause: errors.New("fence miss: absent")}, ReasonExpiredBeforeStart},
+		{"message", laneMsg("m", RolePrompt, "x", func(r *Request) { r.StartBy = t0.Add(time.Minute) }), unavailable, ReasonExpiredBeforeStart},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newLaneHarness(t)
 			op := h.propose(t, tc.req)
 			exec := newFakeExec(h.clk)
-			unavailable := NotDelivered{Transient: true, Cause: errors.New("runtime unavailable")}
-			exec.interrupt = func(InterruptCall) ControlResult { return unavailable }
-			exec.deliver = func(Delivery) DeliveryResult { return unavailable }
+			exec.interrupt = func(InterruptCall) ControlResult { return tc.release }
+			exec.deliver = func(Delivery) DeliveryResult { return tc.release }
 			l := h.lane(t, "ctl")
 			if res := mustPass(t, l, view(), exec); res.Done != DoneReleased {
 				t.Fatalf("first pass %+v, want released", res)

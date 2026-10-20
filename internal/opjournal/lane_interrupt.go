@@ -21,13 +21,13 @@ const (
 // startByReason is the failed reason of an op whose start_by passed while it
 // was not executing: deadline_in_flight once an attempt may have reached the
 // agent, provider_unavailable for an interrupt whose last attempt was
-// released because the runtime was unavailable (X11 §5.4), else
-// expired_before_start.
+// released because the runtime was unavailable (NotDelivered.Unavailable,
+// X11 §5.4), else expired_before_start, after any other release included.
 func startByReason(op Op) string {
 	switch {
 	case op.MaybeDelivered > 0:
 		return ReasonDeadlineInFlight
-	case op.Kind == KindInterrupt && (op.LastError == lastErrorTransient || strings.HasPrefix(op.LastError, lastErrorTransient+":")):
+	case op.Kind == KindInterrupt && (op.LastError == lastErrorUnavailable || strings.HasPrefix(op.LastError, lastErrorUnavailable+":")):
 		return ReasonProviderUnavailable
 	default:
 		return ReasonExpiredBeforeStart

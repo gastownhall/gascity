@@ -32,6 +32,7 @@ func (a incarnation) cmp(b incarnation) int {
 const (
 	lastErrorLeaseExpired = "lease_expired"
 	lastErrorTransient    = "transient"
+	lastErrorUnavailable  = "unavailable"
 	lastErrorNotDelivered = "not_delivered"
 	lastErrorUnknown      = "unknown"
 	lastErrorKeyRejected  = "key_rejected"

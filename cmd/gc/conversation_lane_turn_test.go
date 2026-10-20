@@ -105,12 +105,14 @@ type turnLaneFixture struct {
 	elapsed    time.Duration // virtual time the link waits slept
 }
 
-// laneStubTurns is a worker.TurnHandle answering from caps and read.
+// laneStubTurns is a worker.TurnHandle answering from caps and read, and
+// FreshTurn from fresh when it is set.
 type laneStubTurns struct {
 	worker.TurnHandle
 	caps    worker.TurnCapabilities
 	capsErr error
 	read    func(context.Context) (runtime.TurnHistory, error)
+	fresh   func(context.Context) (runtime.TurnHistory, error)
 }
 
 func (s laneStubTurns) TurnCapabilities(context.Context) (worker.TurnCapabilities, error) {
@@ -118,6 +120,13 @@ func (s laneStubTurns) TurnCapabilities(context.Context) (worker.TurnCapabilitie
 }
 
 func (s laneStubTurns) CurrentTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	return s.read(ctx)
+}
+
+func (s laneStubTurns) FreshTurn(ctx context.Context) (runtime.TurnHistory, error) {
+	if s.fresh != nil {
+		return s.fresh(ctx)
+	}
 	return s.read(ctx)
 }
 

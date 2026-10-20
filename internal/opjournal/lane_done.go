@@ -323,7 +323,11 @@ func (l *ConversationLane) doneNext(tb *takenBatch, er effectResult, success Out
 		}
 		cause := er.notDelivered.Cause
 		if er.notDelivered.Transient {
-			return release(cur, transientBackoff(cur.Attempt-cur.Failures), lastError(lastErrorTransient, cause))
+			token := lastErrorTransient
+			if er.notDelivered.Unavailable {
+				token = lastErrorUnavailable
+			}
+			return release(cur, transientBackoff(cur.Attempt-cur.Failures), lastError(token, cause))
 		}
 		return failed(cur, lastError(lastErrorNotDelivered, cause))
 	case resultUnknown:

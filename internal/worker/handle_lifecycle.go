@@ -435,7 +435,6 @@ func (h *SessionHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req
 		var report sessionpkg.StopTurnReport
 		report, err = h.manager.StopTurnWith(stopCtx, id, opts)
 		result.Restarted = report.Restarted
-		return result, err
 	case !req.Fence.IsZero():
 		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
 	default:
@@ -447,7 +446,25 @@ func (h *SessionHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req
 			err = h.manager.StopTurn(id)
 		}
 	}
+	err = sessionStopResult(id, err)
 	return result, err
+}
+
+// sessionStopResult is err, from session id's session-scoped stop, in the
+// classes InterruptRequest.Turn documents for session scope. A stop that
+// failed before it sent anything for a cause it names no other sentinel for
+// (session.ErrStopNotSent) is runtime.ErrSessionNotFound when its row,
+// loaded under the session mutation lock, was gone, closed or not a session,
+// as a turn read has it (turnRowError), and ErrInterruptNotSent otherwise: a
+// row that would not load, or an actor refused a restart.
+func sessionStopResult(id string, err error) error {
+	switch {
+	case !errors.Is(err, sessionpkg.ErrStopNotSent):
+		return err
+	case TurnSessionGone(err):
+		return fmt.Errorf("interrupting session %s: %w: %w", id, runtime.ErrSessionNotFound, err)
+	}
+	return fmt.Errorf("interrupting session %s: %w: %w", id, ErrInterruptNotSent, err)
 }
 
 // unfenceable is req with its fence dropped, and true, when req allows it
@@ -471,9 +488,9 @@ func (h *SessionHandle) unfenceable(id string, req InterruptRequest) (InterruptR
 
 // stopTurnOptions are the session stop's options for req's policy: a
 // replacement, refused where the session's turn is not replaced by an
-// interrupt (replacementRefusal), and a restart on failure for by, with the
-// session's start command and hints. A plain interrupt has none.
-// What it cannot read is an error wrapping ErrInterruptNotSent.
+// interrupt (replacementRefusal), and a restart on failure
+// (restartOnFailure). A plain interrupt has none. What it cannot read is an
+// error wrapping ErrInterruptNotSent.
 func (h *SessionHandle) stopTurnOptions(ctx context.Context, by *sessionpkg.Actor, id string, req InterruptRequest) (sessionpkg.StopTurnOptions, error) {
 	var opts sessionpkg.StopTurnOptions
 	if req.ForReplacement {
@@ -486,14 +503,28 @@ func (h *SessionHandle) stopTurnOptions(ctx context.Context, by *sessionpkg.Acto
 		}
 		opts.ForReplacement = true
 	}
-	if req.OnFailure == InterruptOnFailureRestart {
-		resume, err := h.startCommand(id)
-		if err != nil {
-			return opts, fmt.Errorf("interrupting session %s, restarting it on failure: %w: %w", id, ErrInterruptNotSent, err)
-		}
-		opts.Restart = &sessionpkg.StopTurnRestart{By: *by, ResumeCommand: resume, Hints: h.runtimeHints()}
+	restart, err := h.restartOnFailure(by, id, req.OnFailure)
+	if err != nil {
+		return opts, err
 	}
+	opts.Restart = restart
 	return opts, nil
+}
+
+// restartOnFailure is the session stop's or turn interrupt's restart for an
+// interrupt whose policy is onFailure: for InterruptOnFailureRestart, one by
+// by with session id's start command and hints; for any other policy, none
+// (nil). A start command it cannot read is an error wrapping
+// ErrInterruptNotSent.
+func (h *SessionHandle) restartOnFailure(by *sessionpkg.Actor, id string, onFailure InterruptOnFailure) (*sessionpkg.StopTurnRestart, error) {
+	if onFailure != InterruptOnFailureRestart {
+		return nil, nil
+	}
+	resume, err := h.startCommand(id)
+	if err != nil {
+		return nil, fmt.Errorf("interrupting session %s, restarting it on failure: %w: %w", id, ErrInterruptNotSent, err)
+	}
+	return &sessionpkg.StopTurnRestart{By: *by, ResumeCommand: resume, Hints: h.runtimeHints()}, nil
 }
 
 // replacementRefusal is why an interrupt for a replacement

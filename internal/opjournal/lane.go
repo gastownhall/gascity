@@ -319,7 +319,13 @@ type Settled struct {
 // back off without counting a failure.
 type NotDelivered struct {
 	Transient bool
-	Cause     error
+	// Unavailable, on a transient release, says the provider could not be
+	// reached, or could not answer whether the effect could run: the release
+	// is recorded as such, and an interrupt whose start_by passes on it
+	// closes failed{provider_unavailable} (X11 §5.4). Any other transient
+	// release is recorded as transient.
+	Unavailable bool
+	Cause       error
 	// SettleBy, when set, is the last instant on the lane's clock the lane
 	// may record the release, set by an executor whose process ends then (a
 	// hook its runner kills at a deadline). As for Delivered, the Done's

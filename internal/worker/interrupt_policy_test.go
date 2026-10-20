@@ -24,8 +24,9 @@ func callMethodsOf(sp *runtime.Fake, name string) []string {
 	return out
 }
 
-// A policy the handle cannot run is refused before anything is sent: an
-// unknown on_failure, and a restart with no actor to start the runtime as.
+// A policy the handle cannot run is refused before anything is sent, and
+// says nothing was (ErrInterruptNotSent): an unknown on_failure, a restart
+// with no actor to start the runtime as, and an invalid fence.
 func TestInterruptPolicyRefusedBeforeSending(t *testing.T) {
 	h, sp, name, _ := fencedSessionHandle(t)
 	cases := []struct {
@@ -44,6 +45,9 @@ func TestInterruptPolicyRefusedBeforeSending(t *testing.T) {
 			_, err := h.InterruptAs(context.Background(), sessionpkg.Actor{}, InterruptRequest{OnFailure: InterruptOnFailureRestart})
 			return err
 		}, sessionpkg.ErrNoActor},
+		{"invalid fence", func() error {
+			return h.Interrupt(context.Background(), InterruptRequest{Fence: runtime.InputFence{Token: "tok"}})
+		}, runtime.ErrInvalidInputFence},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -51,6 +55,9 @@ func TestInterruptPolicyRefusedBeforeSending(t *testing.T) {
 			err := tc.call()
 			if err == nil || (tc.want != nil && !errors.Is(err, tc.want)) {
 				t.Fatalf("Interrupt = %v, want refused (%v)", err, tc.want)
+			}
+			if !errors.Is(err, ErrInterruptNotSent) {
+				t.Fatalf("Interrupt = %v, want ErrInterruptNotSent: nothing was sent", err)
 			}
 			if got := callMethodsOf(sp, name); len(got) != 0 {
 				t.Fatalf("a refused interrupt made calls %v", got)
@@ -124,6 +131,36 @@ func TestTurnInterruptOnFailureRestart(t *testing.T) {
 	}
 	if clock.now().Sub(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC)) < turnInterruptSettle {
 		t.Fatal("restarted before the settle bound")
+	}
+}
+
+// A turn-scoped restart that stopped the runtime and could not start it
+// again reaches the caller as that (session.ErrRestartNotStarted): never as
+// a row that would not load (runtime.ErrRuntimeUnavailable, nothing sent),
+// nor as a turn not seen to end.
+func TestTurnInterruptFailedRestartStartIsNotStarted(t *testing.T) {
+	fake := runtime.NewFake()
+	backend := inputHookBackend{idleScript: idleScript{FullFake: runtime.FullFake{Fake: fake}, state: &idleScriptState{}}}
+	s := newTurnSession(t, profiled(runtime.ProfileTmux, backend), "codex", "")
+	timing, clock := racingTurnTiming(time.Date(2026, 10, 9, 0, 0, 0, 0, time.UTC))
+	s.handle.turns.timing = timing
+	path := s.writeTranscript(t, "codex", codexStarted(codexTurn1, "2026-10-08T02:22:22.191Z", 1791426142))
+	ageTranscript(t, path, clock.now().Add(-time.Hour))
+	fake.StartErrors[s.info.SessionName] = errors.New("cannot start")
+	fake.Calls = nil
+
+	res, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+		InterruptRequest{Turn: codexTurn1, OnFailure: InterruptOnFailureRestart})
+	if res.Restarted || !errors.Is(err, sessionpkg.ErrRestartNotStarted) {
+		t.Fatalf("InterruptAs(turn, restart, start fails) = %+v, %v; want ErrRestartNotStarted and no restart", res, err)
+	}
+	for _, sentinel := range []error{runtime.ErrRuntimeUnavailable, runtime.ErrTurnNotEnded, runtime.ErrSessionNotFound} {
+		if errors.Is(err, sentinel) {
+			t.Fatalf("InterruptAs(turn, restart, start fails) = %v, want ErrRestartNotStarted alone, not %v", err, sentinel)
+		}
+	}
+	if methods := callMethodsOf(fake, s.info.SessionName); !slices.Contains(methods, "Stop") {
+		t.Fatalf("calls = %v, want the restart's Stop", methods)
 	}
 }
 
@@ -324,22 +361,45 @@ func TestTurnInterruptForReplacementPreparesTheSession(t *testing.T) {
 }
 
 // ACP interrupts by keystroke but reads its turns by protocol: a turn-scoped
-// interrupt with on_failure restart there is refused, nothing sent, rather
-// than run without its restart.
-func TestProtocolTurnInterruptRefusesARestartOnAKeystrokeRuntime(t *testing.T) {
-	fake := runtime.NewFake()
-	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
-	fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
-	fake.TurnScripts = map[string][]string{s.info.SessionName: {"acp-1", ""}}
-	fake.TurnInterruptModeValue = runtime.TurnInterruptKeystroke
-	fake.Calls = nil
-	_, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
-		InterruptRequest{Turn: "acp-1", OnFailure: InterruptOnFailureRestart})
-	if !errors.Is(err, ErrInterruptRestartUnsupported) {
-		t.Fatalf("InterruptAs(protocol turn, keystroke, restart) = %v, want ErrInterruptRestartUnsupported", err)
-	}
-	if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
-		t.Fatalf("a refused interrupt sent %v", got)
+// interrupt with on_failure restart there interrupts the turn by protocol
+// first, and only once the turn is not seen to end stops the runtime and
+// starts it again, as the session-scoped stop and deliver-now restart it. A
+// turn that ends is left alone. A protocol runtime (T3) is never restarted,
+// its stop may leave it running: the turn not seen to end is returned.
+func TestProtocolTurnInterruptRestartOnFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		profile   runtime.Profile
+		turns     []string
+		restarted bool
+		notEnded  bool
+	}{
+		{"keystroke runtime, turn not seen to end", runtime.ProfileACP, []string{"acp-1"}, true, false},
+		{"keystroke runtime, turn ends", runtime.ProfileACP, []string{"acp-1", ""}, false, false},
+		{"protocol runtime, turn not seen to end", runtime.ProfileT3Bridge, []string{"acp-1"}, false, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := runtime.NewFake()
+			s := newTurnSession(t, profiled(tc.profile, runtime.FullFake{Fake: fake}), "claude", "")
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+			fake.TurnScripts = map[string][]string{s.info.SessionName: tc.turns}
+			fake.Calls = nil
+			res, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+				InterruptRequest{Turn: "acp-1", OnFailure: InterruptOnFailureRestart})
+			if res.Restarted != tc.restarted || errors.Is(err, runtime.ErrTurnNotEnded) != tc.notEnded || (err != nil) != tc.notEnded {
+				t.Fatalf("InterruptAs(protocol turn, restart) = %+v, %v; want restarted %v, not ended %v", res, err, tc.restarted, tc.notEnded)
+			}
+			methods := callMethodsOf(fake, s.info.SessionName)
+			interrupt, stop, start := slices.Index(methods, "InterruptTurn"), slices.Index(methods, "Stop"), slices.Index(methods, "Start")
+			switch {
+			case interrupt < 0:
+				t.Fatalf("calls = %v, want the turn interrupt sent", methods)
+			case tc.restarted && (stop < interrupt || start < stop):
+				t.Fatalf("calls = %v, want the turn interrupt, then the restart's Stop and Start", methods)
+			case !tc.restarted && (stop >= 0 || start >= 0):
+				t.Fatalf("calls = %v, want no restart", methods)
+			}
+		})
 	}
 }
 
@@ -369,6 +429,77 @@ func TestInterruptPreSendFailureIsNotSent(t *testing.T) {
 	}
 	if got := sp.SnapshotCalls(); len(got) != 0 {
 		t.Fatalf("an interrupt that failed before sending made calls %+v", got)
+	}
+}
+
+// A session-scoped interrupt whose stop loads the row again under the
+// session mutation lock and finds it closed or gone is not found
+// (runtime.ErrSessionNotFound), and one whose row will not load is
+// ErrInterruptNotSent, nothing sent either way: with or without a deadline,
+// and with a restart on failure. Neither is an error in no class, which a
+// caller must take as maybe sent.
+func TestSessionInterruptRowLoadUnderTheLock(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		onLocked func(s turnSession) error
+		want     error
+		not      []error
+	}{
+		{
+			name:     "closed",
+			onLocked: func(s turnSession) error { return s.store.Close(s.info.ID) },
+			want:     runtime.ErrSessionNotFound,
+			not:      []error{ErrInterruptNotSent, runtime.ErrRuntimeUnavailable},
+		},
+		{
+			name: "gone",
+			onLocked: func(s turnSession) error {
+				return fmt.Errorf("getting bead %q: %w", s.info.ID, beads.ErrNotFound)
+			},
+			want: runtime.ErrSessionNotFound,
+			not:  []error{ErrInterruptNotSent, runtime.ErrRuntimeUnavailable},
+		},
+		{
+			name:     "unreadable",
+			onLocked: func(turnSession) error { return errors.New("store: connection reset by peer") },
+			want:     ErrInterruptNotSent,
+			not:      []error{runtime.ErrSessionNotFound, runtime.ErrRuntimeUnavailable},
+		},
+	} {
+		for _, call := range []struct {
+			name     string
+			deadline bool
+			req      InterruptRequest
+		}{
+			{"no deadline", false, InterruptRequest{}},
+			{"deadline", true, InterruptRequest{}},
+			{"restart on failure", true, InterruptRequest{OnFailure: InterruptOnFailureRestart}},
+		} {
+			t.Run(tc.name+"/"+call.name, func(t *testing.T) {
+				fake := runtime.NewFake()
+				s := newTurnSession(t, profiled(runtime.ProfileTmux, runtime.FullFake{Fake: fake}), "claude", "")
+				s.onLockedLoad(t, func() error { return tc.onLocked(s) })
+				ctx := context.Background()
+				if call.deadline {
+					var cancel context.CancelFunc
+					ctx, cancel = context.WithTimeout(ctx, 10*time.Second)
+					defer cancel()
+				}
+				fake.Calls = nil
+				_, err := s.handle.InterruptAs(ctx, handleActor(t, s.handle, sessionpkg.ActorController), call.req)
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("InterruptAs(row %s) = %v, want %v", tc.name, err, tc.want)
+				}
+				for _, other := range append(tc.not, runtime.ErrTurnNotEnded, sessionpkg.ErrInterruptOutcomeUnknown) {
+					if errors.Is(err, other) {
+						t.Fatalf("InterruptAs(row %s) = %v, want %v, not %v too", tc.name, err, tc.want, other)
+					}
+				}
+				if got := sentInputs(fake, s.info.SessionName); len(got) != 0 {
+					t.Fatalf("sent %v, want nothing", got)
+				}
+			})
+		}
 	}
 }
 
