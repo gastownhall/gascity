@@ -733,51 +733,65 @@ func protocolTurnInterruptFenceRefusal(fence runtime.InputFence, session, turn s
 		turn, session, runtime.ErrInputFenceUnsupported)
 }
 
-// interruptTurn interrupts the session's turn turn, as InterruptRequest.Turn
-// documents. fence, when set, has been validated.
-func (h *SessionHandle) interruptTurn(ctx context.Context, turn string, fence runtime.InputFence) error {
+// interruptTurn interrupts the session's turn req.Turn for by, as
+// InterruptRequest.Turn documents. req has been validated.
+func (h *SessionHandle) interruptTurn(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	turn := req.Turn
 	plan, err := h.planTurnsWithin(ctx)
 	if err != nil {
-		return err
+		return InterruptResult{}, err
 	}
 	name := plan.info.SessionName
 	if name == "" {
 		name = "a session not created yet"
 	}
 	if err := turnInterruptRefusal(plan.caps, name, turn); err != nil {
-		return err
+		return InterruptResult{}, err
+	}
+	if req.ForReplacement {
+		if err := replacementRefusal(plan.caps.Replace, name); err != nil {
+			return InterruptResult{}, err
+		}
 	}
 	switch plan.caps.Source {
 	case TurnSourceProtocol:
-		if err := protocolTurnInterruptFenceRefusal(fence, name, turn); err != nil {
-			return err
+		if err := protocolTurnInterruptFenceRefusal(req.Fence, name, turn); err != nil {
+			return InterruptResult{}, err
 		}
 		// The runtime's acknowledgement says whether it fenced the
 		// interrupt itself; the capabilities' Fence already tells the
-		// caller which tier it is on, so the result carries no more.
+		// caller which tier it is on, so the result carries no more. A
+		// protocol runtime is not restarted on failure (its stop may leave
+		// it running), and a replacement needs nothing more of it.
 		_, err := h.manager.InterruptTurn(ctx, plan.info.ID, turn)
-		return turnInterruptResult(plan.info.ID, err)
+		return InterruptResult{}, turnInterruptResult(plan.info.ID, err)
 	case TurnSourceTranscript:
-		return h.checkedTurnInterrupt(ctx, plan.info, turn, fence)
+		opts, err := h.stopTurnOptions(ctx, by, plan.info.ID, InterruptRequest{OnFailure: req.OnFailure})
+		if err != nil {
+			return InterruptResult{}, err
+		}
+		opts.ForReplacement = req.ForReplacement
+		return h.checkedTurnInterrupt(ctx, plan.info, turn, req.Fence, opts)
 	}
-	return h.noTurnSource(plan)
+	return InterruptResult{}, h.noTurnSource(plan)
 }
 
-// checkedTurnInterrupt is the checked transcript path: StopTurnIf re-reads
-// the transcript under the session mutation lock and sends the family's
-// sequence only while turn is the open turn, each key under fence when one
-// is set, and checks again before the sequence's follow-up interrupt (a
-// soft-escape family's Ctrl-C fallback); then the transcript is read until
-// turn is no longer current, within turnInterruptSettle of the check first
-// passing. ctx bounds the wait for the lock and the check, whose session
-// reload and runtime probes are further bounded by turnWatchReadBound: the
-// check holds the lock. They are the check's own, started under the lock
-// (lockedCurrentTurn), so a shared read that began before it never decides
-// the check. A check that cannot finish within them, or whose idle reading
-// is neither idle nor busy (idleUnknown), refuses, nothing sent, with
-// runtime.ErrRuntimeUnavailable: an idle reading it could not take is no
-// proof the turn runs.
-func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpkg.Info, turn string, fence runtime.InputFence) error {
+// checkedTurnInterrupt is the checked transcript path: the session stop
+// (session.Manager.StopTurnWith) re-reads the transcript under the session
+// mutation lock and sends the family's sequence only while turn is the open
+// turn, each key under fence when one is set, and checks again before the
+// sequence's follow-up interrupt (a soft-escape family's Ctrl-C fallback);
+// then, still under the lock, the transcript is read until turn is no longer
+// current, within turnInterruptSettle of the check first passing, and opts'
+// replacement or restart on failure runs. ctx bounds the wait for the lock
+// and the check, whose session reload and runtime probes are further bounded
+// by turnWatchReadBound: the check holds the lock. They are the check's own,
+// started under the lock (lockedCurrentTurn), so a shared read that began
+// before it never decides the check. A check that cannot finish within them,
+// or whose idle reading is neither idle nor busy (idleUnknown), refuses,
+// nothing sent, with runtime.ErrRuntimeUnavailable: an idle reading it could
+// not take is no proof the turn runs.
+func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpkg.Info, turn string, fence runtime.InputFence, opts sessionpkg.StopTurnOptions) (InterruptResult, error) {
 	timing := h.turns.clock()
 	var deadline time.Time
 	checked := false
@@ -788,7 +802,7 @@ func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpk
 	if !fence.IsZero() {
 		stopCtx = runtime.WithInputFence(ctx, fence)
 	}
-	err := h.manager.StopTurnIf(stopCtx, info.ID, func() error {
+	opts.Still = func() error {
 		if err := ctx.Err(); err != nil {
 			return unanswered(err)
 		}
@@ -811,20 +825,25 @@ func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpk
 			deadline = timing.now().Add(turnInterruptSettle)
 		}
 		return nil
-	})
+	}
+	opts.Settle = func(waitErr error) error {
+		return h.awaitTurnEnd(ctx, info.SessionName, turn, deadline, timing, waitErr)
+	}
+	report, err := h.manager.StopTurnWith(stopCtx, info.ID, opts)
+	result := InterruptResult{Restarted: report.Restarted}
 	switch {
 	case err == nil && !checked:
 		// The stop found no turn to interrupt (a suspended row, a runtime
 		// not running) and sent nothing.
-		return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
+		return result, &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
 	case checked && errors.Is(err, runtime.ErrSessionNotFound) && !errors.Is(err, runtime.ErrRuntimeUnavailable) && !errors.Is(err, runtime.ErrTurnNotEnded):
 		// The runtime stopped between the check and the keys: nothing was
 		// sent, and no turn runs.
-		return &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
+		return result, &runtime.TurnNotCurrentError{Session: info.SessionName, TurnID: turn}
 	case err != nil && !errors.Is(err, runtime.ErrTurnNotEnded):
-		return turnInterruptResult(info.ID, err)
+		return result, turnInterruptResult(info.ID, err)
 	}
-	return h.awaitTurnEnd(ctx, info.SessionName, turn, deadline, timing, err)
+	return result, err
 }
 
 // turnInterruptResult is err, from the Manager's turn-scoped stop or

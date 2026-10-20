@@ -303,38 +303,53 @@ func (h *RuntimeHandle) lookupDelivery(ctx context.Context, key string) (runtime
 // the provider's InterruptTurn and WaitTurnEnded, and is refused, nothing
 // sent, on any other provider, and with an input fence, which a protocol
 // turn interrupt cannot carry (runtime.ErrInputFenceUnsupported).
-func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
+func (h *RuntimeHandle) Interrupt(ctx context.Context, req InterruptRequest) error {
+	_, err := h.interrupt(ctx, nil, req)
+	return err
+}
+
+// InterruptAs is Interrupt; by is unused, since a bare runtime is never
+// restarted: an OnFailure restart is refused, nothing sent, with
+// ErrInterruptRestartUnsupported, and a ForReplacement interrupt with
+// session.ErrTurnInterruptUnsupported (a bare runtime has no deliver-now,
+// its Replace is none).
+func (h *RuntimeHandle) InterruptAs(ctx context.Context, by sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	return h.interrupt(ctx, &by, req)
+}
+
+// interrupt is InterruptAs for by, nil for no actor.
+func (h *RuntimeHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (result InterruptResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
-	if req.Turn != "" {
-		if !req.Fence.IsZero() {
-			if err = req.Fence.Validate(); err != nil {
-				return err
-			}
-		}
-		err = h.interruptTurn(ctx, req.Turn, req.Fence)
-		return err
+	if err = req.validate(by); err != nil {
+		return InterruptResult{}, err
 	}
-	if !req.Fence.IsZero() {
-		if err = req.Fence.Validate(); err != nil {
-			return err
-		}
-		if runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
-			err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
-			return err
-		}
+	switch {
+	case req.OnFailure == InterruptOnFailureRestart:
+		err = fmt.Errorf("interrupting %s: %w", h.sessionName, ErrInterruptRestartUnsupported)
+		return InterruptResult{}, err
+	case req.ForReplacement:
+		err = replacementRefusal(TurnReplaceNone, h.sessionName)
+		return InterruptResult{}, err
+	case req.Turn != "":
+		err = h.interruptTurn(ctx, req.Turn, req.Fence)
+		return InterruptResult{}, err
+	}
+	if !req.Fence.IsZero() && runtime.InputFencingFor(h.provider, h.sessionName) == runtime.InputFencingNone {
+		err = fmt.Errorf("%w: %s", runtime.ErrInputFenceUnsupported, h.sessionName)
+		return InterruptResult{}, err
 	}
 	if runtime.TurnInterruptModeFor(h.provider, h.sessionName) == runtime.TurnInterruptUnsupported {
 		err = fmt.Errorf("%w: %s", sessionpkg.ErrTurnInterruptUnsupported, h.sessionName)
-		return err
+		return InterruptResult{}, err
 	}
 	if !req.Fence.IsZero() {
 		err = runtime.InterruptWithContext(runtime.WithInputFence(ctx, req.Fence), h.provider, h.sessionName)
-		return err
+		return InterruptResult{}, err
 	}
 	err = h.provider.Interrupt(h.sessionName)
-	return err
+	return InterruptResult{}, err
 }
 
 // interruptTurn is the turn-scoped interrupt from the provider alone: its

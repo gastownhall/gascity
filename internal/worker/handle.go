@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"sync"
 	"time"
 
@@ -68,6 +69,10 @@ type MessagingHandle interface {
 	// (CONTRACT v5.9 D8).
 	Message(context.Context, sessionpkg.Actor, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
+	// InterruptAs is Interrupt for by, reporting what the interrupt did
+	// beyond its error; by may restart the runtime (InterruptRequest's
+	// OnFailure restart). Interrupt is InterruptAs with no actor.
+	InterruptAs(context.Context, sessionpkg.Actor, InterruptRequest) (InterruptResult, error)
 	Nudge(context.Context, sessionpkg.Actor, NudgeRequest) (NudgeResult, error)
 }
 
@@ -249,6 +254,71 @@ type InterruptRequest struct {
 	// idle state could not be read (nothing sent then). ctx bounds the wait
 	// for the session mutation lock and the check before the keys.
 	Turn string `json:"turn,omitempty"`
+	// OnFailure is what the interrupt does when it was sent and its turn was
+	// not seen to end. Empty and InterruptOnFailureFail return that error
+	// (one wrapping runtime.ErrTurnNotEnded). InterruptOnFailureRestart
+	// stops the runtime and starts it again in its place, inline, under the
+	// runtime lease taken before anything is sent (DES-O1 §10.1, O1), and
+	// then returns nil with InterruptResult.Restarted; only InterruptAs
+	// takes it, with an actor that may start the runtime, else it is
+	// refused, nothing sent, with an error wrapping session.ErrNoActor. A
+	// restart applies to a keystroke runtime on a SessionHandle: a protocol
+	// runtime's stop may leave it running, so its not-ended error is
+	// returned as with fail, and a RuntimeHandle, which has no session row
+	// to restart from, refuses it, nothing sent, with
+	// ErrInterruptRestartUnsupported.
+	OnFailure InterruptOnFailure `json:"on_failure,omitempty"`
+	// ForReplacement says a message replaces the interrupted turn
+	// (deliver-now's interrupt step, X11 D11): once the turn settled, the
+	// session is prepared for it as interrupt_now prepares it (Gemini's
+	// reset of the interrupted turn, and on a keystroke runtime the input
+	// box cleared for the message). It is refused, nothing sent, with an
+	// error wrapping session.ErrTurnInterruptUnsupported, where the
+	// session's turn is replaced otherwise or not at all
+	// (TurnCapabilities.Replace restart or none), which is always so on a
+	// RuntimeHandle.
+	ForReplacement bool `json:"for_replacement,omitempty"`
+}
+
+// InterruptOnFailure is what an interrupt does when its turn is not seen to
+// end (InterruptRequest.OnFailure).
+type InterruptOnFailure string
+
+// The interrupt failure policies, an interrupt op's on_failure.
+const (
+	// InterruptOnFailureFail returns the not-ended error.
+	InterruptOnFailureFail InterruptOnFailure = "fail"
+	// InterruptOnFailureRestart restarts the runtime inline.
+	InterruptOnFailureRestart InterruptOnFailure = "restart"
+)
+
+// ErrInterruptRestartUnsupported refuses an interrupt whose OnFailure is
+// restart on a handle that cannot restart the runtime: nothing is sent.
+var ErrInterruptRestartUnsupported = errors.New("worker: the handle cannot restart the runtime after a failed interrupt")
+
+// InterruptResult reports what one interrupt did beyond its error.
+type InterruptResult struct {
+	// Restarted says the interrupt was sent, its turn was not seen to end,
+	// and OnFailure restart replaced the runtime.
+	Restarted bool
+}
+
+// validate checks req's policy for by (nil for none) before anything is sent: a known
+// OnFailure, an actor for a restart, and a valid fence when one is set.
+func (req InterruptRequest) validate(by *sessionpkg.Actor) error {
+	switch req.OnFailure {
+	case "", InterruptOnFailureFail:
+	case InterruptOnFailureRestart:
+		if by == nil || by.Kind == 0 {
+			return fmt.Errorf("interrupt on_failure restart: %w", sessionpkg.ErrNoActor)
+		}
+	default:
+		return fmt.Errorf("interrupt on_failure %q is not fail or restart", req.OnFailure)
+	}
+	if !req.Fence.IsZero() {
+		return req.Fence.Validate()
+	}
+	return nil
 }
 
 // NudgeDelivery controls how a nudge should be delivered.

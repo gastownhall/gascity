@@ -383,37 +383,95 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 }
 
 // Interrupt soft-stops the in-flight worker turn: the one req.Turn names, or
-// with no Turn whatever runs.
-func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) (err error) {
+// with no Turn whatever runs. It is InterruptAs with no actor.
+func (h *SessionHandle) Interrupt(ctx context.Context, req InterruptRequest) error {
+	_, err := h.interrupt(ctx, nil, req)
+	return err
+}
+
+// InterruptAs soft-stops the in-flight worker turn for by, as
+// InterruptRequest documents, and reports whether its OnFailure restart
+// replaced the runtime.
+func (h *SessionHandle) InterruptAs(ctx context.Context, by sessionpkg.Actor, req InterruptRequest) (InterruptResult, error) {
+	return h.interrupt(ctx, &by, req)
+}
+
+// interrupt is InterruptAs for by, nil for no actor.
+func (h *SessionHandle) interrupt(ctx context.Context, by *sessionpkg.Actor, req InterruptRequest) (result InterruptResult, err error) {
 	event := h.beginOperationEvent(ctx, workerOperationInterrupt)
 	defer func() { event.finish(err) }()
 
+	if err = req.validate(by); err != nil {
+		return InterruptResult{}, err
+	}
 	if req.Turn != "" {
-		if !req.Fence.IsZero() {
-			if err = req.Fence.Validate(); err != nil {
-				return err
-			}
-		}
-		err = h.interruptTurn(ctx, req.Turn, req.Fence)
-		return err
+		return h.interruptTurn(ctx, by, req)
 	}
 	id := h.currentSessionID()
-	if !req.Fence.IsZero() {
-		if err = req.Fence.Validate(); err != nil {
-			return err
-		}
-		if id == "" {
-			err = h.noRowFenceMiss()
-			return err
-		}
-		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
-		return err
-	}
 	if id == "" {
+		if !req.Fence.IsZero() {
+			err = h.noRowFenceMiss()
+		}
+		return InterruptResult{}, err
+	}
+	opts, err := h.stopTurnOptions(ctx, by, id, req)
+	if err != nil {
+		return InterruptResult{}, err
+	}
+	switch {
+	case opts.ForReplacement || opts.Restart != nil:
+		stopCtx := ctx
+		if !req.Fence.IsZero() {
+			stopCtx = runtime.WithInputFence(ctx, req.Fence)
+		}
+		var report sessionpkg.StopTurnReport
+		report, err = h.manager.StopTurnWith(stopCtx, id, opts)
+		return InterruptResult{Restarted: report.Restarted}, err
+	case !req.Fence.IsZero():
+		err = h.manager.StopTurnFenced(ctx, id, req.Fence)
+	default:
+		err = h.manager.StopTurn(id)
+	}
+	return InterruptResult{}, err
+}
+
+// stopTurnOptions are the session stop's options for req's policy: a
+// replacement, refused where the session's turn is not replaced by an
+// interrupt (replacementRefusal), and a restart on failure for by, with the
+// session's start command and hints. A plain interrupt has none.
+func (h *SessionHandle) stopTurnOptions(ctx context.Context, by *sessionpkg.Actor, id string, req InterruptRequest) (sessionpkg.StopTurnOptions, error) {
+	var opts sessionpkg.StopTurnOptions
+	if req.ForReplacement {
+		plan, err := h.planTurnsWithin(ctx)
+		if err != nil {
+			return opts, err
+		}
+		if err := replacementRefusal(plan.caps.Replace, plan.info.SessionName); err != nil {
+			return opts, err
+		}
+		opts.ForReplacement = true
+	}
+	if req.OnFailure == InterruptOnFailureRestart {
+		resume, err := h.startCommand(id)
+		if err != nil {
+			return opts, err
+		}
+		opts.Restart = &sessionpkg.StopTurnRestart{By: *by, ResumeCommand: resume, Hints: h.runtimeHints()}
+	}
+	return opts, nil
+}
+
+// replacementRefusal is why an interrupt for a replacement
+// (InterruptRequest.ForReplacement) cannot run on a session whose turn is
+// replaced as replace says, or nil: only an interrupt replaces it there
+// (interrupt or interrupt_reset). A restart replaces it otherwise, and none
+// cannot be replaced at all.
+func replacementRefusal(replace TurnReplace, session string) error {
+	switch replace {
+	case TurnReplaceInterrupt, TurnReplaceInterruptReset:
 		return nil
 	}
-	err = h.manager.StopTurn(id)
-	return err
+	return fmt.Errorf("interrupting %s for a replacement, which it takes as %q: %w", session, replace, sessionpkg.ErrTurnInterruptUnsupported)
 }
 
 // Nudge sends a best-effort redirect message to the worker.

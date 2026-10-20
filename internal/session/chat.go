@@ -1707,76 +1707,8 @@ func (m *Manager) StopTurn(id string) error {
 // refusal then sends nothing more, and the stop returns an error wrapping
 // runtime.ErrTurnNotEnded, since the first key was sent.
 func (m *Manager) StopTurnIf(ctx context.Context, id string, still func() error) error {
-	lock := withSessionMutationLock
-	if still != nil {
-		lock = func(id string, fn func() error) error {
-			err := WithSessionMutationLockContext(ctx, id, fn)
-			if errors.Is(err, ErrSessionMutationBusy) {
-				return fmt.Errorf("stopping the turn of %s: %w: %w", id, runtime.ErrRuntimeUnavailable, err)
-			}
-			return err
-		}
-	}
-	return lock(id, func() error {
-		b, sessName, err := m.sessionBead(id)
-		if err != nil {
-			return err
-		}
-		_, fenced := runtime.InputFenceFrom(ctx)
-		if fenced && runtime.InputFencingFor(m.sp, sessName) == runtime.InputFencingNone {
-			return fmt.Errorf("stopping the turn of %s: %w", id, runtime.ErrInputFenceUnsupported)
-		}
-		if none, err := m.stopFindsNoTurn(ctx, b, sessName, still != nil); none {
-			// No runtime means no turn to interrupt: stopTurnLocked sends
-			// nothing, so there is nothing to wait for either. A fenced or
-			// checked stop reports what its fresh read found: never
-			// success into none, nor no turn from a stale cache.
-			return err
-		}
-		if still != nil {
-			if err := still(); err != nil {
-				return fmt.Errorf("stopping the turn of %s: %w", id, err)
-			}
-		}
-		mode := runtime.TurnInterruptModeFor(m.sp, sessName)
-		interruptStartedAt := time.Now()
-		none, err := m.sendTurnInterruptLocked(ctx, b, sessName, mode, still != nil)
-		switch {
-		case still == nil && (none || err != nil):
-			// Nothing was sent (the runtime gone at the keys, a miss), or
-			// the send failed: StopTurn returns that and waits for nothing.
-			return err
-		case none && err == nil:
-			return fmt.Errorf("stopping the turn of %s: the runtime or its agent stopped after the check, nothing sent: %w", id, runtime.ErrSessionNotFound)
-		case none, errors.Is(err, runtime.ErrFenceMismatch), errors.Is(err, runtime.ErrInputFenceUnsupported),
-			errors.Is(err, ErrTurnInterruptUnsupported), errors.Is(err, runtime.ErrRuntimeUnavailable):
-			// Nothing was sent (a miss, a refusal), or the error already
-			// says the outcome is unknown.
-			return err
-		case err != nil:
-			return fmt.Errorf("stopping the turn of %s: %w: %w", id, runtime.ErrRuntimeUnavailable, err)
-		}
-		if err := m.waitForInterruptIdleLocked(ctx, b, sessName, mode, still); err != nil {
-			return fmt.Errorf("waiting for stopped session to become idle: %w: %w", runtime.ErrTurnNotEnded, err)
-		}
-		if err := m.waitForInterruptBoundaryLocked(ctx, b, sessName, interruptStartedAt); err != nil {
-			return fmt.Errorf("waiting for stopped session interrupt boundary: %w: %w", runtime.ErrTurnNotEnded, err)
-		}
-		if restoresInterruptedInput(b) && mode == runtime.TurnInterruptKeystroke {
-			// The stop already succeeded. A draft that will not clear is
-			// logged, not returned: the next submit clears the input box
-			// again before it pastes.
-			if _, err := m.clearRestoredInputLocked(ctx, sessName); err != nil {
-				log.Printf("session: stopped the turn of %q but %v", sessName, err)
-			}
-		}
-		// After the restored prompt is cleared: Claude's background shells
-		// are stopped from an empty input box.
-		if stopsBackgroundWork(b) {
-			m.stopBackgroundWorkLocked(context.Background(), sessName)
-		}
-		return nil
-	})
+	_, err := m.StopTurnWith(ctx, id, StopTurnOptions{Still: still})
+	return err
 }
 
 // TurnInterruptSettle bounds the wait for an interrupted turn to end, from
