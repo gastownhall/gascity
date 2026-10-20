@@ -2989,6 +2989,33 @@ func TestGcBdUpdateUnsetMetadataRejectsAnInvalidKeyLikeBd(t *testing.T) {
 	}
 }
 
+// TestGcBdUpdateSetMetadataRejectsAnInvalidKeyLikeBd pins the same grammar on
+// the --set-metadata half: bd validates set keys before writing too, so an
+// invalid one fails the command and neither the other set nor the unset in the
+// same call is applied.
+func TestGcBdUpdateSetMetadataRejectsAnInvalidKeyLikeBd(t *testing.T) {
+	for _, key := range []string{"has-dash", "9starts.with.digit", "has space"} {
+		t.Run(fmt.Sprintf("%q", key), func(t *testing.T) {
+			_, resident, store := unsetMetadataSplitCity(t, map[string]string{"pr.followup_url": "u"})
+			var stdout, stderr bytes.Buffer
+			args := []string{"update", resident.ID, "--set-metadata", "gc.outcome=pass", "--set-metadata", key + "=v", "--unset-metadata", "pr.followup_url"}
+			if code := doBd(args, &stdout, &stderr); code == 0 {
+				t.Fatalf("doBd %v exited 0; stdout=%q", args, stdout.String())
+			}
+			if !strings.Contains(stderr.String(), "invalid metadata key") {
+				t.Errorf("stderr does not explain the invalid key: %q", stderr.String())
+			}
+			after, err := store.Get(resident.ID)
+			if err != nil {
+				t.Fatalf("re-reading: %v", err)
+			}
+			if after.Metadata["pr.followup_url"] != "u" || after.Metadata["gc.outcome"] != "" || after.Metadata[key] != "" {
+				t.Errorf("a rejected update wrote anyway: %v", after.Metadata)
+			}
+		})
+	}
+}
+
 // TestGcBdUpdateNotesStaysRefusedBesideUnset pins that serving
 // --unset-metadata did not widen the door: --notes and --append-notes still
 // have no representation in the class store and are still refused whole.

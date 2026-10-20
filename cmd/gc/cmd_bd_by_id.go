@@ -1921,11 +1921,18 @@ func printBdByIDBead(b beads.Bead, jsonOut bool, binding string, stdout, stderr 
 // have learned to trust that output; rendering the UpdateOpts back would report
 // what was asked for rather than what the store now holds.
 func doBdByIDUpdate(graph storebinding.GraphStore, op bdByIDOp, binding string, stdout, stderr io.Writer) int {
-	// bd validates every --unset-metadata key before it writes anything
-	// (storage.ValidateMetadataKey), so an invalid one fails the whole command
-	// with nothing applied. Matching that keeps a typo from being reported as
-	// a successful unset of a key that was never there.
-	for _, key := range op.Update.UnsetMetadata {
+	// bd validates every --set-metadata and --unset-metadata key before it
+	// writes anything (storage.ValidateMetadataKey), so an invalid one fails
+	// the whole command with nothing applied. Matching that keeps a typo from
+	// being reported as a successful unset of a key that was never there, and
+	// keeps a key bd would refuse from landing here.
+	keys := make([]string, 0, len(op.Update.Metadata)+len(op.Update.UnsetMetadata))
+	for key := range op.Update.Metadata {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	keys = append(keys, op.Update.UnsetMetadata...)
+	for _, key := range keys {
 		if !bdMetadataKeyPattern.MatchString(key) {
 			fmt.Fprintf(stderr, "gc bd update: %s: invalid metadata key %q: must match %s\n", op.ID, key, bdMetadataKeyPattern.String()) //nolint:errcheck // best-effort stderr
 			return 1
