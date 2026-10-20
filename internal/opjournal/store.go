@@ -158,8 +158,7 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 	if err != nil {
 		return Op{}, false, err
 	}
-	b, err := EncodeOp(op)
-	if err != nil {
+	if _, err := EncodeOp(op); err != nil {
 		return Op{}, false, err
 	}
 	// Read first: a retry then never reaches Create, so a store that
@@ -175,6 +174,16 @@ func (s *Store) Propose(req Request) (Op, bool, error) {
 		case !errors.Is(getErr, beads.ErrNotFound):
 			return Op{}, false, fmt.Errorf("reading op %s before creating it: %w", op.ID, getErr)
 		}
+	}
+	return s.create(op)
+}
+
+// create writes op, a previewed op, create-if-absent at its pinned id, and
+// resolves a create that lost to a stored row as Propose does.
+func (s *Store) create(op Op) (Op, bool, error) {
+	b, err := EncodeOp(op)
+	if err != nil {
+		return Op{}, false, err
 	}
 	created, createErr := s.store.Create(b)
 	if createErr == nil {

@@ -131,25 +131,43 @@ func TestLaneContentHoldDoesNotAdmitTheDrainNotice(t *testing.T) {
 
 // TestLaneContentHoldEditedMessageGoesToTheBack characterizes T3 decision 2:
 // a queued message edited under a hold (Cancel, then a new message) loses
-// its place.
+// its place unless the edit reuses the original's client_seq, which
+// orderEntries sorts one principal's ops by.
 func TestLaneContentHoldEditedMessageGoesToTheBack(t *testing.T) {
-	h := newLaneHarness(t)
-	l := h.lane(t, "ctl")
-	exec := newFakeExec(h.clk)
-	m1 := h.propose(t, laneMsg("m1", RoleNotice, "one"))
-	h.clk.Advance(time.Millisecond)
-	m2 := h.propose(t, laneMsg("m2", RoleNotice, "two"))
-	mustPass(t, l, heldView(), exec)
-	if res, _, err := h.store.Cancel(m1.ID, "operator", "edited"); err != nil || res != CancelClosed {
-		t.Fatalf("Cancel = %v, %v", res, err)
-	}
-	h.clk.Advance(time.Millisecond)
-	edited := h.propose(t, laneMsg("m1-edit", RoleNotice, "one, edited"))
-	if res := mustPass(t, l, heldView(), exec); res.Took != TakeNone {
-		t.Fatalf("held pass took %v", res.Taken)
-	}
-	res := mustPass(t, l, view(), exec)
-	if !slices.Equal(res.Taken, []string{m2.ID, edited.ID}) {
-		t.Fatalf("resumed pass took %v, want [m2, m1']", res.Taken)
+	seq := func(n uint64) func(*Request) { return func(r *Request) { r.ClientSeq = n } }
+	none := func(*Request) {}
+	for _, tc := range []struct {
+		name           string
+		m1, m2, edit   func(*Request)
+		editKeepsPlace bool
+	}{
+		{"no client_seq", none, none, none, false},
+		{"fresh client_seq", seq(1), seq(2), seq(3), false},
+		{"reused client_seq", seq(1), seq(2), seq(1), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			l := h.lane(t, "ctl")
+			exec := newFakeExec(h.clk)
+			m1 := h.propose(t, laneMsg("m1", RoleNotice, "one", tc.m1))
+			h.clk.Advance(time.Millisecond)
+			m2 := h.propose(t, laneMsg("m2", RoleNotice, "two", tc.m2))
+			mustPass(t, l, heldView(), exec)
+			if res, _, err := h.store.Cancel(m1.ID, "operator", "edited"); err != nil || res != CancelClosed {
+				t.Fatalf("Cancel = %v, %v", res, err)
+			}
+			h.clk.Advance(time.Millisecond)
+			edited := h.propose(t, laneMsg("m1-edit", RoleNotice, "one, edited", tc.edit))
+			if res := mustPass(t, l, heldView(), exec); res.Took != TakeNone {
+				t.Fatalf("held pass took %v", res.Taken)
+			}
+			want := []string{m2.ID, edited.ID}
+			if tc.editKeepsPlace {
+				want = []string{edited.ID, m2.ID}
+			}
+			if res := mustPass(t, l, view(), exec); !slices.Equal(res.Taken, want) {
+				t.Fatalf("resumed pass took %v, want %v", res.Taken, want)
+			}
+		})
 	}
 }

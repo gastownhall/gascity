@@ -26,6 +26,7 @@ func companionRow(t *testing.T, mem *beads.MemStore) string {
 func companionOf(store beads.Store, id string, writes *int) Companion {
 	const value = "held"
 	return Companion{
+		Tag:  companionKey,
 		Item: beads.GuardedItem{Update: &beads.GuardedUpdate{ID: id, Opts: beads.UpdateOpts{Metadata: map[string]string{companionKey: value}}}},
 		Write: func() error {
 			*writes++
@@ -109,11 +110,15 @@ func TestProposeWithLosesARaceAsAReplay(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newLaneHarness(t)
 			row := companionRow(t, h.mem)
-			writes := 0
+			winnerRow, err := h.mem.Create(beads.Bead{ID: "gc-winner-row", Type: "task"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			writes, winnerWrites := 0, 0
 			winner := laneMsg("k1", RolePrompt, tc.winner)
 			h.batcher.setFault(func(n int, _ beads.GuardedBatch) (bool, error) {
 				if n == 0 {
-					if _, _, err := h.store.Propose(winner); err != nil {
+					if _, _, err := h.store.ProposeWith(context.Background(), winner, companionOf(h.mem, winnerRow.ID, &winnerWrites)); err != nil {
 						t.Fatal(err)
 					}
 				}
@@ -206,6 +211,7 @@ func TestProposeWithProposesNothingWhenTheCompanionFails(t *testing.T) {
 	errRow := errors.New("row write refused")
 	preview, _ := h.store.Preview(laneMsg("k1", RolePrompt, "hi"))
 	with := Companion{
+		Tag:   companionKey,
 		Item:  beads.GuardedItem{Update: &beads.GuardedUpdate{ID: "gc-row"}},
 		Write: func() error { return errRow },
 	}
@@ -264,6 +270,55 @@ func TestProposeWithReplaysWithoutTheCompanion(t *testing.T) {
 	})
 }
 
+// TestProposeWithCompanionIsPartOfTheRequest: the companion's tag is in the
+// request digest, so a key first proposed without a companion, or with
+// another one, is a *KeyReuseError and writes nothing; a hold-less Stop
+// cannot make a later held Stop on its key a silent replay.
+func TestProposeWithCompanionIsPartOfTheRequest(t *testing.T) {
+	run := func(t *testing.T, mem *beads.MemStore, st *Store, batches func() int) {
+		row := companionRow(t, mem)
+		writes := 0
+		plain, created, err := st.Propose(laneMsg("k1", RolePrompt, "hi"))
+		if err != nil || !created {
+			t.Fatalf("Propose = created %v, %v", created, err)
+		}
+		before := batches()
+		var reuse *KeyReuseError
+		if _, _, err := st.ProposeWith(context.Background(), laneMsg("k1", RolePrompt, "hi"), companionOf(mem, row, &writes)); !errors.As(err, &reuse) || reuse.Existing.ID != plain.ID {
+			t.Fatalf("ProposeWith over a plain op = %v, want *KeyReuseError naming %s", err, plain.ID)
+		}
+		if writes != 0 || batches() != before || companionMark(t, mem, row) != "" {
+			t.Fatalf("a held Stop over a plain op wrote the companion (%d solo writes, %d batches)", writes, batches()-before)
+		}
+		other := companionOf(mem, row, &writes)
+		other.Tag = "another_companion"
+		if _, _, err := st.ProposeWith(context.Background(), laneMsg("k2", RolePrompt, "hi"), companionOf(mem, row, &writes)); err != nil {
+			t.Fatal(err)
+		}
+		if err := mem.SetMetadata(row, companionKey, ""); err != nil {
+			t.Fatal(err)
+		}
+		writes, before = 0, batches()
+		if _, _, err := st.ProposeWith(context.Background(), laneMsg("k2", RolePrompt, "hi"), other); !errors.As(err, &reuse) {
+			t.Fatalf("ProposeWith with another companion = %v, want *KeyReuseError", err)
+		}
+		if _, _, err := st.Propose(laneMsg("k2", RolePrompt, "hi")); !errors.As(err, &reuse) {
+			t.Fatalf("Propose over an op proposed with a companion = %v, want *KeyReuseError", err)
+		}
+		if writes != 0 || batches() != before || companionMark(t, mem, row) != "" {
+			t.Fatalf("a reused key wrote the companion (%d solo writes, %d batches, cell %q)", writes, batches()-before, companionMark(t, mem, row))
+		}
+	}
+	t.Run("batch", func(t *testing.T) {
+		h := newLaneHarness(t)
+		run(t, h.mem, h.store, func() int { return len(h.batcher.batches()) })
+	})
+	t.Run("fallback", func(t *testing.T) {
+		h := newHarness(t)
+		run(t, h.mem, h.store, func() int { return 0 })
+	})
+}
+
 func TestProposeWithRefusesBeforeWriting(t *testing.T) {
 	h := newLaneHarness(t)
 	row := companionRow(t, h.mem)
@@ -275,11 +330,13 @@ func TestProposeWithRefusesBeforeWriting(t *testing.T) {
 		with Companion
 	}{
 		"empty client key": {laneMsg("", RolePrompt, "hi"), good},
-		"no item":          {laneMsg("k1", RolePrompt, "hi"), Companion{Write: good.Write}},
+		"no item":          {laneMsg("k1", RolePrompt, "hi"), Companion{Tag: good.Tag, Write: good.Write}},
 		"two items": {laneMsg("k1", RolePrompt, "hi"), Companion{
-			Item: beads.GuardedItem{Create: &beads.Bead{ID: "gc-x"}, Update: good.Item.Update}, Write: good.Write,
+			Tag: good.Tag, Item: beads.GuardedItem{Create: &beads.Bead{ID: "gc-x"}, Update: good.Item.Update}, Write: good.Write,
 		}},
-		"nil write":       {laneMsg("k1", RolePrompt, "hi"), Companion{Item: good.Item}},
+		"nil write":       {laneMsg("k1", RolePrompt, "hi"), Companion{Tag: good.Tag, Item: good.Item}},
+		"no tag":          {laneMsg("k1", RolePrompt, "hi"), Companion{Item: good.Item, Write: good.Write}},
+		"spaced tag":      {laneMsg("k1", RolePrompt, "hi"), Companion{Tag: " hold", Item: good.Item, Write: good.Write}},
 		"names the op id": {laneMsg("k1", RolePrompt, "hi"), companionOf(h.mem, preview.ID, &writes)},
 	}
 	for name, tc := range cases {

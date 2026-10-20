@@ -10,10 +10,12 @@ import (
 )
 
 // Companion is a row write an op must not be durable without: a Stop's
-// content hold rides its interrupt (DES-O1 §10.5). Item is the write as one
-// guarded-batch item; Write is the same write on its own. Both are required,
-// so the producer need not know which one the store takes.
+// content hold rides its interrupt (DES-O1 §10.5). Tag names the companion
+// and is part of the op's request digest. Item is the write as one
+// guarded-batch item; Write is the same write on its own. All three are
+// required, so the producer need not know which write the store takes.
 type Companion struct {
+	Tag   string
 	Item  beads.GuardedItem
 	Write func() error
 }
@@ -21,12 +23,19 @@ type Companion struct {
 // ProposeWith is Propose with a companion row write that lands no later than
 // the op. On a lane store (NewLaneStore) the op's pinned create and the
 // companion go in one guarded batch, all or nothing; on any other store the
-// companion is written first and the op proposed after it, so a failure
-// leaves at most the companion, never the op alone. A proposal that finds its
-// op already stored, a replay or a lost race, writes no companion: the stored
-// op's own proposal wrote it, and a later write (a resume's clear) must
-// stand. Refused requests and companions write nothing. ctx bounds the
-// guarded batch.
+// companion is written first and the op created after it, so a failure
+// leaves at most the companion, never the op alone.
+//
+// The companion's Tag is part of the request: the op's digest covers it, so
+// a key already proposed without a companion (Propose), or with another
+// tag, is a *KeyReuseError and writes nothing, and Propose on a key proposed
+// here is one too. A proposal that finds the same request stored, a replay
+// or a lost race, writes no companion: the stored op was proposed with this
+// companion, which landed no later than it, and a later write (a resume's
+// clear) must stand. So a producer that must write the companion again, a
+// Stop after a resume cleared the last Stop's hold, needs a fresh key.
+// Refused requests and companions write nothing. ctx bounds the guarded
+// batch.
 func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (Op, bool, error) {
 	op, err := s.Preview(req)
 	if err != nil {
@@ -35,6 +44,7 @@ func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (O
 	if err := validCompanion(op.ID, with); err != nil {
 		return Op{}, false, err
 	}
+	op.PayloadDigest = companionDigest(op, with.Tag)
 	if !req.MintedKey {
 		existing, getErr := s.store.Get(op.ID)
 		switch {
@@ -48,7 +58,7 @@ func (s *Store) ProposeWith(ctx context.Context, req Request, with Companion) (O
 		if err := with.Write(); err != nil {
 			return Op{}, false, fmt.Errorf("writing the companion of op %s: %w", op.ID, err)
 		}
-		return s.Propose(req)
+		return s.create(op)
 	}
 	b, err := EncodeOp(op)
 	if err != nil {
@@ -95,6 +105,8 @@ func (s *Store) proposedElsewhere(op Op, batchErr error) (Op, bool, error) {
 func validCompanion(opID string, with Companion) error {
 	item := with.Item
 	switch {
+	case with.Tag == "" || strings.TrimSpace(with.Tag) != with.Tag:
+		return invalidf("op %s: a companion needs a tag without surrounding space", opID)
 	case (item.Create == nil) == (item.Update == nil):
 		return invalidf("op %s: a companion is exactly one create or update", opID)
 	case with.Write == nil:
