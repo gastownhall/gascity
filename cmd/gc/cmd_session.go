@@ -2908,6 +2908,9 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, js
 			if resp.Replayed {
 				fmt.Fprintf(stderr, "gc session submit: replayed op %s; resume was not reapplied (outside the op's request)\n", resp.OpID) //nolint:errcheck // best-effort stderr
 			}
+			if key != "" && apiKey != "" && resp.OpID == "" && !resp.Replayed {
+				fmt.Fprintf(stderr, "gc session submit: warning: --key not recorded (the API ran the message without recording an op), so a rerun acts again\n") //nolint:errcheck // best-effort stderr
+			}
 			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput, recorded)
 		}
 		if !api.ShouldFallback(c, err) {

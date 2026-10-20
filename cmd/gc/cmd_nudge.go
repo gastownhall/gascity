@@ -2054,9 +2054,15 @@ var errMessageOpRefused = errors.New("the op journal refused the request before 
 // as req: under require it first checks that the op journal can record req
 // (cliOp.preflight), since the resolution may materialize a configured named
 // session's row, and answers errMessageOpRefused, the refusal reported, when
-// it cannot. With the gate off it checks nothing and opens no op store.
+// it cannot. With the gate off, or on a worker site, which records no op, it
+// checks nothing and opens no op store.
 func resolveMessageOpTarget(identifier string, req cliOpRequest, warningWriter ...io.Writer) (nudgeTarget, error) {
 	return resolveNudgeTargetAfter(identifier, false, func(cityPath string, cfg *config.City, store beads.NudgesStore) error {
+		if onWorkerSite(cityPath) {
+			// A worker site records no op (sendMailNotifyWithOp records only
+			// the recipient's wake), so the journal has nothing to refuse.
+			return nil
+		}
 		// The op the verb starts once its target resolves prints the gate's
 		// warnings; this one only refuses.
 		stderr := req.stderr

@@ -749,22 +749,39 @@ func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
 // D12, §8.2: under require, a store that cannot record refuses before the
 // target resolves, so a configured named session with no row gets none.
 func TestMessageVerbsRequireRefuseBeforeMaterializing(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		run  func(t *testing.T) (code int, stdout, stderr string)
-	}{
-		{"submit", func(*testing.T) (int, string, string) {
+	oversized := strings.Repeat("x", opjournal.MaxInlinePayload+1)
+	invalidKey := strings.Repeat("k", 513)
+	submit := func(text, key string) func(*testing.T) (int, string, string) {
+		return func(t *testing.T) (int, string, string) {
 			t.Setenv("GC_NO_API", "1")
 			var stdout, stderr bytes.Buffer
-			code := cmdSessionSubmit([]string{killPokeSessionIdentity, "hello"}, session.SubmitIntentDefault, "", true, &stdout, &stderr)
+			code := cmdSessionSubmit([]string{killPokeSessionIdentity, text}, session.SubmitIntentDefault, key, true, &stdout, &stderr)
 			return code, stdout.String(), stderr.String()
-		}},
-		{"nudge", func(*testing.T) (int, string, string) {
+		}
+	}
+	nudge := func(text, key string) func(*testing.T) (int, string, string) {
+		return func(*testing.T) (int, string, string) {
 			var stdout, stderr bytes.Buffer
-			code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryImmediate, "", true, &stdout, &stderr)
+			code := cmdSessionNudge([]string{killPokeSessionIdentity, text}, nudgeDeliveryImmediate, key, true, &stdout, &stderr)
 			return code, stdout.String(), stderr.String()
-		}},
-		{"mail notify", func(t *testing.T) (int, string, string) {
+		}
+	}
+	for _, tc := range []struct {
+		name string
+		// incapable: the op store cannot record; else only the request is
+		// refused.
+		incapable bool
+		run       func(t *testing.T) (code int, stdout, stderr string)
+		wantCode  string
+		wantText  string
+	}{
+		{"submit store", true, submit("hello", ""), cliOpCodeUnavailable, "op journal cannot record this request"},
+		{"submit oversized", false, submit(oversized, ""), cliOpCodeUnavailable, "payload too large"},
+		{"submit invalid key", false, submit("hello", invalidKey), cliOpCodeInvalidKey, "invalid --key"},
+		{"nudge store", true, nudge("hello", ""), cliOpCodeUnavailable, "op journal cannot record this request"},
+		{"nudge oversized", false, nudge(oversized, ""), cliOpCodeUnavailable, "payload too large"},
+		{"nudge invalid key", false, nudge("hello", invalidKey), cliOpCodeInvalidKey, "invalid --key"},
+		{"mail notify store", true, func(t *testing.T) (int, string, string) {
 			var warn bytes.Buffer
 			prev := nudgeWarningWriter
 			nudgeWarningWriter = &warn
@@ -774,19 +791,23 @@ func TestMessageVerbsRequireRefuseBeforeMaterializing(t *testing.T) {
 				t.Fatalf("notify err = %v, want the refusal", err)
 			}
 			return 1, "", warn.String()
-		}},
+		}, "", "op journal cannot record this request"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			h := newCLIOpHarness(t, map[string]string{"GC_OPS_CONTENT": "require"})
 			dir := newCLIOpNamedCityWithoutRow(t)
-			h.opStore = cliOpIncapableStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+			var opStore beads.Store = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+			if tc.incapable {
+				opStore = cliOpIncapableStore{opStore}
+			}
+			h.opStore = opStore
 			code, stdout, stderr := tc.run(t)
-			if code != 1 || !strings.Contains(stderr, "op journal cannot record this request") {
-				t.Fatalf("code = %d, stderr = %q; want 1 and the require refusal", code, stderr)
+			if code != 1 || !strings.Contains(stderr, tc.wantText) {
+				t.Fatalf("code = %d, stderr = %q; want 1 and %q", code, stderr, tc.wantText)
 			}
 			if stdout != "" {
-				if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeUnavailable {
-					t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+				if got := cliOpFailureCode(t, []byte(stdout)); got != tc.wantCode {
+					t.Fatalf("failure code = %q, want %s", got, tc.wantCode)
 				}
 			}
 			if n := cliOpSessionRows(t, dir); n != 0 {
@@ -1020,5 +1041,151 @@ func TestSessionSubmitThroughTheAPIReportsTheLiveOp(t *testing.T) {
 	}
 	if n := submitDeliveries(c.sp) + len(cliOpRows(t, h.opStore)); n != 0 {
 		t.Fatalf("local deliveries and op rows = %d, want none: the API ran it", n)
+	}
+}
+
+// Under require, a nudge whose nudge store did not open cannot be recorded,
+// so it is refused before its target resolves.
+func TestSessionNudgeRequireNoNudgeStoreRefusesBeforeResolving(t *testing.T) {
+	h := newCLIOpHarness(t, map[string]string{"GC_OPS_CONTENT": "require"})
+	dir := newCLIOpNamedCityWithoutRow(t)
+	h.opStore = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	prev := openNudgeBeadStore
+	openNudgeBeadStore = func(string) beads.NudgesStore { return beads.NudgesStore{} }
+	t.Cleanup(func() { openNudgeBeadStore = prev })
+	var stdout, stderr bytes.Buffer
+	code := cmdSessionNudge([]string{killPokeSessionIdentity, "hello"}, nudgeDeliveryImmediate, "", true, &stdout, &stderr)
+	if code != 1 || !strings.Contains(stderr.String(), "op journal cannot record this request") {
+		t.Fatalf("nudge = %d, stderr = %q; want 1 and the require refusal", code, stderr.String())
+	}
+	if got := cliOpFailureCode(t, stdout.Bytes()); got != cliOpCodeUnavailable {
+		t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+	}
+	if n := cliOpSessionRows(t, dir); n != 0 {
+		t.Fatalf("session rows = %d, want none", n)
+	}
+}
+
+// admitMailNotifyAsCLI records, as another gc mail notify run would, the
+// notice sendMailNotifyWithOp records for messageID from mayor to c's
+// session, and leaves it open.
+func admitMailNotifyAsCLI(t *testing.T, c *contentOpCity, messageID string) *legacyop.Admission {
+	t.Helper()
+	st, err := opjournal.NewStore(beads.SessionStore{Store: c.h.opStore}, c.h.clk, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("opening op store: %v", err)
+	}
+	principal, actor := cliPrincipal(cliOpLookupEnv)
+	rec := &legacyop.Recorder{Mode: rollout.Auto, Executor: legacyop.ExecutorCLI, Open: func() (*opjournal.Store, error) { return st, nil }, Clock: c.h.clk}
+	adm, err := rec.Admit(legacyop.Request{
+		Conversation: c.target.sessionID, Principal: principal, Actor: actor,
+		Key: mailNotifyOpKey(messageID), Payload: mailNotifyText("mayor"), Causation: messageID,
+		Kind: opjournal.KindMessage, Policy: mailNotifyOpPolicy,
+	})
+	if err != nil || !adm.Recorded {
+		t.Fatalf("admit: recorded=%v err=%v", adm != nil && adm.Recorded, err)
+	}
+	return adm
+}
+
+// A notice has no --key, so its refusals name no --key remedy: an op in
+// progress says rerun later, and a closed failed op says rerun.
+func TestMailNotifyOpRefusalsNameNoKeyRemedy(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		failed     bool
+	}{
+		{name: "in progress", want: "rerun later"},
+		{name: "already failed", want: "rerun to act again", failed: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newContentOpCityOn(t, "auto", "claude")
+			adm := admitMailNotifyAsCLI(t, c, "gc-mail-k")
+			if tc.failed {
+				adm.Finish(legacyop.Result{Outcome: opjournal.Outcome{Arm: opjournal.ArmFailed, Reason: opjournal.RefusedReasonPrefix + "test"}})
+			}
+			var warn bytes.Buffer
+			nudgeWarningWriter = &warn
+			id, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-k")
+			if err == nil || id != "" {
+				t.Fatalf("notify = %q, %v; want the refusal", id, err)
+			}
+			if got := warn.String(); !strings.Contains(got, tc.want) || strings.Contains(got, "--key") {
+				t.Fatalf("warning = %q, want %q and no --key remedy", got, tc.want)
+			}
+			if n := len(c.delivered()); n != 0 {
+				t.Fatalf("deliveries = %d, want none", n)
+			}
+		})
+	}
+}
+
+// A submit whose city config does not load says its [ops] gates were not
+// read.
+func TestSessionSubmitConfigLoadFailureWarns(t *testing.T) {
+	_, c := submitOpCity(t, "", nil)
+	appendCityTOML(t, c.dir, "\n[ops]\ncontent = \"bogus\"\n")
+	var stdout, stderr bytes.Buffer
+	cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "", false, &stdout, &stderr)
+	if !strings.Contains(stderr.String(), "[ops] gates were not read") {
+		t.Fatalf("stderr = %q, want a warning that the [ops] gates were not read", stderr.String())
+	}
+}
+
+// A local submit composes the city config once: the gate read and the local
+// path share the invocation's config memo.
+func TestSessionSubmitLocalComposesConfigOnce(t *testing.T) {
+	_, c := submitOpCity(t, "auto", nil)
+	before := composedCityConfigLoads.Load()
+	var stdout, stderr bytes.Buffer
+	if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
+		t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+	}
+	if got := composedCityConfigLoads.Load() - before; got != 1 {
+		t.Fatalf("composed config loads = %d, want 1", got)
+	}
+}
+
+// In auto, an API that ran a --key submit without recording an op (its
+// answer names none) leaves the key unrecorded, so the CLI warns that a
+// rerun acts again, as the local path does; without --key it says nothing.
+func TestSessionSubmitThroughTheAPIUnrecordedKeyWarns(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/submit"):
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(map[string]any{"status": "accepted", "request_id": "req-1", "event_cursor": "0"}) //nolint:errcheck // test server
+		case r.Method == http.MethodGet && strings.HasSuffix(r.URL.Path, "/events/stream"):
+			raw, err := json.Marshal(map[string]any{
+				"type":    events.RequestResultSessionSubmit,
+				"payload": api.SessionSubmitSucceededPayload{RequestID: "req-1", SessionID: "gc-1", Intent: string(session.SubmitIntentDefault)},
+			})
+			if err != nil {
+				t.Errorf("encoding the event: %v", err)
+				return
+			}
+			w.Header().Set("Content-Type", "text/event-stream")
+			fmt.Fprintf(w, "data: %s\n\n", raw) //nolint:errcheck // test server
+			if f, ok := w.(http.Flusher); ok {
+				f.Flush()
+			}
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	t.Cleanup(srv.Close)
+	for _, tc := range []struct {
+		key  string
+		warn bool
+	}{{key: "k-unrec", warn: true}, {key: ""}} {
+		_, c := submitOpCity(t, "auto", srv)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, testSubmitText}, session.SubmitIntentDefault, tc.key, false, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit key %q = %d; stderr=%s", tc.key, code, stderr.String())
+		}
+		if got := strings.Contains(stderr.String(), "warning: --key not recorded"); got != tc.warn {
+			t.Fatalf("submit key %q stderr = %q, want the unrecorded --key warning = %v", tc.key, stderr.String(), tc.warn)
+		}
 	}
 }

@@ -295,10 +295,11 @@ func cliCityConfig(cityPath string, cityErr error, warn io.Writer) (*config.City
 	return loadCityConfig(cityPath, warn)
 }
 
-// preflight opens the op store and checks --key ahead of a verb's
-// resolution, which may itself write (wake materializes a named session's
-// row): under require a store that cannot record, and then an invalid key,
-// refuse before anything is written. A refusal only proposing the op can
+// preflight opens the op store and checks --key and the payload ahead of a
+// verb's resolution, which may itself write (wake materializes a named
+// session's row): under require a store that cannot record, and then an
+// invalid key or a payload over opjournal.MaxInlinePayload, refuse before
+// anything is written. A refusal only proposing the op can
 // raise, such as a journal write that fails, still comes after that write
 // (admitWake). The refusal goes through the recorder, which counts (and
 // degrades) it as it does at admission; preflight reports false after
@@ -313,21 +314,19 @@ func (o *cliOp) preflight() bool {
 		o.refuseUnrecordable()
 		return false
 	}
-	_, err := o.rec.Open()
-	if err == nil {
-		if o.req.key == "" {
-			return true
+	if _, err := o.rec.Open(); err != nil {
+		_, aerr := o.rec.Admit(legacyop.Request{Key: o.req.key, Kind: o.req.kind})
+		if !errors.Is(aerr, legacyop.ErrUnavailable) {
+			aerr = err
 		}
-		if err = opjournal.ValidateClientKey(o.req.key); err == nil {
-			return true
-		}
+		o.refuseAdmit(aerr)
+		return false
 	}
-	_, aerr := o.rec.Admit(legacyop.Request{Key: o.req.key, Kind: o.req.kind})
-	if errors.Is(aerr, legacyop.ErrUnavailable) {
-		err = aerr
+	if err := o.rec.Check(legacyop.Request{Key: o.req.key, Payload: o.req.payload, Kind: o.req.kind}); err != nil {
+		o.refuseAdmit(err)
+		return false
 	}
-	o.refuseAdmit(err)
-	return false
+	return true
 }
 
 // unavailableMessage is the require refusal of a request the journal cannot

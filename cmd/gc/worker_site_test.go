@@ -455,6 +455,47 @@ func TestWorkerSiteMailSendNotifiedMeansAWakeWasRecorded(t *testing.T) {
 	}
 }
 
+// A worker-site mail notice records only the recipient's wake and never an
+// op (sendMailNotifyWithOp), so whether the op journal can record does not
+// decide whether it is sent: under require, with an op store that cannot
+// record and with the box's own store, the wake is recorded.
+func TestWorkerSiteMailNotifyUnderRequireRecordsTheWake(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		incapable bool
+	}{
+		{name: "op store cannot record", incapable: true},
+		{name: "box store"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir, sessionID := newWorkerSiteSessionCity(t, map[string]string{"state": string(session.StateAsleep), "alias": "worker"})
+			if tc.incapable {
+				h := newCLIOpHarness(t, map[string]string{"GC_OPS_CONTENT": "require"})
+				h.opStore = cliOpIncapableStore{&beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}}
+			} else {
+				t.Setenv("GC_OPS_CONTENT", "require")
+			}
+			var stdout, stderr bytes.Buffer
+			if code := cmdMailSendJSON([]string{"worker", "check the deploy"}, true, false, "human", "", "", "", "", true, &stdout, &stderr); code != 0 {
+				t.Fatalf("gc mail send --notify = %d, want 0; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
+			}
+			var result struct {
+				Notified bool `json:"notified"`
+			}
+			if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+				t.Fatalf("decoding %q: %v", stdout.String(), err)
+			}
+			recipient, err := localLedger(t, cityDir).Get(sessionID)
+			if err != nil {
+				t.Fatalf("Get: %v", err)
+			}
+			if !result.Notified || recipient.Metadata["wake_request"] == "" {
+				t.Fatalf("notified = %v, wake_request = %q; stderr=%q: the notice records no op, so require must not refuse it", result.Notified, recipient.Metadata["wake_request"], stderr.String())
+			}
+		})
+	}
+}
+
 // TestWorkerSiteSlingNudgePokesAreNotices: gc sling's courtesy nudge on a box
 // queues no text, since the box's nudge queue is a local file the remote
 // controller never reads, and claims no poke. A pool with no running member
