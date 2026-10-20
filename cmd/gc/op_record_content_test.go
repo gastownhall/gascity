@@ -1,0 +1,684 @@
+package main
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	gascity "github.com/gastownhall/gascity"
+	"github.com/gastownhall/gascity/internal/api"
+	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/events"
+	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/rollout"
+	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
+)
+
+// testNudgeMessage is the text deliverSessionNudgeWithWorker nudges with.
+const testNudgeMessage = "check deploy status"
+
+// deliverSessionNudgeWithWorker delivers testNudgeMessage in plain-text
+// output under a minted key (deliverSessionNudgeKeyed).
+func deliverSessionNudgeWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, mode nudgeDeliveryMode, stdout, stderr io.Writer) int {
+	return deliverSessionNudgeKeyed(target, store, sp, testNudgeMessage, mode, "", false, stdout, stderr)
+}
+
+// sendMailNotifyWithWorker notifies target of mail messageID from the human
+// sender, without the op id (sendMailNotifyWithOp).
+func sendMailNotifyWithWorker(target nudgeTarget, store beads.Store, sp runtime.Provider, messageID string) error {
+	_, err := sendMailNotifyWithOp(target, store, sp, "human", messageID)
+	return err
+}
+
+// contentOpCity is a file-backed city with one running session on a fake
+// runtime, for the nudge and mail notify ops. Its op rows live in h's
+// opStore, which pins ids.
+type contentOpCity struct {
+	dir    string
+	store  beads.Store
+	fake   *runtime.Fake
+	target nudgeTarget
+	h      *cliOpHarness
+}
+
+// newContentOpCity builds the city with the ops.content gate at mode (""
+// leaves it off).
+func newContentOpCity(t *testing.T, mode string) *contentOpCity {
+	t.Helper()
+	t.Setenv("GC_BEADS", "file")
+	env := map[string]string{}
+	if mode != "" {
+		env["GC_OPS_CONTENT"] = mode
+	}
+	h := newCLIOpHarness(t, env)
+	h.opStore = &beads.MemStore{IDPrefix: "gc", HonorExplicitIDs: true}
+	dir := t.TempDir()
+	store := openNudgeBeadStore(dir)
+	fake := runtime.NewFake()
+	mgr := newSessionManagerWithConfig(dir, store, fake, nil)
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "worker", Title: "Worker", Command: "codex", WorkDir: dir, Provider: "codex", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	prevManaged, prevPoke := nudgeCityUsesManagedReconciler, nudgePokeController
+	nudgeCityUsesManagedReconciler = func(string) bool { return false }
+	nudgePokeController = func(string, reconcilekey.Key) error { return nil }
+	prevWarn := nudgeWarningWriter
+	nudgeWarningWriter = io.Discard
+	t.Cleanup(func() {
+		nudgeCityUsesManagedReconciler, nudgePokeController = prevManaged, prevPoke
+		nudgeWarningWriter = prevWarn
+	})
+	return &contentOpCity{
+		dir: dir, store: store, fake: fake, h: h,
+		target: nudgeTarget{
+			cityPath:    dir,
+			cfg:         &config.City{Agents: []config.Agent{{Name: "worker", Provider: "codex"}}},
+			sessionID:   info.ID,
+			sessionName: info.SessionName,
+			identity:    "worker",
+			agent:       config.Agent{Name: "worker", Provider: "codex"},
+			resolved:    &config.ResolvedProvider{Name: "codex"},
+		},
+	}
+}
+
+// nudge runs gc session nudge's delivery under key.
+func (c *contentOpCity) nudge(mode nudgeDeliveryMode, key string, asJSON bool) (int, string, string) {
+	var stdout, stderr bytes.Buffer
+	code := deliverSessionNudgeKeyed(c.target, c.store, c.fake, testNudgeMessage, mode, key, asJSON, &stdout, &stderr)
+	return code, stdout.String(), stderr.String()
+}
+
+// delivered lists the runtime deliveries the fake saw: the text a session
+// received, with its structured content and delivery key.
+func (c *contentOpCity) delivered() []runtime.Call {
+	var out []runtime.Call
+	for _, call := range c.fake.Calls {
+		if call.Method == "Nudge" || call.Method == "NudgeNow" {
+			out = append(out, runtime.Call{Method: call.Method, Message: call.Message, Content: call.Content, DeliveryKey: call.DeliveryKey})
+		}
+	}
+	return out
+}
+
+// queuedTexts lists the texts of the nudges queued for the target.
+func (c *contentOpCity) queuedTexts(t *testing.T) []string {
+	t.Helper()
+	pending, _, _, err := listQueuedNudgesForTarget(c.dir, c.target, time.Now().Add(time.Hour))
+	if err != nil {
+		t.Fatalf("listing queued nudges: %v", err)
+	}
+	var texts []string
+	for _, item := range pending {
+		texts = append(texts, item.Source+": "+item.Message)
+	}
+	return texts
+}
+
+// queued counts the nudges queued for the target.
+func (c *contentOpCity) queued(t *testing.T) int {
+	t.Helper()
+	return len(c.queuedTexts(t))
+}
+
+// contentOpValidate fails unless out, one JSON line, validates against the
+// built-in schema at path.
+func contentOpValidate(t *testing.T, path, out string) {
+	t.Helper()
+	raw, err := gascity.BuiltinSchemas.ReadFile(path)
+	if err != nil {
+		t.Fatalf("reading %s: %v", path, err)
+	}
+	var doc any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(out)), &doc); err != nil {
+		t.Fatalf("decoding JSON %q: %v", out, err)
+	}
+	if err := compileJSONSchema(t, "gc://"+path, raw).Validate(doc); err != nil {
+		t.Fatalf("%s does not match %s: %v", out, path, err)
+	}
+}
+
+func TestSessionNudgeOpPolicy(t *testing.T) {
+	for mode, want := range map[nudgeDeliveryMode]opjournal.MessagePolicy{
+		nudgeDeliveryImmediate: {When: opjournal.WhenSteer, Wake: opjournal.WakeIfNeeded, Role: opjournal.RoleNotice, OnUnsupported: opjournal.FallbackBoundary},
+		nudgeDeliveryWaitIdle:  {When: opjournal.WhenBoundary, Wake: opjournal.WakeIfNeeded, Role: opjournal.RoleNotice},
+		nudgeDeliveryQueue:     {When: opjournal.WhenBoundary, Wake: opjournal.WakeIfNeeded, Role: opjournal.RoleNotice},
+	} {
+		if got := sessionNudgeOpPolicy(mode).Message; got != want {
+			t.Errorf("sessionNudgeOpPolicy(%s) = %+v, want %+v", mode, got, want)
+		}
+	}
+}
+
+// A recorded nudge is one message{role: notice} op, proposed before the
+// delivery and closed from it: delivered, or queued.
+func TestSessionNudgeOpRecordsTheDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		mode    nudgeDeliveryMode
+		when    opjournal.When
+		via     string
+		outcome string
+	}{
+		{nudgeDeliveryImmediate, opjournal.WhenSteer, legacyop.ViaLegacyDelivered, "delivered"},
+		// The fake reports no idle boundary, so a wait-idle nudge queues.
+		{nudgeDeliveryWaitIdle, opjournal.WhenBoundary, legacyop.ViaLegacyQueued, "queued"},
+		{nudgeDeliveryQueue, opjournal.WhenBoundary, legacyop.ViaLegacyQueued, "queued"},
+	} {
+		t.Run(string(tc.mode), func(t *testing.T) {
+			c := newContentOpCity(t, "auto")
+			proposedBeforeDelivery := false
+			c.h.onOpen = func() { proposedBeforeDelivery = len(c.delivered()) == 0 && c.queued(t) == 0 }
+			code, stdout, stderr := c.nudge(tc.mode, "", true)
+			if code != 0 {
+				t.Fatalf("nudge = %d, want 0; stderr=%s", code, stderr)
+			}
+			if !proposedBeforeDelivery {
+				t.Fatal("the op store opened after the delivery: the op must be proposed before it")
+			}
+			op := cliOpOnly(t, c.h.opStore)
+			cliOpWantOutcome(t, op, opjournal.ArmSucceeded, "", tc.via)
+			if op.Kind != opjournal.KindMessage || op.Conversation != c.target.sessionID || op.Payload != testNudgeMessage {
+				t.Fatalf("op = %+v, want a message op for %s carrying the nudge text", op, c.target.sessionID)
+			}
+			if op.Policy.Message.When != tc.when || op.Policy.Message.Role != opjournal.RoleNotice {
+				t.Fatalf("op policy = %+v, want when %s, role notice", op.Policy.Message, tc.when)
+			}
+			if op.Producer.Principal != legacyop.PrincipalOperator {
+				t.Fatalf("principal = %q, want operator outside an agent session", op.Producer.Principal)
+			}
+			contentOpValidate(t, "schemas/session/nudge/result.schema.json", stdout)
+			got := cliOpJSON(t, []byte(stdout))
+			if got["op_id"] != op.ID || got["key"] != op.ClientKey || got["outcome"] != tc.outcome {
+				t.Fatalf("JSON = %v, want op_id %s, key %s, outcome %s", got, op.ID, op.ClientKey, tc.outcome)
+			}
+			if _, ok := got["replayed"]; ok {
+				t.Fatalf("JSON = %v, want no replayed on a first run", got)
+			}
+		})
+	}
+}
+
+// Inside an agent session the nudge is the agent's: its principal is the
+// caller's conversation.
+func TestSessionNudgeOpAgentPrincipal(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	c.h.env["GC_SESSION_ID"] = "gc-caller"
+	if code, _, stderr := c.nudge(nudgeDeliveryImmediate, "", false); code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	op := cliOpOnly(t, c.h.opStore)
+	if op.Producer.Principal != "conversation:gc-caller" || op.Producer.Actor != opjournal.ActorAgent {
+		t.Fatalf("producer = %+v, want conversation:gc-caller, agent", op.Producer)
+	}
+}
+
+// A same-key rerun replays the first run's outcome and delivers nothing.
+func TestSessionNudgeOpKeyReplaysWithoutDeliveringAgain(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	code, first, stderr := c.nudge(nudgeDeliveryImmediate, "k-nudge-1", false)
+	if code != 0 {
+		t.Fatalf("first nudge = %d; stderr=%s", code, stderr)
+	}
+	code, again, stderr := c.nudge(nudgeDeliveryImmediate, "k-nudge-1", false)
+	if code != 0 {
+		t.Fatalf("rerun = %d; stderr=%s", code, stderr)
+	}
+	if n := len(c.delivered()); n != 1 {
+		t.Fatalf("deliveries = %d, want 1: the rerun replays", n)
+	}
+	op := cliOpOnly(t, c.h.opStore)
+	if again != first || !strings.Contains(stderr, "replayed op "+op.ID) {
+		t.Fatalf("rerun stdout = %q (first %q), stderr = %q; want the first success line and the replay note", again, first, stderr)
+	}
+	code, out, _ := c.nudge(nudgeDeliveryImmediate, "k-nudge-1", true)
+	contentOpValidate(t, "schemas/session/nudge/result.schema.json", out)
+	if got := cliOpJSON(t, []byte(out)); code != 0 || got["replayed"] != true || got["op_id"] != op.ID {
+		t.Fatalf("JSON rerun = %d %v, want replayed op %s", code, got, op.ID)
+	}
+}
+
+// A queued nudge's replay reports the queue, as the first run did.
+func TestSessionNudgeOpReplaysAQueuedNudgeAsQueued(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	if code, _, stderr := c.nudge(nudgeDeliveryQueue, "k-q", false); code != 0 {
+		t.Fatalf("nudge = %d; stderr=%s", code, stderr)
+	}
+	code, out, stderr := c.nudge(nudgeDeliveryQueue, "k-q", true)
+	if code != 0 {
+		t.Fatalf("rerun = %d; stderr=%s", code, stderr)
+	}
+	if got := cliOpJSON(t, []byte(out)); got["outcome"] != "queued" || got["queued"] != true || got["replayed"] != true {
+		t.Fatalf("JSON = %v, want a replayed queued outcome", got)
+	}
+	if n := c.queued(t); n != 1 {
+		t.Fatalf("queued nudges = %d, want 1: the rerun replays", n)
+	}
+}
+
+// An immediate nudge refused behind a permission prompt closes
+// failed{refused:pending_interaction}, and types nothing.
+func TestSessionNudgeOpRefusedBehindAPendingPrompt(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	c.fake.SetPendingInteraction(c.target.sessionName, &runtime.PendingInteraction{RequestID: "req-1", Kind: "approval", Prompt: "Run it?"})
+	code, _, stderr := c.nudge(nudgeDeliveryImmediate, "", false)
+	if code != 1 {
+		t.Fatalf("nudge = %d, want 1; stderr=%s", code, stderr)
+	}
+	op := cliOpOnly(t, c.h.opStore)
+	cliOpWantOutcome(t, op, opjournal.ArmFailed, opjournal.RefusedReasonPrefix+cliOpRefusedPendingInteraction, "")
+	if !strings.Contains(stderr, "waiting on a permission prompt") || !strings.Contains(stderr, op.ID) {
+		t.Fatalf("stderr = %q, want the refusal and the op", stderr)
+	}
+	if n := len(c.delivered()); n != 0 {
+		t.Fatalf("deliveries = %d, want none behind the prompt", n)
+	}
+}
+
+// Off records nothing; under require a store that cannot record refuses the
+// nudge before any effect.
+func TestSessionNudgeOpOffAndRequire(t *testing.T) {
+	t.Run("off", func(t *testing.T) {
+		c := newContentOpCity(t, "")
+		code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", true)
+		if code != 0 || stderr != "" {
+			t.Fatalf("nudge = %d, stderr %q; want 0 and nothing on stderr", code, stderr)
+		}
+		if got := cliOpJSON(t, []byte(stdout)); got["op_id"] != nil || got["key"] != nil {
+			t.Fatalf("JSON = %v, want no op fields with the gate off", got)
+		}
+		if n := len(cliOpRows(t, c.h.opStore)); n != 0 || c.h.opens != 0 {
+			t.Fatalf("op rows = %d, store opens = %d; want neither with the gate off", n, c.h.opens)
+		}
+	})
+	t.Run("require", func(t *testing.T) {
+		c := newContentOpCity(t, "require")
+		c.h.opStore = cliOpIncapableStore{c.h.opStore}
+		code, stdout, stderr := c.nudge(nudgeDeliveryImmediate, "", true)
+		if code != 1 {
+			t.Fatalf("nudge = %d, want 1; stderr=%s", code, stderr)
+		}
+		if got := cliOpFailureCode(t, []byte(stdout)); got != cliOpCodeUnavailable {
+			t.Fatalf("failure code = %q, want %s", got, cliOpCodeUnavailable)
+		}
+		if n := len(c.delivered()); n != 0 || c.queued(t) != 0 {
+			t.Fatalf("deliveries = %d, queued = %d; want no effect", n, c.queued(t))
+		}
+	})
+}
+
+// I11: the text a session receives is the off text, byte for byte, in every
+// ops.content mode, and no op id or key reaches the runtime.
+func TestSessionNudgeAndMailNotifyDeliveredTextIsUnchangedByTheGate(t *testing.T) {
+	type run struct {
+		calls  []runtime.Call
+		queued []string
+		ids    []string
+	}
+	runAll := func(mode string) run {
+		c := newContentOpCity(t, mode)
+		if code, _, stderr := c.nudge(nudgeDeliveryImmediate, "k-text", false); code != 0 {
+			t.Fatalf("%s nudge = %d; stderr=%s", mode, code, stderr)
+		}
+		if code, _, stderr := c.nudge(nudgeDeliveryWaitIdle, "k-text-2", false); code != 0 {
+			t.Fatalf("%s wait-idle nudge = %d; stderr=%s", mode, code, stderr)
+		}
+		if _, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-7"); err != nil {
+			t.Fatalf("%s mail notify: %v", mode, err)
+		}
+		r := run{calls: c.delivered(), queued: c.queuedTexts(t)}
+		for _, op := range cliOpRows(t, c.h.opStore) {
+			r.ids = append(r.ids, op.ID, op.ClientKey)
+		}
+		return r
+	}
+	off := runAll("")
+	if len(off.calls)+len(off.queued) != 3 {
+		t.Fatalf("off deliveries = %+v, queued = %v; want 3 between them", off.calls, off.queued)
+	}
+	for _, mode := range []string{"auto", "require"} {
+		got := runAll(mode)
+		if len(got.ids) != 6 {
+			t.Fatalf("%s op rows = %d, want 3 recorded", mode, len(got.ids)/2)
+		}
+		offJSON, _ := json.Marshal([]any{off.calls, off.queued})
+		gotJSON, _ := json.Marshal([]any{got.calls, got.queued})
+		if !bytes.Equal(offJSON, gotJSON) {
+			t.Fatalf("%s deliveries = %s, want the off deliveries %s", mode, gotJSON, offJSON)
+		}
+		for _, id := range got.ids {
+			if strings.Contains(string(gotJSON), id) {
+				t.Fatalf("%s: delivered text carries %q", mode, id)
+			}
+		}
+	}
+}
+
+// A mail notify is cause-keyed: key mail:<message id>, causation the message
+// id; a notify the op already closed is not delivered again.
+func TestMailNotifyOpIsCauseKeyed(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	id, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-1")
+	if err != nil {
+		t.Fatalf("notify: %v", err)
+	}
+	op := cliOpOnly(t, c.h.opStore)
+	// The fake reports no idle boundary, so the wait-idle notice queues.
+	cliOpWantOutcome(t, op, opjournal.ArmSucceeded, "", legacyop.ViaLegacyQueued)
+	if id != op.ID || op.ClientKey != "mail:gc-mail-1" || op.Causation != "gc-mail-1" || op.Payload != "You have mail from mayor" {
+		t.Fatalf("op = %+v (returned id %q), want key mail:gc-mail-1, causation gc-mail-1, the notice text", op, id)
+	}
+	if op.Policy.Message.When != opjournal.WhenBoundary || op.Policy.Message.Role != opjournal.RoleNotice {
+		t.Fatalf("policy = %+v, want a boundary notice", op.Policy.Message)
+	}
+	again, err := sendMailNotifyWithOp(c.target, c.store, c.fake, "mayor", "gc-mail-1")
+	if err != nil || again != op.ID {
+		t.Fatalf("second notify = %q, %v; want the replayed op %s", again, err, op.ID)
+	}
+	if n := len(c.delivered()) + c.queued(t); n != 1 {
+		t.Fatalf("deliveries and queued notices = %d, want 1: the same message notifies once", n)
+	}
+}
+
+// A broadcast records one notify op per recipient, and --json names them; a
+// dedup-suppressed send proposes nothing.
+func TestMailSendNotifyOpsPerRecipient(t *testing.T) {
+	c := newContentOpCity(t, "auto")
+	mp := beadmail.New(beads.NewMemStore())
+	nf := func(_, messageID string) (string, error) {
+		return sendMailNotifyWithOp(c.target, c.store, c.fake, "human", messageID)
+	}
+	recipients := map[string]bool{"human": true, "a": true, "b": true}
+	var stdout, stderr bytes.Buffer
+	if code := doMailSendAllJSON(mp, events.Discard, recipients, "human", []string{"hello"}, nf, true, &stdout, &stderr); code != 0 {
+		t.Fatalf("send --all = %d; stderr=%s", code, stderr.String())
+	}
+	contentOpValidate(t, "schemas/mail/send/result.schema.json", stdout.String())
+	var got mailActionResult
+	if err := json.Unmarshal(bytes.TrimSpace(stdout.Bytes()), &got); err != nil {
+		t.Fatalf("decoding %q: %v", stdout.String(), err)
+	}
+	ops := cliOpRows(t, c.h.opStore)
+	if len(ops) != 2 || len(got.NotifyOpIDs) != 2 {
+		t.Fatalf("ops = %d, notify_op_ids = %v; want one per recipient", len(ops), got.NotifyOpIDs)
+	}
+	for i, m := range got.Messages {
+		if ops[i].ClientKey != "mail:"+m.ID && ops[1-i].ClientKey != "mail:"+m.ID {
+			t.Fatalf("no notify op keyed by message %s among %+v", m.ID, ops)
+		}
+	}
+
+	before := len(cliOpRows(t, c.h.opStore))
+	args := []string{"a", "subject", "body"}
+	for i := 0; i < 2; i++ {
+		stdout.Reset()
+		if code := doMailSendJSON(mp, events.Discard, recipients, "human", args, nf, "dedup-1", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("dedup send %d = %d; stderr=%s", i, code, stderr.String())
+		}
+	}
+	if n := len(cliOpRows(t, c.h.opStore)) - before; n != 1 {
+		t.Fatalf("notify ops for two dedup sends = %d, want 1: the suppressed send proposes nothing", n)
+	}
+}
+
+// submitOpCity is the OJ-3 named-session city under ops.content, with the
+// CLI's API client pointed at srv (nil: no API).
+func submitOpCity(t *testing.T, mode string, srv *httptest.Server) (*cliOpHarness, *cliOpCity) {
+	t.Helper()
+	env := map[string]string{}
+	if mode != "" {
+		env["GC_OPS_CONTENT"] = mode
+	}
+	h := newCLIOpHarness(t, env)
+	c := newCLIOpCity(t, h, nil)
+	oldAlive, oldClient := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	apiRouteControllerAliveHook = func(string) int { return 0 }
+	apiRouteSupervisorClientHook = func(string) *api.Client {
+		if srv == nil {
+			return nil
+		}
+		return api.NewCityScopedClient(srv.URL, filepath.Base(c.dir))
+	}
+	t.Cleanup(func() { apiRouteControllerAliveHook, apiRouteSupervisorClientHook = oldAlive, oldClient })
+	return h, c
+}
+
+// testSubmitText is the message the submit tests send.
+const testSubmitText = "status update please"
+
+// submitDeliveries counts the runtime deliveries of testSubmitText.
+func submitDeliveries(sp *runtime.Fake) int {
+	n := 0
+	for _, call := range sp.Calls {
+		if (call.Method == "Nudge" || call.Method == "NudgeNow") && strings.Contains(call.Message, testSubmitText) {
+			n++
+		}
+	}
+	return n
+}
+
+// proposeAsAPI records the submit as the API's admitMessageOp records it, on
+// the op store h opens.
+func proposeAsAPI(t *testing.T, h *cliOpHarness, conv, key, text string, intent session.SubmitIntent, outcome *opjournal.Outcome) opjournal.Op {
+	t.Helper()
+	st, err := opjournal.NewStore(beads.SessionStore{Store: h.opStore}, &clock.Fake{Time: cliOpT0}, opjournal.WithIDPrefix("gc"))
+	if err != nil {
+		t.Fatalf("opening op store: %v", err)
+	}
+	rec := &legacyop.Recorder{Mode: rollout.Auto, Executor: legacyop.ExecutorAPI, Open: func() (*opjournal.Store, error) { return st, nil }, Clock: h.clk, Inflight: legacyop.NewInflight()}
+	adm, err := rec.Admit(legacyop.Request{
+		Conversation: conv, Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator,
+		Key: key, Payload: text, Kind: opjournal.KindMessage, Policy: api.MessageOpPolicy(intent),
+	})
+	if err != nil || !adm.Recorded {
+		t.Fatalf("API admit: recorded=%v err=%v", adm != nil && adm.Recorded, err)
+	}
+	if outcome == nil {
+		return adm.Op
+	}
+	return adm.Finish(legacyop.Result{Outcome: *outcome}).Op
+}
+
+// lostAnswerServer accepts a submit, records it as the API would through
+// accept, and then drops the connection before answering, as a transport
+// failure after the commit does.
+func lostAnswerServer(t *testing.T, accept func(key string)) *httptest.Server {
+	t.Helper()
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/submit") {
+			http.NotFound(w, r)
+			return
+		}
+		accept(r.Header.Get("Idempotency-Key"))
+		hj, ok := w.(http.Hijacker)
+		if !ok {
+			t.Errorf("response writer cannot hijack")
+			return
+		}
+		conn, _, err := hj.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close() //nolint:errcheck // dropping the answer is the point
+	}))
+	t.Cleanup(srv.Close)
+	return srv
+}
+
+// The fallback dedupe matrix (DES-O0API §15 OJ-5): the local path proposes
+// the op id the API records, so a message the API accepted is never
+// delivered again by the fallback.
+func TestSessionSubmitFallbackDedupe(t *testing.T) {
+	const text = testSubmitText
+	t.Run("api never reached: local proposes and delivers", func(t *testing.T) {
+		h, c := submitOpCity(t, "auto", nil)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+		}
+		op := cliOpOnly(t, h.opStore)
+		cliOpWantOutcome(t, op, opjournal.ArmSucceeded, "", legacyop.ViaLegacyDelivered)
+		if op.Producer.Principal != legacyop.PrincipalOperator || op.Payload != text {
+			t.Fatalf("op = %+v, want the operator's message", op)
+		}
+		if n := submitDeliveries(c.sp); n != 1 {
+			t.Fatalf("deliveries = %d, want 1", n)
+		}
+		contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+		if got := cliOpJSON(t, stdout.Bytes()); got["op_id"] != op.ID || got["key"] != op.ClientKey {
+			t.Fatalf("JSON = %v, want op %s and its key", got, op.ID)
+		}
+	})
+	t.Run("api accepted, answer lost, op open: reports the API's op", func(t *testing.T) {
+		var h *cliOpHarness
+		var c *cliOpCity
+		var sent string
+		var apiOp opjournal.Op
+		srv := lostAnswerServer(t, func(key string) {
+			sent = key
+			apiOp = proposeAsAPI(t, h, c.bead.ID, key, text, session.SubmitIntentDefault, nil)
+		})
+		h, c = submitOpCity(t, "auto", srv)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+		}
+		if !strings.HasPrefix(sent, "k-") {
+			t.Fatalf("Idempotency-Key = %q, want the minted key", sent)
+		}
+		if n := submitDeliveries(c.sp); n != 0 {
+			t.Fatalf("deliveries = %d, want none: the API accepted the message", n)
+		}
+		if !strings.Contains(stdout.String(), "Accepted by the controller") || !strings.Contains(stdout.String(), apiOp.ID) || !strings.Contains(stdout.String(), "--key "+sent) {
+			t.Fatalf("stdout = %q, want the API's op %s and the key %s", stdout.String(), apiOp.ID, sent)
+		}
+		if ops := cliOpRows(t, h.opStore); len(ops) != 1 || ops[0].Executor != opjournal.ExecutorLegacyAPI || ops[0].Status == opjournal.StatusClosed {
+			t.Fatalf("ops = %+v, want only the API's open op", ops)
+		}
+		// A same-key rerun under --json, whose API answer is lost too, finds
+		// the API's op still open: accepted, with the op and its key.
+		stdout.Reset()
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, sent, true, &stdout, &stderr); code != 0 {
+			t.Fatalf("JSON rerun = %d; stderr=%s", code, stderr.String())
+		}
+		contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+		if got := cliOpJSON(t, stdout.Bytes()); got["outcome"] != sessionSubmitAcceptedOutcome || got["op_id"] != apiOp.ID || got["key"] != sent {
+			t.Fatalf("JSON = %v, want accepted with op %s and key %s", got, apiOp.ID, sent)
+		}
+		if n := submitDeliveries(c.sp); n != 0 {
+			t.Fatalf("deliveries = %d, want none", n)
+		}
+	})
+	t.Run("api accepted and closed, answer lost: replays the outcome", func(t *testing.T) {
+		var h *cliOpHarness
+		var c *cliOpCity
+		queued := opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyQueued}}
+		srv := lostAnswerServer(t, func(key string) {
+			proposeAsAPI(t, h, c.bead.ID, key, text, session.SubmitIntentFollowUp, &queued)
+		})
+		h, c = submitOpCity(t, "auto", srv)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentFollowUp, "k-submit-1", false, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+		}
+		if n := submitDeliveries(c.sp); n != 0 {
+			t.Fatalf("deliveries = %d, want none: the API delivered it", n)
+		}
+		if !strings.Contains(stdout.String(), "Queued follow-up for "+c.bead.ID) || !strings.Contains(stderr.String(), "replayed op") {
+			t.Fatalf("stdout = %q, stderr = %q; want the replayed queued outcome", stdout.String(), stderr.String())
+		}
+	})
+	t.Run("local op in progress: no second delivery", func(t *testing.T) {
+		h, c := submitOpCity(t, "auto", nil)
+		st, err := opjournal.NewStore(beads.SessionStore{Store: h.opStore}, h.clk, opjournal.WithIDPrefix("gc"))
+		if err != nil {
+			t.Fatalf("opening op store: %v", err)
+		}
+		if _, created, err := st.Propose(opjournal.Request{
+			Conversation: c.bead.ID, Kind: opjournal.KindMessage, Executor: opjournal.ExecutorLegacyCLI, ClientKey: "k-busy",
+			Producer: opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+			Payload:  text, Policy: api.MessageOpPolicy(session.SubmitIntentDefault),
+			StartBy: cliOpT0.Add(legacyop.ExecutionBound), FinishBy: cliOpT0.Add(legacyop.ExecutionBound),
+		}); err != nil || !created {
+			t.Fatalf("proposing the open op: created=%t err=%v", created, err)
+		}
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, text}, session.SubmitIntentDefault, "k-busy", false, &stdout, &stderr); code != 1 {
+			t.Fatalf("submit = %d, want 1; stderr=%s", code, stderr.String())
+		}
+		if n := submitDeliveries(c.sp); n != 0 || !strings.Contains(stderr.String(), "in progress") {
+			t.Fatalf("deliveries = %d, stderr = %q; want none and op_in_progress", n, stderr.String())
+		}
+	})
+}
+
+// Through the API the CLI sends its key as the Idempotency-Key and reports
+// the op the API recorded; with the gate off and no --key it sends none.
+func TestSessionSubmitThroughTheAPISendsTheKey(t *testing.T) {
+	serve := func(t *testing.T, gotKey *string) *httptest.Server {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			*gotKey = r.Header.Get("Idempotency-Key")
+			replayed, via := true, legacyop.ViaLegacyDelivered
+			body := map[string]any{
+				"status": "accepted", "request_id": "gc-op-1", "event_cursor": "0", "replayed": replayed,
+				"op": map[string]any{
+					"id": "gc-op-1", "conversation": "gc-1", "kind": "message", "status": "closed",
+					"outcome": map[string]any{"arm": "succeeded", "via": via},
+				},
+			}
+			if *gotKey == "" {
+				http.Error(w, "test server refuses this request", http.StatusTeapot)
+				return
+			}
+			body["idempotency_key"] = *gotKey
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusAccepted)
+			json.NewEncoder(w).Encode(body) //nolint:errcheck // test server
+		}))
+		t.Cleanup(srv.Close)
+		return srv
+	}
+	t.Run("key", func(t *testing.T) {
+		var got string
+		srv := serve(t, &got)
+		_, c := submitOpCity(t, "auto", srv)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "k-api-1", true, &stdout, &stderr); code != 0 {
+			t.Fatalf("submit = %d; stderr=%s", code, stderr.String())
+		}
+		if got != "k-api-1" {
+			t.Fatalf("Idempotency-Key = %q, want k-api-1", got)
+		}
+		contentOpValidate(t, "schemas/session/submit/result.schema.json", stdout.String())
+		out := cliOpJSON(t, stdout.Bytes())
+		if out["op_id"] != "gc-op-1" || out["key"] != "k-api-1" || out["replayed"] != true || !strings.Contains(stderr.String(), "replayed op gc-op-1") {
+			t.Fatalf("JSON = %v, stderr = %q; want the API's replayed op", out, stderr.String())
+		}
+	})
+	t.Run("off sends no key", func(t *testing.T) {
+		var got string
+		srv := serve(t, &got)
+		h, c := submitOpCity(t, "", srv)
+		var stdout, stderr bytes.Buffer
+		if code := cmdSessionSubmit([]string{c.bead.ID, "hi"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
+			t.Fatalf("submit = %d, want the test server's refusal; stderr=%s", code, stderr.String())
+		}
+		if got != "" || h.opens != 0 || strings.Contains(stderr.String(), "key") {
+			t.Fatalf("Idempotency-Key = %q, opens = %d, stderr = %q; want no key, no op store, no key on stderr", got, h.opens, stderr.String())
+		}
+	})
+}

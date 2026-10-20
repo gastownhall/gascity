@@ -1588,6 +1588,7 @@ go_test(
         "oneshot_by_id_routes_test.go",
         "oneshot_class_routes_test.go",
         "only_lanes_inject_input_test.go",
+        "op_record_content_test.go",
         "op_record_test.go",
         "op_record_verbs_matrix_test.go",
         "op_record_verbs_test.go",

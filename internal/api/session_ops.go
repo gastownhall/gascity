@@ -532,7 +532,7 @@ func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *mes
 		Key:          req.key,
 		Payload:      req.text,
 		Kind:         opjournal.KindMessage,
-		Policy:       messageOpPolicy(req.intent),
+		Policy:       MessageOpPolicy(req.intent),
 	}
 	if req.conv == "" {
 		if rec.Mode != gate.Require {
@@ -631,9 +631,11 @@ func requestInFlight() error {
 	return apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
 }
 
-// messageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
-// /messages is the default intent.
-func messageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
+// MessageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
+// /messages is the default intent. gc session submit's local path records its
+// op under the same policy, so a request the API recorded and its CLI
+// fallback derive one op digest.
+func MessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 	when := opjournal.WhenBoundary
 	switch intent {
 	case session.SubmitIntentFollowUp:

@@ -269,7 +269,7 @@ func TestWorkerSiteSessionNudgeRefusesBeforeWriting(t *testing.T) {
 
 			for _, target := range []string{sessionID, "no-such-session"} {
 				var stdout, stderr bytes.Buffer
-				if code := cmdSessionNudge([]string{target, "check", "deploy", "status"}, mode, false, &stdout, &stderr); code != 1 {
+				if code := cmdSessionNudge([]string{target, "check", "deploy", "status"}, mode, "", false, &stdout, &stderr); code != 1 {
 					t.Fatalf("gc session nudge %s on a worker site = %d, want 1; stdout=%q stderr=%q", target, code, stdout.String(), stderr.String())
 				}
 				if !strings.Contains(stderr.String(), errWorkerSiteDeliveryNeedsController.Error()) || strings.Contains(stderr.String(), "recorded change") {
@@ -301,7 +301,7 @@ func TestWorkerSiteSessionSubmitRefusesBeforeWriting(t *testing.T) {
 	dials := countSocketDials(t)
 
 	var stdout, stderr bytes.Buffer
-	if code := cmdSessionSubmit([]string{sessionID, "check", "deploy", "status"}, session.SubmitIntentDefault, false, &stdout, &stderr); code != 1 {
+	if code := cmdSessionSubmit([]string{sessionID, "check", "deploy", "status"}, session.SubmitIntentDefault, "", false, &stdout, &stderr); code != 1 {
 		t.Fatalf("gc session submit on a worker site = %d, want 1; stdout=%q stderr=%q", code, stdout.String(), stderr.String())
 	}
 	if !strings.Contains(stderr.String(), errWorkerSiteDeliveryNeedsController.Error()) {
@@ -333,7 +333,7 @@ func TestWorkerSiteMailNotifyToADormantTargetRecordsOnlyAWake(t *testing.T) {
 	t.Cleanup(func() { nudgeWarningWriter = prevWarnings })
 	beforeCalls := len(fake.Calls)
 
-	if err := sendMailNotifyWithWorker(target, store, fake, "human", ""); err != nil {
+	if err := sendMailNotifyWithWorker(target, store, fake, ""); err != nil {
 		t.Fatalf("sendMailNotifyWithWorker on a worker site: %v", err)
 	}
 	assertNudgeNotQueuedNotice(t, warnings.String(), true)
@@ -377,7 +377,7 @@ func TestWorkerSiteMailNotifyWithoutARecordedWakeNotifiesNobody(t *testing.T) {
 			t.Cleanup(func() { nudgeWarningWriter = prevWarnings })
 			beforeCalls := len(fake.Calls)
 
-			err = sendMailNotifyWithWorker(target, store, fake, "human", "")
+			err = sendMailNotifyWithWorker(target, store, fake, "")
 			if !errors.Is(err, errWorkerSiteNotifyNotDelivered) {
 				t.Fatalf("sendMailNotifyWithWorker = %v, want errWorkerSiteNotifyNotDelivered", err)
 			}

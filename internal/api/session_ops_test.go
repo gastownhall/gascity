@@ -1392,7 +1392,7 @@ func (e *opsEnv) seedOpAt(t *testing.T, conv, key, text string, executor opjourn
 	op, created, err := st.Propose(opjournal.Request{
 		Conversation: conv, Kind: opjournal.KindMessage, Executor: executor, ClientKey: key,
 		Producer: opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
-		Payload:  text, Policy: messageOpPolicy(session.SubmitIntentDefault),
+		Payload:  text, Policy: MessageOpPolicy(session.SubmitIntentDefault),
 		StartBy: now.Add(legacyop.ExecutionBound), FinishBy: now.Add(legacyop.ExecutionBound),
 	})
 	if err != nil || !created {
@@ -1793,7 +1793,7 @@ func TestMessageOpOutcomesMapBothWays(t *testing.T) {
 			}
 			op := opjournal.Op{
 				ID: "gc-op-1", Conversation: "gc-1", Kind: opjournal.KindMessage, Status: opjournal.StatusClosed, Outcome: res.Outcome,
-				Policy: messageOpPolicy(session.SubmitIntentFollowUp),
+				Policy: MessageOpPolicy(session.SubmitIntentFollowUp),
 			}
 			for _, ep := range []struct{ operation, code, success string }{
 				{RequestOperationSessionSubmit, tc.submitCode, events.RequestResultSessionSubmit},

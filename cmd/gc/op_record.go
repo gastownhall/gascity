@@ -15,6 +15,16 @@ package main
 // loaded city config, as every rollout gate is; with it off nothing is
 // recorded and no store is opened.
 //
+// The content verbs (OJ-5) record message ops under ops.content: gc session
+// nudge and a mail notify under the caller's principal, the notify keyed by
+// its cause (mail:<message id>), and gc session submit under the operator on
+// its API and local paths alike. Submit mints its key before it calls the
+// API, which records the op as legacy:api; a fallback after a lost answer
+// proposes that op id locally, so it replays a closed op and reports an open
+// one as accepted rather than delivering again. A queued delivery closes its
+// op succeeded{via: legacy.queued} at enqueue (§8.5). The delivered text is
+// the legacy path's in every mode (I11).
+//
 // Output (DES-O0API §8.3): stdout stays the command's own; JSON results gain
 // op_id, key and replayed when an op backs the run. The key, minted when
 // --key is absent, is printed only in JSON and on failures, never on a
@@ -50,6 +60,7 @@ package main
 // would kill the replacement.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -172,9 +183,26 @@ type cliOpRequest struct {
 	// unreplayed names the execution options outside the op's digest this
 	// run was given (kill's --force); a replay says they were not reapplied.
 	unreplayed []string
-	asJSON     bool
-	stdout     io.Writer
-	stderr     io.Writer
+	// payload is a message op's text and causation the id of what caused it
+	// (a mail notify's message); both are empty for the lifecycle verbs.
+	payload   string
+	causation string
+	// asOperator records the request under the operator principal whoever
+	// runs it: gc session submit is an operator verb on its API and local
+	// paths alike, so both derive one op id (DES-O0API §3.3).
+	asOperator bool
+	// presetKey is a key the command minted itself, used when key (--key) is
+	// empty: submit mints its key before it calls the API, so its local
+	// fallback proposes the op id the API would have recorded.
+	presetKey string
+	// acceptsAPIOp answers an open legacy:api op under the key as the API
+	// having accepted the request (cliOpAcceptedByAPI) instead of
+	// op_in_progress: submit's local fallback after an API call whose answer
+	// was lost.
+	acceptsAPIOp bool
+	asJSON       bool
+	stdout       io.Writer
+	stderr       io.Writer
 }
 
 // unrecordableCause is why the request cannot be recorded: its reason, with
@@ -197,12 +225,20 @@ const (
 	cliOpReplayed
 	// cliOpRefused reported a refusal; the command exits 1 without acting.
 	cliOpRefused
+	// cliOpAcceptedByAPI found the request's op open under the API's
+	// executor (cliOp.apiOp): the API accepted it and runs it, so the
+	// command reports that and exits 0 without acting.
+	cliOpAcceptedByAPI
 )
 
 // cliOp is one CLI verb's op.
 type cliOp struct {
 	req cliOpRequest
 	rec *legacyop.Recorder
+	// sessStore is the sessions-class store the op store opens over. A
+	// command that resolves its gate before it opens its stores (submit)
+	// binds it later, before it starts the op.
+	sessStore beads.Store
 	// opened is the op store the recorder opened first, and openErr the
 	// error that open failed with: every later open reuses the one answer.
 	opened  *opjournal.Store
@@ -214,18 +250,20 @@ type cliOp struct {
 	// restartedAs is the generation a kill's session restarted as since the
 	// earlier kill its key names; 0 when the op is not that earlier kill.
 	restartedAs int64
+	// apiOp is the open legacy:api op a cliOpAcceptedByAPI start found.
+	apiOp opjournal.Op
 }
 
 // newCLIOp resolves req's gate from cfg and builds its recorder over the op
 // store opened lazily on sessStore. It records nothing yet.
 func newCLIOp(cfg *config.City, sessStore beads.Store, req cliOpRequest) *cliOp {
-	op := &cliOp{req: req}
+	op := &cliOp{req: req, sessStore: sessStore}
 	op.rec = &legacyop.Recorder{
 		Mode:     op.mode(cfg),
 		Executor: legacyop.ExecutorCLI,
 		Open: func() (*opjournal.Store, error) {
 			if op.opened == nil && op.openErr == nil {
-				op.opened, op.openErr = cliOpenOpStore(sessStore)
+				op.opened, op.openErr = cliOpenOpStore(op.sessStore)
 			}
 			return op.opened, op.openErr
 		},
@@ -297,28 +335,33 @@ func (o *cliOp) start() cliOpStart {
 	rec := o.rec
 	if req.unrecordable != "" && rec.Mode == rollout.Require {
 		rec.Refused(req.kind, req.unrecordable)
-		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(req.unrecordableCause()), "", req.key)
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(req.unrecordableCause()), "", o.requestKey())
 		return cliOpRefused
 	}
 	if req.unrecordable != "" {
 		if req.key != "" && rec.Mode == rollout.Auto {
 			fmt.Fprintf(req.stderr, "%s: warning: --key not recorded (%s); running unrecorded, so a rerun acts again\n", req.verb, req.unrecordableCause()) //nolint:errcheck // best-effort stderr
 		}
-		o.adm = rec.Unrecorded(req.kind, req.key, req.unrecordable)
+		o.adm = rec.Unrecorded(req.kind, o.requestKey(), req.unrecordable)
 		return cliOpExecute
 	}
-	principal, actor := cliPrincipal(cliOpLookupEnv)
+	principal, actor := o.principal()
 	o.rescopeRestartedKill(principal)
 	adm, err := rec.Admit(legacyop.Request{
 		Conversation: req.conversation,
 		Principal:    principal,
 		Actor:        actor,
-		Key:          req.key,
+		Key:          o.requestKey(),
+		Payload:      req.payload,
+		Causation:    req.causation,
 		Kind:         req.kind,
 		Policy:       req.policy,
 		Scope:        o.req.scope,
 	})
 	if err != nil {
+		if o.acceptedByAPI(err) {
+			return cliOpAcceptedByAPI
+		}
 		o.refuseAdmit(err)
 		return cliOpRefused
 	}
@@ -343,6 +386,45 @@ func (o *cliOp) start() cliOpStart {
 		fmt.Sprintf("op %s closed %s%s; rerun without --key to act again", adm.Op.ID, cliOpOutcomeText(adm.Op.Outcome), o.restartNote()),
 		adm.Op.ID, adm.Key)
 	return cliOpRefused
+}
+
+// principal is the request's principal and actor: the operator for an
+// operator verb (asOperator), else the caller's (cliPrincipal).
+func (o *cliOp) principal() (principal, actor string) {
+	if o.req.asOperator {
+		return legacyop.PrincipalOperator, opjournal.ActorOperator
+	}
+	return cliPrincipal(cliOpLookupEnv)
+}
+
+// requestKey is the client key the op is admitted under: --key, else the key
+// the command minted itself (presetKey), else empty, which the recorder mints.
+func (o *cliOp) requestKey() string {
+	if o.req.key != "" {
+		return o.req.key
+	}
+	return o.req.presetKey
+}
+
+// acceptedByAPI reports whether err is a busy refusal of an open op the API
+// executes, for a request that accepts one (acceptsAPIOp), and keeps that op
+// as apiOp. An op that does not read, or that another executor holds, is the
+// busy refusal it is.
+func (o *cliOp) acceptedByAPI(err error) bool {
+	var busy *legacyop.BusyError
+	if !o.req.acceptsAPIOp || !errors.As(err, &busy) {
+		return false
+	}
+	st, oerr := o.rec.Open()
+	if oerr != nil {
+		return false
+	}
+	op, gerr := st.Get(busy.ID)
+	if gerr != nil || op.Executor != opjournal.ExecutorLegacyAPI || op.Status == opjournal.StatusClosed {
+		return false
+	}
+	o.apiOp = op
+	return true
 }
 
 // rescopeRestartedKill scopes a kill under a client key to the earlier kill
@@ -529,15 +611,15 @@ func (o *cliOp) refuseAdmit(err error) {
 	var busy *legacyop.BusyError
 	switch {
 	case errors.As(err, &busy):
-		o.refuse(cliOpCodeInProgress, fmt.Sprintf("%v%s; rerun later or without --key", busy, o.restartNote()), busy.ID, o.req.key)
+		o.refuse(cliOpCodeInProgress, fmt.Sprintf("%v%s; rerun later or without --key", busy, o.restartNote()), busy.ID, o.requestKey())
 	case errors.Is(err, opjournal.ErrKeyReuse):
-		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), cliOpReusedID(err), o.req.key)
+		o.refuse(cliOpCodeKeyMismatch, fmt.Sprintf("the key names a different request (%v); rerun with another --key", err), cliOpReusedID(err), o.requestKey())
 	case errors.Is(err, legacyop.ErrUnavailable):
-		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.req.key)
-	case o.req.key != "" && opjournal.ValidateClientKey(o.req.key) != nil:
-		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), "", o.req.key)
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.requestKey())
+	case o.requestKey() != "" && opjournal.ValidateClientKey(o.requestKey()) != nil:
+		o.refuse(cliOpCodeInvalidKey, fmt.Sprintf("invalid --key (%v)", err), "", o.requestKey())
 	default:
-		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.req.key)
+		o.refuse(cliOpCodeUnavailable, o.unavailableMessage(err), "", o.requestKey())
 	}
 }
 
@@ -669,12 +751,69 @@ func (o *cliOp) outcome() opjournal.Outcome {
 // annotate adds the op's id, key and replay flag to a JSON result when an op
 // backs the run.
 func (o *cliOp) annotate(result *sessionActionResult) {
+	result.OpID, result.Key, result.Replayed = o.jsonFields()
+}
+
+// jsonFields are the op_id, key and replayed fields of a JSON result: the
+// op's id, its client key and whether the run replayed it, when an op backs
+// the run, else zero.
+func (o *cliOp) jsonFields() (opID, key string, replayed bool) {
 	if o == nil || o.adm == nil || !o.adm.Recorded {
+		return "", "", false
+	}
+	return o.adm.Op.ID, o.adm.Key, o.adm.Decision == legacyop.Replay
+}
+
+// replayedQueued reports whether the replayed op's message was queued rather
+// than delivered (succeeded{via: legacy.queued}).
+func (o *cliOp) replayedQueued() bool {
+	return o.outcome().Result.Via == legacyop.ViaLegacyQueued
+}
+
+// cliMessageSentinels maps the CLI message paths' legacy errors onto op
+// outcomes (DES-O0API §6.3). Message ops always close.
+var cliMessageSentinels = legacyop.Sentinels{
+	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
+	ConversationClosed:  []error{session.ErrSessionClosed},
+	SessionGone:         []error{session.ErrSessionNotFound, runtime.ErrSessionNotFound},
+	ProviderUnavailable: []error{runtime.ErrRuntimeUnavailable},
+	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
+}
+
+// Refusal reasons the message verbs close an op with, after refused:.
+const (
+	// cliOpRefusedPendingInteraction is an immediate nudge refused because
+	// its session waits on a permission prompt it would answer.
+	cliOpRefusedPendingInteraction = "pending_interaction"
+	// cliOpRefusedACPNotOwned is an immediate nudge to an ACP session whose
+	// connection this process does not own.
+	cliOpRefusedACPNotOwned = "acp_connection_not_owned"
+)
+
+// cliMessageRefusal is a message verb's refusal of its request: its error
+// text is the refusal's, and its op closes failed{refused:<why>}.
+type cliMessageRefusal struct {
+	why string
+	err error
+}
+
+// Error is the refusal's text.
+func (e *cliMessageRefusal) Error() string { return e.err.Error() }
+
+// Unwrap returns the refusal's error.
+func (e *cliMessageRefusal) Unwrap() error { return e.err }
+
+// finishMessage closes a message op from its legacy result: delivered,
+// queued, refused (cliMessageRefusal) or another error's outcome.
+func (o *cliOp) finishMessage(queued bool, err error) {
+	if o == nil {
 		return
 	}
-	result.OpID = o.adm.Op.ID
-	result.Key = o.adm.Key
-	result.Replayed = o.adm.Decision == legacyop.Replay
+	if refusal := (*cliMessageRefusal)(nil); errors.As(err, &refusal) {
+		o.finishOutcome(cliOpRefusedOutcome(refusal.why))
+		return
+	}
+	o.finish(cliMessageSentinels.MessageResult(queued, err))
 }
 
 // cliOpRefusedOutcome is failed{refused:<why>}.
