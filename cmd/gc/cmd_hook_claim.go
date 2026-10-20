@@ -240,6 +240,10 @@ type hookClaimOps struct {
 	// EmitClaimRejected publishes a bead.claim_rejected event when a claim is
 	// lost to a different live claimant (ADR-0009). Best-effort.
 	EmitClaimRejected hookEmitClaimRejectedFunc
+	// EmitClaimFailed publishes a bead.claim_failed event when a served
+	// candidate is skipped because its claim write failed: the controller's
+	// claim-loop guard counts these (claim_loop_guard.go). Best-effort.
+	EmitClaimFailed func(beadID string, opts hookClaimOptions, err error)
 	// ResolveWorkBranch returns the git branch of the worker's worktree, stamped
 	// onto the bead as gc.work_branch at claim time. It is handed a tree that
 	// already carries the repository it resolved to, so the branch comes from the
@@ -587,6 +591,9 @@ func (ops *hookClaimOps) applyDefaults() {
 	if ops.EmitClaimRejected == nil {
 		ops.EmitClaimRejected = hookEmitClaimRejected
 	}
+	if ops.EmitClaimFailed == nil {
+		ops.EmitClaimFailed = hookEmitClaimFailed
+	}
 	if ops.ResolveWorkBranch == nil {
 		ops.ResolveWorkBranch = hookResolveWorkBranch
 	}
@@ -661,6 +668,14 @@ func (ops *hookClaimOps) applyDefaults() {
 	}
 	if ops.ClaimWindow <= 0 {
 		ops.ClaimWindow = resolveHookClaimWindow()
+	}
+}
+
+// emitClaimFailed is ops.EmitClaimFailed for a caller that may drive a claim
+// tier directly, without the production defaults applied.
+func (ops *hookClaimOps) emitClaimFailed(beadID string, opts hookClaimOptions, err error) {
+	if ops.EmitClaimFailed != nil {
+		ops.EmitClaimFailed(beadID, opts, err)
 	}
 }
 
@@ -835,7 +850,8 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 				//
 				// A binding that refuses the claim CAS outright carries the same
 				// proof and is skipped for the same reason: the escalation only
-				// ran because a work store returned not-found, and the refusal
+				// ran because the work store was proved not to hold the bead
+				// (claim_class_route.go legProvedAbsent), and the refusal
 				// lands before any write (hookClaimBindingRefusedTheClaim). One
 				// bead no store can claim must not stop this session claiming
 				// the work that other stores can.
@@ -1000,6 +1016,10 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// drain report claims_errored instead of a healthy no_work so the write
 			// failure stays visible; the work is reclaimed next tick (NDI) either way.
 			fmt.Fprintf(stderr, "gc hook --claim: skipping %s: %v\n", candidate.ID, err) //nolint:errcheck
+			// The claim-loop guard's input. Only this tier reports: its rows
+			// are the routed demand a seat was spawned for, the one count the
+			// guard can withhold a bead from (claim_loop_guard.go).
+			ops.emitClaimFailed(candidate.ID, opts, err)
 			claimsErrored = true
 			continue
 		}
@@ -3240,6 +3260,59 @@ func emitClaimReleased(rec events.Recorder, release hookClaimReleaseRecord) {
 // city event log so a lost-claim race is observable for eval/audit (ADR-0009).
 func hookEmitClaimRejected(beadID, existingClaimant, attemptedClaimant string) {
 	emitClaimRejected(openCityRecorder(io.Discard), beadID, existingClaimant, attemptedClaimant)
+}
+
+// hookEmitClaimFailed publishes a best-effort bead.claim_failed event for a
+// routed candidate this seat skipped because its claim write failed. A `gc hook`
+// invocation records to its own city instead (hookCity.claimOps).
+func hookEmitClaimFailed(beadID string, opts hookClaimOptions, err error) {
+	emitClaimFailedTo(func() events.Recorder { return openCityRecorder(io.Discard) }, beadID, opts, err)
+}
+
+// emitClaimFailedTo records claimFailedEvent's event, if there is one, to the
+// log open opens, which it closes. The log is opened only when there is
+// something to record.
+func emitClaimFailedTo(open func() events.Recorder, beadID string, opts hookClaimOptions, err error) {
+	evt, ok := claimFailedEvent(beadID, opts, err)
+	if !ok {
+		return
+	}
+	rec := open()
+	if closer, ok := rec.(io.Closer); ok {
+		defer closer.Close() //nolint:errcheck // claim-failure events are best-effort
+	}
+	rec.Record(evt)
+}
+
+// claimFailedEvent is the bead.claim_failed record for one skipped candidate,
+// or false when there is nothing to record. Only a seat of a template has
+// anything for the claim-loop guard to count, so a hook run outside one
+// records nothing. The payload's error is the form the guard compares
+// (claimLoopComparable), made here from the whole text; the message keeps the
+// server request id for the operator.
+func claimFailedEvent(beadID string, opts hookClaimOptions, err error) (events.Event, bool) {
+	template := strings.TrimSpace(hookClaimEnvValue(opts.Env, "GC_TEMPLATE"))
+	if err == nil || template == "" || strings.TrimSpace(beadID) == "" {
+		return events.Event{}, false
+	}
+	sessionID := hookClaimSessionID(opts.Env)
+	text := err.Error()
+	var epoch int64
+	if opts.StartedFence.HasGen {
+		epoch = opts.StartedFence.Gen
+	}
+	payload, marshalErr := json.Marshal(events.BeadClaimFailedPayload{Template: template, SessionID: sessionID, RuntimeEpoch: epoch, Error: claimLoopComparable(text)})
+	if marshalErr != nil {
+		return events.Event{}, false
+	}
+	return events.Event{
+		Type:      events.BeadClaimFailed,
+		Actor:     opts.Assignee,
+		Subject:   beadID,
+		SessionID: sessionID,
+		Message:   claimLoopErrorText(text),
+		Payload:   payload,
+	}, true
 }
 
 // emitClaimRejected is hookEmitClaimRejected recording to rec, which it closes.

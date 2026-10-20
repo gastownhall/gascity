@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/extmsg"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -705,6 +706,33 @@ type messageOutcome struct {
 // 2026-10-08). Otherwise a session that is not running gets the message
 // queued and the start is left to the controller (deferToController).
 func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool) (messageOutcome, error) {
+	return s.submitMessageToSessionFor(ctx, store, id, message, intent, resume, messageOpDelivery{})
+}
+
+// messageOpDelivery is how a recorded message op's delivery is keyed: op is
+// its id, key the runtime delivery key every execution uses
+// (legacyop.Admission.DeliveryKey), and redelivery whether this execution
+// re-runs an adopted op whose first execution may have delivered. The zero
+// value is an unrecorded request: unkeyed, with no lookup.
+type messageOpDelivery struct {
+	op, key    string
+	redelivery bool
+}
+
+// opDeliveryOf is adm's delivery: zero unless adm is a recorded Execute.
+func opDeliveryOf(adm *legacyop.Admission) messageOpDelivery {
+	key := adm.DeliveryKey()
+	if key == "" {
+		return messageOpDelivery{}
+	}
+	return messageOpDelivery{op: adm.Op.ID, key: key, redelivery: adm.Adopted}
+}
+
+// submitMessageToSessionFor is submitMessageToSession for a recorded op: the
+// request carries od's key and redelivery. A result the runtime replayed (an
+// adopted op whose first execution delivered) is logged and returned as a
+// delivered, unqueued outcome: nothing was sent again.
+func (s *Server) submitMessageToSessionFor(ctx context.Context, store beads.Store, id, message string, intent session.SubmitIntent, resume bool, od messageOpDelivery) (messageOutcome, error) {
 	handle, err := s.workerHandleForSession(store, id)
 	if err != nil {
 		return messageOutcome{}, err
@@ -714,11 +742,17 @@ func (s *Server) submitMessageToSession(ctx context.Context, store beads.Store, 
 		by = s.actor(session.ActorOperator)
 	}
 	result, err := handle.Message(ctx, by, worker.MessageRequest{
-		Text:     message,
-		Delivery: workerDeliveryIntent(intent),
+		Text:        message,
+		Delivery:    workerDeliveryIntent(intent),
+		DeliveryKey: od.key,
+		Redelivery:  od.redelivery,
 	})
 	if err != nil {
 		return messageOutcome{}, err
+	}
+	if result.Replayed {
+		log.Printf("gc api: op %s: session %s's runtime already holds the message an earlier execution delivered; nothing sent again", od.op, id)
+		return messageOutcome{}, nil
 	}
 	out := messageOutcome{SubmitOutcome: session.SubmitOutcome{Queued: result.Queued, Deferred: result.Deferred, Interrupt: result.Interrupt}}
 	if result.Deferred {

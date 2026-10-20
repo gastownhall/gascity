@@ -346,6 +346,20 @@ export type BeadAssignInputBody = {
     assignee?: string;
 };
 
+export type BeadClaimFailedPayload = {
+    error: string;
+    runtime_epoch?: number;
+    session_id?: string;
+    template: string;
+};
+
+export type BeadClaimLoopHeldPayload = {
+    error: string;
+    failures: number;
+    held_until: string;
+    template: string;
+};
+
 export type BeadClaimRejectedPayload = {
     attempted_claimant: string;
     bead_id: string;
@@ -1013,7 +1027,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -5823,6 +5837,10 @@ export type TranscriptProvenance = 'live' | 'hydrated';
 export type TypedEventStreamEnvelope = ({
     type: 'backend.credential_resolved';
 } & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
+    type: 'bead.claim_failed';
+} & TypedEventStreamEnvelopeBeadClaimFailed) | ({
+    type: 'bead.claim_loop_held';
+} & TypedEventStreamEnvelopeBeadClaimLoopHeld) | ({
     type: 'bead.claim_rejected';
 } & TypedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.claim_released';
@@ -6069,6 +6087,42 @@ export type TypedEventStreamEnvelopeBackendCredentialResolved = {
     subject?: string;
     ts: string;
     type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.claim_failed
+ */
+export type TypedEventStreamEnvelopeBeadClaimFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.claim_loop_held
+ */
+export type TypedEventStreamEnvelopeBeadClaimLoopHeld = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimLoopHeldPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_loop_held';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8150,6 +8204,10 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
 export type TypedTaggedEventStreamEnvelope = ({
     type: 'backend.credential_resolved';
 } & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
+    type: 'bead.claim_failed';
+} & TypedTaggedEventStreamEnvelopeBeadClaimFailed) | ({
+    type: 'bead.claim_loop_held';
+} & TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld) | ({
     type: 'bead.claim_rejected';
 } & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.claim_released';
@@ -8397,6 +8455,44 @@ export type TypedTaggedEventStreamEnvelopeBackendCredentialResolved = {
     subject?: string;
     ts: string;
     type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_failed
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_loop_held
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimLoopHeldPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_loop_held';
     workflow?: WorkflowEventProjection;
 };
 

@@ -182,6 +182,11 @@ type CityRuntime struct {
 	detachedOrphan     *detachedOrphanLane
 	detachedOrphanOnce sync.Once
 
+	// claimLoop is the claim-loop guard (claim_loop_guard.go), fed by the same
+	// journal feed as the delta lanes; created on first use.
+	claimLoop     *claimLoopGuard
+	claimLoopOnce sync.Once
+
 	// ordersLane runs order dispatch off the tick (orders_lane.go). It owns
 	// od, retiredOrderDispatchers, the order-set bookkeeping and the watchdog
 	// clocks below; created on first use.
@@ -2964,7 +2969,7 @@ func (cr *CityRuntime) reloadConfigTraced(
 		cr.sessionDrains = newDrainTracker()
 		cr.providerHealthGate = newProviderHealthGate()
 	}
-	cr.configRev = result.Revision
+	cr.adoptConfigRevision(result.Revision)
 	cr.watchTargets = config.WatchTargets(result.Prov, nextCfg, cityRoot)
 	cr.restartConfigWatcher()
 	if trace != nil {
@@ -5327,4 +5332,14 @@ func (cr *CityRuntime) preserveSessionsOnShutdown() {
 
 func (cr *CityRuntime) forceStopRequested() bool {
 	return cr != nil && cr.forceStopShutdown != nil && cr.forceStopShutdown.Load()
+}
+
+// adoptConfigRevision records rev as the configuration this runtime runs. A
+// changed revision resets the claim-loop guard: the new config may have fixed
+// what held claims were failing on.
+func (cr *CityRuntime) adoptConfigRevision(rev string) {
+	if rev != cr.configRev {
+		cr.claimLoopGuardOf().configChanged()
+	}
+	cr.configRev = rev
 }

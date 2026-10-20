@@ -785,7 +785,7 @@ func TestNudgeFileQueueCharacterizationCLI(t *testing.T) {
 	h.step("gc nudge drop --json", func() string { return drop(true, "n-3", "n-1", "n-missing") })
 	h.step("queued nudge line", func() string {
 		var stdout, stderr bytes.Buffer
-		code := writeQueuedSessionNudgeResult(h.target("s-new", "2"), nudgeDeliveryQueue, false, "", &stdout, &stderr)
+		code := writeQueuedSessionNudgeResult(h.target("s-new", "2"), nudgeDeliveryQueue, false, "", nil, &stdout, &stderr)
 		return fmt.Sprintf("exit=%d\nstdout:\n%sstderr:\n%s", code, stdout.String(), stderr.String())
 	})
 	h.finish("cli")

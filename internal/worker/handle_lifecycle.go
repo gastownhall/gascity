@@ -362,9 +362,17 @@ func (h *SessionHandle) Message(ctx context.Context, by sessionpkg.Actor, req Me
 	if err != nil {
 		return MessageResult{}, err
 	}
+	if _, held, lookErr := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery(id)); lookErr != nil || held {
+		err = lookErr
+		result = MessageResult{Replayed: held}
+		return result, err
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return MessageResult{}, err
+	}
+	if req.DeliveryKey != "" {
+		ctx = runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 	}
 	outcome, err := h.manager.Submit(ctx, by, id, req.Text, resumeCommand, h.runtimeHints(), submitIntent(req.Delivery))
 	if err != nil {
@@ -437,7 +445,15 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	if err != nil {
 		return NudgeResult{}, err
 	}
-	defer func() { result.Unfenced = unfenced && result.Delivered }()
+	defer func() { result.Unfenced = unfenced && result.Delivered && !result.Replayed }()
+	receipt, held, err := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery(id))
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	if held {
+		result = NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}
+		return result, nil
+	}
 	resumeCommand, err := h.startCommand(id)
 	if err != nil {
 		return NudgeResult{}, err
@@ -495,6 +511,13 @@ func (h *SessionHandle) Nudge(ctx context.Context, by sessionpkg.Actor, req Nudg
 	default:
 		err = fmt.Errorf("unknown nudge delivery %q", req.Delivery)
 		return NudgeResult{}, err
+	}
+}
+
+// lookupDelivery is session id's delivery lookup for heldDelivery.
+func (h *SessionHandle) lookupDelivery(id string) func(context.Context, string) (runtime.DeliveryReceipt, bool, error) {
+	return func(ctx context.Context, key string) (runtime.DeliveryReceipt, bool, error) {
+		return h.manager.LookupDelivery(ctx, id, key)
 	}
 }
 

@@ -31,8 +31,9 @@ import (
 // the ID of the message the nudge announces. messageID lets the queued nudge
 // carry a re-checkable reference, so delivery-time re-validation can withdraw
 // it if the message is read or gone by then (gastownhall/gascity#5321).
+// It returns the id of the op that records the notice, "" when none does.
 // Errors are non-fatal.
-type nudgeFunc func(recipient, messageID string) error
+type nudgeFunc func(recipient, messageID string) (opID string, err error)
 
 const (
 	mailInjectMaxMessages          = 3
@@ -80,7 +81,11 @@ type mailActionResult struct {
 	Count         *int                 `json:"count,omitempty"`
 	AlreadyDone   bool                 `json:"already_done,omitempty"`
 	Notified      bool                 `json:"notified,omitempty"`
-	DryRun        bool                 `json:"dry_run,omitempty"`
+	// NotifyOpIDs are the ids of the operation-journal ops that record the
+	// recipients' new-mail notices, one per notified recipient whose notice
+	// was recorded (DES-O0API §8.4).
+	NotifyOpIDs []string `json:"notify_op_ids,omitempty"`
+	DryRun      bool     `json:"dry_run,omitempty"`
 }
 
 type mailMessageSummary struct {
@@ -116,11 +121,26 @@ func summarizeMailMessage(m mail.Message) mailMessageSummary {
 	}
 }
 
+// appendNotifyOp appends a notice's op id to ids, when an op recorded it.
+func appendNotifyOp(ids []string, opID string) []string {
+	if opID == "" {
+		return ids
+	}
+	return append(ids, opID)
+}
+
+// newMailNudgeFunc notifies a mail recipient from sender, passing the mail
+// message id as the notice's cause (sendMailNotify). Under require a notice
+// the op journal cannot record is refused before the recipient resolves, so
+// it materializes no configured named session's row.
 func newMailNudgeFunc(sender string) nudgeFunc {
-	return func(recipient, messageID string) error {
-		target, err := resolveNudgeTarget(recipient, io.Discard)
+	return func(recipient, messageID string) (string, error) {
+		target, err := resolveMessageOpTarget(recipient, mailNotifyOpRequest(mailNotifyText(sender), messageID), io.Discard)
+		if errors.Is(err, errMessageOpRefused) {
+			return "", mailNotifyRefusedError(messageID)
+		}
 		if err != nil {
-			return err
+			return "", err
 		}
 		return sendMailNotify(target, sender, messageID)
 	}
@@ -2156,16 +2176,18 @@ func doMailSendJSON(mp mail.Provider, rec events.Recorder, validRecipients map[s
 
 	// Nudge recipient if requested and recipient is not human.
 	notified := false
+	var notifyOps []string
 	if nudgeFn != nil && to != "human" {
-		if err := nudgeFn(to, m.ID); err != nil {
+		if opID, err := nudgeFn(to, m.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail send: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
+			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(m)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", ID: m.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -2206,6 +2228,7 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 	}
 
 	var sent []mailMessageSummary
+	var notifyOps []string
 	notified := false
 	for _, to := range recipients {
 		m, err := mp.Send(sender, to, subject, body)
@@ -2226,15 +2249,16 @@ func doMailSendAllJSON(mp mail.Provider, rec events.Recorder, validRecipients ma
 		}
 
 		if nudgeFn != nil {
-			if err := nudgeFn(to, m.ID); err != nil {
+			if opID, err := nudgeFn(to, m.ID); err != nil {
 				fmt.Fprintf(stderr, "gc mail send --all: nudge %s failed: %v\n", to, err) //nolint:errcheck // best-effort stderr
 			} else {
 				notified = true
+				notifyOps = appendNotifyOp(notifyOps, opID)
 			}
 		}
 	}
 	if jsonOut {
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail send", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.send", Action: "send", Messages: sent, Count: intRef(len(sent)), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }
@@ -2567,16 +2591,18 @@ func doMailReplyJSON(mp mail.Provider, rec events.Recorder, id, sender, subject,
 	}
 
 	notified := false
+	var notifyOps []string
 	if nudgeFn != nil && reply.To != "human" {
-		if err := nudgeFn(reply.To, reply.ID); err != nil {
+		if opID, err := nudgeFn(reply.To, reply.ID); err != nil {
 			fmt.Fprintf(stderr, "gc mail reply: nudge failed: %v\n", err) //nolint:errcheck // best-effort stderr
 		} else {
 			notified = true
+			notifyOps = appendNotifyOp(notifyOps, opID)
 		}
 	}
 	if jsonOut {
 		summary := summarizeMailMessage(reply)
-		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified})
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc mail reply", mailActionResult{SchemaVersion: "1", OK: true, Command: "mail.reply", Action: "reply", ID: reply.ID, Message: &summary, Messages: []mailMessageSummary{summary}, Count: intRef(1), Notified: notified, NotifyOpIDs: notifyOps})
 	}
 	return 0
 }

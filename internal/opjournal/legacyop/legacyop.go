@@ -139,10 +139,29 @@ type Admission struct {
 	Cached any
 	// Entry is the in-flight entry this request holds, or nil.
 	Entry *Entry
+	// Unrecordable is the journal's refusal of a request auto runs
+	// unrecorded because the journal rejects the request itself (its key,
+	// or its payload: too large, not valid UTF-8, or empty), so the caller
+	// can say why; nil otherwise, a store failure included (Degraded hears
+	// of that).
+	Unrecordable error
 
 	rec   *Recorder
 	store *opjournal.Store
 	done  atomic.Bool
+}
+
+// DeliveryKey is the runtime delivery key of the admitted op's delivery:
+// gc:<op id>:1 for an Execute admission an op row backs, "" otherwise. A
+// legacy op is delivered on its own and closes on a definitive refusal, so
+// every execution of it, an adopted one included, uses this one key, and a
+// deduplicating runtime replays the first delivery instead of delivering
+// twice (DES-O0API §6.1, §17).
+func (a *Admission) DeliveryKey() string {
+	if a == nil || a.Decision != Execute || !a.Recorded || a.Op.ID == "" {
+		return ""
+	}
+	return opjournal.RuntimeDeliveryKey(opjournal.FormatDeliveryKey(a.Op.ID, 1))
 }
 
 // Recorder records one surface's requests under one gate mode. Executor is
@@ -384,7 +403,7 @@ func (r *Recorder) unrecordable(req Request, key string, minted bool, err error)
 		return nil, err
 	}
 	r.count(req.Kind, StageAdmit, ResultUnrecorded, reason)
-	return &Admission{Decision: Execute, Key: key, Minted: minted, rec: r}, nil
+	return &Admission{Decision: Execute, Key: key, Minted: minted, Unrecordable: err, rec: r}, nil
 }
 
 // cannotRecord answers a request the store cannot record: degrade, then run

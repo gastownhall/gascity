@@ -20,6 +20,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
 	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -72,7 +73,7 @@ continuity.`,
 }
 
 func newSessionSubmitCmd(stdout, stderr io.Writer) *cobra.Command {
-	var intent string
+	var intent, key string
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "submit <id-or-alias> <message...>",
@@ -91,7 +92,7 @@ according to the selected semantic intent.`,
 				fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionSubmit(args, parsedIntent, jsonOutput, stdout, stderr) != 0 {
+			if cmdSessionSubmit(args, parsedIntent, key, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -100,6 +101,7 @@ according to the selected semantic intent.`,
 	}
 	cmd.Flags().StringVar(&intent, "intent", string(session.SubmitIntentDefault), "submit intent: default, follow_up, or interrupt_now")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	addOpKeyFlag(cmd, &key, "")
 	return cmd
 }
 
@@ -2774,7 +2776,7 @@ var sessionKillWaitLease = session.WaitOperatorRuntimeLease
 
 // newSessionNudgeCmd creates the "gc session nudge <id-or-alias> <message>" command.
 func newSessionNudgeCmd(stdout, stderr io.Writer) *cobra.Command {
-	var delivery string
+	var delivery, key string
 	var jsonOutput bool
 	cmd := &cobra.Command{
 		Use:   "nudge <id-or-alias> <message...>",
@@ -2793,7 +2795,7 @@ joined automatically.`,
 				fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 				return errExit
 			}
-			if cmdSessionNudge(args, mode, jsonOutput, stdout, stderr) != 0 {
+			if cmdSessionNudge(args, mode, key, jsonOutput, stdout, stderr) != 0 {
 				return errExit
 			}
 			return nil
@@ -2802,6 +2804,7 @@ joined automatically.`,
 	}
 	cmd.Flags().StringVar(&delivery, "delivery", string(nudgeDeliveryWaitIdle), "delivery mode: immediate, wait-idle, or queue")
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "JSON output")
+	addOpKeyFlag(cmd, &key, "")
 	return cmd
 }
 
@@ -2825,9 +2828,39 @@ type sessionSubmitJSON struct {
 	Intent        string `json:"intent"`
 	Queued        bool   `json:"queued"`
 	Outcome       string `json:"outcome"`
+	// OpID, Key and Replayed name the operation-journal op that backs the
+	// run, when one does (DES-O0API §8.3).
+	OpID     string `json:"op_id,omitempty"`
+	Key      string `json:"key,omitempty"`
+	Replayed bool   `json:"replayed,omitempty"`
 }
 
-func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput bool, stdout, stderr io.Writer) int {
+// sessionSubmitAcceptedOutcome is the JSON outcome of a submit whose local
+// fallback found its op open under the API: the API accepted the message
+// and delivers it.
+const sessionSubmitAcceptedOutcome = "accepted"
+
+// sessionSubmitOp names the op that backs a submit's success output.
+type sessionSubmitOp struct {
+	id, key  string
+	replayed bool
+}
+
+// cmdSessionSubmit is the CLI entry point for "gc session submit", recorded
+// under the op key key as a message op under the operator principal on both
+// of its paths (DES-O0API §8.4). While ops.content records, the key (minted
+// when key is empty) goes to the API as its Idempotency-Key, and the API
+// records the op; a call that fails so the CLI falls back proposes the same
+// op id locally: absent, it delivers (legacy:cli); closed, it reports that
+// outcome; open under the API, it reports the API accepted the message and
+// exits 0. The gate is read from the city config before the API call, which
+// that config load reports only as the warning that its [ops] gates were not
+// read: the local path loads it again, as it always has, from the
+// invocation's config memo. Under require the local path checks that the op
+// journal can record before it resolves the target, which may materialize a
+// named session's row.
+func cmdSessionSubmit(args []string, intent session.SubmitIntent, key string, jsonOutput bool, stdout, stderr io.Writer) int {
+	defer beginInvocationConfigMemo()()
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -2841,12 +2874,50 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		return 1
 	}
 
+	gateCfg, gateErr := loadCityConfig(cityPath, io.Discard)
+	if gateErr != nil {
+		gateCfg = nil
+	}
+	op := newCLIOp(gateCfg, nil, cliOpRequest{
+		verb: "gc session submit", kind: opjournal.KindMessage, key: key,
+		payload: message, policy: api.MessageOpPolicy(intent),
+		asOperator: true, acceptsAPIOp: true, cfgErr: gateErr,
+		asJSON: jsonOutput, stdout: stdout, stderr: stderr,
+	})
+	if op.recording() && key == "" {
+		minted, err := legacyop.MintKey()
+		if err != nil {
+			fmt.Fprintf(stderr, "gc session submit: warning: minting an op key: %v; the API call carries none\n", err) //nolint:errcheck // best-effort stderr
+		}
+		op.req.presetKey = minted
+	}
+
 	if c := apiClient(cityPath); c != nil {
-		resp, err := c.SubmitSession(target, message, intent)
+		// The key is the API's Idempotency-Key only while the gate records,
+		// as --key is ignored when it is off.
+		apiKey := ""
+		if op.recording() {
+			apiKey = op.requestKey()
+		}
+		resp, err := c.SubmitSessionWithKey(target, message, intent, apiKey)
 		if err == nil {
-			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput)
+			recorded := sessionSubmitOp{id: resp.OpID, replayed: resp.Replayed}
+			if resp.OpID != "" {
+				recorded.key = apiKey
+			}
+			if resp.Replayed {
+				fmt.Fprintf(stderr, "gc session submit: replayed op %s; resume was not reapplied (outside the op's request)\n", resp.OpID) //nolint:errcheck // best-effort stderr
+			}
+			if key != "" && apiKey != "" && resp.OpID == "" && !resp.Replayed {
+				fmt.Fprintf(stderr, "gc session submit: warning: --key not recorded (the API ran the message without recording an op), so a rerun acts again\n") //nolint:errcheck // best-effort stderr
+			}
+			return emitSessionSubmitResult(stdout, stderr, target, intent, resp.Queued, jsonOutput, recorded)
 		}
 		if !api.ShouldFallback(c, err) {
+			if apiKey != "" {
+				fmt.Fprintf(stderr, "gc session submit: %v (key %s)\n", err, apiKey) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
@@ -2865,6 +2936,10 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 	// worker handle), so route the whole flow through the session coordination-class
 	// store for relocation-safety.
 	sessStore := cliSessionStore(store, cfg, cityPath)
+	op.sessStore = sessStore
+	if !op.preflight() {
+		return 1
+	}
 
 	sessionID, err := resolveSessionIDMaterializingNamed(cityPath, cfg, sessStore, target)
 	if err != nil {
@@ -2872,13 +2947,27 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		return 1
 	}
 
+	op.req.conversation = sessionID
+	switch op.start() {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		id, k, replayed := op.jsonFields()
+		return emitSessionSubmitResult(stdout, stderr, target, intent, op.replayedQueued(), jsonOutput, sessionSubmitOp{id: id, key: k, replayed: replayed})
+	case cliOpAcceptedByAPI:
+		return emitSessionSubmitAccepted(stdout, stderr, target, intent, op.apiOp.ID, op.requestKey(), jsonOutput)
+	}
+	defer op.end()
+
 	sp, err := newSessionProvider()
 	if err != nil {
+		op.finishMessage(false, err)
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	handle, err := workerHandleForSessionWithConfig(cityPath, sessStore, sp, cfg, sessionID)
 	if err != nil {
+		op.finishMessage(false, err)
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -2886,14 +2975,35 @@ func cmdSessionSubmit(args []string, intent session.SubmitIntent, jsonOutput boo
 		Text:     message,
 		Delivery: workerDeliveryIntentForSubmitIntent(intent),
 	})
+	op.finishMessageInterrupted(outcome.Queued, err, outcome.Interrupt)
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session submit: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput)
+	id, k, replayed := op.jsonFields()
+	return emitSessionSubmitResult(stdout, stderr, target, intent, outcome.Queued, jsonOutput, sessionSubmitOp{id: id, key: k, replayed: replayed})
 }
 
-func emitSessionSubmitResult(stdout, stderr io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool) int {
+// emitSessionSubmitAccepted reports a submit whose local fallback found its
+// op opID open under the API: the API accepted the message, so this run
+// delivers nothing, and a same-key rerun reports the op's outcome.
+func emitSessionSubmitAccepted(stdout, stderr io.Writer, target string, intent session.SubmitIntent, opID, key string, jsonOutput bool) int {
+	if jsonOutput {
+		return writeCLIJSONLineOrExit(stdout, stderr, "gc session submit", sessionSubmitJSON{
+			SchemaVersion: "1",
+			OK:            true,
+			Target:        target,
+			Intent:        string(intent),
+			Outcome:       sessionSubmitAcceptedOutcome,
+			OpID:          opID,
+			Key:           key,
+		})
+	}
+	fmt.Fprintf(stdout, "Accepted by the controller for %s (op %s); gc session submit --key %s reports its outcome\n", target, opID, key) //nolint:errcheck // best-effort stdout
+	return 0
+}
+
+func emitSessionSubmitResult(stdout, stderr io.Writer, target string, intent session.SubmitIntent, queued, jsonOutput bool, recorded sessionSubmitOp) int {
 	if jsonOutput {
 		outcome := "submitted"
 		if queued {
@@ -2908,6 +3018,9 @@ func emitSessionSubmitResult(stdout, stderr io.Writer, target string, intent ses
 			Intent:        string(intent),
 			Queued:        queued,
 			Outcome:       outcome,
+			OpID:          recorded.id,
+			Key:           recorded.key,
+			Replayed:      recorded.replayed,
 		})
 	}
 	switch {
@@ -2932,12 +3045,19 @@ type sessionNudgeJSON struct {
 	Delivery      string `json:"delivery"`
 	Queued        bool   `json:"queued"`
 	Outcome       string `json:"outcome"`
+	// OpID, Key and Replayed name the operation-journal op that backs the
+	// run, when one does (DES-O0API §8.3).
+	OpID     string `json:"op_id,omitempty"`
+	Key      string `json:"key,omitempty"`
+	Replayed bool   `json:"replayed,omitempty"`
 }
 
-// cmdSessionNudge is the CLI entry point for "gc session nudge". A worker site
-// refuses before it resolves the target or writes anything
-// (errWorkerSiteDeliveryNeedsController).
-func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool, stdout, stderr io.Writer) int {
+// cmdSessionNudge is the CLI entry point for "gc session nudge", recorded
+// under the op key key (empty mints one). A worker site refuses before it
+// resolves the target or writes anything
+// (errWorkerSiteDeliveryNeedsController), and so does a require gate whose op
+// journal cannot record (resolveMessageOpTarget).
+func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) int {
 	target := args[0]
 	message := strings.Join(args[1:], " ")
 
@@ -2950,12 +3070,15 @@ func cmdSessionNudge(args []string, delivery nudgeDeliveryMode, jsonOutput bool,
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", errWorkerSiteDeliveryNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	targetInfo, err := resolveNudgeTarget(target)
+	targetInfo, err := resolveMessageOpTarget(target, sessionNudgeOpRequest(message, delivery, key, jsonOutput, stdout, stderr))
+	if errors.Is(err, errMessageOpRefused) {
+		return 1
+	}
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session nudge: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-	return deliverSessionNudge(targetInfo, message, delivery, jsonOutput, stdout, stderr)
+	return deliverSessionNudge(targetInfo, message, delivery, key, jsonOutput, stdout, stderr)
 }
 
 // resolveWorkDir determines the working directory for a session based on the

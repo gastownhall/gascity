@@ -166,9 +166,11 @@ func (s steerModeForName) SteerMode(name string) runtime.SteerMode {
 }
 
 // TestLaneSteerCapNeedsAKeyedSteer kills a lane that steers a runtime that
-// deduplicates by delivery key: a steer goes out through the immediate
-// nudge, which no runtime keys yet, so a re-taken steer would be applied
-// twice while the planner drops the D-NOTE repeat line for a dedup runtime.
+// deduplicates by delivery key: to such a runtime a keyed immediate nudge is
+// its keyed send, a deduplicated turn start that is not a steer, and its
+// steer, NudgeNow, takes no key, so a re-taken steer would either not steer
+// or be applied twice while the planner drops the D-NOTE repeat line for a
+// dedup runtime.
 func TestLaneSteerCapNeedsAKeyedSteer(t *testing.T) {
 	for _, tc := range []struct {
 		name      string

@@ -201,11 +201,14 @@ func (e *FenceMismatchError) Is(target error) bool { return target == ErrFenceMi
 
 // FencedNudge is one fenced nudge. Immediate skips the runtime's own idle
 // wait (as NudgeNow does); DeliveryKey is used by a runtime that
-// deduplicates deliveries.
+// deduplicates deliveries. Receipt, when not nil, is set by a runtime that
+// deduplicates keyed deliveries ([KeyedNudgeProvider]) to its receipt once
+// the nudge succeeded; other runtimes leave it as is.
 type FencedNudge struct {
 	Fence       InputFence
 	Immediate   bool
 	DeliveryKey string
+	Receipt     *DeliveryReceipt
 }
 
 // FencedInputProvider is implemented by runtimes that can make input to a
@@ -335,23 +338,13 @@ func fencedProvider(ctx context.Context, p Provider, name string) (InputFence, F
 
 // NudgeWithContext delivers content to name through p. When ctx carries no
 // fence it is the legacy dispatch: NudgeNow when immediate and p is an
-// ImmediateNudgeProvider, else NudgeWithDeliveryKey. With a fence it is p's
-// NudgeFenced carrying ctx's delivery key, or ErrInputFenceUnsupported when
-// p cannot fence name.
+// ImmediateNudgeProvider (unless ctx's delivery key goes to a leaf that
+// deduplicates keyed deliveries), else NudgeWithDeliveryKey. With a fence it
+// is p's NudgeFenced carrying ctx's delivery key, or ErrInputFenceUnsupported
+// when p cannot fence name. It is [NudgeWithReceipt] without the receipt.
 func NudgeWithContext(ctx context.Context, p Provider, name string, content []ContentBlock, immediate bool) error {
-	f, fp, fenced, err := fencedProvider(ctx, p, name)
-	if err != nil {
-		return err
-	}
-	if fenced {
-		return fp.NudgeFenced(ctx, name, content, FencedNudge{Fence: f, Immediate: immediate, DeliveryKey: NudgeDeliveryKey(ctx)})
-	}
-	if immediate {
-		if np, ok := p.(ImmediateNudgeProvider); ok {
-			return np.NudgeNow(name, content)
-		}
-	}
-	return NudgeWithDeliveryKey(ctx, p, name, content)
+	_, err := NudgeWithReceipt(ctx, p, name, content, immediate)
+	return err
 }
 
 // SendKeysWithContext sends keys to name through p: SendKeysFenced under the

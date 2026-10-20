@@ -3400,6 +3400,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
+				// A pinned configured named session is never stopped on a
+				// recycler restart request: the restart-request guard below
+				// clears the marker and ends the tick for it. Requesting one
+				// anyway repeats that on every tick the session stays idle, and
+				// each of those ticks ends before the config-drift gate, so a
+				// pending drift is neither logged nor recorded as deferred.
+				if !exempt && pinnedConfiguredNamedSessionKillProtected(infoByID[id]) {
+					exempt = true
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonPinned, TraceOutcomeExempt, tp.TemplateName, name, nil)
+					}
+				}
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 					if attachErr != nil {

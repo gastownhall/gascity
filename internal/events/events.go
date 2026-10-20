@@ -53,6 +53,25 @@ const (
 	// always same-subject and same-process, and the payload's reason names which
 	// unwind ran.
 	BeadClaimReleased = "bead.claim_released"
+	// BeadClaimFailed fires when gc hook --claim skips a routed candidate
+	// because the claim write itself failed: not a lost race (that is
+	// BeadClaimRejected) but an error. The seat goes on to its other
+	// candidates and, if none claims, drains claims_errored. The payload names
+	// the seat (template, session, runtime epoch) and the error text. It is
+	// the input of the controller's claim-loop guard
+	// (cmd/gc/claim_loop_guard.go): the same bead failing the same way for
+	// every seat a template spawns is a spawn loop, not a slow claim.
+	BeadClaimFailed = "bead.claim_failed"
+	// BeadClaimLoopHeld fires when the controller's claim-loop guard stops
+	// counting a bead in a template's default routed-work demand, because the
+	// template's seats failed to claim it with the same error enough times in a
+	// row, and again, with the hold's new end, each time a probe seat fails to
+	// claim it. A custom scale_check count is not withheld. It is an operator
+	// alert: the payload names the template, the bead (Subject), the error, the
+	// failure count and when the next probe seat may spawn. The bead counts as
+	// demand again when it changes, when the city config changes, or for one
+	// probe seat each time the hold's backoff runs out.
+	BeadClaimLoopHeld = "bead.claim_loop_held"
 	// HookClaimReclaimedStale fires when gc hook --claim (ga-7rj87d), opted in
 	// via config.Agent.AutoReclaimStaleClaims, recovers a route-matched
 	// candidate whose only claim blocker was another worker's stale (lease-
@@ -575,6 +594,7 @@ var KnownEventTypes = []string{
 	BeadCreated, BeadClosed, BeadDeleted, BeadUpdated,
 	BeadWorktreeReaped, BeadWorktreeReapSkipped,
 	BeadClaimRejected, BeadClaimReleased,
+	BeadClaimFailed, BeadClaimLoopHeld,
 	HookClaimReclaimedStale,
 	BeadDeadAssigneeReopened,
 	ExecutionWorkAssociated, ExecutionRunAnchored, ExecutionStepDefined, ExecutionStepStarted, ExecutionStepCompleted,

@@ -1787,14 +1787,17 @@ func deliveryIDNamespace(city string) string {
 const t3TimeLayout = "2006-01-02T15:04:05.000Z"
 
 func (p *Provider) dispatchTurnStart(threadID, text, provider, model string, ids turnStartIDs) error {
-	return p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+	_, err := p.dispatchTurnStartFor(context.Background(), threadID, text, provider, model, ids, nil)
+	return err
 }
 
-// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx. ids are
-// reused by every retry; beforeRetry, when set, must pass before each
-// transient retry.
-func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) error {
-	now := time.Now().UTC().Format(t3TimeLayout)
+// dispatchTurnStartFor dispatches thread.turn.start bounded by ctx and
+// returns the createdAt it stamped, which T3 stores as the message's
+// creation time and the turn's requestedAt. ids and the stamp are reused by
+// every retry; beforeRetry, when set, must pass before each transient retry.
+func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, provider, model string, ids turnStartIDs, beforeRetry func(context.Context) error) (time.Time, error) {
+	stamp := time.Now().UTC().Truncate(time.Millisecond)
+	now := stamp.Format(t3TimeLayout)
 	_, err := p.rpcCallCheckedCtx(ctx, "orchestration.dispatchCommand", map[string]interface{}{
 		"type":      "thread.turn.start",
 		"commandId": ids.commandID,
@@ -1813,7 +1816,10 @@ func (p *Provider) dispatchTurnStartFor(ctx context.Context, threadID, text, pro
 		"interactionMode": "default",
 		"createdAt":       now,
 	}, beforeRetry)
-	return err
+	if err != nil {
+		return time.Time{}, err
+	}
+	return stamp, nil
 }
 
 func (p *Provider) dispatchTurnInterrupt(threadID string) error {
@@ -3176,38 +3182,42 @@ func (p *Provider) SessionBinding(name string) (runtime.SessionBinding, error) {
 // caller that delivers without first checking IsRunning, which reports such a
 // thread as not running.
 func (p *Provider) Nudge(name string, content []runtime.ContentBlock) error {
-	return p.nudge(name, content, "")
+	_, err := p.nudge(name, content, "")
+	return err
 }
 
 // NudgeKeyed implements [runtime.KeyedNudgeProvider]: it delivers like Nudge,
 // deriving the turn's T3 command and message ids from key, so a redelivery
 // under the same key replays T3's receipt instead of starting a second turn.
 // A definitive T3 refusal is reported as [runtime.ErrNudgeRejected]; the
-// caller then redelivers under a new key.
-func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) error {
+// caller then redelivers under a new key. The receipt is the turn's message
+// id and the createdAt this send stamped on it.
+func (p *Provider) NudgeKeyed(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	return p.nudge(name, content, key)
 }
 
-func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) error {
+func (p *Provider) nudge(name string, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	thread, binding, err := p.boundThread(name)
 	if err != nil {
-		return err
+		return runtime.DeliveryReceipt{}, err
 	}
 	return p.nudgeThread(name, thread, binding, content, key)
 }
 
 // nudgeThread starts a turn carrying content on the thread bound to name, as
 // read: thread and its binding. A non-empty key derives the turn's T3 ids.
-func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) error {
+func (p *Provider) nudgeThread(name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string) (runtime.DeliveryReceipt, error) {
 	return p.nudgeThreadFor(context.Background(), name, thread, binding, content, key, nil)
 }
 
 // nudgeThreadFor is nudgeThread bounded by ctx, with beforeRetry gating each
-// transient retry of the turn start.
-func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) error {
+// transient retry of the turn start. It returns the receipt of the turn
+// start: its message id and the createdAt it stamped. Empty text dispatches
+// nothing and reports no receipt.
+func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[string]interface{}, binding *threadBinding, content []runtime.ContentBlock, key string, beforeRetry func(context.Context) error) (runtime.DeliveryReceipt, error) {
 	text := runtime.FlattenText(content)
 	if strings.TrimSpace(text) == "" {
-		return nil
+		return runtime.DeliveryReceipt{}, nil
 	}
 	meta := threadCustomMetadata(thread)
 	provider := meta["gc.runtimeProvider"]
@@ -3222,16 +3232,17 @@ func (p *Provider) nudgeThreadFor(ctx context.Context, name string, thread map[s
 	if key != "" {
 		ids = deriveDeliveryIDs(meta["gc.city"], binding.ThreadID, key)
 	}
-	if err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry); err != nil {
+	stamp, err := p.dispatchTurnStartFor(ctx, binding.ThreadID, text, provider, model, ids, beforeRetry)
+	if err != nil {
 		if isT3Rejection(err) {
-			return fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 refused the turn for %q: %w", runtime.ErrNudgeRejected, name, err)
 		}
 		if errors.Is(err, errRPCWrittenUnanswered) {
-			return fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
+			return runtime.DeliveryReceipt{}, fmt.Errorf("%w: t3 took the turn for %q without answering: %w", runtime.ErrNudgeDeliveryUnconfirmed, name, err)
 		}
-		return err
+		return runtime.DeliveryReceipt{}, err
 	}
-	return nil
+	return runtime.DeliveryReceipt{MessageID: ids.messageID, MessageAt: stamp}, nil
 }
 
 // SetMeta persists a session metadata value and reflects drain transitions onto

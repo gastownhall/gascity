@@ -270,15 +270,28 @@ func (h *RuntimeHandle) Message(ctx context.Context, _ sessionpkg.Actor, req Mes
 		err = fmt.Errorf("message text is required")
 		return MessageResult{}, err
 	}
+	if _, held, lookErr := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery); lookErr != nil || held {
+		err = lookErr
+		result = MessageResult{Replayed: held}
+		return result, err
+	}
 	if !h.provider.IsRunning(h.sessionName) {
 		err = fmt.Errorf("%w: %s", sessionpkg.ErrSessionInactive, h.sessionName)
 		return MessageResult{}, err
 	}
-	if err := h.provider.Nudge(h.sessionName, runtime.TextContent(req.Text)); err != nil {
+	// A message goes out unfenced, as it always has, under its key alone.
+	ctx, _, _ = fencedNudgeContext(ctx, NudgeRequest{}, nil)
+	ctx = nudgeDeliveryContext(ctx, NudgeRequest{DeliveryKey: req.DeliveryKey})
+	if _, err := runtime.NudgeWithReceipt(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), false); err != nil {
 		return MessageResult{}, runtimeInteractionError(err)
 	}
 	result = MessageResult{Queued: false}
 	return result, nil
+}
+
+// lookupDelivery is the session's delivery lookup for heldDelivery.
+func (h *RuntimeHandle) lookupDelivery(ctx context.Context, key string) (runtime.DeliveryReceipt, bool, error) {
+	return runtime.LookupDelivery(ctx, h.provider, h.sessionName, key)
 }
 
 // Interrupt asks the provider to interrupt the live runtime session. With no
@@ -363,8 +376,15 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 	if err != nil {
 		return NudgeResult{}, err
 	}
-	defer func() { result.Unfenced = unfenced && result.Delivered }()
-	_, fenced := runtime.InputFenceFrom(ctx)
+	defer func() { result.Unfenced = unfenced && result.Delivered && !result.Replayed }()
+	receipt, held, err := heldDelivery(ctx, req.Redelivery, req.DeliveryKey, h.lookupDelivery)
+	if err != nil {
+		return NudgeResult{}, err
+	}
+	if held {
+		result = NudgeResult{Delivered: true, Replayed: true, Receipt: receipt}
+		return result, nil
+	}
 	// Decided on a fresh read, not the provider's cache: the tmux state
 	// cache can show a crashed agent alive for seconds after the crash.
 	live, liveErr := runtime.ObserveLivenessSince(h.provider, h.sessionName, h.processNames, time.Now())
@@ -387,27 +407,13 @@ func (h *RuntimeHandle) Nudge(ctx context.Context, _ sessionpkg.Actor, req Nudge
 		return result, err
 	}
 	switch req.Delivery {
-	case "", NudgeDeliveryDefault:
-		if fenced {
-			err = runtime.NudgeWithContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), false)
-		} else {
-			err = runtime.NudgeWithDeliveryKey(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text))
-		}
+	case "", NudgeDeliveryDefault, NudgeDeliveryImmediate:
+		immediate := req.Delivery == NudgeDeliveryImmediate
+		receipt, err = runtime.NudgeWithReceipt(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), immediate)
 		if err != nil {
 			return NudgeResult{}, runtimeInteractionError(err)
 		}
-		result = NudgeResult{Delivered: true}
-		return result, nil
-	case NudgeDeliveryImmediate:
-		if fenced {
-			err = runtime.NudgeWithContext(ctx, h.provider, h.sessionName, runtime.TextContent(req.Text), true)
-		} else {
-			err = h.nudgeNow(req.Text)
-		}
-		if err != nil {
-			return NudgeResult{}, runtimeInteractionError(err)
-		}
-		result = NudgeResult{Delivered: true}
+		result = NudgeResult{Delivered: true, Receipt: receipt}
 		return result, nil
 	case NudgeDeliveryWaitIdle:
 		result, err = h.nudgeWaitIdle(ctx, req)

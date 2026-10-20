@@ -231,6 +231,7 @@ go_test(
         "native_dolt_store_test.go",
         "native_dolt_store_update_force_test.go",
         "native_dolt_store_update_retry_test.go",
+        "native_dolt_store_wire_not_found_test.go",
         "native_list_plan_test.go",
         "native_list_pushdown_integration_test.go",
         "native_list_pushdown_test.go",

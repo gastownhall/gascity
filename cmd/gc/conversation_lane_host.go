@@ -18,6 +18,11 @@ package main
 // rollback still drain once whatever gate they wait on clears (DES-O1 §7.1,
 // §12). The list is latched at controller start.
 //
+// Each worker also hosts its conversation's turn observer
+// (conversation_lane_turns.go), which folds the session's turn updates while
+// the worker waits, keeps the worker serving while observations are
+// pending, and stops when the worker exits.
+//
 // A worker holds its slot only while no other conversation waits for one and
 // its next pass is at most laneParkAfter away; otherwise it parks the
 // conversation on a timer, so neither long waits nor busy runtimes starve the
@@ -63,6 +68,7 @@ import (
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/worker"
 )
 
 const (
@@ -258,7 +264,15 @@ type conversationLaneHost struct {
 	newTicker func(time.Duration) (<-chan time.Time, func())
 	// newExec builds a pass's executor; production is the live executor.
 	newExec func(laneExecDeps, session.Info) opjournal.Executor
-	logf    func(format string, args ...any)
+	// turnHandle resolves a conversation's turn handle for its observer
+	// (conversation_lane_turns.go); production builds the session's worker
+	// handle.
+	turnHandle func(conv string) (worker.TurnHandle, error)
+	// turnStats counts the turn observers' work.
+	turnStats laneTurnStats
+	// observerName is the observers' gc.rt.observer stamp.
+	observerName string
+	logf         func(format string, args ...any)
 	// onPass, onReprobe and onWorkerExit are test seams: each pass's
 	// outcome, each re-probe, and each worker's exit. Nil in production.
 	onPass       func(conv string, out lanePassOutcome)
@@ -308,9 +322,12 @@ type conversationLaneHost struct {
 	noticeFailures map[string]*laneNoticeFailures
 }
 
-// laneWorker is one conversation's slot; poke wakes its worker.
+// laneWorker is one conversation's slot; poke wakes its worker for a pass,
+// and queued wakes it, while it waits only for its observer, to weigh its
+// slot again because a conversation queued for one.
 type laneWorker struct {
-	poke chan struct{}
+	poke   chan struct{}
+	queued chan struct{}
 }
 
 // laneParked is one parked conversation.
@@ -338,13 +355,14 @@ func newConversationLaneHost(env laneHostEnv, kinds []string) *conversationLaneH
 		newExec: func(deps laneExecDeps, info session.Info) opjournal.Executor {
 			return newConversationLaneExec(deps, info)
 		},
-		logf:        log.Printf,
-		workers:     map[string]*laneWorker{},
-		inQueue:     map[string]bool{},
-		parked:      map[string]*laneParked{},
-		logged:      map[string]time.Time{},
-		quarantined: map[string][]string{},
-		waits:       map[string]laneConversationWaits{},
+		logf:         log.Printf,
+		observerName: laneObserverName(),
+		workers:      map[string]*laneWorker{},
+		inQueue:      map[string]bool{},
+		parked:       map[string]*laneParked{},
+		logged:       map[string]time.Time{},
+		quarantined:  map[string][]string{},
+		waits:        map[string]laneConversationWaits{},
 	}
 }
 
@@ -535,6 +553,12 @@ func (h *conversationLaneHost) pokeLocked(conv string) bool {
 		if !h.inQueue[conv] {
 			h.inQueue[conv] = true
 			h.queued = append(h.queued, conv)
+			for _, w := range h.workers {
+				select {
+				case w.queued <- struct{}{}:
+				default:
+				}
+			}
 		}
 		return true
 	}
@@ -551,7 +575,7 @@ func (h *conversationLaneHost) startWorkerLocked(conv string) {
 		delete(h.parked, conv)
 		state = p.state
 	}
-	w := &laneWorker{poke: make(chan struct{}, 1)}
+	w := &laneWorker{poke: make(chan struct{}, 1), queued: make(chan struct{}, 1)}
 	h.workers[conv] = w
 	h.wg.Add(1)
 	go h.runWorker(conv, w, state)
@@ -640,12 +664,33 @@ func (h *conversationLaneHost) runWorker(conv string, w *laneWorker, state laneW
 	if h.onWorkerExit != nil {
 		defer h.onWorkerExit(conv)
 	}
+	turns := h.newTurnObserver(conv)
+	defer turns.stop()
+	// A worker parked with observations pending hands its successor the
+	// watch, whatever the successor's first pass finds.
+	resumeTurns := state.turns
 	cw := &conversationLaneWorker{
-		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, state: state, startFor: h.wakeStartFor(),
+		ctx: h.ctx, clk: h.clk, newTimer: h.newTimer, poke: w.poke, queued: w.queued, state: state, startFor: h.wakeStartFor(),
 		hooks: laneWorkerHooks{
-			pass:    func() lanePassOutcome { return h.pass(conv) },
-			yield:   h.yield,
-			release: func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
+			pass: func() lanePassOutcome {
+				// The turn a content take starts begins after the pass
+				// does, never before.
+				began := h.clk.Now()
+				out := h.pass(conv)
+				if laneTurnsWatchAfter(out, len(h.kinds) > 0 || resumeTurns) {
+					h.watchTurns(conv, turns)
+				}
+				if out.err == nil && out.res.Took == opjournal.TakeContent {
+					turns.expect(began)
+				}
+				return out
+			},
+			turns:        turns.updates,
+			onTurn:       func(u worker.TurnUpdate, ok bool) { h.observeTurn(conv, turns, u, ok) },
+			turnsPending: func() (time.Duration, bool) { return turns.pending(h.clk.Now()) },
+			onTurnTimer:  func() { h.turnTimer(conv, turns) },
+			yield:        h.yield,
+			release:      func(force bool, park *lanePark) bool { return h.retire(conv, w, force, park) },
 			onPass: func(out lanePassOutcome) {
 				if h.onPass != nil {
 					h.onPass(conv, out)
@@ -839,7 +884,6 @@ func (h *conversationLaneHost) noteError(stage string, err error) {
 // noteFailure records a failure in the status, and logs it at most once per
 // laneErrorLogInterval per stage.
 func (h *conversationLaneHost) noteFailure(stage string, err error, pass bool) {
-	now := h.clk.Now()
 	h.mu.Lock()
 	h.passErrors++
 	h.sinceSuccess++
@@ -847,6 +891,16 @@ func (h *conversationLaneHost) noteFailure(stage string, err error, pass bool) {
 	if pass {
 		h.lastFailed = true
 	}
+	h.mu.Unlock()
+	h.logFailure(stage, err)
+}
+
+// logFailure logs a failure at most once per laneErrorLogInterval per stage,
+// counting it nowhere: the turn observers count their own (laneTurnStats),
+// so they never read as lane failures.
+func (h *conversationLaneHost) logFailure(stage string, err error) {
+	now := h.clk.Now()
+	h.mu.Lock()
 	due := true
 	if last, seen := h.logged[stage]; seen && now.Before(last.Add(laneErrorLogInterval)) {
 		due = false
@@ -937,6 +991,8 @@ type conversationLaneStatus struct {
 	// Waiting lists, for the first few conversations in id order, why
 	// their ops wait after their last pass.
 	Waiting []laneConversationWaits `json:"waiting,omitempty"`
+	// Turns counts the turn observers' work; omitted before any watched.
+	Turns *laneTurnStatus `json:"turns,omitempty"`
 }
 
 // status reads the host's status at now.
@@ -947,6 +1003,7 @@ func (h *conversationLaneHost) status(now time.Time) conversationLaneStatus {
 		State: h.state, Reason: h.reason, Kinds: append([]string(nil), h.kinds...),
 		Workers: len(h.workers), Queued: len(h.queued), Parked: len(h.parked), Passes: h.passes, Reprobes: h.reprobes,
 		LastPassFailed: h.lastFailed, Errors: h.passErrors, ErrorsSinceSuccess: h.sinceSuccess, LastError: h.lastErr,
+		Turns: h.turnStats.status(),
 	}
 	if !h.lastPass.IsZero() {
 		st.LastPassAt = h.lastPass.UTC().Format(time.RFC3339Nano)

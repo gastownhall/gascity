@@ -3568,11 +3568,25 @@ func nativeIssueFilterFromListQuery(query ListQuery) beadslib.IssueFilter {
 	return filter
 }
 
+// nativeStoreError maps a native door's miss onto gc's own not-found sentinel
+// and passes every other error through unchanged.
+//
+// The typed sentinel is the authority: a role reports a miss as
+// issueops.ErrNotFound on both routes, and over a remote bd serve that is the
+// only form the miss has, because the http client renders its own text ("...
+// answered 404 not_found: no issue or wisp with that id") and keeps the
+// sentinel in the chain. The message match below is for raw doors whose
+// engines spell a miss without the sentinel. Reading only the message left a
+// native door's claim over the wire unclassified (ga-ylpbsy.30). This covers
+// the in-process doors only: `gc hook --claim` claims through a bd
+// subprocess, which no sentinel crosses, and its class route settles such an
+// error by reading the same work leg (cmd/gc claim_class_route.go,
+// legProvedAbsent).
 func nativeStoreError(id string, err error) error {
 	if err == nil || errors.Is(err, ErrNotFound) {
 		return err
 	}
-	if !nativeUpstreamNotFound(err) {
+	if !errors.Is(err, issueops.ErrNotFound) && !nativeUpstreamNotFound(err) {
 		return err
 	}
 	if id == "" {

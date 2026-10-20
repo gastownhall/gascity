@@ -780,7 +780,7 @@ func (s *Server) deliverSubmit(d messageDelivery, message string, intent session
 	result := awaitSend(d, RequestOperationSessionSubmit, timeout, submitTimeoutError{}, func(ctx context.Context, send *messageSend) {
 		s.sendSubmit(ctx, d, send, message, intent, resume)
 	})
-	op := s.finishMessageOp(d.adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
+	op := s.finishMessageOp(d.adm, MessageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
 	if result.err != nil {
 		s.emitSessionSubmitFailed(d.reqID, result.errorCode, result.err.Error(), op)
 		return
@@ -805,7 +805,7 @@ func (s *Server) sendSubmit(ctx context.Context, d messageDelivery, send *messag
 		send.post(messageResult{errorCode: "resolve_failed", err: err})
 		return
 	}
-	outcome, err := s.submitMessageToSession(ctx, d.store, id, message, intent, resume)
+	outcome, err := s.submitMessageToSessionFor(ctx, d.store, id, message, intent, resume, opDeliveryOf(d.adm))
 	if err != nil {
 		code := sessionSubmitFailureCode(err)
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
@@ -921,7 +921,7 @@ func (s *Server) resolveDeliveryTarget(ctx context.Context, d messageDelivery) (
 // closed op and a request.failed{internal_error} event carrying it.
 func (s *Server) recoverMessageOp(adm *legacyop.Admission, requestID, operation string) {
 	if r := recover(); r != nil {
-		op := s.finishMessageOp(adm, messageOpResult(false, fmt.Errorf("panic: %v", r), nil))
+		op := s.finishMessageOp(adm, MessageOpResult(false, fmt.Errorf("panic: %v", r), nil))
 		s.emitRequestFailedOp(requestID, operation, "internal_error", fmt.Sprintf("panic: %v", r), op)
 	}
 }
@@ -1028,7 +1028,7 @@ func (s *Server) deliverMessage(d messageDelivery, message string, resume bool) 
 	result := awaitSend(d, RequestOperationSessionMessage, sessionMessageAsyncTimeout, messageTimeoutError{}, func(ctx context.Context, send *messageSend) {
 		s.sendMessage(ctx, d, send, message, resume)
 	})
-	op := s.finishMessageOp(d.adm, messageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
+	op := s.finishMessageOp(d.adm, MessageOpResult(result.outcome.Queued, result.err, result.outcome.Interrupt))
 	if result.err != nil {
 		s.emitSessionMessageFailed(d.reqID, result.errorCode, result.err.Error(), op)
 		return
@@ -1049,7 +1049,7 @@ func (s *Server) sendMessage(ctx context.Context, d messageDelivery, send *messa
 		send.post(messageResult{errorCode: "resolve_failed", err: err})
 		return
 	}
-	outcome, err := s.sendUserMessageToSession(ctx, d.store, id, message, resume)
+	outcome, err := s.submitMessageToSessionFor(ctx, d.store, id, message, session.SubmitIntentDefault, resume, opDeliveryOf(d.adm))
 	if err != nil {
 		code := "message_failed"
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {

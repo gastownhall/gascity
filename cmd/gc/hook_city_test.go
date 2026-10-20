@@ -127,12 +127,13 @@ func TestHookCityEventsGoToTheInvocationsCity(t *testing.T) {
 
 	ops.EmitClaimRejected("gc-1", "holder", "claimer")
 	ops.EmitClaimReleased(hookClaimReleaseRecord{BeadID: "gc-2", Assignee: "claimer", Reason: "test"})
+	ops.EmitClaimFailed("gc-3", hookClaimOptions{Assignee: "claimer", Env: []string{"GC_TEMPLATE=pool", "GC_SESSION_ID=gcg-session-1"}}, errors.New("claim failed"))
 
 	data, err := os.ReadFile(filepath.Join(cityDir, ".gc", "events.jsonl"))
 	if err != nil {
 		t.Fatalf("read the invocation city's event log: %v", err)
 	}
-	for _, want := range []string{"gc-1", "gc-2"} {
+	for _, want := range []string{"gc-1", "gc-2", `"type":"bead.claim_failed"`} {
 		if !strings.Contains(string(data), want) {
 			t.Fatalf("event log %s does not record %s:\n%s", cityDir, want, data)
 		}

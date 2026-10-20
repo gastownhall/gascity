@@ -79,13 +79,15 @@ import (
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
-// messageSentinels maps the message path's legacy errors onto op outcomes
-// (DES-O0API §6.3). The delivery timeouts of /messages and of a recorded
-// /submit are reported as context.DeadlineExceeded.
+// messageSentinels maps the message paths' legacy errors onto op outcomes
+// (DES-O0API §6.3), the API's and the CLI's alike (MessageOpResult). A
+// session whose row or runtime is gone is session_gone. The delivery
+// timeouts of /messages and of a recorded /submit are reported as
+// context.DeadlineExceeded.
 var messageSentinels = legacyop.Sentinels{
 	Unsupported:         []error{session.ErrTurnInterruptUnsupported},
 	ConversationClosed:  []error{session.ErrSessionClosed},
-	SessionGone:         []error{session.ErrSessionNotFound},
+	SessionGone:         []error{session.ErrSessionNotFound, runtime.ErrSessionNotFound},
 	ProviderUnavailable: []error{runtime.ErrRuntimeUnavailable},
 	DeliveryTimeout:     []error{context.DeadlineExceeded, context.Canceled},
 }
@@ -552,7 +554,7 @@ func (s *Server) admitMessageOp(ctx context.Context, store beads.Store, req *mes
 		Key:          req.key,
 		Payload:      req.text,
 		Kind:         opjournal.KindMessage,
-		Policy:       messageOpPolicy(req.intent),
+		Policy:       MessageOpPolicy(req.intent),
 	}
 	if req.conv == "" {
 		if rec.Mode != gate.Require {
@@ -651,9 +653,11 @@ func requestInFlight() error {
 	return apierr.IdempotencyInFlight.Msg("in_flight: request with this Idempotency-Key is already in progress")
 }
 
-// messageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
-// /messages is the default intent.
-func messageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
+// MessageOpPolicy is the message policy of a submit intent (DES-O0API §3.1);
+// /messages is the default intent. gc session submit's local path records its
+// op under the same policy, so a request the API recorded and its CLI
+// fallback derive one op digest.
+func MessageOpPolicy(intent session.SubmitIntent) opjournal.Policy {
 	when := opjournal.WhenBoundary
 	switch intent {
 	case session.SubmitIntentFollowUp:
@@ -719,10 +723,12 @@ func messageRequestID(adm *legacyop.Admission) (string, error) {
 	return newRequestID()
 }
 
-// messageOpResult is the op result of a message delivery's legacy result. A
-// delivery whose interrupt the runtime accepted unfenced records that
-// degradation.
-func messageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
+// MessageOpResult is the op result of a message delivery's legacy result,
+// its error mapped by messageSentinels: a delivery whose interrupt the runtime
+// accepted unfenced records that degradation. The API and the CLI's message
+// paths all close a message op through it, so one op id closes alike on
+// either surface.
+func MessageOpResult(queued bool, err error, interrupt *session.TurnInterruptReport) legacyop.Result {
 	res := messageSentinels.MessageResult(queued, err)
 	if err == nil && interrupt != nil && interrupt.Degradation != "" {
 		res.Outcome.Degradation = interrupt.Degradation

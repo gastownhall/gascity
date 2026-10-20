@@ -918,6 +918,11 @@ resource = "listener_helper"
 calls = 4
 
 [[count]]
+path = "cmd/gc/op_record_content_test.go"
+resource = "http_test_server"
+calls = 4
+
+[[count]]
 path = "cmd/gc/op_record_verbs_matrix_test.go"
 resource = "net_listen"
 calls = 1

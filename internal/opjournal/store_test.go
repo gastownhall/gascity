@@ -57,7 +57,8 @@ func assertOnlyKeyedLists(t *testing.T, rec *beadstest.OpRecordingStore) {
 		legacyKeyed := q.Label == LabelOp && len(q.Metadata) == 1 && q.Metadata[keyStatus] == string(StatusSubmitted)
 		laneScanKeyed := q.Label == LabelOp && len(q.Metadata) == 2 && q.Metadata[keyExecutor] == string(ExecutorLane) && q.Metadata[keyStatus] != ""
 		openLaneKeyed := q.Label == "" && len(q.Metadata) == 2 && q.Metadata[keyOpen] != "" && q.Metadata[keyExecutor] == string(ExecutorLane)
-		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed {
+		interruptsKeyed := strings.HasPrefix(q.Label, labelOpConvPrefix) && len(q.Metadata) == 1 && q.Metadata[keyKind] == string(KindInterrupt) && q.Limit > 0
+		if !openKeyed && !legacyKeyed && !laneScanKeyed && !openLaneKeyed && !interruptsKeyed {
 			t.Errorf("unkeyed list %+v from %v", q, op.Caller)
 		}
 		for _, req := range beads.NativeListPlan(op.Query) {
@@ -347,6 +348,34 @@ func TestProposePayloadCap(t *testing.T) {
 	}
 	if h.countOps(beadstest.OpCreate) != creates {
 		t.Fatal("an oversized payload reached the store")
+	}
+}
+
+// TestValidatePayload pins the exported payload check's verdicts: it refuses
+// what Propose refuses of a payload whatever the op's conversation, a payload
+// over the cap as ErrPayloadTooLarge, one a kind cannot carry as
+// ErrInvalidRequest, and an unknown kind as ErrUnknownKind. It is
+// validatePayload, the check Propose applies, so the two cannot drift.
+func TestValidatePayload(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		kind    Kind
+		payload string
+		want    error
+	}{
+		{"message", KindMessage, "hello", nil},
+		{"message at the cap", KindMessage, strings.Repeat("a", MaxInlinePayload), nil},
+		{"message over the cap", KindMessage, strings.Repeat("a", MaxInlinePayload+1), ErrPayloadTooLarge},
+		{"message not UTF-8", KindMessage, "bad \xff text", ErrInvalidRequest},
+		{"message empty", KindMessage, "", ErrInvalidRequest},
+		{"wake without payload", KindWake, "", nil},
+		{"wake with payload", KindWake, "x", ErrInvalidRequest},
+		{"unknown kind", "teleport", "x", ErrUnknownKind},
+	} {
+		err := ValidatePayload(tc.kind, tc.payload)
+		if (tc.want == nil) != (err == nil) || tc.want != nil && !errors.Is(err, tc.want) {
+			t.Errorf("%s: ValidatePayload = %v, want %v", tc.name, err, tc.want)
+		}
 	}
 }
 
