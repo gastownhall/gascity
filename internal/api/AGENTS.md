@@ -177,8 +177,15 @@ a client-keyed op open for a same-key retry to adopt. A retry that reuses a
 key on a session-scoped command (stop, kill, respond) reuses the first
 request's scope (`priorSessionScope`), so a session that moved to another
 generation or turn since replays the first request instead of refusing the
-key as another request; a kill that adopts an op whose generation is gone
-refuses `refused:target_moved`, as `gc session kill` does. With the gates
+key as another request. A recorded kill takes the runtime lease first
+(`recordedKillLease`), checks its op's generation under it, and only then
+lends the lease to `KillFenced`, as `gc session kill` does: a kill whose
+generation is gone refuses `refused:target_moved` before the fence, the stop
+or the asleep sync touches anything. A close op carries no payload, so
+`delete` is fingerprinted by the in-memory cache only (reusing a key across
+`/close` and `/close?delete=true` is 422 in one process); after a restart a
+same-key `/close?delete=true` that replays a successful close deletes the
+bead if it is still closed and refuses 409 if it was reopened. With the gates
 off nothing is read or written beyond the legacy path, except that a `/stop`
 that names a turn is stopped turn-scoped through the worker in every mode. A
 request `auto` could not record runs exactly as in off (I8).

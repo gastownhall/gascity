@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"strings"
 	"time"
@@ -847,6 +848,33 @@ func killScopeMoved(store beads.Store, id string, adm *legacyop.Admission) error
 	}
 	return fmt.Errorf("%s: session %s is at generation %d, not generation %d, which op %s was recorded for, so nothing was killed; resend with a new Idempotency-Key to kill the new run: %w",
 		refusedTargetMoved, id, now.Generation, adm.Op.Scope.Generation, adm.Op.ID, errKillTargetMoved)
+}
+
+// recordedKillLease takes the runtime lease a recorded kill checks its scope
+// under, as gc session kill does: the lease is held from before the
+// generation check through the fence's stop and asleep sync (I-LEASE), so a
+// start cannot slip a new run in between. A busy lease is ErrSessionStarting
+// (retryable); any other lease failure takes the name's flock alone rather
+// than hold the kill hostage. It returns nil, taking none, for a kill that is
+// not recorded at the session's generation, or a row that does not read open
+// with a runtime name: the fence then takes its own lease and decides on its
+// own read.
+func (s *Server) recordedKillLease(ctx context.Context, store beads.Store, id string, by session.Actor, adm *legacyop.Admission) (*session.RuntimeLease, error) {
+	if !adm.Recorded || adm.Op.Scope.Kind != opjournal.ScopeSession || by.City.IsZero() {
+		return nil, nil
+	}
+	front := session.NewStore(beads.SessionStore{Store: store})
+	info, err := front.Get(id)
+	if err != nil || info.Closed || info.SessionName == "" {
+		return nil, nil
+	}
+	req := session.RuntimeLeaseRequest{City: by.City.Path(), Name: info.SessionName, ID: id, TTL: session.RuntimeLeaseTTLFor(s.state.Config())}
+	lease, err := session.WaitOperatorRuntimeLease(ctx, front, req)
+	if err != nil && !errors.Is(err, session.ErrRuntimeLeaseBusy) {
+		log.Printf("gc api: session kill: stopping %s under the name's flock alone: %v", info.SessionName, err)
+		lease, err = session.WaitOperatorRuntimeLease(ctx, nil, session.RuntimeLeaseRequest{City: req.City, Name: req.Name})
+	}
+	return lease, err
 }
 
 // killOpResult is a kill's op result: a moved target closes

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	goruntime "runtime"
 	"strconv"
 	"strings"
 	"sync/atomic"
@@ -1406,5 +1407,245 @@ func TestSessionControlOpsRequireNamedStopRefusesAnInvalidKey(t *testing.T) {
 	}
 	if n := len(e.opRows(t)); n != 0 {
 		t.Fatalf("op rows = %d, want 0", n)
+	}
+}
+
+// A named stop is turn-scoped in every mode: in off, and in an auto that
+// could not record it (I8 keeps the request's own turn), it sends the one
+// turn-scoped interrupt and never the session-scoped one.
+func TestSessionControlOpsNamedStopIsTurnScopedUnrecorded(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		control string
+		setup   func(e *opsEnv)
+	}{
+		{name: "off", control: "off", setup: func(*opsEnv) {}},
+		{name: "auto unrecorded", control: "auto", setup: func(e *opsEnv) {
+			e.store.set(func(s *opsTestStore) { s.createErr = errors.New("store down") })
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e, info := protocolStopEnvMode(t, tc.control)
+			e.fs.sp.TurnScripts[info.SessionName] = []string{"t-1", ""}
+			tc.setup(e)
+			rec := e.post(t, "/session/"+info.ID+"/stop", "", `{"turn":"t-1"}`)
+			wantStatus(t, "named stop", rec, http.StatusOK)
+			unfenced, turnScoped := interruptsSent(e.fs.sp, info.SessionName)
+			if unfenced != 0 || turnScoped != 1 {
+				t.Fatalf("sent %d session-scoped and %d turn-scoped interrupts, want 0 and 1", unfenced, turnScoped)
+			}
+			if n := len(e.opRows(t)); n != 0 {
+				t.Fatalf("op rows = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// frameFailingStore fails one Get of bead id while fails is above zero and
+// the call stack holds a frame whose function name contains frame: a read
+// made on one path, the others served as usual.
+type frameFailingStore struct {
+	*opsTestStore
+	id    string
+	frame string
+	err   error
+	fails atomic.Int32
+}
+
+func (s *frameFailingStore) Get(id string) (beads.Bead, error) {
+	if id == s.id && s.fails.Load() > 0 && callStackHas(s.frame) {
+		s.fails.Add(-1)
+		return beads.Bead{}, s.err
+	}
+	return s.opsTestStore.Get(id)
+}
+
+// callStackHas reports whether a caller's function name contains frame.
+func callStackHas(frame string) bool {
+	pcs := make([]uintptr, 64)
+	frames := goruntime.CallersFrames(pcs[:goruntime.Callers(2, pcs)])
+	for {
+		f, more := frames.Next()
+		if strings.Contains(f.Function, frame) {
+			return true
+		}
+		if !more {
+			return false
+		}
+	}
+}
+
+// A protocol session whose worker handle or turn capabilities do not read is
+// refused before anything is sent, on a fresh stop and on a same-key retry
+// that adopts a stop of a turn: the unreadable read never falls back to the
+// unfenced session-scoped stop (DES-T3I §14 item 3).
+func TestSessionControlOpsUnreadableTurnSourceRefusesTheStop(t *testing.T) {
+	for _, read := range []struct {
+		name  string
+		frame string
+	}{
+		{name: "worker handle", frame: "worker.(*Factory).SessionByHandle"},
+		{name: "turn capabilities", frame: "worker.(*SessionHandle).turnSession"},
+	} {
+		for _, retry := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s retry=%v", read.name, retry), func(t *testing.T) {
+				e, info := protocolStopEnv(t)
+				e.fs.sp.TurnHistoryScripts[info.SessionName] = []runtime.TurnHistory{{Current: runtime.TurnState{TurnID: "t-2"}}}
+				e.fs.sp.TurnScripts[info.SessionName] = []string{"t-2", ""}
+				key := ""
+				if retry {
+					key = "stop-1"
+					e.seedSyncOp(t, info.ID, opjournal.KindInterrupt, key, turnStopScope(t, e, info.ID, "t-2"), interruptOpPolicy, "", legacyop.ExecutorAPI, time.Now())
+				}
+				failing := &frameFailingStore{opsTestStore: e.store, id: info.ID, frame: read.frame, err: fmt.Errorf("transport: %w", runtime.ErrRuntimeUnavailable)}
+				failing.fails.Store(1)
+				e.fs.cityBeadStore = failing
+				e.restart(t)
+				rec := e.post(t, "/session/"+info.ID+"/stop", key, "")
+				wantStatus(t, "stop", rec, http.StatusServiceUnavailable)
+				if failing.fails.Load() != 0 {
+					t.Fatalf("the %s read never ran", read.name)
+				}
+				if unfenced, turnScoped := interruptsSent(e.fs.sp, info.SessionName); unfenced != 0 || turnScoped != 0 || e.fs.sp.CountCalls("Interrupt", info.SessionName) != 0 {
+					t.Fatalf("sent %d session-scoped and %d turn-scoped interrupts, want none", unfenced, turnScoped)
+				}
+			})
+		}
+	}
+}
+
+// A plain close and a close?delete=true are different requests: in the
+// process that answered the first, reusing its Idempotency-Key for the other
+// is 422 idempotency_mismatch, nothing deleted. A close op records no
+// delete, so after a restart the same-key close?delete=true replays the
+// close and deletes the bead it left closed; one reopened since is refused,
+// nothing deleted.
+func TestSessionControlOpsCloseAndCloseDeleteUnderOneKey(t *testing.T) {
+	for _, mode := range []string{"off", "auto"} {
+		t.Run(mode+" one process", func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", mode)
+			info := e.session(t, "Close twice")
+			wantStatus(t, "plain close", e.post(t, "/session/"+info.ID+"/close", "c-1", ""), http.StatusOK)
+			rec := e.post(t, "/session/"+info.ID+"/close?delete=true", "c-1", "")
+			if rec.Code != http.StatusUnprocessableEntity || !strings.Contains(rec.Body.String(), "idempotency_mismatch") {
+				t.Fatalf("close?delete=true under the plain close's key: %d %s, want 422 idempotency_mismatch", rec.Code, rec.Body.String())
+			}
+			if _, err := e.store.Get(info.ID); err != nil {
+				t.Fatalf("session bead after the mismatch: %v, want kept", err)
+			}
+		})
+	}
+	for _, reopened := range []bool{false, true} {
+		t.Run(fmt.Sprintf("auto restart reopened=%v", reopened), func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", "auto")
+			info := e.session(t, "Close twice")
+			wantStatus(t, "plain close", e.post(t, "/session/"+info.ID+"/close", "c-1", ""), http.StatusOK)
+			if reopened {
+				if err := e.store.Reopen(info.ID); err != nil {
+					t.Fatal(err)
+				}
+			}
+			e.restart(t)
+			rec := e.post(t, "/session/"+info.ID+"/close?delete=true", "c-1", "")
+			_, getErr := e.store.Get(info.ID)
+			if reopened {
+				if rec.Code != http.StatusConflict || getErr != nil {
+					t.Fatalf("replayed close of a reopened session: %d %s, bead %v; want 409 and the bead kept", rec.Code, rec.Body.String(), getErr)
+				}
+				return
+			}
+			wantStatus(t, "replayed close?delete=true", rec, http.StatusOK)
+			if a := decodeCommandAnswer(t, rec); !a.Replayed {
+				t.Fatalf("answer %+v, want the plain close replayed", a)
+			}
+			if !errors.Is(getErr, beads.ErrNotFound) {
+				t.Fatalf("session bead after the replayed close?delete=true: %v, want deleted", getErr)
+			}
+		})
+	}
+}
+
+// leaseFreeMetadata is meta without the runtime lease record, which taking
+// the kill's lease writes on every path, gc session kill's too.
+func leaseFreeMetadata(meta map[string]string) map[string]string {
+	out := maps.Clone(meta)
+	for k := range out {
+		if strings.HasPrefix(k, "runtime_lease_") {
+			delete(out, k)
+		}
+	}
+	return out
+}
+
+// openKillAtMovedGeneration leaves a client-keyed kill op open at session
+// id's generation (a retryable Stop failure), then moves the session to a
+// later generation, and returns the op's ID and the generation it names.
+func openKillAtMovedGeneration(t *testing.T, e *opsEnv, info session.Info) (string, int64) {
+	t.Helper()
+	gen := generationOf(t, e.store, info.ID)
+	e.fs.sp.StopErrors[info.SessionName] = errors.New("transport: reset")
+	if rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", ""); rec.Code == http.StatusOK {
+		t.Fatalf("failing kill answered 200: %s", rec.Body.String())
+	}
+	delete(e.fs.sp.StopErrors, info.SessionName)
+	opID, _ := opjournal.DeriveID("gc", info.ID, legacyop.PrincipalOperator, "kill-1")
+	if op, err := e.opStore(t).Get(opID); err != nil || op.Status == opjournal.StatusClosed {
+		t.Fatalf("kill op after the failed kill = %+v, %v; want open", op, err)
+	}
+	if err := e.store.SetMetadata(info.ID, "generation", strconv.FormatInt(gen+41, 10)); err != nil {
+		t.Fatal(err)
+	}
+	return opID, gen
+}
+
+// The generation check of an adopted kill runs before the kill does
+// anything, as gc session kill's does: a later run that died, or a
+// configured named session asleep with its runtime gone and a wake pending,
+// is refused refused:target_moved and its row left as it was (no asleep
+// sync, the pending wake kept).
+func TestSessionControlOpsAdoptedKillOfAMovedSessionTouchesNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, e *opsEnv, info session.Info)
+	}{
+		{name: "later run died", setup: func(*testing.T, *opsEnv, session.Info) {}},
+		{name: "named session, runtime gone, wake pending", setup: func(t *testing.T, e *opsEnv, info session.Info) {
+			for k, v := range map[string]string{
+				"configured_named_identity": "chat", "state": "asleep", "sleep_reason": "idle",
+				"wake_request": "true", "wake_requested_at": time.Now().UTC().Format(time.RFC3339),
+			} {
+				if err := e.store.SetMetadata(info.ID, k, v); err != nil {
+					t.Fatal(err)
+				}
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			e := newControlOpsEnv(t, "off", "auto")
+			e.fs.sessionProvider = runtime.FullFake{Fake: e.fs.sp}
+			info := e.session(t, "Kill moved")
+			opID, gen := openKillAtMovedGeneration(t, e, info)
+			if err := e.fs.sp.Stop(info.SessionName); err != nil { // the later run died
+				t.Fatal(err)
+			}
+			tc.setup(t, e, info)
+			before := leaseFreeMetadata(metadataOf(t, e.store, info.ID))
+			stops := e.fs.sp.CountCalls("Stop", info.SessionName)
+			e.restart(t)
+			rec := e.post(t, "/session/"+info.ID+"/kill", "kill-1", "")
+			if rec.Code != http.StatusConflict || !strings.Contains(rec.Body.String(), refusedTargetMoved) {
+				t.Fatalf("adopted kill: %d %s, want 409 %s", rec.Code, rec.Body.String(), refusedTargetMoved)
+			}
+			op, err := e.opStore(t).Get(opID)
+			if err != nil || op.Status != opjournal.StatusClosed || op.Outcome.Reason != opjournal.RefusedReasonPrefix+refusedTargetMoved || op.Scope.Generation != gen {
+				t.Fatalf("op = %+v, %v; want closed failed{refused:target_moved} at generation %d", op, err, gen)
+			}
+			if after := leaseFreeMetadata(metadataOf(t, e.store, info.ID)); !maps.Equal(before, after) {
+				t.Fatalf("the refused kill changed the row:\nbefore %v\nafter  %v", before, after)
+			}
+			if got := e.fs.sp.CountCalls("Stop", info.SessionName); got != stops {
+				t.Fatalf("Stop calls = %d, want %d: the refused kill stopped the runtime", got, stops)
+			}
+		})
 	}
 }

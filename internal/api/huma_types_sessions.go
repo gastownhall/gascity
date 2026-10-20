@@ -183,7 +183,7 @@ type SessionPermissionModeInput struct {
 type SessionCloseInput struct {
 	CityScope
 	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Delete         bool   `query:"delete" required:"false" doc:"Permanently delete bead after closing. Outside the recorded operation: a same-key retry that changes it gets the first request's outcome."`
+	Delete         bool   `query:"delete" required:"false" doc:"Permanently delete bead after closing. Part of the request an Idempotency-Key names in the process that answered it (a retry that changes it is 422); the recorded close op does not carry it, so a same-key close?delete=true that replays a successful close deletes the bead if it is still closed."`
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 }
 
