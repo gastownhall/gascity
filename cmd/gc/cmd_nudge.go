@@ -1254,8 +1254,13 @@ type sessionNudgeResult struct {
 // result before it reports: delivered, queued (succeeded{via:
 // legacy.queued}), or refused. A same-key rerun replays the first run's
 // outcome without delivering again. The delivered text is the message,
-// unchanged in every ops.content mode.
+// unchanged in every ops.content mode. When [ops] authoritative lists message
+// and a lane host can type into the session, the nudge is a conversation-lane
+// op instead (deliverSessionNudgeLane), which ops.content does not govern.
 func deliverSessionNudgeKeyed(target nudgeTarget, store beads.Store, sp runtime.Provider, message string, mode nudgeDeliveryMode, key string, jsonOutput bool, stdout, stderr io.Writer) int {
+	if handled, code := deliverSessionNudgeLane(target, store, sp, message, mode, key, jsonOutput, stdout, stderr); handled {
+		return code
+	}
 	op, start := startSessionNudgeOp(target, store, message, mode, key, jsonOutput, stdout, stderr)
 	switch start {
 	case cliOpRefused:
@@ -2058,25 +2063,33 @@ var errMessageOpRefused = errors.New("the op journal refused the request before 
 // checks nothing and opens no op store.
 func resolveMessageOpTarget(identifier string, req cliOpRequest, warningWriter ...io.Writer) (nudgeTarget, error) {
 	return resolveNudgeTargetAfter(identifier, false, func(cityPath string, cfg *config.City, store beads.NudgesStore) error {
-		if onWorkerSite(cityPath) {
-			// A worker site records no op (sendMailNotifyWithOp records only
-			// the recipient's wake), so the journal has nothing to refuse.
-			return nil
-		}
-		// The op the verb starts once its target resolves prints the gate's
-		// warnings; this one only refuses.
-		stderr := req.stderr
-		req.stderr = io.Discard
-		if store.Store == nil {
-			req.unrecordable = legacyop.ReasonStoreUnavailable
-		}
-		op := newCLIOp(cfg, cliSessionStore(store.Store, cfg, cityPath), req)
-		op.req.stderr = stderr
-		if !op.preflight() {
-			return errMessageOpRefused
-		}
-		return nil
+		return messageOpPreflight(cityPath, cfg, store, req)
 	}, warningWriter...)
+}
+
+// messageOpPreflight is resolveMessageOpTarget's check over the loaded
+// config and the opened nudges store: under require, whether the op journal
+// can record req (cliOp.preflight), answering errMessageOpRefused, the
+// refusal reported, when it cannot. A worker site checks nothing.
+func messageOpPreflight(cityPath string, cfg *config.City, store beads.NudgesStore, req cliOpRequest) error {
+	if onWorkerSite(cityPath) {
+		// A worker site records no op (sendMailNotifyWithOp records only
+		// the recipient's wake), so the journal has nothing to refuse.
+		return nil
+	}
+	// The op the verb starts once its target resolves prints the gate's
+	// warnings; this one only refuses.
+	stderr := req.stderr
+	req.stderr = io.Discard
+	if store.Store == nil {
+		req.unrecordable = legacyop.ReasonStoreUnavailable
+	}
+	op := newCLIOp(cfg, cliSessionStore(store.Store, cfg, cityPath), req)
+	op.req.stderr = stderr
+	if !op.preflight() {
+		return errMessageOpRefused
+	}
+	return nil
 }
 
 // resolveNudgeTargetInStore is resolveNudgeTargetPreferringHookIdentity over a

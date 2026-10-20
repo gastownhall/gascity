@@ -504,14 +504,7 @@ func (h *conversationLaneHost) noticeNow() time.Time { return h.clk.Now() }
 // lane then delivers it. A protocol-mode session is nudged directly, as
 // before, even where this host's executor serves it from its turns.
 func (h *conversationLaneHost) servesNotice(st *opjournal.Store, sessName string, view opjournal.ConversationView) (bool, error) {
-	if laneTypesLive(h.env.SessionProvider(), sessName) {
-		return true, nil
-	}
-	row, _, found, err := st.Runtime(view.ID)
-	if err != nil {
-		return false, fmt.Errorf("reading conversation %s's runtime row: %w", view.ID, err)
-	}
-	return found && hostedElsewhere(row.Host, view.Generation), nil
+	return laneServesSession(h.env.SessionProvider(), st, sessName, view)
 }
 
 // noticeFailed implements plannerNoticeLane.

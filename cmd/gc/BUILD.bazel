@@ -261,7 +261,9 @@ go_library(
         "controller_stop_client.go",
         "convergence_store.go",
         "convergence_tick.go",
+        "conversation_lane_cli.go",
         "conversation_lane_exec.go",
+        "conversation_lane_failpoint.go",
         "conversation_lane_hook.go",
         "conversation_lane_host.go",
         "conversation_lane_turn.go",
@@ -864,8 +866,10 @@ go_binary(
 )
 
 # gc linked with test hooks (internal/clock.testHooks): the only binary in
-# which GC_TEST_BACKSTOP_SPEEDUP divides the controller's backstop cadences.
-# testonly, manual, and visible only to the acceptance rows that use it;
+# which GC_TEST_BACKSTOP_SPEEDUP divides the controller's backstop cadences
+# and GC_LANE_FAILPOINT kills a lane at a stage. testonly, manual, and
+# visible only to the acceptance rows and the conversation-lane evidence
+# (//test/conversationlane) that use it;
 # scripts/cmd_gc_testhooks_test.go keeps the stamp out of every other link
 # and out of the release config.
 # keep
@@ -874,7 +878,10 @@ go_binary(
     testonly = True,
     embed = [":gc_lib"],
     tags = ["manual"],
-    visibility = ["//test/acceptance:__pkg__"],
+    visibility = [
+        "//test/acceptance:__pkg__",
+        "//test/conversationlane:__pkg__",
+    ],
     x_defs = {"github.com/gastownhall/gascity/internal/clock.testHooks": "enabled"},
 )
 
@@ -1333,12 +1340,15 @@ go_test(
         "controller_watcher_fd_test.go",
         "converge_scope_store_test.go",
         "convergence_integration_test.go",
+        "conversation_lane_cli_test.go",
         "conversation_lane_exec_test.go",
+        "conversation_lane_failpoint_test.go",
         "conversation_lane_hook_test.go",
         "conversation_lane_host_test.go",
         "conversation_lane_steer_test.go",
         "conversation_lane_turn_test.go",
         "conversation_lane_turns_test.go",
+        "conversation_lane_x2_test.go",
         "convoy_chargolden_test.go",
         "core_formula_drain_ack_test.go",
         "crash_tracker_test.go",

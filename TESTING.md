@@ -173,6 +173,33 @@ orders and pack scripts run, is the binary under test, and whenever an order
 they run fails. `test/acceptance/BUILD.bazel` sets both variables
 (`SOLO_ENV`); its `REALTIME_TESTS` run the same rows with neither, nightly.
 
+### Lane failpoints
+
+`GC_LANE_FAILPOINT=<host>:<stage>[:<n>]` makes a gc process kill itself with
+SIGKILL at one crash point of one of its conversation lanes, so the X2 kill
+matrix can show what a crash there leaves behind and that the next lane host
+recovers it. Only `//test/conversationlane` uses it.
+
+- `host` is `ctl`, the controller's lane host, or `cli`, the inline pass of
+  `gc session nudge`. A gc that hosts no such lane never fires.
+- `stage` is `propose` (`cli` only: the op is durable and nothing is taken),
+  `take` (the Take's guarded batch landed and the effect has not started),
+  `effect` (the effect returned and its Done is not written) or `done` (a
+  pass's Done landed accepted).
+- `n` fires on the n-th hit of that host and stage in the process; it
+  defaults to 1.
+
+Like `GC_TEST_BACKSTOP_SPEEDUP`, it is honored only by the
+`//cmd/gc:gc_testhooks` link. Any other gc ignores it and prints one
+`gc: WARNING: GC_LANE_FAILPOINT=...: ignored: ...` line. An armed failpoint
+prints one `gc: WARNING: GC_LANE_FAILPOINT=...: TEST HOOK ACTIVE: ...` line
+when the lane first consults it, and the evidence tests check for that line,
+so a gc that ignored the variable fails them instead of passing vacuously. A
+malformed value is ignored with a notice naming why. The variable is in the
+GC_* env-read inventory and in `internal/testenv.LeakVectorVars`, so a shell
+value never reaches a test's gc child; a test sets it on the child it means
+to kill.
+
 ### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after

@@ -4518,6 +4518,15 @@ equivalent to typing the message into the session's terminal.
 Accepts a session ID or session alias. Multi-word messages are
 joined automatically.
 
+When [ops] authoritative lists message, a nudge to a session a conversation
+lane can type into is recorded as a lane op instead: wait-idle and immediate
+deliver it as a prompt at once when the session is at an idle boundary, with
+or without a running controller, and otherwise report it queued for the
+controller's lane host, which delivers it at the next boundary; queue
+delivers it as a notice at the next boundary and never wakes the session.
+The [ops] content gate does not govern such a nudge, and one whose op cannot
+be written is refused.
+
 ```
 gc session nudge <id-or-alias> <message...> [flags]
 ```
@@ -4526,7 +4535,7 @@ gc session nudge <id-or-alias> <message...> [flags]
 |------|------|---------|-------------|
 | `--delivery` | string | `wait-idle` | delivery mode: immediate, wait-idle, or queue |
 | `--json` | bool |  | JSON output |
-| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] gate is auto or require), rerunning with the same key reports the first run's outcome instead of acting again; ignored when the gate is off (default: a new key each run) |
+| `--key` | string |  | idempotency key: while the op journal records this command (its [ops] content gate is auto or require, or [ops] authoritative lists message), rerunning with the same key reports the first run's outcome instead of acting again; ignored otherwise (default: a new key each run) |
 
 ## gc session peek
 

@@ -762,6 +762,7 @@ func (h *conversationLaneHost) pass(conv string) (out lanePassOutcome) {
 	}, info)
 	res, err := lane.Pass(h.ctx, view, exec)
 	h.notePass(conv, res, err)
+	laneFailpointAfterPass(laneHostName, res)
 	out = lanePassOutcome{res: res, err: err}
 	if err == nil && res.Wake && !view.Closed {
 		out.wake, out.wakeErr = h.requestWake(live, conv)
@@ -833,6 +834,7 @@ func (h *conversationLaneHost) store() (*opjournal.Store, *opjournal.Conversatio
 	if err != nil {
 		return nil, nil, err
 	}
+	armLaneFailpoints(lane, laneHostName)
 	h.st, h.lane, h.stOver = st, lane, over
 	return st, lane, nil
 }

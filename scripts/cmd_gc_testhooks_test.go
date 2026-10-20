@@ -10,7 +10,8 @@ import (
 )
 
 // testHooksStamp is the link-time variable that turns gc's test-only hooks
-// on (internal/clock.testHooks; today GC_TEST_BACKSTOP_SPEEDUP).
+// on (internal/clock.testHooks; today GC_TEST_BACKSTOP_SPEEDUP and
+// GC_LANE_FAILPOINT).
 const testHooksStamp = "internal/clock.testHooks"
 
 // TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp keeps gc's test hooks out
@@ -18,7 +19,8 @@ const testHooksStamp = "internal/clock.testHooks"
 // with -X .../internal/clock.testHooks=enabled, so this pins that:
 //
 //   - exactly one Bazel target stamps it, //cmd/gc:gc_testhooks, and that
-//     target is testonly, manual and visible to //test/acceptance only;
+//     target is testonly, manual and visible to //test/acceptance and
+//     //test/conversationlane only;
 //   - //cmd/gc:gc_lib, gc's main package, stays private, so no other
 //     package can link a gc of its own;
 //   - the release config (.goreleaser.yml) and the Makefile's LDFLAGS never
@@ -73,7 +75,7 @@ func TestOnlyTheTestonlyGCLinkCarriesTheTestHooksStamp(t *testing.T) {
 	for _, want := range []string{
 		"    testonly = True,\n",
 		`    tags = ["manual"],` + "\n",
-		`    visibility = ["//test/acceptance:__pkg__"],` + "\n",
+		"    visibility = [\n        \"//test/acceptance:__pkg__\",\n        \"//test/conversationlane:__pkg__\",\n    ],\n",
 		`    x_defs = {"github.com/gastownhall/gascity/` + testHooksStamp + `": "enabled"},` + "\n",
 	} {
 		if !strings.Contains(rule[1], want) {
