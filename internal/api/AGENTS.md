@@ -161,3 +161,27 @@ delivery that runs to its timeout closes its op after the timer fires. Past
 still open `failed{deadline_in_flight}`, and the retry replays it; nothing
 adopts it, since its message may have landed. A new recorded endpoint must
 bound its delivery the same way.
+
+## Session command ops
+
+The synchronous session commands record ops through `runSyncOp`
+(`session_control_ops.go`; DES-O0API §7): `/stop` and `/respond` under
+`ops.control`, `/wake`, `/suspend`, `/kill`, `/close` and `/reset` under
+`ops.lifecycle`. The op is admitted after the front-door checks (target
+resolution, the always-on named close refusal, a named stop turn's turn
+identity) and closed from the legacy result before the answer. A sync command
+caches no in-flight answer, so a same-key request while one runs is 409
+`in_flight`; a retryable error leaves a client-keyed op open for a same-key
+retry to adopt. A retry that reuses a key on a session-scoped command (stop,
+kill, respond) reuses the first request's scope (`priorSessionScope`), so a
+session that moved to another generation or turn since replays the first
+request instead of refusing the key as another request. With the gates off
+nothing is read or written beyond the legacy path, except that a `/stop` that
+names a turn is stopped turn-scoped through the worker in every mode.
+
+While `ops.control` records, `/stop` reads the session's turn live
+(`resolveStopTurn`) and interrupts a running turn turn-scoped. On a protocol
+turn source it never falls back to the unfenced session-scoped interrupt: no
+turn running is nothing to stop, and a turn read that fails sends nothing
+(DES-T3I §14 item 3). Keep it that way: a late protocol interrupt kills the
+next turn.
