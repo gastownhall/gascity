@@ -138,7 +138,17 @@
 // orphan: it closes canceled (cancel_by lane:cascade) when M was canceled,
 // which replaces the rule close of an I that never ran, else
 // skipped{not_needed}. A partner row that cannot be read waits
-// now_unreadable.
+// now_unreadable. An open derived interrupt pairs by identity, not by
+// namespace: a message that moved here with its id from another namespace
+// forms its unit with it wherever a lane pinned it. A closed one is read
+// only where this lane or the message's own namespace pins it, so one a
+// lane of a third namespace pinned (a lowering on a stale mint prefix)
+// reads as missing here, and its message goes marked interrupt_failed
+// whatever its outcome. A message not yet lowered whose derived interrupt
+// already exists, open anywhere or found at either of those ids, is refused
+// (now_interrupt_taken) and never lowered beside it: only a lowering mints
+// that key. An interrupt keyed as a derived one whose causation is another
+// namespace's op id with no row here is plain.
 //
 // # Executor and open rows
 //

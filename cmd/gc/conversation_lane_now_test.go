@@ -60,7 +60,8 @@ func laneReadOf(hist runtime.TurnHistory, err error) func(context.Context) (runt
 // lagging on the replaced turn) is the boundary, a newer turn is not, and a
 // source it cannot read, or a read that failed, leaves a keystroke runtime
 // at the session layer's boundary and a protocol runtime unknown. The
-// executor's own look moves to what the step read.
+// replaced turn is known on every path, read or not. The executor's own
+// look moves to what the step read.
 func TestLaneNowReplacementAfter(t *testing.T) {
 	inferred := worker.TurnCapabilities{
 		TurnCapabilities: runtime.TurnCapabilities{Start: runtime.TurnStartRecorded, End: runtime.TurnEndInferred, Fence: runtime.TurnFenceChecked},
@@ -79,7 +80,8 @@ func TestLaneNowReplacementAfter(t *testing.T) {
 	}
 	boundary := opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriNo, Known: []string{"t1"}}
 	newer := opjournal.TurnAfter{Boundary: opjournal.TriNo, Live: opjournal.TriYes, Turn: "t2", Known: []string{"t2", "t1"}}
-	keystrokeUnread := opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriUnknown}
+	keystrokeUnread := opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriUnknown, Known: []string{"t1"}}
+	protocolUnread := opjournal.TurnAfter{Known: []string{"t1"}}
 	for _, tc := range []struct {
 		name      string
 		caps      worker.TurnCapabilities
@@ -98,10 +100,11 @@ func TestLaneNowReplacementAfter(t *testing.T) {
 		{name: "acp, idle", caps: acp, transport: "acp", protocol: true, read: "idle", replaced: "t1", want: boundary},
 		{name: "acp, newer turn", caps: acp, transport: "acp", protocol: true, read: "newer", replaced: "t1", want: newer},
 		{name: "t3, lagging", caps: acp, protocol: true, read: "lagging", replaced: "t1", want: boundary},
-		{name: "t3, read fails", caps: acp, protocol: true, read: "error", replaced: "t1", want: opjournal.TurnAfter{}},
+		{name: "t3, read fails", caps: acp, protocol: true, read: "error", replaced: "t1", want: protocolUnread},
 		{name: "session scope, a turn runs", caps: acp, protocol: true, read: "lagging", want: opjournal.TurnAfter{Boundary: opjournal.TriNo, Live: opjournal.TriYes, Turn: "t1", Known: []string{"t1"}}},
+		{name: "session scope, read fails", caps: inferred, read: "error", want: opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriUnknown}},
 		{name: "no source, keystroke", want: keystrokeUnread, replaced: "t1"},
-		{name: "no source, protocol", protocol: true, want: opjournal.TurnAfter{}, replaced: "t1"},
+		{name: "no source, protocol", protocol: true, want: protocolUnread, replaced: "t1"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			e := replacementExec(t, tc.caps, tc.transport, tc.protocol, reads[tc.read])
@@ -217,7 +220,7 @@ func TestLaneNowReplacementResultMapping(t *testing.T) {
 	}{
 		{"settled", nil, opjournal.Settled{
 			Turn: "t1", Via: laneViaLive, Degradation: opjournal.DegradationUnfencedInterrupt,
-			After: opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriUnknown},
+			After: opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriUnknown, Known: []string{"t1"}},
 		}},
 		{"not prepared", notPrepared, opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonReplacementNotPrepared, Turn: "t1"}},
 		{"refused", fmt.Errorf("x: %w", session.ErrTurnInterruptUnsupported), opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}},

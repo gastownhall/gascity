@@ -206,7 +206,7 @@ func planRules(snap laneSnapshot, conv ConversationView, now time.Time, by strin
 		}
 		// A deliver-now op's waits and placement are left to planNow
 		// (phase 2), which pairs it with its partner; its closes stand.
-		ns := rp.nowOp(op, snap.prefix)
+		ns := rp.nowOp(op)
 		waitOpDetail := func(op Op, r WaitReason, detail string, until time.Time) {
 			if ns != nil {
 				ns.wait, ns.detail, ns.until = r, detail, until

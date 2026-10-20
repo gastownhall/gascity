@@ -24,7 +24,8 @@ import (
 const (
 	// DegradationInterruptFailed marks a deliver-now message delivered at a
 	// boundary after its derived interrupt failed, or after an interrupt
-	// that cannot be read back.
+	// that cannot be read back here: among them a closed one a lane of a
+	// third namespace pinned, whatever its outcome.
 	DegradationInterruptFailed = "interrupt_failed"
 	// DegradationInterruptUnsupported marks a deliver-now message delivered
 	// at a boundary because its session cannot interrupt the turn
@@ -58,6 +59,36 @@ func NowInterruptID(prefix string, m Op) (string, error) {
 	return DeriveID(prefix, m.Conversation, m.Producer.Principal, m.ID+nowInterruptKeySuffix)
 }
 
+// nowInterruptIDs are the ids deliver-now message m's derived interrupt may
+// have in a store of namespace prefix: pinned in prefix, the id a lowering
+// here creates, then in m's own namespace, where a lane of that namespace
+// lowered m before it moved here with its id.
+func nowInterruptIDs(prefix string, m Op) ([]string, error) {
+	id, err := NowInterruptID(prefix, m)
+	if err != nil {
+		return nil, err
+	}
+	own := opIDPrefix(m.ID)
+	if own == "" || own == prefix {
+		return []string{id}, nil
+	}
+	ownID, err := NowInterruptID(own, m)
+	if err != nil {
+		return nil, err
+	}
+	return []string{id, ownID}, nil
+}
+
+// opIDPrefix is the namespace prefix an op id was minted in: what precedes
+// its last -op- infix, since the hash after it holds no '-'; "" for an id
+// that is no op id.
+func opIDPrefix(id string) string {
+	if !validOpID(id) {
+		return ""
+	}
+	return id[:strings.LastIndex(id, opIDInfix)]
+}
+
 // TurnAfter is a session's turns as a deliver-now unit's replacement step
 // left them. The zero value says nothing is known.
 type TurnAfter struct {
@@ -68,8 +99,8 @@ type TurnAfter struct {
 	// LiveTurn.
 	Live Tri
 	Turn string
-	// Known are the turn ids the step's last read returned, the replaced
-	// turn among them.
+	// Known are the turn ids the step's last read returned and the replaced
+	// turn, which is known whether or not that read succeeded.
 	Known []string
 }
 
@@ -94,8 +125,9 @@ type NowResult struct {
 	// Interrupt is the replacement step's result.
 	Interrupt ControlResult
 	// Delivery is the message's result; nil when the command never reached
-	// it. A nil Delivery after a settled Interrupt breaks the contract: the
-	// message is then recorded Unknown.
+	// it, which only an Interrupt that sent nothing can say (NotDelivered,
+	// skipped{stale}, failed{unsupported}). A nil Delivery after any other
+	// Interrupt breaks the contract: the message is then recorded Unknown.
 	Delivery DeliveryResult
 }
 
@@ -120,11 +152,12 @@ func nowKeyShape(op Op) bool {
 
 // hasNowShape reports a lane interrupt that may be a derived interrupt, its
 // deliver-now partner to be read: keyed as one (nowKeyShape), with a
-// causation that is an op id of namespace prefix. Any other causation (a
+// causation that is an op id of any namespace, since a message that moved
+// here with its id pairs by identity (isDerivedOf). Any other causation (a
 // mail or session bead, a producer's own id) names no deliver-now message,
 // and the interrupt is plain.
-func hasNowShape(op Op, prefix string) bool {
-	return nowKeyShape(op) && strings.HasPrefix(op.Causation, prefix+opIDInfix) && validOpID(op.Causation)
+func hasNowShape(op Op) bool {
+	return nowKeyShape(op) && validOpID(op.Causation)
 }
 
 // isDerivedOf reports whether i is deliver-now message m's derived
@@ -159,9 +192,9 @@ func (r nowRow) detail() string {
 }
 
 // readNow reads, by id, each deliver-now partner that is not open: the
-// derived interrupt of each deliver-now message (is its id free, or how did
-// it close?) and the message of each derived-shape interrupt (how did it
-// close?). Gets, not lists.
+// derived interrupt of each deliver-now message, at each id it may have (is
+// its id free, or how did it close?), and the message of each derived-shape
+// interrupt (how did it close?). Gets, not lists.
 func (l *ConversationLane) readNow(snap *laneSnapshot) {
 	snap.prefix = l.store.prefix
 	snap.nowRows = map[string]nowRow{}
@@ -177,10 +210,12 @@ func (l *ConversationLane) readNow(snap *laneSnapshot) {
 	for _, op := range snap.ops {
 		switch {
 		case isNowMessage(op):
-			if id, err := NowInterruptID(snap.prefix, op); err == nil {
-				read(id)
+			if ids, err := nowInterruptIDs(snap.prefix, op); err == nil {
+				for _, id := range ids {
+					read(id)
+				}
 			}
-		case hasNowShape(op, snap.prefix):
+		case hasNowShape(op):
 			read(op.Causation)
 		}
 	}
@@ -251,8 +286,8 @@ const (
 
 // nowOp returns op's deliver-now state, made on first use, or nil for an op
 // that is neither a deliver-now message nor a derived-shape interrupt.
-func (rp *rulesPlan) nowOp(op Op, prefix string) *nowOpState {
-	if !isNowMessage(op) && !hasNowShape(op, prefix) {
+func (rp *rulesPlan) nowOp(op Op) *nowOpState {
+	if !isNowMessage(op) && !hasNowShape(op) {
 		return nil
 	}
 	st := &nowOpState{e: entry{op: op, cur: op}}
@@ -291,7 +326,10 @@ func (rp *rulesPlan) emitPlain(st *nowOpState, class *[]entry) {
 // deliver-now message with its derived interrupt and emits their final
 // closes, waits and entries: a lowering for a message not yet lowered, a
 // unit entry while both are open, a post-unit content entry once the
-// interrupt is closed, and a close for an orphan interrupt.
+// interrupt is closed, and a close for an orphan interrupt. Pairing goes by
+// identity (isDerivedOf), never by namespace: a message that moved here
+// with its id pairs with its open derived interrupt wherever a lane pinned
+// it.
 func (rp *rulesPlan) planNow(snap laneSnapshot, conv ConversationView) {
 	open := make(map[string]Op, len(snap.ops))
 	for _, op := range snap.ops {
@@ -301,76 +339,95 @@ func (rp *rulesPlan) planNow(snap laneSnapshot, conv ConversationView) {
 	for _, q := range snap.quarantined {
 		quarantined[q.ID] = true
 	}
+	// partner is each open message's open derived interrupt, the first in
+	// read order.
+	partner := map[string]*nowOpState{}
+	for _, id := range rp.nowOrder {
+		st := rp.nowState[id]
+		if m, ok := open[st.e.op.Causation]; ok && isDerivedOf(st.e.op, m) && partner[m.ID] == nil {
+			partner[m.ID] = st
+		}
+	}
 	for _, id := range rp.nowOrder {
 		st := rp.nowState[id]
 		if isNowMessage(st.e.op) {
-			rp.planNowMessage(snap, conv, st, open, quarantined)
+			rp.planNowMessage(snap, conv, st, partner[id], quarantined)
 		} else {
 			rp.planNowInterrupt(snap, st, open, quarantined)
 		}
 	}
 }
 
-// planNowMessage finishes deliver-now message st. A lowered message whose
-// derived interrupt is open, by the read or by its own row, or whose
+// planNowMessage finishes deliver-now message st, whose open derived
+// interrupt is ist (nil when none is open in the read). A lowered message
+// whose derived interrupt is open, by the read or by its own row, or whose
 // interrupt's read failed transiently, holds the content (openUnits). A
 // derived row this build cannot decode (quarantined, or undecodable at its
 // id) holds nothing: this build cannot tell whether the unit is open, and
 // holding every content op behind a row it will never read would stall the
 // conversation until the message's start_by. The newer build that wrote
 // the row orders the unit when it serves the lane.
-func (rp *rulesPlan) planNowMessage(snap laneSnapshot, conv ConversationView, st *nowOpState, open map[string]Op, quarantined map[string]bool) {
+func (rp *rulesPlan) planNowMessage(snap laneSnapshot, conv ConversationView, st, ist *nowOpState, quarantined map[string]bool) {
 	m := st.e.op
 	if st.closing != nil {
 		return
 	}
-	iid, err := NowInterruptID(snap.prefix, m)
+	ids, err := nowInterruptIDs(snap.prefix, m)
 	if err != nil {
 		rp.closeOp(m, st.e.cur, Outcome{Arm: ArmFailed, Reason: refusedNowInterruptInvalid})
 		return
 	}
-	if m.Status == StatusSubmitted {
-		rp.planLowering(snap, conv, st, iid)
-		return
+	switch {
+	case m.Status == StatusSubmitted:
+		rp.planLowering(snap, conv, st, ist, ids)
+	case ist != nil && ist.closing != nil:
+		rp.postUnit(st, nowDegradation(*ist.closing, true))
+	case ist != nil:
+		rp.planUnitEntry(st, ist)
+	default:
+		for _, iid := range ids {
+			if rp.planNowRow(snap, st, iid, quarantined) {
+				return
+			}
+		}
+		// Missing, or no row that is this message's interrupt.
+		rp.postUnit(st, nowDegradation(Outcome{}, false))
 	}
+}
+
+// planNowRow finishes lowered message st, whose derived interrupt is not
+// open in the read, by the row at iid, one of the ids that interrupt may
+// have, and reports whether that row decided it: false when the row is not
+// st's interrupt.
+func (rp *rulesPlan) planNowRow(snap laneSnapshot, st *nowOpState, iid string, quarantined map[string]bool) bool {
+	m := st.e.op
 	row, read := snap.nowRows[iid]
-	iop, iOpen := open[iid]
 	switch {
 	case quarantined[iid]:
 		// A row this build cannot decode: a newer host may serve the unit.
 		rp.nowWait(st, WaitNowUnreadable, "", time.Time{}, m.ID)
-	case iOpen && isDerivedOf(iop, m) && rp.nowState[iid] != nil:
-		// A derived interrupt whose causation is outside this namespace (a
-		// message moved here with its id from another prefix) has no
-		// deliver-now state (hasNowShape): it runs plain, and the message
-		// goes after it, as below.
-		ist := rp.nowState[iid]
-		if ist.closing != nil {
-			rp.postUnit(st, nowDegradation(*ist.closing, true))
-			return
-		}
-		rp.planUnitEntry(st, ist)
-	case snap.openIDs[iid]:
-		// Open, but not this message's lane interrupt.
-		rp.postUnit(st, nowDegradation(Outcome{}, false))
-	case read && row.state == afterUnreadable:
+	case !read:
+		// Open, but not this message's lane interrupt (planNow pairs that).
+		return false
+	case row.state == afterUnreadable:
 		until := time.Time{}
 		if !row.undecodable {
 			until = rp.now.Add(TransientBackoffBase)
 			rp.openUnits = append(rp.openUnits, m.ID)
 		}
 		rp.nowWait(st, WaitNowUnreadable, row.detail(), until, m.ID)
-	case read && row.state == afterClosed && isDerivedOf(row.op, m) && row.op.Status != StatusClosed:
+	case row.state != afterClosed || !isDerivedOf(row.op, m):
+		// Missing, or a row that is not this message's interrupt.
+		return false
+	case row.op.Status != StatusClosed:
 		// Open by its own row, though the open list missed it: read again
 		// shortly.
 		rp.openUnits = append(rp.openUnits, m.ID)
 		rp.nowWait(st, WaitNowUnreadable, "the derived interrupt is open but was not listed", rp.now.Add(TransientBackoffBase), m.ID)
-	case read && row.state == afterClosed && isDerivedOf(row.op, m):
-		rp.postUnit(st, nowDegradation(row.op.Outcome, true))
 	default:
-		// Missing, or a row that is not this message's interrupt.
-		rp.postUnit(st, nowDegradation(Outcome{}, false))
+		rp.postUnit(st, nowDegradation(row.op.Outcome, true))
 	}
+	return true
 }
 
 // nowWait reports a deliver-now op as waiting r for each of ids: the wait
@@ -380,35 +437,55 @@ func (rp *rulesPlan) nowWait(st *nowOpState, r WaitReason, detail string, until 
 	rp.emitWait(st, ids...)
 }
 
-// planLowering finishes an unlowered deliver-now message (L1 to L6): it
-// waits as any op does, then until its derived id can be read and the
-// conversation has a session awake to run the unit, and is then lowered.
-func (rp *rulesPlan) planLowering(snap laneSnapshot, conv ConversationView, st *nowOpState, iid string) {
+// planLowering finishes an unlowered deliver-now message (L1 to L6), whose
+// derived interrupt may have ids here and is ist when one is open in the
+// read. A derived interrupt that already exists, open anywhere (ist) or
+// found at any of ids, refuses it, whatever it waits on: only a lowering
+// mints that interrupt's key, and a second interrupt minted beside one that
+// may have been sent could cut a turn twice. The interrupt there is an
+// orphan (planNowInterrupt): it closes, or waits while it is in flight.
+// Otherwise the message waits as any op does, then until each of ids can be
+// read and the conversation has a session awake to run the unit, and is
+// then lowered.
+func (rp *rulesPlan) planLowering(snap laneSnapshot, conv ConversationView, st, ist *nowOpState, ids []string) {
 	m := st.e.op
+	taken := func(iid string) bool {
+		row, read := snap.nowRows[iid]
+		return snap.openIDs[iid] || read && row.state != afterMissing && row.state != afterUnreadable
+	}
+	if ist != nil || slices.ContainsFunc(ids, taken) {
+		// Only m's own principal can mint the key: a key misuse, refused as
+		// a key reuse is.
+		rp.closeOp(m, st.e.cur, Outcome{Arm: ArmFailed, Reason: refusedNowInterruptTaken})
+		return
+	}
 	if st.wait != "" {
 		rp.emitWait(st, m.ID)
 		return
 	}
-	row, read := snap.nowRows[iid]
-	switch {
-	case !snap.openIDs[iid] && read && row.state == afterUnreadable:
-		until := time.Time{}
-		if !row.undecodable {
-			// Due, and lowered once the read succeeds: content waits as it
-			// does for a lowered unit, so none goes ahead of the unit it
-			// forms (U-ORDER). A row that will never decode holds nothing.
-			until = rp.now.Add(TransientBackoffBase)
-			rp.openUnits = append(rp.openUnits, m.ID)
+	for _, iid := range ids {
+		row, read := snap.nowRows[iid]
+		switch {
+		case !read:
+			// readNow reads every free id; a snapshot without the read is
+			// a planner bug, not an id to take.
+			rp.nowWait(st, WaitNowUnreadable, "the derived interrupt's id was not read", rp.now.Add(TransientBackoffBase), m.ID)
+			return
+		case row.state == afterUnreadable:
+			until := time.Time{}
+			if !row.undecodable {
+				// Due, and lowered once the read succeeds: content waits as
+				// it does for a lowered unit, so none goes ahead of the unit
+				// it forms (U-ORDER). A row that will never decode holds
+				// nothing.
+				until = rp.now.Add(TransientBackoffBase)
+				rp.openUnits = append(rp.openUnits, m.ID)
+			}
+			rp.nowWait(st, WaitNowUnreadable, row.detail(), until, m.ID)
+			return
 		}
-		rp.nowWait(st, WaitNowUnreadable, row.detail(), until, m.ID)
-	case snap.openIDs[iid], read && row.state != afterMissing:
-		// Only m's own principal can mint the id: a key misuse, refused as
-		// a key reuse is.
-		rp.closeOp(m, st.e.cur, Outcome{Arm: ArmFailed, Reason: refusedNowInterruptTaken})
-	case !read:
-		// readNow reads every free id; a snapshot without the read is a
-		// planner bug, not an id to take.
-		rp.nowWait(st, WaitNowUnreadable, "the derived interrupt's id was not read", rp.now.Add(TransientBackoffBase), m.ID)
+	}
+	switch {
 	case conv.Generation < 1:
 		rp.nowWait(st, WaitNoSession, "", time.Time{}, m.ID)
 		rp.wake = rp.wake || wantsWake(m)
@@ -503,11 +580,12 @@ func (rp *rulesPlan) postUnit(st *nowOpState, degradation string) {
 }
 
 // planNowInterrupt finishes derived-shape interrupt st: a plain interrupt
-// when its causation is no deliver-now message of its principal, nothing
-// while it is in a unit, and otherwise an orphan, which closes (canceled
-// with its canceled message, the cascade; not_needed otherwise) unless it is
-// in flight. The cascade replaces a rule close of an interrupt that never
-// ran: the message's cancel, not the rule, is why it ends.
+// when its causation is no deliver-now message of its principal (another
+// namespace's op id with no row here among them), nothing while it is in a
+// unit, and otherwise an orphan, which closes (canceled with its canceled
+// message, the cascade; not_needed otherwise) unless it is in flight. The
+// cascade replaces a rule close of an interrupt that never ran: the
+// message's cancel, not the rule, is why it ends.
 func (rp *rulesPlan) planNowInterrupt(snap laneSnapshot, st *nowOpState, open map[string]Op, quarantined map[string]bool) {
 	x := st.e.op
 	mid := x.Causation
@@ -567,6 +645,11 @@ func (rp *rulesPlan) planNowInterrupt(snap laneSnapshot, st *nowOpState, open ma
 			until = rp.now.Add(TransientBackoffBase)
 		}
 		rp.unreadablePartner(st, row.detail(), until)
+	case row.state == afterMissing && opIDPrefix(mid) != snap.prefix:
+		// Another namespace's op id with no row here is no message this
+		// lane serves: a producer's own interrupt, caused by an op of
+		// another store.
+		plain()
 	case row.state == afterMissing:
 		orphan(Op{}, false)
 	case !isDerivedOf(x, row.op):
@@ -833,9 +916,9 @@ func (l *ConversationLane) unitEffect(ctx context.Context, exec Executor, tb *ta
 				}
 				ne.after = &after
 			}
-		case ne.i.kind == resultSettled:
+		case !sentNothing(ne.i):
 			// The command may have carried the message.
-			ne.m = unknownResult(errors.New("fused executor settled the interrupt but returned no delivery result"))
+			ne.m = unknownResult(errors.New("fused executor returned no delivery result after an interrupt step that may have sent the command"))
 			ne.mSent, ne.mPreCall = true, ne.iPreCall
 		default:
 			ne.unsentWhy = "the interrupt step ended " + stepEnd(ne.i)
@@ -860,6 +943,21 @@ func (l *ConversationLane) unitEffect(ctx context.Context, exec Executor, tb *ta
 		}
 	}
 	return ne
+}
+
+// sentNothing reports an interrupt step's result that says its command sent
+// nothing: not delivered, skipped{stale} or failed{unsupported}. Any other
+// result may have reached the runtime.
+func sentNothing(er effectResult) bool {
+	switch er.kind {
+	case resultNotDelivered:
+		return true
+	case resultRejected:
+		r := er.rejected
+		return r.Arm == ArmSkipped && r.Reason == ReasonStale || r.Arm == ArmFailed && r.Reason == ReasonUnsupported
+	default:
+		return false
+	}
 }
 
 // stepEnd names how an interrupt step that did not settle ended.

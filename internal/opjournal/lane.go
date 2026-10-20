@@ -719,8 +719,8 @@ type laneSnapshot struct {
 	rt          runtimeSnap
 	// after holds each after target that is not open.
 	after map[string]afterTarget
-	// prefix is the store's namespace prefix, which derived interrupt ids
-	// are pinned in.
+	// prefix is the store's namespace prefix, which this lane's lowerings
+	// pin derived interrupt ids in.
 	prefix string
 	// nowRows holds the deliver-now partner rows that are not open, read by
 	// id (readNow).

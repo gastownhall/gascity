@@ -511,9 +511,10 @@ func (f *fusedExec) DeliverNow(_ context.Context, c NowCall) NowResult {
 }
 
 // A fused executor runs the unit as one DeliverNow call; its two results
-// settle the two ops; a nil delivery after a settled interrupt may have
-// carried the message (Unknown, reported); and a probe that claims
-// FusedNow for an executor without DeliverNow takes nothing.
+// settle the two ops; a nil delivery after an interrupt step that may have
+// sent the command may have carried the message (Unknown, reported); and a
+// probe that claims FusedNow for an executor without DeliverNow takes
+// nothing.
 func TestLaneNowFused(t *testing.T) {
 	setup := func(t *testing.T, now func(NowCall) NowResult) (*laneHarness, *fusedExec, Op) {
 		h := newLaneHarness(t)
@@ -543,27 +544,50 @@ func TestLaneNowFused(t *testing.T) {
 		}
 		wantOutcome(t, h.get(t, m.ID), ArmSucceeded, "")
 	})
-	t.Run("nil delivery after a settled interrupt", func(t *testing.T) {
-		h, exec, m := setup(t, func(NowCall) NowResult { return NowResult{Interrupt: Settled{Turn: "t1"}} })
-		if _, err := h.lane(t, "ctl").Pass(context.Background(), view(), exec); err == nil {
-			t.Fatal("the contract breach was not reported")
-		}
-		got := h.get(t, m.ID)
-		if got.Status != StatusAccepted || got.MaybeDelivered != 1 {
-			t.Fatalf("message %+v, want released maybe delivered", got)
-		}
-	})
-	t.Run("nil delivery after a stale interrupt", func(t *testing.T) {
-		h, exec, m := setup(t, func(NowCall) NowResult {
-			return NowResult{Interrupt: Rejected{Arm: ArmSkipped, Reason: ReasonStale}}
+	// A nil delivery says the command never reached the message, which
+	// only an interrupt step that sent nothing can say; after any other
+	// step the command may have carried it, so the message replays under
+	// the command's key.
+	for _, tc := range []struct {
+		name string
+		res  ControlResult
+		sent bool
+	}{
+		{"settled", Settled{Turn: "t1"}, true},
+		{"unknown", Unknown{Cause: errors.New("lost the answer")}, true},
+		{"no boundary", Rejected{Arm: ArmFailed, Reason: ReasonNoBoundary, Turn: "t1"}, true},
+		{"stale", Rejected{Arm: ArmSkipped, Reason: ReasonStale}, false},
+		{"unsupported", Rejected{Arm: ArmFailed, Reason: ReasonUnsupported}, false},
+		{"not delivered", NotDelivered{Transient: true, Cause: errors.New("busy socket")}, false},
+	} {
+		t.Run("nil delivery after "+tc.name, func(t *testing.T) {
+			h, exec, m := setup(t, func(NowCall) NowResult { return NowResult{Interrupt: tc.res} })
+			l := h.lane(t, "ctl")
+			_, err := l.Pass(context.Background(), view(), exec)
+			if (err != nil) != tc.sent {
+				t.Fatalf("Pass = %v, want the contract breach reported %v", err, tc.sent)
+			}
+			got := h.get(t, m.ID)
+			if !tc.sent {
+				if got.Status != StatusAccepted || got.MaybeDelivered != 0 || !strings.HasPrefix(got.LastError, lastErrorNotAttempted) {
+					t.Fatalf("message %+v, want released not attempted", got)
+				}
+				return
+			}
+			if got.Status != StatusAccepted || got.MaybeDelivered != 1 {
+				t.Fatalf("message %+v, want released maybe delivered", got)
+			}
+			h.clk.Advance(ExecutorErrorBackoff)
+			exec.probe = idleProbe()
+			exec.probe.Caps.Dedup = true
+			res := mustPass(t, l, view(), exec)
+			ds := exec.delivered()
+			if res.Took != TakeContent || len(ds) != 1 || !ds[0].Redelivery || ds[0].Key != exec.calls[0].Delivery.Key {
+				t.Fatalf("pass %+v deliveries %+v, want a replay under the command's key %s", res, ds, exec.calls[0].Delivery.Key)
+			}
+			wantOutcome(t, h.get(t, m.ID), ArmSucceeded, "")
 		})
-		mustPass(t, h.lane(t, "ctl"), view(), exec)
-		got := h.get(t, m.ID)
-		if got.Status != StatusAccepted || got.MaybeDelivered != 0 || !strings.HasPrefix(got.LastError, lastErrorNotAttempted) {
-			t.Fatalf("message %+v", got)
-		}
-		wantOutcome(t, h.get(t, nowID(t, m)), ArmSkipped, ReasonStale)
-	})
+	}
 	t.Run("fused_now without DeliverNow", func(t *testing.T) {
 		h := newLaneHarness(t)
 		m := h.propose(t, nowReq("a"))
@@ -765,10 +789,10 @@ func TestLaneNowUnattemptedTakesAreNoAttempts(t *testing.T) {
 }
 
 // A plain lane interrupt keyed <X>:interrupt with causation X runs as any
-// interrupt unless X is an op of this namespace that is a deliver-now
-// message: a causation that is no op id, a row that is no op, or an op of a
-// kind this build does not know leaves it plain. An op-shaped causation
-// with no row is an orphan, as before.
+// interrupt unless X is an op that is a deliver-now message: a causation
+// that is no op id, a row that is no op, an op of a kind this build does
+// not know, or another namespace's op id with no row here leaves it plain.
+// An op id of this namespace with no row is an orphan, as before.
 func TestLaneNowPlainInterruptShapes(t *testing.T) {
 	for _, tc := range []struct {
 		name      string
@@ -807,6 +831,7 @@ func TestLaneNowPlainInterruptShapes(t *testing.T) {
 			}
 			return op.ID
 		}, true},
+		{"another namespace's op id with no row", func(*testing.T, *laneHarness) string { return "old-op-abcdefghijklmnopqrstuvwxy2" }, true},
 		{"an op id with no row", func(*testing.T, *laneHarness) string { return "gc-op-abcdefghijklmnopqrstuvwxy2" }, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -833,17 +858,26 @@ func TestLaneNowPlainInterruptShapes(t *testing.T) {
 	}
 }
 
+// storeIn is a lane store over h's beads that mints ids in namespace
+// prefix: the store a conversation's ops lived in before they moved here
+// with their ids.
+func (h *laneHarness) storeIn(t *testing.T, prefix string) *Store {
+	t.Helper()
+	s, err := NewLaneStore(beads.SessionStore{Store: laneRecStore{OpRecordingStore: h.rec, batcher: h.batcher}}, h.clk, WithIDPrefix(prefix))
+	if err != nil {
+		t.Fatalf("NewLaneStore(%s): %v", prefix, err)
+	}
+	return s
+}
+
 // A deliver-now message proposed under another namespace's prefix (moved
-// here with its id unchanged) is lowered by this lane under its own prefix;
-// the pass after the lowering runs the derived interrupt plain and the
-// message goes after it at the boundary, and no later pass fails.
+// here with its id unchanged) is lowered by this lane, its derived
+// interrupt pinned in this namespace, and the two run as one unit: the
+// interrupt's replacement step, then the message at the boundary the step
+// reached.
 func TestLaneNowForeignPrefixMessage(t *testing.T) {
 	h := newLaneHarness(t)
-	other, err := NewLaneStore(beads.SessionStore{Store: laneRecStore{OpRecordingStore: h.rec, batcher: h.batcher}}, h.clk, WithIDPrefix("old"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	m, created, err := other.Propose(nowReq("a"))
+	m, created, err := h.storeIn(t, "old").Propose(nowReq("a"))
 	if err != nil || !created {
 		t.Fatalf("Propose: created %v, %v", created, err)
 	}
@@ -851,15 +885,200 @@ func TestLaneNowForeignPrefixMessage(t *testing.T) {
 	exec := newFakeExec(h.clk)
 	exec.probe = busyProbe("t1")
 	exec.interrupt = settledT1(afterT1())
-	l := h.lane(t, "ctl")
-	mustPass(t, l, view(), exec)
-	wantOutcome(t, h.get(t, iid), ArmSucceeded, "")
-	if got := h.get(t, m.ID); got.Status == StatusClosed {
-		t.Fatalf("message %s closed %s{%s} before its boundary", m.ID, got.Outcome.Arm, got.Outcome.Reason)
+	res := mustPass(t, h.lane(t, "ctl"), view(), exec)
+	if !slices.Equal(res.Lowered, []string{m.ID}) || res.Took != TakeNow || !slices.Equal(res.Taken, []string{iid, m.ID}) {
+		t.Fatalf("pass %+v, want the message lowered here and its unit taken", res)
 	}
-	exec.probe = idleProbe()
-	mustPass(t, l, view(), exec)
+	if len(exec.interrupts) != 1 || !exec.interrupts[0].ForReplacement || exec.interrupts[0].Op.ID != iid {
+		t.Fatalf("interrupt calls %+v, want the unit's replacement step", exec.interrupts)
+	}
+	if ds := exec.delivered(); len(ds) != 1 || !ds[0].Replacement || ds[0].Ops[0].ID != m.ID {
+		t.Fatalf("deliveries %+v, want the message after the step", ds)
+	}
+	wantOutcome(t, h.get(t, iid), ArmSucceeded, "")
 	wantOutcome(t, h.get(t, m.ID), ArmSucceeded, "")
+}
+
+// A deliver-now message that moved here with its id from another namespace
+// runs as one unit with its derived interrupt whether this lane lowered it
+// (the interrupt pinned in this namespace) or a lane of the message's own
+// namespace did before the move (pinned in that one). While the interrupt
+// waits out a backoff, the boundary types neither the message nor content
+// proposed after it (U-ORDER, T5); the interrupt then runs as the unit's
+// replacement step, with the message right after it. A cancel of the
+// message while the interrupt waits cascades to the interrupt, and the
+// session is not interrupted again.
+func TestLaneNowForeignPrefixUnit(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// lowerer is the namespace of the lane that lowers the message.
+		lowerer string
+	}{
+		{"lowered here", "gc"},
+		{"lowered in its namespace", "old"},
+	} {
+		// setup proposes deliver-now message m in namespace old, and a lane
+		// of the lowerer's namespace lowers it and runs its unit once while
+		// turn t1 runs: the step does not reach the runtime, so interrupt i
+		// is released into its backoff and m is not attempted. l is this
+		// namespace's lane.
+		setup := func(t *testing.T) (h *laneHarness, exec *fakeExec, l *ConversationLane, m, i Op) {
+			t.Helper()
+			h = newLaneHarness(t)
+			m, created, err := h.storeIn(t, "old").Propose(nowReq("a"))
+			if err != nil || !created {
+				t.Fatalf("Propose: created %v, %v", created, err)
+			}
+			l = h.lane(t, "ctl")
+			lowerer := l
+			if tc.lowerer != "gc" {
+				if lowerer, err = NewLane(h.storeIn(t, tc.lowerer), tc.lowerer, h.clk); err != nil {
+					t.Fatalf("NewLane: %v", err)
+				}
+			}
+			exec = newFakeExec(h.clk)
+			exec.probe = busyProbe("t1")
+			exec.interrupt = func(InterruptCall) ControlResult {
+				return NotDelivered{Transient: true, Cause: errors.New("busy socket")}
+			}
+			res := mustPass(t, lowerer, view(), exec)
+			iid, err := NowInterruptID(tc.lowerer, m)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(res.Lowered, []string{m.ID}) || res.Took != TakeNow || !slices.Equal(res.Taken, []string{iid, m.ID}) {
+				t.Fatalf("lowering pass %+v, want %s lowered and its unit taken", res, m.ID)
+			}
+			i = h.get(t, iid)
+			if i.Status != StatusAccepted || !i.RetryAt.After(h.clk.Now()) {
+				t.Fatalf("interrupt %s retry %s, want released into its backoff", i.Status, i.RetryAt)
+			}
+			return h, exec, l, m, i
+		}
+		t.Run(tc.name+": the unit holds its message and later content", func(t *testing.T) {
+			h, exec, l, m, i := setup(t)
+			c := h.propose(t, laneMsg("later", RolePrompt, "other work"))
+			// The turn ends on its own before the interrupt's backoff does.
+			exec.probe = idleProbe()
+			res := mustPass(t, l, view(), exec)
+			if res.Took != TakeNone || len(exec.delivered()) != 0 {
+				t.Fatalf("boundary pass %+v deliveries %+v, want nothing typed while the unit waits", res, exec.delivered())
+			}
+			if w := waitOf(res.Waits, m.ID); w.Reason != WaitRetryBackoff {
+				t.Fatalf("message wait %+v, want its unit's backoff", w)
+			}
+			if w := waitOf(res.Waits, c.ID); w.Reason != WaitBlocked {
+				t.Fatalf("later content wait %+v, want blocked by the unit", w)
+			}
+			// After the backoff turn t2 runs: the unit replaces it.
+			h.clk.Advance(i.RetryAt.Sub(h.clk.Now()) + time.Millisecond)
+			exec.probe = busyProbe("t2")
+			exec.interrupt = func(InterruptCall) ControlResult {
+				return Settled{Turn: "t2", Via: "fake", After: TurnAfter{Boundary: TriYes, Live: TriNo, Known: []string{"t2"}}}
+			}
+			res = mustPass(t, l, view(), exec)
+			if res.Took != TakeNow || !slices.Equal(res.Taken, []string{i.ID, m.ID}) {
+				t.Fatalf("retry pass %+v, want the unit", res)
+			}
+			if n := len(exec.interrupts); n != 2 || !exec.interrupts[1].ForReplacement || exec.interrupts[1].Op.ID != i.ID {
+				t.Fatalf("interrupt calls %+v, want the unit's replacement step", exec.interrupts)
+			}
+			if ds := exec.delivered(); len(ds) != 1 || !ds[0].Replacement || ds[0].Ops[0].ID != m.ID {
+				t.Fatalf("deliveries %+v, want the message right after the step", ds)
+			}
+			wantOutcome(t, h.get(t, i.ID), ArmSucceeded, "")
+			wantOutcome(t, h.get(t, m.ID), ArmSucceeded, "")
+			exec.probe = idleProbe()
+			mustPass(t, l, view(), exec)
+			if ds := exec.delivered(); len(ds) != 2 || ds[1].Ops[0].ID != c.ID {
+				t.Fatalf("deliveries %+v, want the later content after the unit", ds)
+			}
+		})
+		t.Run(tc.name+": a cancel of the message cascades", func(t *testing.T) {
+			h, exec, l, m, i := setup(t)
+			if r, _, err := h.store.Cancel(m.ID, "operator", "changed my mind"); err != nil || r != CancelClosed {
+				t.Fatalf("Cancel = %s, %v", r, err)
+			}
+			h.clk.Advance(i.RetryAt.Sub(h.clk.Now()) + time.Millisecond)
+			exec.probe = busyProbe("t2")
+			mustPass(t, l, view(), exec)
+			got := h.get(t, i.ID)
+			wantOutcome(t, got, ArmCanceled, "")
+			if got.Cancel.By != nowCascadeBy || len(exec.interrupts) != 1 || len(exec.delivered()) != 0 {
+				t.Fatalf("interrupt cancel %+v, %d interrupt calls, %d deliveries: want the cascade and nothing run", got.Cancel, len(exec.interrupts), len(exec.delivered()))
+			}
+		})
+	}
+}
+
+// A producer's lane interrupt keyed as a deliver-now message's derived
+// interrupt, at the id the message's own namespace pins, runs plain while
+// the message has no row here. Once the message is proposed, a pass that
+// sees it beside that interrupt, in flight or after it ran, refuses it
+// (now_interrupt_taken) rather than lowering it: no second interrupt is
+// minted here, and the session is interrupted once (T5).
+func TestLaneNowUnloweredBesideItsInterrupt(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// inFlight proposes the message, and runs another host's pass over
+		// it, while the interrupt is in flight.
+		inFlight bool
+	}{
+		{"after the interrupt ran", false},
+		{"while the interrupt is in flight", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newLaneHarness(t)
+			old := h.storeIn(t, "old")
+			req := nowReq("a")
+			m, err := old.Preview(req)
+			if err != nil {
+				t.Fatalf("Preview: %v", err)
+			}
+			ireq := laneInterrupt(m.ID+nowInterruptKeySuffix, "")
+			ireq.Producer, ireq.Causation = m.Producer, m.ID
+			i, created, err := old.Propose(ireq)
+			if err != nil || !created {
+				t.Fatalf("Propose(interrupt): created %v, %v", created, err)
+			}
+			if own, err := NowInterruptID("old", m); err != nil || i.ID != own {
+				t.Fatalf("interrupt %s, want the message's own-namespace pin %s (%v)", i.ID, own, err)
+			}
+			propose := func() {
+				t.Helper()
+				if _, created, err := old.Propose(req); err != nil || !created {
+					t.Fatalf("Propose(message): created %v, %v", created, err)
+				}
+			}
+			exec := newFakeExec(h.clk)
+			exec.probe = busyProbe("t1")
+			exec.interrupt = func(c InterruptCall) ControlResult {
+				if tc.inFlight && c.Op.ID == i.ID {
+					propose()
+					mustPass(t, h.lane(t, "ctl2"), view(), newFakeExec(h.clk))
+					wantOutcome(t, h.get(t, m.ID), ArmFailed, refusedNowInterruptTaken)
+				}
+				return Settled{Turn: "t1", Via: "fake"}
+			}
+			l := h.lane(t, "ctl")
+			if res := mustPass(t, l, view(), exec); res.Took != TakeControl || !slices.Equal(res.Taken, []string{i.ID}) {
+				t.Fatalf("pass %+v, want the interrupt taken plain", res)
+			}
+			if !tc.inFlight {
+				propose()
+			}
+			exec.probe = busyProbe("t2")
+			res := mustPass(t, l, view(), exec)
+			if len(res.Lowered) != 0 || len(exec.interrupts) != 1 {
+				t.Fatalf("pass %+v after %d interrupt calls, want %s never lowered and the session interrupted once", res, len(exec.interrupts), m.ID)
+			}
+			wantOutcome(t, h.get(t, m.ID), ArmFailed, refusedNowInterruptTaken)
+			wantOutcome(t, h.get(t, i.ID), ArmSucceeded, "")
+			if _, err := h.store.Get(nowID(t, m)); !errors.Is(err, beads.ErrNotFound) {
+				t.Fatalf("Get(%s) = %v, want no interrupt minted here", nowID(t, m), err)
+			}
+		})
+	}
 }
 
 // A fused command whose interrupt settled turn t1, run on a probe that

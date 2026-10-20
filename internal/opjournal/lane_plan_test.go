@@ -47,14 +47,16 @@ func snapOf(ops ...Op) laneSnapshot {
 	}
 	slices.SortFunc(s.ops, CompareOrder)
 	for _, op := range s.ops {
-		id := op.Causation
+		ids := []string{op.Causation}
 		if isNowMessage(op) {
-			id, _ = NowInterruptID(s.prefix, op)
-		} else if !hasNowShape(op, s.prefix) {
+			ids, _ = nowInterruptIDs(s.prefix, op)
+		} else if !hasNowShape(op) {
 			continue
 		}
-		if !s.openIDs[id] {
-			s.nowRows[id] = nowRow{state: afterMissing}
+		for _, id := range ids {
+			if !s.openIDs[id] {
+				s.nowRows[id] = nowRow{state: afterMissing}
+			}
 		}
 	}
 	return s

@@ -52,13 +52,17 @@ func (e *conversationLaneExec) replacementResult(ctx context.Context, out opjour
 // typed into a running turn. With no source to read, or a read that failed,
 // a keystroke runtime's boundary is the session layer's settle waits, as
 // interrupt_now trusts them (Boundary yes, liveness unknown), and a protocol
-// runtime's is unknown. The executor's own look moves to what the step
-// read, so Deliver's link evidence starts from the same evidence the lane
-// records.
+// runtime's is unknown. The replaced turn is known on every path, read or
+// not, so the message's link never names it. The executor's own look moves
+// to what the step read, so Deliver's link evidence starts from the same
+// evidence the lane records.
 func (e *conversationLaneExec) replacementAfter(ctx context.Context, replaced string) opjournal.TurnAfter {
 	unread := opjournal.TurnAfter{}
 	if !e.protocol {
 		unread = opjournal.TurnAfter{Boundary: opjournal.TriYes, Live: opjournal.TriUnknown}
+	}
+	if replaced != "" {
+		unread.Known = []string{replaced}
 	}
 	after := unread
 	if e.turnHandle != nil && e.traits.readable && e.turnCaps.End.AtLeast(runtime.TurnEndInferred) {

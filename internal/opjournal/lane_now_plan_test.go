@@ -31,13 +31,33 @@ func nowID(t *testing.T, m Op) string {
 // at at in generation 1 leaves them: m accepted, the interrupt submitted.
 func lowered(t *testing.T, m Op, at time.Time) (Op, Op) {
 	t.Helper()
-	i, err := deriveNowInterrupt("gc", m, 1, at, "lane:ctl")
+	return loweredIn(t, "gc", m, at)
+}
+
+// loweredIn is lowered by a lane of namespace prefix: the derived interrupt
+// is pinned in prefix.
+func loweredIn(t *testing.T, prefix string, m Op, at time.Time) (Op, Op) {
+	t.Helper()
+	i, err := deriveNowInterrupt(prefix, m, 1, at, "lane:ctl")
 	if err != nil {
 		t.Fatalf("deriveNowInterrupt: %v", err)
 	}
 	m.Status = StatusAccepted
 	m.Transitions = appendTransition(m.Transitions, Transition{Status: StatusAccepted, At: at, By: "lane:ctl"})
 	return m, i
+}
+
+// mintedIn is deliver-now message nowReq("a"), not yet lowered, with its id
+// minted in namespace prefix, as it reads here once it moved with its id.
+func mintedIn(t *testing.T, p *planner, prefix string) Op {
+	t.Helper()
+	m := p.op(nowReq("a"))
+	id, err := DeriveID(prefix, m.Conversation, m.Producer.Principal, m.ClientKey)
+	if err != nil {
+		t.Fatalf("DeriveID: %v", err)
+	}
+	m.ID = id
+	return m
 }
 
 // waitOf is op id's wait in ws, the zero wait when it has none.
@@ -784,10 +804,10 @@ func TestPlanNowPartnerReads(t *testing.T) {
 	})
 }
 
-// A lane interrupt is a derived interrupt (or an orphan) only when its
-// causation is an op id of this store's namespace: any other causation, or
-// one whose row is no op or of a kind this build does not know, makes it
-// plain.
+// A lane interrupt may be a derived interrupt, its causation read as its
+// deliver-now message, only when that causation is an op id, of any
+// namespace: pairing goes by identity, not by this store's prefix. Any other
+// causation makes it plain.
 func TestPlanNowShape(t *testing.T) {
 	for _, tc := range []struct {
 		causation string
@@ -795,13 +815,13 @@ func TestPlanNowShape(t *testing.T) {
 	}{
 		{"gc-op-abcdefghijklmnopqrstuvwxyz", true},
 		{"gc-op-abcdefghijklmnopqrstuvwxy2", true},
-		{"other-op-abcdefghijklmnopqrstuvwxyz", false},
+		{"other-op-abcdefghijklmnopqrstuvwxyz", true},
 		{"gc-12", false},
 		{"t3-msg-42", false},
 		{"gc-op-short", false},
 	} {
 		op := Op{Kind: KindInterrupt, Executor: ExecutorLane, Causation: tc.causation, ClientKey: tc.causation + ":interrupt"}
-		if got := hasNowShape(op, "gc"); got != tc.want {
+		if got := hasNowShape(op); got != tc.want {
 			t.Errorf("hasNowShape(causation %q) = %v, want %v", tc.causation, got, tc.want)
 		}
 	}
@@ -842,33 +862,247 @@ func TestPlanNowUOrderAdmitsPastTheBlock(t *testing.T) {
 	}
 }
 
-// A lowered message whose id carries another namespace's prefix (moved
-// here with its id unchanged) has a derived interrupt under this lane's
-// prefix that names it as its causation. That interrupt has no deliver-now
-// state (hasNowShape): the plan never pairs them as a unit, it runs the
-// interrupt plain, and the message waits to go after it.
-func TestPlanNowForeignPrefixMessage(t *testing.T) {
+// A deliver-now message and its derived interrupt pair by identity, not by
+// this store's namespace. A message that moved here with its id from
+// another namespace forms its unit whether this lane lowered it (its
+// interrupt pinned in this namespace) or a lane of its own namespace did
+// (pinned in that one), and an open interrupt pinned in a third namespace
+// pairs too. While the interrupt is open, whatever the unit waits on, it
+// holds later content (U-ORDER) and the message never goes ahead of it; a
+// cancel of the message cascades to the interrupt; once the interrupt is
+// closed, by a rule in this pass or by its own row, the message is
+// post-unit, marked with the interrupt's own outcome.
+func TestPlanNowForeignPrefixUnit(t *testing.T) {
 	now := t0.Add(time.Second)
-	p := newPlanner(t)
-	m := p.op(nowReq("a"))
-	id, err := DeriveID("old", m.Conversation, m.Producer.Principal, m.ClientKey)
-	if err != nil {
-		t.Fatal(err)
+	// moved is deliver-now message m with its id in namespace msgNS,
+	// lowered by a lane of namespace laneNS.
+	moved := func(t *testing.T, p *planner, msgNS, laneNS string) (Op, Op) {
+		t.Helper()
+		m, i := loweredIn(t, laneNS, mintedIn(t, p, msgNS), now)
+		if !hasNowShape(i) || !isDerivedOf(i, m) {
+			t.Fatalf("hasNowShape %v isDerivedOf %v, want %s the derived interrupt of %s", hasNowShape(i), isDerivedOf(i, m), i.ID, m.ID)
+		}
+		return m, i
 	}
-	m.ID = id
-	m, i := lowered(t, m, now)
-	if hasNowShape(i, "gc") || !isDerivedOf(i, m) {
-		t.Fatalf("hasNowShape %v isDerivedOf %v, want a derived key shape outside the namespace", hasNowShape(i, "gc"), isDerivedOf(i, m))
+	type shape struct{ name, msgNS, laneNS string }
+	lowered := []shape{{"lowered here", "old", "gc"}, {"lowered in its namespace", "old", "old"}}
+	for _, s := range append(lowered, shape{"lowered in a third namespace", "gc", "old"}) {
+		for _, tc := range []struct {
+			name string
+			mod  func(*Op)
+			// wait is the unit's wait, on both ops; "" for a candidate.
+			wait WaitReason
+		}{
+			{"a candidate", func(*Op) {}, ""},
+			{"in its backoff", func(i *Op) { i.Status, i.Attempt, i.RetryAt = StatusAccepted, 1, now.Add(time.Second) }, WaitRetryBackoff},
+			{"for a future scope", func(i *Op) { i.Scope.Generation = 5 }, WaitScopeFuture},
+			{"in flight", executingWith(now.Add(time.Minute)), WaitInFlight},
+		} {
+			t.Run(s.name+": the interrupt is open: "+tc.name, func(t *testing.T) {
+				p := newPlanner(t)
+				m, i := moved(t, p, s.msgNS, s.laneNS)
+				tc.mod(&i)
+				n := p.op(laneMsg("n", RolePrompt, "later"))
+				rp := planRules(snapOf(m, i, n), view(), now, "lane:ctl")
+				if cs := closesOf(rp); len(cs) != 0 {
+					t.Fatalf("closes %v, want none", cs)
+				}
+				if !slices.Contains(rp.openUnits, m.ID) || slices.ContainsFunc(rp.content, func(e entry) bool { return e.op.ID == m.ID }) {
+					t.Fatalf("open units %v content %+v, want the unit open and the message no content", rp.openUnits, rp.content)
+				}
+				if wi, wm := waitOf(rp.waits, i.ID), waitOf(rp.waits, m.ID); wi.Reason != tc.wait || wm.Reason != tc.wait {
+					t.Fatalf("waits %+v and %+v, want the unit's %q on both", wi, wm, tc.wait)
+				}
+				if !rp.takePossible {
+					if tc.wait != WaitInFlight {
+						t.Fatal("no Take possible")
+					}
+					return
+				}
+				tp, err := planTake(rp, idleProbe(), view(), now)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if w := waitOf(tp.waits, n.ID); w.Reason != WaitBlocked {
+					t.Fatalf("later content wait %+v, want blocked by the open unit", w)
+				}
+				switch {
+				case tc.wait == "":
+					if tp.take == nil || tp.take.kind != TakeNow || !slices.Equal(candidatesOf(tp.take.ops), []string{i.ID, m.ID}) {
+						t.Fatalf("take %+v, want the unit [%s %s]", tp.take, i.ID, m.ID)
+					}
+				case tp.take != nil:
+					t.Fatalf("take %+v while the unit waits %s", tp.take, tc.wait)
+				}
+			})
+		}
+		for _, tc := range []struct {
+			name string
+			// snap is the read once the message is canceled: closed by its
+			// producer (Store.Cancel closes an accepted lane op), or closing
+			// by a rule this pass.
+			snap func(m, i Op) laneSnapshot
+		}{
+			{"by its producer", func(m, i Op) laneSnapshot {
+				m.Status, m.Outcome, m.Cancel = StatusClosed, Outcome{Arm: ArmCanceled}, Cancel{By: "operator", At: now}
+				snap := snapOf(i)
+				snap.nowRows[m.ID] = nowRow{state: afterClosed, op: m}
+				return snap
+			}},
+			{"by a rule this pass", func(m, i Op) laneSnapshot {
+				m.Cancel = Cancel{By: "operator", At: now}
+				return snapOf(m, i)
+			}},
+		} {
+			t.Run(s.name+": the message is canceled "+tc.name, func(t *testing.T) {
+				p := newPlanner(t)
+				m, i := moved(t, p, s.msgNS, s.laneNS)
+				i.Status, i.Attempt, i.RetryAt = StatusAccepted, 1, now.Add(time.Second)
+				rp := planRules(tc.snap(m, i), view(), now, "lane:ctl")
+				if got := closesOf(rp)[i.ID]; got != "canceled{}" {
+					t.Fatalf("interrupt close %q, want the cascade (closes %v)", got, closesOf(rp))
+				}
+				for _, c := range rp.closes {
+					if c.cur.ID == i.ID && c.next.Cancel.By != nowCascadeBy {
+						t.Fatalf("interrupt cancel %+v, want %s", c.next.Cancel, nowCascadeBy)
+					}
+				}
+				if slices.ContainsFunc(rp.control, func(e entry) bool { return slices.Contains(entryIDs(e), i.ID) }) {
+					t.Fatalf("control %+v, want the canceled message's interrupt never run", rp.control)
+				}
+			})
+		}
 	}
-	rp := planRules(snapOf(m, i), view(), now, "lane:ctl")
-	if cs := closesOf(rp); len(cs) != 0 {
-		t.Fatalf("closes %v, want none", cs)
+	// A closed interrupt is read where this lane or the message's own
+	// namespace pinned it.
+	for _, s := range lowered {
+		for _, tc := range []struct {
+			name string
+			// snap is the read: the interrupt closing by a rule this pass,
+			// or closed by its row.
+			snap        func(m, i Op) laneSnapshot
+			degradation string
+		}{
+			{"closes at its start_by", func(m, i Op) laneSnapshot {
+				i.StartBy = now.Add(-time.Millisecond)
+				return snapOf(m, i)
+			}, DegradationInterruptFailed},
+			{"closes canceled", func(m, i Op) laneSnapshot {
+				i.Cancel = Cancel{By: "operator", At: now}
+				return snapOf(m, i)
+			}, ""},
+			{"closed unsupported", func(m, i Op) laneSnapshot {
+				snap := snapOf(m)
+				snap.nowRows[i.ID] = nowRow{state: afterClosed, op: closedAt(i, Outcome{Arm: ArmFailed, Reason: ReasonUnsupported}, "lane:ctl", now)}
+				return snap
+			}, DegradationInterruptUnsupported},
+			{"closed succeeded", func(m, i Op) laneSnapshot {
+				snap := snapOf(m)
+				snap.nowRows[i.ID] = nowRow{state: afterClosed, op: closedAt(i, Outcome{Arm: ArmSucceeded}, "lane:ctl", now)}
+				return snap
+			}, ""},
+		} {
+			t.Run(s.name+": the interrupt "+tc.name, func(t *testing.T) {
+				p := newPlanner(t)
+				m, i := moved(t, p, s.msgNS, s.laneNS)
+				rp := planRules(tc.snap(m, i), view(), now, "lane:ctl")
+				if len(rp.content) != 1 || rp.content[0].op.ID != m.ID || !rp.content[0].postUnit || !rp.content[0].candidate() || rp.content[0].nowDegradation != tc.degradation {
+					t.Fatalf("content %+v, want the message post-unit marked %q", rp.content, tc.degradation)
+				}
+				if w := waitOf(rp.waits, m.ID); w.Reason != "" || slices.Contains(rp.openUnits, m.ID) {
+					t.Fatalf("message wait %+v open units %v, want neither", w, rp.openUnits)
+				}
+			})
+		}
 	}
-	if !slices.ContainsFunc(rp.control, func(e entry) bool { return e.op.ID == i.ID }) {
-		t.Fatalf("control %v, want the interrupt %s run plain", rp.control, i.ID)
+}
+
+// A deliver-now message not yet lowered is refused (now_interrupt_taken),
+// and never lowered, while its derived interrupt's key is taken: by a row at
+// either id the interrupt may have here (this namespace's, the message's
+// own) or by an open derived interrupt pinned anywhere, whatever the message
+// waits on. Only a lowering mints that key, and a second interrupt minted
+// beside one that may have been sent could cut a turn twice. The interrupt
+// already there closes as an orphan, or waits while it is in flight. A read
+// that failed at either id holds the lowering, as this namespace's does
+// (L1).
+func TestPlanNowUnloweredDerivedKeyTaken(t *testing.T) {
+	now := t0.Add(time.Second)
+	type pin struct{ name, msgNS, pinNS string }
+	here := pin{"pinned here", "old", "gc"}
+	own := pin{"pinned in its own namespace", "old", "old"}
+	third := pin{"pinned in a third namespace", "gc", "old"}
+	keep := func(*Op) {}
+	inFlight := executingWith(now.Add(time.Minute))
+	notDue := func(m *Op) { m.NotBefore = now.Add(time.Minute) }
+	for _, s := range []pin{here, own, third} {
+		for _, tc := range []struct {
+			name string
+			// i and m adjust the interrupt and the message.
+			i, m func(*Op)
+			// close is the interrupt's close; "" while it is in flight.
+			close string
+		}{
+			{"open", keep, keep, "skipped{not_needed}"},
+			{"in flight", inFlight, keep, ""},
+			{"open, the message not yet due", keep, notDue, "skipped{not_needed}"},
+			{"in flight, the message not yet due", inFlight, notDue, ""},
+		} {
+			t.Run(s.name+": "+tc.name, func(t *testing.T) {
+				p := newPlanner(t)
+				m := mintedIn(t, p, s.msgNS)
+				_, i := loweredIn(t, s.pinNS, m, now)
+				tc.i(&i)
+				tc.m(&m)
+				rp := planRules(snapOf(m, i), view(), now, "lane:ctl")
+				cs := closesOf(rp)
+				if len(rp.lowerings) != 0 || cs[m.ID] != "failed{refused:now_interrupt_taken}" {
+					t.Fatalf("lowerings %+v closes %v, want %s refused, never lowered beside %s", rp.lowerings, cs, m.ID, i.ID)
+				}
+				if cs[i.ID] != tc.close {
+					t.Fatalf("interrupt close %q, want %q", cs[i.ID], tc.close)
+				}
+				if w := waitOf(rp.waits, i.ID); tc.close == "" && w.Reason != WaitInFlight {
+					t.Fatalf("interrupt wait %+v, want in flight", w)
+				}
+			})
+		}
 	}
-	if slices.Contains(rp.openUnits, m.ID) {
-		t.Fatalf("open units %v, want no unit for %s", rp.openUnits, m.ID)
+	for _, s := range []pin{here, own} {
+		t.Run(s.name+": closed", func(t *testing.T) {
+			p := newPlanner(t)
+			m := mintedIn(t, p, s.msgNS)
+			_, i := loweredIn(t, s.pinNS, m, now)
+			snap := snapOf(m)
+			snap.nowRows[i.ID] = nowRow{state: afterClosed, op: closedAt(i, Outcome{Arm: ArmSucceeded}, "lane:ctl", now)}
+			rp := planRules(snap, view(), now, "lane:ctl")
+			if cs := closesOf(rp); len(rp.lowerings) != 0 || cs[m.ID] != "failed{refused:now_interrupt_taken}" {
+				t.Fatalf("lowerings %+v closes %v, want %s refused", rp.lowerings, cs, m.ID)
+			}
+		})
+		for _, tc := range []struct {
+			name        string
+			undecodable bool
+		}{
+			{"unreadable", false},
+			{"undecodable", true},
+		} {
+			t.Run(s.name+": "+tc.name, func(t *testing.T) {
+				p := newPlanner(t)
+				m := mintedIn(t, p, s.msgNS)
+				_, i := loweredIn(t, s.pinNS, m, now)
+				snap := snapOf(m)
+				snap.nowRows[i.ID] = nowRow{state: afterUnreadable, err: errFlakyRead, undecodable: tc.undecodable}
+				rp := planRules(snap, view(), now, "lane:ctl")
+				if len(rp.lowerings) != 0 || len(rp.closes) != 0 {
+					t.Fatalf("lowerings %+v closes %v, want %s waiting its read", rp.lowerings, closesOf(rp), m.ID)
+				}
+				w := waitOf(rp.waits, m.ID)
+				if w.Reason != WaitNowUnreadable || w.Until.IsZero() != tc.undecodable || slices.Contains(rp.openUnits, m.ID) == tc.undecodable {
+					t.Fatalf("wait %+v open units %v, want now_unreadable, held and on a timer only while the read may recover", w, rp.openUnits)
+				}
+			})
+		}
 	}
 }
 

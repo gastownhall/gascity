@@ -39,6 +39,10 @@ func propSeedCount(t *testing.T) uint64 {
 
 var propConversations = []string{"gc-1", "gc-2"}
 
+// propPrefixes are the namespaces the world's ops are minted in: the lanes'
+// own, then the one some ops moved here from with their ids.
+var propPrefixes = []string{"gc", "old"}
+
 // propConv is one conversation's world: its view and the agent's side.
 type propConv struct {
 	view  ConversationView
@@ -52,10 +56,14 @@ type propConv struct {
 // propWorld drives two lanes over one store with a scripted runtime and
 // checks the lane's invariants after every step.
 type propWorld struct {
-	t          *testing.T
-	r          *rand.Rand
-	h          *laneHarness
-	lanes      []*ConversationLane
+	t     *testing.T
+	r     *rand.Rand
+	h     *laneHarness
+	lanes []*ConversationLane
+	// old is a store of namespace propPrefixes[1] over the same beads, and
+	// oldLane a lane of it, which never passes: it only lowers.
+	old        *Store
+	oldLane    *ConversationLane
 	convs      map[string]*propConv
 	restricted bool
 	keys       int
@@ -132,6 +140,14 @@ func newPropWorld(t *testing.T, seed uint64) *propWorld {
 		return w.flaky && (w.afterTargets[id] && w.fr.IntN(2) == 0 || w.fr.IntN(25) == 0)
 	})
 	w.lanes = []*ConversationLane{h.lane(t, "ctl"), h.lane(t, "cli")}
+	old, err := NewLaneStore(beads.SessionStore{Store: fs}, h.clk, WithIDPrefix(propPrefixes[1]))
+	if err != nil {
+		t.Fatalf("NewLaneStore: %v", err)
+	}
+	if w.oldLane, err = NewLane(old, propPrefixes[1], h.clk); err != nil {
+		t.Fatalf("NewLane: %v", err)
+	}
+	w.old = old
 	for i, id := range propConversations {
 		w.convs[id] = &propConv{
 			view:  ConversationView{ID: id, Generation: 1, Epoch: 1, Token: "tok"},
@@ -293,8 +309,8 @@ func (w *propWorld) checkNowDelivery(d Delivery) {
 			if !isNowMessage(op) {
 				continue
 			}
-			iid, _ := NowInterruptID("gc", op)
-			i, err := w.h.store.Get(iid)
+			i, err := w.nowInterruptOf(op)
+			iid := i.ID
 			inUnit := err == nil && i.Status == StatusExecuting && i.Lease == op.Lease
 			if len(d.Ops) != 1 {
 				w.fail("deliver-now message %s delivered with %d other ops", op.ID, len(d.Ops)-1)
@@ -303,6 +319,12 @@ func (w *propWorld) checkNowDelivery(d Delivery) {
 			case inUnit:
 				unit = true
 				w.cov.add("now_unit")
+				if opIDPrefix(op.ID) != propPrefixes[0] {
+					w.cov.add("now_unit_foreign_message")
+				}
+				if opIDPrefix(iid) != propPrefixes[0] {
+					w.cov.add("now_unit_foreign_interrupt")
+				}
 				if d.Redelivery || op.MaybeDelivered > 0 {
 					w.fail("maybe-delivered message %s in a unit (N4)", op.ID)
 				}
@@ -337,12 +359,40 @@ func (w *propWorld) checkNowDelivery(d Delivery) {
 			if err != nil || m.Status == StatusSubmitted || m.Status == StatusClosed {
 				continue
 			}
-			iid, _ := NowInterruptID("gc", m)
-			if i, err := w.h.store.Get(iid); err == nil && i.Status != StatusClosed {
-				w.fail("content %v delivered while unit %s/%s is open (N3)", takenOpIDs(d.Ops), iid, mid)
+			if i, err := w.nowInterruptOf(m); err == nil && i.Status != StatusClosed {
+				w.fail("content %v delivered while unit %s/%s is open (N3)", takenOpIDs(d.Ops), i.ID, mid)
 			}
 		}
 	})
+}
+
+// nowInterruptOf reads deliver-now message m's derived interrupt by its
+// identity in each of the world's namespaces, wherever the lane that
+// lowered m pinned it: beads.ErrNotFound when m has none, and an N1 failure
+// when it has two.
+func (w *propWorld) nowInterruptOf(m Op) (Op, error) {
+	var found []Op
+	for _, p := range propPrefixes {
+		id, err := NowInterruptID(p, m)
+		if err != nil {
+			return Op{}, err
+		}
+		i, err := w.h.store.Get(id)
+		switch {
+		case errors.Is(err, beads.ErrNotFound):
+			continue
+		case err != nil:
+			return Op{}, err
+		}
+		found = append(found, i)
+	}
+	if len(found) == 0 {
+		return Op{}, fmt.Errorf("deliver-now message %s: %w", m.ID, beads.ErrNotFound)
+	}
+	if len(found) > 1 {
+		w.fail("deliver-now message %s has %d derived interrupts (N1)", m.ID, len(found))
+	}
+	return found[0], nil
 }
 
 func takenOpIDs(ops []Op) []string {
@@ -549,10 +599,18 @@ func (w *propWorld) propose() {
 			}
 		}
 	}
+	// A quarter of the ops moved here with their ids from another
+	// namespace; a deliver-now message among them may have been lowered
+	// there before it moved. A respond stays in the lanes' namespace: the
+	// raising it answers, recorded there, keys it (validateRespondKey).
+	s := w.h.store
+	if r.IntN(4) == 0 && req.Kind != KindRespond {
+		s = w.old
+	}
 	// Ops arrive at distinct instants: the interim order key (OJ-10a)
 	// breaks same-instant ties by id, not by arrival.
 	w.h.clk.Advance(time.Millisecond)
-	op, created, err := w.h.store.Propose(req)
+	op, created, err := s.Propose(req)
 	if req.Kind == KindRespond && (errors.Is(err, ErrKeyReuse) || err == nil && !created) {
 		return // the same principal answering one occurrence again: the first answer wins
 	}
@@ -564,6 +622,40 @@ func (w *propWorld) propose() {
 	if isNowMessage(op) {
 		w.nowMsgs[op.ID] = conv
 		w.nowIDs = append(w.nowIDs, op.ID)
+		if s == w.old && r.IntN(2) == 0 && w.lowerable(op) {
+			w.lowerIn(w.oldLane, op)
+		}
+	}
+}
+
+// lowerable reports a deliver-now message the rules would lower at once:
+// no after or not_before to wait for, its scope the current one, and a
+// session awake.
+func (w *propWorld) lowerable(m Op) bool {
+	v := w.convs[m.Conversation].view
+	return m.After == "" && !m.NotBefore.After(w.h.clk.Now()) && scopeCmp(m.Scope, incarnation{v.Generation, v.Epoch}) == 0 &&
+		v.Generation >= 1 && !v.Dormant && !v.Closed
+}
+
+// lowerIn lowers deliver-now message m as a lane of l's namespace did
+// before m moved here with its id: its derived interrupt pinned in that
+// namespace and m accepted, in one guarded batch.
+func (w *propWorld) lowerIn(l *ConversationLane, m Op) {
+	now := w.h.clk.Now()
+	gen := m.Policy.Message.NowGeneration
+	if gen < 1 {
+		gen = w.convs[m.Conversation].view.Generation
+	}
+	i, err := deriveNowInterrupt(l.store.prefix, m, gen, now, l.by())
+	if err != nil {
+		w.t.Fatalf("deriving the interrupt of %s: %v", m.ID, err)
+	}
+	next := m
+	next.Status = StatusAccepted
+	next.Transitions = appendTransition(m.Transitions, Transition{Status: StatusAccepted, At: now, By: l.by()})
+	var res PassResult
+	if done, err := l.writeLowerings(context.Background(), []nowLowering{{m: m, mNext: next, i: i}}, &res); err != nil || !done {
+		w.t.Fatalf("lowering %s in namespace %s: done %v, %v", m.ID, l.store.prefix, done, err)
 	}
 }
 
@@ -882,8 +974,8 @@ func (w *propWorld) checkNowPairs() {
 		if err != nil {
 			w.t.Fatal(err)
 		}
-		iid, _ := NowInterruptID("gc", m)
-		i, err := w.h.store.Get(iid)
+		i, err := w.nowInterruptOf(m)
+		iid := i.ID
 		switch {
 		case errors.Is(err, beads.ErrNotFound) && slices.ContainsFunc(m.Transitions, func(t Transition) bool { return t.Status == StatusAccepted }):
 			w.fail("lowered message %s (%s) has no derived interrupt (N1)", mid, m.Status)
@@ -1017,7 +1109,7 @@ func TestLaneProperties(t *testing.T) {
 			"delivery", "redelivery", "note", "replay_dedup", "closed:poison", "closed:ambiguous_delivery",
 			"closed:stale", "closed:canceled", "closed:busy", "closed:dependency_failed", "closed:expired_before_start",
 			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group", "after_unreadable",
-			"respond_answered", "now_unit", "now_post_unit", "now_replace", "now_cascade",
+			"respond_answered", "now_unit", "now_post_unit", "now_replace", "now_cascade", "now_unit_foreign_message", "now_unit_foreign_interrupt",
 		} {
 			if cov.counts[k] == 0 {
 				t.Errorf("the property runs never exercised %s (%v)", k, cov.counts)
