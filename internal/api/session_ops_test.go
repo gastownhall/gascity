@@ -1433,9 +1433,13 @@ func TestSessionContentOpsAutoAdoptsAnOrphan(t *testing.T) {
 	}
 }
 
+// assertNoOpIDs asserts no runtime call carries ids, outside DeliveryKey:
+// after OJ-7 only the delivery key carries the op-derived key, which a
+// deduplicating runtime digests into its own ids (DES-O0API §15).
 func assertNoOpIDs(t *testing.T, calls []runtime.Call, ids ...string) {
 	t.Helper()
 	for _, c := range calls {
+		c.DeliveryKey = ""
 		raw := fmt.Sprintf("%+v", c)
 		for _, id := range ids {
 			if id != "" && strings.Contains(raw, id) {
@@ -3227,5 +3231,180 @@ func TestMessageDeliveryTimeoutsEndInsideFinishBy(t *testing.T) {
 		if timeout <= 0 || legacyop.ExecutionBound-timeout < time.Minute {
 			t.Errorf("%s delivery timeout = %s, want it positive and at least a minute inside ExecutionBound %s", endpoint, timeout, legacyop.ExecutionBound)
 		}
+	}
+}
+
+// newT3OpsEnv is an ops env whose sessions run on a t3bridge-profiled fake,
+// with one session created on it.
+func newT3OpsEnv(t *testing.T, mode string) (*opsEnv, session.Info) {
+	t.Helper()
+	e := newOpsEnv(t, mode)
+	e.fs.sessionProvider = runtime.NewFakeProfile(runtime.ProfileT3Bridge, runtime.FullFake{Fake: e.fs.sp})
+	mgr := session.NewManagerWithOptions(e.fs.cityBeadStore, e.fs.sessionProvider, session.WithCityPath(e.fs.cityPath))
+	info, err := mgr.CreateSession(context.Background(), session.CreateOptions{Template: "helper", Title: "T3", Command: "claude", WorkDir: t.TempDir(), Provider: "claude", ExtraMeta: map[string]string{"session_origin": "manual"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return e, info
+}
+
+// callsOf are sp's calls of any of methods to name.
+func callsOf(sp *runtime.Fake, name string, methods ...string) []runtime.Call {
+	var out []runtime.Call
+	for _, c := range sp.SnapshotCalls() {
+		if c.Name == name && slices.Contains(methods, c.Method) {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// opDeliveryKey is the runtime delivery key of legacy op id.
+func opDeliveryKey(id string) string { return "gc:" + id + ":1" }
+
+// assertOneKeyedDelivery asserts the one runtime delivery to info carries
+// key exactly and text with neither the op id nor the client key (I11).
+func assertOneKeyedDelivery(t *testing.T, e *opsEnv, info session.Info, key, text string, ids ...string) {
+	t.Helper()
+	calls := deliveredCalls(e.fs.sp, info.SessionName)
+	if len(calls) != 1 || calls[0].DeliveryKey != key || calls[0].Message != text {
+		t.Fatalf("deliveries = %+v, want one of %q under key %q", calls, text, key)
+	}
+	assertNoOpIDs(t, calls, ids...)
+}
+
+// Kills a first execution sent unkeyed (M35): every recorded /submit and
+// /messages delivery goes to T3 under gc:<op id>:1, and off or an
+// unrecorded request goes unkeyed as before.
+func TestSessionContentOpsKeyTheirT3Delivery(t *testing.T) {
+	for _, mode := range []string{"auto", "require"} {
+		for _, path := range []string{"/submit", "/messages"} {
+			t.Run(mode+path, func(t *testing.T) {
+				e, info := newT3OpsEnv(t, mode)
+				acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+path, "k1", `{"message":"hello"}`).Body)
+				if acc.Op == nil {
+					t.Fatalf("accepted = %+v, want a recorded op", acc)
+				}
+				waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+				e.waitClosed(t, acc.RequestID)
+				assertOneKeyedDelivery(t, e, info, opDeliveryKey(acc.RequestID), "hello", acc.RequestID, "k1")
+			})
+		}
+	}
+	t.Run("off", func(t *testing.T) {
+		e, info := newT3OpsEnv(t, "off")
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k1", `{"message":"hello"}`).Body)
+		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+		assertOneKeyedDelivery(t, e, info, "", "hello")
+	})
+	t.Run("unrecorded auto", func(t *testing.T) {
+		e, info := newT3OpsEnv(t, "auto")
+		e.store.set(func(s *opsTestStore) { s.createErr = errors.New("transport: down") })
+		acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k1", `{"message":"hello"}`).Body)
+		if acc.Op != nil {
+			t.Fatalf("accepted = %+v, want unrecorded", acc)
+		}
+		waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+		assertOneKeyedDelivery(t, e, info, "", "hello")
+	})
+}
+
+// seedOpWith is seedOp for a request of intent.
+func (e *opsEnv) seedOpWith(t *testing.T, conv, key, text string, intent session.SubmitIntent) opjournal.Op {
+	t.Helper()
+	st := e.opStore(t)
+	now := time.Now()
+	op, created, err := st.Propose(opjournal.Request{
+		Conversation: conv, Kind: opjournal.KindMessage, Executor: legacyop.ExecutorAPI, ClientKey: key,
+		Producer: opjournal.Producer{Principal: legacyop.PrincipalOperator, Actor: opjournal.ActorOperator},
+		Payload:  text, Policy: MessageOpPolicy(intent),
+		StartBy: now.Add(legacyop.ExecutionBound), FinishBy: now.Add(legacyop.ExecutionBound),
+	})
+	if err != nil || !created {
+		t.Fatalf("seed: %v created %v", err, created)
+	}
+	return op
+}
+
+// Kills an adoption without Redelivery (M36) or under another key (M19 at
+// the API): the re-execution looks the first execution's delivery up under
+// gc:<op id>:1 and, finding none, delivers once under the same key.
+func TestSessionContentOpsAdoptionReusesTheDeliveryKey(t *testing.T) {
+	e, info := newT3OpsEnv(t, "auto")
+	orphan := e.seedOp(t, info.ID, "key-o", "deliver me", legacyop.ExecutorAPI)
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-o", `{"message":"deliver me"}`).Body)
+	if acc.RequestID != orphan.ID || acc.Op == nil || acc.Op.Attempt != 1 {
+		t.Fatalf("adoption = %+v", acc)
+	}
+	if op := e.waitClosed(t, orphan.ID); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != legacyop.ViaLegacyDelivered {
+		t.Fatalf("adopted op = %+v", op.Outcome)
+	}
+	looks := callsOf(e.fs.sp, info.SessionName, "LookupDelivery")
+	if len(looks) != 1 || looks[0].DeliveryKey != opDeliveryKey(orphan.ID) {
+		t.Fatalf("lookups = %+v, want one under %s", looks, opDeliveryKey(orphan.ID))
+	}
+	assertOneKeyedDelivery(t, e, info, opDeliveryKey(orphan.ID), "deliver me", orphan.ID, "key-o")
+}
+
+// K3, DES-T3I §14 item 8 (M27, M36 at the API): an adopted interrupt_now
+// whose first execution T3 already holds, while that execution's turn still
+// runs, sends nothing: no sighting, interrupt or send. It closes
+// succeeded{legacy.delivered} with an unqueued result and no interrupt.
+func TestSessionContentOpsAdoptedInterruptNowThatLandedSendsNothing(t *testing.T) {
+	e, info := newT3OpsEnv(t, "auto")
+	orphan := e.seedOpWith(t, info.ID, "key-k3", "now", session.SubmitIntentInterruptNow)
+	e.fs.sp.KeyedDeliveries = map[string]map[string]runtime.DeliveryReceipt{info.SessionName: {opDeliveryKey(orphan.ID): {MessageID: "t3-message-1"}}}
+	e.fs.sp.TurnScripts = map[string][]string{info.SessionName: {"thread/t1"}}
+	rec := e.post(t, "/session/"+info.ID+"/submit", "key-k3", `{"message":"now","intent":"interrupt_now"}`)
+	acc := decodeAsyncAccepted(t, rec.Body)
+	if rec.Code != http.StatusAccepted || acc.RequestID != orphan.ID || acc.Op == nil || acc.Op.Attempt != 1 {
+		t.Fatalf("adoption = %d %+v", rec.Code, acc)
+	}
+	success, failure := waitForSessionSubmitResult(t, e.fs.eventProv, orphan.ID)
+	if success == nil || success.Queued || success.Intent != "interrupt_now" || success.Interrupt != nil {
+		t.Fatalf("terminal = %+v, %+v; want unqueued interrupt_now with no interrupt report", success, failure)
+	}
+	if op := e.waitClosed(t, orphan.ID); op.Outcome.Arm != opjournal.ArmSucceeded || op.Outcome.Result.Via != legacyop.ViaLegacyDelivered {
+		t.Fatalf("op = %+v, want succeeded via legacy.delivered", op.Outcome)
+	}
+	if looks := callsOf(e.fs.sp, info.SessionName, "LookupDelivery"); len(looks) != 1 {
+		t.Fatalf("lookups = %+v, want exactly one", looks)
+	}
+	if got := callsOf(e.fs.sp, info.SessionName, "ObserveTurn", "InterruptTurn", "WaitTurnEnded", "Interrupt", "Nudge", "NudgeNow"); len(got) != 0 {
+		t.Fatalf("calls = %+v, want none", got)
+	}
+}
+
+// Kills a send after a failed lookup (M25 at the API): an adoption whose
+// lookup cannot tell closes failed{provider_unavailable} and emits
+// request.failed, with nothing sent or interrupted.
+func TestSessionContentOpsAdoptionLookupFailureSendsNothing(t *testing.T) {
+	e, info := newT3OpsEnv(t, "auto")
+	orphan := e.seedOpWith(t, info.ID, "key-f", "now", session.SubmitIntentInterruptNow)
+	e.fs.sp.LookupDeliveryErrors = map[string]error{info.SessionName: runtime.ErrRuntimeUnavailable}
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "key-f", `{"message":"now","intent":"interrupt_now"}`).Body)
+	if acc.RequestID != orphan.ID {
+		t.Fatalf("adoption = %+v", acc)
+	}
+	evs := waitTerminalEvents(t, e.fs.eventProv, orphan.ID, 1)
+	if evs[0].Type != events.RequestFailed {
+		t.Fatalf("terminal = %s %s, want request.failed", evs[0].Type, evs[0].Payload)
+	}
+	if op := e.waitClosed(t, orphan.ID); op.Outcome.Arm != opjournal.ArmFailed || op.Outcome.Reason != opjournal.ReasonProviderUnavailable {
+		t.Fatalf("op = %+v, want failed{provider_unavailable}", op.Outcome)
+	}
+	if got := callsOf(e.fs.sp, info.SessionName, "ObserveTurn", "InterruptTurn", "Interrupt", "Nudge", "NudgeNow"); len(got) != 0 {
+		t.Fatalf("calls = %+v, want none after a failed lookup", got)
+	}
+}
+
+// Kills a lookup on every delivery (M24 at the API): a first execution
+// looks nothing up.
+func TestSessionContentOpsFirstExecutionLooksNothingUp(t *testing.T) {
+	e, info := newT3OpsEnv(t, "auto")
+	acc := decodeAsyncAccepted(t, e.post(t, "/session/"+info.ID+"/submit", "k1", `{"message":"hello"}`).Body)
+	waitTerminalEvents(t, e.fs.eventProv, acc.RequestID, 1)
+	if looks := callsOf(e.fs.sp, info.SessionName, "LookupDelivery"); len(looks) != 0 {
+		t.Fatalf("lookups = %+v, want none on a first execution", looks)
 	}
 }

@@ -804,7 +804,7 @@ func (s *Server) sendSubmit(ctx context.Context, d messageDelivery, send *messag
 		send.post(messageResult{errorCode: "resolve_failed", err: err})
 		return
 	}
-	outcome, err := s.submitMessageToSession(ctx, d.store, id, message, intent, resume)
+	outcome, err := s.submitMessageToSessionFor(ctx, d.store, id, message, intent, resume, opDeliveryOf(d.adm))
 	if err != nil {
 		code := sessionSubmitFailureCode(err)
 		if ctx.Err() != nil && errors.Is(err, context.Canceled) {
@@ -1048,7 +1048,7 @@ func (s *Server) sendMessage(ctx context.Context, d messageDelivery, send *messa
 		send.post(messageResult{errorCode: "resolve_failed", err: err})
 		return
 	}
-	outcome, err := s.sendUserMessageToSession(ctx, d.store, id, message, resume)
+	outcome, err := s.submitMessageToSessionFor(ctx, d.store, id, message, session.SubmitIntentDefault, resume, opDeliveryOf(d.adm))
 	if err != nil {
 		code := "message_failed"
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
