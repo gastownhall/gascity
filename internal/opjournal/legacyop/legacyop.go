@@ -151,6 +151,19 @@ type Admission struct {
 	done  atomic.Bool
 }
 
+// DeliveryKey is the runtime delivery key of the admitted op's delivery:
+// gc:<op id>:1 for an Execute admission an op row backs, "" otherwise. A
+// legacy op is delivered on its own and closes on a definitive refusal, so
+// every execution of it, an adopted one included, uses this one key, and a
+// deduplicating runtime replays the first delivery instead of delivering
+// twice (DES-O0API §6.1, §17).
+func (a *Admission) DeliveryKey() string {
+	if a == nil || a.Decision != Execute || !a.Recorded || a.Op.ID == "" {
+		return ""
+	}
+	return opjournal.RuntimeDeliveryKey(opjournal.FormatDeliveryKey(a.Op.ID, 1))
+}
+
 // Recorder records one surface's requests under one gate mode. Executor is
 // ExecutorAPI or ExecutorCLI; Admit refuses any other. Open opens
 // the op store lazily; the caller caches it. Admit opens it once per

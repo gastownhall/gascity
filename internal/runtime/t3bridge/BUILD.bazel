@@ -30,6 +30,7 @@ go_test(
     name = "t3bridge_test",
     srcs = [
         "delivery_ids_test.go",
+        "delivery_lookup_test.go",
         "envelope_test.go",
         "fence_test.go",
         "provider_test.go",

@@ -867,3 +867,77 @@ func TestFinishPanicReleasesTheEntry(t *testing.T) {
 		t.Fatalf("second Finish = %+v", f)
 	}
 }
+
+// Kills a key carrying the attempt (M19) or a key for a request no op row
+// backs (M20): a recorded Execute, adopted or not, delivers under
+// gc:<op id>:1; an unrecorded request and either replay deliver unkeyed.
+func TestAdmissionDeliveryKey(t *testing.T) {
+	key := func(op opjournal.Op) string { return "gc:" + op.ID + ":1" }
+	t.Run("recorded execute", func(t *testing.T) {
+		e := newEnv(t)
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || adm.Decision != Execute || !adm.Recorded {
+			t.Fatalf("Admit = %+v, %v", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != key(adm.Op) {
+			t.Fatalf("DeliveryKey = %q, want %q", got, key(adm.Op))
+		}
+	})
+	t.Run("adopted", func(t *testing.T) {
+		e := newEnv(t)
+		op := e.seed(t, msg("k1", "hello"), ExecutorAPI)
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || !adm.Adopted || adm.Op.Attempt != 1 {
+			t.Fatalf("Admit = %+v, %v; want an adoption", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != key(op) {
+			t.Fatalf("adopted DeliveryKey = %q, want the first execution's %q", got, key(op))
+		}
+	})
+	t.Run("unrecorded", func(t *testing.T) {
+		e := newEnv(t)
+		e.fault.createErr = errors.New("transport: refused")
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || adm.Recorded {
+			t.Fatalf("Admit = %+v, %v; want unrecorded", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != "" {
+			t.Fatalf("unrecorded DeliveryKey = %q, want none", got)
+		}
+	})
+	t.Run("stored replay", func(t *testing.T) {
+		e := newEnv(t)
+		op := e.seed(t, msg("k1", "hello"), ExecutorAPI)
+		if _, err := e.st.Close(op.ID, succeeded(ViaLegacyQueued), "legacy:api"); err != nil {
+			t.Fatal(err)
+		}
+		adm, err := apiRecorder(e, gate.Auto).Admit(msg("k1", "hello"))
+		if err != nil || adm.Decision != Replay {
+			t.Fatalf("Admit = %+v, %v; want a replay", adm, err)
+		}
+		if got := adm.DeliveryKey(); got != "" {
+			t.Fatalf("replay DeliveryKey = %q, want none", got)
+		}
+	})
+	t.Run("in-flight replay", func(t *testing.T) {
+		e := newEnv(t)
+		r := apiRecorder(e, gate.Auto)
+		first, err := r.Admit(msg("k1", "hello"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		first.Accept("202 body")
+		second, err := r.Admit(msg("k1", "hello"))
+		if err != nil || second.Decision != Replay {
+			t.Fatalf("Admit = %+v, %v; want an in-flight replay", second, err)
+		}
+		if got := second.DeliveryKey(); got != "" {
+			t.Fatalf("in-flight replay DeliveryKey = %q, want none", got)
+		}
+		first.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)})
+	})
+	var nilAdm *Admission
+	if got := nilAdm.DeliveryKey(); got != "" {
+		t.Fatalf("nil DeliveryKey = %q", got)
+	}
+}
