@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
-	"io"
+	"fmt"
 	"maps"
 	"os"
 	"regexp"
@@ -17,7 +17,6 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/coordclass"
-	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/opjournal"
 )
 
@@ -184,20 +183,6 @@ func (c *relowerCity) migrate(t *testing.T) (int, string, string) {
 	return code, stdout.String(), stderr.String()
 }
 
-// converged is the binding a converged migrate of c left.
-func (c *relowerCity) converged(t *testing.T) convergedInfraBinding {
-	t.Helper()
-	plan, err := resolveCityStoragePlan(c.request.CityPath, c.request.Cfg)
-	if err != nil {
-		t.Fatal(err)
-	}
-	b, ok := infraMigrationReport{Outcome: infraMigrationConverged, Target: c.target}.convergedBinding(plan, c.request.CityPath, c.request.Cfg)
-	if !ok {
-		t.Fatal("no converged binding")
-	}
-	return b
-}
-
 // bootStore opens the binding's sessions store as boot routes it, and its op
 // store; both close with the test.
 func (c *relowerCity) bootStore(t *testing.T) (beads.Store, *opjournal.Store) {
@@ -256,24 +241,24 @@ func (b countingBatcher) ApplyGuarded(ctx context.Context, batch beads.GuardedBa
 func stubRelowerBatches(t *testing.T, fail *bool) *int {
 	t.Helper()
 	n := new(int)
-	prev := openInfraRelowerStore
-	openInfraRelowerStore = func(b convergedInfraBinding, rec events.Recorder) (*opjournal.Store, io.Closer, error) {
-		engine, closer, err := b.openEngine(rec)
-		if err != nil {
-			return nil, nil, err
-		}
+	stubRelowerStore(t, func(engine beads.Store, open func(beads.Store) (*opjournal.Store, error)) (*opjournal.Store, error) {
 		inner, ok := beads.GuardedBatcherFor(engine)
 		if !ok {
 			t.Fatal("the binding engine applies no guarded batches")
 		}
-		store, err := newInfraRelowerStore(faultingRelowerEngine{Store: engine, batcher: countingBatcher{inner: inner, n: n, fail: *fail}})
-		if err != nil {
-			return nil, nil, errors.Join(err, closer.Close())
-		}
-		return store, closer, nil
-	}
-	t.Cleanup(func() { openInfraRelowerStore = prev })
+		return open(faultingRelowerEngine{Store: engine, batcher: countingBatcher{inner: inner, n: n, fail: *fail}})
+	})
 	return n
+}
+
+// stubRelowerStore replaces the step's lane-store constructor with wrap,
+// which is handed the engine the step opened and the constructor it
+// replaces.
+func stubRelowerStore(t *testing.T, wrap func(engine beads.Store, open func(beads.Store) (*opjournal.Store, error)) (*opjournal.Store, error)) {
+	t.Helper()
+	prev := newInfraRelowerStore
+	newInfraRelowerStore = func(engine beads.Store) (*opjournal.Store, error) { return wrap(engine, prev) }
+	t.Cleanup(func() { newInfraRelowerStore = prev })
 }
 
 // opMetadata is an op row's metadata without the migration's stamp: the
@@ -293,7 +278,7 @@ func opMetadata(t *testing.T, b beads.Bead) map[string]string {
 
 // migratedLinePattern is the success line as this command printed it before
 // the re-lowering step existed.
-var migratedLinePattern = regexp.MustCompile("^Migrated\\. infra now serves [^ ]+ from [^;]+; [^\\n]*cop\\(ies\\) cleared[^\\n]*\\. Start the city with `gc start`\\.\\n$")
+var migratedLinePattern = regexp.MustCompile("^Migrated\\. infra now serves [^ ]+ from [^;]+; ([^\\n]*cop\\(ies\\) cleared[^\\n]*)\\. Start the city with `gc start`\\.\\n$")
 
 // A migrate re-lowers the open deliver-now unit it carried: the success line
 // says so, stderr names the message and both ids, the binding holds the
@@ -439,48 +424,41 @@ func TestStorageMigrateRelowersOnlyAConvergedBinding(t *testing.T) {
 	}
 }
 
-// The step's store is the runtime's: it mints under the binding's prefix,
-// its guarded creates are fenced to the binding's namespaces, and what it
-// writes reads back through boot's routes.
+// The step's store is the runtime's: the engine the step writes through is
+// fenced to the binding's namespaces, the lane store over it mints under the
+// binding's prefix, and what it writes reads back through boot's routes.
 func TestRelowerOpensTheBindingAsTheRuntimeDoes(t *testing.T) {
 	c := newRelowerCity(t)
-	if code, stdout, stderr := c.migrate(t); code != 0 {
-		t.Fatalf("migrate exited %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
-	}
-	b := c.converged(t)
-	store, closer, err := openInfraRelowerStore(b, nil)
-	if err != nil {
-		t.Fatalf("openInfraRelowerStore: %v", err)
-	}
 	prefix, err := infraBindingIDPrefix()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if store.Prefix() != prefix {
-		t.Errorf("the step's store mints under %q, want %q", store.Prefix(), prefix)
+	opened := 0
+	stubRelowerStore(t, func(engine beads.Store, open func(beads.Store) (*opjournal.Store, error)) (*opjournal.Store, error) {
+		opened++
+		batcher, ok := beads.GuardedBatcherFor(engine)
+		if !ok {
+			t.Fatal("the step's engine applies no guarded batches")
+		}
+		outside := beads.Bead{ID: "zz-op-aaaaaaaaaaaaaaaaaaaaaaaaaa", Title: "outside", Type: "task"}
+		if _, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Reason: "test", Items: []beads.GuardedItem{{Create: &outside}}}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
+			t.Errorf("a create outside the binding's namespaces through the step's engine = %v, want ErrPinnedIDOutsideNamespace", err)
+		}
+		store, err := open(engine)
+		if err == nil && store.Prefix() != prefix {
+			t.Errorf("the step's store mints under %q, want %q", store.Prefix(), prefix)
+		}
+		return store, err
+	})
+	if code, stdout, stderr := c.migrate(t); code != 0 {
+		t.Fatalf("migrate exited %d\nstdout: %s\nstderr: %s", code, stdout, stderr)
+	}
+	if opened != 1 {
+		t.Fatalf("the step opened %d lane stores, want one", opened)
 	}
 	home, err := opjournal.NowInterruptID(prefix, c.m1)
 	if err != nil {
 		t.Fatal(err)
-	}
-	if got, err := store.Get(home); err != nil || got.Causation != c.m1.ID {
-		t.Fatalf("Get(%s) = %+v, %v through the step's store", home, got, err)
-	}
-	if err := closer.Close(); err != nil {
-		t.Fatal(err)
-	}
-	engine, engineCloser, err := b.openEngine(nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = engineCloser.Close() })
-	batcher, ok := beads.GuardedBatcherFor(engine)
-	if !ok {
-		t.Fatal("the engine applies no guarded batches")
-	}
-	outside := beads.Bead{ID: "zz-op-aaaaaaaaaaaaaaaaaaaaaaaaaa", Title: "outside", Type: "task"}
-	if _, err := batcher.ApplyGuarded(context.Background(), beads.GuardedBatch{Reason: "test", Items: []beads.GuardedItem{{Create: &outside}}}); !errors.Is(err, beads.ErrPinnedIDOutsideNamespace) {
-		t.Fatalf("a create outside the binding's namespaces = %v, want ErrPinnedIDOutsideNamespace", err)
 	}
 	sessions, _ := c.bootStore(t)
 	if _, err := sessions.Get(home); err != nil {
@@ -488,28 +466,122 @@ func TestRelowerOpensTheBindingAsTheRuntimeDoes(t *testing.T) {
 	}
 }
 
+// A unit the step leaves where it is (two open derived interrupts) is named
+// with its reason, and the migrate still succeeds: the lane runs the unit by
+// identity, and nothing was moved.
+func TestStorageMigrateNamesAUnitItLeaves(t *testing.T) {
+	c := newRelowerCity(t)
+	store, err := opjournal.NewLaneStore(beads.SessionStore{Store: c.source}, c.clk, opjournal.WithIDPrefix("zz"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	twinReq := opjournal.Request{
+		Conversation: c.m1.Conversation, Kind: opjournal.KindInterrupt, Executor: opjournal.ExecutorLane,
+		ClientKey: c.m1.ID + ":interrupt", Causation: c.m1.ID, Producer: c.m1.Producer,
+		Scope: opjournal.Scope{Kind: opjournal.ScopeSession, Generation: 1},
+	}
+	twin, created, err := store.Propose(twinReq)
+	if err != nil || !created {
+		t.Fatalf("Propose(twin): created %v, %v", created, err)
+	}
+	code, stdout, stderr := c.migrate(t)
+	if code != 0 || !migratedLinePattern.MatchString(stdout) {
+		t.Fatalf("migrate exited %d\nstdout: %q\nstderr: %q", code, stdout, stderr)
+	}
+	ids := []string{c.i1.ID, twin.ID}
+	slices.Sort(ids)
+	want := "gc storage migrate: left deliver-now message " + c.m1.ID + " where it is: it has 2 open derived interrupts (" +
+		strings.Join(ids, ", ") + "); its lane runs it by identity\n"
+	if got := relowerStepStderr(t, c.target, stderr); got != want {
+		t.Fatalf("the step's stderr %q, want exactly %q", got, want)
+	}
+}
+
 // A city without lane ops prints exactly what the command printed before
-// the step existed.
+// the step existed, and opens no lane store.
 func TestStorageMigrateWithoutLaneOpsPrintsNothingNew(t *testing.T) {
 	cfg := infraSplitConfig(t.TempDir() + "/store")
 	request := storageTestRequest(t, cfg)
+	target := mustResolveInfraTarget(t, request.CityPath, cfg)
 	source := stubInfraMigrationSource(t)
 	stubInfraControllerPing(t, 0)
 	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session"})
 	mustCreateInfraBead(t, source, beads.Bead{Title: "ordinary work", Type: "task"})
-	fail := false
-	batches := stubRelowerBatches(t, &fail)
+	assertMigratePrintsWhatItAlwaysPrinted(t, request, target)
+}
+
+// A city without lane ops whose binding is the pre-revision layout (no
+// revision column, so no guarded batches: it hosts no lane) migrates as it
+// did before the step existed, on every run.
+func TestStorageMigrateWithoutLaneOpsOverALegacyBinding(t *testing.T) {
+	cfg := infraSplitConfig(t.TempDir() + "/store")
+	request := storageTestRequest(t, cfg)
+	target := mustResolveInfraTarget(t, request.CityPath, cfg)
+	opened, err := beads.OpenSQLiteStore(target.Dir)
+	if err != nil {
+		t.Fatalf("OpenSQLiteStore: %v", err)
+	}
+	if err := opened.(interface{ CloseStore() error }).CloseStore(); err != nil {
+		t.Fatalf("CloseStore: %v", err)
+	}
+	rewriteToPreRevisionLayout(t, target.Database)
+	source := stubInfraMigrationSource(t)
+	stubInfraControllerPing(t, 0)
+	mustCreateInfraBead(t, source, beads.Bead{Title: "a session", Type: "session"})
+	mustCreateInfraBead(t, source, beads.Bead{Title: "ordinary work", Type: "task"})
+	for range 2 {
+		assertMigratePrintsWhatItAlwaysPrinted(t, request, target)
+	}
+}
+
+// relowerStepStderr is a migrate's stderr without the lines the migration
+// printed before the re-lowering step existed: the copy's line and the
+// clear's.
+func relowerStepStderr(t *testing.T, target infraBindingTarget, stderr string) string {
+	t.Helper()
+	own := []*regexp.Regexp{
+		regexp.MustCompile("^gc storage migrate: infrastructure classes migrated to " + regexp.QuoteMeta(target.Database) + ` \(\d+ beads copied\)$`),
+		regexp.MustCompile(`^gc storage migrate: \d+ retained work-store cop\(ies\) cleared \(backup: ` + regexp.QuoteMeta(target.RetainedBackupPath()) + `\)[^\n]*$`),
+	}
+	var rest strings.Builder
+	for _, line := range strings.SplitAfter(stderr, "\n") {
+		if line == "" || slices.ContainsFunc(own, func(re *regexp.Regexp) bool { return re.MatchString(strings.TrimSuffix(line, "\n")) }) {
+			continue
+		}
+		rest.WriteString(line)
+	}
+	return rest.String()
+}
+
+// assertMigratePrintsWhatItAlwaysPrinted runs a migrate of a city with no
+// lane ops and fails unless it exits 0 with exactly the success line the
+// command printed before the step existed, nothing on stderr, and no lane
+// store opened.
+func assertMigratePrintsWhatItAlwaysPrinted(t *testing.T, request storageOperatorRequest, target infraBindingTarget) {
+	t.Helper()
+	opened := 0
+	stubRelowerStore(t, func(engine beads.Store, open func(beads.Store) (*opjournal.Store, error)) (*opjournal.Store, error) {
+		opened++
+		return open(engine)
+	})
 	var stdout, stderr bytes.Buffer
-	if code := doStorageMigrate(context.Background(), request, &stdout, &stderr); code != 0 {
+	code := doStorageMigrate(context.Background(), request, &stdout, &stderr)
+	if code != 0 {
 		t.Fatalf("migrate exited %d\nstdout: %s\nstderr: %s", code, stdout.String(), stderr.String())
 	}
-	if !migratedLinePattern.MatchString(stdout.String()) || strings.Contains(stdout.String(), "re-lowered") {
-		t.Errorf("stdout %q is not the line the command always printed", stdout.String())
+	m := migratedLinePattern.FindStringSubmatch(stdout.String())
+	if m == nil {
+		t.Fatalf("stdout %q is not the line the command always printed", stdout.String())
 	}
-	if strings.Contains(stderr.String(), "deliver-now") || strings.Contains(stderr.String(), "op rows") {
-		t.Errorf("stderr %q carries re-lowering lines", stderr.String())
+	want := fmt.Sprintf("Migrated. %s now serves %s from %s; %s. Start the city with `gc start`.\n",
+		target.Binding, infraMigrationClassList(), target.Database, m[1])
+	if stdout.String() != want || strings.Contains(m[1], "re-lowered") {
+		t.Errorf("stdout %q, want exactly %q", stdout.String(), want)
 	}
-	if *batches != 0 {
-		t.Errorf("the step issued %d batches, want none", *batches)
+	if got := relowerStepStderr(t, target, stderr.String()); got != "" {
+		t.Errorf("stderr %q carries %q past the migration's own lines, want nothing", stderr.String(), got)
+	}
+	if opened != 0 {
+		t.Errorf("the step opened %d lane stores, want none", opened)
 	}
 }

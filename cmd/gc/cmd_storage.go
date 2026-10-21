@@ -274,10 +274,13 @@ instead of from the work store, which no longer holds the slice.
 Last, on the converged binding, each open deliver-now unit the copy carried in
 is re-lowered under the binding's id prefix: its derived interrupt is re-created
 at the id a lowering there gives it, with its state, and the old row is closed
-as a pointer to it, one all-or-nothing write per unit. Units in flight, already
-over, not yet lowered, or with more than one open derived interrupt are left as
-they are and named; their lanes run each one as a unit by identity. A step that
-did not finish exits non-zero, and running this command again finishes it.
+as a pointer to it, one all-or-nothing write per unit. A unit in flight or that
+may have run, one with more than one open derived interrupt, and one whose id
+there another row already holds are left as they are and named; their lanes run
+each one as a unit by identity. A message not yet lowered, or whose unit is
+over, is not a unit to move, and is not named. A city whose binding holds no
+lowered deliver-now message skips the step and prints nothing for it. A step
+that did not finish exits non-zero, and running this command again finishes it.
 
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that

@@ -50,22 +50,9 @@ func (b convergedInfraBinding) openEngine(rec events.Recorder) (beads.Store, io.
 
 // newInfraRelowerStore is the op store the step writes through: a lane store
 // over engine, minting under the prefix the runtime's lane host discovers.
-func newInfraRelowerStore(engine beads.Store) (*opjournal.Store, error) {
+// Overridden by tests, which fault its batches or inspect its engine.
+var newInfraRelowerStore = func(engine beads.Store) (*opjournal.Store, error) {
 	return opjournal.NewLaneStore(beads.SessionStore{Store: engine}, cliOpClock)
-}
-
-// openInfraRelowerStore opens the op store the re-lowering step writes
-// through. Overridden by tests, which fault its batches.
-var openInfraRelowerStore = func(b convergedInfraBinding, rec events.Recorder) (*opjournal.Store, io.Closer, error) {
-	engine, closer, err := b.openEngine(rec)
-	if err != nil {
-		return nil, nil, err
-	}
-	store, err := newInfraRelowerStore(engine)
-	if err != nil {
-		return nil, nil, errors.Join(fmt.Errorf("opening the op store of binding %q: %w", b.target.Binding, err), closer.Close())
-	}
-	return store, closer, nil
 }
 
 // relowerConvergedNowUnits is the migration's last step: it re-lowers, under
@@ -76,17 +63,37 @@ var openInfraRelowerStore = func(b convergedInfraBinding, rec events.Recorder) (
 // a step that did not finish: a store error, or a unit a writer changed
 // under it.
 func relowerConvergedNowUnits(ctx context.Context, b convergedInfraBinding, rec events.Recorder, logPrefix string, stderr io.Writer) (opjournal.RelowerReport, error) {
-	store, closer, err := openInfraRelowerStore(b, rec)
+	engine, closer, err := b.openEngine(rec)
 	if err != nil {
 		return opjournal.RelowerReport{}, err
 	}
-	rep, runErr := store.RelowerNowUnits(ctx, infraRelowerBy)
+	rep, runErr := relowerNowUnitsOn(ctx, b, engine)
 	closeErr := closer.Close()
 	printRelowerReport(rep, logPrefix, stderr)
 	if closeErr != nil {
 		closeErr = fmt.Errorf("closing binding %q: %w", b.target.Binding, closeErr)
 	}
 	return rep, errors.Join(runErr, closeErr)
+}
+
+// relowerNowUnitsOn runs the step on the binding's engine. A binding with no
+// lowered deliver-now message has no unit to move or report: the step reads
+// that with keyed reads, opens no lane store and writes nothing, so a
+// binding that cannot apply guarded batches (and so hosts no lane) migrates
+// as it did before the step existed.
+func relowerNowUnitsOn(ctx context.Context, b convergedInfraBinding, engine beads.Store) (opjournal.RelowerReport, error) {
+	has, err := opjournal.HasLoweredNowMessages(beads.SessionStore{Store: engine})
+	if err != nil {
+		return opjournal.RelowerReport{}, fmt.Errorf("reading binding %q: %w", b.target.Binding, err)
+	}
+	if !has {
+		return opjournal.RelowerReport{}, nil
+	}
+	store, err := newInfraRelowerStore(engine)
+	if err != nil {
+		return opjournal.RelowerReport{}, fmt.Errorf("opening the op store of binding %q: %w", b.target.Binding, err)
+	}
+	return store.RelowerNowUnits(ctx, infraRelowerBy)
 }
 
 // printRelowerReport writes one stderr line per unit moved and per unit left,
@@ -114,7 +121,7 @@ func printRelowerReport(rep opjournal.RelowerReport, logPrefix string, stderr io
 func relowerLeftWhy(l opjournal.RelowerLeft) string {
 	switch l.Reason {
 	case opjournal.RelowerInFlight:
-		return "its unit was taken before the stop and is still leased"
+		return "its unit was taken before the stop or may have run, so a copy could run it twice"
 	case opjournal.RelowerAmbiguous:
 		return fmt.Sprintf("it has %d open derived interrupts (%s)", len(l.Interrupts), infraStrandedIDList(l.Interrupts))
 	case opjournal.RelowerHomeTaken:
