@@ -44,7 +44,8 @@ type reapReport struct {
 }
 
 // reapClosedBeadWorktrees discovers per-bead git worktrees under
-// cityPath/.gc/worktrees/<rig>/ and removes any whose associated bead is closed
+// <worktrees root>/<rig>/, the configured worktrees root
+// (workdir.WorktreesRoot), and removes any whose associated bead is closed
 // and that pass every safety gate. It returns a reapReport describing what was
 // reaped and what was protected.
 //

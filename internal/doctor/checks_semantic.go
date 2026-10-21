@@ -197,16 +197,17 @@ func (c *EventLogSizeCheck) Fix(_ *CheckContext) error { return nil }
 // --- Worktree disk size check ---
 
 // rigSize pairs a rig directory name with its measured byte footprint
-// under .gc/worktrees/<rig>/. Used as the sort key for ordered output.
+// under <worktrees root>/<rig>/. Used as the sort key for ordered output.
 type rigSize struct {
 	name  string
 	bytes int64
 }
 
-// WorktreeDiskSizeCheck warns when a per-rig footprint under
-// .gc/worktrees/<rig>/ exceeds the configured threshold. Build
-// artifacts, nested task worktrees, and accumulated state can grow
-// unboundedly here; without this check the disk fills silently.
+// WorktreeDiskSizeCheck warns when a per-rig footprint under the
+// configured worktrees root (workdir.WorktreesRoot) exceeds the
+// configured threshold. Build artifacts, nested task worktrees, and
+// accumulated state can grow unboundedly here; without this check the
+// disk fills silently.
 type WorktreeDiskSizeCheck struct {
 	cfg config.DoctorConfig
 	// measureDir is injectable so tests can avoid shelling out to du.
@@ -244,11 +245,11 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no .gc/worktrees directory"
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("reading .gc/worktrees: %v", err)
+		r.Message = fmt.Sprintf("reading %s: %v", wtRoot, err)
 		return r
 	}
 
@@ -282,7 +283,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 			r.Status = StatusWarning
 			r.Message = "could not measure any rig worktree directory"
 			r.Details = measureErrs
-			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
+			r.FixHint = fmt.Sprintf("check filesystem permissions on %s", filepath.Join(wtRoot, "<rig>"))
 		} else {
 			r.Status = StatusOK
 			r.Message = "no rig worktree directories"
@@ -329,7 +330,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("%d rig(s) over worktree size threshold (largest: %q at %s)",
 			overThreshold, sizes[0].name, humanSize(sizes[0].bytes))
 		r.Details = details
-		r.FixHint = "investigate .gc/worktrees/<rig>/ for build-artifact accumulation; consider routing builds out of worktrees, periodic clean steps, or running `gc doctor --fix` to remove safely-prunable nested worktrees"
+		r.FixHint = fmt.Sprintf("investigate %s for build-artifact accumulation; consider routing builds out of worktrees, periodic clean steps, or running `gc doctor --fix` to remove safely-prunable nested worktrees", filepath.Join(wtRoot, "<rig>"))
 	case StatusWarning:
 		if overThreshold > 0 {
 			r.Message = fmt.Sprintf("%d rig(s) approaching worktree size limit (largest: %q at %s)",
@@ -338,7 +339,7 @@ func (c *WorktreeDiskSizeCheck) Run(ctx *CheckContext) *CheckResult {
 		} else {
 			r.Message = fmt.Sprintf("could not measure %d rig worktree path(s) (largest measured: %q at %s)",
 				len(measureErrs), sizes[0].name, humanSize(sizes[0].bytes))
-			r.FixHint = "check filesystem permissions on .gc/worktrees/<rig>/"
+			r.FixHint = fmt.Sprintf("check filesystem permissions on %s", filepath.Join(wtRoot, "<rig>"))
 		}
 		r.Details = details
 	default:
@@ -411,9 +412,10 @@ func NewNestedWorktreePruneCheck(cfg config.DoctorConfig) *NestedWorktreePruneCh
 // Name returns the check identifier.
 func (c *NestedWorktreePruneCheck) Name() string { return "nested-worktree-prune" }
 
-// Run walks .gc/worktrees/<rig>/<agent>/ for each agent home that is a
-// git worktree, lists its sibling worktrees, and classifies each
-// nested entry as safe-to-prune or rejected with a reason.
+// Run walks <worktrees root>/<rig>/<agent>/ (workdir.WorktreesRoot) for
+// each agent home that is a git worktree, lists its sibling worktrees,
+// and classifies each nested entry as safe-to-prune or rejected with a
+// reason.
 func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	c.findings = nil
@@ -423,11 +425,11 @@ func (c *NestedWorktreePruneCheck) Run(ctx *CheckContext) *CheckResult {
 	if err != nil {
 		if os.IsNotExist(err) {
 			r.Status = StatusOK
-			r.Message = "no .gc/worktrees directory"
+			r.Message = fmt.Sprintf("no worktrees directory at %s", wtRoot)
 			return r
 		}
 		r.Status = StatusError
-		r.Message = fmt.Sprintf("reading .gc/worktrees: %v", err)
+		r.Message = fmt.Sprintf("reading %s: %v", wtRoot, err)
 		return r
 	}
 

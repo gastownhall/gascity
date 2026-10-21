@@ -734,6 +734,43 @@ func TestNestedWorktreePruneCheck_NoWorktreesDir(t *testing.T) {
 	}
 }
 
+func TestNestedWorktreePruneCheckUsesConfiguredWorktreesRoot(t *testing.T) {
+	dir := t.TempDir()
+	configuredRoot := filepath.Join(t.TempDir(), "configured-worktrees")
+	t.Setenv("GC_WORKTREES_DIR", configuredRoot)
+	homeDir := filepath.Join(configuredRoot, "rig-a", "polecat-1")
+	if err := os.MkdirAll(homeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(homeDir, ".git"), []byte("gitdir: /tmp/none/worktrees/polecat-1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	home := pathutil.NormalizePathForCompare(homeDir)
+	nested := pathutil.NormalizePathForCompare(filepath.Join(home, "worktrees", "task-clean"))
+	if err := os.MkdirAll(nested, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	c := &NestedWorktreePruneCheck{
+		cfg: config.DoctorConfig{},
+		newGit: func(path string) gitWorktree {
+			return &fakeGitWorktree{
+				listResp: []git.Worktree{
+					{Path: home, Branch: "home-branch"},
+					{Path: nested, Branch: "task-clean"},
+				},
+				currentPath: path,
+			}
+		},
+	}
+	r := c.Run(&CheckContext{CityPath: dir})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning from configured root; msg=%s", r.Status, r.Message)
+	}
+	if len(c.findings) != 1 || c.findings[0].path != nested || !c.findings[0].safeToRm {
+		t.Fatalf("findings = %+v, want one safe finding at %s", c.findings, nested)
+	}
+}
+
 func TestNestedWorktreePruneCheck_NoNestedWorktrees(t *testing.T) {
 	dir := t.TempDir()
 	home := makeAgentHome(t, dir, "polecat-1")
