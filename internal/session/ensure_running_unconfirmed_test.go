@@ -205,9 +205,10 @@ func TestEnsureRunning_UnconfirmedLivenessStartsNothingAndChangesNothing(t *test
 	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			mgr, sp, store, id, _ := seedUnconfirmedSession(t, StateAsleep, true, false, freshUnknown)
+			start := newStart(t, mgr, id) // the bridge's mint is its caller's, before the start
 			before := metadataOf(t, store, id)
 
-			err := newStart(t, mgr, id)()
+			err := start()
 
 			if !errors.Is(err, runtime.ErrRuntimeUnavailable) {
 				t.Fatalf("%s error = %v, want runtime unavailable", entry, err)
