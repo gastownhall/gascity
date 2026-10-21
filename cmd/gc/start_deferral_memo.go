@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"strings"
 	"sync"
@@ -70,8 +71,13 @@ func (p *startDeferralPass) noteGateDeferred(id string) {
 }
 
 // noteStartOutcome records session id when outcome is the async start limiter
-// refusing it a slot.
-func (p *startDeferralPass) noteStartOutcome(_, _ string) {}
+// refusing it a slot, the one start-op outcome reported at the point the slot
+// is reserved. Any other outcome records nothing here.
+func (p *startDeferralPass) noteStartOutcome(outcome, id string) {
+	if outcome == "deferred_by_async_start_limit" {
+		p.noteGateDeferred(id)
+	}
+}
 
 // finish publishes the run to the memo, replacing the previous record. A run
 // whose ctx is canceled by now did not offer every candidate a start, so it
@@ -111,10 +117,28 @@ func (m *startDeferralMemo) Holds(info sessionpkg.Info, now time.Time) bool {
 	return born.After(m.lastPassStart)
 }
 
-// holdPendingCreate keeps a never-started pending create past its lease when
-// the memo holds it.
-func (m *startDeferralMemo) holdPendingCreate(_ sessionpkg.Info, expired, capacityHeld bool, _ clock.Clock, _ io.Writer, _ *sessionReconcilerTraceCycle, _, _ string) (bool, bool) {
-	return expired, capacityHeld
+// holdPendingCreate is the reconciler's start-gate hold on a never-started
+// pending create whose lease has expired. When the memo holds info, nothing
+// refused the create (see startDeferralMemo for the criterion), so the lease
+// does not roll it back while the pool drains: the hold is logged to stderr and
+// traced, and it returns expired=false and capacityHeld=true. Otherwise,
+// including for a nil memo or a row that is not expired, it returns expired
+// and capacityHeld as it was given them and writes nothing. A nil trace is
+// allowed.
+func (m *startDeferralMemo) holdPendingCreate(info sessionpkg.Info, expired, capacityHeld bool, clk clock.Clock, stderr io.Writer, trace *sessionReconcilerTraceCycle, templateName, sessionName string) (bool, bool) {
+	if m == nil || !expired {
+		return expired, capacityHeld
+	}
+	now := clk.Now()
+	if !m.Holds(info, now) {
+		return expired, capacityHeld
+	}
+	fmt.Fprintf(stderr, "session reconciler: keeping pending create %s past its lease: its start is waiting on a start gate\n", sessionName) //nolint:errcheck
+	trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonStartGateDeferred, TraceOutcomeDeferred, templateName, sessionName, traceRecordPayload{
+		"hold":       "start_gate",
+		"anchor_age": now.Sub(pendingCreateLeaseAnchor(info)).Truncate(time.Second).String(),
+	})
+	return false, true
 }
 
 // withStartDeferralMemo installs the start-deferral memo for this run. Nil (or

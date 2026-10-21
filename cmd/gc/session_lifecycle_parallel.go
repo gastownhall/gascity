@@ -4769,9 +4769,7 @@ func executePlannedStartsTraced(
 					if !reserved {
 						done()
 						logLifecycleOutcome(stderr, "start", wave, candidate.name(), candidate.logicalTemplate(cfg), outcome, time.Time{}, time.Time{}, nil)
-						if outcome == "deferred_by_async_start_limit" {
-							deferrals.noteGateDeferred(candidate.info.ID)
-						}
+						deferrals.noteStartOutcome(outcome, candidate.info.ID)
 						continue
 					}
 				}

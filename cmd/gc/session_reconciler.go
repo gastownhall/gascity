@@ -3215,19 +3215,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							"state":    st.State.String(),
 						})
 					}
-				} else if now := clk.Now(); deferralMemo.Holds(infoPostZombie, now) {
-					// The create waits only on a start gate (see
-					// startDeferralMemo for the criterion): nothing refused it, so
-					// the lease does not roll it back while the pool drains.
-					expired = false
-					capacityHeld = true
-					fmt.Fprintf(stderr, "session reconciler: keeping pending create %s past its lease: its start is waiting on a start gate\n", name) //nolint:errcheck
-					if trace != nil {
-						trace.RecordDecision(TraceSiteReconcilerPendingCreate, TraceReasonStartGateDeferred, TraceOutcomeDeferred, tp.TemplateName, name, traceRecordPayload{
-							"hold":       "start_gate",
-							"anchor_age": now.Sub(pendingCreateLeaseAnchor(infoPostZombie)).Truncate(time.Second).String(),
-						})
-					}
+				} else {
+					expired, capacityHeld = deferralMemo.holdPendingCreate(infoPostZombie, expired, capacityHeld, clk, stderr, trace, tp.TemplateName, name)
 				}
 			}
 			if expired {
