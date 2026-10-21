@@ -1479,7 +1479,7 @@ func TestLaneExecProbeBoundaryAt(t *testing.T) {
 		name     string
 		opts     []laneFixtureOpt
 		protocol bool
-		activity time.Time // zero: never set
+		activity time.Time // zero: the runtime reports none
 		want     time.Time
 		boundary opjournal.Tri
 	}{
@@ -1496,9 +1496,7 @@ func TestLaneExecProbeBoundaryAt(t *testing.T) {
 			if tc.protocol {
 				f.sp.TurnInterruptModeValue = runtime.TurnInterruptProtocol
 			}
-			if !tc.activity.IsZero() {
-				f.sp.SetActivity(f.name, tc.activity)
-			}
+			f.sp.SetActivity(f.name, tc.activity)
 			v, info := f.view(t)
 			e := newConversationLaneExec(f.deps(f.laneStore(t)), info)
 			e.now = f.clk.Now
