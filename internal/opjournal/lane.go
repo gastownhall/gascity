@@ -174,6 +174,9 @@ type Probe struct {
 	Running   bool
 	// Boundary is whether the runtime is idle at input.
 	Boundary Tri
+	// BoundaryAt is when a closed Boundary opens by itself, zero when
+	// unknown.
+	BoundaryAt time.Time
 	// Turn is the turn running at the probe, "" when unknown.
 	Turn     string
 	TurnLive Tri

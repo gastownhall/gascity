@@ -940,6 +940,7 @@ func TestLaneWorkerNextDelay(t *testing.T) {
 		{"next", lanePassOutcome{res: opjournal.PassResult{Next: laneT0.Add(7 * time.Second)}}, 7 * time.Second, false},
 		{"busy", lanePassOutcome{res: opjournal.PassResult{Busy: true}}, laneBusyFirst, false},
 		{"busy beats a later next", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(time.Minute)}}, laneBusyFirst, false},
+		{"next beats the busy backoff", lanePassOutcome{res: opjournal.PassResult{Busy: true, Next: laneT0.Add(1500 * time.Millisecond)}}, 1500 * time.Millisecond, false},
 		{"quiescent", lanePassOutcome{skipped: true}, laneQuiescentRetry, false},
 		{"wake recorded", lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeRecorded}, laneWakeRecheck, false},
 		{"wake held", lanePassOutcome{res: opjournal.PassResult{Wake: true}, wake: session.WakeHeld}, laneWakeHeldRecheck, false},
@@ -1506,6 +1507,48 @@ func TestLaneHostReprobesBusyRuntimeWithoutRows(t *testing.T) {
 	}
 	if s := hh.h.status(f.clk.Now()); s.Reprobes != 2 {
 		t.Fatalf("status = %+v, want two re-probes", s)
+	}
+}
+
+// TestLaneHostBusyBoundaryWakesAtItsDeadline proves a busy keystroke
+// boundary is passed again at its quiescence deadline, not on the next
+// re-probe of the backoff grid: the wait is the time left to the deadline,
+// and the pass that deadline ends is a full pass that delivers. The worker
+// already waits for the sooner of the backoff and Next; the executor's hint
+// is what makes Next the deadline.
+func TestLaneHostBusyBoundaryWakesAtItsDeadline(t *testing.T) {
+	f := newLaneFixture(t)
+	left := 1500 * time.Millisecond
+	f.sp.SetActivity(f.name, laneT0.Add(left-defaultNudgePollQuiescence))
+	st := f.laneStore(t)
+	op := f.propose(t, st, f.msg("k1", opjournal.RolePrompt, "hello"))
+	hh := newLaneHostHarness(t, f)
+	hh.h.newExec = func(deps laneExecDeps, info session.Info) opjournal.Executor {
+		e := newConversationLaneExec(deps, info)
+		e.now = f.clk.Now
+		e.idle = func(_ nudgeTarget, obs worker.LiveObservation) bool {
+			return obs.LastActivity != nil && f.clk.Now().Sub(*obs.LastActivity) >= defaultNudgePollQuiescence
+		}
+		return e
+	}
+	hh.start()
+	if p := hh.nextPass(t); !p.out.res.Busy {
+		t.Fatalf("first pass = %+v, want busy", p.out.res)
+	}
+	tm := hh.nextTimer(t)
+	if tm.d != left {
+		t.Fatalf("wait = %s, want the %s left to the quiescence deadline, not the %s backoff", tm.d, left, laneBusyFirst)
+	}
+	f.clk.Advance(tm.d)
+	tm.c <- f.clk.Now()
+	if p := hh.nextPass(t); p.out.res.Done != opjournal.DoneAccepted {
+		t.Fatalf("pass at the deadline = %+v, want the delivery", p.out.res)
+	}
+	if got := f.get(t, st, op.ID); got.Outcome.Arm != opjournal.ArmSucceeded {
+		t.Fatalf("op = %+v", got.Outcome)
+	}
+	if s := hh.h.status(f.clk.Now()); s.Reprobes != 0 {
+		t.Fatalf("status = %+v, want no re-probe: the deadline wakes a full pass", s)
 	}
 }
 
