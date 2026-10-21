@@ -254,6 +254,9 @@ func unreadableOwnerScanError(root string, pid int, incarnationStartedAt time.Ti
 // tmux-spawn parent is skipped too, but a failed age proof still leaves the
 // scan incomplete.
 func unreadableEnvironScanError(root string, pid int, id string, incarnationStartedAt time.Time, readErr error) error {
+	if errors.Is(readErr, fs.ErrPermission) && unreadableProcessProvenNonRuntime(root, pid) {
+		return nil
+	}
 	irrelevant, proofErr := processPredatesIncarnation(root, pid, incarnationStartedAt)
 	if irrelevant {
 		return nil
@@ -270,6 +273,95 @@ func unreadableEnvironScanError(root string, pid int, id string, incarnationStar
 		errs = append(errs, fmt.Errorf("proving tmux parent for pid %d: %w", pid, proofErr))
 	}
 	return errors.Join(append(errs, fmt.Errorf("reading environ for pid %d: %w", pid, readErr))...)
+}
+
+// unreadableProcessProvenNonRuntime reports whether a same-uid process whose
+// environment could not be read (EACCES) is positively proven, from the
+// signals /proc still exposes for it, to be something no gc session runtime
+// can be. An environ read is a ptrace-mode access, so a same-uid process
+// refuses it when it is non-dumpable: a privilege-transitioned exec (sudo), a
+// helper that sets PR_SET_DUMPABLE=0 on itself, or an agent CLI that hardens
+// itself the same way. Non-dumpability alone therefore proves nothing, and an
+// unproven process stays an entry error: the scan keeps failing closed for
+// anything that could be ours. Two shapes are proven:
+//
+//   - The systemd user manager's own cgroup, user@<uid>.service/init.scope,
+//     which holds only `systemd --user` and its non-dumpable `(sd-pam)`
+//     helper. systemd starts every unit, scope and session elsewhere, so no
+//     process gc or tmux launches can live there.
+//   - A credential agent (ssh-agent, gpg-agent and its gpg helpers), named
+//     alike by its comm and by its argv[0]. These set PR_SET_DUMPABLE=0 by
+//     design and never run an agent provider, so even one started from a
+//     session's shell holds no session work for a replacement to race.
+//
+// The identity is read twice around the proof, so a pid recycled mid-proof
+// abandons it rather than resolving it either way. Any read that fails leaves
+// the process unproven.
+func unreadableProcessProvenNonRuntime(root string, pid int) bool {
+	statPath := filepath.Join(root, strconv.Itoa(pid), "stat")
+	_, _, before, ok, err := readProcStatIdentity(statPath)
+	if err != nil || !ok {
+		return false
+	}
+	if !userManagerInitScopeProcess(root, pid) && !credentialAgentProcess(root, pid) {
+		return false
+	}
+	_, _, after, ok, err := readProcStatIdentity(statPath)
+	return err == nil && ok && after == before
+}
+
+// userManagerInitScopeProcess reports whether pid sits in a systemd user
+// manager's own init.scope (…/user@<uid>.service/init.scope).
+func userManagerInitScopeProcess(root string, pid int) bool {
+	cgroup, exists, err := readProcessCgroup(root, pid)
+	if err != nil || !exists {
+		return false
+	}
+	return isUserManagerInitScope(cgroup)
+}
+
+func isUserManagerInitScope(cgroup string) bool {
+	if filepath.Base(cgroup) != "init.scope" {
+		return false
+	}
+	unit := filepath.Base(filepath.Dir(cgroup))
+	uid, ok := strings.CutPrefix(unit, "user@")
+	if !ok {
+		return false
+	}
+	uid, ok = strings.CutSuffix(uid, ".service")
+	if !ok || uid == "" {
+		return false
+	}
+	_, err := strconv.ParseUint(uid, 10, 32)
+	return err == nil
+}
+
+// credentialAgents are the non-dumpable credential helpers a host or a
+// session's shell starts that never run an agent provider.
+var credentialAgents = map[string]struct{}{
+	"ssh-agent": {}, "gpg-agent": {}, "scdaemon": {}, "dirmngr": {}, "keyboxd": {},
+}
+
+// credentialAgentProcess reports whether pid's comm and argv[0] basename both
+// name the same credential agent. Requiring both keeps a renamed thread or an
+// unrelated binary that merely shares one of them unproven.
+func credentialAgentProcess(root string, pid int) bool {
+	dir := filepath.Join(root, strconv.Itoa(pid))
+	comm, err := os.ReadFile(filepath.Join(dir, "comm"))
+	if err != nil {
+		return false
+	}
+	name := strings.TrimSpace(string(comm))
+	if _, ok := credentialAgents[name]; !ok {
+		return false
+	}
+	cmdline, err := os.ReadFile(filepath.Join(dir, "cmdline"))
+	if err != nil {
+		return false
+	}
+	argv0, _, _ := strings.Cut(string(cmdline), "\x00")
+	return filepath.Base(strings.TrimSpace(argv0)) == name
 }
 
 const (
