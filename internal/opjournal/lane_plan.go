@@ -129,7 +129,8 @@ type rulesPlan struct {
 	lowerings []nowLowering
 	// openUnits are the lowered deliver-now messages whose derived
 	// interrupt is open, whatever either op waits on, and the due ones not
-	// yet lowered only because their derived id's read failed transiently:
+	// yet lowered only because a read (of their after target or of their
+	// derived id) failed transiently:
 	// while any is, no content is taken (U-ORDER), unless planTake admits it
 	// past the content block the unit waits on.
 	openUnits []string

@@ -1241,9 +1241,10 @@ settled:
 		switch {
 		case op.Status != StatusClosed:
 			w.fail("op %s still %s after the drain", id, op.Status)
-		case op.Policy.Message.When == WhenAfterTurn:
+		case w.ridesOnRider(op):
 			// A rider waits for a turn-starting op by design; with none
-			// left it expires at start_by.
+			// left it expires at start_by, and so does an op whose after
+			// chain runs through one.
 		case op.StartBy.After(start.Add(drainSlack)) && op.Outcome.Arm == ArmFailed &&
 			(op.Outcome.Reason == ReasonExpiredBeforeStart || op.Outcome.Reason == ReasonDeadlineInFlight) &&
 			op.Transitions[len(op.Transitions)-1].At.After(start):
@@ -1251,6 +1252,31 @@ settled:
 				id, op.Outcome.Reason, op.StartBy, drainSlack, start)
 		}
 	}
+}
+
+// ridesOnRider reports whether op is a rider (when after_turn) or waits,
+// through its after chain, on one.
+func (w *propWorld) ridesOnRider(op Op) bool {
+	rides := false
+	w.unflaky(func() {
+		seen := map[string]bool{}
+		for {
+			if op.Policy.Message.When == WhenAfterTurn {
+				rides = true
+				return
+			}
+			if op.After == "" || seen[op.After] {
+				return
+			}
+			seen[op.After] = true
+			next, err := w.h.store.Get(op.After)
+			if err != nil {
+				return
+			}
+			op = next
+		}
+	})
+	return rides
 }
 
 // propCoverage counts what the property runs exercised, across seeds.

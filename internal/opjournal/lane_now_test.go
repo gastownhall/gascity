@@ -732,6 +732,89 @@ func TestLaneNowUOrderAcrossAnAfterRead(t *testing.T) {
 	}
 }
 
+// U-ORDER across a failed read of an unlowered message's after (N3): a due
+// deliver-now message a pass cannot lower only because its after target's
+// read failed transiently holds the content, since another host that reads
+// the target meanwhile lowers it: content taken then would run while that
+// unit is open. Once the read succeeds the unit goes before the content. A
+// message that is not due yet (not_before ahead) holds nothing.
+func TestLaneNowUOrderAcrossAnUnloweredAfterRead(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		// notBefore delays the message past the pass.
+		notBefore time.Duration
+	}{{name: "due"}, {name: "not due", notBefore: time.Hour}} {
+		t.Run(tc.name, func(t *testing.T) {
+			h, fs := newLaneHarnessFlaky(t)
+			x := h.propose(t, laneMsg("x", RoleNotice, "earlier notice"))
+			exec := newFakeExec(h.clk)
+			outer := h.lane(t, "ctl")
+			mustPass(t, outer, view(), exec)
+			wantOutcome(t, h.get(t, x.ID), ArmSucceeded, "")
+			h.clk.Advance(time.Millisecond)
+			m := h.propose(t, nowReq("now", func(r *Request) {
+				r.After = x.ID
+				if tc.notBefore > 0 {
+					r.NotBefore = h.clk.Now().Add(tc.notBefore)
+				}
+			}))
+			h.clk.Advance(time.Millisecond)
+			n := h.propose(t, laneMsg("later", RoleNotice, "other work"))
+			// The other host reads through a store whose reads succeed.
+			steady, err := NewLaneStore(beads.SessionStore{Store: &flakyGetStore{MemStore: h.mem, batcher: h.batcher}}, h.clk, WithIDPrefix("gc"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			other, err := NewLane(steady, "cli", h.clk)
+			if err != nil {
+				t.Fatal(err)
+			}
+			other.sleep = func(context.Context, time.Duration) error { return nil }
+			otherExec := newFakeExec(h.clk)
+			otherExec.probe = notLiveProbe()
+			var inner PassResult
+			ran := false
+			outer.hooks.at = func(s laneStage) error {
+				if s == stageAfterRead && !ran {
+					ran = true
+					inner = mustPass(t, other, view(), otherExec)
+				}
+				return nil
+			}
+			fs.setFail(func(id string) bool { return id == x.ID })
+			res := mustPass(t, outer, view(), exec)
+			fs.setFail(nil)
+			outer.hooks.at = nil
+			if w := waitOf(res.Waits, m.ID); w.Reason != WaitAfterUnreadable && w.Reason != WaitNotBefore {
+				t.Fatalf("message wait %+v, want its after unreadable or its not_before", w)
+			}
+			if tc.notBefore > 0 {
+				if res.Took != TakeContent || !slices.Equal(res.Taken, []string{n.ID}) {
+					t.Fatalf("pass %+v, want the content: a message not due holds nothing", res)
+				}
+				return
+			}
+			if !slices.Equal(inner.Lowered, []string{m.ID}) {
+				t.Fatalf("other host's pass %+v, want the message lowered", inner)
+			}
+			if res.Took != TakeNone || len(exec.delivered()) != 1 {
+				t.Fatalf("pass %+v after %d deliveries, want the content held", res, len(exec.delivered()))
+			}
+			if w := waitOf(res.Waits, n.ID); w.Reason != WaitBlocked {
+				t.Fatalf("later content wait %+v, want blocked by the unit", w)
+			}
+			exec.probe = idleProbe()
+			if res := mustPass(t, outer, view(), exec); res.Took != TakeNow || !slices.Equal(res.Taken, []string{nowID(t, m), m.ID}) {
+				t.Fatalf("pass %+v, want the unit first", res)
+			}
+			mustPass(t, outer, view(), exec)
+			if ds := exec.delivered(); len(ds) != 3 || ds[1].Ops[0].ID != m.ID || ds[2].Ops[0].ID != n.ID {
+				t.Fatalf("deliveries %+v, want the message before the later content", ds)
+			}
+		})
+	}
+}
+
 // A fused command whose interrupt did not settle leaves the message's link
 // evidence the probe's: only a settled interrupt says no turn is live, so a
 // link the probe's evidence grades ambiguous stays ambiguous (D23).

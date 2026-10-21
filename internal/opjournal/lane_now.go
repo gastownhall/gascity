@@ -447,7 +447,8 @@ func (rp *rulesPlan) nowWait(st *nowOpState, r WaitReason, detail string, until 
 // orphan (planNowInterrupt): it closes, or waits while it is in flight.
 // Otherwise the message waits as any op does, then until each of ids can be
 // read and the conversation has a session awake to run the unit, and is
-// then lowered.
+// then lowered. While it waits only on a transient read (of its after
+// target or of one of ids) it holds the content (openUnits).
 func (rp *rulesPlan) planLowering(snap laneSnapshot, conv ConversationView, st, ist *nowOpState, ids []string) {
 	m := st.e.op
 	taken := func(iid string) bool {
@@ -461,6 +462,13 @@ func (rp *rulesPlan) planLowering(snap laneSnapshot, conv ConversationView, st, 
 		return
 	}
 	if st.wait != "" {
+		if st.wait == WaitAfterUnreadable && !st.until.IsZero() && !m.NotBefore.After(rp.now) {
+			// Due, and lowered once the after read succeeds, by this lane or
+			// by another host that reads it now: content waits, so none is
+			// taken while a unit it forms may be open (U-ORDER). A target
+			// that will never decode holds nothing.
+			rp.openUnits = append(rp.openUnits, m.ID)
+		}
 		rp.emitWait(st, m.ID)
 		return
 	}
