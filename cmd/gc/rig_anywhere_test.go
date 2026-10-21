@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 
@@ -1133,6 +1134,11 @@ enabled = false
 		if code != 0 {
 			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
 		}
+		// Every swept block kind is deleted in place (#7899), without the
+		// comment-dropping full-rewrite fallback.
+		if stderr.Len() != 0 {
+			t.Fatalf("cmdRigRemove stderr = %q, want the in-place removal to need no fallback", stderr.String())
+		}
 
 		// The city must stay loadable: gc reload / gc rig list compose via
 		// LoadWithIncludes, which applies [[patches.agent]]. A patch left
@@ -1222,12 +1228,17 @@ base = "builtin:claude"
 name = "comment-rig"
 
 # kept-rig rationale: must survive the removal untouched.
-[[rigs]]
+[[rigs]] # kept-rig: the docs repo
 name = "kept-rig"
 
 # comment-rig's patch rationale.
 [[patches.agent]]
 dir = "comment-rig"
+name = "claude"
+suspended = true
+
+[[patches.agent]]
+dir = "kept-rig"
 name = "claude"
 suspended = true
 `
@@ -1254,11 +1265,15 @@ suspended = true
 			t.Fatal(err)
 		}
 		got := string(data)
+		if stderr.Len() != 0 {
+			t.Fatalf("cmdRigRemove stderr = %q, want the in-place removal to need no fallback", stderr.String())
+		}
 		for _, want := range []string{
 			"# This is a city-level rationale comment.",
 			"# Provider rationale: claude is the only configured provider.",
 			"# kept-rig rationale: must survive the removal untouched.",
-			"kept-rig",
+			"[[rigs]] # kept-rig: the docs repo\nname = \"kept-rig\"",
+			"dir = \"kept-rig\"",
 		} {
 			if !strings.Contains(got, want) {
 				t.Errorf("city.toml missing %q after rig remove:\n%s", want, got)
@@ -1276,6 +1291,70 @@ suspended = true
 
 		if _, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml")); err != nil {
 			t.Fatalf("LoadWithIncludes after rig remove failed: %v", err)
+		}
+	})
+
+	// A city.toml whose rig entries cannot be deleted in place (here an
+	// inline rigs array, which has no [[rigs]] blocks to delete) still loses
+	// the rig: cmdRigRemove falls back to the full rewrite and says on stderr
+	// that the file's comments were dropped.
+	t.Run("falls_back_to_full_rewrite_when_blocks_cannot_be_deleted_in_place", func(t *testing.T) {
+		gcHome := t.TempDir()
+		t.Setenv("GC_HOME", gcHome)
+		resetFlags(t)
+
+		cityPath := setupCity(t, "inline-city")
+		goneDir := filepath.Join(t.TempDir(), "gone-rig")
+		keptDir := filepath.Join(t.TempDir(), "kept-rig")
+		for _, dir := range []string{goneDir, keptDir} {
+			if err := os.MkdirAll(dir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+		toml := `rigs = [{ name = "gone-rig" }, { name = "kept-rig" }]
+
+# inline-city rationale: lost to the full rewrite.
+[workspace]
+name = "inline-city"
+`
+		if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte(toml), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := config.PersistRigSiteBindings(fsys.OSFS{}, cityPath, []config.Rig{
+			{Name: "gone-rig", Path: goneDir},
+			{Name: "kept-rig", Path: keptDir},
+		}); err != nil {
+			t.Fatalf("PersistRigSiteBindings: %v", err)
+		}
+		registerCityForRigResolution(t, gcHome, cityPath, "inline-city")
+
+		cityFlag = cityPath
+		var stdout, stderr bytes.Buffer
+		code := cmdRigRemove("gone-rig", &stdout, &stderr)
+		if code != 0 {
+			t.Fatalf("cmdRigRemove = %d, stderr: %s", code, stderr.String())
+		}
+		if !strings.Contains(stderr.String(), "warning") || !strings.Contains(stderr.String(), "drops its comments") {
+			t.Fatalf("cmdRigRemove stderr = %q, want a warning that the full rewrite drops comments", stderr.String())
+		}
+
+		cfg, _, err := config.LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"))
+		if err != nil {
+			t.Fatalf("LoadWithIncludes after rig remove failed: %v", err)
+		}
+		var names []string
+		for _, rig := range cfg.Rigs {
+			names = append(names, rig.Name)
+		}
+		if !slices.Equal(names, []string{"kept-rig"}) {
+			t.Fatalf("rigs after removing gone-rig = %v, want [kept-rig]", names)
+		}
+		binding, err := config.LoadSiteBinding(fsys.OSFS{}, cityPath)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(binding.Rigs) != 1 || binding.Rigs[0].Name != "kept-rig" {
+			t.Fatalf("site binding rigs = %#v, want only kept-rig", binding.Rigs)
 		}
 	})
 }

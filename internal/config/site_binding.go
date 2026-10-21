@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"regexp"
 	"sort"
 	"strings"
 
@@ -400,7 +399,7 @@ func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City
 		return fmt.Errorf("reading %s: %w", writePath, err)
 	}
 
-	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, SiteBindingPath(cityRoot))
+	snapshot, err := snapshotCityEdit(fs, writePath, cityRoot)
 	if err != nil {
 		return err
 	}
@@ -425,209 +424,6 @@ func AppendRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City
 	return nil
 }
 
-// RemoveRigAndWriteSiteBindingsForEdit deletes rigName's [[rigs]] block from
-// city.toml, along with the [[patches.*]], [[github.pr_monitor]], and
-// [[orders.overrides]] blocks that dangle once it's gone (#3666 — a dangling
-// reference fails City.LoadWithIncludes, or for an [[orders.overrides]],
-// dangles silently at order-scan time), by deleting their byte spans from
-// the existing text instead of re-serializing the whole file. This is the
-// surgical counterpart of AppendRigAndWriteSiteBindingsForEdit (#3414) for
-// removal: every other comment and the existing key order survive (#7899).
-//
-// cfg must already have rigName's [[rigs]] entry, and every dangling block
-// named by removedMonitorNames, filtered out — this only rewrites city.toml
-// to match; it does not decide what to remove. removedMonitorNames holds the
-// names of [[github.pr_monitor]] entries rigName owned, so their matching
-// [[patches.github_pr_monitor]] blocks can be found by name instead of by
-// rig (a patch has no rig field of its own). If the site binding write fails
-// after city.toml is changed, both files are restored before the error is
-// returned.
-func RemoveRigAndWriteSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, rigName string, removedMonitorNames map[string]bool) error {
-	cityRoot := filepath.Dir(tomlPath)
-	writePath, err := ResolveCityAppendPath(fs, tomlPath)
-	if err != nil {
-		return err
-	}
-
-	existing, err := fs.ReadFile(writePath)
-	if err != nil {
-		return fmt.Errorf("reading %s: %w", writePath, err)
-	}
-
-	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, SiteBindingPath(cityRoot))
-	if err != nil {
-		return err
-	}
-
-	content, err := removeRigSweptBlocks(existing, rigName, removedMonitorNames)
-	if err != nil {
-		return fmt.Errorf("removing rig %q from %s: %w", rigName, writePath, err)
-	}
-
-	if err := fsys.WriteFileIfChangedAtomic(fs, writePath, content, 0o644); err != nil {
-		return err
-	}
-	if err := persistRigSiteBindings(fs, cityRoot, cfg.Rigs, map[string]struct{}{rigName: {}}); err != nil {
-		if restoreErr := snapshot.restore(fs); restoreErr != nil {
-			return fmt.Errorf("writing .gc/site.toml failed and restoring city.toml/site binding failed: %w", errors.Join(err, restoreErr))
-		}
-		return fmt.Errorf("writing .gc/site.toml failed; restored city.toml and previous site binding, fix the site binding write error and retry: %w", err)
-	}
-	return nil
-}
-
-// tomlHeaderPattern matches a TOML table or array-of-tables header line —
-// "[name]" or "[[name]]" — on a line by itself, which is how
-// (*City).Marshal's enc.Indent = "" always writes one.
-var tomlHeaderPattern = regexp.MustCompile(`^[ \t]*\[+([^\[\]]+)\]+[ \t]*$`)
-
-// tomlScalarStringLinePattern matches a "key = \"value\"" line, the shape
-// every field removeRigSweptBlocks needs to match on (dir, rig, name) is
-// always written in by the same encoder.
-var tomlScalarStringLinePattern = regexp.MustCompile(`^[ \t]*([A-Za-z_][A-Za-z0-9_-]*)[ \t]*=[ \t]*"((?:[^"\\]|\\.)*)"`)
-
-// rigSweptTables lists the array-of-tables kinds cmdRigRemove sweeps out of
-// the in-memory config when a rig is removed (#3666), by their exact dotted
-// [[table]] name, together with the fields (checked as OR) that identify an
-// instance belonging to the removed rig. Keep in sync with cmdRigRemove's
-// sweep in cmd/gc/cmd_rig.go — a kind added there without a matching entry
-// here reverts to leaving a stray, uncommented block in city.toml on removal
-// (not a data-loss regression on its own, but back to the #7899 shape for
-// that one kind).
-func rigSweptTables(rigName string, removedMonitorNames map[string]bool) map[string]func(fields map[string]string) bool {
-	return map[string]func(fields map[string]string) bool{
-		"rigs": func(f map[string]string) bool { return f["name"] == rigName },
-		"patches.agent": func(f map[string]string) bool {
-			return f["dir"] == rigName || f["rig"] == rigName
-		},
-		"patches.named_session": func(f map[string]string) bool { return f["dir"] == rigName },
-		"patches.rigs":          func(f map[string]string) bool { return f["name"] == rigName },
-		"patches.github_pr_monitor": func(f map[string]string) bool {
-			return removedMonitorNames[f["name"]]
-		},
-		"github.pr_monitor": func(f map[string]string) bool { return f["rig"] == rigName },
-		"orders.overrides":  func(f map[string]string) bool { return f["rig"] == rigName },
-	}
-}
-
-// removeRigSweptBlocks deletes the byte spans of rigName's [[rigs]] entry
-// and of every swept [[patches.*]]/[[github.pr_monitor]]/[[orders.overrides]]
-// entry (see rigSweptTables) from the raw text of a city.toml file, leaving
-// everything else — comments, key order, unrelated tables — untouched.
-//
-// It scans for array-of-tables headers rather than parsing into a struct,
-// because the struct round-trip is exactly what #7899 and #3414 need to
-// avoid: re-marshaling drops every comment. A header line opens a NEW
-// top-level instance only when its dotted name exactly matches one of
-// rigSweptTables' keys; a header whose name is dot-prefixed by the
-// currently open instance's table name (e.g. "rigs.session_sleep" or
-// "rigs.overrides" while inside a "[[rigs]]" entry) is a nested sub-table of
-// that SAME instance and stays part of its span — Rig alone has several such
-// nested fields (session_sleep, overrides, patches, imports, formula_vars),
-// any of which would otherwise be mistaken for the start of the next
-// top-level section. Any other header (including a fresh instance of the
-// same swept table, e.g. the next [[rigs]]) closes whatever instance is
-// open.
-//
-// A removed instance's immediately preceding, contiguous comment lines (no
-// blank line in between) are removed with it, since an operator rationale
-// comment conventionally sits directly above the table it explains. This is
-// a heuristic, not a parse of TOML's comment-attachment rules (TOML has
-// none): a comment that happens to sit directly above a removed entry with
-// no blank line between it and the entry, but was actually about something
-// else, is lost along with it. #7899 names the same trade-off for the
-// alternative "refuse and let the operator pick by hand" design.
-//
-// The result is checked to still parse as a City before it's returned, so a
-// boundary bug here fails the removal instead of writing a corrupt
-// city.toml.
-func removeRigSweptBlocks(content []byte, rigName string, removedMonitorNames map[string]bool) ([]byte, error) {
-	rules := rigSweptTables(rigName, removedMonitorNames)
-	lines := strings.Split(string(content), "\n")
-	remove := make([]bool, len(lines))
-
-	var openTable string
-	var openStart int
-	var openMatch func(map[string]string) bool
-	openFields := map[string]string{}
-
-	closeOpen := func(endExclusive int) {
-		if openTable == "" {
-			return
-		}
-		if openMatch(openFields) {
-			start := openStart
-			for start > 0 {
-				prev := strings.TrimSpace(lines[start-1])
-				if prev == "" || !strings.HasPrefix(prev, "#") {
-					break
-				}
-				start--
-			}
-			// endExclusive is the next header's line, which can be preceded
-			// by a comment that — by the same "comment introduces what
-			// follows" convention just applied above — belongs to THAT
-			// header, not to this instance, even though it falls inside
-			// this instance's byte range. Give it back the same way: trim
-			// a contiguous comment run directly touching endExclusive out
-			// of the deletion span.
-			end := endExclusive
-			for end > openStart+1 {
-				prev := strings.TrimSpace(lines[end-1])
-				if prev == "" || !strings.HasPrefix(prev, "#") {
-					break
-				}
-				end--
-			}
-			for i := start; i < end; i++ {
-				remove[i] = true
-			}
-		}
-		openTable = ""
-		openMatch = nil
-		openFields = map[string]string{}
-	}
-
-	for i, line := range lines {
-		if m := tomlHeaderPattern.FindStringSubmatch(line); m != nil {
-			name := strings.TrimSpace(m[1])
-			if openTable != "" && name != openTable && strings.HasPrefix(name, openTable+".") {
-				continue // nested sub-table of the still-open instance
-			}
-			closeOpen(i)
-			if match, ok := rules[name]; ok {
-				openTable = name
-				openStart = i
-				openMatch = match
-				openFields = map[string]string{}
-			}
-			continue
-		}
-		if openTable != "" {
-			if m := tomlScalarStringLinePattern.FindStringSubmatch(line); m != nil {
-				if _, exists := openFields[m[1]]; !exists {
-					openFields[m[1]] = m[2]
-				}
-			}
-		}
-	}
-	closeOpen(len(lines))
-
-	kept := make([]string, 0, len(lines))
-	for i, line := range lines {
-		if !remove[i] {
-			kept = append(kept, line)
-		}
-	}
-	result := []byte(strings.Join(kept, "\n"))
-
-	var probe City
-	if _, err := toml.Decode(string(result), &probe); err != nil {
-		return nil, fmt.Errorf("surgical removal produced unparsable TOML: %w", err)
-	}
-	return result, nil
-}
-
 // WriteCityAndRigSiteBindingsForEditRemovingRigs writes city.toml and
 // .gc/site.toml while removing bindings for rig names that were intentionally
 // deleted from the city config.
@@ -647,17 +443,7 @@ func writeCityAndRigSiteBindingsForEdit(fs fsys.FS, tomlPath string, cfg *City, 
 	if err != nil {
 		return err
 	}
-	// Snapshot the .gc/site.toml target persistSiteBinding actually writes,
-	// not the link itself: resolve-only (no key-loss guard, the rollback
-	// rewrites snapshotted bytes), mirroring the resolved forward write so a
-	// post-city.toml binding failure restores the target instead of renaming
-	// over (or removing) a symlinked site binding.
-	sitePath := SiteBindingPath(cityRoot)
-	resolvedSitePath, err := fsys.ResolveSymlinks(fs, sitePath)
-	if err != nil {
-		return fmt.Errorf("resolving site binding %q for rewrite: %w", sitePath, err)
-	}
-	snapshot, err := snapshotCityAndSiteFiles(fs, writePath, resolvedSitePath)
+	snapshot, err := snapshotCityEdit(fs, writePath, cityRoot)
 	if err != nil {
 		return err
 	}
@@ -824,6 +610,22 @@ type configFileSnapshot struct {
 	data    []byte
 	mode    os.FileMode
 	existed bool
+}
+
+// snapshotCityEdit snapshots city.toml at writePath and the city's
+// .gc/site.toml for a city edit to restore if its site-binding write fails.
+// It snapshots the .gc/site.toml target persistSiteBinding actually writes,
+// not the link itself: resolve-only (no key-loss guard, the rollback rewrites
+// snapshotted bytes), mirroring the resolved forward write so a
+// post-city.toml binding failure restores the target instead of renaming
+// over (or removing) a symlinked site binding.
+func snapshotCityEdit(fs fsys.FS, writePath, cityRoot string) (*configFileRestoreSnapshot, error) {
+	sitePath := SiteBindingPath(cityRoot)
+	resolvedSitePath, err := fsys.ResolveSymlinks(fs, sitePath)
+	if err != nil {
+		return nil, fmt.Errorf("resolving site binding %q for edit: %w", sitePath, err)
+	}
+	return snapshotCityAndSiteFiles(fs, writePath, resolvedSitePath)
 }
 
 func snapshotCityAndSiteFiles(fs fsys.FS, paths ...string) (*configFileRestoreSnapshot, error) {
