@@ -1997,25 +1997,26 @@ func dryRunBatch(opts slingOpts, deps slingDeps, stdout, _ io.Writer,
 	}
 	w("")
 
-	// Attach formula section (per open child).
-	if opts.OnFormula != "" {
+	// Attach formula section (per open child), omitted when every open child
+	// is only re-routed and so none would get a formula.
+	var attach []beads.Bead
+	for _, c := range open {
+		if !routeOnly[c.ID] {
+			attach = append(attach, c)
+		}
+	}
+	if len(attach) > 0 && opts.OnFormula != "" {
 		w("Attach formula (per open child):")
 		w("  Would run:")
-		for _, c := range open {
-			if routeOnly[c.ID] {
-				continue
-			}
+		for _, c := range attach {
 			w("    gc formula cook " + opts.OnFormula + " --attach " + c.ID)
 		}
 		w("")
-	} else if !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
+	} else if len(attach) > 0 && !opts.NoFormula && a.EffectiveDefaultSlingFormula() != "" {
 		w("Default formula (per open child):")
 		w("  Formula: " + a.EffectiveDefaultSlingFormula())
 		w("  Would run:")
-		for _, c := range open {
-			if routeOnly[c.ID] {
-				continue
-			}
+		for _, c := range attach {
 			w("    gc formula cook " + a.EffectiveDefaultSlingFormula() + " --attach " + c.ID)
 		}
 		w("")

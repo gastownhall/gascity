@@ -9506,3 +9506,47 @@ func TestSlingDryRunBatchClaimedChildRoutedElsewhereShowsRerouteOnly(t *testing.
 		t.Errorf("dry run executed commands: %v", runner.calls)
 	}
 }
+
+func TestSlingDryRunBatchAllChildrenRouteOnlyOmitsFormulaSection(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		onFormula string
+		agent     config.Agent
+		header    string
+	}{
+		{"on formula", "code-review", config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1)}, "Attach formula (per open child):"},
+		{"default formula", "", config.Agent{Name: "mayor", MaxActiveSessions: intPtr(1), DefaultSlingFormula: strPtr("code-review")}, "Default formula (per open child):"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			runner := newFakeRunner()
+			cfg := &config.City{Workspace: config.Workspace{Name: "test-city"}}
+
+			q := newFakeChildQuerier()
+			q.beadsByID["CVY-1"] = beads.Bead{ID: "CVY-1", Type: "convoy", Status: "open"}
+			child := beads.Bead{ID: "BL-1", Status: "open", Assignee: "mayor", Metadata: map[string]string{"gc.routed_to": "reviewers"}}
+			q.childrenOf["CVY-1"] = []beads.Bead{child}
+			q.beadsByID[child.ID] = child
+
+			deps, stdout, stderr := testDeps(cfg, runtime.NewFake(), runner.run)
+			opts := testOpts(tc.agent, "CVY-1")
+			opts.OnFormula = tc.onFormula
+			opts.DryRun = true
+			if code := doSlingBatch(opts, deps, q, stdout, stderr); code != 0 {
+				t.Fatalf("dry run returned %d; stderr: %s", code, stderr.String())
+			}
+			out := stdout.String()
+			if !strings.Contains(out, "BL-1 (open) → would re-route only") {
+				t.Errorf("claimed child BL-1 should preview a re-route only; got:\n%s", out)
+			}
+			if strings.Contains(out, tc.header) || strings.Contains(out, "Would run:") {
+				t.Errorf("no child gets a formula, so the formula section should be omitted; got:\n%s", out)
+			}
+			if !strings.Contains(out, "Route commands (not executed):") {
+				t.Errorf("dry run should still show the route commands; got:\n%s", out)
+			}
+			if len(runner.calls) != 0 {
+				t.Errorf("dry run executed commands: %v", runner.calls)
+			}
+		})
+	}
+}
