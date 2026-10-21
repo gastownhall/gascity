@@ -48,10 +48,12 @@ var ErrRelowerRaced = errors.New("opjournal: a deliver-now unit changed while it
 type Relowered struct{ Message, From, To string }
 
 // RelowerLeft is one unit RelowerNowUnits left where it is: message Message,
-// its open derived interrupts, and why.
+// its open derived interrupts, the id a move would have given its interrupt
+// (Home), and why.
 type RelowerLeft struct {
 	Message    string
 	Interrupts []string
+	Home       string
 	Reason     RelowerReason
 }
 
@@ -137,25 +139,24 @@ func (s *Store) relowerMessage(ctx context.Context, rep *RelowerReport, ops []Op
 			derived = append(derived, op)
 		}
 	}
-	switch len(derived) {
-	case 0:
-		return nil
-	case 1:
-	default:
-		rep.Left = append(rep.Left, RelowerLeft{Message: m.ID, Interrupts: opIDs(derived), Reason: RelowerAmbiguous})
+	if len(derived) == 0 {
 		return nil
 	}
-	i := derived[0]
 	home, err := NowInterruptID(s.prefix, m)
 	if err != nil {
 		return fmt.Errorf("re-lowering deliver-now message %s: %w", m.ID, err)
 	}
+	if len(derived) > 1 {
+		rep.Left = append(rep.Left, RelowerLeft{Message: m.ID, Interrupts: opIDs(derived), Home: home, Reason: RelowerAmbiguous})
+		return nil
+	}
+	i := derived[0]
 	switch {
 	case i.ID == home:
 		rep.Home++
 		return nil
 	case m.Status != StatusAccepted || !relowerable(i):
-		rep.Left = append(rep.Left, RelowerLeft{Message: m.ID, Interrupts: []string{i.ID}, Reason: RelowerInFlight})
+		rep.Left = append(rep.Left, RelowerLeft{Message: m.ID, Interrupts: []string{i.ID}, Home: home, Reason: RelowerInFlight})
 		return nil
 	}
 	moved, left, err := s.relowerOne(ctx, m, i.ID, home, by)
@@ -163,7 +164,7 @@ func (s *Store) relowerMessage(ctx context.Context, rep *RelowerReport, ops []Op
 	case err != nil:
 		return err
 	case left:
-		rep.Left = append(rep.Left, RelowerLeft{Message: m.ID, Interrupts: []string{i.ID}, Reason: RelowerHomeTaken})
+		rep.Left = append(rep.Left, RelowerLeft{Message: m.ID, Interrupts: []string{i.ID}, Home: home, Reason: RelowerHomeTaken})
 	case moved:
 		rep.Relowered = append(rep.Relowered, Relowered{Message: m.ID, From: i.ID, To: home})
 	}
