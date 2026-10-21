@@ -1,6 +1,8 @@
 package main
 
 import (
+	"context"
+	"io"
 	"strings"
 	"sync"
 	"time"
@@ -50,12 +52,13 @@ type startDeferralPass struct {
 // newStartDeferralMemo returns an empty memo.
 func newStartDeferralMemo() *startDeferralMemo { return &startDeferralMemo{} }
 
-// beginPass opens a run that started at start. A nil memo returns a nil pass.
-func (m *startDeferralMemo) beginPass(start time.Time) *startDeferralPass {
+// beginPass opens a run that starts now, by clk. A nil memo returns a nil pass
+// without reading the clock.
+func (m *startDeferralMemo) beginPass(clk clock.Clock) *startDeferralPass {
 	if m == nil {
 		return nil
 	}
-	return &startDeferralPass{memo: m, start: start, deferred: make(map[string]struct{})}
+	return &startDeferralPass{memo: m, start: clk.Now(), deferred: make(map[string]struct{})}
 }
 
 // noteGateDeferred records that the run deferred session id at a start gate.
@@ -66,11 +69,16 @@ func (p *startDeferralPass) noteGateDeferred(id string) {
 	p.deferred[id] = struct{}{}
 }
 
-// finish publishes the run to the memo, replacing the previous record. A
-// canceled run did not offer every candidate a start, so it commits nothing
-// and leaves the previous record alone.
-func (p *startDeferralPass) finish(canceled bool) {
-	if p == nil || canceled {
+// noteStartOutcome records session id when outcome is the async start limiter
+// refusing it a slot.
+func (p *startDeferralPass) noteStartOutcome(_, _ string) {}
+
+// finish publishes the run to the memo, replacing the previous record. A run
+// whose ctx is canceled by now did not offer every candidate a start, so it
+// commits nothing and leaves the previous record alone. A nil ctx is never
+// canceled.
+func (p *startDeferralPass) finish(ctx context.Context) {
+	if p == nil || (ctx != nil && ctx.Err() != nil) {
 		return
 	}
 	p.memo.mu.Lock()
@@ -101,6 +109,12 @@ func (m *startDeferralMemo) Holds(info sessionpkg.Info, now time.Time) bool {
 		born = started
 	}
 	return born.After(m.lastPassStart)
+}
+
+// holdPendingCreate keeps a never-started pending create past its lease when
+// the memo holds it.
+func (m *startDeferralMemo) holdPendingCreate(_ sessionpkg.Info, expired, capacityHeld bool, _ clock.Clock, _ io.Writer, _ *sessionReconcilerTraceCycle, _, _ string) (bool, bool) {
+	return expired, capacityHeld
 }
 
 // withStartDeferralMemo installs the start-deferral memo for this run. Nil (or

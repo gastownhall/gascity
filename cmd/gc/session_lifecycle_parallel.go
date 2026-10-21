@@ -4611,11 +4611,8 @@ func executePlannedStartsTraced(
 	// The run's start-gate deferrals publish when it ends, unless its context
 	// was canceled: a canceled run did not offer every candidate a start. A run
 	// with no candidates still publishes, so the memo drops a drained backlog.
-	var deferrals *startDeferralPass
-	if startOpts.deferralMemo != nil {
-		deferrals = startOpts.deferralMemo.beginPass(clk.Now())
-	}
-	defer func() { deferrals.finish(ctx != nil && ctx.Err() != nil) }()
+	deferrals := startOpts.deferralMemo.beginPass(clk)
+	defer deferrals.finish(ctx)
 	if len(candidates) == 0 {
 		return 0
 	}

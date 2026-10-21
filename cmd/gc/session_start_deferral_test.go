@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
 )
@@ -34,11 +35,11 @@ func committedDeferrals(m *startDeferralMemo) []string {
 
 // commitDeferralPass records ids as one completed pass that began at start.
 func commitDeferralPass(m *startDeferralMemo, start time.Time, ids ...string) {
-	pass := m.beginPass(start)
+	pass := m.beginPass(&clock.Fake{Time: start})
 	for _, id := range ids {
 		pass.noteGateDeferred(id)
 	}
-	pass.finish(false)
+	pass.finish(context.Background())
 }
 
 func TestStartDeferralMemoRecordsOnlyStartGateDeferrals(t *testing.T) {
@@ -387,9 +388,9 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 
 	t.Run("an empty session id is never recorded", func(t *testing.T) {
 		memo := newStartDeferralMemo()
-		pass := memo.beginPass(passStart)
+		pass := memo.beginPass(&clock.Fake{Time: passStart})
 		pass.noteGateDeferred("")
-		pass.finish(false)
+		pass.finish(context.Background())
 		if got := committedDeferrals(memo); len(got) != 0 {
 			t.Fatalf("committed = %v, want none", got)
 		}
@@ -400,8 +401,8 @@ func TestStartDeferralMemoHolds(t *testing.T) {
 		if memo.Holds(deferralInfo(before, before), before.Add(11*time.Minute)) {
 			t.Fatal("nil memo held a row")
 		}
-		memo.beginPass(passStart).noteGateDeferred("x") // must not panic
-		memo.beginPass(passStart).finish(false)
+		memo.beginPass(&clock.Fake{Time: passStart}).noteGateDeferred("x") // must not panic
+		memo.beginPass(&clock.Fake{Time: passStart}).finish(context.Background())
 	})
 }
 
