@@ -321,7 +321,8 @@ type hookClaimOps struct {
 	// ClassesRelocated reports that the city relocates its coordination
 	// classes even when ClassRoute is nil because the route degraded (a
 	// binding with no claim CAS): a bead its leg serves may then reside in the
-	// binding, so an adoption's leg is no proven residence (hookStartedKeyFor).
+	// binding, so an adoption's leg is a proven residence only when its
+	// readback found the bead there (hookStartedKeyFor).
 	ClassesRelocated bool
 	// ReclaimStale attempts a scoped stale-lease reclaim (ga-7rj87d FR1/FR2)
 	// for exactly one candidate bead ID. Only consulted when
@@ -568,8 +569,9 @@ func tryHookClaim(workQuery, dir string, opts *hookClaimOptions, ops *hookClaimO
 			if restamped, adopt := restampHookAdoption(bead, canonicalAssignee, verdict, *opts, *ops, dir, stderr); adopt {
 				bead = restamped
 				result.Assignee = restamped.Assignee
-				// minted=false: adoption returns work this session already owned.
-				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, false, time.Time{}, stdout, stderr)}
+				// The readback's verdict, never hookClaimMinted: adoption
+				// returns work this session already owned.
+				return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, bead, *opts, *ops, dir, verdict, time.Time{}, stdout, stderr)}
 			}
 		}
 		// Not adopted — the canonical store named another owner, or the bead is
@@ -989,7 +991,7 @@ func claimFirstReadyHookAssignment(candidates []beads.Bead, opts hookClaimOption
 		if result.Assignee == "" {
 			result.Assignee = claimActor
 		}
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, landedAt, stdout, stderr)}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, hookClaimMinted, landedAt, stdout, stderr)}
 	}
 	return hookClaimResult{claimsErrored: claimsErrored}
 }
@@ -1153,7 +1155,7 @@ func claimFirstEligibleHookCandidate(candidates []beads.Bead, opts hookClaimOpti
 			// since the bead was never ours to begin with.
 			ops.EmitHookClaimReclaimedStale(result.BeadID, reclaimedFrom, result.Assignee)
 		}
-		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, true, landedAt, stdout, stderr)}
+		return hookClaimResult{terminal: true, code: writeHookClaimWorkResultForBead(result, claimed, opts, ops, dir, hookClaimMinted, landedAt, stdout, stderr)}
 	}
 
 	return hookClaimResult{claimsErrored: claimsErrored}
@@ -1308,11 +1310,11 @@ const (
 	// hookAdoptionRefused: the canonical store names a different owner. The
 	// receipt is withheld.
 	hookAdoptionRefused
-	// hookClaimMinted: not an adoption at all — the ready-assignment tier just
-	// won this claim and read it back canonically. Used only to tell
-	// restampHookAdoption that a failed re-stamp must still hand the bead out
-	// (with the recovery warning): refusing would strand a claim this
-	// invocation minted.
+	// hookClaimMinted: not an adoption at all — a claim tier just won this
+	// claim and read it back canonically. It tells restampHookAdoption that a
+	// failed re-stamp must still hand the bead out (with the recovery
+	// warning): refusing would strand a claim this invocation minted. It tells
+	// writeHookClaimWorkResultForBead the claim was won, not adopted.
 	hookClaimMinted
 )
 
@@ -1473,15 +1475,18 @@ func hookClaimCandidateIsMessage(candidate beads.Bead) bool {
 // writeHookClaimWorkResultForBead stamps, correlates and reports one claimed or
 // adopted bead.
 //
-// minted distinguishes a claim this invocation WON from one it merely adopted,
-// and only a minted claim is unwound: adoption returns work the session already
-// owned, so releasing it on a delivery failure would give away a claim an earlier
-// turn legitimately made. A held claim that goes undelivered is re-served to the
-// next turn by the existing-assignment tier instead.
+// verdict is hookClaimMinted for a claim this invocation WON, else the
+// verdict of the readback that certified an adoption. Only a minted claim is
+// unwound: adoption returns work the session already owned, so releasing it on
+// a delivery failure would give away a claim an earlier turn legitimately made.
+// A held claim that goes undelivered is re-served to the next turn by the
+// existing-assignment tier instead. The verdict also decides whether the
+// claim's work_started key is a proven residence (hookStartedKeyFor).
 //
 // landedAt is the instant a minted claim's CAS returned (see
 // claimLandingWindowSpent); adoption passes the zero time.
-func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, landedAt time.Time, stdout, stderr io.Writer) int {
+func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, verdict hookAdoptionVerdict, landedAt time.Time, stdout, stderr io.Writer) int {
+	minted := verdict == hookClaimMinted
 	// F-B straddle. The CAS was STARTED inside the window and LANDED outside the
 	// window plus its reserved claim budget: the claim-write child carries its own
 	// ceiling, so a claim can commit after the invoking turn is already gone. That
@@ -1491,7 +1496,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	if minted && ops.claimLandingWindowSpent(landedAt) {
 		cause := fmt.Sprintf("claim of %s landed after the %s claim window and its %s claim reserve closed (invocation age %s at landing); releasing it rather than parking it",
 			bead.ID, ops.claimWindowOrDefault(), hookClaimMutationTimeout, ops.claimLandingAge(landedAt).Round(time.Millisecond))
-		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, stderr)
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonStraddled, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
 	}
 	// F-D, post-claim. The pre-claim fence read the session row before the
 	// CAS; a controller drain can mark the row draining between that read and
@@ -1506,7 +1511,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		if sessionID := hookClaimSessionID(opts.Env); sessionID != "" {
 			if pending, err := ops.DrainPending(sessionID); err == nil && pending {
 				cause := fmt.Sprintf("claim of %s landed on session %s after its drain began; releasing it rather than parking it", bead.ID, sessionID)
-				unwindUndeliveredHookClaim(hookClaimReleaseReasonDraining, cause, bead, opts, ops, dir, stderr)
+				unwindUndeliveredHookClaim(hookClaimReleaseReasonDraining, cause, bead, opts, ops, dir, hookStartedKeyFor(ops, dir, bead.ID, verdict), stderr)
 				return writeHookClaimDrainPending(hookClaimLabel, sessionID, opts, ops, dir, stdout, stderr)
 			}
 		}
@@ -1516,15 +1521,18 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 	durable, stamped := stampHookClaimIdentity(bead, opts, ops, dir, stderr)
 	// The started write (PHASE1-2 §6.4): before the result line, so a claim
 	// is never handed to a turn without the row saying so, and before the
-	// step-started event, so a refused hand-over emits none.
-	switch recordHookWorkStarted(bead, opts, ops, dir, minted, stderr) {
+	// step-started event, so a refused hand-over emits none. Its key is taken
+	// once, here, and every unwind below forgets that same key: the residence
+	// memo it reads can learn the bead later (a continuation listing).
+	started := hookStartedKeyFor(ops, dir, bead.ID, verdict)
+	switch recordHookWorkStarted(bead, opts, ops, started, minted, stderr) {
 	case hookStartedReleasing:
-		return refuseHookClaimBeingReleased(bead, opts, ops, dir, minted, stdout, stderr)
+		return refuseHookClaimBeingReleased(bead, opts, ops, dir, started, minted, stdout, stderr)
 	case hookStartedClosed:
 		// No turn of a closed row runs the claim: a minted one is given back
 		// (an adopted one is the close cascade's), then the stale drain.
 		if minted {
-			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, fmt.Sprintf("refusing to hand %s to a closed session; giving it back", bead.ID), bead, opts, ops, dir, stderr)
+			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, fmt.Sprintf("refusing to hand %s to a closed session; giving it back", bead.ID), bead, opts, ops, dir, started, stderr)
 		}
 		return writeHookClaimDrain(hookClaimLabel, hookClaimReasonStaleSession, opts.JSON, opts.DrainAck, tolerateDrainAckRefusal(ops.DrainAck), stdout, stderr)
 	case hookStartedStale:
@@ -1533,7 +1541,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// a claim can be minted here and must be given back, not parked.
 		cause := fmt.Sprintf("refusing to hand %s to a stale session: the session row names another incarnation", bead.ID)
 		if minted {
-			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause+"; giving it back", bead, opts, ops, dir, stderr)
+			unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause+"; giving it back", bead, opts, ops, dir, started, stderr)
 		} else {
 			fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 		}
@@ -1574,7 +1582,7 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 		// this back-channel exists to prevent. The straddle path (F-B) needs no clear
 		// because it returns before the stamp.
 		clearHookSessionCurrentClaim(opts, ops, stderr)
-		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, stderr)
+		return unwindUndeliveredHookClaim(hookClaimReleaseReasonUndelivered, cause, bead, opts, ops, dir, started, stderr)
 	}
 	// Enqueue a per-session continuation nudge when the hook just claimed a
 	// graph.v2 workflow root and pre-assigned at least one continuation sibling.
@@ -1603,8 +1611,9 @@ func writeHookClaimWorkResultForBead(result hookClaimJSONResult, bead beads.Bead
 // the work ladder rolled back ([daemon] work_ladder = "off") the drain-ack
 // release (D5) also keeps a claim the execution backstop's
 // execution_claim_started stamp names once the backstop writes it. A claim
-// neither re-served nor stamped can be released by a drain-ack.
-func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stderr io.Writer) hookStartedResult {
+// neither re-served nor stamped can be released by a drain-ack. key is the
+// claim's (hookStartedKeyFor's), which the caller keeps for any unwind of it.
+func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, key hookStartedKey, minted bool, stderr io.Writer) hookStartedResult {
 	sessionID := hookClaimSessionID(opts.Env)
 	beadID := strings.TrimSpace(bead.ID)
 	if sessionID == "" || beadID == "" {
@@ -1622,7 +1631,7 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 	if fence.Token == "" {
 		err = errors.New("no instance token to fence the write by")
 	} else {
-		res, err = ops.RecordWorkStarted(sessionID, fence, hookStartedKeyFor(ops, dir, beadID, minted), via)
+		res, err = ops.RecordWorkStarted(sessionID, fence, key, via)
 	}
 	switch {
 	case errors.Is(err, errWorkStartedRespell):
@@ -1644,13 +1653,14 @@ func recordHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaim
 
 // refuseHookClaimBeingReleased answers a hand-over the controller's release
 // won (§6.4): the claim is not delivered. A minted claim is given back
-// through the F-C unwind; an adopted one is the controller's to release. The
-// answer is the no-work drain, but --drain-ack is NOT consumed: the seat may
-// hold other work, and the release is the controller's act, not the seat's.
-func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, minted bool, stdout, stderr io.Writer) int {
+// through the F-C unwind, which forgets its work_started key, started; an
+// adopted one is the controller's to release. The answer is the no-work
+// drain, but --drain-ack is NOT consumed: the seat may hold other work, and
+// the release is the controller's act, not the seat's.
+func refuseHookClaimBeingReleased(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, started hookStartedKey, minted bool, stdout, stderr io.Writer) int {
 	cause := fmt.Sprintf("%s is being released by the controller's work ladder; not handing it out", bead.ID)
 	if minted {
-		unwindUndeliveredHookClaim(hookClaimReleaseReasonBeingReleased, cause, bead, opts, ops, dir, stderr)
+		unwindUndeliveredHookClaim(hookClaimReleaseReasonBeingReleased, cause, bead, opts, ops, dir, started, stderr)
 	} else {
 		fmt.Fprintf(stderr, "gc hook --claim: %s\n", cause) //nolint:errcheck
 	}
@@ -1697,7 +1707,10 @@ func writeHookClaimResultLine(result hookClaimJSONResult, jsonOut bool, stdout i
 // of the result payload, so they cannot be computed after it). Those siblings
 // stay open and assigned, which is the dead-assignee release lane's shape, and
 // the next turn of the same session re-claims them.
-func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, stderr io.Writer) int {
+//
+// started is the claim's work_started key: the one its record wrote, or, for
+// an unwind before the record (F-B, F-D), the one the record would write.
+func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string, started hookStartedKey, stderr io.Writer) int {
 	assignee := strings.TrimSpace(bead.Assignee)
 	if assignee == "" {
 		assignee = opts.Assignee
@@ -1706,7 +1719,7 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	// current-claim stamp does (F-C clears it before calling here): a released
 	// claim must never still read as started. Best-effort; it writes only the
 	// session row, never the claim.
-	forgetHookWorkStarted(bead, opts, ops, dir)
+	forgetHookWorkStarted(opts, ops, started)
 	// This emits bead.claim_released for a bead that may ALREADY have an
 	// execution.step_started from this same invocation (the stamp runs before the
 	// result write). That pair is the compensation record: the step never
@@ -1741,47 +1754,61 @@ func unwindUndeliveredHookClaim(reason, cause string, bead beads.Bead, opts hook
 	return 1
 }
 
-// forgetHookWorkStarted drops every record of bead, a claim this invocation
-// is giving back, from this session's work_started cell, best effort: an
-// unwind that cannot drop it still gives the claim back. It forgets by bead
-// (an unknown store names it in every store), not under the key its record
-// wrote: that key follows the class route's residence memo, which can learn
-// the bead after the record (a continuation listing), and a released claim
-// must not read as started under any spelling.
-func forgetHookWorkStarted(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, _ string) {
-	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && strings.TrimSpace(bead.ID) != "" {
-		_ = ops.ForgetWorkStarted(sessionID, hookStartedKey{Bead: strings.TrimSpace(bead.ID)})
+// forgetHookWorkStarted drops key, the work_started key of a claim this
+// invocation is giving back, from this session's cell, best effort: an unwind
+// that cannot drop it still gives the claim back. key is the one the record
+// wrote, not one recomputed now: it follows the class route's residence memo,
+// which can learn the bead after the record (a continuation listing). Every
+// entry naming key at the row's generation goes (Without): its store's, a
+// storeless one, and an unmarked one of this generation, so no reader keying
+// the claim by its residence reads it started. A resident entry of another
+// store stays, as the record kept it (decideWorkStarted): it names another
+// copy of the id, which this unwind does not give back.
+func forgetHookWorkStarted(opts hookClaimOptions, ops hookClaimOps, key hookStartedKey) {
+	if sessionID := hookClaimSessionID(opts.Env); sessionID != "" && key.Bead != "" {
+		_ = ops.ForgetWorkStarted(sessionID, key)
 	}
 }
 
 // hookStartedKeyFor is the work cells' key for beadID, a claim this
 // invocation minted, or adopted, in the work leg at dir: its residence,
-// spelled by claimStoreRef as every controller reader spells it.
+// spelled by claimStoreRef as every controller reader spells it. verdict is
+// how the invocation holds it (writeHookClaimWorkResultForBead).
 //
 // A bead this invocation's class route proved the binding holds resides in
 // the binding, whatever leg the hook ran in: a graph step claimed or adopted
 // by a rig seat lives in the city-scope binding, and the census, the ladder
-// and the backstop key it "city". Anything else resides in the work leg: a
-// minted claim's compare-and-swap committed there, and a city that relocates
-// nothing has no other store a bead its leg serves could live in. Both are
-// proven residences (Resident).
+// and the backstop key it "city". Anything else resides in the work leg when
+// the invocation proved it there: a minted claim's compare-and-swap committed
+// there, or an adoption's readback found it there held by this session
+// (hookAdoptionOwned). The readback reads the leg, and reads the binding
+// instead only for a bead the route proved the binding holds, which it
+// memoizes (the case above). A city that relocates nothing has no other store
+// a bead its leg serves could live in. All of these are proven residences
+// (Resident). The claim and the readback are the leg's on the assumption that
+// bd resolves the bead in the leg's own store: on a local miss bd falls back
+// to the store a routes.jsonl prefix route names, a fallback the routes
+// gascity writes never select (writeAllRoutes spells a bare prefix; bd matches
+// an id's hyphenated one), and to its contributor auto-routing, which gc turns
+// off for every bd it runs (applyBdContributorRoutingOptOut).
 //
 // An adoption on a city that relocates classes (a class route, or one that
-// degraded) that the route did not prove the binding holds keeps the leg's
-// spelling, unproven: its readback may have failed before the residence was
-// asked, or no route could ask it. Its entry is written unmarked, as the older
-// hook wrote every entry, so the readers match it by bead at its generation
-// (session.WorkStartedEntry.NamesAt) instead of trusting a store nobody
-// proved.
-func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, minted bool) hookStartedKey {
+// degraded) whose readback found it in no store (hookAdoptionUnverified: the
+// read failed, or the leg did not hold the bead and no route found it in the
+// binding) keeps the leg's spelling, unproven. Its entry is written unmarked,
+// as the older hook wrote every entry, so the readers match it by bead at its
+// generation (session.WorkStartedEntry.NamesAt) instead of trusting a store
+// nobody proved.
+func hookStartedKeyFor(ops hookClaimOps, dir, beadID string, verdict hookAdoptionVerdict) hookStartedKey {
 	beadID = strings.TrimSpace(beadID)
 	if route := ops.ClassRoute; route != nil && route.knownResident(beadID) {
 		ref := route.storeRef()
 		return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != ""}
 	}
 	ref := ops.StoreRef(dir)
+	proven := verdict == hookClaimMinted || verdict == hookAdoptionOwned
 	relocates := ops.ClassRoute != nil || ops.ClassesRelocated
-	return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != "" && (minted || !relocates)}
+	return hookStartedKey{Store: ref, Bead: beadID, Resident: ref != "" && (proven || !relocates)}
 }
 
 // writeHookClaimNoWork writes the single drain result for a hook that claimed

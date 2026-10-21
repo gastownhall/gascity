@@ -39,14 +39,17 @@ const (
 // store.
 //
 // Resident marks an entry whose Store is the store the claim RESIDES in, as
-// the hook proved it (the store its claim compare-and-swap ran against, or the
-// class binding its route proved holds the bead), spelled as the census spells
-// it, which is how every reader keys the claim. An unmarked entry's Store is
+// the hook proved it (the store its claim compare-and-swap ran against or its
+// ownership readback found the bead in, or the class binding its route proved
+// holds the bead), spelled as the census spells it, which is how every reader
+// keys the claim. A compare-and-swap's or a readback's store is the residence
+// only while bd resolves the bead in the store it ran against, not in one a
+// prefix route names (cmd/gc hookStartedKeyFor). An unmarked entry's Store is
 // the work LEG the hook ran in, which it could not prove the bead resides in:
 // every entry an older hook wrote, and this hook's for an adoption on a city
-// that relocates classes whose residence it could not prove. Leg and residence
-// agree except for a bead resident in a relocated class binding reached
-// through a rig seat's leg (a graph step: the leg says rig:<rig>, its
+// that relocates classes whose residence it could not prove. Leg and
+// residence agree except for a bead resident in a relocated class binding
+// reached through a rig seat's leg (a graph step: the leg says rig:<rig>, its
 // residence city), so an unmarked entry also names its bead under any store,
 // at its own generation only (NamesAt).
 type WorkStartedEntry struct {
@@ -131,11 +134,13 @@ func (w WorkStarted) Names(store, bead string, gen int64) bool {
 }
 
 // With is w with e recorded first, every entry naming e's claim at e's
-// generation dropped (NamesAt), and the oldest beyond the cap dropped.
+// generation dropped (NamesAt), and the oldest beyond the cap dropped. An
+// unmarked e proves no residence, so it drops no resident entry recorded at
+// its generation: that entry, which does, stays beside it.
 func (w WorkStarted) With(e WorkStartedEntry) WorkStarted {
 	out := WorkStarted{V: workCellVersion, Claims: []WorkStartedEntry{e}}
 	for _, c := range w.Claims {
-		if c.NamesAt(e.Store, e.Bead, e.Gen) {
+		if c.NamesAt(e.Store, e.Bead, e.Gen) && (e.Resident || !c.Resident || c.Gen != e.Gen) {
 			continue
 		}
 		if len(out.Claims) == workStartedCap {
@@ -194,14 +199,16 @@ func (w WorkStarted) Respelled(store, bead string, gen int64) (out WorkStarted, 
 	return out, changed
 }
 
-// RecordsBead reports whether w holds an entry for bead that a reader keyed
-// by any store honors on a row at generation gen: a resident entry (exact, at
-// every generation), a storeless one, or an unmarked one recorded at gen. A
-// hook whose key is not a proven residence asks it before writing an entry
-// that would only duplicate one the readers already match.
+// RecordsBead reports whether w holds an entry naming bead under every store
+// on a row at generation gen (NamesAt): a storeless one, or an unmarked one
+// recorded at gen. A resident entry is not one: it names its bead in its own
+// store only, and a reader keying the claim by another store (where another
+// copy of the id may be the claim) reads it unstarted. A hook whose key is not
+// a proven residence asks it before writing an entry that would only duplicate
+// one every reader already matches.
 func (w WorkStarted) RecordsBead(bead string, gen int64) bool {
 	return slices.ContainsFunc(w.Claims, func(c WorkStartedEntry) bool {
-		return c.Bead != "" && c.Bead == bead && (c.Resident || c.Store == "" || (gen > 0 && c.Gen == gen))
+		return c.Bead != "" && c.Bead == bead && (c.Store == "" || (!c.Resident && gen > 0 && c.Gen == gen))
 	})
 }
 

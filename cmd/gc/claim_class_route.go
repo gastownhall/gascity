@@ -287,7 +287,8 @@ func claimRouteTopology(bindings []storeref.ClassBinding, refused error) storere
 // city that relocates its coordination classes: a route opened, or a binding
 // that cannot claim, which degrades the route to nil (hookClaimRouteVerdict)
 // but still holds the relocated beads. The started key must not take a
-// degraded city's legs for proven residences (hookStartedKeyFor).
+// degraded city's leg for an adoption's proven residence unless its readback
+// found the bead there (hookStartedKeyFor).
 func hookClaimClassesRelocated(opened *hookClaimClassRoute, err error) bool {
 	return opened != nil || errors.Is(err, errClaimRouteBindingCannotClaim)
 }

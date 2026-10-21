@@ -290,10 +290,19 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 	if fence.HasGen {
 		gen = fence.Gen
 	}
-	// Recorded already: an entry names the claim. A key that is not a proven
-	// residence may be the leg's spelling of a claim the cell holds under its
-	// residence, so any entry the readers honor for the bead counts.
-	if cell.Names(key.Store, key.Bead, gen) || (!key.Resident && cell.RecordsBead(key.Bead, gen)) {
+	// Recorded already: an entry names the claim. A proven residence key is
+	// matched as the readers match it (Names). A key that is not one may be the
+	// leg's spelling of a claim the readers key by another store, so only an
+	// entry naming the bead under every store counts (RecordsBead): a resident
+	// entry is exact to its store, the leg's included, and may be another
+	// copy's record (a co-resident copy on a migrated city). With no readable
+	// generation the readers match exactly and nothing else, so an unproven key
+	// is then matched as any key is.
+	recorded := cell.Names(key.Store, key.Bead, gen)
+	if !key.Resident && gen > 0 {
+		recorded = cell.RecordsBead(key.Bead, gen)
+	}
+	if recorded {
 		// An older hook (or an unproven adoption) may have spelled it by its
 		// leg: re-spell that entry as the residence this run proved, in place,
 		// keeping its generation, time and way (the cell's migration).
@@ -304,6 +313,10 @@ func decideWorkStarted(fresh session.Info, fence hookStartedFence, key hookStart
 		}
 		return hookStartedAlreadyRecorded, nil, nil
 	}
+	// An unproven key's entry goes beside a resident entry of this
+	// generation, not over it (With): that one is the proof a minted claim or
+	// a readback left, and the next proven hand-over re-spells or drops the
+	// leg spelling (Respelled).
 	cell = cell.With(session.WorkStartedEntry{Store: key.Store, Bead: key.Bead, Gen: gen, At: now.UTC(), Via: via, Resident: key.Resident && key.Store != ""})
 	return hookStartedRecorded, session.MetadataPatch{session.WorkStartedKey: session.EncodeWorkStarted(cell)}, reset
 }

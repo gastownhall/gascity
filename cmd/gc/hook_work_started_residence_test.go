@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"syscall"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/workladder"
 )
 
 // The hook's work_started key is the claim's RESIDENCE (claimStoreRef), the
@@ -136,6 +138,66 @@ func TestHookLeavesAnUnprovenAdoptionUnmarked(t *testing.T) {
 	}
 }
 
+// TestHookAdoptionRecordsStartedOnceOnARelocatingCity (T2 on a city that
+// relocates classes, the dominant path there): a rig seat mints a claim in
+// its leg and re-serves it twice, each readback finding it in the leg, then
+// once more after the row's generation moved. The minted entry, resident,
+// records every hand-over: one write in all, whether the city's route opened
+// or degraded. Kills a hook that takes a leg readback for no proof of
+// residence: its first re-serve rewrites the minted entry unmarked, as does
+// each new generation's, and the city key then reads every store's copy of
+// the id as started.
+func TestHookAdoptionRecordsStartedOnceOnARelocatingCity(t *testing.T) {
+	for _, c := range []struct {
+		name     string
+		relocate func(*testing.T, hookClaimOps) hookClaimOps
+	}{
+		{"a class route", func(t *testing.T, ops hookClaimOps) hookClaimOps {
+			route := newClaimRouteFor(t, newClaimRouteClassStore(t))
+			route.recorder = func() events.Recorder { return events.Discard }
+			return classRoutedHookClaimOps(ops, route)
+		}},
+		{"a route that degraded", func(_ *testing.T, ops hookClaimOps) hookClaimOps {
+			ops.ClassesRelocated = true
+			return ops
+		}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			row := newStartedRow(t, nil)
+			for i, turn := range []struct{ work, gen, via string }{
+				{startedRoutedWork, "7", session.WorkStartedViaClaim},
+				{startedAssignedWork, "7", session.WorkStartedViaAdopt},
+				{startedAssignedWork, "7", session.WorkStartedViaAdopt},
+				{startedAssignedWork, "8", session.WorkStartedViaAdopt},
+			} {
+				b, err := row.store.Get(row.id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if b.Metadata["generation"] != turn.gen {
+					// The controller's write, not the hook's: uncounted.
+					if err := row.store.MemStore.UpdateIfMatch(row.id, b.Revision, beads.UpdateOpts{Metadata: map[string]string{"generation": turn.gen}}); err != nil {
+						t.Fatal(err)
+					}
+				}
+				l := &startedLog{}
+				stdout := &orderedWriter{l: l}
+				var stderr bytes.Buffer
+				if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, turn.gen)), c.relocate(t, l.ops(turn.work, row, nil)), stdout, &stderr); code != 0 {
+					t.Fatalf("turn %d: code %d; stderr=%s", i, code, stderr.String())
+				}
+				if l.index("record:work-1:"+turn.via) < 0 {
+					t.Fatalf("turn %d: effects %v; want the hand-over recorded as %s", i, l.log, turn.via)
+				}
+			}
+			want := session.WorkStartedEntry{Store: startedStoreRef, Bead: "work-1", Gen: 7, At: time.Date(2026, 10, 17, 20, 0, 0, 0, time.UTC), Via: session.WorkStartedViaClaim, Resident: true}
+			if cell := row.cell(t); row.store.rowWrites != 1 || !slices.Equal(cell.Claims, []session.WorkStartedEntry{want}) {
+				t.Fatalf("conditional row writes = %d, cell %+v; want the minted write alone, its entry kept resident", row.store.rowWrites, cell.Claims)
+			}
+		})
+	}
+}
+
 // TestHookRespellsALegSpelledEntry: the cell's migration. A seat whose
 // 8d6r4 hook recorded its graph step under its rig leg at this generation
 // (the live cell, verbatim but for this row's leg) re-serves the claim: the
@@ -214,31 +276,35 @@ func TestHookFenceMatchesTheLaddersReleaseAcrossSpellings(t *testing.T) {
 }
 
 // TestHookStartedKeyForIsTheResidence pins hookStartedKeyFor's table: the
-// binding when the route proved it, the work leg for a minted claim or a city
-// with no route (both resident), the leg unproven for an adoption the route
-// did not prove, and no store at all when the leg is unknown.
+// binding when the route proved it; the work leg, resident, for a minted
+// claim, for an adoption whose readback found it there, and for any claim on
+// a city with no route; the leg unproven for an adoption whose readback found
+// it in no store, on a city whose route opened or degraded; and no store at
+// all when the leg is unknown.
 func TestHookStartedKeyForIsTheResidence(t *testing.T) {
 	route := newClaimRouteFor(t, newClaimRouteClassStore(t))
 	route.resident["gcg-1"] = true
 	leg := func(string) string { return "rig:gascity" }
 	for _, c := range []struct {
-		name   string
-		ops    hookClaimOps
-		bead   string
-		minted bool
-		want   hookStartedKey
+		name    string
+		ops     hookClaimOps
+		bead    string
+		verdict hookAdoptionVerdict
+		want    hookStartedKey
 	}{
-		{"binding claim, minted", hookClaimOps{StoreRef: leg, ClassRoute: route}, "gcg-1", true, hookStartedKey{Store: "city", Bead: "gcg-1", Resident: true}},
-		{"binding claim, adopted", hookClaimOps{StoreRef: leg, ClassRoute: route}, "gcg-1", false, hookStartedKey{Store: "city", Bead: "gcg-1", Resident: true}},
-		{"work-leg claim, minted on a split city", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", true, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
-		{"work-leg claim, adopted on a split city", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", false, hookStartedKey{Store: "rig:gascity", Bead: "ga-1"}},
-		{"adopted on a city with no route", hookClaimOps{StoreRef: leg}, "ga-1", false, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
-		{"adopted on a city whose route degraded", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "gcg-1", false, hookStartedKey{Store: "rig:gascity", Bead: "gcg-1"}},
-		{"minted on a city whose route degraded", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "ga-1", true, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
-		{"unknown leg", hookClaimOps{StoreRef: func(string) string { return "" }}, " ga-1 ", true, hookStartedKey{Bead: "ga-1"}},
+		{"binding claim, minted", hookClaimOps{StoreRef: leg, ClassRoute: route}, "gcg-1", hookClaimMinted, hookStartedKey{Store: "city", Bead: "gcg-1", Resident: true}},
+		{"binding claim, adopted", hookClaimOps{StoreRef: leg, ClassRoute: route}, "gcg-1", hookAdoptionOwned, hookStartedKey{Store: "city", Bead: "gcg-1", Resident: true}},
+		{"work-leg claim, minted on a split city", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", hookClaimMinted, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
+		{"work-leg claim, adopted on a split city, the leg readback found it", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", hookAdoptionOwned, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
+		{"work-leg claim, adopted on a split city, the readback failed", hookClaimOps{StoreRef: leg, ClassRoute: route}, "ga-1", hookAdoptionUnverified, hookStartedKey{Store: "rig:gascity", Bead: "ga-1"}},
+		{"adopted on a city with no route, the readback failed", hookClaimOps{StoreRef: leg}, "ga-1", hookAdoptionUnverified, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
+		{"adopted on a city whose route degraded, the leg readback found it", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "ga-1", hookAdoptionOwned, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
+		{"adopted on a city whose route degraded, no route could ask the binding", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "gcg-1", hookAdoptionUnverified, hookStartedKey{Store: "rig:gascity", Bead: "gcg-1"}},
+		{"minted on a city whose route degraded", hookClaimOps{StoreRef: leg, ClassesRelocated: true}, "ga-1", hookClaimMinted, hookStartedKey{Store: "rig:gascity", Bead: "ga-1", Resident: true}},
+		{"unknown leg", hookClaimOps{StoreRef: func(string) string { return "" }}, " ga-1 ", hookClaimMinted, hookStartedKey{Bead: "ga-1"}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if got := hookStartedKeyFor(c.ops, "/rig", c.bead, c.minted); got != c.want {
+			if got := hookStartedKeyFor(c.ops, "/rig", c.bead, c.verdict); got != c.want {
 				t.Fatalf("hookStartedKeyFor = %+v, want %+v", got, c.want)
 			}
 		})
@@ -288,25 +354,36 @@ func TestHookDrainAckFenceReadsTheBindingsEntries(t *testing.T) {
 	}
 }
 
-// TestUnwindForgetsEveryRecordOfTheBead: an unwind gives a claim back, and a
-// released claim must not read as started under any spelling or generation:
-// were the seat to claim it again, a stale record would make the new claim
-// read started before any turn began it. The unwind forgets by bead, so it
-// does not depend on the class route's memo still agreeing with the key the
-// record wrote. Other beads' entries stay.
-func TestUnwindForgetsEveryRecordOfTheBead(t *testing.T) {
+// TestUnwindForgetsTheClaimsKey: an unwind gives a claim back under the key
+// its record wrote (the residence city here), and a released claim must not
+// read as started to a reader keying it so: were the seat to claim it again, a
+// stale record would make the new claim read started before any turn began
+// it. The forget drops the key's store's entries at every generation, a
+// storeless entry, and an unmarked one of this generation (an older hook's leg
+// spelling of the claim). It keeps a resident entry of another store, which
+// the record took for a co-resident copy's
+// (TestHookResidenceKeyIsExactOverAnotherStoresEntry) and which this unwind
+// does not give back, and other beads' entries.
+func TestUnwindForgetsTheClaimsKey(t *testing.T) {
+	copyEntry := session.WorkStartedEntry{Store: "rig:other", Bead: residenceStep, Gen: 5, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}
+	otherBead := session.WorkStartedEntry{Store: startedStoreRef, Bead: "gcg-200", Gen: 6, At: stepsTestNow, Via: session.WorkStartedViaClaim}
 	cell := session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{
 		{Store: startedStoreRef, Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim},
 		{Store: "city", Bead: residenceStep, Gen: 6, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true},
-		{Store: startedStoreRef, Bead: "gcg-200", Gen: 6, At: stepsTestNow, Via: session.WorkStartedViaClaim},
+		{Bead: residenceStep, Gen: 4, At: stepsTestNow, Via: session.WorkStartedViaClaim},
+		copyEntry,
+		otherBead,
 	}})
 	row := newStartedRow(t, map[string]string{session.WorkStartedKey: cell})
 	l := &startedLog{}
 	ops := l.ops(`[]`, row, nil)
-	forgetHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, "/rig")
+	forgetHookWorkStarted(startedOpts(startedEnv(startedToken, "7")), ops, hookStartedKey{Store: "city", Bead: residenceStep, Resident: true})
 	got := row.cell(t)
-	if len(got.Claims) != 1 || got.Claims[0].Bead != "gcg-200" {
-		t.Fatalf("cell %+v: want every record of %s forgotten and gcg-200 kept", got.Claims, residenceStep)
+	if !slices.Equal(got.Claims, []session.WorkStartedEntry{copyEntry, otherBead}) {
+		t.Fatalf("cell %+v: want the claim's records forgotten, the co-resident copy's and gcg-200's kept", got.Claims)
+	}
+	if got.Names("city", residenceStep, 7) {
+		t.Fatal("the given-back claim still reads started under its key")
 	}
 }
 
@@ -333,19 +410,76 @@ func TestHookUnwindForgetsARouteProvenClaim(t *testing.T) {
 	}
 }
 
+// TestHookUnwindForgetsTheKeyItRecorded (F-C after the residence memo moved):
+// a rig seat mints a claim in its leg and records it there (resident). Before
+// its result line fails, the class route's memo learns that the binding holds
+// the id too, as a continuation listing's probe can on a city holding a
+// co-resident copy. The unwind forgets the key the record wrote, not one
+// recomputed from the moved memo (city), and keeps the copy's own entry.
+// Kills a forget that recomputes the key at unwind time, and one that forgets
+// the bead in every store.
+func TestHookUnwindForgetsTheKeyItRecorded(t *testing.T) {
+	copyEntry := session.WorkStartedEntry{Store: "city", Bead: "work-1", Gen: 5, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}
+	row := newStartedRow(t, map[string]string{session.WorkStartedKey: session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{copyEntry}})})
+	l := &startedLog{}
+	route := newClaimRouteFor(t, newClaimRouteClassStore(t))
+	route.recorder = func() events.Recorder { return events.Discard }
+	ops := classRoutedHookClaimOps(l.ops(startedRoutedWork, row, nil), route)
+	var recorded, forgotten []hookStartedKey
+	record, forget, publish := ops.RecordWorkStarted, ops.ForgetWorkStarted, ops.PublishRunMap
+	ops.RecordWorkStarted = func(sessionID string, fence hookStartedFence, key hookStartedKey, via string) (hookStartedResult, error) {
+		recorded = append(recorded, key)
+		return record(sessionID, fence, key, via)
+	}
+	ops.ForgetWorkStarted = func(sessionID string, key hookStartedKey) error {
+		forgotten = append(forgotten, key)
+		return forget(sessionID, key)
+	}
+	// After the record and before the result line: the memo learns the id.
+	ops.PublishRunMap = func(runID, beadID string, sessionKeys ...string) error {
+		route.resident["work-1"] = true
+		return publish(runID, beadID, sessionKeys...)
+	}
+	stdout := &orderedWriter{l: l, err: syscall.EPIPE}
+	var stderr bytes.Buffer
+	if code := doHookClaim("q", "/rig", startedOpts(startedEnv(startedToken, "7")), ops, stdout, &stderr); code != 1 {
+		t.Fatalf("exit %d though the result could not be written; stderr %s", code, stderr.String())
+	}
+	want := hookStartedKey{Store: startedStoreRef, Bead: "work-1", Resident: true}
+	if !slices.Equal(recorded, []hookStartedKey{want}) || !slices.Equal(forgotten, []hookStartedKey{want}) {
+		t.Fatalf("recorded %+v, forgot %+v; want the one key %+v both times", recorded, forgotten, want)
+	}
+	if got := row.cell(t); !slices.Equal(got.Claims, []session.WorkStartedEntry{copyEntry}) {
+		t.Fatalf("cell %+v: want the given-back claim forgotten and the copy's entry kept", got.Claims)
+	}
+}
+
 // TestHookUnprovenAdoptionRecordsNothingNew (the respell guard): an adoption
-// whose residence the hook could not prove finds the claim already recorded.
-// Over an older hook's leg spelling it writes nothing (it must not mark an
-// unproven leg as the residence, which no reader keyed city could match);
-// over a resident entry an earlier proven hand-over wrote, it adds no
-// duplicate leg spelling.
+// whose residence the hook could not prove finds the claim already recorded
+// when an entry names its bead under every store at this generation: an older
+// hook's leg spelling of it, through this leg or another, or a storeless
+// entry. It writes nothing (it must not mark an unproven leg as the
+// residence, which no reader keyed city could match). On a row whose
+// generation nobody can read, the readers match exactly, so its own leg
+// spelling is its record and a second such hand-over writes nothing either.
 func TestHookUnprovenAdoptionRecordsNothingNew(t *testing.T) {
-	legacy := session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Store: startedStoreRef, Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim}}})
-	proven := session.EncodeWorkStarted(session.WorkStarted{}.With(session.WorkStartedEntry{Store: "city", Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}))
-	for name, cell := range map[string]string{"an older hook's leg spelling": legacy, "a resident entry": proven} {
-		t.Run(name, func(t *testing.T) {
-			fresh := session.Info{InstanceToken: "tok", Generation: "7", WorkStartedRaw: cell}
-			res, patch, err := decideWorkStarted(fresh, hookStartedFence{Token: "tok", Gen: 7, HasGen: true},
+	entry := func(store string, gen int64) string {
+		return session.EncodeWorkStarted(session.WorkStarted{Claims: []session.WorkStartedEntry{{Store: store, Bead: residenceStep, Gen: gen, At: stepsTestNow, Via: session.WorkStartedViaClaim}}})
+	}
+	legacy := entry(startedStoreRef, 7)
+	fenced := hookStartedFence{Token: "tok", Gen: 7, HasGen: true}
+	for _, c := range []struct {
+		name, cell, gen string
+		fence           hookStartedFence
+	}{
+		{"an older hook's leg spelling", legacy, "7", fenced},
+		{"an older hook's spelling through another leg", entry("rig:other", 7), "7", fenced},
+		{"a storeless entry, a generation ago", entry("", 5), "7", fenced},
+		{"its own leg spelling, no readable generation", entry(startedStoreRef, 0), "", hookStartedFence{Token: "tok"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fresh := session.Info{InstanceToken: "tok", Generation: c.gen, WorkStartedRaw: c.cell}
+			res, patch, err := decideWorkStarted(fresh, c.fence,
 				hookStartedKey{Store: startedStoreRef, Bead: residenceStep}, session.WorkStartedViaAdopt, stepsTestNow)
 			if err != nil || res != hookStartedAlreadyRecorded || patch != nil {
 				t.Fatalf("decide = %v, patch %v, %v; want already recorded and nothing written", res, patch, err)
@@ -361,6 +495,87 @@ func TestHookUnprovenAdoptionRecordsNothingNew(t *testing.T) {
 		}
 		if h.row.store.rowWrites != before || h.row.meta(t, session.WorkStartedKey) != legacy {
 			t.Fatalf("the cell was rewritten to %s", h.row.meta(t, session.WorkStartedKey))
+		}
+	})
+}
+
+// TestHookUnprovenAdoptionTakesNoResidentEntryForIt: an adoption whose
+// residence the hook could not prove counts no resident entry as its record,
+// whatever store it names and whatever its generation. A resident entry is
+// exact to its store, and the readers may key this claim by another: a graph
+// step adopted through a rig seat's leg is keyed city, and on a migrated city
+// a co-resident copy of the id may hold the entry. The adoption records its
+// leg spelling, unmarked, at this generation, which every reader matches
+// there; it keeps the resident entries of other stores, and its own leg's of
+// this generation (the proof a minted claim or a readback left), and
+// supersedes its own leg's older one. Over the binding's entry that is a
+// duplicate, which the next proven hand-over drops (Respelled). Kills an
+// unproven dedup that takes a resident entry for the claim, through
+// RecordsBead or through Names over the leg, and an unproven write over its
+// leg's proof of this generation.
+func TestHookUnprovenAdoptionTakesNoResidentEntryForIt(t *testing.T) {
+	fence := hookStartedFence{Token: "tok", Gen: 7, HasGen: true}
+	spelling := session.WorkStartedEntry{Store: startedStoreRef, Bead: residenceStep, Gen: 7, At: stepsTestNow, Via: session.WorkStartedViaAdopt}
+	resident := func(store string, gen int64) session.WorkStartedEntry {
+		return session.WorkStartedEntry{Store: store, Bead: residenceStep, Gen: gen, At: stepsTestNow, Via: session.WorkStartedViaClaim, Resident: true}
+	}
+	cellOf := func(claims ...session.WorkStartedEntry) string {
+		return session.EncodeWorkStarted(session.WorkStarted{Claims: claims})
+	}
+	for _, c := range []struct {
+		name  string
+		prior session.WorkStartedEntry
+		want  []session.WorkStartedEntry
+	}{
+		{"another store's, a generation ago", resident("rig:other", 5), []session.WorkStartedEntry{spelling, resident("rig:other", 5)}},
+		{"another store's, this generation", resident("rig:other", 7), []session.WorkStartedEntry{spelling, resident("rig:other", 7)}},
+		{"the leg's, a generation ago", resident(startedStoreRef, 5), []session.WorkStartedEntry{spelling}},
+		{"the leg's, this generation", resident(startedStoreRef, 7), []session.WorkStartedEntry{spelling, resident(startedStoreRef, 7)}},
+		{"the binding's", resident("city", 7), []session.WorkStartedEntry{spelling, resident("city", 7)}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			fresh := session.Info{InstanceToken: "tok", Generation: "7", WorkStartedRaw: cellOf(c.prior)}
+			res, patch, err := decideWorkStarted(fresh, fence, hookStartedKey{Store: startedStoreRef, Bead: residenceStep}, session.WorkStartedViaAdopt, stepsTestNow)
+			if err != nil || res != hookStartedRecorded {
+				t.Fatalf("decide = %v, %v; want the claim recorded", res, err)
+			}
+			cell, err := session.DecodeWorkStarted(patch[session.WorkStartedKey])
+			if err != nil || !slices.Equal(cell.Claims, c.want) {
+				t.Fatalf("cell %+v, %v; want %+v", cell.Claims, err, c.want)
+			}
+			if !cell.Names("city", residenceStep, 7) {
+				t.Fatal("the binding's key still reads the claim unstarted")
+			}
+		})
+	}
+	for _, c := range []struct{ name, store string }{{"the binding's", "city"}, {"the leg's", startedStoreRef}} {
+		t.Run(c.name+", at the next proven hand-over", func(t *testing.T) {
+			fresh := session.Info{InstanceToken: "tok", Generation: "7", WorkStartedRaw: cellOf(spelling, resident(c.store, 7))}
+			res, patch, err := decideWorkStarted(fresh, fence, hookStartedKey{Store: c.store, Bead: residenceStep, Resident: true}, session.WorkStartedViaAdopt, stepsTestNow)
+			folded, decodeErr := session.DecodeWorkStarted(patch[session.WorkStartedKey])
+			if err != nil || res != hookStartedAlreadyRecorded || decodeErr != nil || !slices.Equal(folded.Claims, []session.WorkStartedEntry{resident(c.store, 7)}) {
+				t.Fatalf("decide = %v, %v, cell %+v (%v); want the duplicate leg spelling dropped beside the residence", res, err, folded.Claims, decodeErr)
+			}
+		})
+	}
+	// The live failure: the readback fails, the route never asks the binding,
+	// and the ladder and the backstop key the claim city.
+	t.Run("through the hook, the readback failing", func(t *testing.T) {
+		h := newResidenceHook(t, `[{"id":"gcg-100","status":"in_progress","assignee":"worker-1","metadata":{"gc.routed_to":"worker"}}]`, cellOf(resident("rig:other", 5)),
+			func(string) (beads.Bead, error) { return beads.Bead{}, errors.New("bd: connection refused") })
+		if code, stderr := h.run(t); code != 0 {
+			t.Fatalf("exit %d; stderr %s", code, stderr)
+		}
+		row, err := h.row.store.Get(h.row.id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		raw := row.Metadata[session.WorkStartedKey]
+		if ladder, err := workladder.DecodeStarted(raw); err != nil || !ladder.Names(workladder.ClaimKey{Store: "city", Bead: residenceStep}, 7) {
+			t.Fatalf("the ladder's city key reads %s unstarted (%v)", raw, err)
+		}
+		if !workStartedAtGen(row, executionClaim{StoreRef: "city", BeadID: residenceStep}) {
+			t.Fatalf("the backstop's city key reads %s unstarted", raw)
 		}
 	})
 }
@@ -393,7 +608,7 @@ func TestHookRespellFailureIsNotUnrecorded(t *testing.T) {
 	l := &startedLog{}
 	ops := l.ops(`[]`, nil, func(string, hookStartedFence, hookStartedKey, string) (hookStartedResult, error) { return res, err })
 	var stderr bytes.Buffer
-	if got := recordHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, "/rig", false, &stderr); got != hookStartedAlreadyRecorded {
+	if got := recordHookWorkStarted(beads.Bead{ID: residenceStep}, startedOpts(startedEnv(startedToken, "7")), ops, hookStartedKey{Store: "city", Bead: residenceStep, Resident: true}, false, &stderr); got != hookStartedAlreadyRecorded {
 		t.Fatalf("recordHookWorkStarted = %v, want already recorded", got)
 	}
 	if len(l.unrecorded) != 0 || !strings.Contains(stderr.String(), "migrating") {
@@ -427,8 +642,9 @@ func TestHookClaimClassesRelocated(t *testing.T) {
 // TestRoutedHookClaimOpsMarksARelocatedCity: the ops a class-route resolution
 // yields. A route that opened wraps them and takes the recorder; a binding
 // with no claim CAS degrades to no route but still marks the city as one
-// that relocates (so an adoption there is no proven residence); a city that
-// relocates nothing is neither; any other failure refuses the claim.
+// that relocates (so an adoption there whose readback found it in no store is
+// no proven residence); a city that relocates nothing is neither; any other
+// failure refuses the claim.
 func TestRoutedHookClaimOpsMarksARelocatedCity(t *testing.T) {
 	route := newClaimRouteFor(t, newClaimRouteClassStore(t))
 	recorder := func() events.Recorder { return events.Discard }
@@ -460,9 +676,9 @@ func TestRoutedHookClaimOpsMarksARelocatedCity(t *testing.T) {
 			if c.routed && ops.ClassRoute.recorder == nil {
 				t.Fatal("the opened route did not take the recorder")
 			}
-			key := hookStartedKeyFor(ops, "/rig", "gcg-9", false)
+			key := hookStartedKeyFor(ops, "/rig", "gcg-9", hookAdoptionUnverified)
 			if key.Resident == c.relocated {
-				t.Fatalf("an adoption's key %+v on relocated=%v: want unmarked exactly when the city relocates", key, c.relocated)
+				t.Fatalf("an unverified adoption's key %+v on relocated=%v: want unmarked exactly when the city relocates", key, c.relocated)
 			}
 		})
 	}

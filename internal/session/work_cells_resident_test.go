@@ -92,6 +92,23 @@ func TestWorkStartedWithReplacesTheLegSpelling(t *testing.T) {
 	}
 }
 
+// TestWorkStartedWithKeepsTheProofBesideAnUnmarkedEntry: an unmarked entry
+// proves no residence, so recording one drops no resident entry of its
+// generation (the proof a minted claim or a readback left): that stays
+// beside it. Older generations' entries of the claim, resident or not, are
+// superseded as before, and a resident entry supersedes every one.
+func TestWorkStartedWithKeepsTheProofBesideAnUnmarkedEntry(t *testing.T) {
+	proof := residentEntry("rig:gascity", "gcg-1", 2)
+	w := WorkStarted{Claims: []WorkStartedEntry{proof, residentEntry("rig:gascity", "gcg-1", 1), legacyEntry("rig:gascity", "gcg-1", 1)}}
+	spelling := legacyEntry("rig:gascity", "gcg-1", 2)
+	if got := w.With(spelling); len(got.Claims) != 2 || got.Claims[0] != spelling || got.Claims[1] != proof {
+		t.Fatalf("With(unmarked) = %+v; want the unmarked entry beside this generation's proof, the older entries superseded", got.Claims)
+	}
+	if got := w.With(proof); len(got.Claims) != 1 || got.Claims[0] != proof {
+		t.Fatalf("With(resident) = %+v; want the resident entry superseding every entry of its claim", got.Claims)
+	}
+}
+
 // TestWorkStartedRespelled: the hook's migration of a claim it recorded
 // under its leg: the entry at the row's generation is re-spelled as resident
 // in the residence store, keeping its generation, time, way and place in the
@@ -144,9 +161,10 @@ func TestWorkStartedRespelled(t *testing.T) {
 	}
 }
 
-// TestWorkStartedRecordsBead: the entries a reader keyed by any store honors
-// at a generation: a resident one at every generation, a storeless one, an
-// unmarked one at its own generation; never another bead.
+// TestWorkStartedRecordsBead: the entries naming a bead under every store at a
+// generation: a storeless one, at any generation, and an unmarked one at its
+// own; never a resident one, which names its own store alone, and never
+// another bead.
 func TestWorkStartedRecordsBead(t *testing.T) {
 	for _, c := range []struct {
 		name  string
@@ -154,8 +172,10 @@ func TestWorkStartedRecordsBead(t *testing.T) {
 		gen   int64
 		want  bool
 	}{
-		{"resident, another generation", residentEntry("city", "gcg-1", 1), 2, true},
+		{"resident, its generation", residentEntry("city", "gcg-1", 2), 2, false},
+		{"resident, another generation", residentEntry("city", "gcg-1", 1), 2, false},
 		{"storeless, another generation", legacyEntry("", "gcg-1", 1), 2, true},
+		{"storeless, an unreadable generation", legacyEntry("", "gcg-1", 0), 0, true},
 		{"unmarked, its generation", legacyEntry("rig:gascity", "gcg-1", 2), 2, true},
 		{"unmarked, another generation", legacyEntry("rig:gascity", "gcg-1", 1), 2, false},
 		{"unmarked, an unreadable generation", legacyEntry("rig:gascity", "gcg-1", 0), 0, false},
