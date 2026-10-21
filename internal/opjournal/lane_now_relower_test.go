@@ -951,8 +951,8 @@ func TestRelowerNowUnitsScansEveryConversation(t *testing.T) {
 type capabilityFreeStore struct{ beads.Store }
 
 // HasLoweredNowMessages is true exactly while the store holds a lowered
-// deliver-now message (accepted, executing or settling; when now or
-// interrupt), from the lane scan's keyed reads, paged past other lane ops,
+// deliver-now message (accepted, executing with a live or expired lease, or
+// settling; when now or interrupt), from the lane scan's keyed reads, paged past other lane ops,
 // on a store no lane store can open; a failed read is an error, never
 // "none".
 func TestHasLoweredNowMessages(t *testing.T) {
@@ -1025,6 +1025,30 @@ func TestHasLoweredNowMessages(t *testing.T) {
 			}
 		})
 	}
+	for _, expired := range []bool{false, true} {
+		t.Run("executing, lease expired "+strconv.FormatBool(expired), func(t *testing.T) {
+			h := newLaneHarness(t)
+			w := inFlightWorld(expired)(t, h)
+			if got := h.get(t, w.m.ID); got.Status != StatusExecuting {
+				t.Fatalf("message %s, want executing", got.Status)
+			}
+			got, err := HasLoweredNowMessages(beads.SessionStore{Store: capabilityFreeStore{h.mem}})
+			if err != nil || !got {
+				t.Fatalf("HasLoweredNowMessages = %v, %v; want the in-flight message seen", got, err)
+			}
+		})
+	}
+	t.Run("settling", func(t *testing.T) {
+		h := newLaneHarness(t)
+		m, _ := h.migratedUnit(t, nowReq("a"))
+		if _, err := h.store.Transition(m.ID, StatusAccepted, StatusSettling, "test"); err != nil {
+			t.Fatalf("settling the message: %v", err)
+		}
+		got, err := HasLoweredNowMessages(beads.SessionStore{Store: capabilityFreeStore{h.mem}})
+		if err != nil || !got {
+			t.Fatalf("HasLoweredNowMessages = %v, %v; want the settling message seen", got, err)
+		}
+	})
 	if _, err := HasLoweredNowMessages(beads.SessionStore{Store: failingListStore{beads.NewMemStore()}}); err == nil {
 		t.Fatal("a failed read reported no error")
 	}

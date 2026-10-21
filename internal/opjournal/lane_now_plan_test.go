@@ -1132,26 +1132,43 @@ func TestPlanNowAdmitNeedsEveryUnitBlocked(t *testing.T) {
 	}
 }
 
-// A due deliver-now message not yet lowered because its derived id's read
-// failed transiently holds content as a lowered unit does (U-ORDER); one
-// whose derived row will never decode holds nothing.
+// A due deliver-now message not yet lowered because a read failed
+// transiently (its derived id's, or its after target's) holds content as a
+// lowered unit does (U-ORDER); one whose row will never decode holds
+// nothing.
 func TestPlanNowUnloweredUnreadableHoldsContent(t *testing.T) {
 	now := t0.Add(time.Second)
 	for _, tc := range []struct {
 		name        string
+		after       bool
 		undecodable bool
 		holds       bool
 	}{
-		{"transient read", false, true},
-		{"undecodable row", true, false},
+		{"transient read", false, false, true},
+		{"undecodable row", false, true, false},
+		{"transient after read", true, false, true},
+		{"undecodable after target", true, true, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			p := newPlanner(t)
-			m := p.op(nowReq("a"))
-			n := p.op(laneMsg("n", RolePrompt, "later"))
-			snap := snapOf(m, n)
-			snap.nowRows[nowID(t, m)] = nowRow{state: afterUnreadable, err: errFlakyRead, undecodable: tc.undecodable}
+			var m, n Op
+			var snap laneSnapshot
+			if tc.after {
+				x := p.op(laneMsg("x", RoleNotice, "earlier"))
+				m = p.op(nowReq("a", func(r *Request) { r.After = x.ID }))
+				n = p.op(laneMsg("n", RolePrompt, "later"))
+				snap = snapOf(m, n)
+				snap.after[x.ID] = afterTarget{state: afterUnreadable, err: errFlakyRead, undecodable: tc.undecodable}
+			} else {
+				m = p.op(nowReq("a"))
+				n = p.op(laneMsg("n", RolePrompt, "later"))
+				snap = snapOf(m, n)
+				snap.nowRows[nowID(t, m)] = nowRow{state: afterUnreadable, err: errFlakyRead, undecodable: tc.undecodable}
+			}
 			rp := planRules(snap, view(), now, "lane:ctl")
+			if w := waitOf(rp.waits, m.ID); tc.after && w.Reason != WaitAfterUnreadable {
+				t.Fatalf("message wait %+v, want after_unreadable", w)
+			}
 			if got := slices.Contains(rp.openUnits, m.ID); got != tc.holds {
 				t.Fatalf("open units %v, want %s held %v", rp.openUnits, m.ID, tc.holds)
 			}

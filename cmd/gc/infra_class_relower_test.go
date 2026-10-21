@@ -534,6 +534,25 @@ func TestStorageMigrateWithoutLaneOpsOverALegacyBinding(t *testing.T) {
 	}
 }
 
+// A failed probe read is the step's error, naming the binding, never "no
+// lowered message": the migrate does not report success over units it never
+// read, and no lane store is opened.
+func TestRelowerProbeReadErrorIsTheStepsError(t *testing.T) {
+	opened := 0
+	stubRelowerStore(t, func(engine beads.Store, open func(beads.Store) (*opjournal.Store, error)) (*opjournal.Store, error) {
+		opened++
+		return open(engine)
+	})
+	b := convergedInfraBinding{target: infraBindingTarget{Binding: "infra"}}
+	_, err := relowerNowUnitsOn(context.Background(), b, failingListStore{beads.NewMemStore()})
+	if !errors.Is(err, errDarkLeg{}) || !strings.Contains(err.Error(), `binding "infra"`) {
+		t.Fatalf("relowerNowUnitsOn = %v, want the probe's read error naming the binding", err)
+	}
+	if opened != 0 {
+		t.Fatalf("%d lane stores opened after a failed probe, want none", opened)
+	}
+}
+
 // relowerStepStderr is a migrate's stderr without the lines the migration
 // printed before the re-lowering step existed: the copy's line and the
 // clear's.
