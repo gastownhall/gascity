@@ -9,8 +9,8 @@ package conversationlane_test
 // line (5,000 notices in 60 s with p99 <= 5 s) is out of reach for any
 // keystroke runtime. CI asserts the line at a rate the boundary cadence
 // admits: one injection per boundary, at most MaxBatchOps notices each, none
-// lost, order kept, and a p99 within the cycle the boundary and the link
-// wait impose (x6SteadyP99) at 20 notices a second. GC_LANE_X6_FULL=1
+// lost, order kept, and a p99 within the cycle the boundary imposes
+// (x6SteadyP99) at 20 notices a second. GC_LANE_X6_FULL=1
 // runs the literal line and logs the measurement.
 
 import (
@@ -31,11 +31,12 @@ var x6Principals = []string{"gc:x6-p0", "gc:x6-p1", "gc:x6-p2", "gc:x6-p3", "gc:
 
 // x6SteadyP99 and x6SteadyMax bound the steady phase's latency: DES-O1's
 // p99 <= 5 s, and a max two seconds over it. A notice that arrives just
-// after a Take waits for that batch's effect, its link wait
-// (opjournal.DefaultLinkWait), the runtime's next boundary (the 3 s
-// quiescence after the delivery) and the next pass: measured p99 3.5 s (max
-// 3.7 s) with the phase alone on its host, which is why the phases run
-// sequentially and the package runs X6 before its parallel tests.
+// after a Take waits for the runtime's next boundary (the 3 s quiescence
+// after the delivery) and the next pass: measured p99 3.5 s (max 3.7 s) with
+// the phase alone on its host, which is why the phases run sequentially and
+// the package runs X6 before its parallel tests. The link wait
+// (opjournal.DefaultLinkWait) is not on this path: the lane city's runtime
+// reports no turn source, so the executor links a delivery at once.
 const (
 	x6SteadyP99 = 5 * time.Second
 	x6SteadyMax = 7 * time.Second
@@ -161,6 +162,42 @@ func (c *laneCity) injectionSizes(phase string) []int {
 	return sizes
 }
 
+// logTail logs the phase's injection spacing: the notice count and gap before
+// each injection, and the tail, which is the final gap's excess over the
+// longest in-stream gap and the time from the last notice proposed to the
+// final injection. The producers ring the lane only while they propose, so
+// after the last ring the final batch waits for the lane to wake itself: the
+// tail is what that wake costs beyond the boundary cadence.
+func (c *laneCity) logTail(phase string) {
+	c.t.Helper()
+	var at []time.Time
+	var sizes []int
+	for _, d := range deliveriesOf(c.deliveries(), "x6 "+phase+" ") {
+		at = append(at, d.at(c.t))
+		sizes = append(sizes, len(injectedPayloads(d.Text)))
+	}
+	if len(at) < 2 {
+		return
+	}
+	var lastNotice time.Time
+	for _, op := range c.ops() {
+		if strings.HasPrefix(op.Payload, "x6 "+phase+" ") && op.CreatedAt.After(lastNotice) {
+			lastNotice = op.CreatedAt
+		}
+	}
+	gaps := make([]time.Duration, len(at)-1)
+	var longest time.Duration
+	for i := range gaps {
+		gaps[i] = at[i+1].Sub(at[i]).Round(time.Millisecond)
+		if i < len(gaps)-1 && gaps[i] > longest {
+			longest = gaps[i]
+		}
+	}
+	final := gaps[len(gaps)-1]
+	c.t.Logf("x6 %s tail: sizes %v; gaps %v; final batch %d notices, final gap %s, longest in-stream gap %s, tail %s; last notice to final injection %s",
+		phase, sizes, gaps, sizes[len(sizes)-1], final, longest, (final - longest).Round(time.Millisecond), at[len(at)-1].Sub(lastNotice).Round(time.Millisecond))
+}
+
 // TestX6FanIn runs its phases one after another, never in parallel: the
 // steady phase measures latency, which a city beside it would load.
 func TestX6FanIn(t *testing.T) {
@@ -183,6 +220,7 @@ func TestX6FanIn(t *testing.T) {
 		lat := c.x6Check(ids, "steady", 3*time.Minute)
 		p50, p99, maxLat := percentile(lat, 0.5), percentile(lat, 0.99), lat[len(lat)-1]
 		t.Logf("x6 steady: %d notices at 20/s in %d injections; latency p50 %s p99 %s max %s", len(ids), len(c.injectionSizes("steady")), p50, p99, maxLat)
+		c.logTail("steady")
 		if p99 > x6SteadyP99 || maxLat > x6SteadyMax {
 			t.Fatalf("latency p99 %s max %s, want p99 <= %s and max <= %s", p99, maxLat, x6SteadyP99, x6SteadyMax)
 		}
