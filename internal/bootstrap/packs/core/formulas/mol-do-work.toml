@@ -155,7 +155,7 @@ STEP_BEAD=$(gc bd show "$STEP_BEAD_ID" --json) || exit 1
 printf '%s' "$STEP_BEAD" | jq -e --arg work "$WORK_BEAD_ID" \
   '(if type == "array" then .[0] else . end) | .status == "in_progress" and (.metadata["gc.step_ref"] == "mol-do-work.do-work") and (.id != $work)' \
   >/dev/null || { echo "mol-do-work do-work: current claim $STEP_BEAD_ID is not this in-progress step (or is the work item itself); not closing" >&2; exit 1; }
-gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed --notes "Target $WORK_BEAD_ID completed. Commit: ${COMMIT:-none}." || exit 1
+gc bd update "$STEP_BEAD_ID" --set-metadata gc.outcome=pass --status=closed || exit 1
 ```
 This step bead is workflow infrastructure, not work: do not add `--notes` or
 `--append-notes` to it. On a city that keeps its coordination classes in a
