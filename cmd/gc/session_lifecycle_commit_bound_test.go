@@ -157,6 +157,12 @@ func productionLease(store beads.Store) startLeaseShape {
 			t.Fatalf("TakeRecord: %v", err)
 		}
 		item.candidate.lease = lease
+		// A fixture start that skipped PreWake runs under the incarnation its
+		// row records, as leasedStart does: a runtime-only start refuses one
+		// that was not minted.
+		if !item.candidate.inc.Valid() && item.candidate.info.ID != "" {
+			item.candidate.inc = sessionpkg.RecordedIncarnationForTest(item.candidate.info)
+		}
 		return item, dropLease
 	}
 }
