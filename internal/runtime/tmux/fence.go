@@ -314,16 +314,22 @@ func (g *paneGuard) verifiedPane() string {
 }
 
 // finish is the operation's result: its miss when it had one, else err, or
-// the server it lost when body swallowed that.
+// the server it lost when body swallowed that. A server lost after input
+// reached the fenced incarnation also wraps
+// runtime.ErrNudgeDeliveryUnconfirmed: that input may have delivered.
 func (g *paneGuard) finish(err error) error {
 	if miss := g.missed(); miss != nil {
 		return miss
 	}
 	g.mu.Lock()
-	unavailable := g.unavailable
+	unavailable, applied := g.unavailable, g.applied
 	g.mu.Unlock()
 	if err == nil && unavailable != nil {
-		return unavailable
+		err = unavailable
+	}
+	var lost *fenceUnavailableError
+	if applied && errors.As(err, &lost) && !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		return fmt.Errorf("%w after input was applied: %w", runtime.ErrNudgeDeliveryUnconfirmed, err)
 	}
 	return err
 }

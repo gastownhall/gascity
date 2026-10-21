@@ -96,6 +96,11 @@ func PromptHash(prompt string) string {
 // work bead. ComputeAwakeSet uses it to detect when an alive session has been
 // reassigned to a different bead — the trigger for a fresh-wake conversation
 // cycle under wake_mode=fresh.
+//
+// Usage attribution is a second consumer: the worker reads it to find the
+// formula a session's facts belong to. It is a single-valued pointer meaning
+// "the last bead the controller stamped", so it survives that bead's close and
+// a sleep.
 const CurrentBeadIDKey = "currently_processing_bead_id"
 
 var freshWakeConversationResetKeys = []string{
@@ -497,6 +502,23 @@ func DrainAckStopPendingPatch(now time.Time) MetadataPatch {
 	patch["pending_create_claim"] = ""
 	patch["pending_create_started_at"] = ""
 	return patch
+}
+
+// RevertDrainAckStopPendingPatch undoes DrainAckStopPendingPatch on a row
+// whose stop was never queued, restoring the lifecycle fields prior — the row
+// as read before the stop-pending mark — carried. The caller commits it
+// fenced on the stop-pending decision, so it lands only on the row that mark
+// produced and never over a later writer's state that its read sees; only a
+// store with conditional writes also refuses a writer that lands between that
+// read and the write (Store.Commit).
+func RevertDrainAckStopPendingPatch(prior Info) MetadataPatch {
+	return MetadataPatch{
+		"state":                     prior.MetadataState,
+		"state_reason":              prior.StateReason,
+		"drain_at":                  prior.DrainAt,
+		"pending_create_claim":      prior.PendingCreateClaimMetadata,
+		"pending_create_started_at": prior.PendingCreateStartedAt,
+	}
 }
 
 // SleepPatch records a non-terminal sleep/drain result. The holds are the

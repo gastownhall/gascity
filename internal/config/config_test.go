@@ -5858,6 +5858,23 @@ func TestMailConfigUnreadRetentionTTLParsesFromTOML(t *testing.T) {
 
 // --- WispGC config tests ---
 
+// The work ladder is on unless [daemon] work_ladder says "off" (the
+// rollback to the three backstops), however it is spelled.
+func TestDaemonConfig_WorkLadderEnabled(t *testing.T) {
+	for raw, want := range map[string]bool{"": true, "on": true, "off": false, "OFF": false, "Off": false, "bogus": true} {
+		if got := (DaemonConfig{WorkLadder: raw}).WorkLadderEnabled(); got != want {
+			t.Errorf("work_ladder = %q: enabled %v, want %v", raw, got, want)
+		}
+	}
+	cfg, err := Parse([]byte("[workspace]\nname = \"c\"\n\n[daemon]\nwork_ladder = \"off\"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if cfg.Daemon.WorkLadderEnabled() {
+		t.Error(`[daemon] work_ladder = "off" parsed as enabled`)
+	}
+}
+
 func TestDaemonConfig_WispGCDisabledByDefault(t *testing.T) {
 	d := DaemonConfig{}
 	if d.WispGCEnabled() {

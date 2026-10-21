@@ -28,6 +28,13 @@ type Reference struct {
 	ID   string `json:"id"`
 }
 
+// SourceSubmit is the Source of a user's submitted message that the session
+// layer queued instead of delivering (a held or dead session, a running turn
+// its submit keys would interrupt, a follow-up). It is still the user's
+// prompt: it is delivered alone and verbatim, never folded into a deferred
+// reminder or injected as hook context.
+const SourceSubmit = "submit"
+
 // Item is a persisted deferred nudge.
 type Item struct {
 	ID                string     `json:"id"`

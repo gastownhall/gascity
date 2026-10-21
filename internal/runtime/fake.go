@@ -38,7 +38,15 @@ type Fake struct {
 	Activity         map[string]time.Time // session → last activity time
 	// Bindings are the threads a [FullFake]'s SessionBinding reports, by
 	// session name.
-	Bindings                map[string]SessionBinding
+	Bindings map[string]SessionBinding
+	// KeyedDeliveries are the deliveries a [FullFake] holds, by session name
+	// then delivery key: the first keyed delivery under a key stays, and
+	// LookupDelivery finds it. A test may seed it; it is created on first
+	// use.
+	KeyedDeliveries map[string]map[string]DeliveryReceipt
+	// LookupDeliveryErrors fail a [FullFake]'s LookupDelivery by session
+	// name.
+	LookupDeliveryErrors    map[string]error
 	StartErrors             map[string]error // per-session Start errors for testing
 	StopErrors              map[string]error // per-session Stop errors for testing
 	StopLeavesRunning       map[string]bool  // per-session Stop returns nil without deleting the session
@@ -48,14 +56,18 @@ type Fake struct {
 	SleepCapabilityValue    SessionSleepCapability
 	TurnInterruptModeValue  TurnInterruptMode // reported by TurnInterruptMode; empty reads as keystroke
 	InputFencingValue       InputFencing      // reported by InputFencing; empty reads as atomic
+	SteerModeValue          SteerMode         // reported by SteerMode; empty reads as keystroke
 	WaitForIdleErrors       map[string]error
 	WaitForIdleSequence     map[string][]error
 	DialogErrors            map[string]error
 	ResetTurnErrors         map[string]error
 	InterruptBoundaryErrors map[string]error
 	ClearInputErrors        map[string]error
-	RemoveMetaErrors        map[string]map[string]error // per-session/key RemoveMeta errors for testing
-	GetMetaErrors           map[string]map[string]error // per-session/key GetMeta errors for testing
+	// BackgroundWorkStopErrors configures Fake.StopBackgroundWork errors per
+	// session name; an absent entry stops successfully.
+	BackgroundWorkStopErrors map[string]error
+	RemoveMetaErrors         map[string]map[string]error // per-session/key RemoveMeta errors for testing
+	GetMetaErrors            map[string]map[string]error // per-session/key GetMeta errors for testing
 	// WaitForIdleGates blocks WaitForIdle on a per-name channel until the
 	// caller closes it. A nil or absent entry returns the configured
 	// WaitForIdleErrors value immediately. The gate is read under f.mu
@@ -109,6 +121,8 @@ var (
 	_ ListingAttestation  = (*Fake)(nil)
 	_ InputClearProvider  = (*Fake)(nil)
 	_ FencedInputProvider = (*Fake)(nil)
+
+	_ BackgroundWorkStopper = (*Fake)(nil)
 
 	_ AttachmentObserverWithError = (*Fake)(nil)
 )
@@ -358,6 +372,20 @@ func (f *Fake) WaitForInterruptBoundary(_ context.Context, name string, since ti
 		return fmt.Errorf("session unavailable")
 	}
 	if err, ok := f.InterruptBoundaryErrors[name]; ok {
+		return err
+	}
+	return nil
+}
+
+// StopBackgroundWork records the call and returns the configured result.
+func (f *Fake) StopBackgroundWork(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.Calls = append(f.Calls, Call{Method: "StopBackgroundWork", Name: name})
+	if f.broken {
+		return fmt.Errorf("session unavailable")
+	}
+	if err, ok := f.BackgroundWorkStopErrors[name]; ok {
 		return err
 	}
 	return nil
@@ -915,6 +943,18 @@ func (f *Fake) TurnInterruptMode(string) TurnInterruptMode {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.TurnInterruptModeValue
+}
+
+// SteerMode returns the configured steer mode, keystroke when unset: the
+// fake types NudgeNow as tmux does. It records no call: like
+// TurnInterruptMode it reports a fixed trait of the runtime.
+func (f *Fake) SteerMode(string) SteerMode {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.SteerModeValue == "" {
+		return SteerKeystroke
+	}
+	return f.SteerModeValue
 }
 
 // LastStartConfig returns the Config used in the most recent Start call for

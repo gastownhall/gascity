@@ -42,12 +42,13 @@ func mustParseT3Time(t *testing.T, s string) time.Time {
 	return at
 }
 
-// Kills a declaration that drifts from X11 §5.1's T3 V1 row, varies by
-// session, or is lost through the seam-backed provider.
+// Kills a declaration that drifts from X11 §5.1's T3 V1 row (End inferred,
+// as ruled on 2026-10-20), varies by session, or is lost through the
+// seam-backed provider.
 func TestTurnCapabilitiesAreV1sStaticRow(t *testing.T) {
 	want := runtime.TurnCapabilities{
 		Start:    runtime.TurnStartRecorded,
-		End:      runtime.TurnEndRecorded,
+		End:      runtime.TurnEndInferred,
 		Fence:    runtime.TurnFenceChecked,
 		Link:     runtime.TurnLinkCorrelated,
 		Lossless: false,

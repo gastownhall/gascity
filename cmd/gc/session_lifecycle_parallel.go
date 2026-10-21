@@ -190,6 +190,11 @@ type startCandidate struct {
 	// its commit (I-LEASE): the name's flock, and the row's record from just
 	// before PreWake; nil without a city runtime dir.
 	lease *sessionpkg.RuntimeLease
+
+	// inc is the incarnation the PreWake minted under lease
+	// (preWakeCommitUnder); the runtime-only start runs under it. Zero for a
+	// start with no session row, which has none.
+	inc sessionpkg.Incarnation
 }
 
 // name reads the RAW session_name metadata off the typed twin
@@ -259,6 +264,11 @@ type preparedStart struct {
 	liveHash      string
 	provisionHash string
 	launchHash    string
+	// prePolicyProvisionHash and prePolicyLaunchHash are provisionHash and
+	// launchHash as the v6 binary computed them (runtime.PrePolicy*), which a
+	// session it started matches.
+	prePolicyProvisionHash string
+	prePolicyLaunchHash    string
 	// promptDelivered reports whether a delivery mechanism was selected for
 	// THIS incarnation's rendered startup prompt (S19 confirmation signal 1)
 	// — a pure routing decision, not I/O: it means delivery was
@@ -1076,10 +1086,11 @@ func prepareStartCandidateForCity(
 			// byte-coherent with the persisted state without a second Get. It shares
 			// preWakeCommit's error contract: a failed re-read already returned above,
 			// so the twin is never folded from a stale/rejected bead.
-			_, _, fold, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
+			inc, fold, err := preWakeCommitUnder(current, sessFront, clk, candidate.lease)
 			if err != nil {
 				return err
 			}
+			candidate.inc = inc
 			undo = newPreWakeUndo(current, persisted.Metadata, fold)
 			candidate.info = current.ApplyPatch(fold)
 			return nil
@@ -1219,7 +1230,9 @@ func buildPreparedStartWithTranscript(
 	// agentCfg as coreHash — BEFORE the one-shot dispatch overrides below — so
 	// they stay consistent with the started_config_hash the reconciler compares.
 	provisionHash := runtime.ProvisionFingerprint(agentCfg)
+	prePolicyProvisionHash := runtime.PrePolicyProvisionFingerprint(agentCfg)
 	launchHash := runtime.LaunchFingerprint(agentCfg)
+	prePolicyLaunchHash := runtime.PrePolicyLaunchFingerprint(agentCfg)
 
 	// Work beads may carry one-shot provider option overrides as opt_<key>
 	// metadata, where <key> is an OptionsSchema key such as "model" or
@@ -1462,19 +1475,34 @@ func buildPreparedStartWithTranscript(
 	agentCfg.Env = git.ApplySSHKeepaliveEnv(agentCfg.Env)
 	agentCfg = runtime.SyncWorkDirEnv(agentCfg)
 	return &preparedStart{
-		candidate:         candidate,
-		cfg:               agentCfg,
-		coreHash:          coreHash,
-		coreBreakdown:     coreBreakdown,
-		liveHash:          liveHash,
-		provisionHash:     provisionHash,
-		launchHash:        launchHash,
-		promptDelivered:   promptDelivered,
-		promptHash:        promptHash,
-		transcriptRoots:   transcriptRoots,
-		conversationReset: conversationReset,
-		resumed:           resumed,
+		candidate:              candidate,
+		cfg:                    agentCfg,
+		coreHash:               coreHash,
+		coreBreakdown:          coreBreakdown,
+		liveHash:               liveHash,
+		provisionHash:          provisionHash,
+		prePolicyProvisionHash: prePolicyProvisionHash,
+		launchHash:             launchHash,
+		prePolicyLaunchHash:    prePolicyLaunchHash,
+		promptDelivered:        promptDelivered,
+		promptHash:             promptHash,
+		transcriptRoots:        transcriptRoots,
+		conversationReset:      conversationReset,
+		resumed:                resumed,
 	}, candidate.info, nil
+}
+
+// provisionMatches reports whether a stored provision hash is the prepared
+// config's, as this binary or the v6 one computed it
+// (runtime.ProvisionHashMatches): the box needs no rebuild.
+func (p *preparedStart) provisionMatches(stored string) bool {
+	return stored == p.provisionHash || stored == p.prePolicyProvisionHash
+}
+
+// launchMatches is provisionMatches for the launch half
+// (runtime.LaunchHashMatches): the agent needs no relaunch.
+func (p *preparedStart) launchMatches(stored string) bool {
+	return stored == p.launchHash || stored == p.prePolicyLaunchHash
 }
 
 func preparedStartSessionWorkDir(info sessionpkg.Info) string {
@@ -2561,9 +2589,13 @@ func startPreparedStartCandidate(
 				// (bindPoolSessionTriggerBead) and is still unclaimed, deliver the
 				// claim nudge once — the event-based symmetric counterpart to that
 				// cold-Start nudge. Best-effort; never fails the (successful) warm start.
+				// The text is the claim instruction (warmBindClaimText), never
+				// item.cfg.Nudge: that can carry the startup prompt ahead of it, to
+				// re-prime a resumed or prompt-less launch, which a running slot
+				// already has.
 				if store != nil {
 					if raw, err := store.Get(item.candidate.info.ID); err == nil {
-						deliverWarmBindClaimNudge(ctx, sp, store, &raw, item.cfg.Nudge, warmClaim)
+						deliverWarmBindClaimNudge(ctx, sp, store, &raw, warmBindClaimText(cfg, raw), warmClaim)
 					}
 				}
 				return false, nil
@@ -2641,13 +2673,13 @@ func startPreparedStartCandidate(
 		if err != nil {
 			return false, err
 		}
-		return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
+		return true, handle.StartResolved(ctx, by, sessionpkg.Incarnation{}, item.cfg.Command, item.cfg)
 	}
 	handle, err := workerHandleForSessionWithStaleKeyDetectionWaiter(cityPath, store, sp, cfg, item.candidate.info.ID, staleKeyDetectionWaiter)
 	if err != nil {
 		return true, err
 	}
-	return true, handle.StartResolved(ctx, by, item.cfg.Command, item.cfg)
+	return true, handle.StartResolved(ctx, by, item.candidate.inc, item.cfg.Command, item.cfg)
 }
 
 func runtimeObservationLive(obs worker.LiveObservation) bool {

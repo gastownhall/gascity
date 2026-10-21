@@ -850,7 +850,9 @@ func TestRunStepsEndpoint(t *testing.T) {
 
 // TestRunStepsClampsCompletedRun proves the typed /steps endpoint honors run
 // terminality: a completed run whose steps lost their close events must report each
-// lingering step terminal (completed / skipped), never eternally active.
+// lingering step terminal, never eternally active. It reads skipped, started or
+// not: that is what the finalizer's sweep writes for a member still open when the
+// root settles.
 func TestRunStepsClampsCompletedRun(t *testing.T) {
 	root := runRootBead("runc", "mol-adopt-pr-v2", "closed")
 	root.Metadata["gc.outcome"] = "pass"
@@ -874,18 +876,18 @@ func TestRunStepsClampsCompletedRun(t *testing.T) {
 	if byID["runc.step1"].Status != RunStepStatusCompleted {
 		t.Errorf("step1 = %q, want completed", byID["runc.step1"].Status)
 	}
-	if byID["runc.step2"].Status != RunStepStatusCompleted {
-		t.Errorf("lost-close step2 = %q, want completed (run is completed)", byID["runc.step2"].Status)
+	if byID["runc.step2"].Status != RunStepStatusSkipped {
+		t.Errorf("lost-close step2 = %q, want skipped (run is completed)", byID["runc.step2"].Status)
 	}
 	if byID["runc.step3"].Status != RunStepStatusSkipped {
 		t.Errorf("never-started step3 = %q, want skipped (never started under a completed run)", byID["runc.step3"].Status)
 	}
 }
 
-// TestRunStepsClampsFailedRunToCanceled proves the failure family: a failed run
-// cancels its lingering active steps (rather than completing them) and skips its
-// never-started ones, while a recorded step outcome is preserved.
-func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
+// TestRunStepsClampsFailedRunToSkipped proves the failure family: a failed run
+// skips its lingering steps, active or never started (the finalizer's sweep
+// closes them skipped), while a recorded step outcome is preserved.
+func TestRunStepsClampsFailedRunToSkipped(t *testing.T) {
 	root := runRootBead("runx", "mol-adopt-pr-v2", "closed")
 	root.Metadata["gc.outcome"] = "fail"
 	s := newRunServer(t,
@@ -905,8 +907,8 @@ func TestRunStepsClampsFailedRunToCanceled(t *testing.T) {
 	for _, st := range out.Body.Steps {
 		byID[st.ID] = st
 	}
-	if byID["runx.step1"].Status != RunStepStatusCanceled {
-		t.Errorf("lost-close step1 = %q, want canceled (run failed)", byID["runx.step1"].Status)
+	if byID["runx.step1"].Status != RunStepStatusSkipped {
+		t.Errorf("lost-close step1 = %q, want skipped (run failed)", byID["runx.step1"].Status)
 	}
 	if byID["runx.step2"].Status != RunStepStatusSkipped {
 		t.Errorf("never-started step2 = %q, want skipped", byID["runx.step2"].Status)

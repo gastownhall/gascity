@@ -25,6 +25,11 @@ const (
 	// baseline, the live half included, moves to this binary's hashes
 	// (legacy's sessionHashRebaselineMetadata).
 	baselineVersionArtifact baselineReason = "version-artifact"
+	// baselinePrePolicy rebaselines a v6 core hash of unchanged config
+	// (runtime.IsCoreHashArtifact): the core baseline, not the live pair,
+	// which the live check compares on its own, so a changed session_live is
+	// still applied.
+	baselinePrePolicy baselineReason = "pre-policy"
 	// baselineLiveBackfill stamps an empty live hash with no session_live
 	// config (SESS-563).
 	baselineLiveBackfill baselineReason = "live-backfill"
@@ -45,7 +50,7 @@ const (
 // baselinePatch is cfg's baseline for reason.
 func baselinePatch(cfg runtime.Config, reason baselineReason) session.MetadataPatch {
 	patch := session.MetadataPatch{}
-	if reason != baselineSoftReload && reason != baselineRelaunch {
+	if reason != baselineSoftReload && reason != baselineRelaunch && reason != baselinePrePolicy {
 		live := runtime.LiveFingerprint(cfg)
 		patch["started_live_hash"], patch["live_hash"] = live, live
 	}

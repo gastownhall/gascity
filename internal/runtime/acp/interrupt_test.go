@@ -24,12 +24,12 @@ import (
 // $GC_ASK_PERMISSION set, a held prompt first sends session/request_permission
 // with id 7. $GC_ON_CANCEL is reply (answer held prompts canceled after
 // $GC_CANCEL_DELAY seconds) or ignore. $GC_SIGINT is ignore, cancel (answer
-// held prompts canceled) or exit (status 130).
+// held prompts canceled) or exit (status 130). A thread of its own takes each
+// SIGINT with sigwait; the fake installs no Python signal handler.
 func fakeACPInterruptCommand() string {
 	return `exec python3 -u -c '
 import sys, json, os, signal, threading
-# Reentrant: Python runs on_sig on the main thread, which may hold lock.
-lock = threading.RLock()
+lock = threading.Lock()
 held = []
 log_path = os.environ["GC_WIRE_LOG"]
 on_cancel = os.environ.get("GC_ON_CANCEL", "reply")
@@ -53,14 +53,26 @@ def cancel_held():
     for pid in ids:
         send({"jsonrpc": "2.0", "id": pid, "result": {"stopReason": STOP_CANCELED}})
 
-def on_sig(signum, frame):
+def on_sig():
     log(json.dumps({"signal": "SIGINT"}))
     if on_sigint == "exit":
         os._exit(130)
     if on_sigint == "cancel":
         cancel_held()
 
-signal.signal(signal.SIGINT, on_sig)
+# Python runs a signal handler only between bytecodes. For a SIGINT that lands
+# after the loop below finishes a line but before it blocks reading stdin, the
+# handler would run only once the next line arrives, so a held turn would not
+# end. SIGINT is blocked instead, before any thread starts so every thread
+# inherits the mask, and sigint_loop takes it with sigwait.
+signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGINT})
+
+def sigint_loop():
+    while True:
+        signal.sigwait({signal.SIGINT})
+        on_sig()
+
+threading.Thread(target=sigint_loop, daemon=True).start()
 for line in sys.stdin:
     line = line.strip()
     if not line:

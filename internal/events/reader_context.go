@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
@@ -76,6 +77,16 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 		return result, listed, fmt.Errorf("reading events: %w", err)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
+
+	// Skip the prefix of the active log the cursor already covers, as
+	// readFilteredTracked does.
+	scanFrom := int64(0)
+	if st, statErr := f.Stat(); statErr == nil {
+		scanFrom = activeScanStart(f, st.Size(), filter.AfterSeq)
+	}
+	if _, err := f.Seek(scanFrom, io.SeekStart); err != nil {
+		return result, listed, fmt.Errorf("seeking events: %w", err)
+	}
 
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB

@@ -4,6 +4,9 @@ go_library(
     name = "testenv",
     srcs = [
         "bazel_tools.go",
+        "gittemplate.go",
+        "gittemplate_other.go",
+        "gittemplate_unix.go",
         "testenv.go",
     ],
     importpath = "github.com/gastownhall/gascity/internal/testenv",
@@ -15,6 +18,9 @@ go_test(
     srcs = [
         "bazel_tools_internal_test.go",
         "gc_env_baseline_test.go",
+        "gittemplate_contract_test.go",
+        "gittemplate_internal_test.go",
+        "gittemplate_unix_internal_test.go",
         "legacy_flag_freeze_test.go",
         "lint_test.go",
         "rollout_leak_vector_test.go",
@@ -37,6 +43,7 @@ go_test(
         "//internal/bazeltest",
         "//internal/beads/contract",
         "//internal/rollout",
+        "//internal/testutil",
     ],
 )
 

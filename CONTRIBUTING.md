@@ -43,7 +43,8 @@ CI runs Bazel, so a change is ready when the Bazel tiers it touches pass:
 | Imports, packages, or files added/removed | `make bazel-sync`, then commit the regenerated BUILD files |
 
 Narrow while iterating: `bazel test //internal/config:config_test`.
-`go test ./internal/config -run TestX` is fine as a quick inner loop, but it
+`go test ./internal/config -run TestX` is fine as a human's quick inner loop
+(agents run tests only with `bazel test`: AGENTS.md "Build and test"), but it
 is not what CI enforces: it runs none of the nogo, format, generated-artifact
 or policy targets. Each `make` target above has a plain-Go twin
 (`make test-go`, `make check-go`, `make test-acceptance-go`,

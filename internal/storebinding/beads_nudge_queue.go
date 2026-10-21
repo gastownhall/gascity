@@ -787,7 +787,7 @@ func (q *beadsNudgeQueue) sweepTerminalRecords(ctx context.Context, now time.Tim
 }
 
 // deleteRetired deletes one retired record the sweep listed, fenced on its
-// revision. A store whose List leaves revisions unstamped (the native store),
+// revision. A store whose List leaves revisions unstamped (BdStore, mc-3c8h5),
 // or a cache that served such a row, hands over no usable token, so a refused
 // delete is presented again at the revision of a fresh read — but only while
 // that read still shows a closed, terminal record last written before cutoff.

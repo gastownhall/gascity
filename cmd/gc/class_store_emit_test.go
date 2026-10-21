@@ -22,6 +22,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/splittest"
 	"github.com/gastownhall/gascity/internal/citylayout"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
@@ -1747,7 +1748,10 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		reflect.TypeOf(&beads.SQLiteStore{}): {
 			"ConditionalWritesModeSource", "Count", "DepListBatch",
 			"EventsJournalActive", "NamespaceCensusHandle", "ReadEventsJournalPage",
-			"ReadOnly", "SawRows",
+			// ReadyOrdered over a SQLite binding delegates to beads.ReadyOrdered,
+			// which reads a store without the capability whole and reports
+			// ordered=false: the path a caller takes when the wrapper lacks it.
+			"ReadOnly", "ReadyOrdered", "SawRows",
 			"SupportsEphemeralGraphApply", "TransferIfCurrent", "WaitForParentProjection",
 		},
 	}
@@ -1773,5 +1777,26 @@ func TestEmittingClassStoreOverClaimsArePinnedPerEngine(t *testing.T) {
 		if !slices.Equal(got, sorted) {
 			t.Errorf("the emitter claims %v that %s lacks, pinned %v: check each new claim answers over %s as its absence would, then update the pin", got, engine, sorted, engine)
 		}
+	}
+}
+
+// TestEmittingClassStoreReadyOrderedOverSQLiteReadsWhole pins the over-claim's
+// answer: a SQLite binding cannot cut a bounded ready read in order, so the
+// emitter reads it whole and reports ordered=false, exactly what a caller gets
+// from a wrapper without the method.
+func TestEmittingClassStoreReadyOrderedOverSQLiteReadsWhole(t *testing.T) {
+	engine := splittest.NewClassStore(t, config.BeadClassGraph)
+	for i := range 3 {
+		if _, err := engine.Create(beads.Bead{Title: fmt.Sprintf("step %d", i), Type: "task"}); err != nil {
+			t.Fatalf("create: %v", err)
+		}
+	}
+	wrapped := splitClassRoutes(engine).withCLIEmission(t.TempDir()).stores[coordclass.ClassGraph]
+	rows, ordered, err := beads.ReadyOrdered(wrapped, beads.ReadyQuery{TierMode: beads.FederatedReadTier, Limit: 1}, beads.ReadyOrderCanonical)
+	if err != nil {
+		t.Fatalf("ReadyOrdered: %v", err)
+	}
+	if ordered || len(rows) != 3 {
+		t.Fatalf("ReadyOrdered over SQLite = %d rows, ordered %v; want the whole set, unordered", len(rows), ordered)
 	}
 }

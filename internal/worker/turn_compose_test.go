@@ -56,7 +56,7 @@ func TestTurnCapabilitiesCompositionMatrix(t *testing.T) {
 	}
 	wantT3 := "none none/none/none/none/false protocol interrupt"
 	if _, ok := profiled(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}).(runtime.TurnObservationProvider); ok {
-		wantT3 = "protocol recorded/recorded/checked/correlated/false protocol interrupt"
+		wantT3 = "protocol recorded/inferred/checked/correlated/false protocol interrupt"
 	}
 	tmuxClaude := "transcript recorded/inferred/checked/correlated/false keystroke interrupt"
 	cases := []matrixCase{
@@ -175,7 +175,7 @@ func TestTurnCapabilitiesProductionProfileTable(t *testing.T) {
 	none := func(replace string) string { return "none none/none/none/none/false keystroke " + replace }
 	t3Row := "none none/none/none/none/false protocol interrupt"
 	if _, ok := profiled(runtime.ProfileT3Bridge, runtime.FullFake{Fake: runtime.NewFake()}).(runtime.TurnObservationProvider); ok {
-		t3Row = "protocol recorded/recorded/checked/correlated/false protocol interrupt"
+		t3Row = "protocol recorded/inferred/checked/correlated/false protocol interrupt"
 	}
 	acpRow := "protocol recorded/recorded/atomic/exact/true keystroke "
 	noSnapshots := map[string]string{

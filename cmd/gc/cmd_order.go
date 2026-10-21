@@ -1348,6 +1348,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 			Orders:        make([]orderCheckJSONRow, 0, len(aa)),
 		}
 		for _, a := range aa {
+			if err := validateOrderCheckPreflight(a); err != nil {
+				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+				return 1
+			}
 			if backend, inapplicable := orderCheckInapplicable(cityPath, cfg, a); inapplicable {
 				result.Orders = append(result.Orders, orderCheckJSONRow{
 					Name:         a.Name,
@@ -1358,10 +1362,6 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 					Inapplicable: "backend " + backend,
 				})
 				continue
-			}
-			if err := validateOrderCheckPreflight(a); err != nil {
-				fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-				return 1
 			}
 			typedStores, err := resolveStores(a)
 			if err != nil {
@@ -1438,6 +1438,10 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 	}
 	anyDue := false
 	for _, a := range aa {
+		if err := validateOrderCheckPreflight(a); err != nil {
+			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
 		if backend, inapplicable := orderCheckInapplicable(cityPath, cfg, a); inapplicable {
 			if hasRig {
 				rig := a.Rig
@@ -1449,10 +1453,6 @@ func doOrderCheckWithStoresResolverScopedJSON(cityPath string, cfg *config.City,
 				fmt.Fprintf(stdout, "%-20s %-12s %-5s %s\n", a.Name, a.Trigger, "-", orderInapplicableLabel(backend)) //nolint:errcheck
 			}
 			continue
-		}
-		if err := validateOrderCheckPreflight(a); err != nil {
-			fmt.Fprintf(stderr, "gc order check: %v\n", err) //nolint:errcheck // best-effort stderr
-			return 1
 		}
 		typedStores, err := resolveStores(a)
 		if err != nil {

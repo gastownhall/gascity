@@ -212,9 +212,11 @@ func TestConformance_SuspendForShutdownPropagatesDrainingTeardownFailure(t *test
 
 // The scope control for the pin above. The draining escape hatch must be
 // draining-ONLY, never a blanket "any state suspends" that would hide a real
-// illegal-transition bug elsewhere.
+// illegal-transition bug elsewhere. (An operator's suspend of a drained row is
+// legal and holds it; the sweep and the idle auto-suspend still refuse it, see
+// TestOnlyTheOperatorSuspendsADrainedRow.)
 func TestConformance_SuspendStillRejectsOtherIllegalStates(t *testing.T) {
-	for _, from := range []State{StateStartPending, StateCreating, StateDrained} {
+	for _, from := range []State{StateStartPending, StateCreating} {
 		t.Run(string(from), func(t *testing.T) {
 			store := beads.NewMemStore()
 			sp := runtime.NewFake()

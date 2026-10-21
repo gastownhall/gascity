@@ -165,10 +165,10 @@ func TestSubscribeRuntimeTurnEvents(t *testing.T) {
 }
 
 // Kills a keyed-lookup trait that disagrees with ResolveKeyedTranscriptPath:
-// Gemini has no exact by-key lookup, Codex and Claude do, and the trait does
-// not depend on whether the session has its key yet.
+// Gemini has no exact by-key lookup, Codex, Claude and OpenCode do, and the
+// trait does not depend on whether the session has its key yet.
 func TestHasKeyedTranscriptLookup(t *testing.T) {
-	for provider, want := range map[string]bool{"claude": true, "codex": true, "gemini": false, "opencode": false} {
+	for provider, want := range map[string]bool{"claude": true, "codex": true, "gemini": false, "opencode": true} {
 		for _, key := range []string{"", "k"} {
 			info := Info{ID: "s", Provider: provider, SessionKey: key}
 			if got := HasKeyedTranscriptLookup(info, ""); got != want {

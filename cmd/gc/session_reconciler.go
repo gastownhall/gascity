@@ -255,6 +255,70 @@ func markDrainAckStopPending(act legacyAct, info sessionpkg.Info, dops drainOps,
 	return info, sessionpkg.Decided{}, false
 }
 
+// configDriftSeatHasLiveWork reports whether info's seat holds open or
+// in_progress work, read live from the store rather than from the tick's seat
+// work snapshot: the config-drift drain's claim fence asks it at the stop's
+// commit point, where a claim that landed after the snapshot was read is
+// exactly the one it exists to see.
+func configDriftSeatHasLiveWork(sw *SeatWork, info sessionpkg.Info) (bool, error) {
+	return sessionHasOpenAssignedWorkForReachableStore(sw.fresh(releaseScope(info, sw.Legs().cfg)), info)
+}
+
+// abandonConfigDriftStopPendingOnClaim is the post-write half of the
+// config-drift drain's claim fence. The drain-ack arm checks for live work,
+// then marks the row draining, and `gc hook --claim` refuses a seat whose row
+// reads draining. A claim whose fence read the row before the mark landed can
+// still commit after the arm's pre-check, so the arm re-reads the seat's work
+// AFTER the mark. If work is there, it reverts the mark, cancels the
+// config-drift drain and its ack, and reports true: the caller queues no stop.
+//
+// The revert is committed on the stop-pending decision (Store.Commit at
+// FactsLegacyDrainStop): it writes only if a fresh read of the row still
+// carries the state, state_reason, generation and instance_token the mark
+// left. How far that protects another writer's state (a different drain's
+// included) depends on the store:
+//   - With conditional writes, the write is fenced at the revision of that
+//     read, so the revert never overwrites another writer's state.
+//   - Without them (conditional_writes off, or auto over a store that cannot
+//     write conditionally), the read and the write are separate operations.
+//     A competing write the read sees makes the revert back off, but one that
+//     lands after the read and before the revert's write is overwritten with
+//     prior's lifecycle fields, and the drain is abandoned as if the row were
+//     still this arm's
+//     (TestConfigDriftDrainAck_RevertWithoutConditionalWritesCanOverwriteInWindow).
+//
+// With the claim's own post-claim re-read of the row
+// (writeHookClaimWorkResultForBead) this is a write-then-read on both sides.
+// On a store where a committed write is visible to every later read from any
+// process (read-after-write, which the bd/dolt store and MemStore provide), at
+// least one side sees the other, so a claim never stays on a session this
+// drain stops. When both see each other, both back off: the claim is released
+// and the drain abandoned; the drift is re-detected next tick and the released
+// work is claimable again.
+//
+// A failed probe fails closed (revert, keep the session running). A revert
+// that does not land leaves the stop to proceed exactly as before.
+func abandonConfigDriftStopPendingOnClaim(store beads.Store, sp runtime.Provider, dt *drainTracker, sw *SeatWork, prior, marked sessionpkg.Info, stop sessionpkg.Decided, name string, stderr io.Writer) (sessionpkg.Info, bool) {
+	hasWork, err := configDriftSeatHasLiveWork(sw, prior)
+	if err != nil {
+		fmt.Fprintf(stderr, "session reconciler: re-checking assigned work after config-drift stop-pending mark for %s: %v\n", name, err) //nolint:errcheck
+		hasWork = true
+	}
+	if !hasWork {
+		return marked, false
+	}
+	patch := sessionpkg.RevertDrainAckStopPendingPatch(prior)
+	res, err := sessionFrontDoor(store).Commit(stop, patch)
+	if err != nil || res != sessionpkg.CommitLanded {
+		fmt.Fprintf(stderr, "session reconciler: config-drift stop of %s found claimed work after its mark but could not revert the mark (%v, %v); stopping as decided\n", name, res, err) //nolint:errcheck
+		return marked, false
+	}
+	if !cancelSessionConfigDriftDrainInfo(prior, sp, dt) {
+		_ = clearReconcilerDrainAckMetadata(sp, name)
+	}
+	return marked.ApplyPatch(patch), true
+}
+
 func clearDrainTrackerForStopPending(id string, dt *drainTracker) {
 	if id == "" || dt == nil {
 		return
@@ -3320,6 +3384,38 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 							}
 							continue
 						}
+						// Re-check the live-assigned-work guard that gated the drift
+						// drain's begin, here at the commit point. The begin read an idle
+						// session, but the drain then spends ticks (begin, deferred ack,
+						// this stop) with the session row still awake, and the claim fence
+						// in `gc hook --claim` refuses only a row already marked draining.
+						// A claim that landed in that window would otherwise be stopped
+						// mid-work and re-served only after a restart. Abandon the drain
+						// instead: the drift check re-detects the drift each tick and
+						// defers it until the work completes. A failed probe fails closed
+						// (keep the session running), the verdict the drift check's own
+						// guard reaches.
+						if alive {
+							hasAssignedWork, assignedErr := configDriftSeatHasLiveWork(sw, infoByID[id])
+							if assignedErr != nil {
+								fmt.Fprintf(stderr, "session reconciler: checking assigned work before config-drift drain-ack stop for %s: %v\n", name, assignedErr) //nolint:errcheck
+								hasAssignedWork = true
+							}
+							if hasAssignedWork {
+								drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
+								if !drainCancelled {
+									_ = clearReconcilerDrainAckMetadata(sp, name)
+								}
+								logDrainSkip(dt, stdout, id, fmt.Sprintf("Abandoning config-drift drain for '%s': live assigned work found", name), clk.Now())
+								if trace != nil {
+									trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDrift, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
+										"active_reason":  "live_assigned_work",
+										"drain_canceled": drainCancelled,
+									})
+								}
+								continue
+							}
+						}
 					}
 					// Only a live runtime can raise an interaction: a dead or zombie
 					// target's failed probe must not cancel the drain it acked.
@@ -3346,6 +3442,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					}
 					if alive {
 						if updated, stop, ok := markDrainAckStopPending(legacyAct{cityPath: cityPath, store: store, sp: sp, cfg: cfg, stderr: stderr}, infoByID[id], dops, dt, clk); ok {
+							if configDriftAck {
+								if reverted, abandoned := abandonConfigDriftStopPendingOnClaim(store, sp, dt, sw, infoByID[id], updated, stop, name, stderr); abandoned {
+									tick.set(id, reverted)
+									logDrainSkip(dt, stdout, id, fmt.Sprintf("Abandoning config-drift drain for '%s': work claimed before the drain was visible", name), clk.Now())
+									if trace != nil {
+										trace.RecordDecision(TraceSiteReconcilerDrainAck, TraceReasonConfigDrift, TraceOutcomeCancelReconcilerAck, tp.TemplateName, name, traceRecordPayload{
+											"active_reason": "live_assigned_work_after_mark",
+										})
+									}
+									continue
+								}
+							}
 							// markDrainAckStopPending persisted + folded the stop-pending
 							// transition (write-returns-Info, Step 6d) — assign the returned Info,
 							// same as the orphan-arm site above (STEP6-PREPASS-AUDIT group 3).
@@ -3400,6 +3508,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if lastActivityErr == nil && !lastActivity.IsZero() && clk.Now().Sub(lastActivity) > gateThreshold {
 				exempt := pendingInteractionKeepsAwakeInfo(infoByID[id], sp, name, clk) ||
 					pendingCreateStartInFlightInfo(infoByID[id], clk, startupTimeout)
+				// A pinned configured named session is never stopped on a
+				// recycler restart request: the restart-request guard below
+				// clears the marker and ends the tick for it. Requesting one
+				// anyway repeats that on every tick the session stays idle, and
+				// each of those ticks ends before the config-drift gate, so a
+				// pending drift is neither logged nor recorded as deferred.
+				if !exempt && pinnedConfiguredNamedSessionKillProtected(infoByID[id]) {
+					exempt = true
+					if trace != nil {
+						trace.RecordDecision(TraceSiteReconcilerProgressStallExempt, TraceReasonPinned, TraceOutcomeExempt, tp.TemplateName, name, nil)
+					}
+				}
 				if !exempt {
 					attached, attachErr := sessionAttachedForConfigDrift(id, sp, cityPath, store, cfg, name)
 					if attachErr != nil {
@@ -3797,15 +3917,18 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 					if storedHash != currentHash {
 						// Stored hash has no version prefix or carries a
 						// different version than the current binary — silently
-						// rebaseline all four fingerprint fields rather than
+						// rebaseline the fingerprint fields rather than
 						// draining the session. The mismatch is a versioning
 						// artifact, not real config drift. See ga-s760 FRs 1-3.
-						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
-							outcome := rebaselineLegacyHashOutcome(storedHash)
+						// A v6 hash is one only for config unchanged since,
+						// and leaves the live pair to the next tick's live
+						// check.
+						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
+							outcome := rebaselineLegacyHashOutcome(storedHash, runtime.PrePolicyCoreFingerprint(agentCfg))
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, runtime.IsPrePolicyHash(storedHash))
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -3837,8 +3960,8 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						storedProvision := infoByID[id].StartedProvisionHash
 						storedLaunch := infoByID[id].StartedLaunchHash
 						launchOnlyDrift := storedProvision != "" && storedLaunch != "" &&
-							storedProvision == runtime.ProvisionFingerprint(agentCfg) &&
-							storedLaunch != runtime.LaunchFingerprint(agentCfg)
+							runtime.ProvisionHashMatches(storedProvision, agentCfg) &&
+							!runtime.LaunchHashMatches(storedLaunch, agentCfg)
 						restartedInPlace := false
 						// Attached sessions never get config-drift restarts.
 						// The human will restart when ready; drift applies
@@ -3975,9 +4098,15 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								continue
 							}
 							if hasAssignedWork {
+								// Abandon a config-drift drain begun on an earlier tick,
+								// before this work was claimed: skipping only the begin
+								// would let the drain scan publish its ack and the
+								// drain-ack arm stop the session mid-claim.
+								drainCancelled := cancelSessionConfigDriftDrainInfo(infoByID[id], sp, dt)
 								if trace != nil {
 									trace.RecordDecision(TraceSiteReconcilerConfigDrift, TraceReasonConfigDrift, TraceOutcomeDeferredActive, tp.TemplateName, name, configDriftTracePayload(storedHash, currentHash, driftedFields, traceRecordPayload{
-										"active_reason": "live_assigned_work",
+										"active_reason":  "live_assigned_work",
+										"drain_canceled": drainCancelled,
 									}))
 								}
 								logDrainSkip(dt, stdout, id, fmt.Sprintf("Skipping config-drift drain for '%s': live assigned work found", name), clk.Now())
@@ -4030,10 +4159,14 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 
 					// Core config matches — check live-only drift.
 					// Use started_live_hash exclusively, matching
-					// the started_config_hash pattern above.
+					// the started_config_hash pattern above. A named
+					// session restarted in place falls through with its
+					// core drifted: its start stamps the live pair, or a
+					// refused stop leaves the drift to the next tick, so
+					// nothing here may run or rebaseline over it.
 					storedLive := infoByID[id].StartedLiveHash
 					currentLive := runtime.LiveFingerprint(agentCfg)
-					if storedLive != currentLive {
+					if !driftRestartedInPlace && storedLive != currentLive {
 						switch {
 						case storedLive == "" && len(agentCfg.SessionLive) == 0:
 							// No stored hash and no live config — silently
@@ -4045,15 +4178,16 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 								"live_hash":         currentLive,
 								"started_live_hash": currentLive,
 							})
-						case runtime.IsLegacyOrMismatchedVersion(storedLive):
+						case runtime.IsLiveHashArtifact(storedLive, agentCfg):
 							// Stored live hash from a pre-versioning or
-							// version-mismatched binary — silently rebaseline
-							// all four fingerprint fields rather than running
+							// version-mismatched binary (a v6 one only of the
+							// same session_live) — silently rebaseline
+							// the fingerprint fields rather than running
 							// SessionLive again. ga-s760 FRs 1-3.
-							outcome := rebaselineLegacyHashOutcome(storedLive)
+							outcome := rebaselineLegacyHashOutcome(storedLive, runtime.PrePolicyLiveFingerprint(agentCfg))
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, false)
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy live hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -4121,12 +4255,13 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 						// Stored hash carries no version prefix or a different
 						// version — silently rebaseline rather than treating
 						// the asleep named session as drifted. ga-s760 FRs 1-3.
-						if runtime.IsLegacyOrMismatchedVersion(storedHash) {
-							outcome := rebaselineLegacyHashOutcome(storedHash)
+						// A v6 hash is one only for config unchanged since.
+						if runtime.IsCoreHashArtifact(storedHash, agentCfg) {
+							outcome := rebaselineLegacyHashOutcome(storedHash, runtime.PrePolicyCoreFingerprint(agentCfg))
 							// Fold the rebaseline patch onto the snapshot (Step 6d write-returns-Info).
 							// This site `continue`s, so the fold must run before the continue.
 							// Pre-pass-masked (STEP6-PREPASS-AUDIT group 8).
-							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg)
+							rebaseBatch, rebaseErr := silentRebaselineSessionHashes(id, sessFront, agentCfg, runtime.IsPrePolicyHash(storedHash))
 							if rebaseErr != nil {
 								fmt.Fprintf(stderr, "session reconciler: rebaselining legacy hash for %s: %v\n", name, rebaseErr) //nolint:errcheck
 							} else {
@@ -5314,8 +5449,10 @@ func idleRespawnAckUnsafeToStop(
 // state cache after a `gc session kill`), and a heal on it wrote state=awake
 // over the killed row, which the next pass restarted in place on its claim
 // instead of freeing the slot. A fresh read that fails wakes nothing. The
-// pass's first confirmation fixes since, so the later ones reuse the fresh
-// listing (and process snapshot) it took rather than each paying for one.
+// pass's first confirmation fixes since, so a later one reuses a refreshed
+// snapshot an earlier one published rather than each paying for a refresh. A
+// provider may prove an absent name without publishing (tmux's presence-only
+// listing), so each absent confirmation pays its own cheap listing.
 type healAliveConfirmer struct {
 	sp    runtime.Provider
 	since time.Time
@@ -7461,8 +7598,12 @@ func truncateCrashPaneOutput(output string, maxLines int) string {
 }
 
 // rebaselineLegacyHashOutcome picks the trace outcome that matches a
-// stored hash about to be silently rebaselined.
-func rebaselineLegacyHashOutcome(stored string) TraceOutcomeCode {
+// stored hash about to be silently rebaselined; prePolicy is the config's
+// hash as the v6 binary computed it.
+func rebaselineLegacyHashOutcome(stored, prePolicy string) TraceOutcomeCode {
+	if stored == prePolicy {
+		return TraceOutcomeRebaselinedPrePolicy
+	}
 	if runtime.IsVersionMismatchedHash(stored) {
 		return TraceOutcomeRebaselinedVersionMismatch
 	}
@@ -7492,24 +7633,31 @@ func sessionHashRebaselineMetadata(agentCfg runtime.Config) (map[string]string, 
 	}, nil
 }
 
-// silentRebaselineSessionHashes overwrites the four fingerprint metadata
-// fields (started_config_hash, started_live_hash, live_hash,
-// core_hash_breakdown) with values produced by the current binary. Used
-// when a stored hash carries no version prefix or a version prefix that
-// does not match runtime.FingerprintVersion. The reconciler invokes this
-// instead of draining the session — the hash mismatch is purely a
-// versioning artifact, not real config drift.
+// silentRebaselineSessionHashes overwrites the six fingerprint metadata
+// fields (started_config_hash, started_provision_hash, started_launch_hash,
+// started_live_hash, live_hash, core_hash_breakdown) with values produced by
+// the current binary. Used when a stored hash carries no version prefix or a
+// version prefix that does not match runtime.FingerprintVersion. The
+// reconciler invokes this instead of draining the session — the hash
+// mismatch is purely a versioning artifact, not real config drift. keepLive
+// moves the core baseline alone, for a v6 core hash (one only for config
+// unchanged since, runtime.IsCoreHashArtifact): the live check compares the
+// live pair on its own, so a changed session_live is still applied.
 //
 // Returns (patch, nil) on success, (nil, err) on persist error, (nil, nil)
 // when nothing was written (nil session or nil front-door). The caller folds
 // the returned patch onto the typed snapshot via ApplyPatch (nil is a no-op).
-func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config) (map[string]string, error) {
+func silentRebaselineSessionHashes(id string, sessFront *sessionpkg.Store, agentCfg runtime.Config, keepLive bool) (map[string]string, error) {
 	if id == "" || sessFront == nil {
 		return nil, nil
 	}
 	patch, err := sessionHashRebaselineMetadata(agentCfg)
 	if err != nil {
 		return nil, err
+	}
+	if keepLive {
+		delete(patch, "started_live_hash")
+		delete(patch, "live_hash")
 	}
 	if err := sessFront.ApplyPatch(id, patch); err != nil {
 		return nil, fmt.Errorf("rebaselining hashes: %w", err)
@@ -7636,9 +7784,9 @@ func relaunchAgentForLaunchDrift(
 	// means a concurrent bead mutation or a derivation divergence between the
 	// hash-form and prepared configs — take the full restart rather than
 	// relaunch-then-rebaseline against an unverified baseline.
-	if prepared.coreHash != currentHash || prepared.provisionHash != storedProvisionHash || prepared.launchHash == storedLaunchHash {
+	if prepared.coreHash != currentHash || !prepared.provisionMatches(storedProvisionHash) || prepared.launchMatches(storedLaunchHash) {
 		fmt.Fprintf(stderr, "session reconciler: relaunch precondition skew for %s (core=%v provision=%v launch-unchanged=%v); falling back to full restart\n", //nolint:errcheck
-			name, prepared.coreHash != currentHash, prepared.provisionHash != storedProvisionHash, prepared.launchHash == storedLaunchHash)
+			name, prepared.coreHash != currentHash, !prepared.provisionMatches(storedProvisionHash), prepared.launchMatches(storedLaunchHash))
 		return false, relaunchAbortResidueFold(preparedInfo, sessFront, hadResumeKeyBeforePrepare)
 	}
 	// A warm-box relaunch resumes a TRACKED conversation. When the bead carried no

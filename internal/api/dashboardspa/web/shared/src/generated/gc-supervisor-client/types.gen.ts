@@ -4,6 +4,21 @@ export type ClientOptions = {
     baseUrl: `${string}://${string}` | (string & {});
 };
 
+export type ActiveWorkStep = {
+    /**
+     * The step bead's description; empty when it has none.
+     */
+    description: string;
+    /**
+     * The step bead's id.
+     */
+    id: string;
+    /**
+     * The step bead's title.
+     */
+    title: string;
+};
+
 export type AdapterCapabilities = {
     MaxMessageLength: number;
     SupportsAttachments: boolean;
@@ -252,11 +267,23 @@ export type AnnotatedProviderResponse = {
 
 export type AsyncAcceptedBody = {
     /**
-     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty.
+     * City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty.
      */
     event_cursor: string;
     /**
-     * Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
+     * The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery.
+     */
+    idempotency_key?: string;
+    /**
+     * The operation the request was recorded as.
+     */
+    op?: ConversationOp;
+    /**
+     * True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key.
+     */
+    replayed?: boolean;
+    /**
+     * Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id.
      */
     request_id: string;
     /**
@@ -317,6 +344,20 @@ export type BeadAssignInputBody = {
      * Assignee name.
      */
     assignee?: string;
+};
+
+export type BeadClaimFailedPayload = {
+    error: string;
+    runtime_epoch?: number;
+    session_id?: string;
+    template: string;
+};
+
+export type BeadClaimLoopHeldPayload = {
+    error: string;
+    failures: number;
+    held_until: string;
+    template: string;
 };
 
 export type BeadClaimRejectedPayload = {
@@ -710,6 +751,53 @@ export type ControlStalledPayload = {
     store_path?: string;
 };
 
+export type ConversationFact = {
+    /**
+     * When it happened: the source's time, or the observer's clock when the source gives none.
+     */
+    at: string;
+    /**
+     * How the fact is known: runtime (the provider recorded it), observed (gc inferred it) or lane. Open: a newer build may add values.
+     */
+    basis?: string;
+    /**
+     * Operations that caused the fact.
+     */
+    cause_ops?: Array<string> | null;
+    /**
+     * Session (conversation) id the fact belongs to.
+     */
+    conversation: string;
+    /**
+     * The source's own word for the occurrence, e.g. a provider stop reason.
+     */
+    detail?: string;
+    /**
+     * Session generation the fact happened in.
+     */
+    generation: number;
+    /**
+     * Fact id, keyed by the occurrence.
+     */
+    id: string;
+    /**
+     * The occurrence of an interaction.* fact.
+     */
+    interaction?: string;
+    /**
+     * Fact kind.
+     */
+    kind: 'session.started' | 'session.ended' | 'turn.started' | 'turn.ended' | 'interaction.raised' | 'interaction.resolved';
+    /**
+     * Open reason token, e.g. a turn.ended reason (completed, interrupted, superseded).
+     */
+    reason?: string;
+    /**
+     * The turn of a turn.* fact, as its runtime names it.
+     */
+    turn?: string;
+};
+
 export type ConversationGroupParticipant = {
     GroupID: string;
     Handle: string;
@@ -735,10 +823,342 @@ export type ConversationGroupRecord = {
     SchemaVersion: number;
 };
 
+export type ConversationInterruptPolicyBody = {
+    /**
+     * What the interrupt does when no boundary is observed: fail or restart.
+     */
+    on_failure?: 'fail' | 'restart';
+};
+
 /**
  * Shape of a conversation.
  */
 export type ConversationKind = 'dm' | 'room' | 'thread';
+
+export type ConversationMessagePolicyBody = {
+    /**
+     * With when now: the session generation the requester saw.
+     */
+    now_generation?: number;
+    /**
+     * With when now: the turn the requester saw.
+     */
+    now_turn?: string;
+    /**
+     * What a steer does on a runtime that cannot steer: boundary or fail.
+     */
+    on_unsupported?: 'boundary' | 'fail';
+    /**
+     * How the agent sees it: prompt (a turn of its own) or notice (a reminder).
+     */
+    role?: 'prompt' | 'notice';
+    /**
+     * Whether the message may wake its session: if_needed or live_only.
+     */
+    wake?: 'if_needed' | 'live_only';
+    /**
+     * When to deliver: boundary (the next turn boundary), after_turn (ride the next turn, never start one), interrupt, if_idle (skipped when the session is mid-turn), now (deliver now) or steer (into the running turn, where the runtime can steer).
+     */
+    when?: 'boundary' | 'after_turn' | 'interrupt' | 'if_idle' | 'now' | 'steer';
+};
+
+export type ConversationOp = {
+    /**
+     * The producer's actor class, an open token. Set on the op routes and op.changed only.
+     */
+    actor?: string;
+    /**
+     * When the operation last changed status. Set on the op routes and op.changed only.
+     */
+    at?: string;
+    /**
+     * How many times the operation was executed, counted by its executor. A legacy-executed operation counts executions after the first (an adopted orphan), so its first run reads 0. A lane operation counts the lane's takes, its first included, so one delivered once reads 1 and a redelivery 2; maybe_delivered says whether an earlier take may have reached the agent.
+     */
+    attempt?: number;
+    /**
+     * True once a cancel is recorded on an operation that was already executing; its outcome says whether the cancel won. Set on the op routes and op.changed only.
+     */
+    cancel_requested?: boolean;
+    /**
+     * What caused the operation, as the producer named it. Set on the op routes and op.changed only.
+     */
+    causation?: string;
+    /**
+     * The producer's client key: the Idempotency-Key, or the key the server minted. Set on the op routes and op.changed only.
+     */
+    client_key?: string;
+    /**
+     * The producer's own sequence number, which orders its operations of equal precedence. Set on the op routes and op.changed only.
+     */
+    client_seq?: number;
+    /**
+     * Session (conversation) id the operation targets.
+     */
+    conversation: string;
+    /**
+     * The producer's correlation id. Set on the op routes and op.changed only.
+     */
+    correlation?: string;
+    /**
+     * When the operation was proposed. Set on the op routes and op.changed only.
+     */
+    created_at?: string;
+    /**
+     * Who executes the operation: lane (the conversation lane) or a legacy path. Set on the op routes and op.changed only.
+     */
+    executor?: 'lane' | 'legacy' | 'legacy:api' | 'legacy:cli';
+    /**
+     * Operation id. Equals request_id on async responses.
+     */
+    id: string;
+    /**
+     * Operation kind.
+     */
+    kind: 'message' | 'interrupt' | 'respond' | 'create' | 'wake' | 'suspend' | 'resume' | 'restart' | 'kill' | 'close';
+    /**
+     * The conversation lane's sequence number of the operation's last take. Set on the op routes and op.changed only.
+     */
+    lane_seq?: number;
+    /**
+     * The last attempt that may have reached the agent (a redelivery after an ambiguous attempt), 0 when none may have. Set on the op routes and op.changed only.
+     */
+    maybe_delivered?: number;
+    /**
+     * Present when status is closed.
+     */
+    outcome?: ConversationOpOutcome;
+    /**
+     * The producer's principal: operator, conversation:<id>, t3:<environment id>, or gc:<producer> for gc's own producers. Asserted, not authenticated. Set on the op routes and op.changed only.
+     */
+    principal?: string;
+    /**
+     * Operation status. A legacy-executed operation stays submitted until it closes.
+     */
+    status: 'submitted' | 'accepted' | 'executing' | 'settling' | 'closed';
+};
+
+export type ConversationOpCancelBody = {
+    /**
+     * The asserted principal recorded as the canceler: operator (the default) or t3:<environment id>.
+     */
+    principal?: string;
+    /**
+     * Why the producer cancels.
+     */
+    reason?: string;
+};
+
+export type ConversationOpCancelResult = {
+    /**
+     * The operation after the cancel.
+     */
+    op: ConversationOp;
+    /**
+     * What the cancel did: closed (the operation had not started and is now closed canceled), requested (it is executing; the cancel is recorded and its outcome says who won), already_decided (it is settling; nothing was written) or already_terminal (it was closed).
+     */
+    result: 'closed' | 'requested' | 'already_decided' | 'already_terminal';
+};
+
+export type ConversationOpDelivery = {
+    /**
+     * The runtime's answer (open vocabulary, e.g. delivered, delivered_unobserved, in_band).
+     */
+    ack?: string;
+    /**
+     * The lane's clock just before the delivery's first input.
+     */
+    at?: string;
+    /**
+     * The runtime's creation time for the delivered message, when it reports one.
+     */
+    message_at?: string;
+    /**
+     * The runtime's id for the delivered message, when it reports one.
+     */
+    message_id?: string;
+    /**
+     * lane_seq of the delivery's head operation.
+     */
+    seq?: number;
+};
+
+export type ConversationOpOutcome = {
+    /**
+     * Outcome arm.
+     */
+    arm: 'succeeded' | 'failed' | 'skipped' | 'canceled';
+    /**
+     * How a succeeded operation fell short of its policy, e.g. unfenced_interrupt.
+     */
+    degradation?: string;
+    /**
+     * Why a failed or skipped operation ended (open vocabulary; refused:<why> names a refusal).
+     */
+    reason?: string;
+    /**
+     * What a succeeded or coalesced operation produced. Set on the op routes and op.changed only.
+     */
+    result?: ConversationOpResult;
+    /**
+     * How it was carried out; legacy.* in this release (legacy.delivered, legacy.queued).
+     */
+    via?: string;
+};
+
+export type ConversationOpPolicyBody = {
+    /**
+     * Execution guarantee: at_least_once (the default; a delivery is repeated only after an ambiguous attempt) or at_most_once (never repeated).
+     */
+    guarantee?: 'at_least_once' | 'at_most_once';
+    /**
+     * The interrupt policy.
+     */
+    interrupt?: ConversationInterruptPolicyBody;
+    /**
+     * The message policy.
+     */
+    message?: ConversationMessagePolicyBody;
+};
+
+export type ConversationOpProposeBody = {
+    /**
+     * The actor class within the principal, e.g. user, system or mcp. Defaults to operator for the operator principal; required with a t3 principal.
+     */
+    actor?: string;
+    /**
+     * An operation id of the same session this one runs after.
+     */
+    after?: string;
+    /**
+     * What caused the operation.
+     */
+    causation?: string;
+    /**
+     * The producer's idempotency key (e.g. T3's message id). The Idempotency-Key header may carry it instead; when both are set they must be equal. Minted and returned when both are absent.
+     */
+    client_key?: string;
+    /**
+     * The producer's own sequence number: it keeps two quick proposals in their order even when relayed concurrently.
+     */
+    client_seq?: number;
+    /**
+     * The producer's correlation id.
+     */
+    correlation?: string;
+    /**
+     * The deadline for the operation to finish.
+     */
+    finish_by?: string;
+    /**
+     * Operation kind. Only kinds listed in [ops] authoritative are accepted (409 kind-not-enabled otherwise).
+     */
+    kind: 'message' | 'interrupt' | 'respond' | 'create' | 'wake' | 'suspend' | 'resume' | 'restart' | 'kill' | 'close';
+    /**
+     * Do not start before this time.
+     */
+    not_before?: string;
+    /**
+     * The operation's payload: a message's text.
+     */
+    payload?: string;
+    /**
+     * The operation's policy; omitted fields take the kind's defaults.
+     */
+    policy?: ConversationOpPolicyBody;
+    /**
+     * The asserted principal: operator (the default) or t3:<environment id> for a T3 Code environment. Until the front door exists it is asserted, not authenticated, like the operator identity of every API mutation; conversation:<id> and gc:<producer> stay reserved to gc's own producers. It keys the operation with the client key, so a retry must send the same one.
+     */
+    principal?: string;
+    /**
+     * The operation's validity scope; omitted takes the kind's default.
+     */
+    scope?: ConversationOpScopeBody;
+    /**
+     * Close the operation failed if it has not started by this time.
+     */
+    start_by?: string;
+};
+
+export type ConversationOpProposeResult = {
+    /**
+     * The client key the operation is recorded under: the producer's, or the one the server minted. Retry with it to get this operation back.
+     */
+    client_key: string;
+    /**
+     * True when this request wrote the operation (201), false when it already existed (200).
+     */
+    created: boolean;
+    /**
+     * City event-stream sequence captured before the proposal. Pass it as after_seq to /v0/city/{cityName}/events/stream to receive this operation's op.changed events.
+     */
+    cursor: string;
+    /**
+     * The operation.
+     */
+    op: ConversationOp;
+    /**
+     * The operation id, derived from the session, the principal and the client key.
+     */
+    op_id: string;
+    /**
+     * The operation's status now.
+     */
+    status: 'submitted' | 'accepted' | 'executing' | 'settling' | 'closed';
+};
+
+export type ConversationOpResult = {
+    /**
+     * The operation this one was delivered with, when coalesced.
+     */
+    coalesced_into?: string;
+    /**
+     * Context epoch the operation ran in.
+     */
+    context_epoch?: number;
+    /**
+     * The conversation lane's delivery record.
+     */
+    delivery?: ConversationOpDelivery;
+    /**
+     * Session generation the operation ran in.
+     */
+    generation?: number;
+    /**
+     * The turn the operation ran in or was linked to; empty when the link is none.
+     */
+    turn?: string;
+    /**
+     * The rule that decided the turn link (open vocabulary, e.g. runtime_turn, history_diff, no_source).
+     */
+    turn_basis?: string;
+    /**
+     * Confidence of the turn link: exact when the runtime named the turn, correlated or ambiguous from observed turns, none when no turn could be linked.
+     */
+    turn_link?: 'exact' | 'correlated' | 'ambiguous' | 'none';
+};
+
+export type ConversationOpScopeBody = {
+    /**
+     * The context epoch of a context scope.
+     */
+    epoch?: number;
+    /**
+     * The session generation of a session scope.
+     */
+    generation?: number;
+    /**
+     * The interaction occurrence a respond answers.
+     */
+    interaction?: string;
+    /**
+     * conversation (any session), context (one context epoch) or session (one session generation).
+     */
+    kind: 'conversation' | 'context' | 'session';
+    /**
+     * The turn an interrupt targets.
+     */
+    turn?: string;
+};
 
 export type ConversationRef = {
     account_id: string;
@@ -940,7 +1360,7 @@ export type EventEmitRequest = {
     type: string;
 };
 
-export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkerOperationEventPayload;
+export type EventPayload = AdapterEventPayload | BackendCredentialResolvedPayload | BeadClaimFailedPayload | BeadClaimLoopHeldPayload | BeadClaimRejectedPayload | BeadClaimReleasedPayload | BeadDeadAssigneeReopenedPayload | BeadEventPayload | BeadWorktreeReapSkippedPayload | BeadWorktreeReapedPayload | BlockedRecomputedPayload | BoundEventPayload | CityCreateSucceededPayload | CityLifecyclePayload | CityUnregisterSucceededPayload | ConditionalWritesDegradedPayload | ControlDispatcherScopeGapPayload | ControlRootSettleFailedPayload | ControlStalledPayload | ExecutionClaimWindowExpiredPayload | ExecutionStepStalledPayload | FactRecordedPayload | GroupCreatedEventPayload | HookClaimReclaimedStalePayload | InboundEventPayload | MailEventPayload | MoleculeResolvedPayload | NoPayload | OpChangedPayload | OpsRecordingDegradedPayload | OrderInapplicablePayload | OrderSkippedPayload | OrderSuppressedPayload | OutboundChannelMismatchPayload | OutboundEventPayload | ProjectIdentityStampedPayload | Record | RequestAcceptedPayload | RequestFailedPayload | RigCreateSucceededPayload | RigProvisionProgressPayload | RotatedPayload | SessionCreateSucceededPayload | SessionDemandClaimDivergencePayload | SessionDrainAckedWithAssignedWorkPayload | SessionLifecyclePayload | SessionMessageSucceededPayload | SessionPendingClearedPayload | SessionPendingPayload | SessionPoolSlotRetiredAtDrainDeadlinePayload | SessionResetStalledPayload | SessionStrandedClaimsPayload | SessionStrandedPayload | SessionSubmitSucceededPayload | SessionUnknownStatePayload | SessionWakeRefusedPayload | StorageBindingOutcomePayload | StoreDiskCriticalPayload | StoreDiskWarnPayload | StoreMaintenanceDonePayload | StoreMaintenanceFailedPayload | SupervisorFsPressureSkippedTickPayload | SupervisorRequestPayload | SupervisorShutdownPayload | SupervisorStartedPayload | UnboundEventPayload | WebhookReceivedPayload | WebhookRejectedPayload | WorkLadderPayload | WorkerOperationEventPayload;
 
 export type EventRotateAnchor = {
     /**
@@ -1276,6 +1696,13 @@ export type ExtmsgAdapterInfo = {
     provider: string;
 };
 
+export type FactRecordedPayload = {
+    /**
+     * The recorded fact.
+     */
+    fact: ConversationFact;
+};
+
 export type FanoutPolicy = {
     AllowUntargetedPublication: boolean;
     Enabled: boolean;
@@ -1563,6 +1990,29 @@ export type ListBodyCityPendingEntry = {
      * The list of items.
      */
     items: Array<CityPendingEntry> | null;
+    /**
+     * Cursor for the next page of results.
+     */
+    next_cursor?: string;
+    /**
+     * True when one or more backends failed and the list is incomplete.
+     */
+    partial?: boolean;
+    /**
+     * Human-readable errors from backends that failed during aggregation.
+     */
+    partial_errors?: Array<string> | null;
+    /**
+     * Total number of items matching the query.
+     */
+    total: number;
+};
+
+export type ListBodyConversationOp = {
+    /**
+     * The list of items.
+     */
+    items: Array<ConversationOp> | null;
     /**
      * Cursor for the next page of results.
      */
@@ -2073,9 +2523,55 @@ export type OkWithIdResponseBody = {
      */
     id?: string;
     /**
+     * The key the request was recorded under: the client's Idempotency-Key, one the server minted when the request carried none, or, for a stop of a known turn, stop:<generation>:<turn>, so two stops of one turn are one operation. Retry with the Idempotency-Key to get this request's outcome instead of acting again.
+     */
+    idempotency_key?: string;
+    /**
+     * The operation the request was recorded as.
+     */
+    op?: ConversationOp;
+    /**
+     * True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome. A replayed stop never interrupts a later turn.
+     */
+    replayed?: boolean;
+    /**
      * Operation result.
      */
     status: string;
+};
+
+export type OpChangedPayload = {
+    /**
+     * The operation as its row reads after the change.
+     */
+    op: ConversationOp;
+};
+
+export type OpsRecordingDegradedPayload = {
+    /**
+     * The store error's text, at most 512 bytes.
+     */
+    detail?: string;
+    /**
+     * The ops rollout gate whose recording degraded.
+     */
+    gate: 'ops.content' | 'ops.control' | 'ops.lifecycle';
+    /**
+     * The gate's resolved mode.
+     */
+    mode: 'auto' | 'require';
+    /**
+     * Reason class: conditional_writes_unsupported, type_unregistered, no_namespace, store_error or contention.
+     */
+    reason: string;
+    /**
+     * The recording step that failed.
+     */
+    stage: 'open' | 'propose' | 'close' | 'adopt' | 'sweep';
+    /**
+     * Which producer degraded: the API server or the controller's op sweeper.
+     */
+    surface: 'api' | 'controller';
 };
 
 export type OptionChoiceDto = {
@@ -2706,6 +3202,44 @@ export type ReadinessResponse = {
     };
 };
 
+export type ReadyBead = {
+    assignee?: string;
+    blocked_by?: Array<ReadyBeadBlocker> | null;
+    close_reason?: string;
+    created_at: string;
+    defer_until?: string;
+    dependencies?: Array<ReadyBeadDep> | null;
+    description?: string;
+    ephemeral?: boolean;
+    from?: string;
+    id: string;
+    is_blocked?: boolean;
+    issue_type: string;
+    labels?: Array<string> | null;
+    metadata?: {
+        [key: string]: string;
+    };
+    needs?: Array<string> | null;
+    no_history?: boolean;
+    parent?: string;
+    priority?: number;
+    ref?: string;
+    status: string;
+    title: string;
+    updated_at?: string;
+};
+
+export type ReadyBeadBlocker = {
+    id: string;
+    status: string;
+};
+
+export type ReadyBeadDep = {
+    depends_on_id: string;
+    issue_id: string;
+    type: string;
+};
+
 export type Record = {
     actor: string;
     created_at: string;
@@ -2721,6 +3255,17 @@ export type Record = {
     source_pid?: number;
 };
 
+export type RequestAcceptedPayload = {
+    /**
+     * Which operation was accepted.
+     */
+    operation: 'session.create' | 'session.message' | 'session.submit';
+    /**
+     * Correlation ID from the 202 response.
+     */
+    request_id: string;
+};
+
 export type RequestFailedPayload = {
     /**
      * Machine-readable error code.
@@ -2730,6 +3275,10 @@ export type RequestFailedPayload = {
      * Human-readable error description.
      */
     error_message: string;
+    /**
+     * The operation the failed request was recorded as, when it was.
+     */
+    op?: ConversationOp;
     /**
      * Which operation failed.
      */
@@ -2742,6 +3291,25 @@ export type RequestFailedPayload = {
      * Session a failed session.create had already written, when the server could identify it, so the client can inspect or clean it up instead of retrying into a duplicate. Absence does not prove that no session was written. The event subject does not carry this ID; match the event to its request by request_id.
      */
     session_id?: string;
+};
+
+export type RequestOutcome = {
+    /**
+     * The terminal event exactly as /v0/city/{cityName}/events and the event stream deliver it: request.result.session.* for succeeded, request.failed for failed. Absent while pending and for outcome_unknown.
+     */
+    event?: TypedEventStreamEnvelope;
+    /**
+     * The operation that was accepted.
+     */
+    operation: 'session.create' | 'session.message' | 'session.submit';
+    /**
+     * The request_id from the 202 response.
+     */
+    request_id: string;
+    /**
+     * pending: the request is still running, or its terminal event is held until the city event log takes it. succeeded: its request.result.* event was recorded; event carries it. failed: its request.failed event was recorded; event carries it. outcome_unknown: the server that accepted the request stopped (or lost the terminal event) before recording an outcome, so the operation may or may not have taken effect; inspect the target resource before retrying.
+     */
+    state: 'pending' | 'succeeded' | 'failed' | 'outcome_unknown';
 };
 
 export type RigActionBody = {
@@ -2990,11 +3558,30 @@ export type Run = {
     updated_at?: string;
 };
 
+export type RunCancelInterruptFailure = {
+    /**
+     * Why the interrupt failed.
+     */
+    error: string;
+    /**
+     * Session ID, or the step assignee when it could not be resolved to a session.
+     */
+    session: string;
+};
+
 export type RunCancelOutputBody = {
     /**
-     * Count of the run's beads closed by the cancel.
+     * Count of the run's beads closed by the cancel. Closing is the durable part of a cancel: no closed bead is claimed again.
      */
     closed: number;
+    /**
+     * Holders of an in-progress step the cancel closed whose current turn could not be interrupted. The cancel is durable regardless; stop or suspend these sessions directly.
+     */
+    interrupt_failures?: Array<RunCancelInterruptFailure> | null;
+    /**
+     * IDs of the sessions whose current turn was interrupted because they held an in-progress step the cancel closed. Interrupting ends the agent's turn, the same as POST /session/{id}/stop; for Codex it also closes the session's background terminals. It does not verify that every process the step started has exited, and it cannot undo effects the step already made, such as a push or a call to a remote service. The sessions are not killed; they stay up to serve other work.
+     */
+    interrupted?: Array<string> | null;
     /**
      * The canceled run.
      */
@@ -3096,7 +3683,7 @@ export type RunStep = {
      */
     kind?: string;
     /**
-     * Closed step lifecycle status.
+     * Closed step lifecycle status. Under a terminal run an unfinished step reads the status the run's wind-down closes it with (canceled for a canceled run, skipped otherwise), so it never changes from one terminal status to another; a step that executes after the run settles (the workflow finalizer, the teardown tail) reads its own status until it closes.
      */
     status: RunStepStatus;
     /**
@@ -3204,6 +3791,25 @@ export type SessionBindingRecord = {
     SessionID: string;
     SessionName: string;
     Status: BindingStatus;
+};
+
+export type SessionCommandStatusBody = {
+    /**
+     * The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of acting again.
+     */
+    idempotency_key?: string;
+    /**
+     * The operation the request was recorded as.
+     */
+    op?: ConversationOp;
+    /**
+     * True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome.
+     */
+    replayed?: boolean;
+    /**
+     * Operation result.
+     */
+    status: string;
 };
 
 export type SessionCreateBody = {
@@ -3329,6 +3935,10 @@ export type SessionMessageInputBody = {
 };
 
 export type SessionMessageSucceededPayload = {
+    /**
+     * The operation the request was recorded as, when it was; on a replay of a finished request the will_start fields are absent.
+     */
+    op?: ConversationOp;
     /**
      * True when the message was queued rather than delivered: the session is held (or not running) and the message waits for its next run, expiring after 24h.
      */
@@ -3514,6 +4124,18 @@ export type SessionRespondOutputBody = {
      */
     id: string;
     /**
+     * The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second response.
+     */
+    idempotency_key?: string;
+    /**
+     * The operation the request was recorded as.
+     */
+    op?: ConversationOp;
+    /**
+     * True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome.
+     */
+    replayed?: boolean;
+    /**
      * Operation result.
      */
     status: string;
@@ -3546,13 +4168,28 @@ export type SessionResponse = {
     provider: string;
     reason?: string;
     rig?: string;
+    /**
+     * Whether the session's runtime was live when this response was built, in any open state. It observes the runtime, not the agent: on tmux it is true while the session has a pane whose process has not exited, so a pane still running a launch wrapper or shell before the agent starts reads true, and a pane kept by remain-on-exit after its process exited reads false. GET /session/{id} and GET /sessions read the same probe, which tmux serves from a fleet snapshot refreshed at most every 2 s. Point-in-time: a session in a transitional state (creating, start-pending, draining) can start or stop its process right after; a client confirming quiescence should re-read after its last transition settles.
+     */
     running: boolean;
     session_name: string;
     state: string;
     submission_capabilities?: SubmissionCapabilities;
     template: string;
     title: string;
+    /**
+     * The turn the session's conversation lane last observed, with the runtime's turn capabilities. Set on a single-session read while the city's conversation lane host runs with a kind of [ops] authoritative, once its observer has recorded the session's runtime row.
+     */
+    turn?: SessionTurn;
     work_dir?: string;
+};
+
+export type SessionStopBody = {
+    /**
+     * The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running.
+     */
+    turn?: string;
+    [key: string]: unknown;
 };
 
 export type SessionStrandedClaimsPayload = {
@@ -4626,11 +5263,34 @@ export type SessionSubmitInputBody = {
     resume?: boolean;
 };
 
+export type SessionSubmitInterrupt = {
+    /**
+     * unfenced_interrupt when the runtime accepted the interrupt without fencing it to that turn.
+     */
+    degradation?: string;
+    /**
+     * settled: the interrupt was sent and the turn ended; no_turn: no turn ran, nothing was sent; stale: the sighted turn ended or was replaced, or its agent is down, nothing was sent; unsettled: the interrupt was sent but the turn was not seen to end in time; unavailable: a read or the interrupt failed, nothing is known to have been sent.
+     */
+    outcome: 'settled' | 'no_turn' | 'stale' | 'unsettled' | 'unavailable';
+    /**
+     * The turn the interrupt targeted, when one was sighted.
+     */
+    turn_id?: string;
+};
+
 export type SessionSubmitSucceededPayload = {
     /**
      * Resolved submit intent (default, follow_up, interrupt_now).
      */
     intent: string;
+    /**
+     * What an interrupt_now did about the running turn, on a runtime that reports turns. Absent when no turn fence ran.
+     */
+    interrupt?: SessionSubmitInterrupt;
+    /**
+     * The operation the request was recorded as, when it was; on a replay of a finished request the will_start and interrupt fields are absent.
+     */
+    op?: ConversationOp;
     /**
      * Whether the message was queued for later delivery.
      */
@@ -4735,6 +5395,152 @@ export type SessionTranscriptStructuredResponse = {
      */
     structured_messages: Array<SessionStructuredMessage>;
     template: string;
+};
+
+export type SessionTurn = {
+    /**
+     * When the observer saw the current state begin.
+     */
+    at?: string;
+    /**
+     * The runtime's turn capabilities (gc.rt.turn.caps): the turn axes, then source, interrupt and replace.
+     */
+    caps?: Array<SessionTurnCapPair> | null;
+    /**
+     * The session generation the turn cells describe.
+     */
+    generation: number;
+    /**
+     * The running turn's id, as the runtime names it.
+     */
+    id?: string;
+    /**
+     * When the observer saw the last turn end.
+     */
+    last_at?: string;
+    /**
+     * Why the last turn ended (completed, interrupted, superseded, ...).
+     */
+    last_end?: string;
+    /**
+     * The last turn seen to end.
+     */
+    last_id?: string;
+    /**
+     * The observer's clock at the observation that last changed the cells.
+     */
+    observed_at?: string;
+    /**
+     * running, ended, or unknown (never observed, or the cells describe another generation). Open: a newer build may add values.
+     */
+    state: string;
+};
+
+export type SessionTurnCapPair = {
+    /**
+     * Capability name, e.g. start, end, fence, link, source, interrupt, replace.
+     */
+    key: string;
+    /**
+     * Capability value.
+     */
+    value: string;
+};
+
+export type SessionTurnCapabilities = {
+    /**
+     * How turn ends are known: recorded means every end carries its id and how it ended; inferred means some ends are inferred from the session going idle.
+     */
+    end: 'none' | 'boundary' | 'inferred' | 'recorded';
+    /**
+     * How an interrupt could be confined to a named turn: atomic means the runtime refuses to interrupt a turn that is not current; checked means the turn is re-read just before an untargeted interrupt, so a turn starting in between can still be hit; none means an interrupt cannot be aimed at a turn.
+     */
+    fence: 'none' | 'checked' | 'atomic';
+    /**
+     * How the runtime interrupts the session's turn. unsupported forces fence none.
+     */
+    interrupt: 'keystroke' | 'protocol' | 'unsupported';
+    /**
+     * How a delivery is tied to the turn it started: exact means the runtime names it; correlated means it is matched by observation.
+     */
+    link: 'none' | 'correlated' | 'exact';
+    /**
+     * Every turn since the last read can be recovered from the next one.
+     */
+    lossless: boolean;
+    /**
+     * How turn starts are known: recorded means every start carries its turn id.
+     */
+    start: 'none' | 'boundary' | 'recorded';
+};
+
+export type SessionTurnCurrent = {
+    /**
+     * The turn's id, as the source records it. Opaque; compare for equality only.
+     */
+    id: string;
+    /**
+     * When the turn started, at the source's precision; absent when unknown.
+     */
+    started_at?: string;
+};
+
+export type SessionTurnEnded = {
+    /**
+     * When the turn ended: the source's time, or, for an inferred end, the server's when the read inferred it; absent when unknown. Each read infers an end anew, so an inferred end's time can differ between reads, and a read that cannot confirm the session idle reports that turn current again.
+     */
+    ended_at?: string;
+    /**
+     * The turn's id, as the source records it. Opaque; compare for equality only.
+     */
+    id: string;
+    /**
+     * The end was inferred from the session going idle, not recorded.
+     */
+    inferred: boolean;
+    /**
+     * When the turn started, at the source's precision; absent when unknown.
+     */
+    started_at?: string;
+    /**
+     * How the turn ended: completed, cancelled or failed (the runtime's spelling); absent when the source closed it only because a newer turn started.
+     */
+    status?: string;
+};
+
+export type SessionTurnResponse = {
+    /**
+     * How far the source's answer can be trusted.
+     */
+    capabilities: SessionTurnCapabilities;
+    /**
+     * The turn in progress. Absent when no turn is running, or when the observation is not observed.
+     */
+    current?: SessionTurnCurrent;
+    /**
+     * Why the observation is not observed.
+     */
+    detail?: string;
+    /**
+     * What this read saw. observed: current and recent are this read's answer, and an absent current means no turn is running. unavailable: the source exists but could not be read now (a transcript not written yet, no conversation key yet, a runtime that did not answer); the session's turns are unknown, not idle, so retry. unsupported: the session's turns cannot be identified (no source, or a transcript that records turns without ids).
+     */
+    observation: 'observed' | 'unavailable' | 'unsupported';
+    /**
+     * When the read was made, on the server's clock. Present only when observed.
+     */
+    observed_at?: string;
+    /**
+     * Turns that ended, newest first. A transcript source reports at most 8 from a bounded window, so a turn that ends between two reads can fall out of it unless capabilities.lossless is true.
+     */
+    recent?: Array<SessionTurnEnded> | null;
+    /**
+     * The resolved session id.
+     */
+    session_id: string;
+    /**
+     * Where the session's turns are read from: protocol (the runtime observes turns itself), transcript (the provider's transcript of the session's own conversation, on this host), or none (the session's turns cannot be identified here). Fixed for the session's generation.
+     */
+    source: 'protocol' | 'transcript' | 'none';
 };
 
 export type SessionUnknownStatePayload = {
@@ -5399,6 +6205,7 @@ export type StrandedClaim = {
 export type SubmissionCapabilities = {
     supports_follow_up: boolean;
     supports_interrupt_now: boolean;
+    supports_steer: boolean;
 };
 
 /**
@@ -5602,6 +6409,10 @@ export type TranscriptProvenance = 'live' | 'hydrated';
 export type TypedEventStreamEnvelope = ({
     type: 'backend.credential_resolved';
 } & TypedEventStreamEnvelopeBackendCredentialResolved) | ({
+    type: 'bead.claim_failed';
+} & TypedEventStreamEnvelopeBeadClaimFailed) | ({
+    type: 'bead.claim_loop_held';
+} & TypedEventStreamEnvelopeBeadClaimLoopHeld) | ({
     type: 'bead.claim_rejected';
 } & TypedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.claim_released';
@@ -5682,6 +6493,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'fact.recorded';
+} & TypedEventStreamEnvelopeFactRecorded) | ({
     type: 'gc.store.disk_critical';
 } & TypedEventStreamEnvelopeGcStoreDiskCritical) | ({
     type: 'gc.store.disk_warn';
@@ -5708,6 +6521,10 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'op.changed';
+} & TypedEventStreamEnvelopeOpChanged) | ({
+    type: 'ops.recording_degraded';
+} & TypedEventStreamEnvelopeOpsRecordingDegraded) | ({
     type: 'order.completed';
 } & TypedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -5724,6 +6541,8 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.accepted';
+} & TypedEventStreamEnvelopeRequestAccepted) | ({
     type: 'request.failed';
 } & TypedEventStreamEnvelopeRequestFailed) | ({
     type: 'request.result.city.create';
@@ -5812,6 +6631,20 @@ export type TypedEventStreamEnvelope = ({
 } & TypedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.escalated';
+} & TypedEventStreamEnvelopeWorkEscalated) | ({
+    type: 'work.nudge_failed';
+} & TypedEventStreamEnvelopeWorkNudgeFailed) | ({
+    type: 'work.nudged';
+} & TypedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.recycle_requested';
+} & TypedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.release_unfinished';
+} & TypedEventStreamEnvelopeWorkReleaseUnfinished) | ({
+    type: 'work.released';
+} & TypedEventStreamEnvelopeWorkReleased) | ({
+    type: 'work.started_unrecorded';
+} & TypedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedEventStreamEnvelopeCustom';
@@ -5832,6 +6665,42 @@ export type TypedEventStreamEnvelopeBackendCredentialResolved = {
     subject?: string;
     ts: string;
     type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.claim_failed
+ */
+export type TypedEventStreamEnvelopeBeadClaimFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope bead.claim_loop_held
+ */
+export type TypedEventStreamEnvelopeBeadClaimLoopHeld = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimLoopHeldPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_loop_held';
     workflow?: WorkflowEventProjection;
 };
 
@@ -6574,6 +7443,24 @@ export type TypedEventStreamEnvelopeExtmsgUnbound = {
 };
 
 /**
+ * TypedEventStreamEnvelope fact.recorded
+ */
+export type TypedEventStreamEnvelopeFactRecorded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: FactRecordedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'fact.recorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope gc.store.disk_critical
  */
 export type TypedEventStreamEnvelopeGcStoreDiskCritical = {
@@ -6808,6 +7695,42 @@ export type TypedEventStreamEnvelopeMoleculeResolved = {
 };
 
 /**
+ * TypedEventStreamEnvelope op.changed
+ */
+export type TypedEventStreamEnvelopeOpChanged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'op.changed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope ops.recording_degraded
+ */
+export type TypedEventStreamEnvelopeOpsRecordingDegraded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpsRecordingDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'ops.recording_degraded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope order.completed
  */
 export type TypedEventStreamEnvelopeOrderCompleted = {
@@ -6948,6 +7871,24 @@ export type TypedEventStreamEnvelopeProviderSwapped = {
     subject?: string;
     ts: string;
     type: 'provider.swapped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope request.accepted
+ */
+export type TypedEventStreamEnvelopeRequestAccepted = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: RequestAcceptedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.accepted';
     workflow?: WorkflowEventProjection;
 };
 
@@ -7744,6 +8685,132 @@ export type TypedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedEventStreamEnvelope work.escalated
+ */
+export type TypedEventStreamEnvelopeWorkEscalated = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.nudge_failed
+ */
+export type TypedEventStreamEnvelopeWorkNudgeFailed = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudge_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.nudged
+ */
+export type TypedEventStreamEnvelopeWorkNudged = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.recycle_requested
+ */
+export type TypedEventStreamEnvelopeWorkRecycleRequested = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.recycle_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.release_unfinished
+ */
+export type TypedEventStreamEnvelopeWorkReleaseUnfinished = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.release_unfinished';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.released
+ */
+export type TypedEventStreamEnvelopeWorkReleased = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedEventStreamEnvelope worker.operation
  */
 export type TypedEventStreamEnvelopeWorkerOperation = {
@@ -7769,6 +8836,10 @@ export type TypedEventStreamEnvelopeWorkerOperation = {
 export type TypedTaggedEventStreamEnvelope = ({
     type: 'backend.credential_resolved';
 } & TypedTaggedEventStreamEnvelopeBackendCredentialResolved) | ({
+    type: 'bead.claim_failed';
+} & TypedTaggedEventStreamEnvelopeBeadClaimFailed) | ({
+    type: 'bead.claim_loop_held';
+} & TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld) | ({
     type: 'bead.claim_rejected';
 } & TypedTaggedEventStreamEnvelopeBeadClaimRejected) | ({
     type: 'bead.claim_released';
@@ -7849,6 +8920,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeExtmsgOutboundChannelMismatch) | ({
     type: 'extmsg.unbound';
 } & TypedTaggedEventStreamEnvelopeExtmsgUnbound) | ({
+    type: 'fact.recorded';
+} & TypedTaggedEventStreamEnvelopeFactRecorded) | ({
     type: 'gc.store.disk_critical';
 } & TypedTaggedEventStreamEnvelopeGcStoreDiskCritical) | ({
     type: 'gc.store.disk_warn';
@@ -7875,6 +8948,10 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeMailSent) | ({
     type: 'molecule.resolved';
 } & TypedTaggedEventStreamEnvelopeMoleculeResolved) | ({
+    type: 'op.changed';
+} & TypedTaggedEventStreamEnvelopeOpChanged) | ({
+    type: 'ops.recording_degraded';
+} & TypedTaggedEventStreamEnvelopeOpsRecordingDegraded) | ({
     type: 'order.completed';
 } & TypedTaggedEventStreamEnvelopeOrderCompleted) | ({
     type: 'order.failed';
@@ -7891,6 +8968,8 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeProjectIdentityStamped) | ({
     type: 'provider.swapped';
 } & TypedTaggedEventStreamEnvelopeProviderSwapped) | ({
+    type: 'request.accepted';
+} & TypedTaggedEventStreamEnvelopeRequestAccepted) | ({
     type: 'request.failed';
 } & TypedTaggedEventStreamEnvelopeRequestFailed) | ({
     type: 'request.result.city.create';
@@ -7979,6 +9058,20 @@ export type TypedTaggedEventStreamEnvelope = ({
 } & TypedTaggedEventStreamEnvelopeWebhookReceived) | ({
     type: 'webhook.rejected';
 } & TypedTaggedEventStreamEnvelopeWebhookRejected) | ({
+    type: 'work.escalated';
+} & TypedTaggedEventStreamEnvelopeWorkEscalated) | ({
+    type: 'work.nudge_failed';
+} & TypedTaggedEventStreamEnvelopeWorkNudgeFailed) | ({
+    type: 'work.nudged';
+} & TypedTaggedEventStreamEnvelopeWorkNudged) | ({
+    type: 'work.recycle_requested';
+} & TypedTaggedEventStreamEnvelopeWorkRecycleRequested) | ({
+    type: 'work.release_unfinished';
+} & TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished) | ({
+    type: 'work.released';
+} & TypedTaggedEventStreamEnvelopeWorkReleased) | ({
+    type: 'work.started_unrecorded';
+} & TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded) | ({
     type: 'worker.operation';
 } & TypedTaggedEventStreamEnvelopeWorkerOperation) | ({
     type: 'TypedTaggedEventStreamEnvelopeCustom';
@@ -8000,6 +9093,44 @@ export type TypedTaggedEventStreamEnvelopeBackendCredentialResolved = {
     subject?: string;
     ts: string;
     type: 'backend.credential_resolved';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_failed
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimFailedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope bead.claim_loop_held
+ */
+export type TypedTaggedEventStreamEnvelopeBeadClaimLoopHeld = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: BeadClaimLoopHeldPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'bead.claim_loop_held';
     workflow?: WorkflowEventProjection;
 };
 
@@ -8783,6 +9914,25 @@ export type TypedTaggedEventStreamEnvelopeExtmsgUnbound = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope fact.recorded
+ */
+export type TypedTaggedEventStreamEnvelopeFactRecorded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: FactRecordedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'fact.recorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope gc.store.disk_critical
  */
 export type TypedTaggedEventStreamEnvelopeGcStoreDiskCritical = {
@@ -9030,6 +10180,44 @@ export type TypedTaggedEventStreamEnvelopeMoleculeResolved = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope op.changed
+ */
+export type TypedTaggedEventStreamEnvelopeOpChanged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpChangedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'op.changed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope ops.recording_degraded
+ */
+export type TypedTaggedEventStreamEnvelopeOpsRecordingDegraded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: OpsRecordingDegradedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'ops.recording_degraded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope order.completed
  */
 export type TypedTaggedEventStreamEnvelopeOrderCompleted = {
@@ -9178,6 +10366,25 @@ export type TypedTaggedEventStreamEnvelopeProviderSwapped = {
     subject?: string;
     ts: string;
     type: 'provider.swapped';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope request.accepted
+ */
+export type TypedTaggedEventStreamEnvelopeRequestAccepted = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: RequestAcceptedPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'request.accepted';
     workflow?: WorkflowEventProjection;
 };
 
@@ -10018,6 +11225,139 @@ export type TypedTaggedEventStreamEnvelopeWebhookRejected = {
 };
 
 /**
+ * TypedTaggedEventStreamEnvelope work.escalated
+ */
+export type TypedTaggedEventStreamEnvelopeWorkEscalated = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.escalated';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.nudge_failed
+ */
+export type TypedTaggedEventStreamEnvelopeWorkNudgeFailed = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudge_failed';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.nudged
+ */
+export type TypedTaggedEventStreamEnvelopeWorkNudged = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.nudged';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.recycle_requested
+ */
+export type TypedTaggedEventStreamEnvelopeWorkRecycleRequested = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.recycle_requested';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.release_unfinished
+ */
+export type TypedTaggedEventStreamEnvelopeWorkReleaseUnfinished = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.release_unfinished';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.released
+ */
+export type TypedTaggedEventStreamEnvelopeWorkReleased = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: WorkLadderPayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.released';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
+ * TypedTaggedEventStreamEnvelope work.started_unrecorded
+ */
+export type TypedTaggedEventStreamEnvelopeWorkStartedUnrecorded = {
+    actor: string;
+    city: string;
+    depends_on_step_ids?: Array<string>;
+    message?: string;
+    payload: SessionLifecyclePayload;
+    run_id?: string;
+    seq: number;
+    session_id?: string;
+    step_id?: string;
+    subject?: string;
+    ts: string;
+    type: 'work.started_unrecorded';
+    workflow?: WorkflowEventProjection;
+};
+
+/**
  * TypedTaggedEventStreamEnvelope worker.operation
  */
 export type TypedTaggedEventStreamEnvelopeWorkerOperation = {
@@ -10332,6 +11672,34 @@ export type WebhookRejectedPayload = {
      * Configured webhook name (empty only for unresolved routes, which are not evented).
      */
     webhook: string;
+};
+
+export type WorkActiveStepBody = {
+    /**
+     * The session's current formula step, exactly the bead its step reminder names; absent when there is none.
+     */
+    step?: ActiveWorkStep;
+};
+
+export type WorkLadderPayload = {
+    attempt?: number;
+    bead_id: string;
+    generation: number;
+    kind?: string;
+    paused?: boolean;
+    reason?: string;
+    rung?: string;
+    session_id: string;
+    session_name?: string;
+    store_ref?: string;
+    template?: string;
+};
+
+export type WorkReadyBody = {
+    /**
+     * The ready work, in the query's order, cut to its limit: exactly the rows gc ready prints.
+     */
+    items: Array<ReadyBead> | null;
 };
 
 export type WorkerOperationEventPayload = {
@@ -17229,6 +18597,57 @@ export type GetV0CityByCityNameReadinessResponses = {
 
 export type GetV0CityByCityNameReadinessResponse = GetV0CityByCityNameReadinessResponses[keyof GetV0CityByCityNameReadinessResponses];
 
+export type GetRequestOutcomeData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * The request_id from an async session request's 202 response.
+         */
+        requestId: string;
+    };
+    query: {
+        /**
+         * The event_cursor from the same 202 response. The request's request.accepted marker and terminal event both follow it, so the lookup reads only the events after it.
+         */
+        after_seq: string;
+    };
+    url: '/v0/city/{cityName}/request/{requestId}';
+};
+
+export type GetRequestOutcomeErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetRequestOutcomeError = GetRequestOutcomeErrors[keyof GetRequestOutcomeErrors];
+
+export type GetRequestOutcomeResponses = {
+    /**
+     * OK
+     */
+    200: RequestOutcome;
+};
+
+export type GetRequestOutcomeResponse = GetRequestOutcomeResponses[keyof GetRequestOutcomeResponses];
+
 export type DeleteV0CityByCityNameRigByNameData = {
     body?: never;
     headers: {
@@ -18182,6 +19601,10 @@ export type PostV0CityByCityNameSessionByIdCloseData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18195,7 +19618,7 @@ export type PostV0CityByCityNameSessionByIdCloseData = {
     };
     query?: {
         /**
-         * Permanently delete bead after closing.
+         * Permanently delete bead after closing. Part of the request an Idempotency-Key names: a same-key retry that changes it is 422, after an API restart too while the close is recorded as an operation, and a replay never deletes. After a restart a same-key retry finds the recorded close by the session ID only: by an alias or session_name, or after a completed delete, it is 404.
          */
         delete?: boolean;
     };
@@ -18239,7 +19662,7 @@ export type PostV0CityByCityNameSessionByIdCloseResponses = {
     /**
      * OK
      */
-    200: OkResponseBody;
+    200: SessionCommandStatusBody;
 };
 
 export type PostV0CityByCityNameSessionByIdCloseResponse = PostV0CityByCityNameSessionByIdCloseResponses[keyof PostV0CityByCityNameSessionByIdCloseResponses];
@@ -18251,6 +19674,10 @@ export type PostV0CityByCityNameSessionByIdKillData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18262,7 +19689,12 @@ export type PostV0CityByCityNameSessionByIdKillData = {
          */
         id: string;
     };
-    query?: never;
+    query?: {
+        /**
+         * Kill even when the session has live background subagents, or past a hung holder of its runtime lease whose record expired, as gc session kill --force does.
+         */
+        force?: boolean;
+    };
     url: '/v0/city/{cityName}/session/{id}/kill';
 };
 
@@ -18375,6 +19807,250 @@ export type SendSessionMessageResponses = {
 };
 
 export type SendSessionMessageResponse = SendSessionMessageResponses[keyof SendSessionMessageResponses];
+
+export type ListSessionOpsData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops';
+};
+
+export type ListSessionOpsErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ListSessionOpsError = ListSessionOpsErrors[keyof ListSessionOpsErrors];
+
+export type ListSessionOpsResponses = {
+    /**
+     * OK
+     */
+    200: ListBodyConversationOp;
+};
+
+export type ListSessionOpsResponse = ListSessionOpsResponses[keyof ListSessionOpsResponses];
+
+export type ProposeSessionOpData = {
+    body: ConversationOpProposeBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+        /**
+         * The client key, when the body does not carry one.
+         */
+        'Idempotency-Key'?: string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops';
+};
+
+export type ProposeSessionOpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type ProposeSessionOpError = ProposeSessionOpErrors[keyof ProposeSessionOpErrors];
+
+export type ProposeSessionOpResponses = {
+    /**
+     * The same request was proposed before: the stored operation, with created false.
+     */
+    200: ConversationOpProposeResult;
+    /**
+     * Created
+     */
+    201: ConversationOpProposeResult;
+};
+
+export type ProposeSessionOpResponse = ProposeSessionOpResponses[keyof ProposeSessionOpResponses];
+
+export type GetSessionOpData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+        /**
+         * Operation id.
+         */
+        op: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops/{op}';
+};
+
+export type GetSessionOpErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetSessionOpError = GetSessionOpErrors[keyof GetSessionOpErrors];
+
+export type GetSessionOpResponses = {
+    /**
+     * OK
+     */
+    200: ConversationOp;
+};
+
+export type GetSessionOpResponse = GetSessionOpResponses[keyof GetSessionOpResponses];
+
+export type CancelSessionOpData = {
+    body?: ConversationOpCancelBody;
+    headers: {
+        /**
+         * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
+         */
+        'X-GC-Request': string;
+    };
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+        /**
+         * Operation id.
+         */
+        op: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/ops/{op}/cancel';
+};
+
+export type CancelSessionOpErrors = {
+    /**
+     * Unauthorized
+     */
+    401: ErrorModel;
+    /**
+     * Forbidden
+     */
+    403: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type CancelSessionOpError = CancelSessionOpErrors[keyof CancelSessionOpErrors];
+
+export type CancelSessionOpResponses = {
+    /**
+     * OK
+     */
+    200: ConversationOpCancelResult;
+};
+
+export type CancelSessionOpResponse = CancelSessionOpResponses[keyof CancelSessionOpResponses];
 
 export type GetV0CityByCityNameSessionByIdPendingData = {
     body?: never;
@@ -18641,6 +20317,10 @@ export type PostV0CityByCityNameSessionByIdResetData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -18771,7 +20451,7 @@ export type RespondSessionResponses = {
 export type RespondSessionResponse = RespondSessionResponses[keyof RespondSessionResponses];
 
 export type PostV0CityByCityNameSessionByIdStopData = {
-    body?: never;
+    body?: SessionStopBody;
     headers: {
         /**
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
@@ -19070,6 +20750,10 @@ export type PostV0CityByCityNameSessionByIdSuspendData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -19122,7 +20806,7 @@ export type PostV0CityByCityNameSessionByIdSuspendResponses = {
     /**
      * OK
      */
-    200: OkResponseBody;
+    200: SessionCommandStatusBody;
 };
 
 export type PostV0CityByCityNameSessionByIdSuspendResponse = PostV0CityByCityNameSessionByIdSuspendResponses[keyof PostV0CityByCityNameSessionByIdSuspendResponses];
@@ -19197,6 +20881,56 @@ export type GetV0CityByCityNameSessionByIdTranscriptResponses = {
 };
 
 export type GetV0CityByCityNameSessionByIdTranscriptResponse = GetV0CityByCityNameSessionByIdTranscriptResponses[keyof GetV0CityByCityNameSessionByIdTranscriptResponses];
+
+export type GetV0CityByCityNameSessionByIdTurnData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+        /**
+         * Session ID, alias, or runtime session_name.
+         */
+        id: string;
+    };
+    query?: never;
+    url: '/v0/city/{cityName}/session/{id}/turn';
+};
+
+export type GetV0CityByCityNameSessionByIdTurnErrors = {
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameSessionByIdTurnError = GetV0CityByCityNameSessionByIdTurnErrors[keyof GetV0CityByCityNameSessionByIdTurnErrors];
+
+export type GetV0CityByCityNameSessionByIdTurnResponses = {
+    /**
+     * OK
+     */
+    200: SessionTurnResponse;
+};
+
+export type GetV0CityByCityNameSessionByIdTurnResponse = GetV0CityByCityNameSessionByIdTurnResponses[keyof GetV0CityByCityNameSessionByIdTurnResponses];
 
 export type PostV0CityByCityNameSessionByIdUnpinData = {
     body?: never;
@@ -19412,6 +21146,10 @@ export type CreateSessionData = {
          * Anti-CSRF header required on mutation requests. Any non-empty value is accepted; the header's presence is what the server checks.
          */
         'X-GC-Request': string;
+        /**
+         * Idempotency key for safe retries.
+         */
+        'Idempotency-Key'?: string;
     };
     path: {
         /**
@@ -19440,6 +21178,10 @@ export type CreateSessionErrors = {
      * Not Found
      */
     404: ErrorModel;
+    /**
+     * Conflict
+     */
+    409: ErrorModel;
     /**
      * Unprocessable Entity
      */
@@ -19759,6 +21501,140 @@ export type GetV0CityByCityNameWaitsResponses = {
 };
 
 export type GetV0CityByCityNameWaitsResponse = GetV0CityByCityNameWaitsResponses[keyof GetV0CityByCityNameWaitsResponses];
+
+export type GetV0CityByCityNameWorkActiveStepData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query: {
+        /**
+         * The session's identities, in the order the reminder tries them: its alias, its session name, its session id. Repeatable; one to eight.
+         */
+        assignee: Array<string> | null;
+        /**
+         * Directory of the work scope the session's work lives in, its rig root. Omitted or empty is the city.
+         */
+        scope_root?: string;
+    };
+    url: '/v0/city/{cityName}/work/active-step';
+};
+
+export type GetV0CityByCityNameWorkActiveStepErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWorkActiveStepError = GetV0CityByCityNameWorkActiveStepErrors[keyof GetV0CityByCityNameWorkActiveStepErrors];
+
+export type GetV0CityByCityNameWorkActiveStepResponses = {
+    /**
+     * OK
+     */
+    200: WorkActiveStepBody;
+};
+
+export type GetV0CityByCityNameWorkActiveStepResponse = GetV0CityByCityNameWorkActiveStepResponses[keyof GetV0CityByCityNameWorkActiveStepResponses];
+
+export type GetV0CityByCityNameWorkReadyData = {
+    body?: never;
+    path: {
+        /**
+         * City name.
+         */
+        cityName: string;
+    };
+    query?: {
+        /**
+         * Only work whose assignee is exactly this identity.
+         */
+        assignee?: string;
+        /**
+         * Only work with no assignee.
+         */
+        unassigned?: boolean;
+        /**
+         * Require metadata key=value, or a bare key for any non-empty value. Repeatable; every one must hold.
+         */
+        metadata_field?: Array<string> | null;
+        /**
+         * Drop beads of this issue type. Repeatable.
+         */
+        exclude_type?: Array<string> | null;
+        /**
+         * Drop beads carrying this label. Repeatable.
+         */
+        exclude_label?: Array<string> | null;
+        /**
+         * Order: oldest or newest by created_at. Omitted is the canonical ready order (priority, created_at, id).
+         */
+        sort?: 'oldest' | 'newest';
+        /**
+         * At most this many rows, cut after the merge and the order; 0 is unlimited.
+         */
+        limit?: number;
+        /**
+         * List beads in this status instead of ready work.
+         */
+        status?: 'open' | 'in_progress' | 'blocked' | 'closed';
+    };
+    url: '/v0/city/{cityName}/work/ready';
+};
+
+export type GetV0CityByCityNameWorkReadyErrors = {
+    /**
+     * Bad Request
+     */
+    400: ErrorModel;
+    /**
+     * Not Found
+     */
+    404: ErrorModel;
+    /**
+     * Unprocessable Entity
+     */
+    422: ErrorModel;
+    /**
+     * Internal Server Error
+     */
+    500: ErrorModel;
+    /**
+     * Service Unavailable
+     */
+    503: ErrorModel;
+};
+
+export type GetV0CityByCityNameWorkReadyError = GetV0CityByCityNameWorkReadyErrors[keyof GetV0CityByCityNameWorkReadyErrors];
+
+export type GetV0CityByCityNameWorkReadyResponses = {
+    /**
+     * OK
+     */
+    200: WorkReadyBody;
+};
+
+export type GetV0CityByCityNameWorkReadyResponse = GetV0CityByCityNameWorkReadyResponses[keyof GetV0CityByCityNameWorkReadyResponses];
 
 export type DeleteV0CityByCityNameWorkflowByWorkflowIdData = {
     body?: never;

@@ -3,9 +3,10 @@
 Bazel is how Gas City is built and tested. CI gates on `bazel test`
 (`.github/workflows/bazel.yml`), and `make test`, `make check`,
 `make test-acceptance` and `make test-integration` run the same commands.
-`go build`/`go test` still work for a quick inner loop on one package, but
-they are not what CI enforces: nogo (lint and vet), formatting,
-generated-artifact drift and the policy guards exist only as Bazel targets.
+`go build`/`go test` still work for a human's quick inner loop on one
+package (agents run tests only with `bazel test`), but they are not what CI
+enforces: nogo (lint and vet), formatting, generated-artifact drift and the
+policy guards exist only as Bazel targets.
 This guide sets Bazel up on your machine; TESTING.md "Building and testing"
 lists the command for every test tier.
 
@@ -130,7 +131,7 @@ works without editing `.bazelrc.local`.
 | iterating on one package's tests | `bazel test //pkg:pkg_test` (remote-cached) |
 | verifying a change before pushing | `make check` (`bazel test //...`) |
 | acceptance or integration behavior changed | the matching `--config=acceptance` / `--config=integration` target |
-| quick compile-and-run of one file, no Bazel server | `go build ./pkg/` or `go test ./pkg -run TestX` (inner loop only; not what CI checks) |
+| quick compile-and-run of one file, no Bazel server (humans) | `go build ./pkg/` or `go test ./pkg -run TestX` (inner loop only; not what CI checks) |
 | offline, or a host Bazel does not serve (macOS) | the `-go` make twins: `make test-go`, `make check-go` |
 | adding a new dependency | `go get` then `make bazel-sync` |
 

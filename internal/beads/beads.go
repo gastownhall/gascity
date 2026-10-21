@@ -48,6 +48,12 @@ var ErrCacheUnavailable = errors.New("bead cache unavailable")
 // installed nothing. The caller may retry.
 var ErrRowRefreshFenced = errors.New("bead cache row refresh fenced by newer state")
 
+// ErrRowRefreshYielded is the ErrRowRefreshFenced a refresh asked to yield
+// (RowRefreshOptions.YieldToLocalWrites) returns while a local write of the
+// cache that may touch the row is in flight. It says nothing about the row;
+// the caller retries once the write has returned.
+var ErrRowRefreshYielded = fmt.Errorf("a local write is in flight: %w", ErrRowRefreshFenced)
+
 // ErrReadyContextUnsupported reports that a store cannot guarantee a Ready
 // projection stops when the caller's context is canceled.
 var ErrReadyContextUnsupported = errors.New("context-aware ready unsupported")
@@ -73,6 +79,17 @@ var ErrSQLiteBusyExhausted = errors.New("sqlite busy retries exhausted")
 // producer whose error can reach the dispatcher adds it there as
 // TierAvailability.
 var ErrStoreUnavailable = errors.New("bead store unavailable")
+
+// ErrWriteUnconfirmed marks a write the store reported committed whose
+// read-back did not show it before the store stopped waiting. It is not a
+// failed write: the write may well have landed and become visible a moment
+// later, so the caller must neither report it as failed nor replay it blindly.
+// Re-read the row to learn the outcome. When it wraps the error of a
+// multi-write operation (a staged BdStore Tx), the operation may also be
+// incomplete: the writes after the unconfirmed one did not run. Its producer
+// is BdStore's staged Tx apply, which reads each update back before the next
+// write (waitForUpdateProjection). Check with errors.Is.
+var ErrWriteUnconfirmed = errors.New("bead write committed but its read-back was not confirmed")
 
 // ErrParentProjectionSuperseded reports that a parent update was overtaken by a
 // concurrent reparent before the caller's projection wait could converge.
@@ -263,6 +280,42 @@ type UpdateOpts struct {
 	Labels       []string // append these labels (nil = no change)
 	RemoveLabels []string // remove these labels (nil = no change)
 	Metadata     map[string]string
+	// UnsetMetadata removes these metadata keys. It is bd's
+	// `update --unset-metadata` and has bd's semantics: it is applied AFTER
+	// every Metadata set (so a key named in both ends up absent), and removing
+	// a key the bead does not carry is a no-op rather than an error.
+	//
+	// It is served by the unconditional Update of MemStore (and FileStore),
+	// SQLiteStore (and its Tx), BdStore (and the ProxiedStore and
+	// DoltliteReadStore that delegate to it), and a CachingStore over any of
+	// them. Every revision-guarded path refuses it
+	// (validateConditionalUpdateOpts). A write path that cannot remove a key
+	// (NativeDoltStore, the BdStore Tx, the exec protocol) refuses it with
+	// ErrUnsetMetadataUnsupported rather than silently keeping the key.
+	UnsetMetadata []string
+}
+
+// ErrUnsetMetadataUnsupported reports an UpdateOpts.UnsetMetadata write on a
+// path that cannot remove a metadata key. It is a refusal, never a partial
+// write: the whole update is rejected before anything is applied.
+var ErrUnsetMetadataUnsupported = errors.New("unsetting metadata keys is not supported on this write path")
+
+// refuseUnsetMetadata is the fail-closed guard for write paths that do not
+// implement UpdateOpts.UnsetMetadata. A path that ignored the field would
+// report success while the key stayed set.
+func refuseUnsetMetadata(path string, opts UpdateOpts) error {
+	if len(opts.UnsetMetadata) == 0 {
+		return nil
+	}
+	return fmt.Errorf("%s: %w", path, ErrUnsetMetadataUnsupported)
+}
+
+// unsetMetadataKeys deletes opts.UnsetMetadata from metadata in place. It runs
+// after the Metadata sets, matching bd's set-then-unset order.
+func unsetMetadataKeys(metadata map[string]string, keys []string) {
+	for _, key := range keys {
+		delete(metadata, key)
+	}
 }
 
 // ConditionalAssignmentReleaser is implemented by stores that can release an
@@ -367,9 +420,13 @@ func AssignmentGuardedUpdaterFor(store Store) (AssignmentGuardedUpdater, bool) {
 //   - Every mutated bead carries a nonzero opaque int64 revision. Callers may
 //     test it only for equality; arithmetic, ordering across beads, and gap
 //     inference are undefined. A token is never intentionally reused during one
-//     bead's observed lifetime. A never-mutated bead may read back as zero on a
-//     counter-backed store, so zero means "no usable token", not "revisions
-//     unsupported".
+//     bead's observed lifetime. A never-mutated bead may read back as zero (a
+//     row an older binary inserted before its store minted a token on insert,
+//     or a row seeded at zero). That zero is the row's real token, compared
+//     exactly like any other: a fence at zero lands while the row is
+//     unrewritten and is refused after any whole-row mutation below. A read
+//     that omits the revision reads as zero too, so a fence on it fails
+//     closed; re-read the row for its token.
 //   - Every successful mutation of revision-guarded whole-row content —
 //     conditional or unconditional — mints a fresh nonzero revision. This
 //     covers row-backed Update fields, metadata writes, Close, and Reopen;
@@ -505,6 +562,8 @@ func validateConditionalUpdateOpts(o UpdateOpts, labelsGuarded bool) error {
 	switch {
 	case o.ParentID != nil:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "parent_id"}
+	case len(o.UnsetMetadata) > 0:
+		return &ConditionalUpdateFieldUnsupportedError{Field: "unset_metadata"}
 	case !labelsGuarded && len(o.Labels) > 0:
 		return &ConditionalUpdateFieldUnsupportedError{Field: "labels"}
 	case !labelsGuarded && len(o.RemoveLabels) > 0:

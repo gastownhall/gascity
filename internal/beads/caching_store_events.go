@@ -312,6 +312,27 @@ func (c *CachingStore) applyEvent(eventType string, payload json.RawMessage, dep
 		}
 		if eventType != "bead.closed" || !verifiedClosedFromBacking {
 			b = mergeCacheEventPatch(current, patch, fields)
+			// The merge keeps the cached revision, since an event carries
+			// none. A verified event was checked against a backing read, and
+			// when the merged row reproduces that read it is that row, so it
+			// is installed as the read, whole: its revision, and the stamp,
+			// fence and tier fields the merge never takes and beadChanged
+			// does not compare. A CAS at the stale revision would otherwise
+			// be refused once for nothing. A merge that differs from the read
+			// keeps the merged row, and the guard is what keeps it safe: the
+			// difference may be a field the event's own write has no event
+			// for yet (pairing the read's revision with it is the mc-03lk4
+			// hazard), a local write that landed after the read (installing
+			// the read would roll this process's own write back), or edges
+			// the event carries and a point read omits (installing the read
+			// would wipe a live blocker). The readiness projection is not
+			// stored state, and a point read carries none, so the cached one
+			// is kept and not compared.
+			read := verifiedFresh
+			read.IsBlocked = b.IsBlocked
+			if verifiedRecentLocal && !beadChanged(b, read, false) {
+				b = read
+			}
 		}
 	}
 
@@ -1053,9 +1074,14 @@ func decodeCacheEvent(payload json.RawMessage) (Bead, map[string]json.RawMessage
 // make stale (mc-zndi7.43, .56). Treat an inferred notification as a hint and
 // re-read the store before acting on it durably.
 //
-// ApplyEvent and the list/Get refetch installs notify nothing, so they have no
-// source (mc-zndi7.55), except for a close they install over a cached open row:
-// that close is queued and announced as ChangeRefresh (gastownhall/gascity#6860).
+// ApplyEvent installs notify nothing, so they have no source (mc-zndi7.55),
+// except for a close they install over a cached open row: that close is queued
+// and announced as ChangeRefresh (gastownhall/gascity#6860). The list/Get
+// refetch installs announce the same queued close, and also a change to a held
+// open row's status, assignee or metadata, as a ChangeRefresh bead.updated
+// (caching_store_read_announce.go): such a read is often the first to see
+// another process's claim, and the reconcile that follows finds nothing left
+// to announce.
 type ChangeSource uint8
 
 const (
@@ -1068,8 +1094,9 @@ const (
 	ChangeScan
 	// ChangeRefresh is a point read: RefreshRow, Update's refetch that found
 	// the row gone after the write (its bead.closed is the read's inference,
-	// not a close this process made), and a close a list, dirty-row read or
-	// event patch installed over a cached open row.
+	// not a close this process made), a close a list, dirty-row read or
+	// event patch installed over a cached open row, and an update a list,
+	// dirty-row read or dirty overlay installed over a held open row.
 	ChangeRefresh
 )
 
@@ -1091,15 +1118,21 @@ func (s ChangeSource) String() string {
 	}
 }
 
-// notifyChange announces one change. Any close a read or an event patch
-// installed without announcing goes out first, so a close is never reported
-// after a later change to the same bead.
+// notifyChange announces one change. Any update or close a read or an event
+// patch installed without announcing goes out first, so neither is ever
+// reported after a later change to the same bead.
 func (c *CachingStore) notifyChange(source ChangeSource, eventType string, b Bead) {
-	c.announceUnannouncedCloses()
+	c.announceReadInstalls()
 	c.emitChange(source, eventType, b)
 }
 
 func (c *CachingStore) emitChange(source ChangeSource, eventType string, b Bead) {
+	if eventType == "bead.closed" {
+		// Recorded before the announcement reaches onChange, so a refresh
+		// that reads this close meanwhile does not announce it again
+		// (announcedCloses).
+		c.recordAnnouncedClose(b)
+	}
 	if c.onChange == nil {
 		return
 	}

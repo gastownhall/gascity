@@ -193,3 +193,14 @@ func rowGeneration(meta map[string]string) int64 {
 	gen, _ := strconv.ParseInt(strings.TrimSpace(meta["generation"]), 10, 64)
 	return gen
 }
+
+// stopRequestStands reports an active stop request on a row read outside
+// the census (info, with its persisted metadata meta): the work ladder's
+// gate, which must not nudge a seat being stopped. It is activeStop's
+// answer, so the keys keep one reader.
+func stopRequestStands(info session.Info, meta map[string]string) bool {
+	row := newCensusRow(rowKey{ID: info.ID}, info)
+	row.StopKeys = readStopKeys(meta)
+	_, active := activeStop(row)
+	return active
+}

@@ -179,8 +179,13 @@ func startControllerSocket(
 // Supported commands: "stop" (shutdown), "stop-force" (shutdown without
 // interrupt grace), "ping" (legacy liveness check, returns numeric PID),
 // "identify" (typed process identity), "converge:{json}" (convergence
-// commands routed to event loop), and "v2-pass" (the v2 planner's last pass,
-// for doctor).
+// commands routed to event loop), "v2-pass" (the v2 planner's last pass,
+// for doctor), "ledger-feed" (the journal feeds' status, for doctor),
+// "lane:<conversation>[:<row id>[,<row id>...]]" (a conversation-lane
+// doorbell naming the journal rows to refresh, replying ok, "ok, rows
+// waiting for a retry: <n>", no-host or refused <reason>; laneReplyPoked
+// reads the reply), and "lane-status" (the conversation-lane
+// host's status, for doctor).
 func handleControllerConn(
 	conn net.Conn,
 	cityPath string,
@@ -247,6 +252,12 @@ func handleControllerConn(
 			handleTraceStatusSocketCmd(conn, cityPath)
 		case line == v2PassCommand:
 			writeJSONLine(conn, wake.v2PassStatus(time.Now()))
+		case line == ledgerFeedStatusCommand:
+			writeJSONLine(conn, ledgerFeedStatusFor(cityPath, time.Now()))
+		case strings.HasPrefix(line, laneSocketPrefix):
+			conn.Write([]byte(laneSocketReply(cityPath, line[len(laneSocketPrefix):]) + "\n")) //nolint:errcheck // best-effort reply
+		case line == laneStatusCommand:
+			writeJSONLine(conn, conversationLaneStatusFor(cityPath, time.Now()))
 		}
 	}
 }
@@ -1373,6 +1384,7 @@ func controllerLoop(
 		loopCfg = &cfgCopy
 	}
 	cr := &CityRuntime{
+		bootCityStore:       bootCityStoreFor(cityPath),
 		cityPath:            cityPath,
 		cityName:            cityName,
 		tomlPath:            tomlPath,
@@ -1586,6 +1598,8 @@ func runController(
 
 	cs.startBeadEventWatcher(ctx)
 	cs.startAutocloseSweep(ctx)
+	cs.startOpSweep(ctx)
+	cs.startConversationLaneHost(ctx)
 	cs.startEmergencyEventRelay(ctx)
 	cs.startMaintenanceLoop(ctx)
 

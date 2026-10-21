@@ -77,7 +77,7 @@ func TestTurnReplacementNoneIsWithdrawnInterruptNow(t *testing.T) {
 		for _, mode := range modes {
 			for _, resets := range []bool{false, true} {
 				replaced := turnReplacementFor(info, mode, resets) != TurnReplacementNone
-				offered := SubmissionCapabilitiesForRuntime(meta, true, mode).SupportsInterruptNow
+				offered := SubmissionCapabilitiesForRuntime(meta, true, mode, runtime.SteerNone).SupportsInterruptNow
 				if replaced != offered {
 					t.Errorf("%+v in mode %s (resets %v): replaceable %v, interrupt_now offered %v", info, mode, resets, replaced, offered)
 				}

@@ -8,7 +8,8 @@ common --repo_env=BAZEL_DO_NOT_DETECT_CPP_TOOLCHAIN=1
 # Bazel is gascity's build and test system: CI gates on `bazel test`
 # (.github/workflows/bazel.yml), and `make test`/`make check` run the same
 # commands (TESTING.md "Building and testing"). Plain `go build`/`go test`
-# still work as an inner-loop convenience but are not what CI enforces.
+# still work as a human's inner-loop convenience (agents run tests only with
+# `bazel test`: AGENTS.md "Build and test") but are not what CI enforces.
 # Where actions run is per machine, never committed here: contributors read
 # the anonymous, read-only cache with --config=fork-cache (defined below);
 # maintainers with an rbe-west client certificate execute remotely with

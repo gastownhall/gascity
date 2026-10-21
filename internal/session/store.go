@@ -391,6 +391,18 @@ func sameLifecycleFacts(a, b Info) bool {
 	return reflect.DeepEqual(LifecycleInputFromInfo(a), LifecycleInputFromInfo(b))
 }
 
+// mintPremiseHolds is MintIncarnation's premise on one fresh read of the row
+// (meta its metadata): fresh still carries the lifecycle facts, the
+// generation and the token expect was read with, and still records lease (a
+// nil lease checks none). LifecycleInput holds no generation or token, so the
+// lifecycle facts alone would let a retry after a lost fence mint a stale g+1.
+func mintPremiseHolds(expect, fresh Info, lease *RuntimeLease, meta map[string]string) bool {
+	return sameLifecycleFacts(expect, fresh) &&
+		strings.TrimSpace(fresh.Generation) == strings.TrimSpace(expect.Generation) &&
+		strings.TrimSpace(fresh.InstanceToken) == strings.TrimSpace(expect.InstanceToken) &&
+		(lease == nil || lease.HoldsMeta(meta))
+}
+
 // ApplyPatchInfo persists patch for info.ID (via ApplyPatch) and returns the
 // refreshed Info as a LOCAL fold — info.ApplyPatch(patch) — never a re-Get. It
 // is the write-returns-Info chokepoint the reconciler routes its direct
@@ -894,7 +906,11 @@ func CommitPastKillFence() CommitOpt {
 // so `bd close` carries terminal's close_reason. The metadata is ordered
 // first, so a failed Close leaves the clears landed and the caller retries.
 // That arm keeps a residual race: a writer that lands after the read, or
-// between the Tx's two writes, is closed over.
+// between the Tx's two writes, is closed over. A Tx answering
+// beads.ErrWriteUnconfirmed (its writes committed, a read-back timed out) is
+// settled by a re-read: a row that reads closed is CommitLanded; otherwise the
+// error stands, still wrapping beads.ErrWriteUnconfirmed, so a caller can tell
+// "retry" from "failed".
 func (s *Store) CommitClose(d Decided, terminal MetadataPatch, now time.Time, opts ...CommitOpt) (res CommitResult, err error) {
 	defer func() {
 		if res != CommitLanded {
@@ -952,9 +968,22 @@ func (s *Store) CommitClose(d Decided, terminal MetadataPatch, now time.Time, op
 		}
 		return tx.Close(id)
 	}); err != nil {
+		if errors.Is(err, beads.ErrWriteUnconfirmed) && s.readsClosed(id) {
+			// The Tx's writes committed and only a read-back timed out: a
+			// row that now reads closed is this close landing, not a failure.
+			log.Printf("session %s: close landed; %v", id, err)
+			return CommitLanded, nil
+		}
 		return 0, err
 	}
 	return CommitLanded, nil
+}
+
+// readsClosed reports whether id reads closed now. A failed read is not
+// evidence of a close.
+func (s *Store) readsClosed(id string) bool {
+	b, err := s.validatedBead(id)
+	return err == nil && b.Status == "closed"
 }
 
 // errCloseContended is closeAtomically's exhausted fence.

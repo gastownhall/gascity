@@ -218,7 +218,7 @@ check.
 | Tool | Min version | macOS | Linux |
 |------|-------------|-------|-------|
 | dolt | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | 1.0.4 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| bd | 1.3.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | -- | `brew install flock` | `apt install util-linux` |
 
 ### Optional for GitHub gates
@@ -264,10 +264,18 @@ Upgrade via Homebrew (`brew upgrade dolt`) or download a newer release from
 
 ## `bd` Version Too Old
 
-Gas City requires `bd` 1.0.4 or newer. The bd-backed store relies on
-ephemeral-bead support used by order tracking, including `bd create
---ephemeral` and `bd query ephemeral=true`, so older binaries can fail
-order tracking and the cleanup of those ephemeral beads. Check your
+Gas City requires `bd` 1.3.0 or newer. `gc init` and `gc start` refuse an
+older `bd` with `bd (found vX, need v1.3.0+)`, and `gc doctor`'s `check-bd`
+check reports `bd X is too old (need >= 1.3.0)`.
+
+1.3.0 is the first tested release with the `bd update --if-assignee
+--if-status` conditional release, which Gas City uses to release a stale
+work assignment without clobbering a concurrent re-claim. A `bd` without
+those flags gets a typed "conditional assignment release unsupported" error,
+and Gas City releases no stale assignment through it: work orphaned by a dead
+session stays assigned to that session until you upgrade `bd`. A 1.2.x version
+number is not enough: bd 1.2.0 and 1.2.1 were accidental, untested releases,
+and bd 1.2.2 re-released the 1.1.2 code without the flags. Check your
 version:
 
 ```bash

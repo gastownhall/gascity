@@ -133,3 +133,14 @@ func TestLookupReturnsACopy(t *testing.T) {
 		t.Fatalf("Lookup leaked the registry's slice")
 	}
 }
+
+// A message mode the lane does not lower is one it parks as now_unlowered
+// (lane_plan R19), so a producer must refuse it rather than write it.
+func TestWhenLaneLowered(t *testing.T) {
+	for _, w := range whens {
+		want := w != WhenNow && w != WhenInterrupt
+		if got := w.LaneLowered(); got != want {
+			t.Errorf("%s.LaneLowered() = %v, want %v", w, got, want)
+		}
+	}
+}

@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Upgrading Notes
 
+- **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
+  `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
+  bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
+  >= 1.3.0)`. bd 1.3.0 is the first tested release with `bd update
+  --if-assignee/--if-status`, which `ReleaseIfCurrent` (the orphan-sweep
+  release of a stale work assignment) requires. A 1.2.x version is not enough:
+  bd 1.2.0 and 1.2.1 were accidental, untested releases, and bd 1.2.2
+  re-released the 1.1.2 code without the flags. The raw-SQL fallback (`bd sql`,
+  and the `dolt sql` CLI on embedded Dolt) that served older bd is deleted, so
+  gc no longer bypasses bd with direct SQL for old-bd compatibility. A bd
+  without the flags now gets a typed "conditional assignment release
+  unsupported" error, and gc releases no stale assignment through it: the
+  fenced fallback cannot guard its write on that bd either, so it refuses,
+  and orphaned work stays assigned to its dead session until bd is upgraded.
+  The default `beads.bd_compatibility` (`bd-1.0.4` semantics) is unchanged.
+  Upgrade with `brew upgrade beads` or from
+  https://github.com/gastownhall/beads/releases.
+
 - **The generic bead API no longer writes session rows, startup-health
   episodes or convergence roots.** `POST /beads`, `PATCH /bead/{id}`,
   `POST /bead/{id}/update`, `/close`, `/reopen`, `/assign`, `DELETE
@@ -217,6 +235,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   check. Before, it stopped at the first error and skipped a store it could
   not open without saying so (#6614).
 
+- **Builtin `codex` agents no longer default to `gpt-5.5` at `xhigh`
+  reasoning effort.** Unless the city, agent or session chooses a `model` or
+  `effort`, Gas City passes no `--model` or `model_reasoning_effort` flag, and
+  codex runs on the model and effort from the user's own
+  `~/.codex/config.toml`, which is often a different model and a lower effort.
+  The builtin pin broke every turn for logins that cannot use that model. The
+  launch command of every unpinned `builtin:codex` session changes, so each
+  such session restarts once after the upgrade. To keep the old behavior, pin
+  it for every agent on the harness in `city.toml` (`[providers.codex]` with
+  `option_defaults = { model = "gpt-5.5", effort = "xhigh" }`), or for one
+  agent with the same `option_defaults` line in its `agent.toml` (#7944).
+
 ### Added
 
 - **`gc agent is-foreign <identity>` reports whether this city can vouch for
@@ -350,6 +380,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   same way. Pass `--version` to choose another constraint.
 
 ### Fixed
+
+- **The work ladder and the execution backstop read a rig seat's started
+  graph steps as started.** On a city that relocates its coordination classes
+  (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded
+  a graph step it claimed in the session's `work_started` cell under the
+  rig's work store (`rig:<rig>`), while the step lives in the city-scope
+  class binding, where the ladder and the backstop look it up (`city`). The
+  ladder then treated the seat's started claim as unstarted and nudged it as
+  claimed (a release was still refused by the bead's `gc.session_id`), and
+  the backstop missed the record. The hook now records the store the claim
+  resides in, the spelling every reader uses, and marks the entry
+  `resident`. An unmarked entry (one an older `gc` wrote, or an adoption
+  whose store the hook could not prove) is read by bead alone, and only at
+  the session generation it was recorded in; the hook rewrites an entry of
+  the current generation to the resident spelling the next time it proves the
+  claim's store. A rollback still reads the new entries.
+
+- **A config reload no longer creates or rebinds a city's bead store.** When a
+  city's `.beads/metadata.json` went missing (for example, a `git` checkout
+  deleted a file an older commit had tracked), the next reload fell back to
+  the default `hq` database, created it with `bd init`, and rebound the live
+  city to that empty store. Reload, including a plain `gc reload` with no
+  config change, now holds the city to the store binding it booted on. If
+  metadata.json is missing or unusable, or names a different store, the
+  reload fails and keeps the old config. The error says whether to restore
+  the file (do not restart first: boot treats a missing binding as a new
+  city) or to restart to adopt a deliberate rebinding. Switching a city from
+  a non-bd beads provider (such as `file`) to bd now also takes a restart; a
+  reload refuses it. Rig scopes and boot are unchanged.
 
 - **Codex structured history keeps every turn's model and token usage.**
   Usage was read only from the rollout tail, so older turns (and older

@@ -180,12 +180,27 @@ func TestNudgeSessionReportsARefusedReSendUnconfirmed(t *testing.T) {
 	dropText := func(context.Context, string, string, time.Duration) error { return nil }
 
 	err := tm.nudgeSession(context.Background(), pane.sessionName, "run the tests", dropText,
-		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look)
-	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) {
-		t.Fatalf("nudgeSession = %v, want ErrNudgeSubmitUnconfirmed", err)
+		func(string) bool { return false }, func(string) []string { return []string{"Enter"} }, look, false)
+	if !errors.Is(err, ErrNudgeSubmitUnconfirmed) || !errors.Is(err, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("nudgeSession = %v, want ErrNudgeSubmitUnconfirmed, a runtime.ErrNudgeDeliveryUnconfirmed", err)
 	}
 	if n := pane.keyCount("Enter"); n != 1 {
 		t.Fatalf("sent Enter %d times, want 1 (the re-send refused)", n)
+	}
+}
+
+// The two submits the busy state never confirmed answer the runtime contract
+// apart: a drained composer proves the delivery, and any other unconfirmed
+// submit may or may not have delivered, so a caller that must not deliver
+// twice tells them apart with errors.Is.
+func TestNudgeSubmitErrorsWrapTheRuntimeContract(t *testing.T) {
+	unconfirmed := fmt.Errorf("%w: session %q", ErrNudgeSubmitUnconfirmed, "s")
+	if !errors.Is(unconfirmed, runtime.ErrNudgeDeliveryUnconfirmed) || errors.Is(unconfirmed, runtime.ErrNudgeDeliveredUnobserved) {
+		t.Fatalf("%v: want runtime.ErrNudgeDeliveryUnconfirmed, not runtime.ErrNudgeDeliveredUnobserved", unconfirmed)
+	}
+	unobserved := fmt.Errorf("%w: session %q", ErrNudgeSubmitDeliveredUnobserved, "s")
+	if !errors.Is(unobserved, runtime.ErrNudgeDeliveredUnobserved) || errors.Is(unobserved, runtime.ErrNudgeDeliveryUnconfirmed) {
+		t.Fatalf("%v: want runtime.ErrNudgeDeliveredUnobserved, not runtime.ErrNudgeDeliveryUnconfirmed", unobserved)
 	}
 }
 
