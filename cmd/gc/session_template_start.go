@@ -11,6 +11,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 	"github.com/gastownhall/gascity/internal/worker"
@@ -123,7 +124,7 @@ func materializeSessionForTemplateWithOptions(
 		if err != nil {
 			return "", err
 		}
-		if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+		if err := validateSessionTransportAt(cityPath, resolved, sessionTransport, sp); err != nil {
 			return "", err
 		}
 		sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
@@ -183,8 +184,11 @@ func materializeSessionForTemplateWithOptions(
 			return "", err
 		}
 
+		// A controller will reconcile (one answered the poke, or a worker
+		// site's remote one acts at its next reconcile): create the bead only
+		// and let it start the session.
 		if cityUsesManagedReconciler(cityPath) {
-			if pokeErr := pokeController(cityPath); pokeErr == nil {
+			if pokeErr := pokeController(cityPath); controllerWillReconcile(cityPath, pokeErr) {
 				var info session.Info
 				createErr := session.WithCitySessionIdentifierLocks(cityPath, []string{spec.Identity, spec.SessionName}, func() error {
 					if err := session.EnsureAliasAvailableWithConfigForOwner(store, cfg, spec.Identity, "", spec.Identity); err != nil {
@@ -198,7 +202,9 @@ func materializeSessionForTemplateWithOptions(
 					return createErr
 				})
 				if createErr == nil {
-					_ = pokeController(cityPath)
+					if !noteWorkerSitePoke(stderr, "session materialize", pokeErr) {
+						_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
+					}
 					return info.SessionName, nil
 				}
 				if snapshot, err := loadSessionBeadSnapshot(store); err == nil {
@@ -241,7 +247,7 @@ func materializeSessionForTemplateWithOptions(
 		return "", err
 	}
 
-	return materializeSessionForAgentConfig(cityPath, cfg, store, &found)
+	return materializeSessionForAgentConfig(cityPath, cfg, store, &found, stderr)
 }
 
 func ensureSessionIDForTemplateWithOptions(
@@ -263,7 +269,10 @@ func ensureSessionIDForTemplateWithOptions(
 	return sessionID, nil
 }
 
-func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store beads.Store, agentCfg *config.Agent) (string, error) {
+func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store beads.Store, agentCfg *config.Agent, stderr io.Writer) (string, error) {
+	if stderr == nil {
+		stderr = io.Discard
+	}
 	if cfg == nil {
 		return "", fmt.Errorf("city config unavailable")
 	}
@@ -283,7 +292,7 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	if err != nil {
 		return "", err
 	}
-	if err := validateResolvedSessionTransport(resolved, sessionTransport, sp); err != nil {
+	if err := validateSessionTransportAt(cityPath, resolved, sessionTransport, sp); err != nil {
 		return "", err
 	}
 	sessionCommand, err := resolvedSessionCommand(cityPath, resolved, nil, sessionTransport)
@@ -338,8 +347,10 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 	}
 	reservationIDs := []string{explicitName, sessionQualifiedName}
 
+	// As for a named session: a controller will reconcile, so create the bead
+	// only and let it start the session.
 	if cityUsesManagedReconciler(cityPath) {
-		if pokeErr := pokeController(cityPath); pokeErr == nil {
+		if pokeErr := pokeController(cityPath); controllerWillReconcile(cityPath, pokeErr) {
 			var info session.Info
 			createErr := session.WithCitySessionIdentifierLocks(cityPath, reservationIDs, func() error {
 				if err := session.EnsureAliasAvailableWithConfig(store, cfg, sessionQualifiedName, ""); err != nil {
@@ -353,7 +364,9 @@ func materializeSessionForAgentConfig(cityPath string, cfg *config.City, store b
 				return createErr
 			})
 			if createErr == nil {
-				_ = pokeController(cityPath)
+				if !noteWorkerSitePoke(stderr, "session materialize", pokeErr) {
+					_ = enqueueController(cityPath, reconcilekey.Session(info.ID))
+				}
 				return info.SessionName, nil
 			}
 			return "", createErr

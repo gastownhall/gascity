@@ -2,10 +2,12 @@ package exec //nolint:revive // internal package, always imported with alias
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -251,6 +253,12 @@ func TestStart(t *testing.T) {
 // stop call to stopFile. This is the shape of the sandbox leak: the box exists
 // by the time start reports failure.
 func startFailureScript(createFile, stopFile, startStderr string) string {
+	return startExitScript(createFile, stopFile, startStderr, 1)
+}
+
+// startExitScript is startFailureScript with the start op's exit code chosen by
+// the caller.
+func startExitScript(createFile, stopFile, startStderr string, code int) string {
 	return `
 op="$1"
 name="$2"
@@ -260,7 +268,7 @@ case "$op" in
     cat > /dev/null
     echo "$name" >> "` + createFile + `"
     echo "` + startStderr + `" >&2
-    exit 1
+    exit ` + strconv.Itoa(code) + `
     ;;
   stop) echo "stop $name" >> "` + stopFile + `" ;;
   *) exit 2 ;;
@@ -579,6 +587,101 @@ esac
 	if !strings.Contains(string(data), "send-keys test-sess Down") ||
 		!strings.Contains(string(data), "send-keys test-sess Enter") {
 		t.Fatalf("send-keys log = %q, want delayed bypass dismissal", string(data))
+	}
+}
+
+// Codex 0.162.1 startup screens: the composer is drawn before the status line
+// under it ("<model> · <dir>"), and a startup dialog can replace it in between.
+const (
+	codexEarlyComposerScreen = `  >_ OpenAI Codex (v0.162.1)
+     ~/city
+
+› Ask Codex to do anything
+  ? for shortcuts`
+	codexSettledComposerScreen = `  >_ OpenAI Codex (v0.162.1)
+     ~/city
+  permissions: YOLO mode
+
+› Ask Codex to do anything
+  GPT-6.1-Sol default · ~/city
+  ? for shortcuts`
+	codexHookReviewScreen = `  Hooks need review
+  4 hooks are new or changed.
+  Hooks can run outside the sandbox after you trust them.
+› 1. Review hooks
+  2. Trust all and continue
+  3. Continue without trusting (hooks won't run)
+  enter confirm · esc skip`
+)
+
+// TestStartAnswersCodexDialogDrawnAfterWatchedComposer pins the watch-startup
+// path of #6464: the watcher reports only Codex's early composer, whose "› "
+// the stream handlers read as ready, and "Hooks need review" replaces it once
+// that composer has been read. Start must still answer the dialog.
+func TestStartAnswersCodexDialogDrawnAfterWatchedComposer(t *testing.T) {
+	dir := t.TempDir()
+	screenFile := filepath.Join(dir, "screen")
+	lateFile := filepath.Join(dir, "late")
+	settledFile := filepath.Join(dir, "settled")
+	watchFile := filepath.Join(dir, "watch.jsonl")
+	sendKeysFile := filepath.Join(dir, "send-keys.log")
+	event, err := json.Marshal(startupWatchEvent{Content: codexEarlyComposerScreen})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, content := range map[string]string{
+		screenFile:  codexEarlyComposerScreen,
+		lateFile:    codexHookReviewScreen,
+		settledFile: codexSettledComposerScreen,
+		watchFile:   string(event) + "\n",
+	} {
+		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The watcher stays up after its only snapshot, as a live one does. Codex
+	// draws the dialog over the composer once a peek has read the composer,
+	// and confirming the dialog lets Codex finish starting.
+	script := writeScript(t, dir, `
+op="$1"
+
+case "$op" in
+  start)
+    cat > /dev/null
+    ;;
+  watch-startup)
+    cat "`+watchFile+`"
+    exec sleep `+startupWatchBlockingSleep+`
+    ;;
+  peek)
+    cat "`+screenFile+`"
+    if [ -f "`+lateFile+`" ]; then
+      mv -f "`+lateFile+`" "`+screenFile+`"
+    fi
+    ;;
+  send-keys)
+    echo "$*" >> "`+sendKeysFile+`"
+    if [ "$3" = Enter ]; then
+      cp -f "`+settledFile+`" "`+screenFile+`.tmp" && mv -f "`+screenFile+`.tmp" "`+screenFile+`"
+    fi
+    ;;
+  *) exit 2 ;;
+esac
+`)
+	p := NewProvider(script)
+
+	if err := p.Start(context.Background(), "test-sess", runtime.Config{
+		EmitsPermissionWarning: true,
+	}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
+	data, err := os.ReadFile(sendKeysFile)
+	if err != nil {
+		t.Fatalf("read send-keys log (Start returned without answering the late dialog): %v", err)
+	}
+	if want := "send-keys test-sess Down\nsend-keys test-sess Enter\n"; string(data) != want {
+		t.Fatalf("send-keys log = %q, want %q (Down+Enter trusts the hooks)", string(data), want)
 	}
 }
 
@@ -1461,22 +1564,22 @@ func TestUnknownOperation_exit2(t *testing.T) {
 	}
 }
 
-func TestProvider_StartCancellationInterruptsCooperativeScript(t *testing.T) {
-	for _, interruptExitCode := range []int{0, 2} {
-		t.Run(fmt.Sprintf("interrupt_exit_%d", interruptExitCode), func(t *testing.T) {
+func TestProvider_StartCancellationTerminatesCooperativeScript(t *testing.T) {
+	for _, termExitCode := range []int{0, 2} {
+		t.Run(fmt.Sprintf("term_exit_%d", termExitCode), func(t *testing.T) {
 			dir := t.TempDir()
 			readyFile := filepath.Join(dir, "ready")
-			interruptFile := filepath.Join(dir, "interrupted")
+			terminateFile := filepath.Join(dir, "terminated")
 			script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
-    trap 'printf "%%s\n" interrupted > "%s"; exit %d' INT
+    trap 'printf "%%s\n" terminated > "%s"; exit %d' TERM
     : > "%s"
     while :; do :; done
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, interruptExitCode, readyFile))
+	`, terminateFile, termExitCode, readyFile))
 			p := NewProvider(script)
 
 			ctx, cancel := context.WithCancel(context.Background())
@@ -1515,39 +1618,46 @@ esac
 				t.Fatal("Start did not return after cancellation")
 			}
 
-			data, err := os.ReadFile(interruptFile)
+			data, err := os.ReadFile(terminateFile)
 			if err != nil {
-				t.Fatalf("read interrupt marker: %v", err)
+				t.Fatalf("read termination marker: %v", err)
 			}
-			if got := strings.TrimSpace(string(data)); got != "interrupted" {
-				t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+			if got := strings.TrimSpace(string(data)); got != "terminated" {
+				t.Fatalf("termination marker = %q, want %q", got, "terminated")
 			}
 		})
 	}
 }
 
-// TestProvider_StartCancellationInterruptsForegroundChild proves cooperative
+// TestProvider_StartCancellationTerminatesForegroundChild proves cooperative
 // cancellation reaches a foreground child of the adapter, not just the shell
 // leader. The adapter shell blocks in a foreground `sleep` far longer than the
 // provider's WaitDelay (mimicking a `ready_delay_ms` readiness delay). A
-// process-only interrupt would be deferred by the shell until the child
+// process-only SIGTERM would be deferred by the shell until the child
 // returned, so WaitDelay would force-kill the shell before its rollback trap
 // ran and the resource the adapter created would leak. Signaling the process
 // group unblocks the child so the trap runs inside the grace window.
-func TestProvider_StartCancellationInterruptsForegroundChild(t *testing.T) {
+func TestProvider_StartCancellationTerminatesForegroundChild(t *testing.T) {
 	dir := t.TempDir()
 	readyFile := filepath.Join(dir, "ready")
-	interruptFile := filepath.Join(dir, "interrupted")
+	terminateFile := filepath.Join(dir, "terminated")
+	// The foreground child writes the readiness marker itself, then execs
+	// sleep. A marker written by the adapter shell before forking sleep
+	// leaves a window where the forked child still runs the shell's TERM
+	// handler: a SIGTERM landing there is swallowed by the child, which then
+	// execs a 30s sleep, and the shell defers its trap until that foreground
+	// command completes, so WaitDelay kills it first. The exec'd child starts
+	// with default TERM disposition, so once the marker exists the SIGTERM
+	// always ends the child and runs the trap.
 	script := writeScript(t, dir, fmt.Sprintf(`
 case "$1" in
   start)
-    trap 'printf "%%s\n" interrupted > "%s"; exit 0' INT
-    : > "%s"
-    sleep 30
+    trap 'printf "%%s\n" terminated > "%s"; exit 0' TERM
+    sh -c ': > "$1"; exec sleep 30' sh "%s"
     ;;
   *) exit 2 ;;
 esac
-	`, interruptFile, readyFile))
+	`, terminateFile, readyFile))
 	p := NewProvider(script)
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -1587,12 +1697,12 @@ esac
 		t.Fatal("Start did not return after cancellation; foreground child blocked the rollback trap")
 	}
 
-	data, err := os.ReadFile(interruptFile)
+	data, err := os.ReadFile(terminateFile)
 	if err != nil {
-		t.Fatalf("read interrupt marker (rollback trap never ran): %v", err)
+		t.Fatalf("read termination marker (rollback trap never ran): %v", err)
 	}
-	if got := strings.TrimSpace(string(data)); got != "interrupted" {
-		t.Fatalf("interrupt marker = %q, want %q", got, "interrupted")
+	if got := strings.TrimSpace(string(data)); got != "terminated" {
+		t.Fatalf("termination marker = %q, want %q", got, "terminated")
 	}
 }
 
@@ -1833,3 +1943,36 @@ func TestExec_ExitTwoIsUnsupportedWhenExecNotDeclared(t *testing.T) {
 // --- Compile-time interface check ---
 
 var _ runtime.Provider = (*Provider)(nil)
+
+// A pack without the exec connection cannot fence input, so a ctx-fenced
+// DismissKnownDialogs is refused before the script runs any op but the
+// handshake, directly and through the seam-backed wrapper
+// (RUNTIME-CONTRACT-009). Unfenced, it still runs the script to peek.
+func TestDismissKnownDialogsRefusesCtxFence(t *testing.T) {
+	dir := t.TempDir()
+	calls := filepath.Join(dir, "calls")
+	script := writeScript(t, dir, `echo "$1" >> `+calls+`
+echo "$ "
+`)
+	fenced := runtime.WithInputFence(context.Background(), runtime.InputFence{Generation: 1, Epoch: 1, Token: "t"})
+	for name, p := range map[string]runtime.DialogProvider{
+		"raw":         NewProvider(script),
+		"seam-backed": NewSeamBacked(script).(runtime.DialogProvider),
+	} {
+		t.Run(name, func(t *testing.T) {
+			_ = os.Remove(calls)
+			if err := p.DismissKnownDialogs(fenced, "sess", time.Second); !errors.Is(err, runtime.ErrInputFenceUnsupported) {
+				t.Fatalf("fenced DismissKnownDialogs = %v, want ErrInputFenceUnsupported", err)
+			}
+			if data, err := os.ReadFile(calls); err == nil && strings.TrimSpace(strings.ReplaceAll(string(data), "protocol\n", "")) != "" {
+				t.Fatalf("script ran %q under a fence", data)
+			}
+			if err := p.DismissKnownDialogs(context.Background(), "sess", 200*time.Millisecond); err != nil {
+				t.Fatalf("unfenced DismissKnownDialogs = %v", err)
+			}
+			if data, _ := os.ReadFile(calls); len(data) == 0 {
+				t.Fatal("unfenced DismissKnownDialogs never ran the script, want a peek")
+			}
+		})
+	}
+}

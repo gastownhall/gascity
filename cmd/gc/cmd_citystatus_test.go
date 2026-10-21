@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -22,6 +23,23 @@ import (
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/worker"
 )
+
+// statusTestCityDir returns an empty, test-owned city directory for tests that
+// run real session observations. An observation does real filesystem I/O on
+// the city path (store and controller probes, path normalization, and the
+// per-city events recorder it opens), and gc status bounds each observation by
+// statusObservationTimeout. A made-up host path such as "/home/user/city" makes
+// that I/O depend on the machine: on macOS /home is an autofs mount, every
+// lookup under it costs tens of milliseconds, and the observations overrun the
+// deadline and report a running agent as stopped. resetCLIFactoryRecorders
+// registers its cleanup after t.TempDir's, so the recorder the observations
+// memoize for this directory is closed before the directory is removed.
+func statusTestCityDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	resetCLIFactoryRecorders(t)
+	return dir
+}
 
 func TestCityStatusEmptyCity(t *testing.T) {
 	sp := runtime.NewFake()
@@ -69,14 +87,15 @@ func TestCityStatusWithAgents(t *testing.T) {
 		},
 	}
 
+	cityPath := statusTestCityDir(t)
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, cityPath, &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
 	out := stdout.String()
 
-	if !strings.Contains(out, "/home/user/city") {
+	if !strings.Contains(out, cityPath) {
 		t.Errorf("stdout missing city path, got:\n%s", out)
 	}
 	if !strings.Contains(out, "Agents:") {
@@ -112,7 +131,7 @@ func TestCityStatusReportsObservationErrors(t *testing.T) {
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatus(sp, dops, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatus(sp, dops, cfg, statusTestCityDir(t), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -417,12 +436,12 @@ func TestCityStatusJSONWithAgents(t *testing.T) {
 			{Name: "polecat", Dir: "myrig", MinActiveSessions: intPtr(0), MaxActiveSessions: intPtr(3)},
 		},
 		Rigs: []config.Rig{
-			{Name: "myrig", Path: "/home/user/myrig"},
+			{Name: "myrig", Path: t.TempDir()},
 		},
 	}
 
 	var stdout, stderr bytes.Buffer
-	code := doCityStatusJSON(sp, cfg, "/home/user/city", &stdout, &stderr)
+	code := doCityStatusJSON(sp, cfg, statusTestCityDir(t), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -741,7 +760,14 @@ func TestControllerStatusLine(t *testing.T) {
 
 func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan struct{} {
 	t.Helper()
-	sockPath := controllerSocketPath(cityPath)
+	return startFakeUnixSocket(t, controllerSocketPath(cityPath), func(string) string { return response })
+}
+
+// startFakeUnixSocket listens on sockPath and answers each connection's
+// command line with respond(line); an empty reply closes without replying.
+// The returned channel is signaled (non-blocking) on each accept.
+func startFakeUnixSocket(t *testing.T, sockPath string, respond func(line string) string) <-chan struct{} {
+	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(sockPath), 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -768,9 +794,9 @@ func startFakeControllerSocket(t *testing.T, cityPath, response string) <-chan s
 			go func(conn net.Conn) {
 				defer conn.Close() //nolint:errcheck // test cleanup
 				_ = conn.SetReadDeadline(time.Now().Add(500 * time.Millisecond))
-				_, _ = conn.Read(make([]byte, 64))
+				line, _ := bufio.NewReader(conn).ReadString('\n')
 				_ = conn.SetReadDeadline(time.Time{})
-				_, _ = conn.Write([]byte(response))
+				_, _ = conn.Write([]byte(respond(strings.TrimSuffix(line, "\n"))))
 			}(conn)
 		}
 	}()
@@ -1114,10 +1140,11 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 				c = api.NewCityScopedClient(srv.URL, "test-city")
 			}
 
-			sp := runtime.NewFake()
 			dops := newFakeDrainOps()
 			var stdout, stderr bytes.Buffer
-			code := routeCityStatus(cityPath, cfg, sp, dops, c, tc.nilReason, false, &stdout, &stderr)
+			code := routeCityStatus(cityPath, dops, c, tc.nilReason, false, &stdout, &stderr, func() int {
+				return cmdCityStatusLocalFallback(cfg, cityPath, false, &stdout, &stderr)
+			})
 
 			if code != tc.wantExit {
 				t.Fatalf("exit = %d, want %d; stderr=%q stdout=%q", code, tc.wantExit, stderr.String(), stdout.String())
@@ -1151,17 +1178,28 @@ func TestRouteCityStatus_SixRowMatrix(t *testing.T) {
 // status` call onto the expensive local snapshot builder even though a
 // supervisor was reachable. It must now resolve the fake supervisor's API
 // client and take route=api end to end.
+//
+// It also keeps the supervisor route ahead of every bead/Dolt read. During a
+// store-contention burst, opening the local store can block even while the
+// supervisor's cached status endpoint is healthy; doing that work before
+// choosing the API route made gc status emit no output until the external
+// command timeout killed it.
 func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T) {
 	t.Setenv("GC_DEBUG", "1")
 	cityPath := writeCityStatusTestCity(t)
+	if err := os.Mkdir(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create store marker: %v", err)
+	}
 
 	srv := httptest.NewServer(okCityStatusHandler(t))
 	defer srv.Close()
 
 	origAlive, origSup := apiRouteControllerAliveHook, apiRouteSupervisorClientHook
+	origOpen := openCityStoreAtForStatus
 	t.Cleanup(func() {
 		apiRouteControllerAliveHook = origAlive
 		apiRouteSupervisorClientHook = origSup
+		openCityStoreAtForStatus = origOpen
 	})
 	// Simulates a live per-city controller socket (the supervisor hosts the
 	// controller in-process) answering the "alive" ping, paired with a
@@ -1173,6 +1211,10 @@ func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T)
 			return nil
 		}
 		return api.NewCityScopedClient(srv.URL, "test-city")
+	}
+	openCityStoreAtForStatus = func(string) (beads.StoreOpenResult, error) {
+		t.Fatal("gc status opened the local bead store before using the healthy supervisor API")
+		return beads.StoreOpenResult{}, nil
 	}
 
 	var stdout, stderr bytes.Buffer
@@ -1195,6 +1237,40 @@ func TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI(t *testing.T)
 	}
 }
 
+// TestCmdCityStatus_NoAPIClientOpensLocalStore covers the complement of
+// TestCmdCityStatus_SupervisorManagedNoAPIPortUsesSupervisorAPI: with no
+// supervisor API client available, the entry point must fall back to the
+// local store.
+func TestCmdCityStatus_NoAPIClientOpensLocalStore(t *testing.T) {
+	t.Setenv("GC_DEBUG", "1")
+	cityPath := writeCityStatusTestCity(t)
+	if err := os.Mkdir(filepath.Join(cityPath, ".beads"), 0o755); err != nil {
+		t.Fatalf("create store marker: %v", err)
+	}
+
+	origClient := cityStatusAPIClient
+	origOpen := openCityStoreAtForStatus
+	t.Cleanup(func() {
+		cityStatusAPIClient = origClient
+		openCityStoreAtForStatus = origOpen
+	})
+	cityStatusAPIClient = func(string) (*api.Client, string) { return nil, "controller-down" }
+	opens := 0
+	openCityStoreAtForStatus = func(path string) (beads.StoreOpenResult, error) {
+		opens++
+		return origOpen(path)
+	}
+
+	var stdout, stderr bytes.Buffer
+	cmdCityStatus([]string{cityPath}, true, &stdout, &stderr)
+	if opens < 1 {
+		t.Fatalf("gc status did not open the local bead store on the fallback route; stderr=%s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "route=fallback") {
+		t.Fatalf("stderr missing route=fallback: %s", stderr.String())
+	}
+}
+
 // TestRouteCityStatus_APIJSONIncludesCacheAge verifies the API-path JSON
 // output carries the _cache_age_s envelope field while the fallback path
 // omits it. Enforces D5 from the gc-read-path design doc.
@@ -1209,10 +1285,11 @@ func TestRouteCityStatus_APIJSONIncludesCacheAge(t *testing.T) {
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", true, &stdout, &stderr); code != 0 {
+	if code := routeCityStatus(cityPath, dops, c, "", true, &stdout, &stderr, func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, true, &stdout, &stderr)
+	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var envelope map[string]any
@@ -1235,10 +1312,11 @@ func TestRouteCityStatus_FallbackJSONOmitsCacheAge(t *testing.T) {
 		t.Fatalf("loadCityConfig: %v", err)
 	}
 
-	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, cfg, sp, dops, nil, "controller-down", true, &stdout, &stderr); code != 0 {
+	if code := routeCityStatus(cityPath, dops, nil, "controller-down", true, &stdout, &stderr, func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, true, &stdout, &stderr)
+	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	var envelope map[string]any
@@ -1276,10 +1354,11 @@ func TestRouteCityStatus_APIStaleBanner(t *testing.T) {
 	defer srv.Close()
 	c := api.NewCityScopedClient(srv.URL, "test-city")
 
-	sp := runtime.NewFake()
 	dops := newFakeDrainOps()
 	var stdout, stderr bytes.Buffer
-	if code := routeCityStatus(cityPath, cfg, sp, dops, c, "", false, &stdout, &stderr); code != 0 {
+	if code := routeCityStatus(cityPath, dops, c, "", false, &stdout, &stderr, func() int {
+		return cmdCityStatusLocalFallback(cfg, cityPath, false, &stdout, &stderr)
+	}); code != 0 {
 		t.Fatalf("exit = %d, want 0; stderr=%s", code, stderr.String())
 	}
 	if !strings.Contains(stdout.String(), "cache age:") {

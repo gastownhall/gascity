@@ -13,14 +13,17 @@ import (
 
 	"github.com/gastownhall/gascity/internal/agent"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/mail/beadmail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -46,6 +49,9 @@ type fakeState struct {
 	sessionsBeadStore beads.Store // relocated sessions store; nil falls back to cityBeadStore (default backend)
 	graphBeadStore    beads.Store // relocated graph store; nil falls back to cityBeadStore (default backend)
 	ordersBeadStore   beads.Store // relocated orders store; nil falls back to cityBeadStore (default backend)
+	// nudgeQueue overrides NudgeQueue; nil is the city's state.json queue over
+	// the nudges store.
+	nudgeQueue NudgeQueue
 	// bindingRelics is the boot census a test wants replayed. Absent means
 	// uncensused, which means "assume relics" — see
 	// ClassBindingHasLegacyResidents.
@@ -61,7 +67,9 @@ type fakeState struct {
 	allOrders         []orders.Order
 	services          workspacesvc.Registry
 	webhookDispatcher orderdispatch.Dispatcher // backs WebhookDispatchProvider; nil disables webhook dispatch
-	pokeCount         int
+	pokeCount         int                      // Enqueue calls (each maps to one legacy Poke)
+	enqueueMu         sync.Mutex               // guards enqueued
+	enqueued          []reconcilekey.Key       // every key passed to Enqueue, in order
 	extmsgSvc         *extmsg.Services
 	adapterReg        *extmsg.AdapterRegistry
 	maintenance       MaintenanceProvider
@@ -98,7 +106,7 @@ func newFakeState(t testing.TB) *fakeState {
 		cityMailProv: mp,
 		eventProv:    events.NewFake(),
 		cityName:     "test-city",
-		cityPath:     t.TempDir(),
+		cityPath:     beadstest.GuardedTempDir(t),
 		startedAt:    time.Now(),
 	}
 }
@@ -147,6 +155,13 @@ func (f *fakeState) NudgesBeadStore() beads.NudgesStore {
 	return beads.NudgesStore{Store: f.cityBeadStore}
 }
 
+func (f *fakeState) NudgeQueue() NudgeQueue {
+	if f.nudgeQueue != nil {
+		return f.nudgeQueue
+	}
+	return nudgequeue.StateFileQueue{CityPath: f.cityPath, Shadows: f.NudgesBeadStore().Store}
+}
+
 func (f *fakeState) SessionsBeadStore() beads.SessionStore {
 	if f.sessionsBeadStore != nil {
 		return beads.SessionStore{Store: f.sessionsBeadStore}
@@ -193,7 +208,32 @@ func (f *fakeState) OrdersAll() []orders.Order {
 	}
 	return f.autos
 }
-func (f *fakeState) Poke()                                  { f.pokeCount++ }
+
+func (f *fakeState) Enqueue(keys ...reconcilekey.Key) {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	f.pokeCount++
+	if len(keys) == 0 {
+		keys = []reconcilekey.Key{reconcilekey.Allocator()}
+	}
+	for _, k := range keys {
+		f.enqueued = append(f.enqueued, k.Normalize())
+	}
+}
+
+// enqueueCalls returns the number of Enqueue calls (legacy pokes) so far.
+func (f *fakeState) enqueueCalls() int {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return f.pokeCount
+}
+
+// enqueuedKeys returns a copy of every key passed to Enqueue so far.
+func (f *fakeState) enqueuedKeys() []reconcilekey.Key {
+	f.enqueueMu.Lock()
+	defer f.enqueueMu.Unlock()
+	return append([]reconcilekey.Key(nil), f.enqueued...)
+}
 func (f *fakeState) ServiceRegistry() workspacesvc.Registry { return f.services }
 
 // WebhookDispatcher lets fakeState satisfy WebhookDispatchProvider so webhook
@@ -303,7 +343,7 @@ func (f *fakeMutatorState) SuspendRig(name string) error {
 		if a.Dir != name {
 			continue
 		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp)
+		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
 			_ = f.sp.SetMeta(sessionName, "suspended", "true")
@@ -329,7 +369,7 @@ func (f *fakeMutatorState) ResumeRig(name string) error {
 		if a.Dir != name {
 			continue
 		}
-		expanded := expandAgent(a, f.cityName, tmpl, f.sp)
+		expanded := expandAgent(a, f.cityName, tmpl, f.sp, cfg.NamedSessions)
 		for _, ea := range expanded {
 			sessionName := agent.SessionNameFor(f.cityName, ea.qualifiedName, tmpl)
 			_ = f.sp.RemoveMeta(sessionName, "suspended")

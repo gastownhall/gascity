@@ -362,6 +362,7 @@ operator-visible outcome:
 - `blocked_on_dependencies`
 - `skipped_due_to_failed_dependency`
 - `deferred_by_wake_budget`
+- `deferred_by_prepare_budget`
 - `already_satisfied`
 - `stop_failed`
 - `stop_slow_survivor`

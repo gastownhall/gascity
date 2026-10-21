@@ -81,6 +81,7 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -278,7 +279,7 @@ func newRouteRecoveryLane() *routeRecoveryLane {
 		restores:                   map[string]int{},
 		interval:                   routeRecoveryBackstopInterval,
 		retry:                      routeRecoveryBackstopRetryInterval,
-		poll:                       backstopPollInterval,
+		poll:                       clock.Backstop(backstopPollInterval),
 		// Nothing has scanned yet, so the first thing this lane does is scan.
 		forced:       true,
 		forcedReason: backstopReasonStartup,

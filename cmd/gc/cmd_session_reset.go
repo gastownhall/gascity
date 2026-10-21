@@ -7,12 +7,18 @@ import (
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
+	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/opjournal/legacyop"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/spf13/cobra"
 )
 
 // newSessionResetCmd creates the "gc session reset <id-or-alias>" command.
 func newSessionResetCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "reset <session-id-or-alias>",
 		Short: "Restart a session fresh while preserving the bead",
@@ -24,10 +30,21 @@ work remain attached to the existing session bead. For named sessions, reset
 also clears any tripped named-session respawn circuit breaker before requesting
 the fresh restart.
 
-Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
+One case is not an in-place restart. A session whose create never completed,
+is past its start lease, and has no running runtime cannot be restarted in
+place, because its unfinished create is what blocks it. Reset rolls that
+session back instead: it closes the bead as a failed create and releases the
+alias so the controller can create a replacement. A create that is still
+starting, or whose runtime is running, is never rolled back.
+
+Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor). A rerun
+with the same --key of a reset that rolled back replays it only when it names
+the session by its ID: the rollback released the alias, and once the
+replacement the controller creates holds it, a rerun by the alias resets that
+session.`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionReset(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionReset(args, key, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -35,16 +52,18 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	addOpKeyFlag(cmd, &key, "")
 	return cmd
 }
 
-// cmdSessionReset is the CLI entry point for "gc session reset".
+// cmdSessionReset is the CLI entry point for "gc session reset", recorded
+// under the op key key (empty mints one) as a restart{fresh} op.
 //
 // This command intentionally requires a managed controller. The controller owns
 // the fresh restart lifecycle, including key rotation and immediate restart of
-// already-desired sessions.
-func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+// already-desired sessions. A worker site refuses before writing anything: its
+// controller is remote, and the reset needs that controller's socket.
+func cmdSessionReset(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
 	store, code := openCityStore(stderr, "gc session reset")
 	if store == nil {
 		return code
@@ -53,6 +72,10 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 	cityPath, err := resolveCity()
 	if err != nil {
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
+	if onWorkerSite(cityPath) {
+		fmt.Fprintf(stderr, "gc session reset: %v\n", errWorkerSiteResetNeedsController) //nolint:errcheck // best-effort stderr
 		return 1
 	}
 	if !cityUsesManagedReconciler(cityPath) {
@@ -64,7 +87,7 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		return 1
 	}
 
-	cfg, _ := loadCityConfig(cityPath, stderr)
+	cfg, cfgErr := loadCityConfig(cityPath, stderr)
 
 	// Every store consumer here is session-class (ID resolution, worker handle,
 	// session-bead load), so route the whole flow through the session
@@ -93,29 +116,87 @@ func cmdSessionReset(args []string, stdout, stderr io.Writer, jsonOutput ...bool
 		return 1
 	}
 	identity := namedSessionIdentity(bead)
+
+	// The op is proposed once the target is loaded, before the circuit-breaker
+	// reset, the first write.
+	op, start := startCLIOp(cfg, sessStore, cliOpRequest{
+		verb: "gc session reset", kind: opjournal.KindRestart, key: key, conversation: sessionID,
+		policy: opjournal.Policy{Restart: opjournal.RestartPolicy{Mode: opjournal.RestartFresh}},
+		cfgErr: cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, op.outcome().Result.Via == legacyop.ViaLegacyRollback, op)
+	}
+	defer op.end()
+
 	if identity != "" {
 		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session reset: clearing session circuit breaker for %q: %v\n", identity, err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
 	}
 
-	if err := handle.Reset(context.Background()); err != nil {
+	// An unfinished create cannot be rescued by an in-place restart: that
+	// leaves the pending-create claim and the alias in place, so the
+	// controller re-enters the same failing start next tick. Roll it back
+	// instead and let the controller recreate it. The rescue leases against
+	// the same configured start budget as the reconciler's pending-create
+	// lease.
+	startupTimeout := (&config.SessionConfig{}).StartupTimeoutDuration()
+	if cfg != nil {
+		startupTimeout = cfg.Session.StartupTimeoutDuration()
+	}
+	rolledBack, err := rescuePendingCreateForReset(sessStore, sp, startupTimeout, sessionID, clock.Real{}, stderr)
+	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
-
-	_ = pokeController(cityPath)
-
-	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
-			Action:    "reset",
-			SessionID: sessionID,
-			Identity:  identity,
-		}); err != nil {
+	if !rolledBack {
+		if err := handle.Reset(context.Background()); err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
 			return 1
 		}
+		op.finishErr(nil)
+	} else {
+		op.finishOutcome(opjournal.Outcome{Arm: opjournal.ArmSucceeded, Result: opjournal.Result{Via: legacyop.ViaLegacyRollback}})
+		op.noteReplayByID(args[0])
+	}
+
+	_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
+	return emitSessionResetResult(stdout, stderr, asJSON, sessionID, identity, rolledBack, op)
+}
+
+// emitSessionResetResult prints a reset's success output, a replay's included.
+func emitSessionResetResult(stdout, stderr io.Writer, asJSON bool, sessionID, identity string, rolledBack bool, op *cliOp) int {
+	// Mode tells a caller which outcome it got. A rollback closed the bead, so
+	// a script waiting for this session to restart in place would otherwise
+	// wait for something that is not going to happen.
+	mode := "restart"
+	if rolledBack {
+		mode = "rollback"
+	}
+	if asJSON {
+		result := sessionActionResult{
+			Action:    "reset",
+			Mode:      mode,
+			SessionID: sessionID,
+			Identity:  identity,
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
+			fmt.Fprintf(stderr, "gc session reset: %v\n", err) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+		return 0
+	}
+	if rolledBack {
+		fmt.Fprintf(stdout, "Session %s had an unfinished create; rolled it back and released its alias. Controller will create a replacement.\n", sessionID) //nolint:errcheck // best-effort stdout
 		return 0
 	}
 	fmt.Fprintf(stdout, "Session %s reset requested. Controller will restart it fresh.\n", sessionID) //nolint:errcheck // best-effort stdout
@@ -131,7 +212,7 @@ func resetSessionCircuitBreakerAfterExplicitKill(cityPath string, store beads.St
 		if err := resetSessionCircuitBreakerOnController(cityPath, sessionID, identity); err != nil {
 			return err
 		}
-		_ = pokeController(cityPath)
+		_ = enqueueController(cityPath, reconcilekey.Session(sessionID))
 		return nil
 	}
 	return resetSessionCircuitBreakerState(store, sessionID, identity, defaultSessionCircuitBreaker())

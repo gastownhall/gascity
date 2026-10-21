@@ -36,6 +36,46 @@ func TestWispAutocloseClosesOpenMolecule(t *testing.T) {
 	}
 }
 
+// TestWispAutocloseLeavesAnOpenParentsAttachments is F6: a spurious
+// bead.closed for a parent that is still open (a false scan close, a replay)
+// must not close its attachments, finished or not.
+func TestWispAutocloseLeavesAnOpenParentsAttachments(t *testing.T) {
+	store := beads.NewMemStore()
+	_, _ = store.Create(beads.Bead{Title: "work item", Metadata: map[string]string{"molecule_id": "gc-3"}}) // gc-1
+	_, _ = store.Create(beads.Bead{Title: "wisp", Type: "molecule", ParentID: "gc-1"})                      // gc-2
+	_, _ = store.Create(beads.Bead{Title: "attached", Type: "molecule"})                                    // gc-3
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, "gc-1", &stdout, beads.GraphStore{Store: store})
+
+	for _, id := range []string{"gc-2", "gc-3"} {
+		b, err := store.Get(id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if b.Status != "open" {
+			t.Errorf("attachment %s status = %q under an open parent, want open", id, b.Status)
+		}
+	}
+	if stdout.Len() != 0 {
+		t.Errorf("stdout = %q, want nothing", stdout.String())
+	}
+}
+
+// An open workflow root's generated spec sidecars are its live spec.
+func TestWispAutocloseLeavesAnOpenWorkflowRootsSpecSidecars(t *testing.T) {
+	store := beads.NewMemStore()
+	root, _ := store.Create(beads.Bead{Title: "workflow", Metadata: map[string]string{beadmeta.KindMetadataKey: beadmeta.KindWorkflow}})
+	spec, _ := store.Create(beads.Bead{Title: "spec", Type: "spec", Metadata: map[string]string{beadmeta.RootBeadIDMetadataKey: root.ID}})
+
+	var stdout bytes.Buffer
+	doWispAutocloseWith(store, root.ID, &stdout, beads.GraphStore{Store: store})
+
+	if got, _ := store.Get(spec.ID); got.Status != "open" {
+		t.Fatalf("spec sidecar %s under an open workflow root, want open", got.Status)
+	}
+}
+
 func TestWispAutocloseClosesMetadataAttachedMolecule(t *testing.T) {
 	store := beads.NewMemStore()
 	_, _ = store.Create(beads.Bead{
@@ -166,8 +206,12 @@ func TestAttachedMoleculeIsParkedPreservesOnWalkError(t *testing.T) {
 	}
 	store := &walkFailingStore{Store: base, failID: root.ID}
 
-	if !attachedMoleculeIsParked(store, root) {
+	parked, err := attachedMoleculeIsParked(store, root)
+	if !parked {
 		t.Fatal("attachedMoleculeIsParked = false on subtree walk error, want true (fail-safe preserve)")
+	}
+	if err == nil {
+		t.Fatal("attachedMoleculeIsParked hid the walk error; the autoclose run must see it to retry")
 	}
 }
 

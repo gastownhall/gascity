@@ -97,9 +97,10 @@ func DetectUserSubreaperPIDWith(self int, parentOf func(int) (int, error), commO
 // subreaperPID of 0 means "none detected", which collapses this to the plain
 // `ppid == 1` rule. A live parent — a still-running supervisor, or the tmux
 // server that owns a pane's root process — is never a subreaper, so a genuinely
-// owned child never matches under either model.
+// owned child never matches under either model. A ppid of 0 means the parent
+// could not be read, which proves nothing, so it never matches either.
 func IsReparentedOrphan(ppid, subreaperPID int) bool {
-	if ppid <= 1 {
+	if ppid == 1 {
 		return true
 	}
 	return subreaperPID > 1 && ppid == subreaperPID

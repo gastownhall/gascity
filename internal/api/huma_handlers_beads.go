@@ -3,11 +3,31 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
+	"log"
+	"maps"
+	"slices"
+	"strings"
 	"time"
 
+	"github.com/danielgtaylor/huma/v2"
 	"github.com/gastownhall/gascity/internal/api/apierr"
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/session"
 )
+
+const beadParentProjectionWaitTimeout = 10 * time.Second
+
+// beadUpdateDescription documents the reparent read-after-write contract
+// shared by POST /bead/{id}/update and PATCH /bead/{id}.
+var beadUpdateDescription = fmt.Sprintf("Applies the update. When it changes the parent of a bead that is not being closed (moving it to a new parent or clearing its parent), the request waits up to %d seconds until the parent-child listings reflect the change, so an immediate read of the old and new parents' children shows it (subject to those listings' usual status filters). "+
+	"A 409 (the bead was reparented or deleted concurrently), 503 (the request was canceled while waiting), or 504 (the move was not confirmed in time) can arrive after the update was applied: read the bead's current state before retrying.",
+	int(beadParentProjectionWaitTimeout/time.Second))
 
 // humaHandleBeadList is the Huma-typed handler for GET /v0/beads.
 //
@@ -21,6 +41,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if blocking {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	cityStore := s.state.CityBeadStore()
 	if err := cacheLiveOr503(cityStore); err != nil {
@@ -57,11 +78,11 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 	if input.All && !blocking {
 		cacheKey = cacheKeyFor("beads", input)
 		bucket = responseCacheTimeBucket(time.Now())
-		if body, ok := cachedResponseAs[ListBody[beads.Bead]](s, cacheKey, bucket); ok {
+		if hit, ok := cachedResponseAs[indexedResponse[ListBody[beads.Bead]]](s, cacheKey, bucket); ok {
 			return &ListOutput[beads.Bead]{
-				Index:     s.latestIndex(),
+				Index:     hit.Index,
 				CacheAgeS: cacheAgeSeconds(cityStore),
-				Body:      body,
+				Body:      hit.Body,
 			}, nil
 		}
 	}
@@ -231,7 +252,6 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		beads.SortBeads(all, beads.SortCreatedDesc)
 	}
 
-	index := s.latestIndex()
 	cacheAge := cacheAgeSeconds(cityStore)
 	// A non-cursor request is first-page paging: a truncated first page
 	// carries the continuation cursor too, otherwise the remainder of a
@@ -250,7 +270,7 @@ func (s *Server) humaHandleBeadList(ctx context.Context, input *BeadListInput) (
 		PartialErrors: pa.messages(),
 	}
 	if cacheKey != "" {
-		s.storeResponse(cacheKey, bucket, body)
+		s.storeResponse(cacheKey, bucket, indexedResponse[ListBody[beads.Bead]]{Index: index, Body: body})
 	}
 	return &ListOutput[beads.Bead]{
 		Index:     index,
@@ -492,12 +512,16 @@ func readyFederationQuery() beads.ReadyQuery {
 //     relocated graph store. The CLI composite's legs are work-then-infra, the
 //     same relative order, so on a rig-less city the two sequences agree.
 //     GET /v0/beads federates the same legs in the same order.
-//   - Within a leg: whatever order that leg's own Ready reader emits. That is
-//     the canonical (priority ASC, created_at ASC, id ASC) for a work store —
-//     CachingStore.Ready sorts with sortBeadsReadyOrder — but NOT for the graph
-//     leg: the canonical relocated binding is beads.SQLiteStore, whose
-//     sqliteReadySQL orders by (created_at ASC, id ASC) with no priority term at
-//     all. Per-leg order is therefore deterministic, not canonical.
+//   - Frame: every rig BeadStores holds, suspended ones included. `gc ready`
+//     deliberately does not match this: it federates the serving rigs only,
+//     the frame the controller's demand census reads, so a suspended rig's own
+//     rows are in this answer and absent from the CLI's (ga-h07n0z; see
+//     readyServingRigs in cmd/gc/ready_federation.go). CLI == API holds over a
+//     city with no suspended rig.
+//   - Within a leg: whatever order that leg's own Ready reader emits. For a
+//     work store (CachingStore.Ready) and for the canonical relocated binding
+//     (beads.SQLiteStore.Ready) alike that is the canonical (priority ASC,
+//     created_at ASC, id ASC) order, so each leg is sorted on its own.
 //   - Dedupe: first leg to return an id wins. The graph leg runs last, so a bead
 //     co-resident in the work store and the binding — the documented steady
 //     state of a migrated city, where the migration preserves ids and never
@@ -506,12 +530,26 @@ func readyFederationQuery() beads.ReadyQuery {
 //     re-sort would change the bytes a multi-rig single-store city already
 //     serves, and the graph leg must be free for such a city. Both sides are
 //     therefore compared after normalizing with beads.SortBeadsReadyOrder. That
-//     normalization is load-bearing rather than cosmetic, precisely because the
-//     graph leg is not priority-ordered; it is well-defined because
-//     SortBeadsReadyOrder is a total order over the merged set.
+//     normalization is load-bearing rather than cosmetic, because a
+//     concatenation of sorted legs is not itself sorted; it is well-defined
+//     because SortBeadsReadyOrder is a total order over the merged set.
 //   - Failure: a rig degrades (Partial 200 + partial_errors); the graph leg
 //     does not (503, carrying any work-leg errors recorded before it). See
 //     graphPlaneUnavailable.
+//   - Source: each leg is answered by its ready cache when the cache is warm
+//     and can vouch for the answer (beads.ReadyPreferCache: the freshness and
+//     invalidation rules of the zero-query CachingStore.Ready), and read live
+//     only when it is cold or invalidated. Two limits follow from that. A cache
+//     over a backing with no ready projection (MemStore, FileStore, and
+//     DoltliteReadStore, whose projection is a no-op) treats a blocker it does
+//     not hold as satisfied, where that store's own Ready can hold the
+//     dependent back (ga-gmf8r). And a blocking request (?index=N) wakes on
+//     its own watch, which can run ahead of the cache absorbing the event that
+//     woke it: the body can miss that change while the index moves past it,
+//     and the client sees the change on the next event or when its next wait
+//     runs out (30s by default, 5m at most). DoltliteReadStore's cache also
+//     ignores a closed blocker's gc.work_outcome, but so does its live Ready,
+//     so the two agree there (ga-e3zi0s).
 //   - Tier: every leg is read at beads.FederatedReadTier, stated explicitly.
 //     A no-argument Ready() left TierMode at its zero value, which the work
 //     legs' bead-policy layer rewrote to TierBoth while the unwrapped graph leg
@@ -522,6 +560,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	if bp.isBlocking() {
 		waitForChange(ctx, s.state.EventProvider(), bp)
 	}
+	index := s.latestIndex()
 
 	stores := s.state.BeadStores()
 	rigNames := sortedRigNames(stores)
@@ -533,7 +572,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 			return
 		}
 		pa.attempt()
-		ready, err := beads.HandlesFor(store).Live.Ready(readyFederationQuery())
+		ready, err := beads.ReadyPreferCache(store, readyFederationQuery())
 		if err != nil {
 			if beads.IsPartialResult(err) && len(ready) > 0 {
 				pa.record(label, err)
@@ -578,7 +617,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 	// does NOT go through federate(): the graph leg has no partial tier.
 	if graph := relocatedGraphStore(s.state); graph != nil {
 		pa.attempt()
-		ready, err := beads.HandlesFor(graph).Live.Ready(readyFederationQuery())
+		ready, err := beads.ReadyPreferCache(graph, readyFederationQuery())
 		if err != nil {
 			return nil, graphPlaneUnavailable("ready", err, pa.messages()...)
 		}
@@ -599,7 +638,6 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 		all = []beads.Bead{}
 	}
 
-	index := s.latestIndex()
 	return &ListOutput[beads.Bead]{
 		Index: index,
 		Body: ListBody[beads.Bead]{
@@ -613,6 +651,7 @@ func (s *Server) humaHandleBeadReady(ctx context.Context, input *BeadReadyInput)
 
 // humaHandleBeadGraph is the Huma-typed handler for GET /v0/beads/graph/{rootID}.
 func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (*IndexOutput[BeadGraphResponse], error) {
+	index := s.latestIndex()
 	rootID := input.RootID
 	if rootID == "" {
 		// Defensive: the {rootID} path segment is required, so the router never
@@ -642,7 +681,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 	deps = mergeWorkflowDeps(deps, parentEdges)
 
 	return &IndexOutput[BeadGraphResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body: BeadGraphResponse{
 			Root:       root,
 			Beads:      graphBeads,
@@ -654,6 +693,7 @@ func (s *Server) humaHandleBeadGraph(_ context.Context, input *BeadGraphInput) (
 
 // humaHandleBeadGet is the Huma-typed handler for GET /v0/bead/{id}.
 func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*IndexOutput[beads.Bead], error) {
+	index := s.latestIndex()
 	id := input.ID
 
 	cityStore := s.state.CityBeadStore()
@@ -666,7 +706,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 		return nil, err
 	}
 	return &IndexOutput[beads.Bead]{
-		Index:     s.latestIndex(),
+		Index:     index,
 		CacheAgeS: cacheAgeSeconds(cityStore),
 		Body:      b,
 	}, nil
@@ -674,6 +714,7 @@ func (s *Server) humaHandleBeadGet(_ context.Context, input *BeadGetInput) (*Ind
 
 // humaHandleBeadDeps is the Huma-typed handler for GET /v0/bead/{id}/deps.
 func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*IndexOutput[BeadDepsResponse], error) {
+	index := s.latestIndex()
 	id := input.ID
 	store, parent, err := s.resolveBeadOwner(id)
 	if err != nil {
@@ -691,7 +732,7 @@ func (s *Server) humaHandleBeadDeps(_ context.Context, input *BeadDepsInput) (*I
 		children = []beads.Bead{}
 	}
 	return &IndexOutput[BeadDepsResponse]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  BeadDepsResponse{Children: children},
 	}, nil
 }
@@ -704,10 +745,12 @@ type BeadDepsResponse struct {
 // humaHandleBeadCreate is the Huma-typed handler for POST /v0/beads.
 // Title required via struct tag on BeadCreateInput.
 func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInput) (*IndexOutput[beads.Bead], error) {
+	index := s.latestIndex()
 	// Idempotency: run the create at most once per Idempotency-Key. The helper
 	// owns reserve/replay/mismatch/in-flight and guarantees the reservation is
-	// released on any error, so every fallible step lives in the closure.
-	b, err := withIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body,
+	// released on any error, so every fallible step lives in the closure. A
+	// replay returns the index cached with the body, not the current head.
+	res, err := withIndexedIdempotency(s.idem, "/v0/beads", input.IdempotencyKey, input.Body, index,
 		func() (beads.Bead, error) {
 			candidate := beads.Bead{
 				Title:       input.Body.Title,
@@ -718,6 +761,13 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 				ParentID:    input.Body.Parent,
 				Metadata:    input.Body.Metadata,
 				DeferUntil:  input.Body.DeferUntil,
+			}
+			// Before anything is written, the assignee's materialized session
+			// included, and before the store is chosen: an owned row is a 422
+			// whatever rig it names, never the placement's 400 (the #7766
+			// review).
+			if err := refuseGenericWrite("(new)", nil, candidate, genericWrite{meta: candidate.Metadata, labels: candidate.Labels}); err != nil {
+				return beads.Bead{}, err
 			}
 			// The store follows from the bead, not from the request: an
 			// infrastructure-class body belongs in this city's class binding
@@ -744,29 +794,71 @@ func (s *Server) humaHandleBeadCreate(ctx context.Context, input *BeadCreateInpu
 	if err != nil {
 		return nil, err
 	}
+	s.wakeAfterBeadWrite()
 
 	return &IndexOutput[beads.Bead]{
-		Index: s.latestIndex(),
-		Body:  b,
+		Index: res.Index,
+		Body:  res.Body,
 	}, nil
 }
 
 // humaHandleBeadClose is the Huma-typed handler for POST /v0/bead/{id}/close.
+//
+// An optional {"reason": "..."} body records why the bead was closed. The
+// reason is stamped as metadata.close_reason before the close, the convention
+// every store's close honors: BdStore and NativeDoltStore forward it as the
+// close reason (bd close --reason), and the whole-row stores record it, so it
+// comes back as the bead's close_reason on GET and on bead.closed.
 func (s *Server) humaHandleBeadClose(ctx context.Context, input *BeadCloseInput) (*OKResponse, error) {
 	id := input.ID
 	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.gateWorkRecordClose(ctx, id, store, current, nil); err != nil {
+	if err := refuseOwnedClose(id, "closes", current); err != nil {
 		return nil, err
 	}
+	var submitted map[string]string
+	reason := ""
+	if input.Body != nil {
+		reason = strings.TrimSpace(input.Body.Reason)
+	}
+	if reason != "" {
+		submitted = map[string]string{"close_reason": reason}
+	}
+	if err := s.gateWorkRecordClose(ctx, id, store, current, submitted); err != nil {
+		return nil, err
+	}
+	// Only a close that happens stamps a reason. On a bead that is not closed,
+	// a recorded close_reason is left over from an earlier close (bd's reopen
+	// clears its close_reason column but not the metadata), so this close
+	// replaces it with its own reason, or with none. On a bead already closed,
+	// Close is a no-op that keeps the reason its close recorded, so no other
+	// reason is stamped beside it.
+	priorReason := current.Metadata["close_reason"]
+	stampReason := current.Status != "closed" && (reason != "" || strings.TrimSpace(priorReason) != "")
+	if stampReason {
+		if err := store.SetMetadata(id, "close_reason", reason); err != nil {
+			if errors.Is(err, beads.ErrNotFound) {
+				return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+			}
+			return nil, apierr.Internal.Msg(err.Error())
+		}
+	}
 	if err := store.Close(id); err != nil {
+		if stampReason && !errors.Is(err, beads.ErrNotFound) {
+			// The bead stays open, so it must not keep the reason stamped
+			// for a close that did not happen.
+			if restoreErr := store.SetMetadata(id, "close_reason", priorReason); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restoring close_reason after failed close: %w", restoreErr))
+			}
+		}
 		if errors.Is(err, beads.ErrNotFound) {
 			return nil, apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	resp := &OKResponse{}
 	resp.Body.Status = "closed"
 	return resp, nil
@@ -780,12 +872,16 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 	if err != nil {
 		return nil, err
 	}
+	if err := refuseOwned(id, "reopens", "path.id", b); err != nil {
+		return nil, err
+	}
 	if b.Status != "closed" {
 		return nil, apierr.ConflictWrongState.Msg("conflict: bead " + id + " is not closed (status: " + b.Status + ")")
 	}
 	if err := store.Reopen(id); err != nil {
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	resp := &OKResponse{}
 	resp.Body.Status = "reopened"
 	return resp, nil
@@ -793,9 +889,14 @@ func (s *Server) humaHandleBeadReopen(_ context.Context, input *BeadReopenInput)
 
 // humaHandleBeadAssign is the Huma-typed handler for POST /v0/bead/{id}/assign.
 func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInput) (*IndexOutput[map[string]string], error) {
+	index := s.latestIndex()
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	// Before the assignee's normalization, which may materialize a session.
+	if err := refuseOwned(id, "assigns", "path.id", current); err != nil {
 		return nil, err
 	}
 	assignee, err := s.normalizeRawBeadAssignee(ctx, input.Body.Assignee)
@@ -812,8 +913,9 @@ func (s *Server) humaHandleBeadAssign(ctx context.Context, input *BeadAssignInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	return &IndexOutput[map[string]string]{
-		Index: s.latestIndex(),
+		Index: index,
 		Body:  map[string]string{"status": "assigned", "assignee": assignee},
 	}, nil
 }
@@ -855,16 +957,17 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 	if err != nil {
 		return nil, err
 	}
+	// Before the assignee's normalization, which may materialize a named
+	// session: a refused write creates nothing.
+	if err := refuseGenericWrite(id, &current, afterUpdate(current, body), genericWrite{meta: body.Metadata, labels: body.Labels, removeLabels: body.RemoveLabels}); err != nil {
+		return nil, err
+	}
 	if body.Assignee != nil {
 		assignee, err := s.normalizeRawBeadAssignee(ctx, *body.Assignee)
 		if err != nil {
 			return nil, apierr.InvalidRequest.Msg(err.Error())
 		}
 		opts.Assignee = &assignee
-	}
-	waitStatus := current.Status
-	if opts.Status != nil {
-		waitStatus = *opts.Status
 	}
 	if closesStatus(opts.Status) {
 		// This spelling closes the bead, so it answers to the same contract as
@@ -884,19 +987,232 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
-	if opts.ParentID != nil && current.ParentID != *opts.ParentID && waitStatus != "closed" {
+	// The write landed, so it wakes even if the parent projection wait fails;
+	// deferred so a woken pass's parent-keyed listings, which bypass the
+	// CachingStore, read bd only after the wait.
+	defer s.wakeAfterBeadWrite()
+	if opts.ParentID != nil && current.ParentID != *opts.ParentID && !closesStatus(opts.Status) {
 		if waiter, ok := store.(beads.ParentProjectionWaiter); ok {
-			if err := waiter.WaitForParentProjection(ctx, id, current.ParentID, *opts.ParentID); err != nil {
-				if errors.Is(err, beads.ErrParentProjectionSuperseded) {
-					return nil, apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
-				}
-				return nil, apierr.Internal.Msg(err.Error())
+			if err := awaitBeadParentProjection(ctx, waiter, id, current.ParentID, *opts.ParentID); err != nil {
+				return nil, err
 			}
 		}
 	}
 	resp := &OKResponse{}
 	resp.Body.Status = "updated"
 	return resp, nil
+}
+
+// genericRefused reports a row the generic bead API never writes: a
+// controller-owned row (coordclass.ControllerOwned; architecture B) or a
+// coordination-class row (coordclass.CoordinationOwned; architecture B v2,
+// mc-v8g4p). Teardowns skip only the controller-owned ones: an order's wisp
+// root carries its order-run label and stays a workflow to tear down.
+func genericRefused(b beads.Bead) bool {
+	return coordclass.ControllerOwned(b) || coordclass.CoordinationOwned(b)
+}
+
+// refuseOwned refuses a generic write to b, a row genericRefused names: the
+// generic bead API never writes one, whatever the write (create, update of
+// any field, close, delete, reopen, assign, sling, convoy membership). The
+// owner's routes do, and bd is the escape hatch. verb names the write, where
+// is the refused field's errors[] location.
+func refuseOwned(id, verb, where string, b beads.Bead) error {
+	if !genericRefused(b) {
+		return nil
+	}
+	kind, owner := ownerOf(b)
+	return apierr.ValidationFailed.With(fmt.Sprintf(
+		"bead %s is %s, which only %s writes: the generic bead API never %s one; nothing was written", id, withArticle(kind), owner, verb),
+		&huma.ErrorDetail{Location: where, Message: "an owned " + kind, Value: id})
+}
+
+// refuseOwnedClose is refuseOwned for a generic close or delete (a soft
+// close), which one owned row takes: an order's run root, a wisp or
+// molecule root its run poured carrying the order-run label and nothing
+// else owned (v5.10f, the #7766 review). Closing it ends that run's work, as
+// an operator may; reopening, assigning, updating or relabeling it stays
+// the owner's.
+func refuseOwnedClose(id, verb string, b beads.Bead) error {
+	if orderRunRoot(b) {
+		return nil
+	}
+	return refuseOwned(id, verb, "path.id", b)
+}
+
+// orderRunRoot reports b, an owned row, as an order's run root: a run record
+// (orders.IsRunRecord) whose only owned mark is its order-run label, so no
+// tracking bead (its order-tracking label) and nothing else owned.
+func orderRunRoot(b beads.Bead) bool {
+	if !orders.IsRunRecord(b) || coordclass.ControllerOwned(b) {
+		return false
+	}
+	bare := b
+	bare.Labels = slices.DeleteFunc(slices.Clone(b.Labels), func(l string) bool {
+		return strings.HasPrefix(strings.ToLower(strings.TrimSpace(l)), "order-run:")
+	})
+	return !coordclass.CoordinationOwned(bare)
+}
+
+// withArticle is kind with its indefinite article.
+func withArticle(kind string) string {
+	if strings.ContainsRune("aeiou", rune(kind[0])) {
+		return "an " + kind
+	}
+	return "a " + kind
+}
+
+// ownerOf is an owned row's kind and who writes it. A typed work bead
+// carrying the session label is no session any verb owns, so bd is its only
+// writer (the #7742 review).
+func ownerOf(b beads.Bead) (kind, owner string) {
+	if coordclass.ControllerOwned(b) {
+		switch t := strings.ToLower(strings.TrimSpace(b.Type)); t {
+		case session.StartupHealthEpisodeType:
+			return "startup-health episode", "the controller's startup health"
+		case "convergence":
+			return "convergence root", "the convergence handler (gc converge, the convergence routes)"
+		case opjournal.BeadType:
+			return "operation-journal row", "the operation journal (the session verbs that record ops, the controller's op sweeper and lanes)"
+		case session.BeadType, "":
+			return "session row", "the session verbs (POST /v0/city/{cityName}/sessions and /session/{id}/..., /pin, /unpin, gc session)"
+		}
+		return "bead carrying the " + session.LabelSession + " label", "bd (bd update, bd close)"
+	}
+	if coordclass.CoordinationOwnedType(b.Type) {
+		return "mail message", "the mail routes (POST /v0/city/{cityName}/mail, /mail/{id}/..., gc mail)"
+	}
+	label := ""
+	if i := coordclass.CoordinationOwnedLabel(b.Type, b.Labels, b.Metadata); i >= 0 {
+		label = strings.ToLower(strings.TrimSpace(b.Labels[i]))
+	}
+	switch {
+	case strings.HasPrefix(label, "gc:nudge"):
+		return "queued nudge", "the nudge queue (gc nudge, the session message routes)"
+	case label == "order-tracking" || strings.HasPrefix(label, "order-run:"):
+		return "order run record", "order dispatch, and bd (bd update, bd close) or the workflow's teardown (DELETE /v0/city/{cityName}/workflow/{id}, POST /v0/city/{cityName}/runs/{id}/cancel) for an operator; a run's root alone also takes a generic close"
+	case strings.HasPrefix(label, "gc:extmsg-"):
+		return "external-messaging row", "the extmsg routes (/v0/city/{cityName}/extmsg/...)"
+	}
+	return "session wait", "gc session wait and the controller's waits step"
+}
+
+// refuseGenericWrite refuses, before anything is written (an assignee's
+// materialized session included), a generic bead create or update
+// (architecture B; ARCH-RESTRUCTURE-2 R7):
+//   - on any bead, a metadata key that fails beadmeta.ValidKey: a bd-backed
+//     store would split "wait_hold=true" into another key; and a label that
+//     fails beadmeta.ValidLabel, which bd reads as a CSV record
+//     ("x,gc:session" or "gc:session\n" would add the session label);
+//   - any write to a row genericRefused names (refuseOwned), and any that
+//     would make one, at the type, label or session_id that does.
+//
+// before is the row as read, nil for a create; after is the row with the
+// request's type and labels applied. Each refusal is 422 with an errors[]
+// entry per offending field.
+func refuseGenericWrite(id string, before *beads.Bead, after beads.Bead, w genericWrite) error {
+	var invalid []*huma.ErrorDetail
+	for _, k := range slices.Sorted(maps.Keys(w.meta)) {
+		if !beadmeta.ValidKey(k) {
+			invalid = append(invalid, &huma.ErrorDetail{Location: "body.metadata." + k, Message: "invalid metadata key: must match " + beadmeta.ValidKeyPattern, Value: k})
+		}
+	}
+	for field, labels := range map[string][]string{"labels": w.labels, "remove_labels": w.removeLabels} {
+		for i, l := range labels {
+			if !beadmeta.ValidLabel(l) {
+				invalid = append(invalid, &huma.ErrorDetail{Location: fmt.Sprintf("body.%s[%d]", field, i), Message: "a label must read back as itself from one CSV record: no comma, quote, newline or carriage return (bd reads labels as a CSV list)", Value: l})
+			}
+		}
+	}
+	if len(invalid) > 0 {
+		slices.SortFunc(invalid, func(a, b *huma.ErrorDetail) int { return strings.Compare(a.Location, b.Location) })
+		return apierr.ValidationFailed.With("bead "+id+": invalid metadata key or label; nothing was written", invalid...)
+	}
+	if before != nil {
+		if err := refuseOwned(id, "writes", "path.id", *before); err != nil {
+			return err
+		}
+	}
+	if !genericRefused(after) {
+		return nil
+	}
+	kind, owner := ownerOf(after)
+	msg := "makes the row an owned " + kind
+	detail := &huma.ErrorDetail{Location: "body.type", Message: msg, Value: after.Type}
+	switch i, j := coordclass.ControllerOwnedLabel(w.labels), coordclass.CoordinationOwnedLabel(after.Type, w.labels, after.Metadata); {
+	case i >= 0:
+		detail = &huma.ErrorDetail{Location: fmt.Sprintf("body.labels[%d]", i), Message: msg, Value: w.labels[i]}
+	case j >= 0:
+		detail = &huma.ErrorDetail{Location: fmt.Sprintf("body.labels[%d]", j), Message: msg, Value: w.labels[j]}
+	case !coordclass.ControllerOwnedType(after.Type) && !coordclass.CoordinationOwnedType(after.Type):
+		// A wait made by its session_id: a gate carrying session:<id>.
+		if _, ok := w.meta["session_id"]; ok {
+			detail = &huma.ErrorDetail{Location: "body.metadata.session_id", Message: msg, Value: after.Metadata["session_id"]}
+		}
+	}
+	return apierr.ValidationFailed.With(fmt.Sprintf(
+		"bead %s: the generic bead API never makes %s, which only %s writes; nothing was written", id, withArticle(kind), owner), detail)
+}
+
+// genericWrite is what a generic create or update asks to write: its
+// metadata, and the labels it adds and removes.
+type genericWrite struct {
+	meta                 map[string]string
+	labels, removeLabels []string
+}
+
+// afterUpdate is current with the update's type, label and metadata changes
+// applied: the row the update would leave, as far as whether it is owned.
+func afterUpdate(current beads.Bead, body beadUpdateBody) beads.Bead {
+	after := current
+	if body.Type != nil {
+		after.Type = *body.Type
+	}
+	if len(body.Metadata) > 0 {
+		after.Metadata = maps.Clone(current.Metadata)
+		if after.Metadata == nil {
+			after.Metadata = make(map[string]string, len(body.Metadata))
+		}
+		maps.Copy(after.Metadata, body.Metadata)
+	}
+	labels := slices.Clone(current.Labels)
+	labels = append(labels, body.Labels...)
+	after.Labels = slices.DeleteFunc(labels, func(l string) bool { return slices.Contains(body.RemoveLabels, l) })
+	return after
+}
+
+// awaitBeadParentProjection waits, for at most
+// beadParentProjectionWaitTimeout, until the parent-child listings reflect a
+// reparent of bead id that the store has already applied, and maps a failed
+// wait to its HTTP error.
+func awaitBeadParentProjection(ctx context.Context, waiter beads.ParentProjectionWaiter, id, oldParentID, newParentID string) error {
+	waitCtx, cancel := context.WithTimeout(ctx, beadParentProjectionWaitTimeout)
+	defer cancel()
+	err := waiter.WaitForParentProjection(waitCtx, id, oldParentID, newParentID)
+	switch {
+	case err == nil:
+		return nil
+	case errors.Is(err, beads.ErrParentProjectionSuperseded):
+		return apierr.ConflictConcurrentModify.Msg("conflict: bead " + id + " was reparented concurrently")
+	case errors.Is(err, beads.ErrNotFound):
+		return apierr.ConflictConcurrentDelete.Msg("conflict: bead " + id + " was deleted concurrently")
+	}
+	log.Printf("api: bead %s parent projection confirmation failed after update: %v", id, err)
+	// Classify by why this wait stopped: its own context says so directly,
+	// whereas err may also carry an earlier backend timeout from inside the
+	// wait. Reading it before cancel runs keeps that answer.
+	stopped := waitCtx.Err()
+	if stopped == nil {
+		stopped = err
+	}
+	switch {
+	case errors.Is(stopped, context.DeadlineExceeded):
+		return apierr.GatewayTimeout.Msg("bead " + id + " was updated, but its parent projection was not confirmed before the timeout")
+	case errors.Is(stopped, context.Canceled):
+		return apierr.ServiceUnavailable.Msg("bead " + id + " was updated, but parent projection confirmation was canceled")
+	default:
+		return apierr.Internal.Msg(err.Error())
+	}
 }
 
 // humaHandleBeadDelete is the Huma-typed handler for DELETE /v0/bead/{id}.
@@ -924,8 +1240,11 @@ func (s *Server) humaHandleBeadUpdate(ctx context.Context, input *BeadUpdateInpu
 // refused per-bead close: each tears down an entire subtree rather than one bead.
 func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput) (*OKResponse, error) {
 	id := input.ID
-	store, _, err := s.resolveBeadOwner(id)
+	store, current, err := s.resolveBeadOwner(id)
 	if err != nil {
+		return nil, err
+	}
+	if err := refuseOwnedClose(id, "deletes", current); err != nil {
 		return nil, err
 	}
 	if err := store.Close(id); err != nil {
@@ -934,7 +1253,20 @@ func (s *Server) humaHandleBeadDelete(_ context.Context, input *BeadDeleteInput)
 		}
 		return nil, apierr.Internal.Msg(err.Error())
 	}
+	s.wakeAfterBeadWrite()
 	resp := &OKResponse{}
 	resp.Body.Status = "closed"
 	return resp, nil
+}
+
+// wakeAfterBeadWrite asks the controller to reconcile after a successful
+// generic bead write. The write lands through the controller's CachingStore
+// as a cache-authored bead event, which never wakes the legacy reconciler,
+// so without this an API-written bead waits for the patrol interval. One
+// call: one legacy poke plus the control-dispatcher key, the pair sling
+// wakes. Under v2 this marks the planner on every write, including writes
+// OnBeadEvent's relevance filter skips (critic D7); v2 is trace-only in
+// builds, and gating this to the legacy reconciler is a tracked follow-up.
+func (s *Server) wakeAfterBeadWrite() {
+	s.state.Enqueue(reconcilekey.Allocator(), reconcilekey.ControlDispatch())
 }

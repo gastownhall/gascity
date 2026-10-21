@@ -16,6 +16,7 @@ import (
 	"github.com/gastownhall/gascity/internal/mail"
 	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orders"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
 )
 
@@ -221,13 +222,10 @@ type SessionsStore interface {
 	UpdateMetadataInfo(session.Info, session.MetadataPatch) (session.Info, error)
 	SetState(string, session.State, string) error
 	Sleep(string, string, time.Time) error
-	BeginDrainAckStopPending(string, time.Time) error
-	RequestRestart(string, string, time.Time) error
-	ResetConfigDrift(string, session.State, string, time.Time) error
 	SetWaitHold(string, bool, string) error
 	SetMarker(string, string, string) error
 	RecordCurrentBead(string, string) error
-	Close(string, string, time.Time) (bool, error)
+	Close(session.Info, string, time.Time) (bool, error)
 	CloseWithoutReason(string) error
 	SetStatusOpen(string) error
 	RepairType(string) error
@@ -335,13 +333,33 @@ type OrdersGraphBinder interface {
 	BindGraph(GraphStore) OrdersStore
 }
 
-// ClaimTarget is the data-only identity and session-generation fence for a nudge claim.
-// It matches the the legacy combined layout queue contract and deliberately contains no store handle.
+// ClaimTarget is the identity and session-generation fence for a nudge claim.
+// It deliberately contains no store handle. LiveFenceSessions is a lazy census,
+// not a store handle: it lets the target adopt a nudge pinned to a session that
+// no longer holds a seat.
 type ClaimTarget struct {
 	QueueKeys         []string
 	SessionID         string
 	ContinuationEpoch string
+	// LiveFenceSessions reports the ids of the sessions that still hold a
+	// nudge fence and whether that census was available. Nil keeps strict
+	// fencing. An implementation calls it at most once per claim, and only
+	// when a due candidate is pinned to a session other than SessionID. In
+	// ClaimBatch a pinned batch's due members are such candidates, and a live
+	// member that is not yet due makes its batch not whole without asking. A
+	// session-pinned item is claimable by another session only if the census
+	// is available, contains SessionID, and does not contain the item's
+	// session.
+	LiveFenceSessions func() (map[string]struct{}, bool)
 }
+
+// ErrNudgeDeliveryRejected is the runtime's definitive "no": nothing was
+// delivered, so RecordFailure clears the item's delivery batch and the next
+// claim pins it under a new key. It is runtime.ErrNudgeRejected: the queue
+// adopts the runtime's delivery vocabulary rather than translating it, so a
+// caller reports a rejection by passing the runtime's error (or one wrapping
+// it) as RecordFailure's cause.
+var ErrNudgeDeliveryRejected = runtime.ErrNudgeRejected
 
 // ErrNudgeSessionFenceMismatch marks a delivery failure caused by a queued
 // nudge's session fence not matching the live target. It is CONTRACT
@@ -368,18 +386,80 @@ type ClaimTarget struct {
 var ErrNudgeSessionFenceMismatch = errors.New("queued nudge session fence mismatch")
 
 // NudgeQueue is the closed durable nudge queue contract.
+//
+// The delivery verbs (Enqueue, ClaimDue, ListFor, ListForAgent, Ack,
+// ReleaseClaims, RecordFailure) are target-scoped: they read only the records
+// addressed to the queue keys they are given and repair only the records they
+// touch, so the requests they issue and the records they read do not grow with
+// the rest of the queue. (What one keyed read costs inside the store is the
+// store's index plan; see each implementation.) The
+// whole-queue recovery work — revoking expired leases, dead-lettering expired
+// items, aging dead letters out, and sweeping retired records past retention —
+// is Maintain's alone, and the infrastructure owner runs it on its own cadence.
+//
+// A delivery read (ClaimDue, ClaimBatch, ListFor, ListForAgent, Lookup) that
+// meets a record it cannot decode skips it rather than failing every delivery
+// to that target: it returns everything it could read together with an error
+// for which beads.IsPartialResult reports true. The caller delivers what it got
+// and reports the error.
+//
+// The whole-queue reads (DueKeys, Empty, Snapshot) serve the queue's owner and
+// diagnostics. They are read-only and may be stale.
 type NudgeQueue interface {
 	Enqueue(nudgequeue.Item) error
 	EnqueueDeferred(nudgequeue.Item) error
 	ClaimDue(ClaimTarget, time.Time) ([]nudgequeue.Item, error)
+	// ClaimBatch claims the target's next delivery batch: a pinned batch that
+	// can be claimed whole (every live member due, fence-passing, addressed
+	// to one of the target's keys, and none in flight), all of its pending
+	// members and nothing else; otherwise every due unpinned item, pinned to
+	// a newly minted key. A pinned batch is never claimed in part. Each
+	// returned item carries ClaimedAt, LeaseUntil and DeliveryBatch.
+	ClaimBatch(ClaimTarget, time.Time) ([]nudgequeue.Item, error)
 	ListForAgent(string, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error)
 	ListFor(ClaimTarget, time.Time) ([]nudgequeue.Item, []nudgequeue.Item, []nudgequeue.Item, error)
+	// Lookup reports the bucket each id is in, as of now. Ids the queue no
+	// longer serves (acked, retired, unknown) are absent; an item past its
+	// deliver-by deadline reads as dead.
+	Lookup(ids []string, now time.Time) (map[string]nudgequeue.Bucket, error)
+	// DueKeys returns, sorted and unique, the non-empty queue keys with a due
+	// pending item or an in-flight item whose lease has expired. Like the
+	// delivery reads, it skips a record it cannot decode and returns the keys
+	// it could read together with an error for which beads.IsPartialResult
+	// reports true; the caller acts on the keys and reports the error.
+	DueKeys(time.Time) ([]string, error)
+	// Empty reports that the queue serves no pending, in-flight or dead item.
+	// An unreadable queue is not empty: it reports false with the error.
+	Empty() (bool, error)
 	Snapshot() (nudgequeue.State, error)
 	Ack([]string, string, string, string) error
-	ReleaseClaims([]string) error
+	// ReleaseClaims returns in-flight ids to pending. A non-zero notBefore
+	// keeps them from being claimed again before then; the zero time releases
+	// them for immediate redelivery. Delivery batches are kept.
+	ReleaseClaims(ids []string, notBefore time.Time) error
 	RecordFailure([]string, error, time.Time) ([]nudgequeue.Item, error)
 	Rollback(nudgequeue.Item, string) error
 	WithdrawQueuedWaitNudges([]string) error
+	// Maintain runs one whole-queue recovery pass as of now. ctx is checked
+	// between transitions, so it bounds the writes, not a read already in
+	// progress; the sweep deletes at most one batch per pass. A failed
+	// transition does not stop the pass: every failure is joined into the
+	// returned error. Records it could not decode are not a failure; they are
+	// listed in the report.
+	Maintain(context.Context, time.Time) (NudgeMaintenance, error)
+}
+
+// NudgeMaintenance is what one [NudgeQueue.Maintain] pass found that is not a
+// failure of the pass.
+type NudgeMaintenance struct {
+	// Corrupt holds one error per queue record the pass could not decode
+	// (wrapping ErrBeadsNudgeQueueCorrupt for the beads queue). The pass did
+	// everything else it could.
+	Corrupt []error
+	// Remaining reports that the pass stopped at its per-call bound with
+	// retired records possibly still due for the sweep; the next pass
+	// continues.
+	Remaining bool
 }
 
 // NudgeShadows is the closed nudge shadow projection contract.
@@ -389,6 +469,15 @@ type NudgeShadows interface {
 	RollbackEnqueue(string) error
 	SweepStale(string, string, time.Time) error
 	StaleShadowsBefore(time.Time, int, map[string]bool) ([]nudgequeue.NudgeShadow, error)
+	// ShadowHistorySince lists, oldest first, at least every shadow created
+	// or retired at or after since. The cutoff bounds what must be listed,
+	// not what may be: the beads shadow view also lists every live and dead
+	// queue record however old, where the legacy gc:nudge store leaves out an
+	// open shadow created before since. A nudge can be listed once per
+	// shadow it has, as when a gc:nudge shadow was closed and a later save
+	// for the same id opened another; the view lists a nudge that has a
+	// queue record once, from the record, unless the record was retired
+	// migrated.
 	ShadowHistorySince(time.Time) ([]nudgequeue.NudgeShadow, error)
 	Find(string) (nudgequeue.NudgeShadow, bool, error)
 	FindIncludingTerminal(string) (nudgequeue.NudgeShadow, bool, error)

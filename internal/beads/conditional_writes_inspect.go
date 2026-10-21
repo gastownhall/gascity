@@ -108,10 +108,12 @@ func (c *CachingStore) inspectConditionalWriteState() (probe, latch, reason stri
 // diagnostic surfaces (the status wire, doctor). It follows the same
 // resolve-target walk the write path uses, then reads — never writes — the
 // stamp and the capability memo. Inspecting costs no subprocesses; an
-// unexercised bd store legitimately reports Probe=unprobed.
+// unexercised bd store legitimately reports Probe=unprobed. A wrapper that
+// declares a mode source reports its source, as the write path resolves it.
 func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 	if store != nil {
 		store = followConditionalWritesResolveTarget(store)
+		store, _ = conditionalWritesModeSource(store)
 	}
 	insp := ConditionalWritesInspection{
 		StoreKind: conditionalStoreKind(store),
@@ -130,4 +132,38 @@ func InspectConditionalWrites(store Store) ConditionalWritesInspection {
 	insp.Capable = insp.Probe != ConditionalWriteProbeIncapable &&
 		insp.Latch != ConditionalWriteLatchIncapable
 	return insp
+}
+
+// ProbeConditionalWrites reports whether store can perform revision-fenced
+// writes, with the reason when it cannot. Unlike InspectConditionalWrites it
+// RUNS the store's capability probe if no verdict is memoized yet — for a bd
+// store that is a read-only `bd <verb> --help` per conditional-write verb,
+// once per store instance — so an unexercised store is never reported capable
+// on faith. Unlike ResolveConditionalWriter it ignores the rollout mode: it
+// serves callers that fence every write and must refuse a store that cannot.
+// It walks the same declared resolve targets and mode source as the write
+// path.
+func ProbeConditionalWrites(store Store) (bool, string) {
+	if store == nil {
+		return false, "no store"
+	}
+	store = followConditionalWritesResolveTarget(store)
+	src, sourced := conditionalWritesModeSource(store)
+	if _, ok := ConditionalWriterFor(store); !ok {
+		return false, "store does not implement conditional writes"
+	}
+	if sourced {
+		if _, ok := ConditionalWriterFor(src); !ok {
+			return false, "mode source does not implement conditional writes"
+		}
+	}
+	if liveness, ok := src.(conditionalWritesLiveness); ok {
+		if err := liveness.conditionalWritesStoreOpen(); err != nil {
+			return false, err.Error()
+		}
+	}
+	if prober, ok := src.(conditionalWriteCapabilityProber); ok {
+		return prober.probeConditionalWriteCapability()
+	}
+	return true, ""
 }

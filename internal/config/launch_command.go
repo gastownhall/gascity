@@ -45,7 +45,82 @@ func BuildProviderLaunchCommand(cityPath string, resolved *ResolvedProvider, opt
 		command = ReplaceSchemaFlags(command, resolved.OptionsSchema, mergedArgs)
 	}
 
-	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), command), nil
+	return appendProviderSettings(cityPath, providerLaunchFamily(resolved), command), nil
+}
+
+// BuildProviderTemplateLaunchCommand composes the launch command an agent
+// template resolves to before any per-session option overrides: the
+// ProviderTemplateCommand plus any provider-owned settings file. It is the
+// command the controller's template resolution composes for the same agent,
+// before that resolution expands session-setup placeholders such as
+// {{.WorkDir}}, so a deferred create can persist it as the baseline the
+// async-start drift check compares against.
+func BuildProviderTemplateLaunchCommand(cityPath string, resolved *ResolvedProvider, transport string, installHooks []string, providers map[string]ProviderSpec) (ProviderLaunchCommand, error) {
+	command, err := ProviderTemplateCommand(resolved, transport, installHooks, providers)
+	if err != nil {
+		return ProviderLaunchCommand{}, err
+	}
+	return appendProviderSettings(cityPath, providerLaunchFamily(resolved), command), nil
+}
+
+// ProviderTemplateCommand composes an agent template's provider command
+// without provider settings: the transport-specific base command, the Kimi
+// hook config argument when installHooks covers the Kimi family, and the
+// schema-managed defaults. Unlike BuildProviderLaunchCommand it never fails on
+// an option default: one that cannot be rendered is omitted, as in
+// ResolvedProvider.ResolveDefaultArgs, and callers report it through
+// ResolvedProvider.UnhonoredOptionPins.
+func ProviderTemplateCommand(resolved *ResolvedProvider, transport string, installHooks []string, providers map[string]ProviderSpec) (string, error) {
+	if resolved == nil {
+		return "", fmt.Errorf("resolved provider is nil")
+	}
+	if !IsValidSessionTransport(transport) {
+		return "", fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
+	}
+	command := providerLaunchBaseCommand(resolved, transport)
+	if providerLaunchFamily(resolved) == "kimi" && installHooksIncludeFamily(installHooks, "kimi", providers) {
+		command = appendKimiHookConfigArg(command)
+	}
+	// Append schema-derived default args (e.g., --dangerously-skip-permissions
+	// from EffectiveDefaults["permission_mode"] = "unrestricted").
+	if defaultArgs := resolved.ResolveDefaultArgs(); len(defaultArgs) > 0 {
+		command = command + " " + shellquote.Join(defaultArgs)
+	}
+	return command, nil
+}
+
+func installHooksIncludeFamily(installHooks []string, family string, providers map[string]ProviderSpec) bool {
+	family = strings.TrimSpace(family)
+	if family == "" {
+		return false
+	}
+	for _, hook := range installHooks {
+		hook = strings.TrimSpace(hook)
+		if hook == "" {
+			continue
+		}
+		if hook == family || BuiltinFamily(hook, providers) == family {
+			return true
+		}
+	}
+	return false
+}
+
+func appendKimiHookConfigArg(command string) string {
+	parts := shellquote.Split(command)
+	if len(parts) == 0 {
+		return command
+	}
+	configArgs := []string{"--config-file", ".kimi/config.toml"}
+	if parts[len(parts)-1] == "acp" {
+		withConfig := make([]string, 0, len(parts)+len(configArgs))
+		withConfig = append(withConfig, parts[:len(parts)-1]...)
+		withConfig = append(withConfig, configArgs...)
+		withConfig = append(withConfig, parts[len(parts)-1])
+		return shellquote.Join(withConfig)
+	}
+	parts = append(parts, configArgs...)
+	return shellquote.Join(parts)
 }
 
 // BuildProviderResumeCommand applies schema-managed option overrides to a
@@ -79,24 +154,6 @@ func BuildProviderResumeCommand(resolved *ResolvedProvider, optionOverrides map[
 		return "", err
 	}
 	return replaceResumeSchemaFlags(command, resolved.ResumeFlag, resolved.ResumeStyle, resolved.OptionsSchema, mergedArgs), nil
-}
-
-// BuildProviderLaunchCommandWithoutOptions composes the transport-specific
-// provider command plus any provider-owned settings file without applying
-// schema-managed defaults or explicit option overrides.
-//
-// Deferred agent-session creation uses this helper because option state is
-// stored separately in template_overrides and applied later at actual start
-// time, but the stored base command must still match the selected transport
-// and provider-owned settings semantics.
-func BuildProviderLaunchCommandWithoutOptions(cityPath string, resolved *ResolvedProvider, transport string) (ProviderLaunchCommand, error) {
-	if resolved == nil {
-		return ProviderLaunchCommand{}, fmt.Errorf("resolved provider is nil")
-	}
-	if !IsValidSessionTransport(transport) {
-		return ProviderLaunchCommand{}, fmt.Errorf("unknown session transport %q", strings.TrimSpace(transport))
-	}
-	return appendProviderSettings(cityPath, providerSettingsFamily(resolved), providerLaunchBaseCommand(resolved, transport)), nil
 }
 
 func providerLaunchBaseCommand(resolved *ResolvedProvider, transport string) string {
@@ -191,14 +248,14 @@ func appendProviderSettings(cityPath, providerName, command string) ProviderLaun
 	}
 }
 
-func providerSettingsFamily(resolved *ResolvedProvider) string {
+func providerLaunchFamily(resolved *ResolvedProvider) string {
 	if resolved == nil {
 		return ""
 	}
 	if family := strings.TrimSpace(resolved.BuiltinAncestor); family != "" {
 		return family
 	}
-	// Keep settings discovery aligned with resolvedProviderLaunchFamily in
+	// Keep launch composition aligned with resolvedProviderLaunchFamily in
 	// cmd/gc: deprecated Kind is descriptive metadata, not launch family.
 	return strings.TrimSpace(resolved.Name)
 }

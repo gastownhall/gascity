@@ -1,6 +1,10 @@
 package tmux
 
-import "testing"
+import (
+	"testing"
+
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
+)
 
 func TestKimiCodeProcessLiveness(t *testing.T) {
 	// Kimi Code changes both COMM and argv[0] to kimi-code. The production
@@ -12,7 +16,7 @@ func TestKimiCodeProcessLiveness(t *testing.T) {
 			{PID: "102", PPID: "101", Command: command, Args: command},
 		})
 		pane := paneRuntimeState{Command: "sudo", PID: "100"}
-		if !pane.processAlive(processNameSet([]string{"kimi"}), snapshot) {
+		if !pane.processAlive(proctable.ProcessNameSet([]string{"kimi"}), snapshot) {
 			t.Errorf("live %s descendant reported dead", command)
 		}
 		if !processMatchesNamesForTest(command, command, []string{"kimi"}) {
@@ -33,5 +37,5 @@ func TestKimiCodeProcessLiveness(t *testing.T) {
 }
 
 func processMatchesNamesForTest(command, args string, names []string) bool {
-	return processMatchesNameSet(command, args, processNameSet(names))
+	return proctable.ProcessMatchesNameSet(command, args, proctable.ProcessNameSet(names))
 }

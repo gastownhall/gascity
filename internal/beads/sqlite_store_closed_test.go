@@ -8,9 +8,9 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
-// CloseStore releases both database handles, so every later call would
-// dereference a nil *sql.DB. These two maps record the only exported methods
-// allowed to survive that: everything else must report beads.ErrStoreClosed.
+// CloseStore closes both database handles, so every later call would reach a
+// closed *sql.DB. These two maps record the only exported methods allowed to
+// survive that: everything else must report beads.ErrStoreClosed.
 // A method added later lands in neither map and fails the test.
 var (
 	sqliteMethodsExemptFromClosedGuard = map[string]string{
@@ -19,10 +19,13 @@ var (
 		"SetSequenceFloor": "writes the id-floor sidecar file under its own flock",
 	}
 	sqliteMethodsWithoutErrorResult = map[string]string{
-		"AdvanceSequenceFloor": "raises the in-memory id allocator only",
-		"AtomicTx":             "reports a constant capability",
-		"IDPrefix":             "returns an immutable field",
-		"StoreHealthPath":      "returns an immutable field",
+		"AdvanceSequenceFloor":          "raises the in-memory id allocator only",
+		"AtomicConditionalCloserHandle": "reports a capability from an immutable layout field; the closer it returns guards every call",
+		"AtomicTx":                      "reports a constant capability",
+		"CachedReadExact":               "reports a constant capability",
+		"GuardedBatcherHandle":          "reports a capability from immutable layout fields; the batcher it returns guards every call",
+		"IDPrefix":                      "returns an immutable field",
+		"StoreHealthPath":               "returns an immutable field",
 	}
 )
 

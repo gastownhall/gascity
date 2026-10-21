@@ -9,14 +9,17 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/opjournal"
+	"github.com/gastownhall/gascity/internal/reconcilekey"
+	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
-	"github.com/gastownhall/gascity/internal/suspensionstate"
 	"github.com/spf13/cobra"
 )
 
 // newSessionWakeCmd creates the "gc session wake <id-or-alias>" command.
 func newSessionWakeCmd(stdout, stderr io.Writer) *cobra.Command {
 	var jsonOutput bool
+	var key string
 	cmd := &cobra.Command{
 		Use:   "wake <session-id-or-alias>",
 		Short: "Wake a session (request start and clear holds)",
@@ -26,12 +29,18 @@ After waking, the reconciler will start the session on its next tick
 if it has wake reasons (e.g., a matching config agent). If the session
 has no wake reasons, it remains asleep.
 
+When a configured named session has no session to wake or reopen, the wake
+creates one as it resolves the target, before the wake is recorded. While the
+ops.lifecycle gate is require, a wake whose op the journal then cannot record
+is refused (op_journal_unavailable): the wake did not run, but the session it
+created stays and may start.
+
 Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		Example: `  gc session wake gc-42
   gc session wake mayor`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(_ *cobra.Command, args []string) error {
-			if cmdSessionWake(args, stdout, stderr, jsonOutput) != 0 {
+			if cmdSessionWake(args, key, stdout, stderr, jsonOutput) != 0 {
 				return errExit
 			}
 			return nil
@@ -39,10 +48,15 @@ Accepts a session ID (e.g., gc-42) or session alias (e.g., mayor).`,
 		ValidArgsFunction: completeSessionIDs,
 	}
 	cmd.Flags().BoolVar(&jsonOutput, "json", false, "emit JSONL")
+	addOpKeyFlag(cmd, &key, cliOpKeyNoWithdrawnNote)
 	return cmd
 }
 
 type sessionWakeDeps struct {
+	// opKey is --key, the wake op's client key; empty mints one.
+	opKey string
+	// cfgErr is the city config's load error, when cfg did not load.
+	cfgErr                    error
 	store                     beads.Store
 	cfg                       *config.City
 	cityPath                  string
@@ -50,23 +64,40 @@ type sessionWakeDeps struct {
 	now                       func() time.Time
 	withdrawQueuedWaitNudges  func(string, []string) error
 	cityUsesManagedReconciler func(string) bool
-	pokeController            func(string) error
+	pokeController            func(string, reconcilekey.Key) error
+	// rigStores opens the rig stores the will-not-start predicate reads for
+	// assigned work; nil reads the city store only.
+	rigStores func() map[string]beads.Store
+	// sp reads the sleep policy's capability for the predicate; nil never
+	// refuses on an idle latch.
+	sp runtime.Provider
 }
 
-// cmdSessionWake is the CLI entry point for "gc session wake".
-func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool) int {
-	asJSON := sessionJSONRequested(jsonOutput)
+// wakeVerdictProvider is the session provider the will-not-start predicate
+// reads the sleep policy's capability from; nil (no idle-latch refusal) when
+// it cannot be built.
+func wakeVerdictProvider() runtime.Provider {
+	sp, err := newSessionProvider()
+	if err != nil {
+		return nil
+	}
+	return sp
+}
+
+// cmdSessionWake is the CLI entry point for "gc session wake", recorded
+// under the op key key (empty mints one).
+func cmdSessionWake(args []string, key string, stdout, stderr io.Writer, asJSON bool) int {
 	store, code := openCityStore(stderr, "gc session wake")
 	if store == nil {
 		return code
 	}
 
 	cityPath, cityErr := resolveCity()
-	var cfg *config.City
-	if cityErr == nil {
-		cfg, _ = loadCityConfig(cityPath, stderr)
-	}
+	cfg, cfgErr := cliCityConfig(cityPath, cityErr, stderr)
 	return doSessionWake(args[0], stdout, stderr, asJSON, sessionWakeDeps{
+		opKey:                     key,
+		cfgErr:                    cfgErr,
+		sp:                        wakeVerdictProvider(),
 		store:                     store,
 		cfg:                       cfg,
 		cityPath:                  cityPath,
@@ -74,25 +105,47 @@ func cmdSessionWake(args []string, stdout, stderr io.Writer, jsonOutput ...bool)
 		now:                       time.Now,
 		withdrawQueuedWaitNudges:  withdrawQueuedWaitNudges,
 		cityUsesManagedReconciler: cityUsesManagedReconciler,
-		pokeController:            pokeController,
+		pokeController:            enqueueController,
+		rigStores: func() map[string]beads.Store {
+			return buildStandaloneRigStoresWithConfig(cfg, cityPath, io.Discard)
+		},
 	})
 }
 
 func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps sessionWakeDeps) int {
 	sessStore := cliSessionStore(deps.store, deps.cfg, deps.cityPath)
-	id, err := resolveSessionIDMaterializingNamed(deps.cityPath, deps.cfg, sessStore, target)
+	// Resolving the target may materialize a named session's row, so under
+	// require the op store and the key are checked before it.
+	op := newCLIOp(deps.cfg, sessStore, cliOpRequest{
+		verb: "gc session wake", kind: opjournal.KindWake, key: deps.opKey,
+		cfgErr: deps.cfgErr, asJSON: asJSON, stdout: stdout, stderr: stderr,
+	})
+	if !op.preflight() {
+		return 1
+	}
+	defer op.end()
+	id, start, err := admitWake(op, deps, sessStore, target)
 	if err != nil {
+		op.finishErr(err)
 		fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 		return 1
+	}
+	switch start {
+	case cliOpRefused:
+		return 1
+	case cliOpReplayed:
+		return emitSessionWakeResult(stdout, stderr, asJSON, id, 0, op)
 	}
 
 	sessFront := sessionFrontDoor(sessStore)
 	res, err := sessFront.WakeSession(id, deps.now().UTC(), session.WakeOpts{})
 	if err != nil {
 		if state, conflict := session.WakeConflictState(err); conflict {
+			op.finishOutcome(cliOpRefusedOutcome(cliOpWakeConflictReason(state)))
 			fmt.Fprintf(stderr, "gc session wake: session %s is %s\n", id, state) //nolint:errcheck
 			return 1
 		}
+		op.finishErr(err)
 		switch {
 		case errors.Is(err, session.ErrNotSessionBead):
 			fmt.Fprintf(stderr, "gc session wake: %s is not a session\n", id) //nolint:errcheck
@@ -122,6 +175,7 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			"wake_request":              "",
 			"wake_requested_at":         "",
 		}); err != nil {
+			op.finishErr(err)
 			fmt.Fprintf(stderr, "gc session wake: updating metadata: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -137,12 +191,23 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 		}
 		fmt.Fprintf(stderr, "gc session wake: session %s has been in state %q since %s without completing its create; the wake request was recorded but cannot complete now. If its runtime is gone, use `gc session close` to release the slot.\n", id, res.Info.MetadataState, since) //nolint:errcheck
 		rejectStuck = true
-	// Same "wake recorded but cannot complete" shape as the createAbandoned arm
-	// above: the reconciler never acts on a suspended rig's sessions, so a
-	// wake here is otherwise silently swallowed with no error and no event.
-	case agent != nil:
-		if rigName, suspended := sessionWakeOwningRigSuspended(agent, deps.cfg, deps.cityPath); suspended {
-			fmt.Fprintf(stderr, "gc session wake: rig %q is suspended -- wake dropped; run `gc rig resume %s`\n", rigName, rigName) //nolint:errcheck
+	}
+	// Same "wake recorded but cannot complete" shape: the controller will not
+	// act on the wake. The one will-not-start predicate the API wake also uses
+	// says why, read on the row after the wake (and after the reset above).
+	if !rejectStuck {
+		rigStores := deps.rigStores
+		if rigStores == nil {
+			rigStores = func() map[string]beads.Store { return nil }
+		}
+		woken := res.Info
+		if info, err := sessFront.Get(id); err == nil {
+			woken = info
+		}
+		if why, _ := wakeWillNotStart(woken, wakeVerdictDeps{
+			cfg: deps.cfg, cityPath: deps.cityPath, sessFront: sessFront, sp: deps.sp, work: cityWorkLegOf(beads.WorkStore{Store: deps.store}), rigStores: rigStores,
+		}, deps.now()); why != "" {
+			fmt.Fprintf(stderr, "gc session wake: wake recorded for session %s, but it will not start: %s\n", id, why) //nolint:errcheck
 			rejectStuck = true
 		}
 	}
@@ -151,22 +216,99 @@ func doSessionWake(target string, stdout, stderr io.Writer, asJSON bool, deps se
 			fmt.Fprintf(stderr, "gc session wake: warning: withdrawing queued wait nudges: %v\n", err) //nolint:errcheck
 		}
 		if deps.cityUsesManagedReconciler(deps.cityPath) {
-			if err := deps.pokeController(deps.cityPath); err != nil {
+			if err := deps.pokeController(deps.cityPath, reconcilekey.Session(id)); err != nil && !noteWorkerSitePoke(stderr, "gc session wake", err) {
 				fmt.Fprintf(stderr, "gc session wake: warning: poke failed: %v\n", err) //nolint:errcheck
 			}
 		}
 	}
 	if rejectStuck {
+		op.finishOutcome(cliOpRefusedOutcome(cliOpRefusedWillNotStart))
 		return 1
 	}
+	op.finishErr(nil)
+	return emitSessionWakeResult(stdout, stderr, asJSON, id, len(nudgeIDs), op)
+}
 
+// errWakeNotAdmitted stops a wake's resolution from reopening a closed named
+// row its op did not admit.
+var errWakeNotAdmitted = errors.New("wake not admitted")
+
+// admitWake resolves the wake's target and starts its op (DES-O0API §8.4)
+// before the wake writes the row. A closed named row's op starts before
+// resolution reopens the row, so a refusal or a replay leaves it closed. A
+// named session with no row is created first (§6.4), under a new id no
+// earlier op can name, so admission neither replays it nor refuses it for
+// an earlier op; but under require a journal that then cannot record the op
+// refuses the wake after that create, and the created session stays,
+// started or left for the controller to start. An op admitted for a row
+// resolution did not end up returning is closed as target_moved, and the op
+// started over for the row it returned. A closed row named by its ID is
+// refused before any op, unless the wake's key already names one on that row
+// (refuseClosedWakeTarget).
+func admitWake(op *cliOp, deps sessionWakeDeps, sessStore beads.Store, target string) (string, cliOpStart, error) {
+	admitted, start := "", cliOpStart(0)
+	id, err := resolveSessionIDMaterializingNamedBeforeReopen(deps.cityPath, deps.cfg, sessStore, target, func(closedID string) error {
+		admitted, start = closedID, op.retarget(closedID)
+		if start != cliOpExecute {
+			return errWakeNotAdmitted
+		}
+		return nil
+	})
+	switch {
+	case errors.Is(err, errWakeNotAdmitted):
+		return admitted, start, nil
+	case err != nil:
+		return "", 0, err
+	case admitted != "" && admitted == id:
+		return id, start, nil
+	}
+	if err := refuseClosedWakeTarget(op, sessStore, id); err != nil {
+		return "", 0, err
+	}
+	return id, op.retarget(id), nil
+}
+
+// refuseClosedWakeTarget refuses, before its op is proposed, a recorded wake
+// whose target resolved to a closed row its key names no op on: a row named
+// by its ID resolves closed, and the wake can only refuse it, as it does
+// unrecorded ("session X is closed"). Recorded, that refusal would hold the
+// key on the row's conversation, and a wake of a configured named session by
+// alias under the same key, which reopens that row, would replay it instead
+// of reopening. So it is a front-door refusal and writes no op. A key that
+// already names an op on the row (a wake the row has closed since) passes, so
+// admission answers from that op as it does by alias: a same-key retry
+// replays the wake. A key whose op does not read is refused as one that names
+// none, with a warning that it was not checked. A row that does not read is
+// left to the wake, which reports it.
+func refuseClosedWakeTarget(op *cliOp, sessStore beads.Store, id string) error {
+	if !op.recording() {
+		return nil
+	}
+	if b, err := sessStore.Get(id); err != nil || b.Status != "closed" {
+		return nil
+	}
+	principal, _ := cliPrincipal(cliOpLookupEnv)
+	_, found, err := op.keyedOp(id, principal)
+	if found {
+		return nil
+	}
+	if err != nil {
+		fmt.Fprintf(op.req.stderr, "%s: warning: op journal: %v; --key %s was not checked for an op on session %s to answer from\n", op.req.verb, err, op.req.key, id) //nolint:errcheck // best-effort stderr
+	}
+	return fmt.Errorf("session %s is closed", id)
+}
+
+// emitSessionWakeResult prints a wake's success output, a replay's included.
+func emitSessionWakeResult(stdout, stderr io.Writer, asJSON bool, id string, withdrawn int, op *cliOp) int {
 	if asJSON {
-		if err := writeSessionActionJSON(stdout, sessionActionResult{
+		result := sessionActionResult{
 			Action:              "wake",
 			SessionID:           id,
 			State:               "wake_requested",
-			WaitNudgesWithdrawn: len(nudgeIDs),
-		}); err != nil {
+			WaitNudgesWithdrawn: withdrawn,
+		}
+		op.annotate(&result)
+		if err := writeSessionActionJSON(stdout, result); err != nil {
 			fmt.Fprintf(stderr, "gc session wake: %v\n", err) //nolint:errcheck
 			return 1
 		}
@@ -198,34 +340,6 @@ func sessionWakeResolveAgentInfo(info session.Info, cfg *config.City) *config.Ag
 		template = info.Template
 	}
 	return findAgentByTemplate(cfg, template)
-}
-
-// sessionWakeOwningRigSuspended reports whether agent's configured rig
-// is effectively suspended (runtime override, else the rig's authored
-// suspended_on_start), returning the rig name for the caller's error
-// message. An agent with no configured rig (city-scoped) is never
-// blocked here.
-//
-// This is deliberately rig-only. The canonical superset predicate is
-// isAgentEffectivelySuspendedWith (cmd/gc/cmd_suspend.go), which also
-// covers city-level suspension and the per-agent `suspended` flag;
-// both gates resolve the owning rig through configuredRigName so they
-// cannot drift on rig-bound agents whose Dir is a filesystem path.
-// The narrower scope here keeps this wake-time message specific to the
-// one case that carries an actionable `gc rig resume` hint.
-func sessionWakeOwningRigSuspended(agent *config.Agent, cfg *config.City, cityPath string) (rigName string, suspended bool) {
-	rigName = configuredRigName(cityPath, agent, cfg.Rigs)
-	if rigName == "" {
-		return "", false
-	}
-	suspState := loadSuspensionStateBestEffort(cityPath)
-	for i := range cfg.Rigs {
-		if cfg.Rigs[i].Name != rigName {
-			continue
-		}
-		return rigName, suspensionstate.EffectiveRigSuspended(suspState, rigName, cfg.Rigs[i].EffectiveSuspendedOnStart())
-	}
-	return "", false
 }
 
 func sessionWakeRequestedCreateInfo(info session.Info) bool {

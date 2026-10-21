@@ -1751,7 +1751,7 @@ func installNoSkillLiveProviderCommandOverride(cityDir, provider, sourceProvider
 func noSkillLiveProviderDefaults(provider string) (promptMode, promptFlag string, readyDelay int, args []string) {
 	switch strings.TrimSpace(provider) {
 	case "codex":
-		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox", "--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh"}
+		return "arg", "", 3000, []string{"--dangerously-bypass-approvals-and-sandbox"}
 	case "gemini":
 		return "arg", "", 5000, []string{"--approval-mode", "yolo"}
 	case "opencode":

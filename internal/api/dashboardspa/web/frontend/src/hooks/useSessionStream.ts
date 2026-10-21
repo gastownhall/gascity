@@ -181,28 +181,28 @@ function parseStreamPayload(data: string): SessionStreamPayload {
   if (!isRecord(parsed)) return { kind: 'invalid', error: MALFORMED_SESSION_STREAM_EVENT };
   const snapshot = parseTranscriptSnapshot(parsed);
   if (snapshot) return { kind: 'snapshot', result: snapshot };
-  if (typeof parsed.text !== 'string') {
-    return { kind: 'invalid', error: MALFORMED_SESSION_STREAM_EVENT };
-  }
+  const turn = parseStreamTurn(parsed);
+  if (!turn) return { kind: 'invalid', error: MALFORMED_SESSION_STREAM_EVENT };
+  return { kind: 'turn', turn };
+}
+
+// Keep the entry id: it keys a rendered turn and is the transcript cursor to
+// page from. The server omits it for an entry without a provider id, so an
+// empty one is treated as absent.
+function parseStreamTurn(value: unknown): OutputTurn | null {
+  if (!isRecord(value) || typeof value.text !== 'string') return null;
   return {
-    kind: 'turn',
-    turn: {
-      role: typeof parsed.role === 'string' ? parsed.role : 'assistant',
-      text: parsed.text,
-    },
+    ...(typeof value.id === 'string' && value.id !== '' ? { id: value.id } : {}),
+    role: typeof value.role === 'string' ? value.role : 'assistant',
+    text: value.text,
   };
 }
 
 function parseTranscriptSnapshot(value: Record<string, unknown>): SessionTranscriptView | null {
   if (!Array.isArray(value.turns)) return null;
-  const turns = value.turns.flatMap((turn): OutputTurn[] => {
-    if (!isRecord(turn) || typeof turn.text !== 'string') return [];
-    return [
-      {
-        role: typeof turn.role === 'string' ? turn.role : 'assistant',
-        text: turn.text,
-      },
-    ];
+  const turns = value.turns.flatMap((raw): OutputTurn[] => {
+    const turn = parseStreamTurn(raw);
+    return turn ? [turn] : [];
   });
   if (turns.length !== value.turns.length) return null;
   const sessionId =

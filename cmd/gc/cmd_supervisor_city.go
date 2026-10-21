@@ -161,7 +161,13 @@ func registeredCityEntry(cityPath string) (supervisor.CityEntry, bool, error) {
 	return supervisor.CityEntry{}, false, nil
 }
 
+// cityUsesManagedReconciler reports whether a controller manages cityPath. A
+// worker site is managed by definition: its controller is remote, so the
+// answer is true without probing a socket.
 func cityUsesManagedReconciler(cityPath string) bool {
+	if onWorkerSite(cityPath) {
+		return true
+	}
 	if controllerAlive(cityPath) != 0 {
 		return true
 	}
@@ -348,6 +354,12 @@ func supervisorAlreadyManagesCity(cityPath string) bool {
 
 func registerCityWithSupervisorNamed(cityPath, nameOverride string, stdout, stderr io.Writer, commandName string, showProgress bool) int {
 	cityPath = normalizePathForCompare(cityPath)
+	// Registering hands the city to a local supervisor, which would build its
+	// runtime; a worker site's city is the remote controller's.
+	if err := refuseControllerOnWorkerSite(cityPath); err != nil {
+		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
+		return 1
+	}
 	// Only the registry-mutating intent commands gate interactively on
 	// cross-city impact. Operational entry points (gc start) and any future
 	// caller warn-and-proceed: the guard still prints the audit warning but
@@ -486,7 +498,7 @@ func reloadSupervisorNoWait() error {
 	if sockPath == "" {
 		return errors.New("supervisor is not running; start it with 'gc supervisor start'")
 	}
-	conn, err := net.DialTimeout("unix", sockPath, 2*time.Second)
+	conn, err := dialGCSocket(sockPath, 2*time.Second)
 	if err != nil {
 		return fmt.Errorf("connecting to supervisor reload socket: %w", err)
 	}
@@ -657,6 +669,11 @@ func statusDisplayText(status string) string {
 type supervisorUnregisterOptions struct {
 	Force       bool
 	transaction *supervisorUnregisterTransaction
+	// retainControllerOwnership makes a successful unregister that waited
+	// for the supervisor-hosted controller to stop return with the
+	// controller lock still held, so the caller can retire the bead store
+	// before any controller can start for the city again.
+	retainControllerOwnership bool
 }
 
 type supervisorUnregisterState uint8
@@ -793,15 +810,35 @@ func unregisterCityFromSupervisorWithForce(cityPath string, stdout, stderr io.Wr
 	})
 }
 
+// unregisterCityFromSupervisorForStop is the gc stop form of the unregister:
+// when it had to wait for the supervisor to stop the city's controller, it
+// returns with the controller lock held (nil when nothing was waited on). The
+// caller must keep the lock through bead-store shutdown and then Close it.
+func unregisterCityFromSupervisorForStop(cityPath string, stdout, stderr io.Writer, commandName string, force bool, transaction *supervisorUnregisterTransaction) (bool, int, *os.File) {
+	return unregisterCityFromSupervisorRetainingOwnership(cityPath, stdout, stderr, commandName, supervisorUnregisterOptions{
+		Force:                     force,
+		transaction:               transaction,
+		retainControllerOwnership: true,
+	})
+}
+
 func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int) {
+	handled, code, ownership := unregisterCityFromSupervisorRetainingOwnership(cityPath, stdout, stderr, commandName, opts)
+	if ownership != nil {
+		ownership.Close() //nolint:errcheck // releasing the flock cannot fail meaningfully
+	}
+	return handled, code
+}
+
+func unregisterCityFromSupervisorRetainingOwnership(cityPath string, stdout, stderr io.Writer, commandName string, opts supervisorUnregisterOptions) (bool, int, *os.File) {
 	cityPath = normalizePathForCompare(cityPath)
 	entry, registered, err := registeredCityEntry(cityPath)
 	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return false, 1
+		return false, 1, nil
 	}
 	if !registered {
-		return false, 0
+		return false, 0, nil
 	}
 
 	reg := supervisor.NewRegistry(supervisor.RegistryPath())
@@ -816,19 +853,19 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 		case controllerStopAcknowledged, controllerStopDefinitePreEntryUnavailable:
 		case controllerStopMayHaveEntered, controllerStopOutcomeInvalid:
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
-			return true, 1
+			return true, 1, nil
 		default:
 			fmt.Fprintf(stderr, "%s: %v\n", commandName, stopResult.failClosedError()) //nolint:errcheck // best-effort stderr
-			return true, 1
+			return true, 1, nil
 		}
 	}
 	cityMissing, err := transaction.unregister(reg, entry, cityPath, stdout)
 	if err != nil {
 		if errors.Is(err, errSupervisorUnregisterAborted) {
-			return true, 1
+			return true, 1, nil
 		}
 		fmt.Fprintf(stderr, "%s: %v\n", commandName, err) //nolint:errcheck // best-effort stderr
-		return true, 1
+		return true, 1, nil
 	}
 
 	// If the city directory is gone, there's nothing to wait on or restore.
@@ -839,29 +876,40 @@ func unregisterCityFromSupervisorWithOptions(cityPath string, stdout, stderr io.
 	if cityMissing {
 		writeSupervisorUnregisterSuccess(stdout, entry)
 		if supervisorAliveHook() != 0 && reloadSupervisorHook(stdout, stderr) != 0 {
-			return true, 1
+			return true, 1, nil
 		}
-		return true, 0
+		return true, 0, nil
 	}
 
 	if supervisorAliveHook() != 0 {
 		if reloadSupervisorHook(stdout, stderr) != 0 {
 			writeSupervisorUnregisterRollback(stderr, commandName, "reconcile failed", transaction.rollback())
-			return true, 1
+			return true, 1, nil
 		}
 		if err := waitForSupervisorCityHook(cityPath, false, supervisorCityStopTimeout(cityPath), nil); err != nil {
 			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
-			return true, 1
+			return true, 1, nil
 		}
 		if err := waitForSupervisorControllerStopHook(cityPath, supervisorCityStopTimeout(cityPath)); err != nil {
 			writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
-			return true, 1
+			return true, 1, nil
+		}
+		if opts.retainControllerOwnership {
+			ownership, err := claimStoppedControllerOwnership(cityPath)
+			if err != nil {
+				writeSupervisorUnregisterRollback(stderr, commandName, err.Error(), transaction.rollback())
+				return true, 1, nil
+			}
+			if ownsTransaction {
+				transaction.commit()
+			}
+			return true, 0, ownership
 		}
 	}
 	if ownsTransaction {
 		transaction.commit()
 	}
-	return true, 0
+	return true, 0, nil
 }
 
 var waitForSupervisorControllerStopHook = waitForSupervisorControllerStop

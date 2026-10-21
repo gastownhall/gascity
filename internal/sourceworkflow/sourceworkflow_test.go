@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/testutil"
 )
 
@@ -162,6 +163,138 @@ func TestWorkflowMatchesSourceTreatsMissingSourceStoreRefAsLegacyMatchInOwningSt
 	}
 	if WorkflowMatchesSource(root, "BL-42", "rig:alpha", "rig:beta") {
 		t.Fatal("WorkflowMatchesSource() = true, want false for legacy root in different store")
+	}
+}
+
+func TestCanonicalSourceStoreRefNamesTheBareCityRef(t *testing.T) {
+	tests := []struct {
+		name     string
+		ref      string
+		cityName string
+		want     string
+	}{
+		{name: "bare city ref names this city", ref: "city:", cityName: "mc", want: "city:mc"},
+		{name: "bare city ref with padding", ref: "  city:  ", cityName: "mc", want: "city:mc"},
+		{name: "bare city ref without a city name", ref: "city:", cityName: "", want: "city:city"},
+		{name: "named city ref is kept", ref: "city:mc", cityName: "mc", want: "city:mc"},
+		{name: "other city ref is kept", ref: "city:other", cityName: "mc", want: "city:other"},
+		{name: "padded city name is trimmed", ref: "city: mc ", cityName: "mc", want: "city:mc"},
+		{name: "rig ref is kept", ref: "rig:alpha", cityName: "mc", want: "rig:alpha"},
+		{name: "padded rig name is trimmed", ref: "rig: alpha ", cityName: "mc", want: "rig:alpha"},
+		{name: "bare rig ref stays bare", ref: "rig:", cityName: "mc", want: "rig:"},
+		{name: "graph ref is untouched", ref: "graph:mc", cityName: "mc", want: "graph:mc"},
+		{name: "empty ref stays empty", ref: "  ", cityName: "mc", want: ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := CanonicalSourceStoreRef(tt.ref, tt.cityName); got != tt.want {
+				t.Fatalf("CanonicalSourceStoreRef(%q, %q) = %q, want %q", tt.ref, tt.cityName, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSameSourceStoreRefTreatsBareCityRefAsThisCityInBothDirections(t *testing.T) {
+	tests := []struct {
+		a, b string
+		want bool
+	}{
+		{a: "city:", b: "city:mc", want: true},
+		{a: "city:mc", b: "city:", want: true},
+		{a: "city:", b: "city:", want: true},
+		{a: "city:", b: "city:other", want: false},
+		{a: "city:other", b: "city:", want: false},
+		{a: "city:mc", b: "rig:mc", want: false},
+		{a: "rig:alpha", b: "rig: alpha", want: true},
+		{a: "rig:alpha", b: "rig:beta", want: false},
+		{a: "", b: "", want: false},
+		{a: "city:", b: "", want: false},
+	}
+	for _, tt := range tests {
+		if got := SameSourceStoreRef(tt.a, tt.b, "mc"); got != tt.want {
+			t.Errorf("SameSourceStoreRef(%q, %q, mc) = %t, want %t", tt.a, tt.b, got, tt.want)
+		}
+	}
+}
+
+// TestWorkflowMatchesSourceInCityAcceptsBareCityRefInBothDirections pins the
+// city-aware matcher delete-source walks with. A caller that renders the city
+// ref from city.toml alone stamps (and selects with) a bare "city:" when the
+// city has no [workspace] name, while gc renders the same store as
+// "city:<name>". Either side may carry either spelling.
+func TestWorkflowMatchesSourceInCityAcceptsBareCityRefInBothDirections(t *testing.T) {
+	for _, tt := range []struct {
+		stamped, selected string
+	}{
+		{stamped: "city:", selected: "city:mc"},
+		{stamped: "city:mc", selected: "city:"},
+		{stamped: "city:", selected: "city:"},
+		{stamped: "city:mc", selected: "city:mc"},
+	} {
+		root := beads.Bead{ID: "wf-1", Metadata: map[string]string{
+			"gc.source_bead_id":       "BL-42",
+			SourceStoreRefMetadataKey: tt.stamped,
+		}}
+		if !WorkflowMatchesSourceInCity(root, "BL-42", tt.selected, "rig:alpha", "mc") {
+			t.Errorf("WorkflowMatchesSourceInCity(stamped %q, selected %q) = false, want true", tt.stamped, tt.selected)
+		}
+	}
+
+	other := beads.Bead{ID: "wf-other", Metadata: map[string]string{
+		"gc.source_bead_id":       "BL-42",
+		SourceStoreRefMetadataKey: "city:other",
+	}}
+	if WorkflowMatchesSourceInCity(other, "BL-42", "city:", "rig:alpha", "mc") {
+		t.Error("WorkflowMatchesSourceInCity(stamped city:other, selected city:) = true, want a different city to stay a miss")
+	}
+
+	legacy := beads.Bead{ID: "wf-legacy", Metadata: map[string]string{"gc.source_bead_id": "BL-42"}}
+	if !WorkflowMatchesSourceInCity(legacy, "BL-42", "city:", "city:mc", "mc") {
+		t.Error("WorkflowMatchesSourceInCity(legacy root in city:mc, selected city:) = false, want the owning-store fallback to accept the bare ref")
+	}
+	if WorkflowMatchesSourceInCity(legacy, "BL-42", "city:", "rig:alpha", "mc") {
+		t.Error("WorkflowMatchesSourceInCity(legacy root in rig:alpha, selected city:) = true, want false")
+	}
+}
+
+func TestListLiveRootsInCityAcceptsBareCityRef(t *testing.T) {
+	store := beads.NewMemStore()
+	for _, b := range []beads.Bead{
+		{ID: "wf-bare", Metadata: map[string]string{SourceStoreRefMetadataKey: "city:"}},
+		{ID: "wf-named", Metadata: map[string]string{SourceStoreRefMetadataKey: "city:mc"}},
+		{ID: "wf-other", Metadata: map[string]string{SourceStoreRefMetadataKey: "city:other"}},
+	} {
+		b.Title = b.ID
+		b.Type = "task"
+		b.Status = "in_progress"
+		b.Metadata["gc.kind"] = "workflow"
+		b.Metadata["gc.source_bead_id"] = "BL-42"
+		if _, err := store.Create(b); err != nil {
+			t.Fatalf("Create(%s): %v", b.ID, err)
+		}
+	}
+
+	for _, selected := range []string{"city:", "city:mc"} {
+		roots, err := ListLiveRootsInCity(store, "BL-42", selected, "city:mc", "mc")
+		if err != nil {
+			t.Fatalf("ListLiveRootsInCity(%q): %v", selected, err)
+		}
+		var titles []string
+		for _, root := range roots {
+			titles = append(titles, root.Title)
+		}
+		if len(titles) != 2 || titles[0] != "wf-bare" || titles[1] != "wf-named" {
+			t.Fatalf("ListLiveRootsInCity(%q) = %v, want [wf-bare wf-named]", selected, titles)
+		}
+	}
+
+	// The city-blind scanner keeps its exact comparison.
+	roots, err := ListLiveRoots(store, "BL-42", "city:", "city:mc")
+	if err != nil {
+		t.Fatalf("ListLiveRoots: %v", err)
+	}
+	if len(roots) != 1 || roots[0].Title != "wf-bare" {
+		t.Fatalf("ListLiveRoots(city:) = %#v, want only wf-bare", roots)
 	}
 }
 
@@ -1065,5 +1198,94 @@ func TestGraphStoreRefIsAStoreSentinelNotAScopeKind(t *testing.T) {
 	}
 	if NormalizeSourceStoreRef(ref) == NormalizeSourceStoreRef("city:bright-lights") {
 		t.Error("the graph leg's ref compares equal to the city store's; the two legs would be conflated")
+	}
+}
+
+// TestCloseWorkflowSubtreeNeverClosesASessionRow (mc-dkblm, architecture
+// B): a controller-owned row that carries a workflow's gc.root_bead_id
+// (written past the API) is no member a workflow's teardown closes, a
+// session row typed or crash-damaged, an episode or a convergence root, as
+// sling's force and run cancel close a subtree; the workflow's own beads
+// close.
+func TestCloseWorkflowSubtreeNeverClosesASessionRow(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	step, err := store.Create(beads.Bead{Title: "step", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	typed, err := store.Create(beads.Bead{Title: "s", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	damaged, err := store.Create(beads.Bead{Title: "s2", Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	empty := "" // a create is typed; the crash damage drops it
+	if err := store.Update(damaged.ID, beads.UpdateOpts{Type: &empty}); err != nil {
+		t.Fatal(err)
+	}
+	// Every controller-owned kind (architecture B): an episode, a
+	// convergence root, a session spelled in another case.
+	want := map[string]bool{root.ID: true, step.ID: true, typed.ID: false, damaged.ID: false}
+	for _, typ := range []string{session.StartupHealthEpisodeType, "convergence", " Session "} {
+		b, err := store.Create(beads.Bead{Title: typ, Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID}})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := store.Update(b.ID, beads.UpdateOpts{Type: &typ}); err != nil {
+			t.Fatal(err)
+		}
+		want[b.ID] = false
+	}
+	if _, err := CloseWorkflowSubtree(store, root.ID); err != nil {
+		t.Fatal(err)
+	}
+	for id, wantClosed := range want {
+		if b, _ := store.Get(id); (b.Status == "closed") != wantClosed {
+			t.Fatalf("%s (%q): status %s, want closed %v", id, b.Type, b.Status, wantClosed)
+		}
+	}
+}
+
+// TestCloseSpecSidecarsNeverClosesASessionRow (mc-dkblm, S02): a session row
+// carrying a root's gc.root_bead_id and the spec kind (written past the
+// API) is no sidecar the root's sidecar close closes; a real sidecar is.
+func TestCloseSpecSidecarsNeverClosesASessionRow(t *testing.T) {
+	store := beads.NewMemStore()
+	root, err := store.Create(beads.Bead{Title: "root", Type: "task", Metadata: map[string]string{"gc.kind": "workflow"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sidecar, err := store.Create(beads.Bead{Title: "spec", Type: "task", Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := store.Create(beads.Bead{Title: "s", Type: session.BeadType, Labels: []string{session.LabelSession}, Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.Get(sidecar.ID); b.Status != "closed" {
+		t.Fatalf("sidecar %s, want closed", b.Status)
+	}
+	if b, _ := store.Get(row.ID); b.Status == "closed" {
+		t.Fatal("the session row was closed as a spec sidecar")
+	}
+	episode, err := store.Create(beads.Bead{Title: "e", Type: session.StartupHealthEpisodeType, Metadata: map[string]string{"gc.root_bead_id": root.ID, "gc.kind": "spec"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := CloseSpecSidecarsForRoot(store, root.ID, ""); err != nil {
+		t.Fatal(err)
+	}
+	if b, _ := store.Get(episode.ID); b.Status == "closed" {
+		t.Fatal("the startup-health episode was closed as a spec sidecar")
 	}
 }

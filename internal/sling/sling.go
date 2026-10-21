@@ -117,6 +117,12 @@ type RouteRequest struct {
 	WorkDir  string            // rig directory for command execution
 	Env      map[string]string // extra env vars (GC_SLING_TARGET, etc.)
 	Force    bool              // allow best-effort routing when the bead is absent
+	// Store is the store that holds BeadID and that built-in routing must
+	// stamp. Nil means the router's own default store (the work store the
+	// sling was configured with). A formula wisp root is minted in the graph
+	// store (SlingDeps.graphStore), which on a city whose graph class is
+	// relocated to a [storage] binding is not the work store (#6054).
+	Store beads.Store
 }
 
 // SlingDeps bundles infrastructure dependencies for sling operations.
@@ -218,8 +224,9 @@ type SlingResult struct {
 	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
 	Failed        int
-	Skipped       int // total skipped (idempotent + non-open)
+	Skipped       int // total skipped (idempotent + not open at dispatch turn + not open at listing)
 	IdempotentCt  int // how many were skipped due to idempotency
+	NotOpenCt     int // how many were listed open but no longer open at their dispatch turn
 	Total         int
 	NudgeAgent    *config.Agent // non-nil if caller should nudge
 
@@ -238,6 +245,9 @@ type SlingChildResult struct {
 	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
+	// Conflict is the live source workflow that refused the child's launch,
+	// when that is why it failed.
+	Conflict *sourceworkflow.ConflictError
 }
 
 // Sling provides intent-based work routing operations. Construct via New.
@@ -360,6 +370,35 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
 	}, s.deps, s.deps.Store)
+}
+
+// Dispatch is the one entry point `gc sling` and POST /v0/city/{c}/sling share
+// for an explicit target. It takes the caller's whole intent as SlingOpts (bead
+// or formula, --on, --no-formula, title, vars, scope and the routing flags)
+// and lets the domain decide what it means: a standalone formula launch, an
+// explicit or default-formula attachment, a plain route, or a convoy whose open
+// children are routed one by one. Keeping that decision here rather than in
+// each transport is what keeps the API from drifting from the CLI; the API
+// once skipped convoy expansion and dropped title and vars on the target's
+// default formula. querier is the store the bead or convoy is read from.
+func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQuerier) (SlingResult, error) {
+	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
+		// Formula paths attach per child (or treat a convoy as one graph.v2
+		// input), which DoSlingBatch handles directly.
+		return DoSlingBatch(opts, s.deps, querier)
+	}
+	return s.ExpandConvoy(ctx, opts.BeadOrFormula, opts.Target, RouteOpts{
+		Merge:      opts.Merge,
+		NoConvoy:   opts.NoConvoy,
+		Owned:      opts.Owned,
+		Reassign:   opts.Reassign,
+		Nudge:      opts.Nudge,
+		Force:      opts.Force,
+		SkipPoke:   opts.SkipPoke,
+		DryRun:     opts.DryRun,
+		InlineText: opts.InlineText,
+		NoFormula:  opts.NoFormula,
+	}, querier)
 }
 
 // ExpandConvoy expands a convoy and routes each open child.
@@ -1062,28 +1101,50 @@ func SlingFormulaTargetBranch(beadID string, deps SlingDeps, a config.Agent) str
 	return ""
 }
 
+// SlingMergeStrategy resolves the merge strategy to stamp on a routed bead.
+// Resolution order:
+//  1. the explicit --merge value the caller passed
+//  2. DefaultMergeStrategy recorded on the bead's rig in city.toml
+//  3. DefaultMergeStrategy recorded on the agent's rig in city.toml
+//
+// An empty result means nothing is stamped and consumers keep applying their
+// own implicit default. Rigs that deliver work through a pull request set
+// default_merge_strategy = "mr" so a bare `gc sling` records the shape the rig
+// actually uses instead of the one its consumers assume.
+func SlingMergeStrategy(explicit, beadID string, deps SlingDeps, a config.Agent) string {
+	if explicit := strings.TrimSpace(explicit); explicit != "" {
+		return explicit
+	}
+	return rigStoredValue(deps.Cfg, beadID, a, (*config.Rig).EffectiveDefaultMergeStrategy)
+}
+
 // rigStoredDefaultBranch returns the DefaultBranch recorded on the rig the
 // bead/agent belongs to, or empty string if no match has a stored value.
-// Bead lookup wins over agent lookup so cross-rig sling targets still pick
-// the right rig.
 func rigStoredDefaultBranch(cfg *config.City, beadID string, a config.Agent) string {
+	return rigStoredValue(cfg, beadID, a, (*config.Rig).EffectiveDefaultBranch)
+}
+
+// rigStoredValue returns pick applied to the rig the bead/agent belongs to, or
+// empty string if no match yields a value. Bead lookup wins over agent lookup
+// so cross-rig sling targets still pick the right rig.
+func rigStoredValue(cfg *config.City, beadID string, a config.Agent, pick func(*config.Rig) string) string {
 	if cfg == nil {
 		return ""
 	}
 	if beadID != "" {
 		if bp := BeadPrefixForCity(cfg, beadID); bp != "" && !IsHQPrefix(cfg, bp) {
 			if rig, ok := FindRigByPrefix(cfg, bp); ok {
-				if branch := rig.EffectiveDefaultBranch(); branch != "" {
-					return branch
+				if value := pick(&rig); value != "" {
+					return value
 				}
 			}
 		}
 	}
 	if rigName := rigNameForAgent(cfg, a); rigName != "" {
-		for _, r := range cfg.Rigs {
-			if r.Name == rigName {
-				if branch := r.EffectiveDefaultBranch(); branch != "" {
-					return branch
+		for i := range cfg.Rigs {
+			if cfg.Rigs[i].Name == rigName {
+				if value := pick(&cfg.Rigs[i]); value != "" {
+					return value
 				}
 			}
 		}
@@ -1485,7 +1546,7 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 	if err := closeFailedGraphV2RootsByKey(store, key); err != nil {
 		return graphV2ReplacementSnapshot{}, err
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return graphV2ReplacementSnapshot{}, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1537,7 +1598,7 @@ func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
 }
 
 func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
@@ -1590,7 +1651,7 @@ func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.R
 	if key == "" {
 		return nil, nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1638,6 +1699,15 @@ func mapsCloneWithout(in map[string]string, drop string) map[string]string {
 
 // ShouldPromoteWorkflowLaunchStatus reports whether a bead's status should
 // be promoted to in_progress when a workflow launches.
+//
+// It doubles as the single classifier for "not yet claimed by a worker": the
+// periodic wisp GC decides whether a stepless root was ever picked up by asking
+// this same question rather than testing its own status literals (see
+// steplessRootIsAbandoned in cmd/gc/wisp_gc.go). That shares the STATUS SET,
+// not a write path — the GC side reaches roots this function's caller never
+// promoted. Of the statuses below only "open" reaches the GC today, since its
+// candidate query (openWispGCRootCandidates) asks for exactly open and
+// in_progress; widening that query is what would put the rest in play.
 func ShouldPromoteWorkflowLaunchStatus(status string) bool {
 	switch strings.ToLower(strings.TrimSpace(status)) {
 	case "", "open", "ready", "todo", "triage", "backlog":
@@ -1669,6 +1739,11 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	// Status is the bead status the check read, empty when the bead could not
+	// be read. It is reported alongside the routing verdict, not folded into
+	// it: DoSlingBatch skips a child it listed as open whose status here is no
+	// longer open (#5927), and single-bead sling ignores it.
+	Status string
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

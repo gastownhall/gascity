@@ -293,9 +293,10 @@ type orderSetSnapshot struct {
 //
 // inflightN + inflightDone together track dispatchOne goroutines so
 // drain can select on either completion or ctx.Done without spawning an
-// orphaned waiter goroutine. dispatch is only ever called from the tick
-// goroutine, so addInflight's check-and-create happens-before any
-// concurrent drain call on the same instance.
+// orphaned waiter goroutine. dispatch is only ever called under the
+// orders lane's passMu (orders_lane.go), and every drain of a lane-owned
+// instance runs under that lock too, so addInflight's check-and-create
+// happens-before any drain call on the same instance.
 //
 // dispatchCtx is the parent context for every dispatchOne goroutine. The
 // per-goroutine ctx is derived to cancel when EITHER the caller's tick
@@ -328,6 +329,13 @@ type memoryOrderDispatcher struct {
 	lastRunCache         map[string]time.Time
 	gateBackoffUntil     map[string]time.Time
 	openWorkSuppression  map[string]orderOpenWorkSuppression
+	// inapplicableReported holds the orders this controller boot has already
+	// reported as inapplicable, so each is announced once rather than on every
+	// tick or webhook delivery. Created on first use (inapplicableReports) and
+	// guarded by cacheMu. The set locks itself, so dispatchers share it:
+	// carryInapplicableReportsFrom hands it across dispatcher rebuilds, and the
+	// controller's webhook adapter hands every per-delivery dispatcher the same set.
+	inapplicableReported *inapplicableReportSet
 
 	dispatchCtx    context.Context
 	dispatchCancel context.CancelFunc
@@ -668,6 +676,9 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 	// store — so doing it for every order costs the tick nothing and gives the
 	// parallel pass its complete work list.
 	candidates := make([]*orderDispatchCandidate, 0, total)
+	// scopeBackends memoizes each scope's backend for this tick: resolving it
+	// reads the scope's metadata and, when that names none, city.toml.
+	scopeBackends := make(map[string]string)
 	for offset := 0; offset < total; offset++ {
 		idx := (start + offset) % total
 		a := m.aa[idx]
@@ -680,6 +691,20 @@ func (m *memoryOrderDispatcher) dispatch(ctx context.Context, cityPath string, n
 		if err != nil {
 			logDispatchError(m.stderr, "gc: order dispatch: resolving target for %s: %v", a.ScopedName(), err)
 			continue
+		}
+		// An order that requires a backend its scope does not use is never
+		// dispatched there, and never counted as a failure: it is reported
+		// once as inapplicable and skipped before any store is opened.
+		if a.RequiresBackend != nil {
+			backend, ok := scopeBackends[target.ScopeRoot]
+			if !ok {
+				backend = orderScopeBackendFn(cityPath, target.ScopeRoot)
+				scopeBackends[target.ScopeRoot] = backend
+			}
+			if !a.AppliesToBackend(backend) {
+				m.reportInapplicable(a, target, backend)
+				continue
+			}
 		}
 
 		storeKey := orderStoreTargetKey(target)
@@ -1114,7 +1139,7 @@ func (m *memoryOrderDispatcher) cancel() {
 }
 
 // addInflight increments the in-flight count and lazily creates the done
-// signal. Called synchronously from dispatch on the tick goroutine.
+// signal. Called synchronously from dispatch, under the orders lane's passMu.
 func (m *memoryOrderDispatcher) addInflight() {
 	m.inflightMu.Lock()
 	m.inflightN++
@@ -1395,7 +1420,9 @@ func (idx *orderDispatchTrackingIndex) entriesForStore(store beads.Store, storeK
 	}
 	entries := make(map[string]orderTrackingSummary)
 	for _, b := range items {
-		if b.Status == "closed" {
+		// A plain bead carrying an order-run label is no run of the order
+		// (orders.IsRunRecord, mc-v8g4p): it holds no single-flight.
+		if b.Status == "closed" || !orders.IsRunRecord(b) {
 			continue
 		}
 		tracking := orders.IsTrackingBead(b)
@@ -1506,6 +1533,82 @@ func (m *memoryOrderDispatcher) carryLastRunCacheFrom(prev *memoryOrderDispatche
 			m.lastRunCache[key] = last
 		}
 	}
+}
+
+// inapplicableReportSet is the set of orders already reported as
+// inapplicable, keyed by scoped name and backend. Its zero value is ready to
+// use and it is safe for concurrent use, so dispatchers that each live for
+// less than a controller boot can share one.
+type inapplicableReportSet struct {
+	mu   sync.Mutex
+	seen map[string]struct{}
+}
+
+// claim marks key reported and reports whether this is its first report.
+func (r *inapplicableReportSet) claim(key string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, seen := r.seen[key]; seen {
+		return false
+	}
+	if r.seen == nil {
+		r.seen = make(map[string]struct{})
+	}
+	r.seen[key] = struct{}{}
+	return true
+}
+
+// inapplicableReports returns the dispatcher's report set, creating it on
+// first use.
+func (m *memoryOrderDispatcher) inapplicableReports() *inapplicableReportSet {
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	if m.inapplicableReported == nil {
+		m.inapplicableReported = &inapplicableReportSet{}
+	}
+	return m.inapplicableReported
+}
+
+// reportInapplicable records one order.inapplicable event for an order its
+// scope's backend rules out, the first time this controller boot sees that
+// order on that backend.
+func (m *memoryOrderDispatcher) reportInapplicable(a orders.Order, target execStoreTarget, backend string) {
+	scoped := a.ScopedName()
+	if !m.inapplicableReports().claim(scoped + "\x00" + backend) {
+		return
+	}
+
+	scope := "city"
+	if target.ScopeKind == "rig" && target.RigName != "" {
+		scope = "rig:" + target.RigName
+	}
+	m.rec.Record(events.Event{
+		Type:    events.OrderInapplicable,
+		Actor:   "controller",
+		Subject: scoped,
+		Message: fmt.Sprintf("%s: requires backend %s; %s scope uses %s, so it is not dispatched there",
+			orderInapplicableLabel(backend), strings.Join(a.RequiresBackend, " or "), scope, backend),
+		Payload: events.OrderInapplicablePayloadJSON(events.OrderInapplicablePayload{
+			OrderName:       scoped,
+			Scope:           scope,
+			Backend:         backend,
+			RequiresBackend: append([]string(nil), a.RequiresBackend...),
+		}),
+	})
+}
+
+// carryInapplicableReportsFrom hands this dispatcher the report set of a
+// previous one, so a reload or rescan does not announce again an order the
+// previous one already reported: the report is once per controller boot. Call
+// before this dispatcher reports anything; a set it already holds is replaced.
+func (m *memoryOrderDispatcher) carryInapplicableReportsFrom(prev *memoryOrderDispatcher) {
+	if m == nil || prev == nil {
+		return
+	}
+	reports := prev.inapplicableReports()
+	m.cacheMu.Lock()
+	defer m.cacheMu.Unlock()
+	m.inapplicableReported = reports
 }
 
 // gateBackoffActive reports whether the named order is in a gate-timeout
@@ -1901,6 +2004,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 	env, err := orderExecEnvWithError(cityPath, m.cfg, target, a, vars)
 	var output []byte
 	var execErrMsg string
+	// declared is the outcome file of a run that exited 0; its skipped/partial
+	// declaration (if any) is reported after order.completed.
+	var declared *orderOutcomeFile
 	if err != nil {
 		redactionEnv := append(os.Environ(), env...)
 		redacted := redactOrderEnvError(err, redactionEnv)
@@ -1908,7 +2014,22 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		outcome = orders.RunOutcomeExecEnvFailed
 		logDispatchError(m.stderr, "gc: order exec %s env failed: %s", scoped, redacted)
 	} else {
+		outcomeFile, outcomeErr := newOrderOutcomeFile()
+		if outcomeErr != nil {
+			// The order still runs; it just has nowhere to declare a skip.
+			logDispatchError(m.stderr, "gc: order %s: %v", scoped, outcomeErr)
+		} else {
+			env = append(env, outcomeFile.envEntry())
+			defer func() {
+				if err := outcomeFile.remove(); err != nil {
+					logDispatchError(m.stderr, "gc: order %s: %v", scoped, err)
+				}
+			}()
+		}
 		output, err = m.execRun(ctx, a.Exec, target.ScopeRoot, env)
+		if err == nil {
+			declared = outcomeFile
+		}
 		if err != nil {
 			redactionEnv := append(os.Environ(), env...)
 			execErrMsg = execenv.RedactText(err.Error(), redactionEnv)
@@ -1957,6 +2078,9 @@ func (m *memoryOrderDispatcher) dispatchExec(ctx context.Context, front *orders.
 		Actor:   "controller",
 		Subject: scoped,
 	})
+	if declared != nil {
+		recordOrderOutcome(m.rec, m.stderr, scoped, declared)
+	}
 }
 
 // prepareOrderWispRecipe compiles an order's formula into a recipe and returns
@@ -3860,9 +3984,11 @@ func openSubtreeOlderThan(subtree []beads.Bead, cutoff time.Time) bool {
 // bounded retries. On startup the bead store's backing server may not be
 // query-ready yet (dolt cold-start race, #753). Errors are retried; the
 // total count of beads closed across attempts is returned. Retrying on
-// partial closes is safe because beads.Store.CloseAll skips already-closed
-// beads (see internal/beads/beads.go). The wrapper sleeps for up to
-// attempts*backoff in the worst case.
+// partial closes is safe because every attempt lists the open tracking beads
+// again, so the next attempt closes only what is still open (whether CloseAll
+// would stamp an already-closed bead is store-specific; see
+// internal/beads/beads.go). The wrapper sleeps for up to attempts*backoff in
+// the worst case.
 func sweepOrphanedOrderTrackingRetry(store beads.Store, attempts int, backoff time.Duration) (int, error) { //nolint:unparam // attempts is configurable for testability
 	return sweepOrphanedOrderTrackingRetryLimit(store, attempts, backoff, 0)
 }

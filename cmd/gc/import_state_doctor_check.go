@@ -62,11 +62,20 @@ func (c *importStateDoctorCheck) Run(_ *doctor.CheckContext) *doctor.CheckResult
 		r.Details = details
 		return r
 	}
-	if details := supersededBundledPinDetails(c.cityPath, imports); len(details) > 0 {
+	if details, served := supersededBundledPinReport(c.cityPath, imports); len(details) > 0 {
+		r.Details = details
+		if served {
+			// Every superseded pin here is one this gc serves from its
+			// embedded packs (config.IsBundledSourceAtCanonicalPin), so the
+			// city resolves the right content; the fix only tidies the pin.
+			r.Status = doctor.StatusWarning
+			r.Message = fmt.Sprintf("%d bundled import(s) pinned at an older gc release's canonical version; served correctly from the built-in packs", len(details))
+			r.FixHint = `optional: run "gc doctor --fix" to re-pin them to the current canonical version (offline; content does not change)`
+			return r
+		}
 		r.Status = doctor.StatusError
 		r.Message = fmt.Sprintf("%d bundled import(s) pinned at a superseded canonical version", len(details))
 		r.FixHint = `run "gc doctor --fix" to re-pin superseded canonical bundled imports to the current canonical version`
-		r.Details = details
 		return r
 	}
 	report, err := checkInstalledImports(c.cityPath, imports)
@@ -154,6 +163,27 @@ func (c *importStateDoctorCheck) Fix(_ *doctor.CheckContext) error {
 // supersededBundledPinDetails reports bundled imports pinned at a
 // superseded canonical version (a pin an older gc release wrote as
 // canonical). Deliberate pins at other commits are not flagged.
+// supersededBundledPinReport returns supersededBundledPinDetails plus whether
+// every listed pin is still served from the running binary's embedded packs
+// (superseded core/bd/dolt pins are; superseded public-pack pins are not).
+func supersededBundledPinReport(cityPath string, imports map[string]config.Import) ([]string, bool) {
+	details := supersededBundledPinDetails(cityPath, imports)
+	if len(details) == 0 {
+		return nil, false
+	}
+	lockTargets := supersededBundledLockTargets(fsys.OSFS{}, cityPath)
+	for _, imp := range imports {
+		current, version := supersededBundledTarget(imp, lockTargets)
+		if current == "" {
+			continue
+		}
+		if !config.IsBundledSourceAtCanonicalPin(imp.Source, strings.TrimPrefix(strings.TrimSpace(version), "sha:")) {
+			return details, false
+		}
+	}
+	return details, true
+}
+
 func supersededBundledPinDetails(cityPath string, imports map[string]config.Import) []string {
 	lockTargets := supersededBundledLockTargets(fsys.OSFS{}, cityPath)
 	var names []string

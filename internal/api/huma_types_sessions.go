@@ -55,19 +55,26 @@ type sessionCreateBody struct {
 	Options           map[string]string `json:"options,omitempty" doc:"Provider/agent option overrides."`
 	ProjectID         string            `json:"project_id,omitempty" doc:"Opaque project context identifier."`
 	Title             string            `json:"title,omitempty" doc:"Session title."`
+	Metadata          map[string]string `json:"metadata,omitempty" doc:"External client metadata: real_world_app_* keys only (any other key is refused with 422). The generic bead API never writes a session row."`
 }
 
 // SessionCreateInput is the Huma input for POST /v0/city/{cityName}/sessions.
 type SessionCreateInput struct {
 	CityScope
-	Body sessionCreateBody
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           sessionCreateBody
 }
 
 // asyncAcceptedBody is the response body for all async session 202 responses.
 type asyncAcceptedBody struct {
 	Status      string `json:"status" doc:"Async request status." example:"accepted"`
-	RequestID   string `json:"request_id" doc:"Correlation ID. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
-	EventCursor string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog. A value of 0 can also mean no event provider is configured or the event log is empty."`
+	RequestID   string `json:"request_id" doc:"Opaque correlation ID; clients must not parse it. When the server recorded the request as an operation it is the operation id and equals op.id, and a retry with the same Idempotency-Key against the same session gets the same request_id from either /submit or /messages. Watch the city event stream for request.result.session.create, request.result.session.message, request.result.session.submit, or request.failed with this request_id."`
+	EventCursor string `json:"event_cursor" doc:"City event-stream sequence captured before the async request was accepted. Pass this value as after_seq to /v0/city/{cityName}/events/stream to receive the request result without replaying unrelated historical backlog, and to /v0/city/{cityName}/request/{requestId} to read its outcome. A value of 0 means the event log was empty."`
+	// IdempotencyKey, Replayed and Op are set only when the server recorded
+	// the request as an operation (an ops gate is auto or require).
+	IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The Idempotency-Key the request was recorded under: the client's, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second delivery."`
+	Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, op carries the stored outcome, and the terminal event is emitted again after event_cursor. The retry's own options, resume included, took no effect, as that event's message says; to start the session, wake it, and to send again, use a new Idempotency-Key."`
+	Op             *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as."`
 }
 
 // SessionCreateOutput is the Huma output for POST /v0/sessions.
@@ -80,6 +87,42 @@ type SessionCreateOutput struct {
 type SessionIDInput struct {
 	CityScope
 	ID string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+}
+
+// SessionKillInput is the Huma input for POST
+// /v0/city/{cityName}/session/{id}/kill.
+type SessionKillInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Force          bool   `query:"force" required:"false" doc:"Kill even when the session has live background subagents, or past a hung holder of its runtime lease whose record expired, as gc session kill --force does."`
+}
+
+// SessionControlInput is the Huma input for body-less session control and
+// lifecycle endpoints that honor Idempotency-Key (POST .../session/{id}/wake,
+// .../suspend and .../reset).
+type SessionControlInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+}
+
+// SessionStopBody is the optional request body for POST
+// .../session/{id}/stop (X11 D10). It admits fields it does not know, as the
+// endpoint did before it declared a body: a client that sends one (T3's
+// planned intent, BUILD-PLAN FK-1) is not refused, and the field is ignored.
+type SessionStopBody struct {
+	_    struct{} `json:"-" additionalProperties:"true"`
+	Turn string   `json:"turn,omitempty" maxLength:"128" doc:"The turn to stop, as the client saw it (a turn id the session's runtime reported). Only that turn is interrupted: when another turn, or none, is running by then, nothing is sent and the request is refused with 409 turn_not_current. A runtime that does not record turn identity refuses a named turn with 501 turn_identity_unsupported. Omit it to stop whatever turn is running."`
+}
+
+// SessionStopInput is the Huma input for POST
+// /v0/city/{cityName}/session/{id}/stop.
+type SessionStopInput struct {
+	CityScope
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
+	Body           *SessionStopBody
 }
 
 // SessionTranscriptInput is the Huma input for GET /v0/city/{cityName}/session/{id}/transcript.
@@ -120,6 +163,9 @@ type SessionPatchBody struct {
 	_     struct{} `json:"-" additionalProperties:"false"`
 	Title *string  `json:"title,omitempty" minLength:"1" doc:"Session title. If provided, must be non-empty."`
 	Alias *string  `json:"alias,omitempty" doc:"Session alias. Empty string clears the alias."`
+	// Metadata is the external client's real_world_app_* keys, the only
+	// session metadata a client writes (architecture B).
+	Metadata map[string]string `json:"metadata,omitempty" doc:"External client metadata: real_world_app_* keys only (any other key is refused with 422); an empty value clears the key."`
 }
 
 // SessionPatchInput is the Huma input for PATCH /v0/city/{cityName}/session/{id}.
@@ -146,8 +192,9 @@ type SessionPermissionModeInput struct {
 // SessionCloseInput is the Huma input for POST /v0/city/{cityName}/session/{id}/close.
 type SessionCloseInput struct {
 	CityScope
-	ID     string `path:"id" doc:"Session ID, alias, or runtime session_name."`
-	Delete bool   `query:"delete" required:"false" doc:"Permanently delete bead after closing."`
+	ID             string `path:"id" doc:"Session ID, alias, or runtime session_name."`
+	Delete         bool   `query:"delete" required:"false" doc:"Permanently delete bead after closing. Part of the request an Idempotency-Key names: a same-key retry that changes it is 422, after an API restart too while the close is recorded as an operation, and a replay never deletes. After a restart a same-key retry finds the recorded close by the session ID only: by an alias or session_name, or after a completed delete, it is 404."`
+	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 }
 
 // SessionSubmitInput is the Huma input for POST /v0/city/{cityName}/session/{id}/submit.
@@ -158,6 +205,7 @@ type SessionSubmitInput struct {
 	Body           struct {
 		Message string               `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to submit."`
 		Intent  session.SubmitIntent `json:"intent,omitempty" enum:"default,follow_up,interrupt_now" doc:"Submit intent; empty defaults to \"default\"."`
+		Resume  bool                 `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -175,6 +223,7 @@ type SessionMessageInput struct {
 	IdempotencyKey string `header:"Idempotency-Key" required:"false" doc:"Idempotency key for safe retries."`
 	Body           struct {
 		Message string `json:"message" minLength:"1" pattern:"\\S" doc:"Message text to send."`
+		Resume  bool   `json:"resume,omitempty" doc:"Start or resume the session here if it is not running (an operator's own message; it consumes an operator's hold). Without it, a message to a session that is not running is queued for its next run (expiring after 24h) and the controller is asked to start it; the result's will_start says whether it will."`
 	}
 }
 
@@ -201,6 +250,12 @@ type SessionRespondOutput struct {
 	Body struct {
 		Status string `json:"status" doc:"Operation result." example:"accepted"`
 		ID     string `json:"id" doc:"Session ID."`
+		// IdempotencyKey, Replayed and Op are set only when the server
+		// recorded the request as an operation (ops.control is auto or
+		// require).
+		IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of a second response."`
+		Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome."`
+		Op             *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as."`
 	}
 }
 
@@ -220,10 +275,36 @@ type SessionAgentGetInput struct {
 	AgentID string `path:"agentId" doc:"Subagent ID within the session."`
 }
 
-// OKWithIDResponse is a success response with an ID field.
+// OKWithIDResponse is the success response of the session control and
+// lifecycle commands that name the session they acted on (POST
+// .../session/{id}/stop, .../wake, .../kill and .../reset).
 type OKWithIDResponse struct {
 	Body struct {
 		Status string `json:"status" doc:"Operation result." example:"ok"`
 		ID     string `json:"id,omitempty" doc:"Resource ID."`
+		// IdempotencyKey, Replayed and Op are set only when the server
+		// recorded the request as an operation (the command's ops gate is
+		// auto or require).
+		IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The key the request was recorded under: the client's Idempotency-Key, one the server minted when the request carried none, or, for a stop of a known turn, stop:<generation>:<turn>, so two stops of one turn are one operation. Retry with the Idempotency-Key to get this request's outcome instead of acting again."`
+		Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome. A replayed stop never interrupts a later turn."`
+		Op             *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as."`
 	}
+}
+
+// SessionCommandStatusBody is the success body of the session lifecycle
+// commands that report only a status (POST .../session/{id}/suspend and
+// .../close).
+type SessionCommandStatusBody struct {
+	Status string `json:"status" doc:"Operation result." example:"ok"`
+	// IdempotencyKey, Replayed and Op are set only when the server recorded
+	// the request as an operation (ops.lifecycle is auto or require).
+	IdempotencyKey string          `json:"idempotency_key,omitempty" doc:"The key the request was recorded under: the client's Idempotency-Key, or one the server minted when the request carried none. Retry with it to get this request's outcome instead of acting again."`
+	Replayed       bool            `json:"replayed,omitempty" doc:"True when this answers a retry of a request that already finished: nothing was executed again, and op carries the stored outcome."`
+	Op             *ConversationOp `json:"op,omitempty" doc:"The operation the request was recorded as."`
+}
+
+// SessionCommandStatusOutput is the Huma output of the session commands
+// whose body is a SessionCommandStatusBody.
+type SessionCommandStatusOutput struct {
+	Body SessionCommandStatusBody
 }

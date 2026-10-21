@@ -24,6 +24,11 @@
           "type": "string",
           "description": "StopGrace is how long stopping an ACP session waits after SIGTERM\nbefore escalating to SIGKILL. Raise it for agents that need longer to\ndrain in-flight tool calls on shutdown. Duration string (e.g., \"5s\",\n\"20s\"). Defaults to \"5s\"; non-positive or unparseable values fall back\nto the default. gc stop bounds each session at 30s, so keep stop_grace\ncomfortably below that.",
           "default": "5s"
+        },
+        "cancel_timeout": {
+          "type": "string",
+          "description": "CancelTimeout is how long interrupting an ACP session waits for the\nagent to end its turn after session/cancel before falling back to\nSIGINT. The interrupt never kills the agent. Duration string (e.g.,\n\"10s\", \"30s\"). Defaults to \"10s\"; non-positive or unparseable values\nfall back to the default.",
+          "default": "10s"
         }
       },
       "additionalProperties": false,
@@ -112,7 +117,7 @@
         },
         "prompt_template": {
           "type": "string",
-          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the city directory."
+          "description": "PromptTemplate is the path to this agent's prompt template file.\nRelative paths resolve against the directory of the file that declares\nthe agent: the city directory for city.toml, the fragment's directory\nfor an included fragment, and the pack directory for an agent a pack\ndeclares — in pack.toml or in agents/\u003cname\u003e/agent.toml alike. Paths\nprefixed with \"//\" resolve against the city root."
         },
         "nudge": {
           "type": "string",
@@ -234,7 +239,7 @@
         },
         "work_query": {
           "type": "string",
-          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems."
+          "description": "WorkQuery is the shell command template to find available work for this\nagent. If it contains Go template placeholders, gc expands them using\nthe same PathContext fields as work_dir and session_setup (Agent,\nAgentBase, Rig, RigRoot, CityRoot, CityName, DefaultBranch) before\nprobe, hook, and prompt-context execution. Used by gc hook and available in prompt\ntemplates as {{.WorkQuery}}.\nIf unset, Gas City uses a three-tier default query:\n  1. in_progress work assigned to this session/alias (crash recovery)\n  2. ready work assigned to this session/alias (pre-assigned work)\n  3. ready unassigned work with gc.routed_to=\u003cqualified-name\u003e\nWhen the controller probes for demand without session context, only the\nrouted_to tier applies. Override to integrate with external task systems.\nA custom query that looks up assigned work should read $GC_ALIAS: under\ngc hook --claim, a single-slot pool session the supervisor collapsed onto\nthe agent's canonical [[named_session]] identity runs the query with\n$GC_ALIAS set to that identity, while $GC_AGENT keeps the session's\nruntime value."
         },
         "sling_query": {
           "type": "string",
@@ -1094,6 +1099,34 @@
           ],
           "description": "GuardedRelease selects the ownership-release discipline for work beads:\n\"off\" (legacy, owner-blind bd update/unclaim), \"auto\" (fence-guarded\nrelease verbs where the bd binary is capable, loud degrade otherwise), or\n\"require\" (guarded release or a typed refusal). Empty defaults to \"off\".\nAny other value fails config load."
         },
+        "allow_schema_behind_migrate": {
+          "type": "boolean",
+          "description": "AllowSchemaBehindMigrate opts this city in to letting the linked beads\nlibrary migrate its database forward when the database's own schema\ncursor trails the library's ceiling. Without it, the native-store\npreflight schema check FAILs a behind schema (stays on BdStore) instead\nof risking a native open that would migrate a possibly-shared database;\nthe direct native-open path withholds BD_ALLOW_REMOTE_MIGRATE from the\nlinked library the same way. Default: false (nil). A break-glass\nGC_BEADS_ALLOW_SCHEMA_BEHIND_MIGRATE env override is registered in\ninternal/rollout (beads.allow_schema_behind_migrate); read the effective\nvalue through internal/rollout.Flags.AllowSchemaBehindMigrate, never\nthis field directly.",
+          "default": false
+        },
+        "proxied_idle_timeout": {
+          "type": "string",
+          "description": "ProxiedIdleTimeout is how long a bd-owned proxied scope's proxy and Dolt\nchild stay up with no connections before bd retires them; the next bd\ncommand restarts them. Go duration; \"0\" means never. A finite value\nmust be at least 1m. Empty uses the default, 30m. It applies to scopes gc\ninitializes (gc init, gc rig add, gc beads city migrate-proxied); bd\ncannot change an existing scope's value, and gc doctor reports drift.\nOverridden per rig by beads_proxied_idle_timeout and by the\nGC_BEADS_PROXIED_IDLE_TIMEOUT environment variable.",
+          "default": "30m"
+        },
+        "native_transport": {
+          "type": "string",
+          "enum": [
+            "auto",
+            "off"
+          ],
+          "description": "NativeTransport selects whether this city's bead stores may open the\nnative Dolt store at all: \"off\" (this city's stores never open\nnatively; always BdStore, the bd CLI subprocess — logged once at boot)\nor \"auto\" (default: native when preflight-eligible, today's behavior).\nEmpty defaults to \"auto\". Any other value (including \"require\", which\nbelongs to conditional_writes/guarded_release, not this switch) fails\nconfig load. A running city keeps the stores it holds open on the value\nit read at boot until it restarts; every other open, by a gc command or\nfor a single tick, reads the current value.\nGC_BEADS_FORCE_FALLBACK remains a deprecated process-wide alias for\n\"off\" that overrides every city's value for one release.",
+          "default": "auto"
+        },
+        "ledger_feed": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto"
+          ],
+          "description": "LedgerFeed selects whether the controller tails each bead scope's\ndurable mutation journal to bring writes made outside gc (agents running\nbd, humans) into its caches within about a second instead of at the\nnext re-scan: \"off\" (default) or \"auto\" (tail the scopes whose native or\nproxied store has the journal active; gc never turns the journal on).\nAny other value fails config load. Scopes that cannot be tailed stay on\nthe re-scan, and gc doctor reports which. The stores of a non-work\n[storage] binding, and rigs that share the city's legacy file store,\nare never tailed: they stay on the re-scan, and gc doctor does not list\nthem. A reload that changes ledger_feed rebuilds the controller's\nstores.",
+          "default": "off"
+        },
         "policies": {
           "additionalProperties": {
             "$ref": "#/$defs/BeadPolicyConfig"
@@ -1191,6 +1224,10 @@
         "beads": {
           "$ref": "#/$defs/BeadsConfig",
           "description": "Beads configures the bead store backend."
+        },
+        "ops": {
+          "$ref": "#/$defs/OpsConfig",
+          "description": "Ops holds the operation-journal rollout gates (ops.content,\nops.control, ops.lifecycle) and the conversation lane's switch\n(ops.authoritative)."
         },
         "session": {
           "$ref": "#/$defs/SessionConfig",
@@ -1401,7 +1438,7 @@
         },
         "dolt_start_address_in_use_retry_window": {
           "type": "string",
-          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when bind fails with\n\"address already in use\" before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
+          "description": "DoltStartAddressInUseRetryWindow is how long the managed dolt start\npath waits on the originally requested port when dolt reports it in\nuse (\"address already in use\", or \"Port N already in use.\" from dolt\n2.3.3) before falling back to a higher port. The\ncommon cause is a TIME_WAIT socket left by an abrupt stop of a sibling\ndolt subprocess (external SIGTERM, supervisor restart, OOM kill); on\nLinux the listening-socket slot typically frees within ~30s. Falling\nback immediately publishes the rebound port to provider state, after\nwhich `recoverManagedDoltShouldReuseExisting` keeps accepting the\nrebound instance as canonical and consumers hardcoded to the original\nport stay broken until the orphan is killed. Duration string (e.g.,\n\"30s\", \"1m\"). Set to \"0s\" to disable the retry (legacy fall-back-\nimmediately behavior). Defaults to \"30s\". Each port is waited on at\nmost once per startManagedDoltProcessWithOptions invocation, so the\nworst-case wall time per startup is bounded by\n(DoltStartAddressInUseRetryWindow + per-attempt-startup) × min(5,\ndistinct-ports-tried) rather than DoltStartAddressInUseRetryWindow × 5.\nNegative values are rejected at config load.",
           "default": "30s"
         },
         "wisp_gc_interval": {
@@ -1442,6 +1479,27 @@
           ],
           "description": "NudgeDispatcher selects how queued nudges get delivered to running\nsessions. \"legacy\" (default) auto-spawns a per-session `gc nudge poll`\nprocess that polls the file-backed queue every 2s. \"supervisor\" runs\nthe delivery loop inside the city runtime instead, with a unix-socket\nwake fast path triggered by enqueue, eliminating the per-session bd\nshellout storm.",
           "default": "legacy"
+        },
+        "session_reconciler": {
+          "type": "string",
+          "enum": [
+            "legacy",
+            "v2",
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "SessionReconciler selects the controller's session reconciler. \"legacy\"\n(default) runs the tick reconciler. \"v2\" is reserved for the keyed\nreconciler and is refused in this build: a controller configured with it\ndoes not start. The gc-enterprise values \"off\", \"auto\" and \"require\" are\ndeprecated aliases for \"legacy\". Boot-latched: a change applies at the next\ncontroller restart. Leave it unset.",
+          "default": "legacy"
+        },
+        "work_ladder": {
+          "type": "string",
+          "enum": [
+            "on",
+            "off"
+          ],
+          "description": "WorkLadder selects how the v2 reconciler paces outstanding work on pool\nseats. \"on\" (default) runs the work-progress ladder: nudges back off from\n3 to 60 minutes and never stop, a started claim is recycled at most once\nand then escalated, and an unstarted claim is released after its third\nunanswered nudge. \"off\" runs the three backstops it replaced (idle-claim,\ncontinuation, execution) instead: the rollback. Read on every pass, so a\nconfig reload applies. Legacy ignores it.",
+          "default": "on"
         },
         "auto_restart_on_drift": {
           "type": "boolean",
@@ -1716,6 +1774,13 @@
           "type": "string",
           "description": "Rig is the Gas City rig that owns repair work for this repository."
         },
+        "authors": {
+          "items": {
+            "type": "string"
+          },
+          "type": "array",
+          "description": "Authors is an optional fail-closed allow-list of GitHub author logins.\nWhen empty, the monitor acts on every open PR against the monitored\nrepo/base branches (the historical behavior). When non-empty, the monitor\nacts ONLY on PRs whose author login exactly (case-sensitively) matches an\nallowed value; a PR with an unresolved or empty author is skipped. This\nlets an operator scope the native monitor to their own PRs so it cannot\nmint repair beads for other contributors' pull requests."
+        },
         "notify": {
           "items": {
             "type": "string"
@@ -1939,6 +2004,10 @@
         "retention_ttl": {
           "type": "string",
           "description": "RetentionTTL has two consumers: it is how long read messages are\nretained before purge, and how long a read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables read-message\npurge. The sweep distinguishes the two: empty leaves it at its own\n60-minute default, while \"0\" disables its mail-close phase."
+        },
+        "unread_retention_ttl": {
+          "type": "string",
+          "description": "UnreadRetentionTTL is how long a never-read mail bead stays open before\nthe nudge-mail sweep closes it. Empty or \"0\" disables the unread-mail\nphase; it is opt-in so unread mail is never closed by default."
         }
       },
       "additionalProperties": false,
@@ -2049,6 +2118,53 @@
       "additionalProperties": false,
       "type": "object",
       "description": "NamedSessionPatch modifies an existing named session identified by canonical name or, for compatibility, by an unambiguous template."
+    },
+    "OpsConfig": {
+      "properties": {
+        "content": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Records message deliveries (session submit and messages, nudge, mail\nnotify) as message ops. \"off\" is the shipped default for all three\ngates. \"auto\" records where the store can and degrades loudly where it\ncannot. \"require\" refuses a request it cannot record before any effect.\nExperimental: each mode takes effect as each request surface gains op\nrecording. A change takes effect at the next process start.",
+          "default": "off"
+        },
+        "control": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Records interrupt (stop) and respond requests as ops. \"off\" is the\nshipped default. \"auto\" records where the store can and degrades loudly\nwhere it cannot. \"require\" refuses a request it cannot record before any\neffect. Experimental: each mode takes effect as each request surface\ngains op recording. A change takes effect at the next process start.",
+          "default": "off"
+        },
+        "lifecycle": {
+          "type": "string",
+          "enum": [
+            "off",
+            "auto",
+            "require"
+          ],
+          "description": "Records wake, suspend, reset (restart), kill and close requests as ops.\n\"off\" is the shipped default. \"auto\" records where the store can and\ndegrades loudly where it cannot. \"require\" refuses a request it cannot\nrecord before any effect. Experimental: each mode takes effect as each\nrequest surface gains op recording. A change takes effect at the next\nprocess start.",
+          "default": "off"
+        },
+        "authoritative": {
+          "items": {
+            "type": "string",
+            "enum": [
+              "message"
+            ]
+          },
+          "type": "array",
+          "description": "Authoritative lists the op kinds the conversation lane executes instead\nof their legacy path. The default is empty, and message is not on by\ndefault anywhere yet. This build accepts message only. Experimental:\nlisting message switches on the producers that write lane ops, whose\nmessages the lane host then delivers: the API's POST\n/v0/city/{cityName}/session/{id}/ops (a T3 Code environment or an\noperator proposing a message) and, for sessions a lane host can type\ninto (a keystroke-mode runtime, or one a box host serves), the\ncontroller's planner notices (drain reminders, the nudge backstop) and\ngc session nudge. gc session nudge delivers inline what its delivery\nmode allows now, where it can type into the session: wait-idle only at\nan idle boundary; immediate there too, or into a running turn when the\nruntime can steer it, else at the next boundary. It leaves the rest to\nthe controller's lane host, and the content gate no longer governs it.\nThe API's submit and messages, gc session submit, mail --notify, sling\n--nudge and wait nudges keep their legacy delivery in this build. Under\nsession_reconciler = \"v2\", do not list message yet (gc doctor warns).\nThe city's controller, standalone or supervisor-hosted, runs the lane\nhost that delivers lane ops, and gc doctor reports a listed kind as an\nerror when no lane host serves the city. A keystroke-mode runtime (tmux)\ntakes a boundary delivery at an idle boundary, a protocol-mode runtime\n(t3bridge) at its turn boundary.\nA listed kind needs a sessions store with guarded batches. A change\ntakes effect at the controller's next start; gc session nudge reads it\nat once."
+        }
+      },
+      "additionalProperties": false,
+      "type": "object",
+      "description": "OpsConfig holds the operation-journal rollout gates, which record the requests a session receives as ops beside their unchanged legacy execution, and Authoritative, the conversation lane's switch, which is not a gate."
     },
     "OptionChoice": {
       "properties": {
@@ -2172,7 +2288,7 @@
         },
         "max_dispatches_per_tick": {
           "type": "integer",
-          "description": "MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron\nand event triggers) the supervisor dispatches per tick, in a rotation\nthat resumes where the previous tick stopped. Unset keeps the built-in\ndefault of 4; set to 1 to drain overdue cooldown orders one-per-tick at\ncold start instead of firing several concurrent goroutines at once.\nCondition-triggered orders are outside this budget: a passing check\nmeans work is pending right now, so they dispatch on the tick that\nobserves it. The open-tracking and open-work gates still run for them\n(unless the order sets no_work_gate), but those gates are keyed per\norder and only hold back a redispatch of an order whose previous run\nis still moving, so they do not bound the tick as a whole: a tick\nlaunches at most this budget plus one dispatch per condition order\nwhose check passed on that tick. That second term grows with how many\ncondition orders a city defines, not with this setting, and at cold\nstart, before any tracking bead exists, neither gate holds a\nsimultaneously-due set back."
+          "description": "MaxDispatchesPerTick caps how many clock-driven orders (cooldown, cron\nand event triggers) the supervisor dispatches per orders-lane pass, in\na rotation that resumes where the previous pass stopped. The key keeps\nits historical name from when order dispatch ran once per controller\ntick. Unset keeps the built-in default of 4; set to 1 to drain overdue\ncooldown orders one per pass at cold start instead of firing several\nconcurrent goroutines at once. Condition-triggered orders are outside\nthis budget: a passing check means work is pending right now, so they\ndispatch on the pass that observes it. The open-tracking and open-work\ngates still run for them (unless the order sets no_work_gate), but\nthose gates are keyed per order and only hold back a redispatch of an\norder whose previous run is still moving, so they do not bound the pass\nas a whole: a pass launches at most this budget plus one dispatch per\ncondition order whose check passed on that pass. That second term grows\nwith how many condition orders a city defines, not with this setting,\nand at cold start, before any tracking bead exists, neither gate holds\na simultaneously-due set back."
         },
         "overrides": {
           "items": {
@@ -2610,6 +2726,10 @@
           "type": "string",
           "description": "DefaultBranch is the rig repository's mainline branch (e.g. \"main\",\n\"master\", \"develop\"). When set, routing formulas use this as the\ndefault merge target instead of probing origin/HEAD at sling time.\nCaptured by `gc rig add` from the rig's git config; set manually for\nrigs whose mainline isn't reachable via origin/HEAD."
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy is the merge strategy `gc sling` stamps on a bead\nrouted into this rig when the caller passes no --merge flag. One of\n\"direct\", \"mr\", or \"local\"; empty leaves the bead unstamped, which\nconsumers read as their own implicit default. Set it to \"mr\" on rigs\nthat deliver work through a pull request instead of a push to the\ntarget branch, so a bare `gc sling` records the shape the rig actually\nuses rather than one every caller has to remember to pass."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended is the deprecated pre-runtime-state suspension flag.\nParsed for backwards compatibility and treated as an alias for\nSuspendedOnStart by [Rig.EffectiveSuspendedOnStart], so existing\ncities with `suspended = true` continue to start their rigs\nsuspended after upgrade. Live suspend/resume commands no longer\nwrite this field. `gc doctor` flags it and offers `--fix` to\nrename to suspended_on_start."
@@ -2683,6 +2803,10 @@
           },
           "type": "object",
           "description": "FormulaVars provides rig-scoped defaults for formula vars. Keys match\nvar names declared in formula `[vars.\u003cname\u003e]` blocks. Values are used\nwhen a formula runs in this rig and the caller did not pass an\nexplicit --var override. Takes precedence over formula-level defaults\nbut loses to --var flags."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides [beads] proxied_idle_timeout for this\nrig's bd-owned proxied scope. Go duration; \"0\" means never. Ignored, with\na warning, for a rig that shares the city's proxy root: one proxy serves\nevery scope on that root and carries the city's value."
         }
       },
       "additionalProperties": false,
@@ -2710,6 +2834,10 @@
           "type": "string",
           "description": "DefaultBranch overrides the rig's recorded mainline branch."
         },
+        "default_merge_strategy": {
+          "type": "string",
+          "description": "DefaultMergeStrategy overrides the merge strategy `gc sling` stamps on\nbeads routed into this rig. Set to \"\" to clear the rig's default and go\nback to leaving merge_strategy unstamped."
+        },
         "suspended": {
           "type": "boolean",
           "description": "Suspended is the deprecated, pre-runtime-state suspension override.\nParsed for backwards compatibility; `gc doctor` surfaces it as a\nwarning and recommends the rename to SuspendedOnStart. No behavioral\ncode path reads it."
@@ -2724,6 +2852,10 @@
           },
           "type": "object",
           "description": "FormulaVars adds or overrides rig-scoped formula var defaults.\nAdditive merge: patch keys win over existing rig keys, unspecified\nkeys are preserved."
+        },
+        "beads_proxied_idle_timeout": {
+          "type": "string",
+          "description": "BeadsProxiedIdleTimeout overrides the rig's beads_proxied_idle_timeout."
         }
       },
       "additionalProperties": false,

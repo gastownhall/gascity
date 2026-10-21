@@ -142,6 +142,13 @@ func LoadWithIncludes(fs fsys.FS, path string, extraIncludes ...string) (*City, 
 
 // LoadWithIncludesOptions loads a city.toml with the supplied load options.
 func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraIncludes ...string) (*City, *Provenance, error) {
+	// Convention trees are hashed before the load reads them so an edit that
+	// lands mid-load cannot be stamped with a revision newer than the
+	// content loaded (see conventionRevisionInputs).
+	var conventionInputs *conventionRevisionInputs
+	if !opts.SkipRevisionSnapshot {
+		conventionInputs = captureConventionRevisionInputs(fs, filepath.Dir(path))
+	}
 	data, err := fs.ReadFile(path)
 	if err != nil {
 		return nil, nil, fmt.Errorf("loading config %q: %w", path, err)
@@ -782,6 +789,7 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := ValidateNonNegativeDurations(root, path); err != nil {
 		return nil, nil, err
 	}
+	prov.Warnings = append(prov.Warnings, ValidateProxiedIdleTimeouts(root, path)...)
 	if err := ValidateDoltConfig(root, path); err != nil {
 		return nil, nil, err
 	}
@@ -855,13 +863,33 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 		}
 	}
 
+	// Parse validates the [beads] mode fields on a single layer, but this
+	// composed-root path never calls Parse on the final merged config — it
+	// decodes the root layer with parseWithMeta and merges fragments
+	// in-place, and a fragment that sets one of these fields overrides the
+	// root's value in mergeFragment, so even a root layer that validated
+	// cleanly could end up with a fragment-supplied out-of-enum value.
+	// Without this, a real city.toml like beads.native_transport = "bogus"
+	// loaded via `gc` silently decodes with no error at all:
+	// NormalizedNativeTransport then normalizes "bogus" to itself, every
+	// consumer's `== NativeTransportOff` check fails, and the city silently
+	// goes native regardless of operator intent. Validate once here, over
+	// the fully composed root, so every real load path (not just direct
+	// config.Parse callers, mostly tests) gets the same enum enforcement.
+	if err := validateBeadsModes(root.Beads); err != nil {
+		return nil, nil, err
+	}
+	if err := validateOpsModes(root.Ops); err != nil {
+		return nil, nil, err
+	}
+
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
 	// mutable files from disk. Callers that never compute a Revision opt out
 	// via SkipRevisionSnapshot; Revision falls back to reading from disk, so
 	// the value is the same either way.
 	if !opts.SkipRevisionSnapshot {
-		prov.captureRevisionSnapshot(fs, root, cityRoot)
+		prov.captureRevisionSnapshot(fs, root, cityRoot, conventionInputs)
 	}
 
 	return root, prov, nil
@@ -1120,14 +1148,20 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 
 	// Simple sections: last-writer-wins if fragment defines them.
 	if fragMeta.IsDefined("beads") {
-		// Preserve rollout-gate fields the fragment did not itself set: a
-		// fragment defining any [beads] key would otherwise reset the whole
-		// struct and silently downgrade an explicit conditional_writes /
-		// guarded_release opt-in (mirror of the daemon.formula_v2 preservation
-		// below). Capture before the overwrite; a fragment that DOES set the
-		// field still wins.
+		// Preserve rollout-gate and kill-switch fields the fragment did not
+		// itself set: a fragment defining any [beads] key would otherwise
+		// reset the whole struct and silently downgrade an explicit
+		// conditional_writes / guarded_release / allow_schema_behind_migrate
+		// opt-in, or turn an explicit native_transport = "off" back into the
+		// "auto" default (mirror of the daemon.formula_v2 preservation below).
+		// Capture before the overwrite; a fragment that DOES set the field
+		// still wins.
 		conditionalWrites := base.Beads.ConditionalWrites
 		guardedRelease := base.Beads.GuardedRelease
+		allowSchemaBehindMigrate := base.Beads.AllowSchemaBehindMigrate
+		proxiedIdleTimeout := base.Beads.ProxiedIdleTimeout
+		nativeTransport := base.Beads.NativeTransport
+		ledgerFeed := base.Beads.LedgerFeed
 		base.Beads = fragment.Beads
 		if !fragMeta.IsDefined("beads", "conditional_writes") {
 			base.Beads.ConditionalWrites = conditionalWrites
@@ -1135,6 +1169,34 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 		if !fragMeta.IsDefined("beads", "guarded_release") {
 			base.Beads.GuardedRelease = guardedRelease
 		}
+		if !fragMeta.IsDefined("beads", "allow_schema_behind_migrate") {
+			base.Beads.AllowSchemaBehindMigrate = allowSchemaBehindMigrate
+		}
+		if !fragMeta.IsDefined("beads", "proxied_idle_timeout") {
+			base.Beads.ProxiedIdleTimeout = proxiedIdleTimeout
+		}
+		if !fragMeta.IsDefined("beads", "native_transport") {
+			base.Beads.NativeTransport = nativeTransport
+		}
+		if !fragMeta.IsDefined("beads", "ledger_feed") {
+			base.Beads.LedgerFeed = ledgerFeed
+		}
+	}
+	// [ops] merges per key: each field is a rollout gate, so a fragment
+	// defining one gate keeps the base's others.
+	if fragMeta.IsDefined("ops", "content") {
+		base.Ops.ContentMode = fragment.Ops.ContentMode
+	}
+	if fragMeta.IsDefined("ops", "control") {
+		base.Ops.ControlMode = fragment.Ops.ControlMode
+	}
+	if fragMeta.IsDefined("ops", "lifecycle") {
+		base.Ops.LifecycleMode = fragment.Ops.LifecycleMode
+	}
+	// ops.authoritative is one list, not a gate per kind: a fragment that
+	// defines it replaces the base's list.
+	if fragMeta.IsDefined("ops", "authoritative") {
+		base.Ops.Authoritative = fragment.Ops.Authoritative
 	}
 	if fragMeta.IsDefined("dolt") {
 		base.Dolt = fragment.Dolt
@@ -1144,9 +1206,17 @@ func mergeFragment(base, fragment *City, fragMeta toml.MetaData, fragPath string
 	}
 	if fragMeta.IsDefined("daemon") {
 		formulaV2 := base.Daemon.FormulaV2
+		sessionReconciler := base.Daemon.SessionReconciler
+		workLadder := base.Daemon.WorkLadder
 		base.Daemon = fragment.Daemon
 		if !fragMeta.IsDefined("daemon", "formula_v2") && !fragMeta.IsDefined("daemon", "graph_workflows") {
 			base.Daemon.FormulaV2 = formulaV2
+		}
+		if !fragMeta.IsDefined("daemon", "session_reconciler") {
+			base.Daemon.SessionReconciler = sessionReconciler
+		}
+		if !fragMeta.IsDefined("daemon", "work_ladder") {
+			base.Daemon.WorkLadder = workLadder
 		}
 	}
 	if fragMeta.IsDefined("session") {
@@ -1624,6 +1694,8 @@ func parseWithMeta(data []byte, source string) (*City, toml.MetaData, []string, 
 	warnings := agentDefaultsCompatibilityWarnings(md, source)
 	normalizeLegacyOrderOverrideAliases(&cfg)
 	warnings = append(warnings, CheckUndecodedKeys(md, source)...)
+	warnings = append(warnings, sessionReconcilerWarnings(&cfg, source)...)
+	warnings = append(warnings, workLadderWarnings(&cfg, source)...)
 	// Stamp source=sourceInline on inline [[agent]] tables. For fragments,
 	// adjustAgentPaths later sets SourceDir, which takes precedence in
 	// describeSource (FR-1). For the root city.toml, SourceDir is empty

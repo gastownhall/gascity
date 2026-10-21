@@ -2,6 +2,7 @@ package main
 
 import (
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beads"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -45,6 +46,9 @@ func TestPoolSessionIsLiveInfo_Matrix(t *testing.T) {
 // it (e.g., adding `default: true`) or narrow it (e.g., removing `idle-timeout`)
 // must be caught by an explicit table rather than by accident.
 func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
+	now := time.Date(2026, 10, 8, 12, 0, 0, 0, time.UTC)
+	recent := now.Add(-time.Minute).Format(time.RFC3339)
+	stale := now.Add(-sessionpkg.KillPendingGrace - time.Minute).Format(time.RFC3339)
 	cases := []struct {
 		name string
 		meta map[string]string
@@ -59,6 +63,18 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 		{"asleep+runtime-missing", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonRuntimeMissing)}, true},
 		{"asleep+provider-terminal-error", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonProviderTerminalError)}, true},
 		{"asleep+max-session-age", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonMaxSessionAge)}, true},
+		// A config-drifted pool session is never woken in place (that would run
+		// stale config), so it must be freeable or the pool's slot is lost
+		// forever once every seat drifts (srvcity sr-sxbc7: st/support.dispatch
+		// dark 17.5h with both slots asleep-for-drift and 59 ready steps queued).
+		{"asleep+config-drift", map[string]string{"state": "asleep", "sleep_reason": string(sessionpkg.SleepReasonConfigDrift)}, true},
+		// Owner ruling B1: a killed seat frees its slot unless the kill still
+		// owns the row (an honored kill fence). A fence past KillPendingGrace,
+		// or a malformed one, is not honored.
+		{"asleep+killed", map[string]string{"state": "asleep", "sleep_reason": "killed", "slept_at": recent}, true},
+		{"asleep+killed+fence-pending", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": recent}, false},
+		{"asleep+killed+fence-stale", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": stale}, true},
+		{"asleep+killed+fence-malformed", map[string]string{"state": "asleep", "sleep_reason": "killed", "state_reason": sessionpkg.KillPendingReason, "slept_at": "not-a-time"}, true},
 		{"asleep+empty-reason", map[string]string{"state": "asleep", "sleep_reason": ""}, false},
 		{"asleep+missing-reason", map[string]string{"state": "asleep"}, false},
 		{"asleep+wait-hold", map[string]string{"state": "asleep", "sleep_reason": "wait-hold"}, false},
@@ -70,9 +86,18 @@ func TestIsPoolSessionSlotFreeable_Matrix(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := isPoolSessionSlotFreeable(beads.Bead{Metadata: tc.meta})
+			got := isPoolSessionSlotFreeable(beads.Bead{Metadata: tc.meta}, now)
 			if got != tc.want {
 				t.Fatalf("isPoolSessionSlotFreeable(%v) = %v, want %v", tc.meta, got, tc.want)
+			}
+			info := sessionpkg.Info{
+				MetadataState: tc.meta["state"],
+				StateReason:   tc.meta["state_reason"],
+				SleepReason:   tc.meta["sleep_reason"],
+				SleptAt:       tc.meta["slept_at"],
+			}
+			if gotInfo := isPoolSessionSlotFreeableInfo(info, now); gotInfo != tc.want {
+				t.Fatalf("isPoolSessionSlotFreeableInfo(%v) = %v, want %v", tc.meta, gotInfo, tc.want)
 			}
 		})
 	}

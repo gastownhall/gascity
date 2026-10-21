@@ -25,6 +25,7 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/formula"
 	"github.com/gastownhall/gascity/internal/molecule"
+	"github.com/gastownhall/gascity/internal/readywork"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -71,7 +72,7 @@ import (
 //     store instead of replacing it).
 //   - CLOSED by S2 — I5's release-tier gap. Crash recovery, the retired-session
 //     sweep, `gc session close` and drain-ack all resolve the same leg set from
-//     the city's routes (assignedWorkSweepPlan), so a class-routed claim is
+//     the city's routes (workLegsFromCensus), so a class-routed claim is
 //     released by the same pass that releases a work-store one. What remains
 //     open there is ga-zp3uj, named in I5's own text: the AGENT-SIDE recovery
 //     tiers are raw bd commands in a work directory and stay topology-blind.
@@ -187,7 +188,7 @@ func conformanceReadyFederation(t *testing.T, e splitEnv) {
 		t.Fatalf("HQ bead %s classifies as infrastructure; this leg is about the WORK class specifically", hqWork.ID)
 	}
 
-	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr)
+	found, stores, refs, partial := collectOpenUnassignedRoutedWork(e.cityPath, e.cfg, e.sessionsStore(), e.rigStores, nil, os.Stderr, nil, nil)
 	if partial {
 		t.Fatal("collectOpenUnassignedRoutedWork reported a partial scan; the demand read must be complete for this invariant to mean anything")
 	}
@@ -337,7 +338,7 @@ func conformanceAssignedWorkCapture(t *testing.T, e splitEnv) {
 		got, stores, refs,
 		e.rigStores,
 		nil,
-		nil,
+		nil, nil,
 	)
 	wantReleased := []string{dead.ID, hqDead.ID}
 	releasedIDs := make(map[string]bool, len(released))
@@ -811,7 +812,7 @@ func conformanceClaimRouting(t *testing.T, e splitEnv) {
 	fanout := hookWorkQueryStores(e.cityPath, e.cfg, hookAgent,
 		hookAgent.QualifiedName(),
 		agentCommandDir(e.cityPath, hookAgent, e.cfg.Rigs),
-		mergeRuntimeEnv(nil, hookEnv), hookEnv)
+		mergeRuntimeEnv(nil, hookEnv), hookEnv, nil)
 	if want := 1 + len(e.cfg.Rigs); len(fanout) != want {
 		t.Errorf("`gc hook --claim` fans out over %d store(s), want %d (city + %d rig) — a leg appeared or vanished; the class binding is reached through hookClaimOps, never as a leg, because it is not a bd workspace", len(fanout), want, len(e.cfg.Rigs))
 	}
@@ -1087,7 +1088,7 @@ func conformanceHookClaimClassRouting(t *testing.T, e splitEnv, workBeadID strin
 //
 // S2 UPDATE (ga-j4ob9): the second scan is no longer HANDED the binding by its
 // call site. Both rows now resolve the same leg set from the city's own routes
-// (assignedWorkSweepPlan), which is what closes the case the hand-threading
+// (workLegsFromCensus), which is what closes the case the hand-threading
 // never covered — the Info-form retired-session sweep, which took no class leg
 // at all, so a dead session's binding-resident claim had no automatic reopen
 // lane. The rows below are unchanged in what they assert; only the mechanism
@@ -1106,16 +1107,18 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 		leading beads.Store
 	}{
 		{
-			name:    "reconciler scan — leads with the sessions-class store, which IS the binding",
+			name:    "reconciler scan — the session bead lives in the sessions-class store, which IS the binding",
 			leading: e.sessionsStore(),
 		},
 		{
-			name:    "gc session close — leads with the work store and resolves the binding from the routes",
+			name:    "gc session close — the session bead resolved through the work store",
 			leading: e.work,
 		},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			plan, err := assignedWorkSweepPlan(e.cityPath, e.cfg, tt.leading, e.rigStores, nil)
+			// Both read through the city's WorkLegs over its work store, which
+			// resolve the binding from the routes.
+			plan, err := workLegsPlan(e.cityPath, e.cfg, e.work, e.rigStores)
 			if err != nil {
 				t.Fatalf("resolving the release scan's leg set: %v", err)
 			}
@@ -1125,10 +1128,13 @@ func assertClassRoutedClaimIsReleasable(t *testing.T, e splitEnv) {
 			sessionBead := beads.Bead{ID: "gcg-retired-session", Metadata: map[string]string{"session_name": "worker-1"}}
 			step := e.mintWispWith(t, wispOpts{
 				title:    "graph step claimed by a session that then died",
+				routedTo: "worker",
 				status:   "in_progress",
 				assignee: sessionBead.ID,
 			})
-			unclaimWorkAssignedToRetiredSessionBead(e.cityPath, e.cfg, tt.leading, e.rigStores, sessionBead, "", io.Discard)
+			// A configured "worker" lane the released step routes to.
+			legs := workLegsFromCensus(e.cityPath, servingRigsCity(e.cfg, "worker"), cityWorkLeg{store: e.work}, e.rigStores)
+			unclaimWorkAssignedToRetiredSessionBead(legs, tt.leading, sessionBead, "", io.Discard)
 			released, err := e.class.Get(step.ID)
 			if err != nil {
 				t.Fatalf("reading the claimed graph step back from the binding: %v", err)
@@ -1383,7 +1389,7 @@ func conformanceResidenceSweep(t *testing.T, e splitEnv) {
 		Title:    "worker-1",
 		Type:     session.BeadType,
 		Labels:   []string{session.LabelSession},
-		Metadata: map[string]string{"session_id": "sess-1"},
+		Metadata: map[string]string{"test_session_id": "sess-1"},
 	}); err != nil {
 		t.Fatalf("create session bead: %v", err)
 	}
@@ -1932,10 +1938,8 @@ func beadIDsOf(list []beads.Bead) []string {
 // executable FEDERATION CONTRACT written for this invariant: legs city → rigs
 // ascending → graph last, per-leg order whatever that leg's reader emits, dedupe
 // first-leg-wins, and — the load-bearing part — BOTH sides compared after
-// normalizing with beads.SortBeadsReadyOrder, because per-leg order is
-// deterministic but not canonical across leg kinds (a caching-wrapped work store
-// emits (priority, created_at, id); the canonical relocated binding emits
-// (created_at, id) with no priority term). So this runs the real API handler and
+// normalizing with beads.SortBeadsReadyOrder, because each leg is sorted but
+// their concatenation is not. So this runs the real API handler and
 // the real CLI reader over the SAME three stores and compares the two answers.
 //
 // The single-store row is not a formality: it is the byte-identity claim. There
@@ -2031,7 +2035,7 @@ func conformanceCLIReadyDeadRigLeg(t *testing.T, e splitEnv) {
 	}
 
 	legs := mustReadyLegs(t, loadedCityName(dead.cfg, dead.cityPath), dead.work, dead.rigStores, fixtureGraphLeg(dead))
-	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	rows, err := readywork.Read(legs, readywork.Query{})
 	if err == nil {
 		t.Fatalf("gc ready served %d beads over the same dead %q leg; the API said that read was PARTIAL, and a bare array has nowhere to say so — the CLI's equivalent of Partial 200 is a non-zero exit", len(rows), deadRig)
 	}
@@ -2064,7 +2068,7 @@ func cliReadyIDs(t *testing.T, e splitEnv) []string {
 		e.rigStores,
 		fixtureGraphLeg(e),
 	)
-	rows, err := readyBeadsForOpts(legs, readyOpts{})
+	rows, err := readywork.Read(legs, readywork.Query{})
 	if err != nil {
 		t.Fatalf("gc ready over the fixture stores: %v", err)
 	}
@@ -2225,7 +2229,7 @@ func conformanceFederatedInFlightTier(t *testing.T, e splitEnv, ownerName string
 	}
 
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{status: readyStatusInProgress})
+	rows, err := readywork.Read(legs, readywork.Query{Status: readywork.StatusInProgress})
 	if err != nil {
 		t.Fatalf("gc ready --status in_progress over the fixture stores: %v", err)
 	}
@@ -2447,7 +2451,7 @@ func conformanceProjectionCoherence(t *testing.T, e splitEnv) {
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
 	readyIDs := func(status string) []string {
 		t.Helper()
-		rows, err := readyBeadsForOpts(legs, readyOpts{status: status, metadataFields: []string{selector}})
+		rows, err := readywork.Read(legs, readywork.Query{Status: status, MetadataFields: []string{selector}})
 		if err != nil {
 			t.Fatalf("the federated reader the refusal steers to failed on --status %q: %v", status, err)
 		}
@@ -2587,8 +2591,10 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 		// fell through would print `[]` and exit 0, which is the same fail-open one
 		// layer up. internal/config's TestFederatedWorkQueryPropagatesADeadLeg
 		// EXECUTES this; the clause is pinned here so the split-topology row cannot
-		// go green on a command that swallows it.
-		if !strings.Contains(cmd, `|| exit $?`) {
+		// go green on a command that swallows it. The work query's clause names the
+		// failed read on stderr before exiting with its status (`exit "$gc_rc"`);
+		// the count-form exits with it directly (`|| exit $?`).
+		if !strings.Contains(cmd, `|| exit $?`) && !strings.Contains(cmd, `exit "$gc_rc"`) {
 			t.Errorf("a split city's %s runs the federated reader without propagating its exit status: %q", name, cmd)
 		}
 	}
@@ -2608,12 +2614,12 @@ func conformanceWorkQueryFederation(t *testing.T, e splitEnv) {
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
-		excludeTypes:   []string{"epic"},
-		sortOrder:      readySortOldest,
-		limit:          20,
+	rows, err := readywork.Read(legs, readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		ExcludeTypes:   []string{"epic"},
+		Sort:           readywork.SortOldest,
+		Limit:          20,
 	})
 	if err != nil {
 		t.Fatalf("the reader the split work_query names failed over healthy stores: %v", err)
@@ -2658,12 +2664,12 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	t.Helper()
 
 	routed := e.mintWispWith(t, wispOpts{title: "routed graph step", routedTo: e.qualified})
-	assertFederatedReaderServes(t, e, routed.ID, "routed", readyOpts{
-		unassigned:     true,
-		metadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
-		excludeTypes:   []string{"epic"},
-		sortOrder:      readySortOldest,
-		limit:          20,
+	assertFederatedReaderServes(t, e, routed.ID, "routed", readywork.Query{
+		Unassigned:     true,
+		MetadataFields: []string{beadmeta.RoutedToMetadataKey + "=" + e.qualified},
+		ExcludeTypes:   []string{"epic"},
+		Sort:           readywork.SortOldest,
+		Limit:          20,
 	})
 	assertClaimEscalatesOffTheWorkStore(t, e, routed.ID, "routed")
 
@@ -2672,10 +2678,10 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 	// (graphroute.ApplyGraphRouteBinding sets step.Assignee for a non-pool,
 	// non-direct binding, and molecule materialization writes it through).
 	assigned := e.mintWispWith(t, wispOpts{title: "assigned graph step", assignee: e.qualified})
-	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readyOpts{
-		assignee:  e.qualified,
-		sortOrder: readySortOldest,
-		limit:     20,
+	assertFederatedReaderServes(t, e, assigned.ID, "assigned", readywork.Query{
+		Assignee: e.qualified,
+		Sort:     readywork.SortOldest,
+		Limit:    20,
 	})
 	assertClaimEscalatesOffTheWorkStore(t, e, assigned.ID, "assigned")
 
@@ -2688,10 +2694,10 @@ func conformanceWorkQueryClaimsWhatItSees(t *testing.T, e splitEnv) {
 // a restatement of it. It is the "sees" half of every see-and-claim row: a claim
 // assertion on a bead the query never served would prove nothing about the
 // command.
-func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readyOpts) {
+func assertFederatedReaderServes(t *testing.T, e splitEnv, graphBeadID, tier string, opts readywork.Query) {
 	t.Helper()
 	legs := mustReadyLegs(t, loadedCityName(e.cfg, e.cityPath), e.work, e.rigStores, fixtureGraphLeg(e))
-	rows, err := readyBeadsForOpts(legs, opts)
+	rows, err := readywork.Read(legs, opts)
 	if err != nil {
 		t.Fatalf("the reader the split work_query's %s tier names failed over healthy stores: %v", tier, err)
 	}

@@ -55,12 +55,12 @@ type healOracleCase struct {
 func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 	clk := &clock.Fake{Time: time.Date(2026, 3, 8, 12, 0, 0, 0, time.UTC)}
 	rfc := func(d time.Duration) string { return clk.Now().Add(d).UTC().Format(time.RFC3339) }
-	// S19 stage 2: every started_config_hash clear also clears the priming keys
-	// (pinned by the write-site/priming-lifetime gates), so the reset batches
-	// carry the primed_at/priming_attempted_at/prompt_hash clears.
+	// S19 stage 2: every started_config_hash clear also clears the priming keys,
+	// so the reset batches carry the primed_at/priming_attempted_at/prompt_hash
+	// clears.
 	resetBatch := map[string]string{
 		"continuation_reset_pending": "true", "pending_create_claim": "", "pending_create_started_at": "",
-		"primed_at": "", "priming_attempted_at": "", "prompt_hash": "",
+		"primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "resume_failures": "", "resume_launch": "",
 		"session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep",
 	}
 
@@ -145,7 +145,7 @@ func TestHealStatePatchWithRollbackInfo(t *testing.T) {
 			meta:     map[string]string{"state": "active", "configured_named_session": "true", "configured_named_identity": "mayor", "configured_named_mode": "singleton", "session_name": "mayor", "session_key": "sk", "started_config_hash": "h"},
 			alive:    false,
 			rollback: true,
-			want:     map[string]string{"continuation_reset_pending": "true", "primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep"},
+			want:     map[string]string{"continuation_reset_pending": "true", "primed_at": "", "priming_attempted_at": "", "prompt_hash": "", "resume_failures": "", "resume_launch": "", "session_key": "", "sleep_reason": "runtime-missing", "started_config_hash": "", "state": "asleep"},
 		},
 		{
 			// gascity#5121: a failed liveness probe (Observed=false) must not be
@@ -327,7 +327,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-recovers", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active", "sleep_intent": "idle-stop-pending", "sleep_policy_fingerprint": "fp"})
-		if !recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) == nil {
 			t.Fatal("recoverPendingIdleSleepInfo = false, want true")
 		}
 		persisted, _ := store.Get(b.ID)
@@ -340,7 +340,7 @@ func TestSleepWriteTwinsInfo(t *testing.T) {
 	})
 	t.Run("recoverPendingIdleSleep-noop", func(t *testing.T) {
 		store, b := newBead(t, map[string]string{"session_name": "worker", "state": "active"})
-		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) {
+		if recoverPendingIdleSleepInfo(sessiontest.SeedBead(t, b), sessionFrontDoor(store), false, clk) != nil {
 			t.Fatal("recoverPendingIdleSleepInfo = true, want false (no pending intent)")
 		}
 	})
