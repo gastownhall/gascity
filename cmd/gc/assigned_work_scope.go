@@ -185,13 +185,17 @@ func filterAssignedWorkBeadsForPoolDemand(
 		return assignedWorkBeads
 	}
 	claimRefs := assignedWorkRelocatedClaimRefs(cityPath, cfg, leading)
-	return filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
+	kept, _ := filterAssignedWorkBeadsForPoolDemandAt(cfg, cityPath, claimRefs, sessionInfos, assignedWorkBeads, assignedWorkStoreRefs, time.Now().UTC())
+	return kept
 }
 
 // filterAssignedWorkBeadsForPoolDemandAt is filterAssignedWorkBeadsForPoolDemand
 // with the claim refs (assignedWorkRelocatedClaimRefs) resolved and the clock
 // read by the caller, so it does no I/O: the v2 allocator calls it inside its
-// pure pass.
+// pure pass. It returns the surviving beads plus their store refs, index-
+// aligned, so a caller that needs store-scoped wake-demand readiness
+// (storeScopedBeadKey) for the surviving beads can resolve it without
+// re-deriving each bead's originating store — see readyAssignedFlagsForBeads.
 func filterAssignedWorkBeadsForPoolDemandAt(
 	cfg *config.City,
 	cityPath string,
@@ -200,12 +204,12 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 	assignedWorkBeads []beads.Bead,
 	assignedWorkStoreRefs []string,
 	now time.Time,
-) []beads.Bead {
+) ([]beads.Bead, []string) {
 	if len(assignedWorkBeads) == 0 || len(assignedWorkStoreRefs) == 0 {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	if cfg == nil {
-		return assignedWorkBeads
+		return assignedWorkBeads, assignedWorkStoreRefs
 	}
 	assigneeToSessionBeadID := make(map[string]string)
 	sessionBeadTemplate := make(map[string]string)
@@ -225,6 +229,7 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		}
 	}
 	filtered := make([]beads.Bead, 0, len(assignedWorkBeads))
+	filteredRefs := make([]string, 0, len(assignedWorkBeads))
 	for i, wb := range assignedWorkBeads {
 		// A deferred bead is deliberately parked (a future defer_until, or bd's
 		// deferred status, which holds past its date until the store wakes the
@@ -260,9 +265,10 @@ func filterAssignedWorkBeadsForPoolDemandAt(
 		}
 		if assignedWorkIndexReachableFromAgentOnClaimRefs(cityPath, cfg, agentCfg, assignedWorkStoreRefs, i, claimRefs) {
 			filtered = append(filtered, wb)
+			filteredRefs = append(filteredRefs, assignedWorkStoreRefs[i])
 		}
 	}
-	return filtered
+	return filtered, filteredRefs
 }
 
 // filterAssignedWorkBeadsForSessionWake resolves work through assignment

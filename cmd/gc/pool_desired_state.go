@@ -264,7 +264,7 @@ func ComputePoolDesiredStatesAt(
 	scaleCheckCounts map[string]int,
 	decisionTime time.Time,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, nil, sessionInfos, scaleCheckCounts, nil, decisionTime, nil)
 }
 
 func ComputePoolDesiredStatesTraced(
@@ -287,7 +287,7 @@ func ComputePoolDesiredStatesTracedAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, nil, sessionInfos, scaleCheckCounts, nil, decisionTime, trace)
 }
 
 func ComputePoolDesiredStatesWithDemandTraced(
@@ -301,18 +301,9 @@ func ComputePoolDesiredStatesWithDemandTraced(
 	return computePoolDesiredStates(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, trace)
 }
 
-func computePoolDesiredStates(
-	cfg *config.City,
-	assignedWorkBeads []beads.Bead,
-	sessionInfos []sessionpkg.Info,
-	scaleCheckCounts map[string]int,
-	scaleCheckDemand map[string]scaleCheckDemand,
-	trace *sessionReconcilerTraceCycle,
-) []PoolDesiredState {
-	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
-}
-
-func computePoolDesiredStatesAt(
+// ComputePoolDesiredStatesWithDemandTracedAt computes traced pool demand at a
+// caller-supplied decision time while preserving per-work demand provenance.
+func ComputePoolDesiredStatesWithDemandTracedAt(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
 	sessionInfos []sessionpkg.Info,
@@ -321,7 +312,43 @@ func computePoolDesiredStatesAt(
 	decisionTime time.Time,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
-	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, trace)
+}
+
+func computePoolDesiredStates(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesAt(cfg, assignedWorkBeads, nil, nil, sessionInfos, scaleCheckCounts, scaleCheckDemand, time.Time{}, trace)
+}
+
+// computePoolDesiredStatesAt accepts assignedWorkStoreRefs and readyAssigned
+// as an optional pair (both nil together, or both populated and index-aligned
+// with assignedWorkBeads) so a caller that already resolved store-scoped
+// wake-demand readiness (collectAssignedWorkBeadsWithStores' ReadyAssigned)
+// can gate the fresh-wake pool-demand tier on it (gascity#8172): an open work
+// bead that only survived the open-routed orphan-release pass — never marked
+// ready-assigned — must not, by status alone, spawn a session for a
+// wake_mode="fresh" agent whose owner is merely asleep on blocked work. When
+// the pair is nil (every caller that only needs a demand COUNT, not the
+// actual session-creation decision), this gate is skipped entirely and
+// behavior is unchanged from before this parameter existed.
+func computePoolDesiredStatesAt(
+	cfg *config.City,
+	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
+	sessionInfos []sessionpkg.Info,
+	scaleCheckCounts map[string]int,
+	scaleCheckDemand map[string]scaleCheckDemand,
+	decisionTime time.Time,
+	trace *sessionReconcilerTraceCycle,
+) []PoolDesiredState {
+	return computePoolDesiredStatesParkedAt(cfg, assignedWorkBeads, assignedWorkStoreRefs, readyAssigned, sessionInfos, scaleCheckCounts, scaleCheckDemand, decisionTime, nil, trace)
 }
 
 // computePoolDesiredStatesParkedAt is computePoolDesiredStatesAt with the
@@ -332,6 +359,8 @@ func computePoolDesiredStatesAt(
 func computePoolDesiredStatesParkedAt(
 	cfg *config.City,
 	assignedWorkBeads []beads.Bead,
+	assignedWorkStoreRefs []string,
+	readyAssigned map[storeScopedBeadKey]bool,
 	sessionInfos []sessionpkg.Info,
 	scaleCheckCounts map[string]int,
 	scaleCheckDemand map[string]scaleCheckDemand,
@@ -339,6 +368,10 @@ func computePoolDesiredStatesParkedAt(
 	parked parkedSeats,
 	trace *sessionReconcilerTraceCycle,
 ) []PoolDesiredState {
+	var readyAssignedFlags []bool
+	if readyAssigned != nil {
+		readyAssignedFlags = readyAssignedFlagsForBeads(readyAssigned, assignedWorkBeads, assignedWorkStoreRefs)
+	}
 	// Build reverse lookup: any identifier → session bead ID.
 	// Assignee on work beads may be a bead ID, session name, alias, or
 	// a prior alias preserved in alias_history. Resume-tier dispatch
@@ -452,6 +485,23 @@ func computePoolDesiredStatesParkedAt(
 				// agents with unset or wake_mode="resume" are unaffected.
 				// (gastownhall/gascity#4849)
 				if agent.EffectiveWakeMode() == "fresh" && asleepSessionBeadIDs[sessionBeadID] {
+					// wb may still be blocked on an unmet dependency: it is
+					// "open" only because the orphan-release pass
+					// (appendOpenRoutedWorkUnique) admits every open routed
+					// bead regardless of readiness, never markReadyAssigned
+					// (see collectAssignedWorkBeadsWithStores). A bead that
+					// pass alone surfaced is not real demand and must not,
+					// by status alone, spawn a session — the asleep owner's
+					// own eventual fresh wake will pick it up once it is
+					// actually ready. Without this gate, a blocked assigned
+					// step preassigned to an asleep fresh-wake owner spawns
+					// and immediately drains a session every reconcile tick
+					// until the blocker clears (gascity#8172). In-progress
+					// work is unaffected: it is always marked ready-assigned
+					// by the in-progress pass, so this never skips it.
+					if wb.Status == "open" && readyAssignedFlags != nil && !readyAssignedFlags[w] {
+						continue
+					}
 					if _, ok := wakeRequestedTemplates[template]; ok {
 						continue
 					}
