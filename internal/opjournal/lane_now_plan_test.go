@@ -1166,3 +1166,41 @@ func TestPlanNowUnloweredUnreadableHoldsContent(t *testing.T) {
 		})
 	}
 }
+
+// A forward pointer (skipped{coalesced_into}, a re-lowering's close) is
+// never a unit's outcome: read at a message's own pin with nothing at the
+// store's pin, the message goes post-unit marked interrupt_failed, as with a
+// missing interrupt; with the interrupt closed succeeded at the store's pin,
+// that row decides and the message goes unmarked (RL7).
+func TestPlanNowForwardPointerIsNoOutcome(t *testing.T) {
+	now := t0.Add(time.Second)
+	for _, tc := range []struct {
+		name string
+		// home is the row at the store's pin; nil reads missing.
+		home        func(i Op, home string) *Op
+		degradation string
+	}{
+		{"the home row is missing", func(Op, string) *Op { return nil }, DegradationInterruptFailed},
+		{"the home row closed succeeded", func(i Op, home string) *Op {
+			c := i
+			c.ID = home
+			c = closedAt(c, Outcome{Arm: ArmSucceeded}, "lane:ctl", now)
+			return &c
+		}, ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanner(t)
+			m, i := loweredIn(t, "old", mintedIn(t, p, "old"), now)
+			home := nowID(t, m)
+			snap := snapOf(m)
+			snap.nowRows[i.ID] = nowRow{state: afterClosed, op: closedAt(i, Outcome{Arm: ArmSkipped, Reason: ReasonCoalescedInto, Result: Result{CoalescedInto: home}}, "gc:storage-migrate", now)}
+			if r := tc.home(i, home); r != nil {
+				snap.nowRows[home] = nowRow{state: afterClosed, op: *r}
+			}
+			rp := planRules(snap, view(), now, "lane:ctl")
+			if len(rp.content) != 1 || rp.content[0].op.ID != m.ID || !rp.content[0].postUnit || rp.content[0].nowDegradation != tc.degradation {
+				t.Fatalf("content %+v, want the message post-unit marked %q", rp.content, tc.degradation)
+			}
+		})
+	}
+}

@@ -31,6 +31,9 @@ type Store struct {
 	// batcher applies the conversation lane's guarded batches; nil for a
 	// store opened with NewStore rather than NewLaneStore.
 	batcher beads.GuardedBatcher
+	// beforeRelowerBatch, when set (tests), runs between RelowerNowUnits'
+	// read of an interrupt and the batch that moves it.
+	beforeRelowerBatch func(read Op)
 }
 
 // Option configures NewStore.

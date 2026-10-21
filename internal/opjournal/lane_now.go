@@ -416,8 +416,9 @@ func (rp *rulesPlan) planNowRow(snap laneSnapshot, st *nowOpState, iid string, q
 			rp.openUnits = append(rp.openUnits, m.ID)
 		}
 		rp.nowWait(st, WaitNowUnreadable, row.detail(), until, m.ID)
-	case row.state != afterClosed || !isDerivedOf(row.op, m):
-		// Missing, or a row that is not this message's interrupt.
+	case row.state != afterClosed || !isDerivedOf(row.op, m) || isForwardPointer(row.op):
+		// Missing, a row that is not this message's interrupt, or a forward
+		// pointer a re-lowering left: never the unit's outcome.
 		return false
 	case row.op.Status != StatusClosed:
 		// Open by its own row, though the open list missed it: read again

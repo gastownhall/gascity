@@ -150,6 +150,19 @@
 // that key. An interrupt keyed as a derived one whose causation is another
 // namespace's op id with no row here is plain.
 //
+// RelowerNowUnits re-pins under this store's prefix the derived interrupt
+// of every open deliver-now unit whose interrupt carries another
+// namespace's prefix, as a namespace move (gc storage migrate) leaves them.
+// One guarded batch per unit creates the interrupt at NowInterruptID as a
+// copy of the row it reads and closes that row
+// skipped{coalesced_into: <copy>} under the revision it copied; the
+// message is not written. Only a unit whose two ops are open and not in
+// flight, with one open derived interrupt and a free id here, moves: an
+// open derived interrupt never reached its runtime, so its copy runs
+// nothing twice. A forward pointer is never a unit's outcome. It is
+// idempotent and every batch is all or nothing; run it with the store's
+// writers stopped.
+//
 // # Executor and open rows
 //
 // gc.op.executor says who executes an op: lane, legacy, legacy:api or

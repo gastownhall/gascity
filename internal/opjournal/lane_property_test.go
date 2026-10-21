@@ -114,6 +114,9 @@ type propWorld struct {
 	nowIDs        []string // nowMsgs' keys, in proposal order
 	sentInterrupt map[string]bool
 	lastStep      map[string]ControlResult
+	// lineage maps each interrupt a re-lowering created to the row it
+	// copied.
+	lineage map[string]string
 }
 
 func (w *propWorld) fail(format string, args ...any) {
@@ -132,6 +135,7 @@ func newPropWorld(t *testing.T, seed uint64) *propWorld {
 		afterTargets: map[string]bool{}, fr: rand.New(rand.NewPCG(seed+77, seed)),
 		answers: map[string]int{},
 		nowMsgs: map[string]string{}, sentInterrupt: map[string]bool{}, lastStep: map[string]ControlResult{},
+		lineage: map[string]string{},
 	}
 	fs.setFail(func(id string) bool {
 		if w.afterDown && w.afterTargets[id] {
@@ -254,7 +258,7 @@ func (e propExec) Interrupt(_ context.Context, c InterruptCall) ControlResult {
 	}
 	w.cov.add("now_replace")
 	w.checkInFlight(c.Fence.Conversation, []Op{c.Op})
-	if w.sentInterrupt[c.Op.ID] {
+	if w.sentInterrupt[c.Op.ID] || w.sentInterrupt[w.lineage[c.Op.ID]] {
 		w.fail("derived interrupt %s sent again after an attempt that may have run (N5)", c.Op.ID)
 	}
 	if target := c.Op.Scope.Turn; target != "" && c.Turn != target {
@@ -325,6 +329,9 @@ func (w *propWorld) checkNowDelivery(d Delivery) {
 				if opIDPrefix(iid) != propPrefixes[0] {
 					w.cov.add("now_unit_foreign_interrupt")
 				}
+				if _, moved := w.lineage[iid]; moved {
+					w.cov.add("now_relowered_unit")
+				}
 				if d.Redelivery || op.MaybeDelivered > 0 {
 					w.fail("maybe-delivered message %s in a unit (N4)", op.ID)
 				}
@@ -369,9 +376,10 @@ func (w *propWorld) checkNowDelivery(d Delivery) {
 // nowInterruptOf reads deliver-now message m's derived interrupt by its
 // identity in each of the world's namespaces, wherever the lane that
 // lowered m pinned it: beads.ErrNotFound when m has none, and an N1 failure
-// when it has two.
+// when it has two. A forward pointer a re-lowering left is checked and set
+// aside: it names m's one interrupt, at m's home id here (N8).
 func (w *propWorld) nowInterruptOf(m Op) (Op, error) {
-	var found []Op
+	var found, pointers []Op
 	for _, p := range propPrefixes {
 		id, err := NowInterruptID(p, m)
 		if err != nil {
@@ -384,7 +392,20 @@ func (w *propWorld) nowInterruptOf(m Op) (Op, error) {
 		case err != nil:
 			return Op{}, err
 		}
+		if isForwardPointer(i) {
+			pointers = append(pointers, i)
+			continue
+		}
 		found = append(found, i)
+	}
+	home, err := NowInterruptID(propPrefixes[0], m)
+	if err != nil {
+		return Op{}, err
+	}
+	for _, p := range pointers {
+		if p.Outcome.Result.CoalescedInto != home || len(found) != 1 || found[0].ID != home {
+			w.fail("forward pointer %s of %s names %s, want its one interrupt at %s (N8)", p.ID, m.ID, p.Outcome.Result.CoalescedInto, home)
+		}
 	}
 	if len(found) == 0 {
 		return Op{}, fmt.Errorf("deliver-now message %s: %w", m.ID, beads.ErrNotFound)
@@ -624,6 +645,10 @@ func (w *propWorld) propose() {
 		w.nowIDs = append(w.nowIDs, op.ID)
 		if s == w.old && r.IntN(2) == 0 && w.lowerable(op) {
 			w.lowerIn(w.oldLane, op)
+			if r.IntN(2) == 0 {
+				// The namespace move's migrate, right after the lowering.
+				w.relower()
+			}
 		}
 	}
 }
@@ -701,7 +726,7 @@ func (w *propWorld) step() {
 	w.pendingHook = nil
 	conv := propConversations[r.IntN(len(propConversations))]
 	lane := r.IntN(2)
-	switch k := r.IntN(17); {
+	switch k := r.IntN(19); {
 	case k < 4:
 		w.propose()
 	case k == 4:
@@ -743,6 +768,10 @@ func (w *propWorld) step() {
 		w.keyRejectedThenCrash(lane, conv)
 	case k == 15:
 		w.ambiguousThenAfterUnreadable(lane, conv)
+	case k == 16:
+		w.relower()
+	case k == 17:
+		w.migrateUnit(lane, conv)
 	default:
 		v := &w.convs[conv].view
 		switch r.IntN(10) {
@@ -754,6 +783,138 @@ func (w *propWorld) step() {
 			v.ContentHold = !v.ContentHold
 		}
 	}
+}
+
+// migrateUnit targets re-lowering: a deliver-now message lowered in the
+// old namespace, then moved here by a migrate, at once or after a pass that
+// took its unit and crashed (the step leaves that unit in flight).
+func (w *propWorld) migrateUnit(lane int, conv string) {
+	r := w.r
+	if w.restricted {
+		// The restricted generator proposes notices delivered in arrival
+		// order (I8), which a deliver-now message would jump.
+		return
+	}
+	w.keys++
+	req := Request{
+		Conversation: conv, Kind: KindMessage, Executor: ExecutorLane, ClientKey: fmt.Sprintf("k%d", w.keys),
+		Producer: Producer{Principal: "operator", Actor: ActorBackground},
+		Payload:  fmt.Sprintf("payload %d", r.IntN(1000)),
+		Policy:   Policy{Message: MessagePolicy{Role: RolePrompt, When: WhenNow}},
+	}
+	w.h.clk.Advance(time.Millisecond)
+	m, _, err := w.old.Propose(req)
+	if err != nil {
+		w.t.Fatalf("Propose: %v", err)
+	}
+	w.ids = append(w.ids, m.ID)
+	w.convOf[m.ID] = conv
+	w.nowMsgs[m.ID] = conv
+	w.nowIDs = append(w.nowIDs, m.ID)
+	if !w.lowerable(m) {
+		return
+	}
+	w.lowerIn(w.oldLane, m)
+	if r.IntN(2) == 0 {
+		w.probe = idleProbe()
+		w.probe.Boundary, w.probe.TurnLive, w.probe.Turn = TriNo, TriYes, "t"
+		w.lanes[lane].hooks.at = crashAt(stageAfterTake)
+		w.pass(lane, conv)
+		w.lanes[lane].hooks.at = nil
+	}
+	w.relower()
+}
+
+// relower runs RelowerNowUnits between passes, as a fleet-stopped gc
+// storage migrate does, leases left by crashed passes included. A third of
+// runs read through a flaky store, and a quarter fault one batch, with or
+// without its commit. It checks N9 (no interrupt an attempt may have run is
+// copied) and N10 (a run writes only the rows of the units it moved).
+func (w *propWorld) relower() {
+	before := w.rowRevisions()
+	w.flaky = w.r.IntN(3) == 0
+	if w.r.IntN(4) == 0 {
+		commit, first := w.r.IntN(2) == 0, len(w.h.batcher.batches())
+		w.h.batcher.setFault(func(n int, _ beads.GuardedBatch) (bool, error) {
+			if n == first {
+				return commit, errLinkDropped
+			}
+			return false, nil
+		})
+	}
+	rep, err := w.h.store.RelowerNowUnits(context.Background(), "gc:storage-migrate")
+	w.flaky = false
+	w.h.batcher.setFault(nil)
+	if err != nil && !errors.Is(err, errFlakyRead) && !errors.Is(err, errLinkDropped) {
+		w.t.Fatalf("RelowerNowUnits: %v", err)
+	}
+	for _, rl := range rep.Relowered {
+		w.cov.add("now_relowered")
+		w.lineage[rl.To] = rl.From
+		if w.sentInterrupt[rl.From] {
+			w.fail("re-lowering copied interrupt %s, which an attempt may have run (N9)", rl.From)
+		}
+	}
+	if len(rep.Left) > 0 {
+		w.cov.add("now_relower_left")
+	}
+	after := w.rowRevisions()
+	// A move the run could not read back (a flaky read after a committed
+	// batch) still shows as a new pointer and its copy.
+	moved := map[string]bool{}
+	for id, rev := range after {
+		if old, ok := before[id]; ok && old == rev {
+			continue
+		}
+		b, err := w.h.mem.Get(id)
+		if err != nil {
+			w.t.Fatal(err)
+		}
+		if op, err := DecodeOp(b); err == nil && isForwardPointer(op) {
+			if _, existed := before[op.Outcome.Result.CoalescedInto]; !existed {
+				moved[id], moved[op.Outcome.Result.CoalescedInto] = true, true
+				w.lineage[op.Outcome.Result.CoalescedInto] = id
+				if w.sentInterrupt[id] {
+					w.fail("re-lowering copied interrupt %s, which an attempt may have run (N9)", id)
+				}
+			}
+		}
+	}
+	for id, rev := range after {
+		if old, ok := before[id]; (!ok || old != rev) && !moved[id] {
+			w.fail("re-lowering wrote %s, which is no row of a unit it moved (N10)", id)
+		}
+	}
+	for _, rl := range rep.Relowered {
+		if !moved[rl.From] || !moved[rl.To] {
+			w.fail("re-lowering reported %s -> %s, which the rows do not show (N10)", rl.From, rl.To)
+		}
+	}
+}
+
+// origin is the row id's lineage starts at: the interrupt a re-lowering
+// copied, followed back, or id itself.
+func (w *propWorld) origin(id string) string {
+	for {
+		from, ok := w.lineage[id]
+		if !ok {
+			return id
+		}
+		id = from
+	}
+}
+
+// rowRevisions is every row's revision, read from the beads directly.
+func (w *propWorld) rowRevisions() map[string]int64 {
+	rows, err := w.h.mem.List(beads.ListQuery{IncludeClosed: true, TierMode: beads.TierBoth, AllowScan: true})
+	if err != nil {
+		w.t.Fatal(err)
+	}
+	out := make(map[string]int64, len(rows))
+	for _, b := range rows {
+		out[b.ID] = b.Revision
+	}
+	return out
 }
 
 // delivered is a healthy runtime's answer: delivered, and shown.
@@ -914,7 +1075,9 @@ func (w *propWorld) check() {
 			}
 		}
 		if op.LaneSeq > 0 {
-			take := fmt.Sprintf("%s:%d", id, op.Attempt)
+			// A re-lowered interrupt carries its row's attempts: a take
+			// is keyed by the row the lineage started at.
+			take := fmt.Sprintf("%s:%d", w.origin(id), op.Attempt)
 			if !w.seenTake[take] {
 				w.seenTake[take] = true
 				if other, dup := w.seqs[op.Conversation][op.LaneSeq]; dup {
@@ -1110,6 +1273,7 @@ func TestLaneProperties(t *testing.T) {
 			"closed:stale", "closed:canceled", "closed:busy", "closed:dependency_failed", "closed:expired_before_start",
 			"closed:deadline_in_flight", "closed:conversation_closed", "key_rejected", "replay_group", "after_unreadable",
 			"respond_answered", "now_unit", "now_post_unit", "now_replace", "now_cascade", "now_unit_foreign_message", "now_unit_foreign_interrupt",
+			"now_relowered", "now_relowered_unit", "now_relower_left",
 		} {
 			if cov.counts[k] == 0 {
 				t.Errorf("the property runs never exercised %s (%v)", k, cov.counts)
