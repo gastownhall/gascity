@@ -429,6 +429,13 @@ const (
 // principal.
 const InitiatorMetadataKey = "gc.initiator"
 
+// OwnerNamespaceMetadataKey is the creation stamp a rig with federation =
+// "rig" writes on every row created through its guarded store: the rig's
+// identity namespace ("<rig>/" under the actor fold). It marks a gc-created row
+// that carries no owner identity as the creating city's. Only that store
+// writes it.
+const OwnerNamespaceMetadataKey = "gc.owner_namespace"
+
 // Work-record metadata keys (ADR-0009). These bind a work bead to its claim
 // and its outcome so observability/eval can answer "what work was done, by
 // whom, with what artifact, to what end":
@@ -696,6 +703,7 @@ var KnownMetadataKeys = []string{
 	OutcomeMetadataKey,
 	OutputJSONMetadataKey,
 	OutputJSONRequiredMetadataKey,
+	OwnerNamespaceMetadataKey,
 	ParentBeadIDMetadataKey,
 	ParentConvoyIDMetadataKey,
 	PartialFragmentMetadataKey,
