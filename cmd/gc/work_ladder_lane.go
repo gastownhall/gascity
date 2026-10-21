@@ -118,7 +118,7 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 		if ctx.Err() != nil {
 			return
 		}
-		if !ladderGoverns(row) {
+		if !ladderGoverns(p.cfg, row) {
 			continue
 		}
 		p.seat(row, work[row.ID])
@@ -126,10 +126,21 @@ func (l *externalReadsLane) runWorkLadder(ctx context.Context, env externalReads
 }
 
 // ladderGoverns is the seats the ladder paces: open pool-managed session
-// rows with a runtime name, as the backstops governed.
-func ladderGoverns(row beads.Bead) bool {
-	return !strings.EqualFold(strings.TrimSpace(row.Status), "closed") && isSessionBead(row) &&
-		strings.TrimSpace(row.Metadata["pool_managed"]) == "true" && strings.TrimSpace(row.Metadata["session_name"]) != ""
+// rows with a runtime name, as the backstops governed, excluding a
+// lifecycle=one_shot agent's seats. A one-shot seat executes by running its
+// process, not by answering a prompt; process exit, crash recovery and
+// idle_timeout already own it (gascity#8152), so the ladder must not nudge
+// a quiet one mid-step, release its unstarted-looking claim out from under
+// a still-running script, or recycle it.
+func ladderGoverns(cfg *config.City, row beads.Bead) bool {
+	if !strings.EqualFold(strings.TrimSpace(row.Status), "closed") && isSessionBead(row) &&
+		strings.TrimSpace(row.Metadata["pool_managed"]) == "true" && strings.TrimSpace(row.Metadata["session_name"]) != "" {
+		if agent := findAgentByTemplate(cfg, normalizedSessionTemplate(row, cfg)); agent != nil && agent.Lifecycle == config.AgentLifecycleOneShot {
+			return false
+		}
+		return true
+	}
+	return false
 }
 
 // standDownLadder hands every governed seat back to the backstops when the
@@ -144,7 +155,7 @@ func (l *externalReadsLane) standDownLadder(env externalReadsEnv, raw []beads.Be
 	p := &ladderPass{l: l, env: env, cfg: env.Cfg, now: l.now(), front: sessionFrontDoor(env.CityStore)}
 	off := workladder.Gate{Held: true, Reason: "work_ladder_off"}
 	for _, row := range raw {
-		if !ladderGoverns(row) {
+		if !ladderGoverns(cfg, row) {
 			continue
 		}
 		r, err := workladder.DecodeLadder(row.Metadata[session.WorkLadderKey])
@@ -208,7 +219,7 @@ func (p *ladderPass) outstanding(s *allocSummary, raw []beads.Bead) map[string][
 		}
 	}
 	for _, row := range raw {
-		if !ladderGoverns(row) {
+		if !ladderGoverns(p.cfg, row) {
 			continue
 		}
 		var ts []ladderTarget
