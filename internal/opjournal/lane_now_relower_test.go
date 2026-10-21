@@ -5,10 +5,13 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/beads/beadstest"
 )
 
 // relowerBy is the transition author of the re-lowerings these tests run.
@@ -137,8 +140,8 @@ func (h *laneHarness) wantPointer(t *testing.T, id, to string) {
 
 // The step moves an open unit's derived interrupt to the id a lowering here
 // gives it in one two-item batch: the copy created at NowInterruptID("gc",
-// M), equal to the row it read but for its id and revision (keys this build
-// does not own included), and that row closed skipped{coalesced_into} under
+// M), equal to the row it read but for its id, revision and migration stamp
+// (keys this build does not own included), and that row closed skipped{coalesced_into} under
 // the revision it read. The message is not written (RL1 to RL3).
 func TestRelowerNowUnitsRepinsAnOpenUnit(t *testing.T) {
 	for _, tc := range []struct {
@@ -160,6 +163,11 @@ func TestRelowerNowUnitsRepinsAnOpenUnit(t *testing.T) {
 		{name: "a short start_by", req: nowReq("a", func(r *Request) { r.StartBy = t0.Add(20 * time.Second) })},
 		{name: "a key this build does not own", req: nowReq("a"), mod: func(t *testing.T, h *laneHarness, _, i Op) {
 			if err := h.mem.Update(i.ID, beads.UpdateOpts{Metadata: map[string]string{"gc.op.zz_future": "kept"}}); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "stamped by the migration", req: nowReq("a"), mod: func(t *testing.T, h *laneHarness, _, i Op) {
+			if err := h.mem.Update(i.ID, beads.UpdateOpts{Metadata: map[string]string{beadmeta.InfraMigratedFromMetadataKey: "work"}}); err != nil {
 				t.Fatal(err)
 			}
 		}},
@@ -190,7 +198,14 @@ func TestRelowerNowUnitsRepinsAnOpenUnit(t *testing.T) {
 				t.Fatalf("batches %+v, want one: create %s, update %s at revision %d", bs, home, i.ID, before.Revision)
 			}
 			after := h.raw(t, home)
-			if !maps.Equal(after.Metadata, before.Metadata) || !slices.Equal(after.Labels, before.Labels) || after.Type != before.Type || after.Title != before.Title || after.Status != before.Status {
+			// The copy is the step's row, not the migration's: it carries
+			// no migration stamp, and the pointer keeps the one it had.
+			wantMeta := maps.Clone(before.Metadata)
+			delete(wantMeta, beadmeta.InfraMigratedFromMetadataKey)
+			if stamp, ok := before.Metadata[beadmeta.InfraMigratedFromMetadataKey]; ok && h.raw(t, i.ID).Metadata[beadmeta.InfraMigratedFromMetadataKey] != stamp {
+				t.Fatalf("pointer %s lost its migration stamp %q", i.ID, stamp)
+			}
+			if !maps.Equal(after.Metadata, wantMeta) || !slices.Equal(after.Labels, before.Labels) || after.Type != before.Type || after.Title != before.Title || after.Status != before.Status {
 				t.Fatalf("copy %+v\nwant the row it read %+v", after, before)
 			}
 			got := h.get(t, home)
@@ -478,6 +493,19 @@ func TestRelowerNowUnitsLeavesWhatItMustNotMove(t *testing.T) {
 				t.Fatalf("orphan cancel %+v, want the cascade", got.Cancel)
 			}
 		}},
+		{name: "the interrupt in flight, its message not", left: RelowerInFlight, setup: halfInFlightWorld(true)},
+		{name: "the message in flight, its interrupt not", left: RelowerInFlight, setup: halfInFlightWorld(false)},
+		{name: "the interrupt may have run", left: RelowerInFlight, setup: func(t *testing.T, h *laneHarness) relowerWorld {
+			m, i := h.migratedUnit(t, nowReq("a"))
+			h.forge(t, i.ID, func(op *Op) {
+				op.Status, op.Attempt, op.MaybeDelivered = StatusAccepted, 1, 1
+				op.Transitions = appendTransition(op.Transitions, Transition{Status: StatusAccepted, At: h.clk.Now(), By: "lane:old"})
+			})
+			if got := h.get(t, i.ID); got.Status != StatusAccepted || got.MaybeDelivered != 1 {
+				t.Fatalf("forged interrupt %s maybe_delivered %d", got.Status, got.MaybeDelivered)
+			}
+			return relowerWorld{h: h, m: m, ids: []string{m.ID, i.ID}}
+		}},
 		{name: "two open derived interrupts", left: RelowerAmbiguous, setup: func(t *testing.T, h *laneHarness) relowerWorld {
 			m, i := h.migratedUnit(t, nowReq("a"))
 			twin := forgeDerived(t, h, "third", m)
@@ -615,6 +643,62 @@ func inFlightWorld(expired bool) func(t *testing.T, h *laneHarness) relowerWorld
 	}
 }
 
+// halfInFlightWorld is inFlightWorld (lease live) with one op put back as
+// the lowering left it, so only the other is in flight: the message when
+// interruptInFlight, else the interrupt. Each alone hides no unit that may
+// have run from the step.
+func halfInFlightWorld(interruptInFlight bool) func(t *testing.T, h *laneHarness) relowerWorld {
+	return func(t *testing.T, h *laneHarness) relowerWorld {
+		t.Helper()
+		m, i := h.migratedUnit(t, nowReq("a"))
+		back, flying := m.ID, i.ID
+		if !interruptInFlight {
+			back, flying = i.ID, m.ID
+		}
+		lowered := h.raw(t, back)
+		exec := newFakeExec(h.clk)
+		exec.probe = busyProbe("t1")
+		l := h.oldLane(t)
+		l.hooks.at = crashAt(stageAfterTake)
+		if _, err := l.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+			t.Fatalf("crashing pass = %v", err)
+		}
+		h.replaceRow(t, lowered)
+		if got, want := h.get(t, back).Status, map[bool]Status{true: StatusAccepted, false: StatusSubmitted}[interruptInFlight]; got != want {
+			t.Fatalf("op %s put back %s, want %s", back, got, want)
+		}
+		if got := h.get(t, flying); got.Status != StatusExecuting {
+			t.Fatalf("op %s %s, want in flight", flying, got.Status)
+		}
+		return relowerWorld{h: h, m: m, ids: []string{m.ID, i.ID}}
+	}
+}
+
+// replaceRow puts row b back as it is, under a fresh revision.
+func (h *laneHarness) replaceRow(t *testing.T, b beads.Bead) {
+	t.Helper()
+	if err := h.mem.Delete(b.ID); err != nil {
+		t.Fatalf("Delete(%s): %v", b.ID, err)
+	}
+	b.Revision = 0
+	if _, err := h.mem.Create(b); err != nil {
+		t.Fatalf("Create(%s): %v", b.ID, err)
+	}
+}
+
+// forge rewrites op id as mod changes it: a state no lane writes, for the
+// step's defensive checks.
+func (h *laneHarness) forge(t *testing.T, id string, mod func(*Op)) {
+	t.Helper()
+	op := h.get(t, id)
+	mod(&op)
+	b, err := EncodeOp(op)
+	if err != nil {
+		t.Fatalf("EncodeOp(%s): %v", id, err)
+	}
+	h.replaceRow(t, b)
+}
+
 // overWorld is a migrated unit a lane of namespace old ran before the move,
 // its interrupt ending res: the message is left open post-unit.
 func overWorld(res ControlResult) func(t *testing.T, h *laneHarness) relowerWorld {
@@ -749,7 +833,20 @@ func TestRelowerNowUnitsRacesAWriter(t *testing.T) {
 		write func(t *testing.T, h *laneHarness, m, i Op)
 		// homeHeld says the racing write created the row at home.
 		homeHeld bool
+		// beforeRead races the write between the step's scan and its read
+		// of the interrupt by id, rather than between that read and the
+		// batch.
+		beforeRead bool
 	}{
+		{name: "another host takes the unit before the read", beforeRead: true, write: func(t *testing.T, h *laneHarness, _, _ Op) {
+			exec := newFakeExec(h.clk)
+			exec.probe = busyProbe("t1")
+			l := h.oldLane(t)
+			l.hooks.at = crashAt(stageAfterTake)
+			if _, err := l.Pass(context.Background(), view(), exec); !errors.Is(err, errCrash) {
+				t.Fatalf("crashing pass = %v", err)
+			}
+		}},
 		{name: "another host takes the unit", write: func(t *testing.T, h *laneHarness, _, _ Op) {
 			exec := newFakeExec(h.clk)
 			exec.probe = busyProbe("t1")
@@ -778,18 +875,35 @@ func TestRelowerNowUnitsRacesAWriter(t *testing.T) {
 			m, i := h.migratedUnit(t, nowReq("a"))
 			home := nowID(t, m)
 			ran := false
-			h.store.beforeRelowerBatch = func(Op) {
+			race := func(Op) {
 				if !ran {
 					ran = true
 					tc.write(t, h, m, i)
 				}
 			}
+			if tc.beforeRead {
+				h.store.beforeRelowerRead = race
+			} else {
+				h.store.beforeRelowerBatch = race
+			}
+			n := len(h.batcher.batches())
 			rep, err := h.store.RelowerNowUnits(context.Background(), relowerBy)
+			if !ran {
+				t.Fatal("the racing write never ran")
+			}
 			if !errors.Is(err, ErrRelowerRaced) || len(rep.Relowered) != 0 {
 				t.Fatalf("RelowerNowUnits = %+v, %v; want ErrRelowerRaced", rep, err)
 			}
 			if got := h.get(t, i.ID); isForwardPointer(got) {
 				t.Fatalf("interrupt %+v, want no pointer written", got.Outcome)
+			}
+			if tc.beforeRead {
+				if bs := h.batchesSince(n); len(bs) != 1 || bs[0].Reason == relowerUnitReason {
+					t.Fatalf("batches %+v, want only the racing take", bs)
+				}
+				if got := h.get(t, i.ID); got.Status != StatusExecuting {
+					t.Fatalf("interrupt %s, want the racing take's", got.Status)
+				}
 			}
 			if tc.homeHeld {
 				if got := h.get(t, home); got.Causation != m.ID || got.Status != StatusSubmitted {
@@ -803,12 +917,18 @@ func TestRelowerNowUnitsRacesAWriter(t *testing.T) {
 }
 
 // The step reads every conversation with an open lane op and moves every
-// unit in each (RL1).
+// unit in each (RL1): more conversations than a paged scan (laneScanPages
+// pages of one row per status) reaches, with two units in the first.
 func TestRelowerNowUnitsScansEveryConversation(t *testing.T) {
 	h := newLaneHarness(t)
 	want := map[string]string{}
-	for _, conv := range []string{"gc-1", "gc-2", "gc-3"} {
-		for _, key := range []string{"a", "b"} {
+	for n := 1; n <= laneScanPages+2; n++ {
+		conv := "gc-" + strconv.Itoa(n)
+		keys := []string{"a"}
+		if n == 1 {
+			keys = append(keys, "b")
+		}
+		for _, key := range keys {
 			m, i := h.migratedUnit(t, nowReq(key, inConv(conv)))
 			want[i.ID] = nowID(t, m)
 		}
@@ -823,5 +943,93 @@ func TestRelowerNowUnitsScansEveryConversation(t *testing.T) {
 	}
 	for from, to := range want {
 		h.wantPointer(t, from, to)
+	}
+}
+
+// capabilityFreeStore is a store with no write capability past beads.Store:
+// no conditional writes, no guarded batches.
+type capabilityFreeStore struct{ beads.Store }
+
+// HasLoweredNowMessages is true exactly while the store holds a lowered
+// deliver-now message (accepted, executing or settling; when now or
+// interrupt), from the lane scan's keyed reads, paged past other lane ops,
+// on a store no lane store can open; a failed read is an error, never
+// "none".
+func TestHasLoweredNowMessages(t *testing.T) {
+	h := newLaneHarness(t)
+	probe := func(t *testing.T) bool {
+		t.Helper()
+		h.rec.Reset()
+		got, err := HasLoweredNowMessages(beads.SessionStore{Store: capabilityFreeStore{h.rec}})
+		if err != nil {
+			t.Fatalf("HasLoweredNowMessages: %v", err)
+		}
+		for _, op := range h.rec.Ops() {
+			if op.Kind != beadstest.OpList || op.Query.Limit != hasLoweredNowPage {
+				t.Fatalf("probe op %+v, want paged lists", op)
+			}
+		}
+		return got
+	}
+	if _, err := NewLaneStore(beads.SessionStore{Store: capabilityFreeStore{h.mem}}, h.clk); err == nil {
+		t.Fatal("a lane store opened over a store with no guarded batches")
+	}
+	if probe(t) {
+		t.Fatal("an empty store reports a lowered message")
+	}
+	h.propose(t, nowReq("unlowered", inConv("gc-1")))
+	content := h.propose(t, laneMsg("content", RoleNotice, "fyi", inConv("gc-2")))
+	exec := newFakeExec(h.clk)
+	l := h.lane(t, "ctl")
+	l.hooks.at = crashAt(stageAfterTake)
+	if _, err := l.Pass(context.Background(), viewOf("gc-2"), exec); !errors.Is(err, errCrash) {
+		t.Fatalf("crashing pass = %v", err)
+	}
+	if got := h.get(t, content.ID); got.Status != StatusExecuting {
+		t.Fatalf("content %s, want in flight", got.Status)
+	}
+	if probe(t) {
+		t.Fatal("an unlowered deliver-now message or plain content in flight reads as lowered")
+	}
+	t.Run("behind a page of other lane ops", func(t *testing.T) {
+		h := newLaneHarness(t)
+		for n := range hasLoweredNowPage + 1 {
+			h.propose(t, laneMsg("c"+strconv.Itoa(n), RoleNotice, "fyi", inConv("gc-"+strconv.Itoa(n+10))))
+		}
+		for n := range hasLoweredNowPage + 1 {
+			b, err := h.mem.List(beads.ListQuery{Label: LabelOp, Metadata: map[string]string{keyClientKey: "c" + strconv.Itoa(n)}})
+			if err != nil || len(b) != 1 {
+				t.Fatalf("List(c%d) = %d rows, %v", n, len(b), err)
+			}
+			h.forge(t, b[0].ID, func(op *Op) { op.Status = StatusAccepted })
+		}
+		h.clk.Advance(time.Second)
+		h.migratedUnit(t, nowReq("a"))
+		h.rec.Reset()
+		got, err := HasLoweredNowMessages(beads.SessionStore{Store: capabilityFreeStore{h.rec}})
+		if err != nil || !got {
+			t.Fatalf("HasLoweredNowMessages = %v, %v; want the lowered message behind the page", got, err)
+		}
+		if n := len(h.rec.Ops()); n != 2 {
+			t.Fatalf("%d reads, want two pages of accepted rows", n)
+		}
+	})
+	for _, when := range []When{WhenNow, WhenInterrupt} {
+		t.Run(string(when), func(t *testing.T) {
+			h := newLaneHarness(t)
+			h.migratedUnit(t, nowReq("a", withWhen(when)))
+			h.rec.Reset()
+			got, err := HasLoweredNowMessages(beads.SessionStore{Store: capabilityFreeStore{h.rec}})
+			if err != nil || !got {
+				t.Fatalf("HasLoweredNowMessages = %v, %v; want the lowered message seen", got, err)
+			}
+		})
+	}
+	if _, err := HasLoweredNowMessages(beads.SessionStore{Store: failingListStore{beads.NewMemStore()}}); err == nil {
+		t.Fatal("a failed read reported no error")
+	}
+	var nilMem *beads.MemStore
+	if _, err := HasLoweredNowMessages(beads.SessionStore{Store: nilMem}); err == nil {
+		t.Fatal("a typed nil store reported no error")
 	}
 }

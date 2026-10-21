@@ -18,6 +18,7 @@ import (
 	"reflect"
 	"slices"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 )
 
@@ -74,6 +75,56 @@ type RelowerReport struct {
 	Quarantined []QuarantinedRow
 }
 
+// relowerUnitStatuses are the statuses of a lowered deliver-now message:
+// the only messages RelowerNowUnits classifies.
+var relowerUnitStatuses = []Status{StatusAccepted, StatusExecuting, StatusSettling}
+
+// hasLoweredNowPage is the page size of HasLoweredNowMessages' reads.
+const hasLoweredNowPage = 64
+
+// HasLoweredNowMessages reports whether store holds a lowered deliver-now
+// message (a lane message whose when is now or interrupt, accepted,
+// executing or settling): the only rows RelowerNowUnits can move or report.
+// It reads keyed as the lane scan does (OpenLaneConversations), one list per
+// status in pages of hasLoweredNowPage rows until it meets one, and needs no
+// write capability or namespace, so a caller with nothing to re-lower (a
+// migrate of a city with no lane ops, over a binding that cannot apply
+// guarded batches) learns it without opening a lane store. It reads the
+// row's keys, not the op, so a row that does not decode counts:
+// RelowerNowUnits reports it.
+func HasLoweredNowMessages(store beads.SessionStore) (bool, error) {
+	if isNilStore(store.Store) {
+		return false, errors.New("probing for lowered deliver-now messages: store is required")
+	}
+	for _, status := range relowerUnitStatuses {
+		q := beads.ListQuery{
+			Label:    LabelOp,
+			Metadata: map[string]string{keyExecutor: string(ExecutorLane), keyStatus: string(status)},
+			Sort:     beads.SortCreatedAsc,
+			Limit:    hasLoweredNowPage,
+			TierMode: beads.TierBoth,
+		}
+		for {
+			rows, err := store.List(q)
+			if err != nil {
+				return false, fmt.Errorf("probing for lowered deliver-now messages (%s): %w", status, err)
+			}
+			for _, b := range rows {
+				when := When(b.Metadata[keyWhen])
+				if Kind(b.Metadata[keyKind]) == KindMessage && (when == WhenNow || when == WhenInterrupt) {
+					return true, nil
+				}
+			}
+			if len(rows) < hasLoweredNowPage {
+				break
+			}
+			last := rows[len(rows)-1]
+			q.SeekAfter = &beads.SeekBoundary{CreatedAt: last.CreatedAt, ID: last.ID}
+		}
+	}
+	return false, nil
+}
+
 // relowerUnitReason is the batch reason of a re-lowering.
 const relowerUnitReason = "opjournal: re-lower deliver-now"
 
@@ -82,7 +133,7 @@ const relowerUnitReason = "opjournal: re-lower deliver-now"
 // open derived interrupt, neither in flight, pinned at another id than
 // NowInterruptID(s.Prefix(), M), with that id free. Per unit one guarded
 // batch creates the interrupt at that id as a copy of the row it read (every
-// key and label as stored, the id and revision aside) and closes the row it
+// key and label as stored, the id, revision and migration stamp aside) and closes the row it
 // read, under that revision, skipped{coalesced_into: <copy>} by by. The
 // message is never written. An open derived interrupt never reached its
 // runtime (an at most once op closes on any attempt that may have run), so
@@ -181,6 +232,9 @@ func relowerable(i Op) bool {
 // batch, from a fresh read of iid. moved says the batch landed; homeTaken
 // says another row holds home, so nothing was written.
 func (s *Store) relowerOne(ctx context.Context, m Op, iid, home, by string) (moved, homeTaken bool, err error) {
+	if s.beforeRelowerRead != nil {
+		s.beforeRelowerRead(m)
+	}
 	b, err := s.store.Get(iid)
 	if err != nil {
 		if errors.Is(err, beads.ErrNotFound) {
@@ -258,8 +312,10 @@ func (s *Store) relowerSettle(m Op, rev int64, iid, home string, applyErr error)
 }
 
 // relowerCopy is row b, which decoded as cur, re-pinned at id: every field,
-// key and label as stored, with no revision (the store assigns one) and no
-// read projection. It refuses a copy that does not decode as cur at id.
+// key and label as stored, with no revision (the store assigns one), no read
+// projection and no migration stamp (beadmeta.InfraMigratedFromMetadataKey),
+// since the migration did not write the copy. It refuses a copy that does
+// not decode as cur at id.
 func relowerCopy(b beads.Bead, cur Op, id string) (beads.Bead, error) {
 	c := b
 	c.ID = id
@@ -269,6 +325,7 @@ func relowerCopy(b beads.Bead, cur Op, id string) (beads.Bead, error) {
 	c.Needs = slices.Clone(b.Needs)
 	c.Dependencies = slices.Clone(b.Dependencies)
 	c.Metadata = maps.Clone(b.Metadata)
+	delete(c.Metadata, beadmeta.InfraMigratedFromMetadataKey)
 	if b.Priority != nil {
 		p := *b.Priority
 		c.Priority = &p
