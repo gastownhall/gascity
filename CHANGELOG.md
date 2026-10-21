@@ -538,6 +538,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   runs `stop` to tear the box down unless the name was already in use. Wrapper authors: return 0 from `start` and
   `provision` on success. Exit 2 keeps meaning "unknown operation" for other
   undeclared operations.
+- **Never move a city that sets `[[rigs]] federation = "rig"` to an older
+  build.** Builds without the setting ignore the key with an unknown-field
+  warning and act on every row of the rig's bead store, including rows another
+  city that shares the store owns. Detach the rig first.
+
 - **Gas City now requires bd 1.3.0 or newer (was 1.0.4).** `gc init` and
   `gc start` refuse an older `bd` with `bd (found vX, need v1.3.0+)`, and the
   bd pack's `gc doctor` check `check-bd` now fails with `bd X is too old (need
@@ -960,6 +965,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bounded rate and never blocks event recording. Unset, nothing changes. See
   the "Ship the Event Log" runbook.
 
+- **`[[rigs]] federation` and `namespace` declare a rig whose bead store
+  another city also attaches. They are validated but not enforced yet.**
+  `federation = "rig"` names the rig's namespace (`<rig>/`, compared under the
+  bead store's actor fold) as the only identities this city should act on in
+  the rig's store; `namespace = "exclusive"` declares that no other city
+  serves that namespace. Loading a city refuses an unknown value,
+  `"exclusive"` without `federation = "rig"`, a guarded rig name that is not
+  one segment, two rigs whose names fold to one namespace once case is also
+  ignored (for example `my-rig` and `My_Rig`), and either key in
+  `[[patches.rigs]]`. `gc start`, the supervisor, `gc reload`, `gc rig add`
+  and config edits also refuse a guarded rig that shares its directory, an
+  agent attached to it by path, an agent, pool slot, name-pool name or named
+  session elsewhere whose identity folds into its namespace, and a qualified
+  `default_sling_target` outside it; `gc config show --validate`, `gc doctor`
+  and the config validation API report the same as errors.
+  `gc rig list` shows both settings when they are not the default. This build
+  does **not** enforce the setting on the store: a guarded rig is not
+  protected. `gc start`, `gc reload`, `gc config show`, `gc doctor` and the
+  config validation API warn about each one, and `gc rig list` marks it "not
+  enforced by this build". A city that sets neither key is unchanged, except
+  that `gc config show --json` lists both fields, empty, on every rig.
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go

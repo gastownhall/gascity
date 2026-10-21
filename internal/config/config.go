@@ -655,6 +655,23 @@ type Rig struct {
 	// resolved the same way as DefaultSlingTarget. Example:
 	//   default_sling_targets = ["rig/polecat-a", "rig/polecat-b"]
 	DefaultSlingTargets []string `toml:"default_sling_targets,omitempty"`
+	// Federation selects which of this city's agents may act on the rig's bead
+	// store. "city" (the default) keeps today's behavior: city-scoped agents
+	// read every rig, and any agent whose identity matches a row may serve,
+	// claim or release it. "rig" restricts this city to identities inside the
+	// rig's namespace ("<name>/...", compared under the bead store's actor
+	// fold) and to this city's own pool sessions of the rig's agents; rows
+	// owned by anything else are left alone. Set it on a rig whose bead store
+	// another city also attaches. It is deliberately not patchable. NOT YET
+	// ENFORCED: this build validates the setting and warns at start and
+	// reload, but still acts on every row of the rig's store, so a rig with
+	// federation = "rig" is not protected yet.
+	Federation string `toml:"federation,omitempty" jsonschema:"enum=city,enum=rig"`
+	// Namespace declares whether another city may serve this rig's namespace
+	// on the same bead store: "shared" (the default) or "exclusive".
+	// "exclusive" requires federation = "rig". It is a declaration that
+	// cross-city checks read; it changes nothing in this city on its own.
+	Namespace string `toml:"namespace,omitempty" jsonschema:"enum=shared,enum=exclusive"`
 	// SessionSleep overrides workspace-level idle sleep defaults for agents in
 	// this rig.
 	SessionSleep SessionSleepConfig `toml:"session_sleep,omitempty"`
@@ -5179,6 +5196,9 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	if err := validateProgramStatus(&cfg); err != nil {
+		return nil, err
+	}
+	if err := ValidateRigFederation(cfg.Rigs); err != nil {
 		return nil, err
 	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
