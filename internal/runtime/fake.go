@@ -123,7 +123,7 @@ var (
 	_ InputClearProvider  = (*Fake)(nil)
 	_ FencedInputProvider = (*Fake)(nil)
 
-	_ BackgroundWorkStopper = (*Fake)(nil)
+	_ BackgroundWorkStopper     = (*Fake)(nil)
 	_ FencedInteractionProvider = (*Fake)(nil)
 
 	_ AttachmentObserverWithError = (*Fake)(nil)
