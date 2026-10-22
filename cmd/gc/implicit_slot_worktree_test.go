@@ -1,7 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -186,13 +189,12 @@ func TestImplicitSlotWorktreesKeepTodaysWorkDirOutsideTheirScope(t *testing.T) {
 	}
 }
 
-// provisionImplicitSlot provisions app/claude-<n> on a host-local runtime and
-// returns its slot.
-func provisionImplicitSlot(t *testing.T, city string, cfg *config.City, a *config.Agent, n string) workdirutil.ImplicitSlot {
+// provisionImplicitSlot provisions app/claude-1 and returns its slot.
+func provisionImplicitSlot(t *testing.T, city string, cfg *config.City, a *config.Agent) workdirutil.ImplicitSlot {
 	t.Helper()
-	slot, ok := workdirutil.ImplicitSlotFor(city, "app/claude-"+n, *a, cfg.Rigs)
+	slot, ok := workdirutil.ImplicitSlotFor(city, "app/claude-1", *a, cfg.Rigs)
 	if !ok {
-		t.Fatalf("app/claude-%s is not a pool slot", n)
+		t.Fatal("app/claude-1 is not a pool slot")
 	}
 	if err := ensureImplicitSlotWorktree(slot); err != nil {
 		t.Fatalf("provisioning %s: %v", slot.Path, err)
@@ -243,7 +245,7 @@ func TestImplicitSlotWithStaleMarkerIsReusedWithoutGit(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			city, _, cfg, a := implicitSlotCity(t)
-			slot := provisionImplicitSlot(t, city, cfg, a, "1")
+			slot := provisionImplicitSlot(t, city, cfg, a)
 			tc.dirty(t, slot.Path)
 			marker := filepath.Join(slot.Path, worktreeStaleFileName)
 			before := slotSnapshot(t, slot.Path)
@@ -289,7 +291,7 @@ func TestImplicitSlotMissingDirIsRecreated(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			city, rig, cfg, a := implicitSlotCity(t)
-			slot := provisionImplicitSlot(t, city, cfg, a, "1")
+			slot := provisionImplicitSlot(t, city, cfg, a)
 			var slotWork string
 			if tc.unmerged {
 				if err := os.WriteFile(filepath.Join(slot.Path, "work.txt"), []byte("work\n"), 0o644); err != nil {
@@ -323,6 +325,123 @@ func TestImplicitSlotMissingDirIsRecreated(t *testing.T) {
 			}
 			if got := strings.Count(gitOut(t, rig, "worktree", "list", "--porcelain"), "worktree "); got != 2 {
 				t.Errorf("rig has %d worktrees, want the rig root and the slot", got)
+			}
+		})
+	}
+}
+
+// treeSnapshot records every path under root with its mode and, for files and
+// symlinks, its content, so any file, ref or worktree registration change
+// shows up as a diff.
+func treeSnapshot(t *testing.T, root string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		info, err := d.Info()
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(root, path)
+		fmt.Fprintf(&b, "%s %s", rel, info.Mode())
+		switch {
+		case info.Mode()&os.ModeSymlink != 0:
+			target, err := os.Readlink(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, " -> %s", target)
+		case info.Mode().IsRegular():
+			data, err := os.ReadFile(path)
+			if err != nil {
+				return err
+			}
+			fmt.Fprintf(&b, " %x", sha256.Sum256(data))
+		}
+		b.WriteByte('\n')
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.String()
+}
+
+func TestImplicitSlotThatCannotBeProvisionedFailsClosed(t *testing.T) {
+	slotPath := func(city string) string { return filepath.Join(city, ".gc", "worktrees", "app", "claude-1") }
+	for _, tc := range []struct {
+		name  string
+		prep  func(cfg *config.City, rig string)
+		setup func(t *testing.T, city, rig string, cfg *config.City, a *config.Agent)
+	}{
+		{name: "unborn_head", prep: func(_ *config.City, rig string) {
+			if err := os.RemoveAll(filepath.Join(rig, ".git")); err != nil {
+				panic(err)
+			}
+			if out, err := exec.Command("git", "-C", rig, "init", "-q").CombinedOutput(); err != nil {
+				panic(string(out))
+			}
+		}},
+		{name: "non_empty_plain_dir", setup: func(t *testing.T, city, _ string, _ *config.City, _ *config.Agent) {
+			if err := os.MkdirAll(slotPath(city), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(slotPath(city), "keep.txt"), []byte("keep\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "dot_git_directory", setup: func(t *testing.T, city, _ string, _ *config.City, _ *config.Agent) {
+			if err := os.MkdirAll(slotPath(city), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustGit(t, slotPath(city), "init", "-q")
+		}},
+		{name: "other_repo_worktree", setup: func(t *testing.T, city, _ string, _ *config.City, _ *config.Agent) {
+			other := filepath.Join(city, "other")
+			if err := os.MkdirAll(other, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			mustGit(t, other, "init", "-q")
+			mustGit(t, other, "commit", "-q", "--allow-empty", "-m", "other")
+			mustGit(t, other, "worktree", "add", "-q", "-b", "other-slot", slotPath(city))
+		}},
+		{name: "locked_registration", setup: func(t *testing.T, city, rig string, cfg *config.City, a *config.Agent) {
+			slot := provisionImplicitSlot(t, city, cfg, a)
+			mustGit(t, rig, "worktree", "lock", slot.Path)
+			if err := os.RemoveAll(slot.Path); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "branch_checked_out_elsewhere", setup: func(t *testing.T, city, rig string, cfg *config.City, a *config.Agent) {
+			slot := provisionImplicitSlot(t, city, cfg, a)
+			if err := os.RemoveAll(slot.Path); err != nil {
+				t.Fatal(err)
+			}
+			mustGit(t, rig, "worktree", "prune")
+			mustGit(t, rig, "worktree", "add", "-q", filepath.Join(city, "elsewhere"), slot.Branch)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", "tmux")
+			city, rig, cfg, a := implicitSlotCityPrepared(t, tc.prep)
+			if tc.setup != nil {
+				tc.setup(t, city, rig, cfg, a)
+			}
+			before := treeSnapshot(t, city)
+
+			dir, err := resolveWorkDirForQualifiedName(city, cfg, a, "app/claude-1")
+			if err == nil {
+				t.Fatalf("app/claude-1 resolved to %q, want a provisioning refusal", dir)
+			}
+			for _, want := range []string{slotPath(city), `implicit_isolation = "none"`} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q does not name %s", err, want)
+				}
+			}
+			if after := treeSnapshot(t, city); after != before {
+				t.Errorf("refused provisioning changed the city tree:\nbefore:\n%s\nafter:\n%s", before, after)
 			}
 		})
 	}
