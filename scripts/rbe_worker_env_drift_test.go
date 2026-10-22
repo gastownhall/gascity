@@ -5,9 +5,12 @@ import (
 	"encoding/hex"
 	"errors"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 
 	"gopkg.in/yaml.v3"
@@ -16,15 +19,18 @@ import (
 // rbe-west's oss and oss-fork schedulers match worker-env exactly, so a pin
 // that no live worker advertises is a queue that never drains while the pool
 // scaler keeps dispatching Blacksmith workers that cannot take it. These tests
-// pin the guards (tools/rbe/worker-env-drift) that make that loud and early:
+// pin gascity's guards that make that loud and early: its client
+// tools/rbe/worker-env-drift (pin, preflight) and the workflows that run the
+// farm half (check, await, report, resolve) from the pinned
+// gastownhall/rbe-worker, whose own tests cover that half:
 //
 //   - a worker whose host is not the pinned one still registers, advertising
-//     what it measured: the pools are shared with beads, whose actions send
-//     no worker-env and still run there, while gascity's never match it;
-//   - its run's measurement step fails with the diff and the manifest and pin
-//     to commit in the step summary, and a job beside the worker opens or
-//     updates the pin's drift issue while the worker serves (the farm caps
-//     the pools while that issue is open);
+//     what it measured: the pools are shared, and actions that send no
+//     worker-env still run there, while those carrying the pin (gascity's
+//     and beads') never match it;
+//   - its run's measurement step may fail without stopping the worker, and a
+//     job beside the worker opens or updates the pin's drift issue while the
+//     worker serves (the farm caps the pools while that issue is open);
 //   - while that issue is open, remote CI on that pin fails at once instead
 //     of queueing;
 //   - a scheduled canary measures the Blacksmith image against the pin;
@@ -43,11 +49,10 @@ const (
 )
 
 // ghStub is a gh for worker-env-drift: issue list answers with
-// $GH_ISSUES (a JSON array of {title,url}) through the --jq it is given, api
-// answers commits with $GH_COMMITS, contents?ref=SHA with $GH_FILES/SHA and
-// a run attempt's jobs with $GH_JOBS through the --jq, issue view with
-// $GH_VIEW. Every call is logged to $GH_LOG, one per line. GH_FAIL=1 fails
-// every call.
+// $GH_ISSUES (a JSON array of {title,url}) through the --jq it is given.
+// Every call is logged to $GH_LOG, one per line. GH_FAIL=1 fails every call.
+// Like gh, it exits with its writer's status: a writer killed by SIGPIPE
+// fails the call.
 const ghStub = `#!/bin/sh
 printf '%s\n' "$*" >>"$GH_LOG"
 [ "${GH_FAIL:-}" != 1 ] || { echo "gh: HTTP 502" >&2; exit 1; }
@@ -59,16 +64,6 @@ for a; do
 done
 case "$1 $2" in
 "issue list") jq -r "$jq" "$GH_ISSUES" ;;
-"issue view") cat "$GH_VIEW" ;;
-api*)
-	for a; do
-		case "$a" in
-		*commits\?*) cat "$GH_COMMITS" ;;
-		*contents/*ref=*) cat "$GH_FILES/${a##*ref=}" ;;
-		*/jobs\?*) jq -r "$jq" "$GH_JOBS" ;;
-		esac
-	done
-	;;
 esac
 `
 
@@ -181,120 +176,7 @@ func TestRBEWorkerEnvDriftPin(t *testing.T) {
 	}
 }
 
-// TestRBEWorkerEnvDriftCheck: the pinned host passes quietly; any other
-// fails with the diff, the manifest and the exact pin line to commit, in the
-// step summary and in the drift directory the report job reads.
-func TestRBEWorkerEnvDriftCheck(t *testing.T) {
-	pinned := "arch x86_64\npkg tmux 3.4-1\n"
-	e := newDriftEnv(t, pinned)
-	measured := filepath.Join(e.dir, "measured.txt")
-	writeDriftFile(t, measured, pinned)
-	out, err := e.run("check", measured)
-	if err != nil || !strings.Contains(out, "this host is the pinned one ("+e.pin+")") {
-		t.Fatalf("check of the pinned host: %v\n%s", err, out)
-	}
-	if _, err := os.Stat(filepath.Join(e.dir, "worker-env-drift")); !os.IsNotExist(err) {
-		t.Errorf("check of the pinned host left a drift directory (%v)", err)
-	}
-	if s := e.read(e.summary); s != "" {
-		t.Errorf("check of the pinned host wrote a step summary:\n%s", s)
-	}
-
-	drifted := "arch x86_64\npkg tmux 3.5-1\n"
-	got := sha256Pin(drifted)
-	writeDriftFile(t, measured, drifted)
-	out, err = e.run("check", measured)
-	if err == nil {
-		t.Fatalf("check of a drifted host succeeded:\n%s", out)
-	}
-	if !strings.Contains(out, "::error title=rbe worker-env drift::this host measures worker-env="+got+", gascity requests "+e.pin) {
-		t.Errorf("check output has no ::error naming both hashes:\n%s", out)
-	}
-	summary := e.read(e.summary)
-	for _, want := range []string{
-		"### rbe worker-env drift",
-		"-pkg tmux 3.4-1\n+pkg tmux 3.5-1\n",
-		"        \"worker-env\": \"" + got + "\",\n",
-		"```\n" + drifted + "```",
-		"runner-1 in https://github.com/acme/repo/actions/runs/42",
-	} {
-		if !strings.Contains(summary, want) {
-			t.Errorf("step summary missing %q:\n%s", want, summary)
-		}
-	}
-	dir := filepath.Join(e.dir, "worker-env-drift")
-	for name, want := range map[string]string{
-		"worker-env.txt": drifted,
-		"pinned-pin":     e.pin + "\n",
-		"measured-pin":   got + "\n",
-	} {
-		if b := e.read(filepath.Join(dir, name)); b != want {
-			t.Errorf("drift dir %s = %q, want %q", name, b, want)
-		}
-	}
-}
-
-// TestRBEWorkerEnvDriftAwait: the watch beside a serving worker reports
-// drift once the worker's drift upload ran, nothing if it was skipped (the
-// host matched) or the worker job ended without it, and gives up with a
-// warning at its deadline; a GitHub error is a retry, never a failure.
-func TestRBEWorkerEnvDriftAwait(t *testing.T) {
-	const job, step = "rbe pool worker (X)", "Upload the worker-env drift"
-	e := newDriftEnv(t, "a\n")
-	jobs := filepath.Join(e.dir, "jobs.json")
-	for _, tc := range []struct {
-		name, jobs, drift, say string
-		extra                  []string
-	}{
-		{
-			name: "uploaded", drift: "true", say: "completed (success)",
-			jobs: `{"jobs":[{"name":"other","status":"completed","steps":[]},{"name":"` + job + `","status":"in_progress","steps":[{"name":"Measure","status":"completed","conclusion":"failure"},{"name":"` + step + `","status":"completed","conclusion":"success"}]}]}`,
-		},
-		{
-			name: "host matched", drift: "false", say: "completed (skipped)",
-			jobs: `{"jobs":[{"name":"` + job + `","status":"in_progress","steps":[{"name":"` + step + `","status":"completed","conclusion":"skipped"}]}]}`,
-		},
-		{
-			name: "worker job ended first", drift: "false", say: "completed without",
-			jobs: `{"jobs":[{"name":"` + job + `","status":"completed","steps":[{"name":"Set up job","status":"completed","conclusion":"failure"}]}]}`,
-		},
-		{
-			name: "still provisioning at the deadline", drift: "false", say: "::warning title=rbe worker-env await::",
-			jobs:  `{"jobs":[{"name":"` + job + `","status":"in_progress","steps":[{"name":"` + step + `","status":"pending","conclusion":null}]}]}`,
-			extra: []string{"WORKER_ENV_AWAIT_SECONDS=0"},
-		},
-		{
-			name: "worker job not listed yet", drift: "false", say: "::warning title=rbe worker-env await::",
-			jobs: `{"jobs":[]}`, extra: []string{"WORKER_ENV_AWAIT_SECONDS=0"},
-		},
-		{
-			name: "GitHub down", drift: "false", say: "::warning title=rbe worker-env await::",
-			jobs: `{"jobs":[]}`, extra: []string{"WORKER_ENV_AWAIT_SECONDS=0", "GH_FAIL=1"},
-		},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			writeDriftFile(t, jobs, tc.jobs)
-			_ = os.Remove(e.output)
-			_ = os.Remove(e.ghLog)
-			e.extra = append([]string{"GH_JOBS=" + jobs, "GITHUB_RUN_ATTEMPT=3"}, tc.extra...)
-			out, err := e.run("await", job, step)
-			if err != nil {
-				t.Fatalf("await: %v\n%s", err, out)
-			}
-			if got := strings.TrimSpace(e.read(e.output)); got != "drift="+tc.drift {
-				t.Errorf("await output %q, want drift=%s\n%s", got, tc.drift, out)
-			}
-			if !strings.Contains(out, tc.say) {
-				t.Errorf("await says %q, want %q", out, tc.say)
-			}
-			if log := e.read(e.ghLog); !strings.Contains(log, "api repos/acme/repo/actions/runs/42/attempts/3/jobs?per_page=100") {
-				t.Errorf("await did not ask for this run attempt's jobs:\n%s", log)
-			}
-		})
-	}
-}
-
-// TestRBEWorkerEnvDriftPreflight: bazel-test learns whether the change moves
+// TestRBEWorkerEnvDriftPreflight: bazel.yml learns whether the change moves
 // the pin off the default branch's (no worker serves it before merge),
 // whether to measure the host, and fails a remote run on a pin with an open
 // drift issue instead of queueing it.
@@ -317,8 +199,10 @@ func TestRBEWorkerEnvDriftPreflight(t *testing.T) {
 		moved, measure                 string
 	}{
 		{name: "same pin", basePin: e.pin, changed: "cmd/gc/main.go\n", moved: "false", measure: "false"},
-		{name: "worker script changed", basePin: e.pin, changed: "README.md\ntools/rbe/blacksmith-worker.sh\n", moved: "false", measure: "true"},
-		{name: "measurement changed", basePin: e.pin, changed: "tools/rbe/worker-env\n", moved: "false", measure: "true"},
+		{name: "rbe-worker pin moved", basePin: e.pin, changed: "README.md\n.github/actions/rbe-worker/pin\n", moved: "false", measure: "true"},
+		{name: "rbe-worker fetch changed", basePin: e.pin, changed: ".github/actions/rbe-worker/fetch.sh\n", moved: "false", measure: "true"},
+		{name: "rbe-worker H5 check changed", basePin: e.pin, changed: ".github/actions/rbe-worker/h5.sh\n", moved: "false", measure: "false"},
+		{name: "a gascity copy of a farm script", basePin: e.pin, changed: "tools/rbe/blacksmith-worker.sh\n", moved: "false", measure: "false"},
 		{name: "similar path", basePin: e.pin, changed: "tools/rbe/worker-env.txt.orig\n", moved: "false", measure: "false"},
 		{name: "pin moved", basePin: sha256Pin("b\n"), changed: "tools/rbe/worker-env.txt\n", moved: "true", measure: "true"},
 		{name: "default branch has no pin", basePin: "", changed: "platforms/BUILD.bazel\n", moved: "true", measure: "true"},
@@ -358,256 +242,80 @@ func TestRBEWorkerEnvDriftPreflight(t *testing.T) {
 	}
 }
 
-// driftDir runs check on a drifted host and returns its drift directory and
-// the measured pin.
-func (e *driftEnv) driftDir(measured string) (string, string) {
-	e.t.Helper()
-	path := filepath.Join(e.dir, "measured.txt")
-	writeDriftFile(e.t, path, measured)
-	if out, err := e.run("check", path); err == nil {
-		e.t.Fatalf("check of a drifted host succeeded:\n%s", out)
-	}
-	_ = os.Remove(e.summary)
-	return filepath.Join(e.dir, "worker-env-drift"), sha256Pin(measured)
-}
+// pipeOverflow is more than any pipe buffer holds (64 KiB on Linux, 16-64
+// KiB on macOS): a writer of this much into a reader that stops early is
+// killed by SIGPIPE every time, never only when the race goes that way.
+const pipeOverflow = 1 << 20
 
-// TestRBEWorkerEnvDriftReport: the first drift of a pin opens its issue
-// (labeled, titled with the pin, the manifest in the body); a new
-// measurement is added once; a host whose measurement is a previous pin (a
-// stale image after a re-pin) opens nothing, so it cannot block the new pin.
-func TestRBEWorkerEnvDriftReport(t *testing.T) {
-	e := newDriftEnv(t, "a\n")
-	commits := filepath.Join(e.dir, "commits")
-	files := filepath.Join(e.dir, "files")
-	view := filepath.Join(e.dir, "view")
-	writeDriftFile(t, commits, "c1\nc0\n")
-	writeDriftFile(t, filepath.Join(files, "c1"), buildWithPin(e.pin))
-	writeDriftFile(t, filepath.Join(files, "c0"), buildWithPin(sha256Pin("old\n")))
-	writeDriftFile(t, view, "")
-	e.extra = []string{"GH_COMMITS=" + commits, "GH_FILES=" + files, "GH_VIEW=" + view, "DEFAULT_BRANCH=main"}
-
-	// Nothing recorded (the worker failed for another reason): no GitHub call.
-	if out, err := e.run("report", filepath.Join(e.dir, "nothing")); err != nil || e.read(e.ghLog) != "" {
-		t.Fatalf("report without drift: %v, gh calls %q\n%s", err, e.read(e.ghLog), out)
-	}
-
-	dir, got := e.driftDir("new\n")
-	out, err := e.run("report", dir)
-	if err != nil {
-		t.Fatalf("report: %v\n%s", err, out)
-	}
-	log := e.read(e.ghLog)
-	if !strings.Contains(log, "api repos/acme/repo/commits?path=platforms/BUILD.bazel&sha=main&per_page=20") {
-		t.Errorf("report did not look up the previous pins:\n%s", log)
-	}
-	if !strings.Contains(log, "label create "+rbeWorkerEnvLabel+" -R acme/repo --force") {
-		t.Errorf("report did not ensure the label:\n%s", log)
-	}
-	create := regexp.MustCompile(`(?m)^issue create -R acme/repo --title ` + regexp.QuoteMeta(driftTitle(e.pin)) + ` --label ` + rbeWorkerEnvLabel + ` --body-file (\S+)$`).FindStringSubmatch(log)
-	if create == nil {
-		t.Fatalf("report did not open the pin's issue:\n%s", log)
-	}
-	if body := e.read(create[1]); !strings.Contains(body, "```\nnew\n```") || !strings.Contains(body, `"worker-env": "`+got+`",`) {
-		t.Errorf("issue body lacks the manifest or the pin line:\n%s", body)
-	}
-
-	// The issue is open: a new measurement is a comment, a known one nothing.
-	e.setIssues(driftTitle(e.pin), "https://x/issues/9")
-	_ = os.Remove(e.ghLog)
-	if out, err := e.run("report", dir); err != nil || !strings.Contains(e.read(e.ghLog), "issue comment https://x/issues/9 -R acme/repo --body-file") {
-		t.Errorf("report of a new measurement: %v, gh calls:\n%s\n%s", err, e.read(e.ghLog), out)
-	}
-	writeDriftFile(t, view, "earlier report\nworker-env="+got+"\n")
-	_ = os.Remove(e.ghLog)
-	if out, err := e.run("report", dir); err != nil || strings.Contains(e.read(e.ghLog), "issue comment") || strings.Contains(e.read(e.ghLog), "issue create") {
-		t.Errorf("report of a known measurement: %v, gh calls:\n%s\n%s", err, e.read(e.ghLog), out)
-	}
-
-	// A stale host: it measures the pin of an earlier default-branch commit.
-	e.setIssues()
-	dir, _ = e.driftDir("old\n")
-	_ = os.Remove(e.ghLog)
-	out, err = e.run("report", dir)
-	if err != nil || !strings.Contains(out, "::warning title=rbe worker-env stale host::") {
-		t.Errorf("report of a stale host: %v\n%s", err, out)
-	}
-	if log := e.read(e.ghLog); strings.Contains(log, "issue create") || strings.Contains(log, "label create") {
-		t.Errorf("report of a stale host touched issues:\n%s", log)
-	}
-}
-
-// TestRBEWorkerEnvDriftResolve: once the default branch pins another host,
-// the old pins' issues close; the current pin's stays, with a warning.
-func TestRBEWorkerEnvDriftResolve(t *testing.T) {
-	e := newDriftEnv(t, "a\n")
-	e.setIssues(driftTitle(sha256Pin("old\n")), "https://x/issues/1", driftTitle(e.pin), "https://x/issues/2")
-	out, err := e.run("resolve")
-	if err != nil {
-		t.Fatalf("resolve: %v\n%s", err, out)
-	}
-	log := e.read(e.ghLog)
-	if !strings.Contains(log, "issue close https://x/issues/1 -R acme/repo --comment Superseded") {
-		t.Errorf("resolve did not close the superseded issue:\n%s", log)
-	}
-	if strings.Contains(log, "issues/2 ") || !strings.Contains(out, "::warning title=rbe worker-env drift::this host matches the pin "+e.pin+", but https://x/issues/2 is open") {
-		t.Errorf("resolve must leave the current pin's issue open and warn:\n%s\n%s", log, out)
-	}
-}
-
-// TestRBEWorkerScriptMeasureMode: measure mode needs no certificate and
-// stops after the check, failing on drift; the other modes go on to
-// NativeLink whatever the check says.
-func TestRBEWorkerScriptMeasureMode(t *testing.T) {
-	script := readFile(t, repoRoot(t), rbeWorkerScript)
-	at := 0
-	for _, want := range []string{
-		"WORKER_MODE=${WORKER_MODE:-run}\n",
-		"[ \"$WORKER_MODE\" = measure ] || : \"${RBE_WORKER_TLS_CERT:?}\" \"${RBE_WORKER_TLS_KEY:?}\" \"${RBE_WEST_HOST:?}\" \"${WORKER_NAME:?}\"\n",
-		"measure) ;;\n",
-		`*) echo "WORKER_MODE must be run, pool or measure" >&2; exit 2 ;;`,
-		"\ntools/rbe/worker-env \"${WORKER_TOOLSET[@]}\" >\"$RUNNER_TEMP/worker-env.txt\"\n",
-		"\nif ! tools/rbe/worker-env-drift check \"$RUNNER_TEMP/worker-env.txt\"; then\n\t[ \"$WORKER_MODE\" != measure ] || exit 3\n",
-		"\n[ \"$WORKER_MODE\" != measure ] || exit 0\n",
-		"/nativelink-${NL_VERSION}-x86_64-unknown-linux-musl.tar.gz",
-	} {
-		i := strings.Index(script[at:], want)
-		if i < 0 {
-			t.Fatalf("%s: %q missing or out of order", rbeWorkerScript, want)
-		}
-		at += i + len(want)
-	}
-}
-
-// workerStubs is a host for blacksmith-worker.sh with nothing real behind
-// it: sudo and apt-get do nothing, downloads are empty files whose checksums
-// pass, the NativeLink archive unpacks to $NL_STUB, sleep returns once
-// NativeLink has started, and dolt, go, uname and dpkg-query describe a host
-// that is not the pinned one.
-var workerStubs = map[string]string{
-	"sudo": "echo \"sudo $*\" >>\"$STUB_LOG\"\n",
-	"curl": `out=
-prev=
-for a; do [ "$prev" = -o ] && out=$a; prev=$a; done
-if [ -n "$out" ]; then echo stub >"$out"; else echo '[]'; fi
-`,
-	"sha256sum": `if [ "${1:-}" = -c ]; then cat >/dev/null; exit 0; fi
-for p in /usr/bin/sha256sum /bin/sha256sum; do [ -x "$p" ] && exec "$p" "$@"; done
-exit 127
-`,
-	"tar": `dir=
-prev=
-for a; do [ "$prev" = -C ] && dir=$a; prev=$a; done
-for a; do
-	case "$a" in *nl.tgz) cp "$NL_STUB" "$dir/nativelink"; chmod +x "$dir/nativelink"; exit 0 ;; esac
-done
-for p in /usr/bin/tar /bin/tar; do [ -x "$p" ] && exec "$p" "$@"; done
-exit 127
-`,
-	"sleep": `i=0
-while [ ! -e "$NL_CAPTURE" ] && [ $i -lt 200 ]; do
-	for p in /usr/bin/sleep /bin/sleep; do [ -x "$p" ] && { "$p" 0.05; break; }; done
-	i=$((i + 1))
-done
-`,
-	"uname":      "echo x86_64\n",
-	"dolt":       "echo 'dolt version 2.1.8'\n",
-	"go":         "echo 'go version go0.0.0-drifted linux/amd64'\n",
-	"dpkg-query": "for p; do :; done\nprintf 'installed 9.9-drifted-%s\\n' \"$p\"\n",
-}
-
-// TestRBEWorkerRegistersOnDrift runs blacksmith-worker.sh on a host whose
-// measurement is not the pin. In pool mode it still starts NativeLink, with
-// worker.json advertising the measured hash (so actions without worker-env,
-// beads', run on it and gascity's, which carry the pin, never do), and
-// leaves the drift report. In measure mode the same host fails (exit 3) and
-// starts nothing.
-func TestRBEWorkerRegistersOnDrift(t *testing.T) {
-	root := repoRoot(t)
-	dir := t.TempDir()
-	stubs := filepath.Join(dir, "bin")
-	for name, body := range workerStubs {
-		writeDriftFile(t, filepath.Join(stubs, name), "#!/bin/sh\n"+body)
-		if err := os.Chmod(filepath.Join(stubs, name), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	nlStub := filepath.Join(dir, "nativelink-stub")
-	writeDriftFile(t, nlStub, "#!/bin/sh\ncp \"$1\" \"$NL_CAPTURE.tmp\" && mv -f \"$NL_CAPTURE.tmp\" \"$NL_CAPTURE\"\n")
-	osRelease := filepath.Join(dir, "os-release")
-	writeDriftFile(t, osRelease, "ID=ubuntu\nVERSION_ID=\"24.04\"\n")
-	path := stubs + string(os.PathListSeparator) + "/usr/bin" + string(os.PathListSeparator) + "/bin"
-
-	run := func(mode string) (tmp, capture, out string, err error) {
-		tmp = filepath.Join(dir, mode)
-		capture = filepath.Join(tmp, "nativelink-started-with.json")
-		if err := os.MkdirAll(tmp, 0o755); err != nil {
-			t.Fatal(err)
-		}
-		env := []string{
-			"PATH=" + path, "WORKER_ENV_PATH=" + path, "WORKER_ENV_OS_RELEASE=" + osRelease,
-			"HOME=" + tmp, "GOTOOLCHAIN=local", "RUNNER_TEMP=" + tmp, "RUNNER_NAME=runner-1", "GITHUB_REPOSITORY=acme/repo", "GITHUB_RUN_ID=42",
-			"GITHUB_STEP_SUMMARY=" + filepath.Join(tmp, "summary.md"),
-			"STUB_LOG=" + filepath.Join(tmp, "stub.log"), "NL_STUB=" + nlStub, "NL_CAPTURE=" + capture,
-			"WORKER_MODE=" + mode, "POOL_IDLE_MINUTES=1", "RBE_ACTION_ISOLATION=0",
-		}
-		// Measure mode runs with WORKER_MODE alone (the canary, the bazel
-		// jobs): no certificate, no farm host, no worker name.
-		if mode != "measure" {
-			env = append(env, "RBE_WORKER_TLS_CERT=eA==", "RBE_WORKER_TLS_KEY=eA==", "RBE_WEST_HOST=rbe.invalid", "WORKER_NAME=w-1")
-		}
-		stdout, stderr, err := runRBEScript(root, env, filepath.Join(root, rbeWorkerScript))
-		return tmp, capture, stdout + stderr, err
-	}
-
-	tmp, capture, out, err := run("pool")
-	if err != nil {
-		t.Fatalf("pool worker on a drifted host: %v\n%s", err, out)
-	}
-	measured, err := os.ReadFile(filepath.Join(tmp, "worker-env.txt"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := sha256Pin(string(measured))
-	pin := rbeWorkerPlatformExecProperties(t, readFile(t, root, rbeWorkerPlatformBuild))[rbeWorkerEnvProperty]
-	if got == pin {
-		t.Fatalf("the stub host measures the pin %s; the test needs a drifted one", pin)
-	}
-	if !strings.Contains(out, "worker-env: registering anyway with worker-env="+got) {
-		t.Errorf("pool worker does not say it registers with the measured hash:\n%s", out)
-	}
-	started, err := os.ReadFile(capture)
-	if err != nil {
-		t.Fatalf("NativeLink never started on the drifted host: %v\n%s", err, out)
-	}
-	if err := checkWorkerJSONAdvertises(started, got); err != nil {
-		t.Errorf("NativeLink's worker.json: %v\n%s", err, started)
-	}
-	if m := regexp.MustCompile(`"OSFamily"|"ISA"`).FindAllString(string(started), -1); len(m) != 2 {
-		t.Errorf("worker.json lost its other platform properties: %s", started)
-	}
-	if b := readDriftOut(t, filepath.Join(tmp, "worker-env-drift", "measured-pin")); b != got+"\n" {
-		t.Errorf("drift report measured-pin %q, want %s", b, got)
-	}
-	if s := readDriftOut(t, filepath.Join(tmp, "summary.md")); !strings.Contains(s, "### rbe worker-env drift") {
-		t.Errorf("no drift report in the step summary:\n%s", s)
-	}
-
-	_, capture, out, err = run("measure")
-	if code := exitCode(err); code != 3 {
-		t.Errorf("measure on a drifted host: exit %d (%v), want 3\n%s", code, err, out)
-	}
-	if _, err := os.Stat(capture); !os.IsNotExist(err) {
-		t.Errorf("measure mode started NativeLink (%v)", err)
-	}
-}
-
-func readDriftOut(t *testing.T, path string) string {
+// defaultSIGPIPE gives the scripts this test runs the default SIGPIPE, as
+// on GitHub runners, even when the test inherited it ignored (some agent
+// sandboxes do): a signal ignored at exec stays ignored, and an ignored
+// SIGPIPE turns the kill into an EPIPE that some writers (jq) shrug off.
+// A handled signal is reset to its default at exec.
+func defaultSIGPIPE(t *testing.T) {
 	t.Helper()
-	b, err := os.ReadFile(path)
-	if err != nil {
-		t.Fatal(err)
+	signal.Notify(make(chan os.Signal, 1), syscall.SIGPIPE)
+	t.Cleanup(func() { signal.Reset(syscall.SIGPIPE) })
+}
+
+// TestRBEWorkerEnvDriftSummaryDrainsStdin: summary always reads its input,
+// with or without a step summary file. A summary that returned unread let
+// `echo ... | summary` die of SIGPIPE under pipefail, so preflight exited 141
+// instead of 1, now and then (the hook passes /dev/null to keep it away).
+func TestRBEWorkerEnvDriftSummaryDrainsStdin(t *testing.T) {
+	defaultSIGPIPE(t)
+	root := repoRoot(t)
+	for _, tc := range []struct {
+		name string
+		env  []string
+	}{
+		{name: "unset"},
+		{name: "empty", env: []string{"GITHUB_STEP_SUMMARY="}},
+		{name: "file", env: []string{"GITHUB_STEP_SUMMARY=" + filepath.Join(t.TempDir(), "summary.md")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			script := `. "$1" && head -c ` + strconv.Itoa(pipeOverflow) + ` /dev/zero | summary`
+			// bash -c SCRIPT $0 $1: SCRIPT sources $1, the script under test.
+			stdout, stderr, err := runRBEScript(t.TempDir(), append([]string{"PATH=/usr/bin:/bin"}, tc.env...),
+				"-c", script, "bash", filepath.Join(root, rbeWorkerEnvDrift))
+			if err != nil {
+				t.Fatalf("writer | summary: exit %d (%v), want 0 (141 is SIGPIPE: summary left its input unread)\n%s%s", exitCode(err), err, stdout, stderr)
+			}
+			for _, kv := range tc.env {
+				if path, ok := strings.CutPrefix(kv, "GITHUB_STEP_SUMMARY="); ok && path != "" {
+					if fi, err := os.Stat(path); err != nil || fi.Size() != pipeOverflow {
+						t.Errorf("step summary %s: %v, want %d bytes", path, err, pipeOverflow)
+					}
+				}
+			}
+		})
 	}
-	return string(b)
+}
+
+// TestRBEWorkerEnvDriftReadsWholePipes: no pipe in worker-env-drift ends in a
+// reader that stops early (grep -q, head -n 1). Under pipefail the writer's
+// SIGPIPE fails the pipeline, so a found match reads as no match: preflight
+// let a remote run on a drifted pin queue. (rbe-worker's farm half keeps the
+// same test for report and await.)
+func TestRBEWorkerEnvDriftReadsWholePipes(t *testing.T) {
+	defaultSIGPIPE(t)
+	e := newDriftEnv(t, "a\n")
+
+	// A pin with many open issues of its title: their list overflows the pipe.
+	var issues []string
+	for i := 0; i < 10000; i++ {
+		issues = append(issues, driftTitle(e.pin), "https://x/issues/"+strconv.Itoa(7+i))
+	}
+	e.setIssues(issues...)
+	base := filepath.Join(e.dir, "base.bazel")
+	changed := filepath.Join(e.dir, "changed")
+	writeDriftFile(t, base, buildWithPin(e.pin))
+	writeDriftFile(t, changed, "x\n")
+	e.extra = []string{"WORKER_ENV_REMOTE=true"}
+	out, err := e.run("preflight", base, changed)
+	if code := exitCode(err); code != 1 || !strings.Contains(out, "::error title=rbe worker-env drift::https://x/issues/7:") {
+		t.Errorf("preflight on a pin with many drift issues: exit %d, want 1 naming the first issue\n%s", code, out)
+	}
 }
 
 func exitCode(err error) int {
@@ -646,7 +354,7 @@ type ghStep struct {
 	With            map[string]any    `yaml:"with"`
 	Env             map[string]string `yaml:"env"`
 	Run             string            `yaml:"run"`
-	ContinueOnError bool              `yaml:"continue-on-error"`
+	ContinueOnError string            `yaml:"continue-on-error"` // a string: may be an expression
 }
 
 func parseWorkflow(t *testing.T, path string) ghWorkflow {
@@ -664,7 +372,9 @@ func checkPinnedActions(t *testing.T, path string, wf ghWorkflow) {
 	re := regexp.MustCompile(ghPinnedActionRE)
 	for name, job := range wf.Jobs {
 		for _, s := range job.Steps {
-			if s.Uses != "" && !re.MatchString(s.Uses) {
+			// A local composite action (./.github/actions/...) is this same
+			// commit: nothing to pin, as ci.yml and bazel.yml's local actions.
+			if s.Uses != "" && !strings.HasPrefix(s.Uses, "./") && !re.MatchString(s.Uses) {
 				t.Errorf("%s job %s uses %q, not pinned to a commit SHA", path, name, s.Uses)
 			}
 		}
@@ -706,12 +416,23 @@ func checkDriftReportJob(t *testing.T, path string, job ghJob, needs string) {
 		t.Errorf("%s report job concurrency %v, want group %s without cancel-in-progress", path, job.Concurrency, rbeWorkerEnvReportGrp)
 	}
 	_, dl := findStep(job, uses("actions/download-artifact"))
-	if dl == nil || dl.With["name"] != rbeWorkerEnvDriftName || !dl.ContinueOnError {
+	if dl == nil || dl.With["name"] != rbeWorkerEnvDriftName || dl.ContinueOnError != "true" {
 		t.Errorf("%s report job: download of %s missing or not continue-on-error: %+v", path, rbeWorkerEnvDriftName, dl)
 	}
-	_, rep := findStep(job, runs(rbeWorkerEnvDrift+" report "))
+	_, rep := findStep(job, runs(`worker-env-drift" report `))
 	if rep == nil || rep.Env["GH_TOKEN"] != "${{ github.token }}" {
-		t.Errorf("%s report job: no %s report step with GH_TOKEN: %+v", path, rbeWorkerEnvDrift, rep)
+		t.Fatalf("%s report job: no worker-env-drift report step with GH_TOKEN: %+v", path, rep)
+	}
+	// The farm half of worker-env-drift is the pinned rbe-worker's: the
+	// fetch step sits before the report command, which runs it from
+	// $RBE_WORKER_DIR.
+	fetchAt, fetch := findStep(job, func(s ghStep) bool { return s.Uses == "./.github/actions/rbe-worker" })
+	repAt, _ := findStep(job, runs(`worker-env-drift" report `))
+	if fetch == nil || fetchAt > repAt {
+		t.Errorf("%s report job: no fetch-the-pinned-rbe-worker step before the report command: %+v", path, fetch)
+	}
+	if rep.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" {
+		t.Errorf("%s report job: report step RBE_WORKER_DIR = %q, want the fetch step's dir output", path, rep.Env["RBE_WORKER_DIR"])
 	}
 }
 
@@ -729,9 +450,11 @@ func checkDriftUpload(t *testing.T, path string, job ghJob, measure int, ifExpr 
 	return i
 }
 
-// isMeasureStep: a blacksmith-worker.sh step in measure mode.
+// isMeasureStep: a blacksmith-worker.sh step in measure mode, run from
+// $RBE_WORKER_DIR (the pinned rbe-worker the fetch step checked out).
 func isMeasureStep(s ghStep) bool {
-	return strings.TrimSpace(s.Run) == rbeWorkerScript && s.Env["WORKER_MODE"] == "measure"
+	run := strings.TrimSpace(s.Run)
+	return run == `"$RBE_WORKER_DIR/blacksmith-worker.sh"` && s.Env["WORKER_MODE"] == "measure"
 }
 
 // TestRBEPoolWorkflowsReportDriftWhileServing: both pool workflows boot their
@@ -759,19 +482,32 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			if len(worker.Permissions) != 0 {
 				t.Errorf("worker permissions %v: the worker VM gets no token beyond contents: read", worker.Permissions)
 			}
+			fetchAt, fetch := findStep(worker, func(s ghStep) bool { return s.Uses == "./.github/actions/rbe-worker" })
+			if fetch == nil {
+				t.Fatalf("worker job: no fetch-the-pinned-rbe-worker step")
+			}
 			measureAt, measure := findStep(worker, isMeasureStep)
-			if measure == nil || measure.ID != "worker-env" || !measure.ContinueOnError || len(measure.Env) != 1 {
-				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure alone): %+v", measure)
+			if measure == nil || measure.ID != "worker-env" || measure.ContinueOnError != "true" || len(measure.Env) != 3 ||
+				measure.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" ||
+				measure.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
+				t.Fatalf("worker job: no continue-on-error measure step (id worker-env, WORKER_MODE=measure, RBE_WORKER_DIR and RBE_WORKER_REVISION): %+v", measure)
+			}
+			if fetchAt > measureAt {
+				t.Errorf("worker job: the fetch step (%d) must come before the measure step (%d)", fetchAt, measureAt)
 			}
 			upAt := checkDriftUpload(t, path, worker, measureAt, "steps.worker-env.outcome == 'failure'")
-			serveAt, _ := findStep(worker, func(s ghStep) bool {
-				return strings.TrimSpace(s.Run) == rbeWorkerScript && s.Env["WORKER_MODE"] == "pool"
+			serveAt, serveStep := findStep(worker, func(s ghStep) bool {
+				run := strings.TrimSpace(s.Run)
+				return run == `"$RBE_WORKER_DIR/blacksmith-worker.sh"` && s.Env["WORKER_MODE"] == "pool"
 			})
+			if serveStep != nil && serveStep.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" {
+				t.Errorf("the pool worker step RBE_WORKER_DIR = %q, want the fetch step's dir output", serveStep.Env["RBE_WORKER_DIR"])
+			}
 			if serveAt < upAt {
 				t.Errorf("the pool worker step (%d) must come after the drift upload (%d)", serveAt, upAt)
 			}
-			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError {
-				t.Errorf("the pool worker step runs if %q, continue-on-error %v; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
+			if serve := worker.Steps[serveAt]; serve.If != "" || serve.ContinueOnError == "true" {
+				t.Errorf("the pool worker step runs if %q, continue-on-error %q; it must run whatever the measurement said", serve.If, serve.ContinueOnError)
 			}
 			upload := worker.Steps[upAt].Name
 
@@ -782,10 +518,15 @@ func TestRBEPoolWorkflowsReportDriftWhileServing(t *testing.T) {
 			if len(await.Permissions) != 2 || await.Permissions["contents"] != "read" || await.Permissions["actions"] != "read" {
 				t.Errorf("await-drift permissions %v, want contents: read, actions: read", await.Permissions)
 			}
-			_, wait := findStep(await, runs(rbeWorkerEnvDrift+" await "))
+			awaitFetchAt, awaitFetch := findStep(await, func(s ghStep) bool { return s.Uses == "./.github/actions/rbe-worker" })
+			waitAt, wait := findStep(await, runs(`worker-env-drift" await `))
 			if wait == nil || wait.ID != "await" || wait.Env["GH_TOKEN"] != "${{ github.token }}" ||
+				wait.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" ||
 				!strings.Contains(wait.Run, ` await "`+worker.Name+`" "`+upload+`"`) {
 				t.Errorf("await-drift does not wait for %q / %q: %+v", worker.Name, upload, wait)
+			}
+			if awaitFetch == nil || awaitFetchAt > waitAt {
+				t.Errorf("await-drift: no fetch-the-pinned-rbe-worker step before the await command")
 			}
 			if await.Outputs["drift"] != "${{ steps.await.outputs.drift }}" {
 				t.Errorf("await-drift outputs %v, want drift from the await step", await.Outputs)
@@ -818,8 +559,8 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 	for _, p := range push["paths"].([]any) {
 		paths = append(paths, p.(string))
 	}
-	if strings.Join(paths, ",") != "platforms/BUILD.bazel,tools/rbe/**" {
-		t.Errorf("push paths %v, want platforms/BUILD.bazel and tools/rbe/**", paths)
+	if strings.Join(paths, ",") != "platforms/BUILD.bazel,tools/rbe/worker-env.txt,.github/actions/rbe-worker/**,.github/workflows/rbe-worker-env-canary.yml" {
+		t.Errorf("push paths %v, want platforms/BUILD.bazel, tools/rbe/worker-env.txt, .github/actions/rbe-worker/** and the canary's own path", paths)
 	}
 	if len(wf.Permissions) != 1 || wf.Permissions["contents"] != "read" {
 		t.Errorf("permissions %v, want contents: read", wf.Permissions)
@@ -828,9 +569,17 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 	if measure.RunsOn != "blacksmith-2vcpu-ubuntu-2404" || len(measure.Permissions) != 0 {
 		t.Errorf("measure runs-on %q permissions %v, want blacksmith-2vcpu-ubuntu-2404 and no extra permission", measure.RunsOn, measure.Permissions)
 	}
-	i, s := findStep(measure, runs(rbeWorkerScript))
-	if s == nil || len(s.Env) != 1 || s.Env["WORKER_MODE"] != "measure" {
-		t.Fatalf("measure job: no %s step with WORKER_MODE=measure alone: %+v", rbeWorkerScript, s)
+	fetchAt, fetch := findStep(measure, func(s ghStep) bool { return s.Uses == "./.github/actions/rbe-worker" })
+	if fetch == nil {
+		t.Fatalf("measure job: no fetch-the-pinned-rbe-worker step")
+	}
+	i, s := findStep(measure, isMeasureStep)
+	if s == nil || len(s.Env) != 3 || s.Env["WORKER_MODE"] != "measure" || s.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" ||
+		s.Env["RBE_WORKER_REVISION"] != "${{ steps.rbe-worker.outputs.sha }}" {
+		t.Fatalf("measure job: no blacksmith-worker.sh step with WORKER_MODE=measure, RBE_WORKER_DIR and RBE_WORKER_REVISION: %+v", s)
+	}
+	if fetchAt > i {
+		t.Errorf("measure job: the fetch step (%d) must come before the measure step (%d)", fetchAt, i)
 	}
 	checkDriftUpload(t, rbeWorkerEnvCanary, measure, i, "failure()")
 	report := wf.Jobs["report"]
@@ -838,74 +587,23 @@ func TestRBEWorkerEnvCanaryWorkflow(t *testing.T) {
 		t.Errorf("report if %q", report.If)
 	}
 	checkDriftReportJob(t, rbeWorkerEnvCanary, report, "measure")
-	if _, s := findStep(report, runs(rbeWorkerEnvDrift+" resolve")); s == nil || s.If != "needs.measure.result == 'success'" {
+	reportFetchAt, reportFetch := findStep(report, func(s ghStep) bool { return s.Uses == "./.github/actions/rbe-worker" })
+	resolveAt, s := findStep(report, runs(`worker-env-drift" resolve`))
+	if s == nil || s.If != "needs.measure.result == 'success'" || s.Env["RBE_WORKER_DIR"] != "${{ steps.rbe-worker.outputs.dir }}" {
 		t.Errorf("report job: no resolve step for a matching host: %+v", s)
 	}
-}
-
-// TestBazelTestWorkerEnvPreflight: the required bazel job asks the preflight
-// before any remote bazel run, skips the remote suite when the change moves
-// the pin, and measures its own Blacksmith host after every bazel run when
-// the change touches the worker host (the toolset install would re-key the
-// client's own actions if it came first).
-func TestBazelTestWorkerEnvPreflight(t *testing.T) {
-	wf := parseWorkflow(t, bazelTestWorkflow)
-	job := wf.Jobs["bazel"]
-	if job.Permissions["issues"] != "read" {
-		t.Errorf("bazel job permissions %v, want issues: read (drift issues)", job.Permissions)
-	}
-	certAt, _ := findStep(job, func(s ghStep) bool { return s.ID == "fork-cert" })
-	preAt, pre := findStep(job, func(s ghStep) bool { return s.ID == "worker-env" })
-	if pre == nil || preAt < certAt {
-		t.Fatalf("bazel job: no worker-env preflight step after fork-cert")
-	}
-	if !strings.Contains(pre.Run, rbeWorkerEnvDrift+` preflight "$RUNNER_TEMP/worker-env-base.bazel" "$RUNNER_TEMP/worker-env-changed"`) {
-		t.Errorf("preflight step does not run %s preflight:\n%s", rbeWorkerEnvDrift, pre.Run)
-	}
-	for k, v := range map[string]string{
-		"GH_TOKEN":       "${{ github.token }}",
-		"DEFAULT_BRANCH": "${{ github.event.repository.default_branch }}",
-		"RBE_FORK_CERT":  bazelRCForkCertEnv,
-	} {
-		if pre.Env[k] != v {
-			t.Errorf("preflight env %s = %q, want %q", k, pre.Env[k], v)
-		}
-	}
-	// Remote exactly when the bazel steps add --config=remote-exec.
-	if !strings.Contains(pre.Run, `if [ -n "$BAZEL_REMOTE_EXECUTOR" ] || [ -n "$RBE_FORK_CERT" ]; then export WORKER_ENV_REMOTE=true; fi`) {
-		t.Errorf("preflight step does not set WORKER_ENV_REMOTE as the remote-exec guard does:\n%s", pre.Run)
-	}
-	const skip = "steps.worker-env.outputs.pin-moved != 'true'"
-	lastBazel := -1
-	for i, s := range job.Steps {
-		if !regexp.MustCompile(`(?m)^\s*bazel "\$\{ARGS\[@\]\}" (test|coverage)`).MatchString(s.Run) {
-			continue
-		}
-		lastBazel = i
-		if i < preAt {
-			t.Errorf("step %q runs bazel before the worker-env preflight", s.Name)
-		}
-		if !strings.Contains(s.If, skip) && !strings.Contains(s.If, "github.ref == 'refs/heads/main'") {
-			t.Errorf("step %q if %q: a moved pin must skip it (%s)", s.Name, s.If, skip)
-		}
-	}
-	measAt, meas := findStep(job, runs(rbeWorkerScript))
-	if meas == nil || meas.If != "always() && steps.worker-env.outputs.measure == 'true'" ||
-		len(meas.Env) != 1 || meas.Env["WORKER_MODE"] != "measure" {
-		t.Fatalf("bazel job: no host measurement step (if measure, WORKER_MODE=measure): %+v", meas)
-	}
-	if measAt < lastBazel {
-		t.Errorf("the host measurement (step %d) runs before a bazel run (step %d): its toolset install would re-key the client's actions", measAt, lastBazel)
+	if reportFetch == nil || reportFetchAt > resolveAt {
+		t.Errorf("report job: no fetch-the-pinned-rbe-worker step before the resolve command")
 	}
 }
 
 // TestBazelMultiLaneWorkerEnvPreflight: bazel.yml's remote jobs ask the
-// worker-env preflight as bazel-test.yml's bazel job does. The lane job asks
+// worker-env preflight before any remote bazel run. The lane job asks
 // before setup-bazel (no rbe-fork certificate for a run that would only
 // queue), counts as remote in exactly the modes setup-bazel attaches a
-// remote executor, skips Bazel when the change moves the pin, and its unit
-// lane (in every non-empty lane list) measures its own Blacksmith host last,
-// after every bazel command. The coverage job (remote only) asks too.
+// remote executor, and skips Bazel when the change moves the pin. Neither it
+// nor the coverage job (remote only, which asks too) measures its own host:
+// the worker-host job does (TestBazelWorkerHostFetchAlwaysRuns).
 func TestBazelMultiLaneWorkerEnvPreflight(t *testing.T) {
 	const (
 		skip      = "steps.worker-env.outputs.pin-moved != 'true'"
@@ -973,22 +671,10 @@ func TestBazelMultiLaneWorkerEnvPreflight(t *testing.T) {
 	if strings.Contains(pre.Run, "--depth") {
 		t.Errorf("lane preflight fetches with --depth into a full-history checkout:\n%s", pre.Run)
 	}
-	// The unit lane measures: it leads every non-empty lane list
-	// (TestBazelMultiLaneLaneList runs the Lanes step against wantMultiLanes).
-	for _, event := range multiLaneEvents {
-		for _, mode := range multiLaneModes {
-			if l := wantMultiLanes(event, mode); len(l) > 0 && l[0] != "unit" {
-				t.Errorf("event %s, mode %s: lanes %v start without unit, which measures the host", event, mode, l)
-			}
-		}
-	}
-	measAt, meas := findStep(lane, runs(rbeWorkerScript))
-	if meas == nil || meas.If != "always() && matrix.lane == 'unit' && steps.worker-env.outputs.measure == 'true'" ||
-		len(meas.Env) != 1 || meas.Env["WORKER_MODE"] != "measure" {
-		t.Fatalf("lane job: no unit-lane host measurement step (if measure, WORKER_MODE=measure): %+v", meas)
-	}
-	if measAt != len(lane.Steps)-1 {
-		t.Errorf("the host measurement is step %d of %d; it must be last, after every bazel command (its toolset install would re-key the client's actions)", measAt, len(lane.Steps))
+	// The lane job does not measure its own Blacksmith host; the worker-host
+	// job does, once per run instead of once per lane.
+	if _, meas := findStep(lane, runs("blacksmith-worker.sh")); meas != nil {
+		t.Errorf("lane job still measures the host (%+v); worker-host covers this now (fix 10), once per run instead of once per lane", meas)
 	}
 
 	coverage := wf.Jobs["coverage"]
@@ -996,7 +682,7 @@ func TestBazelMultiLaneWorkerEnvPreflight(t *testing.T) {
 	if cpre == nil || cpre.Env["WORKER_ENV_REMOTE"] != "true" {
 		t.Errorf("coverage preflight must set WORKER_ENV_REMOTE=true (the job runs in mode remote only): %+v", cpre)
 	}
-	if _, m := findStep(coverage, runs(rbeWorkerScript)); m != nil {
-		t.Errorf("coverage job measures the host; the unit lane does")
+	if _, m := findStep(coverage, runs("blacksmith-worker.sh")); m != nil {
+		t.Errorf("coverage job measures the host; the worker-host job does")
 	}
 }

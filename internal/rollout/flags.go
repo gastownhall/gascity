@@ -19,10 +19,14 @@ type resolved[T any] struct {
 // true). So an unwired Flags runs legacy paths; OriginOf returns "" for a gate a
 // zero Flags never resolved. Build defaults with ForTest or Resolve, never Flags{}.
 type Flags struct {
-	beadsConditionalWrites resolved[Mode]
-	beadsGuardedRelease    resolved[Mode]
-	formulaV2              resolved[bool]
-	notices                []Notice
+	beadsConditionalWrites   resolved[Mode]
+	beadsGuardedRelease      resolved[Mode]
+	formulaV2                resolved[bool]
+	allowSchemaBehindMigrate resolved[bool]
+	opsContent               resolved[Mode]
+	opsControl               resolved[Mode]
+	opsLifecycle             resolved[Mode]
+	notices                  []Notice
 }
 
 // OriginOf returns the Origin recorded for a registered gate Key (empty for an
@@ -36,6 +40,14 @@ func (f Flags) OriginOf(key string) Origin {
 		return f.beadsGuardedRelease.origin
 	case keyDaemonFormulaV2:
 		return f.formulaV2.origin
+	case keyBeadsAllowSchemaBehindMigrate:
+		return f.allowSchemaBehindMigrate.origin
+	case keyOpsContent:
+		return f.opsContent.origin
+	case keyOpsControl:
+		return f.opsControl.origin
+	case keyOpsLifecycle:
+		return f.opsLifecycle.origin
 	default:
 		return ""
 	}
@@ -52,6 +64,14 @@ func (f Flags) ValueOf(key string) string {
 		return string(f.beadsGuardedRelease.value)
 	case keyDaemonFormulaV2:
 		return strconv.FormatBool(f.formulaV2.value)
+	case keyBeadsAllowSchemaBehindMigrate:
+		return strconv.FormatBool(f.allowSchemaBehindMigrate.value)
+	case keyOpsContent:
+		return string(f.opsContent.value)
+	case keyOpsControl:
+		return string(f.opsControl.value)
+	case keyOpsLifecycle:
+		return string(f.opsLifecycle.value)
 	default:
 		return ""
 	}

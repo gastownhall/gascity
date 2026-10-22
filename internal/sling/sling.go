@@ -224,8 +224,9 @@ type SlingResult struct {
 	ContainerType string // "convoy", "epic", etc. (batch only)
 	Routed        int
 	Failed        int
-	Skipped       int // total skipped (idempotent + non-open)
+	Skipped       int // total skipped (idempotent + not open at dispatch turn + not open at listing)
 	IdempotentCt  int // how many were skipped due to idempotency
+	NotOpenCt     int // how many were listed open but no longer open at their dispatch turn
 	Total         int
 	NudgeAgent    *config.Agent // non-nil if caller should nudge
 
@@ -244,6 +245,9 @@ type SlingChildResult struct {
 	WorkflowID  string // if graph workflow attached
 	WispRootID  string // if formula attached
 	FormulaName string // formula used
+	// Conflict is the live source workflow that refused the child's launch,
+	// when that is why it failed.
+	Conflict *sourceworkflow.ConflictError
 }
 
 // Sling provides intent-based work routing operations. Construct via New.
@@ -366,6 +370,35 @@ func (s *Sling) AttachFormula(_ context.Context, formulaName, beadID string, tar
 		ScopeKind:     opts.ScopeKind,
 		ScopeRef:      opts.ScopeRef,
 	}, s.deps, s.deps.Store)
+}
+
+// Dispatch is the one entry point `gc sling` and POST /v0/city/{c}/sling share
+// for an explicit target. It takes the caller's whole intent as SlingOpts (bead
+// or formula, --on, --no-formula, title, vars, scope and the routing flags)
+// and lets the domain decide what it means: a standalone formula launch, an
+// explicit or default-formula attachment, a plain route, or a convoy whose open
+// children are routed one by one. Keeping that decision here rather than in
+// each transport is what keeps the API from drifting from the CLI; the API
+// once skipped convoy expansion and dropped title and vars on the target's
+// default formula. querier is the store the bead or convoy is read from.
+func (s *Sling) Dispatch(ctx context.Context, opts SlingOpts, querier BeadChildQuerier) (SlingResult, error) {
+	if opts.IsFormula || opts.OnFormula != "" || (!opts.NoFormula && opts.Target.EffectiveDefaultSlingFormula() != "") {
+		// Formula paths attach per child (or treat a convoy as one graph.v2
+		// input), which DoSlingBatch handles directly.
+		return DoSlingBatch(opts, s.deps, querier)
+	}
+	return s.ExpandConvoy(ctx, opts.BeadOrFormula, opts.Target, RouteOpts{
+		Merge:      opts.Merge,
+		NoConvoy:   opts.NoConvoy,
+		Owned:      opts.Owned,
+		Reassign:   opts.Reassign,
+		Nudge:      opts.Nudge,
+		Force:      opts.Force,
+		SkipPoke:   opts.SkipPoke,
+		DryRun:     opts.DryRun,
+		InlineText: opts.InlineText,
+		NoFormula:  opts.NoFormula,
+	}, querier)
 }
 
 // ExpandConvoy expands a convoy and routes each open child.
@@ -1513,7 +1546,7 @@ func snapshotGraphV2ReplacementRoot(store beads.Store, formulaName string, vars 
 	if err := closeFailedGraphV2RootsByKey(store, key); err != nil {
 		return graphV2ReplacementSnapshot{}, err
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return graphV2ReplacementSnapshot{}, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1565,7 +1598,7 @@ func closeFailedGraphV2Roots(store beads.Store, recipe *formula.Recipe) error {
 }
 
 func closeFailedGraphV2RootsByKey(store beads.Store, key string) error {
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 0, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return fmt.Errorf("looking up failed formulas v2 roots for key %s: %w", key, err)
 	}
@@ -1618,7 +1651,7 @@ func existingGraphV2Root(store beads.Store, recipe *formula.Recipe) (*molecule.R
 	if key == "" {
 		return nil, nil
 	}
-	matches, err := store.ListByMetadata(map[string]string{beadmeta.Graphv2RootKeyMetadataKey: key}, 2, beads.WithBothTiers)
+	matches, err := sourceworkflow.KeyedRoots(store, beadmeta.Graphv2RootKeyMetadataKey, key, beads.WithBothTiers)
 	if err != nil {
 		return nil, fmt.Errorf("looking up formulas v2 root key %s: %w", key, err)
 	}
@@ -1706,6 +1739,11 @@ func PromoteWorkflowLaunchBead(store beads.Store, beadID string) error {
 type BeadCheckResult struct {
 	Idempotent bool
 	Warnings   []string
+	// Status is the bead status the check read, empty when the bead could not
+	// be read. It is reported alongside the routing verdict, not folded into
+	// it: DoSlingBatch skips a child it listed as open whose status here is no
+	// longer open (#5927), and single-bead sling ignores it.
+	Status string
 }
 
 // BeadCheckOptions configures pre-flight bead state checks for a route.

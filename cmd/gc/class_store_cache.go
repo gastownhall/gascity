@@ -38,9 +38,16 @@ package main
 //     re-scan: at most the adaptive cadence (30/60/120s by active-row count)
 //     plus one 5s poll.
 //
-// Those are the bounds a single-store city's cached class reads already live
-// with, minus the gap bd's missing hooks leave there. A poked tick still loads
-// its session snapshot live (loadTickSessionBeadSnapshot).
+// Those are the bounds a single-store city's cached class reads live with when
+// its caches have no ledger feed, minus the gap bd's missing hooks leave there.
+// With [beads] ledger_feed = "auto", a city or rig cache over a store that
+// carries a journal also sees such a write when its feed reads the journal
+// (ledger_feed.go). This cache has no feed, so the binding stays on the
+// re-scan: it is built with wrapWithCachingStore, which never tails, because
+// the feed's mode takes effect by rebuilding the stores at a reload (the mode
+// is part of the store signature) and a reload never rebuilds this cache
+// (Lifecycle, below). A poked tick still loads its session snapshot live
+// (loadTickSessionBeadSnapshot).
 //
 // One known limit: a relic — a bead `gc storage migrate` carried into the
 // binding under its original work-ledger id — refreshes only at the re-scan.
@@ -71,11 +78,12 @@ import (
 // one CachingStore, shared by every class that engine serves, and returns the
 // routes. Store identity is load-bearing, as it is for withCLIEmission: callers
 // dedup legs by store, so a cache per class would turn one binding into five.
+// Each cache is wrapWithCachingStore's, with no ledger feed (Freshness, above).
 //
 // Routes that already emit (the one-shot funnel's) are returned untouched: a
 // cache over an emitter would emit twice and hide the engine's ready
 // projection. A store that is already a cache is left as it is.
-func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provider) *storageRoutes {
+func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provider, opts ...beads.CachingStoreOption) *storageRoutes {
 	if r == nil || len(r.stores) == 0 || r.emitCityPath != "" {
 		return r
 	}
@@ -89,7 +97,7 @@ func (r *storageRoutes) withControllerCache(ctx context.Context, ep events.Provi
 		}
 		wrapped, ok := cached[store]
 		if !ok {
-			wrapped = wrapWithCachingStore(ctx, store, ep, true, beads.WithEventIDPrefixes(r.namespacesServedBy(store)...))
+			wrapped = wrapWithCachingStore(ctx, store, ep, true, append([]beads.CachingStoreOption{beads.WithEventIDPrefixes(r.namespacesServedBy(store)...)}, opts...)...)
 			if wrapped == nil {
 				continue
 			}

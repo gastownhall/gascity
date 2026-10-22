@@ -847,6 +847,13 @@ func (r *FileRecorder) ListInFlight(filter Filter) ([]Event, error) {
 	return ReadFilteredWithInFlight(r.path, filter)
 }
 
+// ListInFlightContext is ListInFlight that stops between archives once ctx is
+// done (ReadFilteredWithInFlightContext). It implements
+// [InFlightContextProvider].
+func (r *FileRecorder) ListInFlightContext(ctx context.Context, filter Filter) ([]Event, error) {
+	return ReadFilteredWithInFlightContext(ctx, r.path, filter)
+}
+
 // ListTail returns trailing matching events from the underlying file.
 func (r *FileRecorder) ListTail(filter Filter, limit int) ([]Event, error) {
 	return ReadFilteredTail(r.path, filter, limit)

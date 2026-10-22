@@ -5,17 +5,22 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
 
 // ReadFilteredContext is ReadFiltered but aborts the archive scan as soon as
 // ctx is canceled, instead of always scanning every overlapping archive to
-// completion. Cancellation is checked once per archive in the loop, so a
-// caller that disconnects mid-scan gets back the events found so far plus
+// completion. Cancellation is checked once per archive in the loop, and
+// before each chunk of a Since filter's backward walk of the active log, so
+// a caller that disconnects mid-scan gets back the events found so far plus
 // ctx.Err(), rather than waiting for the full (potentially large) fallback
 // scan to finish.
 func ReadFilteredContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(ctx, path, filter); bounded || err != nil {
+		return result, err
+	}
 	result, _, err := readFilteredTrackedContext(ctx, path, filter)
 	return result, err
 }
@@ -73,6 +78,16 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	// Skip the prefix of the active log the cursor already covers, as
+	// readFilteredTracked does.
+	scanFrom := int64(0)
+	if st, statErr := f.Stat(); statErr == nil {
+		scanFrom = activeScanStart(f, st.Size(), filter.AfterSeq)
+	}
+	if _, err := f.Seek(scanFrom, io.SeekStart); err != nil {
+		return result, listed, fmt.Errorf("seeking events: %w", err)
+	}
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
 	for scanner.Scan() {
@@ -98,6 +113,9 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 // ctx cancellation through the underlying archive scan, the same way
 // ReadFilteredContext does for ReadFiltered.
 func ReadFilteredWithInFlightContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(ctx, path, filter); bounded || err != nil {
+		return result, err
+	}
 	base, listedArchives, baseErr := readFilteredTrackedContext(ctx, path, filter)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
 	if len(rotated) == 0 {

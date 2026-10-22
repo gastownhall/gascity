@@ -334,8 +334,8 @@ func TestPrePushSuiteWorkerEnvGuard(t *testing.T) {
 			if tc.wantGH && !strings.Contains(ghLog, "issue list -R "+prePushOriginRepo+" --label "+rbeWorkerEnvLabel) {
 				t.Errorf("gh did not list %s's drift issues: %q", prePushOriginRepo, ghLog)
 			}
-			// With no summary file, preflight's `echo | summary` races the
-			// reader's exit and can die of SIGPIPE instead of reporting.
+			// A push from inside a GitHub Actions job must not write that
+			// job's outputs or step summary.
 			for _, sinks := range strings.Split(strings.TrimSpace(f.read(t, w.ghSinks)), "\n") {
 				if tc.wantGH && sinks != "/dev/null /dev/null" {
 					t.Errorf("preflight ran with GITHUB_OUTPUT GITHUB_STEP_SUMMARY = %q, want /dev/null sinks", sinks)

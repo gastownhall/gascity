@@ -98,6 +98,20 @@ func TestBdStoreConditionalWriterConformance(t *testing.T) {
 			})
 	})
 
+	t.Run("pinned_id_duplicate", func(t *testing.T) {
+		// MUST stay below the capability skip above. bd v1.0.4 through
+		// v1.2.2 runs `bd create --id` through INSERT ... ON DUPLICATE KEY
+		// UPDATE and overwrites an existing row; the refusal arrived with
+		// v1.3.0. Create-if-absent callers that fence every write (the op
+		// journal) refuse a bd without --if-revision at construction through
+		// beads.ProbeConditionalWrites, so the capable bd this leg runs on is
+		// the one they accept, and it must refuse a duplicate pinned id.
+		beadstest.RunPinnedIDDuplicateConformance(t, func(t *testing.T) beads.Store {
+			store, _ := newConditionalIntegrationBdStore(t)
+			return store
+		})
+	})
+
 	t.Run("capable_usage_echo_must_not_classify_unsupported", func(t *testing.T) {
 		// MUST stay below the capability skip above: a pre-#4682 bd rejects
 		// --if-revision ITSELF ("unknown flag: --if-revision"), which is a

@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"sync"
 	"testing"
 	"testing/synctest"
@@ -878,6 +879,46 @@ func RunConcurrencyTests(t *testing.T, newProvider func(t *testing.T) (events.Pr
 				t.Errorf("duplicate seq: %d", e.Seq)
 			}
 			seen[e.Seq] = true
+		}
+	})
+}
+
+// RunSinceOrderingTests checks that a Since filter matches each event on its
+// own Ts, in whatever order the events were recorded. A provider keeps a
+// caller-supplied Ts, so an event recorded after others can carry an older Ts
+// than theirs, and a reader must not take it as the end of the window.
+func RunSinceOrderingTests(t *testing.T, newProvider func(t *testing.T) (events.Provider, func())) {
+	t.Helper()
+
+	t.Run("ListFilterBySinceAroundBackdatedEvent", func(t *testing.T) {
+		p, cleanup := newProvider(t)
+		defer cleanup()
+
+		// UTC for the same reason as ListFilterBySince.
+		now := time.Now().UTC()
+		since := now.Add(-1 * time.Hour)
+		listTypes := func() []string {
+			t.Helper()
+			got, err := p.List(events.Filter{Since: since})
+			if err != nil {
+				t.Fatalf("List: %v", err)
+			}
+			types := make([]string, 0, len(got))
+			for _, e := range got {
+				types = append(types, e.Type)
+			}
+			return types
+		}
+
+		p.Record(events.Event{Type: events.SessionWoke, Actor: "gc"}) // auto-filled = now
+		p.Record(events.Event{Type: events.BeadCreated, Actor: "human", Ts: now.Add(-2 * time.Hour)})
+		if got, want := listTypes(), []string{events.SessionWoke}; !slices.Equal(got, want) {
+			t.Fatalf("List(Since) after a backdated last event = %v, want %v", got, want)
+		}
+
+		p.Record(events.Event{Type: events.BeadClosed, Actor: "gc"}) // auto-filled = now
+		if got, want := listTypes(), []string{events.SessionWoke, events.BeadClosed}; !slices.Equal(got, want) {
+			t.Errorf("List(Since) around a backdated event = %v, want %v", got, want)
 		}
 	})
 }

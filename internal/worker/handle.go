@@ -7,6 +7,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/pricing"
 	"github.com/gastownhall/gascity/internal/runtime"
@@ -30,29 +31,44 @@ type StateHandle interface {
 
 // LifecycleHandle exposes worker lifecycle control operations.
 type LifecycleHandle interface {
-	Start(context.Context) error
-	StartResolved(context.Context, string, runtime.Config) error
-	Attach(context.Context) error
+	Start(context.Context, sessionpkg.Actor) error
+	StartResolved(context.Context, sessionpkg.Actor, sessionpkg.Incarnation, string, runtime.Config) error
+	Attach(context.Context, sessionpkg.Actor) error
 	Create(context.Context, CreateMode) (sessionpkg.Info, error)
 	Reset(context.Context) error
-	Stop(context.Context) error
-	// StopForShutdown is Stop with CITY-SHUTDOWN intent, for the `gc stop` /
-	// `gc restart` sweep only. It carries latitude on lifecycle states that have
-	// no live turn to suspend (notably draining), which a targeted operator Stop
-	// must keep rejecting.
+	Stop(context.Context, sessionpkg.Actor) error
+	// StopForShutdown is Stop with CITY-SHUTDOWN intent (an ActorSweep), for
+	// the `gc stop` / `gc restart` sweep only. It carries latitude on lifecycle
+	// states that have no live turn to suspend (notably draining), which a
+	// targeted operator Stop must keep rejecting.
 	StopForShutdown(context.Context) error
-	Kill(context.Context) error
-	Close(context.Context) error
-	CloseDetailed(context.Context) (sessionpkg.CloseResult, error)
+	// StopIdle is Stop for the chat idle auto-suspend: the operator's
+	// transition rules, no operator hold.
+	StopIdle(context.Context, sessionpkg.Actor) error
+	Kill(context.Context, sessionpkg.Actor) error
+	Close(context.Context, sessionpkg.Actor) error
+	CloseDetailed(context.Context, sessionpkg.Actor) (sessionpkg.CloseResult, error)
 	Rename(context.Context, string) error
 	StateHandle
 }
 
+// FencedKillHandle exposes the operator kill under the session kill fence. A
+// handle bound to a session bead implements it; a bare runtime handle has no
+// row to fence.
+type FencedKillHandle interface {
+	KillFenced(context.Context, sessionpkg.Actor, func(string)) (sessionpkg.KillReport, error)
+	// KillRuntimeGone is KillFenced's "runtime already gone" verdict taken
+	// without the lease (session.Manager.KillRuntimeGone).
+	KillRuntimeGone(context.Context) (bool, error)
+}
+
 // MessagingHandle exposes live input delivery operations.
 type MessagingHandle interface {
-	Message(context.Context, MessageRequest) (MessageResult, error)
+	// Message and Nudge may start or resume the session as the Actor may
+	// (CONTRACT v5.9 D8).
+	Message(context.Context, sessionpkg.Actor, MessageRequest) (MessageResult, error)
 	Interrupt(context.Context, InterruptRequest) error
-	Nudge(context.Context, NudgeRequest) (NudgeResult, error)
+	Nudge(context.Context, sessionpkg.Actor, NudgeRequest) (NudgeResult, error)
 }
 
 // HistoryHandle exposes normalized transcript history reads.
@@ -95,6 +111,7 @@ type Handle interface {
 	InteractionHandle
 	PeekHandle
 	LiveObservationHandle
+	TurnHandle
 }
 
 // Phase captures the worker-level lifecycle state surfaced by [Handle.State].
@@ -145,11 +162,32 @@ const (
 type MessageRequest struct {
 	Text     string         `json:"text"`
 	Delivery DeliveryIntent `json:"delivery,omitempty"`
+	// DeliveryKey is the caller's stable identity for this one delivery, as
+	// NudgeRequest.DeliveryKey. It reaches a runtime that deduplicates keyed
+	// deliveries on every intent that sends now, deliver-now and immediate
+	// defaults included. A message the session queues (a follow-up, a
+	// dormant row, a deliver-now that waits for the turn boundary) is later
+	// delivered by the queue under the queue's own key.
+	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Redelivery says DeliveryKey's delivery may already have reached the
+	// session, as NudgeRequest.Redelivery. The lookup runs before anything
+	// else the submit does: when the runtime holds the delivery there is no
+	// turn sighting, interrupt, start or send, and the result is Replayed.
+	// Ignored without a DeliveryKey.
+	Redelivery bool `json:"redelivery,omitempty"`
 }
 
 // MessageResult reports whether a worker turn was queued or delivered now.
 type MessageResult struct {
 	Queued bool `json:"queued"`
+	// Deferred: the actor queued it (session.SubmitOutcome.Deferred).
+	Deferred bool `json:"-"`
+	// Interrupt is what an interrupt_now did about the running turn
+	// (session.SubmitOutcome.Interrupt); nil when no turn fence ran.
+	Interrupt *sessionpkg.TurnInterruptReport `json:"-"`
+	// Replayed: a redelivery the runtime already held. Nothing was done;
+	// Queued is false and Interrupt nil.
+	Replayed bool `json:"-"`
 }
 
 // CreateMode controls how a worker session should be materialized.
@@ -162,8 +200,56 @@ const (
 	CreateModeStarted CreateMode = "started"
 )
 
-// InterruptRequest is reserved for future interrupt controls.
-type InterruptRequest struct{}
+// InterruptRequest controls one interrupt of the worker's current turn.
+type InterruptRequest struct {
+	// Fence, when set, confines every key and interrupt to the incarnation
+	// it names (see runtime.InputFence). A runtime that cannot fence the
+	// session refuses with runtime.ErrInputFenceUnsupported before sending
+	// anything; a miss is a *runtime.FenceMismatchError, and a session that
+	// is not running, or has no session row, is one finding it absent (both
+	// handles; a turn-scoped interrupt on a SessionHandle with no session
+	// created yet is refused first, as Turn documents). Past that the
+	// handles differ. A SessionHandle maps the liveness it reads before the
+	// stop as session.Manager.StopTurnFenced documents: an exited agent is a
+	// miss finding it dead, and a read that cannot answer is
+	// runtime.ErrRuntimeUnavailable. A RuntimeHandle takes no liveness read
+	// and leaves the verdict to the runtime's guard; tmux's checks the agent
+	// pane, not the agent process, so an interrupt into an exited agent
+	// whose pane lives on can return nil. It is a capability and never
+	// serialized. A turn-scoped interrupt takes it too, as a separate axis
+	// from the turn (X11 §3.1): a turn names what to interrupt, not which
+	// incarnation hosts it, since a resumed incarnation can carry on its
+	// predecessor's transcript. On a transcript source every key goes under
+	// the fence, after the turn check; a protocol source's runtime takes no
+	// input fence on its turn interrupt, so a fenced one is refused with
+	// runtime.ErrInputFenceUnsupported, nothing sent.
+	Fence runtime.InputFence `json:"-"`
+	// Turn, when set, scopes the interrupt to the turn it names, a TurnID an
+	// earlier CurrentTurn read reported (X11 §5.2, SESSION-RUNTIME-023).
+	// Empty interrupts whatever runs (session scope). A turn-scoped
+	// interrupt is refused, with nothing sent, unless the session's turn
+	// capabilities record starts, fence at least checked and see ends at
+	// least inferred: runtime.ErrTurnIdentityUnsupported, or
+	// session.ErrTurnInterruptUnsupported when the runtime cannot interrupt
+	// at all, and runtime.ErrTurnIdentityUnsupported too when a
+	// SessionHandle has no session created yet, fenced or not. A closed
+	// session row, or one closed by the time the stop or the interrupt holds
+	// the session mutation lock, is an error wrapping
+	// runtime.ErrSessionNotFound, nothing sent; a row that will not load is
+	// runtime.ErrRuntimeUnavailable, nothing sent. It returns nil only once
+	// a read of the session's turns shows the turn no longer current (or
+	// the session gone) within 15 s of the check; a
+	// *runtime.TurnNotCurrentError when the turn was not current, or the
+	// runtime not running by a fresh liveness read, nothing sent; an error
+	// wrapping runtime.ErrTurnNotEnded when it was interrupted but not seen
+	// to end, which wraps no other sentinel (the last failure is in its text
+	// only), so "sent" is never misread as unknown; and an error wrapping
+	// runtime.ErrRuntimeUnavailable when it is unknown whether anything was
+	// sent, or when the turn could not be checked before ctx ended or its
+	// idle state could not be read (nothing sent then). ctx bounds the wait
+	// for the session mutation lock and the check before the keys.
+	Turn string `json:"turn,omitempty"`
+}
 
 // NudgeDelivery controls how a nudge should be delivered.
 type NudgeDelivery string
@@ -183,6 +269,101 @@ type NudgeRequest struct {
 	Delivery NudgeDelivery   `json:"delivery,omitempty"`
 	Source   string          `json:"source,omitempty"`
 	Wake     NudgeWakePolicy `json:"wake,omitempty"`
+	// DeliveryKey is the caller's stable identity for this one delivery. A
+	// caller that redelivers the same content after an unknown outcome
+	// passes the same key, so a runtime that deduplicates keyed deliveries
+	// ([runtime.KeyedNudgeProvider]) replays the first delivery instead of
+	// delivering twice. Distinct content needs a distinct key. Empty
+	// delivers unkeyed. Default and immediate delivery carry the key to a
+	// runtime that deduplicates keyed deliveries; wait-idle delivery goes
+	// out unkeyed.
+	DeliveryKey string `json:"delivery_key,omitempty"`
+	// Redelivery says DeliveryKey's delivery may already have reached the
+	// session: an earlier attempt under the key timed out, lost its answer
+	// or crashed. A runtime that keeps keyed deliveries is asked first; one
+	// it holds is not sent again, and the result is Delivered and Replayed
+	// with its receipt. A failed lookup is the nudge's error, wrapping
+	// runtime.ErrNudgeNotSent; nothing is sent. Ignored without a
+	// DeliveryKey.
+	Redelivery bool `json:"redelivery,omitempty"`
+	// Fence, when set, delivers only to the incarnation it names (see
+	// runtime.InputFence): a miss is a *runtime.FenceMismatchError, and a
+	// runtime that cannot fence the session refuses with
+	// runtime.ErrInputFenceUnsupported unless AllowUnfenced. A session with
+	// no session row, or not running, is a miss finding it absent and one
+	// whose agent exited a miss finding it dead, where an unfenced nudge
+	// reports it undelivered; a liveness read that fails is
+	// runtime.ErrRuntimeUnavailable (both handles). A fenced nudge must be
+	// live-only with default or immediate delivery (ErrFencedNudgeShape). It
+	// is a capability and never serialized.
+	Fence runtime.InputFence `json:"-"`
+	// AllowUnfenced lets a fenced nudge to a runtime that cannot fence the
+	// session go out unfenced; the result then reports Unfenced.
+	AllowUnfenced bool `json:"allow_unfenced,omitempty"`
+}
+
+// ErrFencedNudgeShape reports a fenced nudge that is not live-only, or that
+// waits for idle: a fenced nudge never starts a runtime, and the wait-idle
+// path cannot report a refused send.
+var ErrFencedNudgeShape = errors.New("a fenced nudge must be live-only with default or immediate delivery")
+
+// validateFencedNudge refuses a fenced request that names no incarnation
+// or lacks the fenced shape. A request with no fence passes.
+func validateFencedNudge(req NudgeRequest) error {
+	if req.Fence.IsZero() {
+		return nil
+	}
+	if err := req.Fence.Validate(); err != nil {
+		return err
+	}
+	if normalizeNudgeWakePolicy(req.Wake) != NudgeWakeLiveOnly || req.Delivery == NudgeDeliveryWaitIdle {
+		return ErrFencedNudgeShape
+	}
+	switch req.Delivery {
+	case "", NudgeDeliveryDefault, NudgeDeliveryImmediate:
+		return nil
+	}
+	return ErrFencedNudgeShape
+}
+
+// fencedNudgeContext applies req's fence to ctx. The request's field is the
+// worker's only fence: a request with no fence returns ctx with any input
+// fence it carried cleared, so a caller's ctx fence never reaches a path
+// (wait-idle, a wake that starts the runtime) the fenced shape refuses.
+// Otherwise the request must pass validateFencedNudge; then fencing (the
+// runtime's fencing of the session) decides: a runtime that cannot fence is
+// refused with runtime.ErrInputFenceUnsupported, or, when req.AllowUnfenced,
+// delivered without the fence and reported unfenced.
+func fencedNudgeContext(ctx context.Context, req NudgeRequest, fencing func() (runtime.InputFencing, error)) (context.Context, bool, error) {
+	if req.Fence.IsZero() {
+		if _, ok := runtime.InputFenceFrom(ctx); ok {
+			ctx = runtime.WithInputFence(ctx, runtime.InputFence{})
+		}
+		return ctx, false, nil
+	}
+	if err := validateFencedNudge(req); err != nil {
+		return ctx, false, err
+	}
+	f, err := fencing()
+	if err != nil {
+		return ctx, false, err
+	}
+	if f == runtime.InputFencingNone {
+		if req.AllowUnfenced {
+			return runtime.WithInputFence(ctx, runtime.InputFence{}), true, nil
+		}
+		return ctx, false, runtime.ErrInputFenceUnsupported
+	}
+	return runtime.WithInputFence(ctx, req.Fence), false, nil
+}
+
+// nudgeDeliveryContext scopes req's delivery key to ctx for this one
+// delivery (see [runtime.WithNudgeDeliveryKey]).
+func nudgeDeliveryContext(ctx context.Context, req NudgeRequest) context.Context {
+	if req.DeliveryKey == "" {
+		return ctx
+	}
+	return runtime.WithNudgeDeliveryKey(ctx, req.DeliveryKey)
 }
 
 // NudgeResult reports whether the requested live delivery actually happened.
@@ -194,6 +375,19 @@ type NudgeResult struct {
 	// not (yet) distinguish — a caller must treat it as a hint, never as a
 	// second copy of Delivered.
 	Undelivered NudgeUndeliveredReason `json:"undelivered,omitempty"`
+	// Unfenced reports a fenced request (NudgeRequest.Fence) delivered
+	// without its fence, as AllowUnfenced permits for a runtime that cannot
+	// fence the session. Set only when Delivered, and never when Replayed.
+	Unfenced bool `json:"unfenced,omitempty"`
+	// Replayed reports a redelivery (NudgeRequest.Redelivery) the runtime
+	// already held: nothing was sent; Delivered is true.
+	Replayed bool `json:"replayed,omitempty"`
+	// Receipt is the runtime's receipt of the delivery, from a runtime that
+	// deduplicates keyed deliveries: for a delivery a RuntimeHandle made
+	// now, or one a redelivery's lookup found (either handle). A
+	// SessionHandle's live delivery goes through the session manager and
+	// reports none. Zero otherwise; never text.
+	Receipt runtime.DeliveryReceipt `json:"-"`
 }
 
 // NudgeUndeliveredReason is the closed set of reasons a live nudge did not
@@ -209,6 +403,26 @@ const (
 	// NudgeUndeliveredNoIdleBoundary means the provider CAN take live delivery
 	// but the session never reached the idle boundary within the wait window.
 	NudgeUndeliveredNoIdleBoundary NudgeUndeliveredReason = "no_idle_boundary"
+	// NudgeUndeliveredPendingInteraction means the session is waiting on a
+	// pending interaction such as a tool permission prompt. Typing into it
+	// would answer the prompt, so the nudge waits until it is resolved.
+	NudgeUndeliveredPendingInteraction NudgeUndeliveredReason = "pending_interaction"
+	// NudgeUndeliveredHeld means the session is held, which a nudge does not
+	// resume (CONTRACT v5.9 D8), and nothing queued the nudge: the caller
+	// must queue it (a wait-idle nudge).
+	NudgeUndeliveredHeld NudgeUndeliveredReason = "session_held"
+	// NudgeQueuedHeld means the session is held and the nudge was queued for
+	// it; the caller must not queue it again.
+	NudgeQueuedHeld NudgeUndeliveredReason = "session_held_queued"
+	// NudgeQueued means the session could not take the nudge now (it is held,
+	// (ActorBackground) not running, or its agent is dead in a pane still up)
+	// and queued it itself; the caller must not queue it again.
+	NudgeQueued NudgeUndeliveredReason = "queued"
+	// NudgeUndeliveredAgentDead means the pane is up but its agent is dead (a
+	// crash the controller has not healed), or a fresh read could not vouch
+	// for it: text typed now would be lost with the pane, and nothing queued
+	// the nudge, so the caller queues it (mc-48az4).
+	NudgeUndeliveredAgentDead NudgeUndeliveredReason = "agent_dead"
 )
 
 // NudgeWakePolicy controls whether a nudge may wake a stopped session.
@@ -230,10 +444,14 @@ func normalizeNudgeWakePolicy(policy NudgeWakePolicy) NudgeWakePolicy {
 
 // HistoryRequest scopes transcript loading for a worker.
 type HistoryRequest struct {
-	TailCompactions int    `json:"tail_compactions,omitempty"`
-	LogicalID       string `json:"logical_conversation_id,omitempty"`
-	BeforeEntryID   string `json:"before_entry_id,omitempty"`
-	AfterEntryID    string `json:"after_entry_id,omitempty"`
+	TailCompactions int `json:"tail_compactions,omitempty"`
+	// LogicalID, when set, replaces the session's own logical conversation ID
+	// (session.Info.LogicalConversationID). The handle stitches snapshots that
+	// share it, so a caller-supplied value must change whenever the session
+	// starts a new conversation.
+	LogicalID     string `json:"logical_conversation_id,omitempty"`
+	BeforeEntryID string `json:"before_entry_id,omitempty"`
+	AfterEntryID  string `json:"after_entry_id,omitempty"`
 }
 
 // PendingInteraction is the worker-level view of a blocking interaction.
@@ -283,12 +501,21 @@ type SessionHandleConfig struct {
 	// Pricing estimates per-invocation cost for telemetry. Nil falls back
 	// to the registry built from shipped defaults.
 	Pricing *pricing.Registry
+	// ResolveBead reads one work bead by id, wherever it lives. Usage
+	// attribution uses it to find the formula the session's acting bead was
+	// compiled from. Nil leaves facts unattributed.
+	ResolveBead func(id string) (beads.Bead, error)
+	// FormulaMemo remembers the formula an acting bead belongs to. Nil is
+	// valid and resolves on every batch.
+	FormulaMemo *FormulaNameMemo
 }
 
 // SessionHandle is the production worker handle backed by session.Manager.
 type SessionHandle struct {
 	mu             sync.Mutex
 	manager        *sessionpkg.Manager
+	resolveBead    func(id string) (beads.Bead, error)
+	formulaMemo    *FormulaNameMemo
 	adapter        SessionLogAdapter
 	recorder       events.Recorder
 	usageSink      usage.Sink
@@ -312,6 +539,8 @@ type SessionHandle struct {
 	sidecarRetryID        string
 	sidecarRetryAttempts  int
 	sidecarRetryScheduled bool
+	// turns is the turn-observation state (turn.go).
+	turns turnObservation
 }
 
 var (
@@ -323,6 +552,8 @@ var (
 	_ InteractionHandle     = (*SessionHandle)(nil)
 	_ PeekHandle            = (*SessionHandle)(nil)
 	_ LiveObservationHandle = (*SessionHandle)(nil)
+	_ TurnHandle            = (*SessionHandle)(nil)
+	_ TurnHandle            = (*RuntimeHandle)(nil)
 )
 
 type historyGeneration struct {

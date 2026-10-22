@@ -1,0 +1,121 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "opjournal",
+    srcs = [
+        "codec.go",
+        "delivery_key.go",
+        "digest.go",
+        "doc.go",
+        "errors.go",
+        "fact.go",
+        "fact_write.go",
+        "id.go",
+        "interrupt_credit.go",
+        "kind.go",
+        "lane.go",
+        "lane_done.go",
+        "lane_open.go",
+        "lane_plan.go",
+        "lane_scan.go",
+        "lane_stage.go",
+        "lane_store.go",
+        "lane_take.go",
+        "lane_text.go",
+        "lease.go",
+        "op.go",
+        "order.go",
+        "request.go",
+        "runtime_row.go",
+        "store.go",
+        "turn_fold.go",
+        "turn_link.go",
+    ],
+    importpath = "github.com/gastownhall/gascity/internal/opjournal",
+    visibility = ["//:__subpackages__"],
+    deps = [
+        "//internal/beads",
+        "//internal/clock",
+        "//internal/promptsafe",
+    ],
+)
+
+go_test(
+    name = "opjournal_test",
+    srcs = [
+        "codec_test.go",
+        "delivery_key_test.go",
+        "digest_test.go",
+        "fact_test.go",
+        "fact_write_test.go",
+        "gen_test.go",
+        "id_test.go",
+        "interrupt_credit_test.go",
+        "kind_test.go",
+        "lane_done_test.go",
+        "lane_harness_test.go",
+        "lane_open_test.go",
+        "lane_plan_test.go",
+        "lane_property_test.go",
+        "lane_replay_test.go",
+        "lane_scan_test.go",
+        "lane_stage_test.go",
+        "lane_store_test.go",
+        "lane_take_done_test.go",
+        "lane_text_test.go",
+        "lease_order_test.go",
+        "runtime_row_test.go",
+        "store_test.go",
+        "testenv_import_test.go",
+        "turn_fold_model_test.go",
+        "turn_fold_test.go",
+        "turn_link_test.go",
+    ],
+    # TestTurnFoldIsStdlibOnly parses the fold's source,
+    # TestOwnIDFamiliesCoverEveryInfix parses every source file, and the lane
+    # text tests read their goldens.
+    data = glob(
+        ["*.go"],
+        exclude = ["*_test.go"],
+    ) + glob(["testdata/**"]),
+    embed = [":opjournal"],
+    deps = [
+        "//internal/beadmeta",
+        "//internal/beads",
+        "//internal/beads/beadstest",
+        "//internal/clock",
+        "//internal/coordclass",
+        "//internal/testenv",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

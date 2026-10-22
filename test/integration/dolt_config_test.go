@@ -5,6 +5,7 @@ package integration
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -17,8 +18,9 @@ import (
 
 // TestDoltConfigWiringExternalHost validates two things for issue 011:
 //
-//  1. A Dolt server bound to 0.0.0.0 is reachable via the machine's
-//     hostname (not just localhost) — proving the network path works.
+//  1. A Dolt server bound to 0.0.0.0 is reachable through an address other
+//     than 127.0.0.1 — proving it listens on every interface, which is the
+//     path a cross-machine setup would use.
 //
 //  2. Beads can be created and read through a server whose port was
 //     explicitly configured (not discovered from local state files) —
@@ -34,33 +36,26 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 	requireDoltIntegration(t)
 	env := newIsolatedToolEnv(t, true)
 
-	hostname, err := os.Hostname()
-	if err != nil {
-		t.Fatalf("getting hostname: %v", err)
-	}
-
 	// Start a Dolt server on 0.0.0.0 so it's reachable beyond localhost.
 	doltDataDir := filepath.Join(t.TempDir(), "dolt-data")
 	port := startDoltServerOnAllInterfaces(t, env, doltDataDir)
 
-	// Phase 1: Verify hostname resolves and server is reachable via it.
-	// This proves the network path that a cross-machine setup would use.
-	addrs, err := net.LookupHost(hostname)
-	if err != nil || len(addrs) == 0 {
-		t.Skipf("hostname %q does not resolve — skipping", hostname)
-	}
-	addr := net.JoinHostPort(hostname, port)
-	conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+	// Phase 1: Verify the server is reachable through an address other than
+	// 127.0.0.1, which a server bound to loopback alone would refuse. The
+	// candidates come from the host's own interfaces, never from DNS: the
+	// test must pass unchanged on a network-less executor, where resolving
+	// the hostname is exactly the undeclared input a cached result cannot
+	// carry (test/bazel-hermeticity.toml).
+	addr, err := firstReachableNonDefaultAddr(port)
 	if err != nil {
-		t.Skipf("cannot connect to Dolt via %s — skipping: %v", addr, err)
+		t.Skipf("no address other than 127.0.0.1 reaches the Dolt server — skipping: %v", err)
 	}
-	_ = conn.Close()
-	t.Logf("Phase 1 PASS: Dolt server reachable via hostname %s:%s", hostname, port)
+	t.Logf("Phase 1 PASS: Dolt server bound to 0.0.0.0 reachable via %s", addr)
 
 	// Phase 2: Create and read beads through the explicitly configured
 	// port (simulating what an agent gets from the config wiring).
 	// Connect via 127.0.0.1 to avoid Dolt's non-localhost auth requirement;
-	// Phase 1 already proved hostname reachability.
+	// Phase 1 already proved the all-interfaces binding.
 	wsDir := filepath.Join(t.TempDir(), "test-workspace")
 	if err := os.MkdirAll(wsDir, 0o755); err != nil {
 		t.Fatal(err)
@@ -150,12 +145,11 @@ func TestDoltConfigWiringExternalHost(t *testing.T) {
 // newIsolatedToolEnv-derived env this file's tests build does not leak the
 // ambient HOME into the bd/dolt subprocesses it drives.
 //
-// newIsolatedToolEnv pins env's own HOME to the REAL passwd-db home (via
-// pinRealHomeEnv/integrationEnvFor) because gc-start/gc-supervisor-start
-// consumers need it. Pure bd/dolt-exec callers like this file's
+// newIsolatedToolEnv sets env's own HOME explicitly (via isolateGCHomeEnv/
+// integrationEnvFor). Pure bd/dolt-exec callers like this file's
 // runBDInitCompat and its direct exec.Command(bdBinary, ...) calls inherit
-// that real-home pin unchanged — t.Setenv("HOME", ...) cannot reach it, so
-// this test substitutes a controlled stand-in for "whatever the real
+// that HOME unchanged — t.Setenv("HOME", ...) cannot reach it, so this test
+// substitutes a controlled stand-in for "whatever the real
 // invoking user's home happens to contain" instead, matching
 // TestBdStoreMailWispInsertIsolatesHOMEFromSharedServerConfig's technique.
 func TestDoltConfigWiringIsolatesHOMEFromSharedServerConfig(t *testing.T) {
@@ -333,4 +327,38 @@ func startDoltServerOnAllInterfaces(t *testing.T, env []string, dataDir string) 
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
+}
+
+// firstReachableNonDefaultAddr returns the first host:port, other than
+// 127.0.0.1, that accepts a TCP connection on port. It tries the host's own
+// non-loopback interface addresses first (what another machine would dial),
+// then 127.0.0.2: on Linux the whole 127.0.0.0/8 block routes to loopback, so
+// that address reaches a socket bound to 0.0.0.0 but not one bound to
+// 127.0.0.1, which keeps the check meaningful on a network-less executor whose
+// only interface is lo. No candidate is resolved through DNS.
+func firstReachableNonDefaultAddr(port string) (string, error) {
+	var candidates []string
+	if ifaceAddrs, err := net.InterfaceAddrs(); err == nil {
+		for _, a := range ifaceAddrs {
+			ipNet, ok := a.(*net.IPNet)
+			if !ok || ipNet.IP.IsLoopback() || ipNet.IP.IsLinkLocalUnicast() {
+				continue
+			}
+			candidates = append(candidates, ipNet.IP.String())
+		}
+	}
+	candidates = append(candidates, "127.0.0.2")
+
+	var errs []string
+	for _, host := range candidates {
+		addr := net.JoinHostPort(host, port)
+		conn, err := net.DialTimeout("tcp", addr, 2*time.Second)
+		if err != nil {
+			errs = append(errs, err.Error())
+			continue
+		}
+		_ = conn.Close()
+		return addr, nil
+	}
+	return "", errors.New(strings.Join(errs, "; "))
 }

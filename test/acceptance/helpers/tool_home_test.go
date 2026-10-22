@@ -343,3 +343,21 @@ func TestRealBdProvisionLeavesTheHostHomeAlone(t *testing.T) {
 	}
 	untouched()
 }
+
+// TestToolCommandDoesNotInheritTheTestCwd pins that a bare probe runs from its
+// own tool home. bd walks up from its working directory looking for a .beads,
+// and an inherited cwd (the package directory, under the developer's home on
+// a dev box) made `bd init --help` read the real ~/.beads/config.yaml.
+func TestToolCommandDoesNotInheritTheTestCwd(t *testing.T) {
+	cmd := ToolCommand(t, "/bin/true")
+	if cmd.Dir == "" {
+		t.Fatal("ToolCommand left Dir empty, so the probe inherits the test process's cwd")
+	}
+	cwd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rel, err := filepath.Rel(cmd.Dir, cwd); err == nil && !strings.HasPrefix(rel, "..") {
+		t.Fatalf("ToolCommand Dir %s contains the test cwd %s", cmd.Dir, cwd)
+	}
+}

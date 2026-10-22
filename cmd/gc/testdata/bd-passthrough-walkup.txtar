@@ -1,0 +1,38 @@
+# gc bd finds its city by walking up from cwd (the operator-shell shape) and
+# routes on the composed config: from the city root it answers from the city
+# store, from inside a rig from that rig's store. The walk-up is refused
+# inside test binaries, so this runs the real gc binary path end to end.
+
+env GC_BEADS=bd
+env GC_DOLT=skip
+env GC_SESSION=fake
+env PATH=$WORK/bin${:}$PATH
+chmod 755 $WORK/bin/bd
+
+cd $WORK/city
+exec gc bd show demo-abc
+stdout 'pwd=.*/city root=.*/city prefix=demo argv=show demo-abc$'
+stderr 'answering from the city store'
+
+mkdir $WORK/city/frontend/sub
+cd $WORK/city/frontend/sub
+exec gc bd list
+stdout 'pwd=.*/city/frontend root=.*/city/frontend prefix=fe argv=list$'
+stderr 'answering from the rig "frontend" store'
+
+-- bin/bd --
+#!/bin/sh
+echo "pwd=$(pwd -P) root=$GC_STORE_ROOT prefix=$GC_BEADS_PREFIX argv=$*"
+-- city/city.toml --
+[[rigs]]
+name = "frontend"
+prefix = "fe"
+-- city/.gc/site.toml --
+workspace_name = "demo"
+workspace_prefix = "demo"
+
+[[rig]]
+name = "frontend"
+path = "./frontend"
+-- city/.beads/.keep --
+-- city/frontend/.beads/.keep --

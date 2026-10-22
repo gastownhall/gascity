@@ -2,6 +2,7 @@ package session
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"sync"
 	"testing"
@@ -66,7 +67,7 @@ func TestCommitStartedIfCurrentRefusesOverAnOutOfBandKill(t *testing.T) {
 				t.Fatalf("kill: %v", err)
 			}
 
-			applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+			applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 			if err != nil {
 				t.Fatalf("CommitStartedIfCurrent: %v", err)
 			}
@@ -100,7 +101,7 @@ func TestCommitStartedIfCurrentFencesAWriteAfterTheReread(t *testing.T) {
 			}}
 			front := NewStore(beads.SessionStore{Store: racing})
 
-			applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+			applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 			if err != nil {
 				t.Fatalf("CommitStartedIfCurrent: %v", err)
 			}
@@ -132,7 +133,7 @@ func TestCommitStartedIfCurrentRedecidesPastAnUnrelatedWrite(t *testing.T) {
 			}}
 			front := NewStore(beads.SessionStore{Store: racing})
 
-			applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+			applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 			if err != nil || !applied {
 				t.Fatalf("CommitStartedIfCurrent = (%v, %v), want applied", applied, err)
 			}
@@ -176,12 +177,12 @@ func TestCommitStartedIfCurrentBoundsALosingFence(t *testing.T) {
 	writes := 0
 	racing := &everyGetStore{Store: store, afterGet: func(id string) {
 		writes++
-		if err := store.SetMetadata(id, "nudge_seq", strconv.Itoa(writes)); err != nil {
+		if err := store.SetMetadata(id, "test_nudge_seq", strconv.Itoa(writes)); err != nil {
 			t.Errorf("unrelated write: %v", err)
 		}
 	}}
 
-	applied, err := NewStore(beads.SessionStore{Store: racing}).CommitStartedIfCurrent(prepared, startCommitPatch)
+	applied, err := NewStore(beads.SessionStore{Store: racing}).CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 	if applied || !beads.IsPreconditionFailed(err) {
 		t.Fatalf("CommitStartedIfCurrent = (%v, %v), want the precondition error", applied, err)
 	}
@@ -207,7 +208,7 @@ func TestCommitStartedIfCurrentRequireModeFailsClosed(t *testing.T) {
 	}
 	mem.DisableConditionalWrites = true
 
-	applied, err := front.CommitStartedIfCurrent(prepared, startCommitPatch)
+	applied, err := front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 	if applied || !beads.IsConditionalWritesRequired(err) {
 		t.Fatalf("CommitStartedIfCurrent = (%v, %v), want the require-mode refusal", applied, err)
 	}
@@ -247,7 +248,7 @@ func TestCommitStartedIfCurrentRaceAgainstAKill(t *testing.T) {
 				go func() {
 					defer wg.Done()
 					<-start
-					_, commitErr = front.CommitStartedIfCurrent(prepared, startCommitPatch)
+					_, commitErr = front.CommitStartedIfCurrent(context.Background(), prepared, startCommitPatch)
 				}()
 				go func() {
 					defer wg.Done()
@@ -280,4 +281,74 @@ func stampedMemStore(t *testing.T, mode gate.Mode, mem *beads.MemStore) beads.St
 		t.Fatalf("OpenStoreAtForCity: %v", err)
 	}
 	return result.Store
+}
+
+// suspendDuringStart is what an operator's `gc session suspend` that lands
+// while a start runs leaves for the commit (mc-z1v39, J16 B): the user hold,
+// with the row healed awake once the start's runtime is listed, so the lease
+// verdict alone would commit.
+func suspendDuringStart(t *testing.T, store beads.Store, id string) {
+	t.Helper()
+	if _, err := NewStore(beads.SessionStore{Store: store}).OperatorSuspend(id, closeTestNow); err != nil {
+		t.Fatalf("OperatorSuspend: %v", err)
+	}
+	if err := store.SetMetadataBatch(id, map[string]string{"state": string(StateAwake)}); err != nil {
+		t.Fatalf("heal: %v", err)
+	}
+}
+
+// TestCommitStartedRefusesAnOperatorSuspendDuringTheStart (mc-z1v39,
+// CONTRACT S1 v5.6, §12.2 row 65): with StartCommitRefusingHolds, a start
+// commit whose re-read finds an operator's suspend refuses with
+// ErrStartCommitHeld and writes nothing, whether the suspend landed before
+// the re-read or after it (the revision fence re-decides); without the
+// option the commit lands, as recoverRunningPendingCreate's does. Kills: the
+// hold check dropped, or read off the prepared row instead of the re-read.
+func TestCommitStartedRefusesAnOperatorSuspendDuringTheStart(t *testing.T) {
+	for _, backend := range patchFenceBackends() {
+		for _, c := range []struct {
+			name       string
+			afterRead  bool
+			refuseHeld bool
+		}{
+			{name: "before the re-read", refuseHeld: true},
+			{name: "after the re-read", afterRead: true, refuseHeld: true},
+			{name: "without the option"},
+		} {
+			if c.afterRead && !backend.fenced {
+				continue // the documented residual window without conditional writes
+			}
+			t.Run(backend.name+"/"+c.name, func(t *testing.T) {
+				store, backing := backend.open(t)
+				created := seedPendingStart(t, store, "s-held")
+				prepared, err := NewStore(beads.SessionStore{Store: store}).Get(created.ID)
+				if err != nil {
+					t.Fatalf("Get: %v", err)
+				}
+				reads := store
+				if c.afterRead {
+					reads = &afterGetStore{Store: store, afterGet: func(id string) { suspendDuringStart(t, backing, id) }}
+				} else {
+					suspendDuringStart(t, backing, created.ID)
+				}
+				var opts []StartCommitOpt
+				if c.refuseHeld {
+					opts = append(opts, StartCommitRefusingHolds())
+				}
+				applied, err := NewStore(beads.SessionStore{Store: reads}).CommitStartedIfCurrentUnder(context.Background(), prepared, startCommitPatch, nil, opts...)
+				got, gerr := backing.Get(created.ID)
+				if gerr != nil {
+					t.Fatalf("Get: %v", gerr)
+				}
+				switch {
+				case !c.refuseHeld && (err != nil || !applied):
+					t.Fatalf("CommitStartedIfCurrentUnder = %v, %v; want it applied without the option", applied, err)
+				case c.refuseHeld && (applied || !errors.Is(err, ErrStartCommitHeld)):
+					t.Fatalf("CommitStartedIfCurrentUnder = %v, %v; want ErrStartCommitHeld", applied, err)
+				case c.refuseHeld && (got.Metadata["state"] != string(StateAwake) || got.Metadata["pending_create_claim"] != "true"):
+					t.Fatalf("row %v; want nothing written", got.Metadata)
+				}
+			})
+		}
+	}
 }

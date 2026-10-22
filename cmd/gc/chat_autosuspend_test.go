@@ -15,9 +15,10 @@ import (
 )
 
 func TestAutoSuspendChatSessions(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -40,7 +41,7 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	sp.SetAttached(s2.SessionName, false)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(city, nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	// s1 should be suspended (idle 2h > 30m timeout).
 	got1, err := mgr.Get(s1.ID)
@@ -49,6 +50,11 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 	}
 	if got1.State != session.StateSuspended {
 		t.Errorf("s1 state = %q, want suspended", got1.State)
+	}
+	// The idle auto-suspend is not an operator's: it writes no hold, so the
+	// session's next wake reason resumes it (mc-esqo7).
+	if raw, _ := store.Get(s1.ID); raw.Metadata["held_until"] != "" || raw.Metadata["sleep_intent"] != "" {
+		t.Errorf("s1 held_until=%q sleep_intent=%q, want no hold", raw.Metadata["held_until"], raw.Metadata["sleep_intent"])
 	}
 
 	// s2 should still be active (idle 1m < 30m timeout).
@@ -77,9 +83,10 @@ func TestAutoSuspendChatSessions(t *testing.T) {
 // the union's type leg and correctly suspended. This is the intended fix, not a
 // regression: the previously-stranded session gets reaped.
 func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
+	city := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -97,7 +104,7 @@ func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
 	sp.SetAttached(s1.SessionName, false)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(city, nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {
@@ -112,9 +119,10 @@ func TestAutoSuspendSuspendsLabelLostActiveSession(t *testing.T) {
 }
 
 func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -128,7 +136,7 @@ func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
 	sp.SetAttached(s1.SessionName, true)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(testCity, nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {
@@ -140,11 +148,12 @@ func TestAutoSuspendSkipsAttachedSessions(t *testing.T) {
 }
 
 func TestAutoSuspendNilStore(t *testing.T) {
+	testCity := t.TempDir()
 	sp := runtime.NewFake()
 	clk := &clock.Fake{Time: time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)}
 	var stdout, stderr bytes.Buffer
 	// Should not panic with nil store.
-	autoSuspendChatSessions(nil, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(testCity, nil, nil, sp, 30*time.Minute, clk, &stdout, &stderr)
 	if stdout.Len() != 0 || stderr.Len() != 0 {
 		t.Errorf("unexpected output with nil store: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
@@ -153,9 +162,10 @@ func TestAutoSuspendNilStore(t *testing.T) {
 // The catalog's Attached is a bool that reads "detached" when the probe fails;
 // an attachment probe that cannot tell must hold the suspend.
 func TestAutoSuspendHoldsOnAttachProbeError(t *testing.T) {
+	testCity := t.TempDir()
 	store := beads.NewMemStore()
 	sp := runtime.NewFake()
-	mgr := session.NewManagerWithOptions(store, sp)
+	mgr := session.NewManagerWithOptions(store, sp, session.WithCityPath(t.TempDir()))
 	now := time.Date(2026, 3, 11, 12, 0, 0, 0, time.UTC)
 	clk := &clock.Fake{Time: now}
 
@@ -167,7 +177,7 @@ func TestAutoSuspendHoldsOnAttachProbeError(t *testing.T) {
 	sp.AttachedErrors[s1.SessionName] = fmt.Errorf("attach probe timed out: %w", runtime.ErrRuntimeUnavailable)
 
 	var stdout, stderr bytes.Buffer
-	autoSuspendChatSessions(store, sp, 30*time.Minute, clk, &stdout, &stderr)
+	autoSuspendChatSessions(testCity, nil, store, sp, 30*time.Minute, clk, &stdout, &stderr)
 
 	got, err := mgr.Get(s1.ID)
 	if err != nil {

@@ -14,11 +14,13 @@ import (
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/extmsg"
 	"github.com/gastownhall/gascity/internal/mail"
+	"github.com/gastownhall/gascity/internal/nudgequeue"
 	"github.com/gastownhall/gascity/internal/orderdispatch"
 	"github.com/gastownhall/gascity/internal/orders"
 	"github.com/gastownhall/gascity/internal/reconcilekey"
 	"github.com/gastownhall/gascity/internal/rollout"
 	"github.com/gastownhall/gascity/internal/runtime"
+	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/supervisor"
 	"github.com/gastownhall/gascity/internal/usage"
 	"github.com/gastownhall/gascity/internal/workspacesvc"
@@ -49,6 +51,14 @@ type MaintenanceProvider interface {
 	TriggerNow(ctx context.Context) (supervisor.MaintenanceRun, error)
 }
 
+// NudgeQueue is the part of the city's nudge queue the API writes through:
+// the deferred submit a session cannot take yet, and the withdrawal of a
+// closed or woken session's queued wait nudges.
+type NudgeQueue interface {
+	EnqueueDeferred(nudgequeue.Item) error
+	WithdrawQueuedWaitNudges([]string) error
+}
+
 // State provides read access to controller-managed state.
 // The controller implements this with RWMutex-protected hot-reload.
 //
@@ -59,7 +69,9 @@ type MaintenanceProvider interface {
 // those accessors; on a single-store city every one collapses to the same
 // concrete store CityBeadStore() returns, so they are byte-identical today.
 type State interface {
-	// Config returns the current city config snapshot.
+	// Config returns the current city config snapshot. A changed config is
+	// served as a new snapshot; a served one is never mutated in place
+	// (Server.configGeneration tells snapshots apart by pointer).
 	Config() *config.City
 
 	// SessionProvider returns the current session provider.
@@ -135,6 +147,10 @@ type State interface {
 	// nudges class statically visible at the call site; its embedded .Store is
 	// nil when no store is available.
 	NudgesBeadStore() beads.NudgesStore
+
+	// NudgeQueue returns the city's nudge queue, through which the API queues
+	// deferred submits and withdraws wait nudges.
+	NudgeQueue() NudgeQueue
 
 	// SessionsBeadStore returns the store backing session-class beads — session
 	// lifecycle (type=session/gc:session) and durable session waits
@@ -270,23 +286,22 @@ type ProviderUpdate struct {
 }
 
 // RawConfigProvider is optionally implemented by State to provide the
-// raw (pre-expansion) config for provenance detection. Used by the
-// /v0/config/explain endpoint to distinguish inline vs pack-derived agents.
+// raw (pre-expansion) config. The agent and config reads use it to tell
+// inline from pack-derived agents, and the patch reads and patch counts use
+// it for the declared [[patches]] that composition clears from Config().
 type RawConfigProvider interface {
 	RawConfig() *config.City
 }
 
-// OnDeathHookGate is an optional State capability. A controller that runs
-// on_death hooks off its tick holds a session name while that name's hook is
-// queued or running, and its reconciler defers the name's start until the
-// hook has run (the hook releases work the dead incarnation held; a restart
-// racing it could resume that work only to have it released). A handler that
-// would start a runtime directly checks the gate and leaves the start to the
-// reconciler instead. Optional for the same reason as WebhookDispatchProvider.
-type OnDeathHookGate interface {
-	// OnDeathHookPending reports whether sessionName's on_death hook is
-	// queued or running.
-	OnDeathHookPending(sessionName string) bool
+// WakeStartRefuser is an optional State capability: the controller names
+// why it will not start a session whose wake was just recorded (an
+// idle-latched row, a suspended rig or agent, no runnable template, a
+// dependency-only row, a startup-health quarantine), or "" when it will.
+// certain is false when it does not refuse but cannot tell (a pool seat that
+// starts only for demand). info is the row after the wake was recorded.
+// Optional for the same reason as WebhookDispatchProvider.
+type WakeStartRefuser interface {
+	WakeStartRefusal(info session.Info) (why string, certain bool)
 }
 
 // WebhookDispatchProvider is optionally implemented by State to expose the live
@@ -328,6 +343,18 @@ type AgentVisibilityWaiter interface {
 	// resolves the given qualified agent name, or returns an error if the
 	// projection does not converge before ctx is done.
 	WaitForAgentVisibility(ctx context.Context, qualifiedName string) error
+}
+
+// SessionKillHooks is an optional capability of the State whose process runs
+// the city's controller: the effects of an operator kill (`gc session kill`,
+// the API session kill) that only the controller's process holds. A State
+// without it kills without them.
+type SessionKillHooks interface {
+	// ResetSessionCircuitBreaker clears a configured named session's respawn
+	// circuit breaker, so the controller can revive the killed session.
+	ResetSessionCircuitBreaker(sessionID, identity string) error
+	// RecordSessionKillStop records the kill's stop metric.
+	RecordSessionKillStop(info session.Info)
 }
 
 // StateMutator extends State with write operations for mutation endpoints.

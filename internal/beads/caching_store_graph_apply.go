@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"time"
 )
 
 // GraphApplyHandle returns a cache-coherent graph-apply handle when the
@@ -29,7 +28,8 @@ type cachingGraphApplyStore struct {
 }
 
 func (s cachingGraphApplyStore) ApplyGraphPlan(ctx context.Context, plan *GraphApplyPlan) (*GraphApplyResult, error) {
-	startSeq := s.cache.currentMutationSeq()
+	startSeq, endWrite := s.cache.beginLocalWrite()
+	defer endWrite()
 	result, err := s.applier.ApplyGraphPlan(ctx, plan)
 	if err != nil {
 		return result, err
@@ -51,7 +51,8 @@ type cachingStorageGraphApplyStore struct {
 }
 
 func (s cachingStorageGraphApplyStore) ApplyGraphPlanWithStorage(ctx context.Context, plan *GraphApplyPlan, storage StorageClass) (*GraphApplyResult, error) {
-	startSeq := s.cache.currentMutationSeq()
+	startSeq, endWrite := s.cache.beginLocalWrite()
+	defer endWrite()
 	result, err := s.storageApplier.ApplyGraphPlanWithStorage(ctx, plan, storage)
 	if err != nil {
 		return result, err
@@ -90,7 +91,7 @@ func (c *CachingStore) refreshGraphAppliedBeads(result *GraphApplyResult, startS
 	}
 
 	notifications := make([]cacheNotification, 0, len(refreshed))
-	now := time.Now()
+	now := c.clockNow()
 	c.mu.Lock()
 	raced := c.racedWritesLocked(ids, startSeq)
 	c.noteLocalMutationLocked(ids...)

@@ -62,6 +62,68 @@ var specs = []Spec{
 		Justification: "Retire the v1 formula path and its process-global atomic.Bool setter " +
 			"anti-pattern; the migration whose completion deletes cmd/gc/feature_flags.go.",
 	},
+	{
+		Key:            keyBeadsAllowSchemaBehindMigrate,
+		Category:       InfraKillswitch,
+		ConfigPath:     "beads.allow_schema_behind_migrate",
+		EnvOverride:    envBeadsAllowSchemaBehindMigrate,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Bool: ptr(false)},
+		Owner:          Owner{Bead: "ga-g4sbm1", GitHub: "@gastownhall/gascity-admin"},
+		SelectsBetween: [2]string{"withhold BD_ALLOW_REMOTE_MIGRATE and FAIL the native-store preflight when the database's schema cursor trails the linked library's ceiling", "set BD_ALLOW_REMOTE_MIGRATE and mark the behind schema preflight-eligible for an operator-opted-in city"},
+		Justification: "A behind-schema city is sometimes a deliberate operator choice (a pinned " +
+			"older schema the city is not ready to migrate yet), not a mixed-fleet rollout with a " +
+			"planned end date; this is a standing per-city escape hatch, not a migration gate, so " +
+			"it carries no Expires/VersionAnchor.",
+	},
+	{
+		Key:            keyOpsContent,
+		Category:       InfraRollout,
+		ConfigPath:     "ops.content",
+		EnvOverride:    envOpsContent,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/opjournal/legacyop",
+		SelectsBetween: [2]string{"legacy message delivery with no op row", "the same delivery recorded as a message op (auto shadow, require durable)"},
+		Justification: "Record each message delivery as an operation-journal op beside its legacy " +
+			"execution (O0 shadow ops), so a retry dedupes across restarts and every request gets " +
+			"one typed outcome; shipped off until X12 passes. Retires in OJ-21 with the legacy content " +
+			"executors; internal/opjournal/legacyop itself goes with the last ops gate in OJ-22.",
+	},
+	{
+		Key:            keyOpsControl,
+		Category:       InfraRollout,
+		ConfigPath:     "ops.control",
+		EnvOverride:    envOpsControl,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/opjournal/legacyop",
+		SelectsBetween: [2]string{"legacy interrupt and respond handling with no op row", "the same request recorded as an interrupt or respond op (auto shadow, require durable)"},
+		Justification: "Record each interrupt and respond request as an operation-journal op beside its legacy " +
+			"execution (O0 shadow ops), so a retry dedupes across restarts and every request gets " +
+			"one typed outcome; shipped off until X12 passes. Retires in OJ-21 with the legacy control " +
+			"executors; internal/opjournal/legacyop itself goes with the last ops gate in OJ-22.",
+	},
+	{
+		Key:            keyOpsLifecycle,
+		Category:       InfraRollout,
+		ConfigPath:     "ops.lifecycle",
+		EnvOverride:    envOpsLifecycle,
+		EnvSemantics:   EnvOverrides,
+		Default:        Default{Mode: ptr(Off)},
+		Owner:          Owner{Bead: "ga-x1i8ww", GitHub: "@gastownhall/gascity-admin"},
+		Expires:        "2027-06-30",
+		VersionAnchor:  "internal/opjournal/legacyop",
+		SelectsBetween: [2]string{"legacy wake, suspend, restart, kill and close handling with no op row", "the same request recorded as a lifecycle op (auto shadow, require durable)"},
+		Justification: "Record each wake, suspend, restart, kill and close request as an operation-journal op " +
+			"beside its legacy execution (O0 shadow ops), so a retry dedupes across restarts and " +
+			"every request gets one typed outcome; shipped off until X12 passes. Retires in OJ-22 " +
+			"with the legacy lifecycle executors, deleting internal/opjournal/legacyop.",
+	},
 }
 
 // Specs returns a defensive copy of the canonical registry. The Default pointers
@@ -100,3 +162,7 @@ func beadsConditionalWritesSpec() Spec { return specByKey(keyBeadsConditionalWri
 // beadsGuardedReleaseSpec returns the canonical Spec for the beads
 // guarded-release gate.
 func beadsGuardedReleaseSpec() Spec { return specByKey(keyBeadsGuardedRelease) }
+
+// beadsAllowSchemaBehindMigrateSpec returns the canonical Spec for the beads
+// allow-schema-behind-migrate gate.
+func beadsAllowSchemaBehindMigrateSpec() Spec { return specByKey(keyBeadsAllowSchemaBehindMigrate) }

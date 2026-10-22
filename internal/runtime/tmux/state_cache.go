@@ -15,6 +15,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/runtime/proctable"
+
 	"github.com/gastownhall/gascity/internal/runtime"
 	"golang.org/x/sync/singleflight"
 )
@@ -77,6 +79,15 @@ type sessionRuntimeState struct {
 	// — the same value the per-session `list-windows -t <s>` read returns. Zero
 	// means the snapshot carries no activity for the session.
 	Activity int64
+	// ID is the session object's #{session_id} (for example "$3"). A session
+	// re-created under the same name gets a new one, but ids are unique only
+	// within one server's lifetime: a restarted server numbers from "$0" again.
+	// Empty when tmux reported no well-formed id.
+	ID string
+	// Created is the session object's #{session_created} (decimal unix
+	// seconds), which tells a reused ID apart. Empty when tmux reported no
+	// decimal value or the row predates the field.
+	Created string
 }
 
 type processRuntimeState struct {
@@ -107,7 +118,9 @@ type runtimeStateSnapshot struct {
 
 // StateCache caches tmux runtime state to avoid spawning N subprocess calls per
 // status check or reconciler pass. Concurrent callers are coalesced via
-// singleflight so at most one tmux/process snapshot refresh runs at a time.
+// singleflight per cache generation: at most one refresh runs at a time for a
+// given generation, and an invalidation opens a new generation, so a caller
+// that arrives after one never joins the flight it superseded.
 type StateCache struct {
 	mu sync.RWMutex
 	// state is the published snapshot. It is copy-on-write: readers copy it
@@ -116,6 +129,9 @@ type StateCache struct {
 	// place. Writers replace a map wholesale under mu instead.
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	// startedAt is when the fetch that produced state began, on the cache
+	// clock, so a fresh read can tell whether state postdates an effect.
+	startedAt time.Time
 	lastError error
 	dirty     bool // set by Invalidate(); cleared by a refresh no invalidation superseded
 	// generation advances on every Invalidate and EvictSession, so a refresh
@@ -147,6 +163,7 @@ type StateCache struct {
 type cacheObservation struct {
 	state     runtimeStateSnapshot
 	fetchedAt time.Time
+	startedAt time.Time
 	// lastErr is the error of the most recent refresh attempt; nil after a
 	// success.
 	lastErr error
@@ -248,35 +265,40 @@ func (c *StateCache) observe() cacheObservation {
 // observeRefreshing reads the cache, refreshing it first unless it is a hit,
 // and reports whether it was one.
 func (c *StateCache) observeRefreshing() (cacheObservation, bool) {
-	obs := c.observation()
+	obs, generation := c.observationAtGeneration()
 
 	// Cache hit: fresh data, not invalidated.
 	if obs.primed() && !obs.dirty && c.clock().Sub(obs.fetchedAt) < c.ttl {
 		return obs, true
 	}
 
-	// Stale, empty, or dirty — trigger refresh.
-	// When dirty, forget any in-flight singleflight so we get a fresh fetch
-	// instead of coalescing with a pre-invalidation call.
-	if obs.dirty {
-		c.sf.Forget("refresh")
-	}
-	c.refresh()
+	// Stale, empty, or dirty — trigger a refresh. Calls from the same
+	// generation coalesce, while an invalidation advances the key so a
+	// fresh call never joins a pre-invalidation fetch.
+	c.refresh(generation)
 
 	// Read the (potentially updated) cache.
 	return c.observation(), false
 }
 
 func (c *StateCache) observation() cacheObservation {
+	obs, _ := c.observationAtGeneration()
+	return obs
+}
+
+// observationAtGeneration reads the cache together with the generation it was
+// read at, under one lock.
+func (c *StateCache) observationAtGeneration() (cacheObservation, uint64) {
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	return cacheObservation{
 		state:            c.state,
 		fetchedAt:        c.fetchedAt,
+		startedAt:        c.startedAt,
 		lastErr:          c.lastError,
 		dirty:            c.dirty,
 		primedByNoServer: c.primedByNoServer,
-	}
+	}, c.generation
 }
 
 func (c *StateCache) clock() time.Time {
@@ -329,6 +351,64 @@ func classifyCacheObservation(obs cacheObservation, name string, now time.Time, 
 	return cacheAnswerUnknown
 }
 
+// presenceListingTimeout bounds a presence-only listing. A healthy one takes
+// tens of milliseconds; one slower than this proves nothing, and the caller
+// takes the full refresh with its own fetchTimeout, so a wedged server costs a
+// fresh read at most this much more than it did before the listing existed.
+const presenceListingTimeout = time.Second
+
+// absentSince reports whether a presence-only listing that started at or after
+// since proves name absent (v5 O1), so a fresh read of a name the server does
+// not hold costs one tmux call instead of a refresh. A refresh's
+// process-table scan only refines sessions its listing holds, so it can never
+// make an absent name present. absentSince proves nothing, and the caller takes
+// the full fresh read, for a name gc could not have created
+// (validateSessionName), when the published snapshot already started at or
+// after since, when the fetcher is not tmux's, when the cache clock has not
+// reached since (a listing would start before it), when the listing fails or
+// runs past presenceListingTimeout, or when it holds name. It never publishes:
+// the shared snapshot is untouched.
+func (c *StateCache) absentSince(name string, since time.Time) bool {
+	if validateSessionName(name) != nil {
+		return false
+	}
+	if obs := c.observation(); obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+		return false
+	}
+	fetcher, ok := c.fetcher.(*tmuxFetcher)
+	if !ok || c.clock().Before(since) {
+		return false
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), presenceListingTimeout)
+	defer cancel()
+	names, err := fetcher.listPresentSessions(ctx)
+	if err != nil {
+		return false
+	}
+	_, present := names[name]
+	return !present
+}
+
+// observeSince returns the published snapshot once a successful fetch that
+// started at or after since has produced it, refreshing when the published one
+// is older. It refreshes at most twice: a fetch already in flight before since
+// is joined rather than restarted, so the second refresh is the one that starts
+// after since. It never invalidates the cache. ok is false when no such fetch
+// succeeded; obs.lastErr then says why.
+func (c *StateCache) observeSince(since time.Time) (obs cacheObservation, ok bool) {
+	for attempt := 0; ; attempt++ {
+		var generation uint64
+		obs, generation = c.observationAtGeneration()
+		if obs.lastErr == nil && obs.primed() && !obs.startedAt.Before(since) {
+			return obs, true
+		}
+		if attempt == 2 {
+			return obs, false
+		}
+		c.refresh(generation)
+	}
+}
+
 // Invalidate marks the cache as dirty, forcing the next IsRunning call
 // to trigger a refresh. The session data and fetchedAt are preserved as
 // last-known-good until the refresh completes — even if the refresh fails.
@@ -363,10 +443,12 @@ func (c *StateCache) EvictSession(name string) {
 	c.mu.Unlock()
 }
 
-// refresh executes a single coalesced fetch. If the fetch fails, the
-// last-known-good cache is preserved and the error is logged.
-func (c *StateCache) refresh() {
-	_, _, _ = c.sf.Do("refresh", func() (interface{}, error) {
+// refresh executes a single fetch, coalesced with concurrent refreshes keyed
+// by the same cache generation. If the fetch fails, the last-known-good cache
+// is preserved and the error is logged.
+func (c *StateCache) refresh(generation uint64) {
+	key := "refresh:" + strconv.FormatUint(generation, 10)
+	_, _, _ = c.sf.Do(key, func() (interface{}, error) {
 		ctx, cancel := context.WithTimeout(context.Background(), fetchTimeout)
 		defer cancel()
 
@@ -416,8 +498,8 @@ func (c *StateCache) refresh() {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if startGeneration < c.publishedGeneration {
-			// A dirty read forgot this flight and a newer fetch has already
-			// published; this observation is older than what readers see.
+			// A fetch keyed by a newer generation has already published;
+			// this observation is older than what readers see.
 			if verbose {
 				log.Printf("tmux state cache: discarded refresh from generation %d after %v (generation %d already published)", startGeneration, elapsed, c.publishedGeneration)
 			}
@@ -444,12 +526,13 @@ func (c *StateCache) refresh() {
 
 		c.state = state
 		c.fetchedAt = c.clock()
+		c.startedAt = start
 		c.lastError = nil
 		c.primedByNoServer = false
 		c.dirty = superseded
 		c.publishedGeneration = startGeneration
-		for name, generation := range c.evictedAt {
-			if generation <= startGeneration {
+		for name, evictedGeneration := range c.evictedAt {
+			if evictedGeneration <= startGeneration {
 				delete(c.evictedAt, name)
 			}
 		}
@@ -487,6 +570,40 @@ type tmuxFetcher struct {
 	// fails. Its zero value attempts immediately, so a bare &tmuxFetcher{tm:
 	// tm} behaves exactly as it did before this gate existed.
 	snapshotGate processSnapshotGate
+	// snapshot takes the process-table snapshot; nil is fetchProcessSnapshot.
+	// Tests count it instead of scanning the OS.
+	snapshot func(ctx context.Context) (processSnapshot, error)
+}
+
+// presenceListingFormat lists one session name per pane, ended like
+// runtimeInventoryFormat so the executor's trim of tmux's output cannot cut a
+// name's own trailing characters.
+const presenceListingFormat = "#{session_name}\t" + runtimeInventoryEnd
+
+// listPresentSessions lists every session the server holds, from the same
+// list-panes source FetchState reads, without the process-table scan. A server
+// that answers with no sessions lists none; any other failure, or a line that
+// does not end with runtimeInventoryEnd, is an error.
+func (f *tmuxFetcher) listPresentSessions(ctx context.Context) (map[string]struct{}, error) {
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", presenceListingFormat)
+	if err != nil {
+		if errors.Is(err, ErrNoCurrentTarget) {
+			return map[string]struct{}{}, nil
+		}
+		return nil, err
+	}
+	names := make(map[string]struct{})
+	for _, line := range strings.Split(out, "\n") {
+		if line == "" {
+			continue
+		}
+		name, end, ok := strings.Cut(line, "\t")
+		if !ok || end != runtimeInventoryEnd || name == "" {
+			return nil, fmt.Errorf("tmux presence listing: malformed line %q", line)
+		}
+		names[name] = struct{}{}
+	}
+	return names, nil
 }
 
 // processSnapshotGate decides whether the full-OS process scan may be attempted
@@ -545,7 +662,7 @@ func (g *processSnapshotGate) succeeded() bool {
 // still contribute no liveness — they represent exited processes, not
 // running ones.
 func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, error) {
-	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}")
+	out, err := f.tm.runCtx(ctx, "list-panes", "-a", "-F", "#{session_name}\t#{pane_dead}\t#{pane_current_command}\t#{pane_pid}\t#{session_attached}\t#{window_activity}\t#{session_id}\t#{session_created}")
 	if err != nil {
 		if errors.Is(err, ErrNoCurrentTarget) {
 			// The server ANSWERED and holds zero sessions. gc configures
@@ -589,7 +706,7 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 	}
 
 	for _, line := range strings.Split(out, "\n") {
-		parts := strings.SplitN(line, "\t", 6)
+		parts := strings.SplitN(line, "\t", 8)
 		if len(parts) < 2 || parts[0] == "" {
 			continue
 		}
@@ -615,6 +732,12 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 			if activity, convErr := strconv.ParseInt(strings.TrimSpace(parts[5]), 10, 64); convErr == nil && activity > session.Activity {
 				session.Activity = activity
 			}
+		}
+		if len(parts) > 6 && validSessionObjectID(strings.TrimSpace(parts[6])) {
+			session.ID = strings.TrimSpace(parts[6])
+		}
+		if len(parts) > 7 && decimalRe.MatchString(strings.TrimSpace(parts[7])) {
+			session.Created = strings.TrimSpace(parts[7])
 		}
 		if parts[1] == "1" {
 			// A dead pane contributes no liveness: Running stays as-is so a
@@ -644,7 +767,11 @@ func (f *tmuxFetcher) FetchState(ctx context.Context) (runtimeStateSnapshot, err
 		state.ProcessesAvailable = false
 		return state, nil
 	}
-	processes, err := fetchProcessSnapshot(ctx)
+	snapshot := f.snapshot
+	if snapshot == nil {
+		snapshot = fetchProcessSnapshot
+	}
+	processes, err := snapshot(ctx)
 	if err != nil {
 		// Degrade, do NOT discard: tmux list-panes above already established
 		// session liveness. The process snapshot is a secondary refinement
@@ -671,7 +798,7 @@ func (s runtimeStateSnapshot) processAlive(sessionName string, processNames []st
 	if !ok || !session.Running {
 		return false
 	}
-	names := processNameSet(processNames)
+	names := proctable.ProcessNameSet(processNames)
 	if len(names) == 0 {
 		return false
 	}
@@ -704,69 +831,6 @@ func (p paneRuntimeState) processAlive(names map[string]struct{}, processes proc
 		return true
 	}
 	return processes.hasDescendantWithNames(p.PID, names, 0)
-}
-
-func processNameSet(names []string) map[string]struct{} {
-	set := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		if name = strings.TrimSpace(name); name != "" {
-			set[name] = struct{}{}
-			// The kimi entry point now sets COMM and argv[0] to kimi-code.
-			// Keep existing provider process_names valid for both CLIs.
-			if name == "kimi" {
-				set["kimi-code"] = struct{}{}
-			}
-		}
-	}
-	return set
-}
-
-func processMatchesNameSet(command, args string, names map[string]struct{}) bool {
-	if len(names) == 0 {
-		return false
-	}
-	command = filepath.Base(strings.TrimSpace(command))
-	if _, ok := names[command]; ok && command != "" {
-		return true
-	}
-	argv := strings.Fields(strings.TrimSpace(args))
-	if len(argv) == 0 {
-		return false
-	}
-	argv0 := filepath.Base(argv[0])
-	if _, ok := names[argv0]; ok {
-		return true
-	}
-	if _, isInterpreter := knownInterpreters[argv0]; !isInterpreter {
-		return false
-	}
-	for _, token := range argv[1:] {
-		token = strings.TrimSpace(token)
-		if token == "" || strings.HasPrefix(token, "-") {
-			continue
-		}
-		if _, isRunner := runnerSubcommands[token]; isRunner {
-			continue
-		}
-		base := filepath.Base(token)
-		if _, ok := names[base]; ok {
-			return true
-		}
-		baseNoExt := strings.TrimSuffix(base, filepath.Ext(base))
-		if _, ok := names[baseNoExt]; ok {
-			return true
-		}
-		break
-	}
-	return false
-}
-
-var knownInterpreters = map[string]struct{}{
-	"node": {}, "bun": {}, "npx": {}, "deno": {},
-}
-
-var runnerSubcommands = map[string]struct{}{
-	"run": {}, "exec": {}, "x": {},
 }
 
 const maxProcessDescendantDepth = 10
@@ -1006,7 +1070,7 @@ func (s processSnapshot) processMatchesNames(pid string, names map[string]struct
 	if !ok {
 		return false
 	}
-	return processMatchesNameSet(process.Command, process.Args, names)
+	return proctable.ProcessMatchesNameSet(process.Command, process.Args, names)
 }
 
 func (s processSnapshot) hasDescendantWithNames(pid string, names map[string]struct{}, depth int) bool {

@@ -70,7 +70,7 @@ const (
 	TraceSiteOrderDispatch                  TraceSiteCode = "orders.dispatch"
 	TraceSiteRuntimeInventoryPass           TraceSiteCode = "runtime_inventory.pass"
 	TraceSiteRuntimeInventoryOnDeath        TraceSiteCode = "runtime_inventory.on_death"
-	TraceSiteReconcileQueue                 TraceSiteCode = "reconcile.queue"
+	TraceSiteReconcilePass                  TraceSiteCode = "reconcile.pass"
 	TraceSiteV2SessionDecision              TraceSiteCode = "reconcile.session.decision"
 	TraceSitePoolDemandCompute              TraceSiteCode = "pool_desired.compute"
 	TraceSiteSessionSnapshot                TraceSiteCode = "session_snapshot.load"
@@ -172,6 +172,7 @@ const (
 	TraceReasonDrainTimeout           TraceReasonCode = "drain_timeout"
 	TraceReasonStoreQueryPartial      TraceReasonCode = "store_query_partial"
 	TraceReasonNoWakeReason           TraceReasonCode = "no_wake_reason"
+	TraceReasonUndesiredWakeGrace     TraceReasonCode = "undesired_wake_grace"
 	TraceReasonFSPressure             TraceReasonCode = "fs_pressure"
 	TraceReasonResetStalled           TraceReasonCode = "reset_stalled"
 
@@ -209,6 +210,7 @@ const (
 	TraceReasonAssignedWorkExhausted TraceReasonCode = "assigned_work_exhausted"
 	TraceReasonEndpointCapacityOpen  TraceReasonCode = "endpoint_capacity_open"
 	TraceReasonOnDeathHookPending    TraceReasonCode = "on_death_hook_pending"
+	TraceReasonPrepareBudgetSpent    TraceReasonCode = "prepare_budget_spent"
 )
 
 type TraceOutcomeCode string
@@ -254,6 +256,11 @@ const (
 	// current FingerprintVersion (older or future binary). No drain, no
 	// event.
 	TraceOutcomeRebaselinedVersionMismatch TraceOutcomeCode = "rebaselined_version_mismatch"
+	// TraceOutcomeRebaselinedPrePolicy marks a silent rebaseline of the
+	// config's hash as the v6 binary computed it, before the FingerprintExtra
+	// change policy (runtime.PrePolicy*): the config did not change. No
+	// drain, no event.
+	TraceOutcomeRebaselinedPrePolicy TraceOutcomeCode = "rebaselined_pre_policy"
 
 	TraceOutcomeKeptOpen            TraceOutcomeCode = "kept_open"
 	TraceOutcomeDeferred            TraceOutcomeCode = "deferred"
@@ -303,6 +310,9 @@ const (
 	// TraceOutcomeDeferredByOnDeathHook marks a start deferred before any
 	// write because the name's on_death hook is queued or running.
 	TraceOutcomeDeferredByOnDeathHook TraceOutcomeCode = "deferred_by_on_death_hook"
+	// TraceOutcomeDeferredByPrepareBudget marks a start deferred before any
+	// write because the planner call's cumulative prepare time spent its budget.
+	TraceOutcomeDeferredByPrepareBudget TraceOutcomeCode = "deferred_by_prepare_budget"
 	// TraceOutcomeSkippedPresent marks an on_death hook skipped because its
 	// name was listed again when the hook was due.
 	TraceOutcomeSkippedPresent TraceOutcomeCode = "skipped_present"

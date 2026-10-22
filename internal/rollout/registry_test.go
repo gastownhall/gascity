@@ -191,4 +191,31 @@ func TestDefaultsDoNotDrift(t *testing.T) {
 	if !(config.DaemonConfig{}).FormulaV2Enabled() {
 		t.Errorf("config accessor formula_v2 default = false, want true")
 	}
+
+	// ops.content, ops.control, ops.lifecycle: Mode gates, default Off; the
+	// zero [ops] table (no accessor) resolves each to off.
+	unsetOps, err := Resolve(&config.City{}, ResolveOptions{LookupEnv: func(string) (string, bool) { return "", false }})
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	for _, g := range []struct {
+		key string
+		def Mode
+		res Mode
+	}{
+		{keyOpsContent, def.OpsContent(), unsetOps.OpsContent()},
+		{keyOpsControl, def.OpsControl(), unsetOps.OpsControl()},
+		{keyOpsLifecycle, def.OpsLifecycle(), unsetOps.OpsLifecycle()},
+	} {
+		spec := byKey[g.key]
+		if spec.Default.Mode == nil || *spec.Default.Mode != Off {
+			t.Errorf("%s Spec.Default = %v, want Off", g.key, spec.Default.Mode)
+		}
+		if g.def != Off {
+			t.Errorf("defaultFlags %s = %q, want off", g.key, g.def)
+		}
+		if g.res != Off {
+			t.Errorf("Resolve of an empty [ops] %s = %q, want off", g.key, g.res)
+		}
+	}
 }

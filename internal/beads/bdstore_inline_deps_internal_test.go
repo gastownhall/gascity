@@ -5,8 +5,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
+
+	"github.com/gastownhall/gascity/internal/beadmeta"
 )
 
 // bdLedgerRow is one row of the fake bd ledger below: the issue fields the
@@ -18,6 +21,7 @@ type bdLedgerRow struct {
 	closed    bool
 	assignee  string
 	deps      []Dep
+	metadata  map[string]string
 	// offscope marks a row bd's ledger HOLDS but this scope's cache never
 	// receives: gc routes relocated classes (the `gcg-` graph beads) to another
 	// store, so `bd list` and `bd query` for this scope do not hand it over.
@@ -44,6 +48,10 @@ type fakeBdLedger struct {
 	// bd/Postgres work store answers exactly this (ga-7i7ts), which is why the
 	// completeness verdict cannot be built on DepListBatch.
 	depListRefusal string
+	// closedReadRefusal, when set, is how a `bd list` or `bd query` that asks
+	// for closed rows fails while the active-set reads keep answering: the
+	// work-outcome veto's blocker read breaking on its own.
+	closedReadRefusal string
 	// truncateDeps drops these ids' inline edges while leaving their
 	// dependency_count intact, modeling a bd whose list JSON is short.
 	truncateDeps map[string]bool
@@ -57,13 +65,17 @@ type fakeBdLedger struct {
 func (f *fakeBdLedger) run(_, name string, args ...string) ([]byte, error) {
 	f.calls = append(f.calls, append([]string{name}, args...))
 	joined := strings.Join(args, " ")
+	// bd's list and query hide closed rows unless asked for all of them.
+	all := slices.Contains(args, "--all")
 	switch {
 	case joined == "version":
 		return []byte("bd version 1.1.0\n"), nil
+	case all && f.closedReadRefusal != "" && (args[0] == "list" || args[0] == "query"):
+		return nil, errors.New(f.closedReadRefusal)
 	case args[0] == "list":
-		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && !r.closed && !r.offscope })
+		return f.renderRows(func(r bdLedgerRow) bool { return !r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "query":
-		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && !r.closed && !r.offscope })
+		return f.renderRows(func(r bdLedgerRow) bool { return r.ephemeral && (all || !r.closed) && !r.offscope })
 	case args[0] == "ready":
 		// bd ready filters is_blocked = 0 (sqlbuild.ReadyWhere). This is the
 		// backing's own verdict, the one the cache may never exceed.
@@ -169,6 +181,9 @@ func (f *fakeBdLedger) renderRows(keep func(bdLedgerRow) bool) ([]byte, error) {
 		if row.assignee != "" {
 			issue["assignee"] = row.assignee
 		}
+		if len(row.metadata) > 0 {
+			issue["metadata"] = row.metadata
+		}
 		blocking := 0
 		deps := make([]map[string]string, 0, len(row.deps))
 		for _, dep := range row.deps {
@@ -267,10 +282,31 @@ func (f *fakeBdLedger) renderBlocked() ([]byte, error) {
 	return json.Marshal(out)
 }
 
-func (f *fakeBdLedger) renderDepRecords(ids []string) ([]byte, error) {
+// renderDepRecords answers `bd dep list` as real bd does: several ids print
+// the raw dependency records, one id prints the depended-on beads' rows, each
+// carrying its dependency_type.
+func (f *fakeBdLedger) renderDepRecords(args []string) ([]byte, error) {
+	var ids []string
+	for _, arg := range args {
+		if !strings.HasPrefix(arg, "-") {
+			ids = append(ids, arg)
+		}
+	}
 	wanted := make(map[string]bool, len(ids))
 	for _, id := range ids {
-		wanted[strings.TrimPrefix(id, "--")] = true
+		wanted[id] = true
+	}
+	if len(ids) == 1 {
+		rows := make([]map[string]string, 0)
+		for _, row := range f.rows {
+			if !wanted[row.id] {
+				continue
+			}
+			for _, dep := range row.deps {
+				rows = append(rows, map[string]string{"id": dep.DependsOnID, "dependency_type": dep.Type})
+			}
+		}
+		return json.Marshal(rows)
 	}
 	out := make([]map[string]string, 0)
 	for _, row := range f.rows {
@@ -595,6 +631,125 @@ func bdLiveReady(t *testing.T, store *BdStore, want ...string) []string {
 		t.Fatalf("bd Ready = %v, want %v: the fixture must model bd's is_blocked filter", got, wantReadyIDs(want...))
 	}
 	return got
+}
+
+// TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome is
+// TestCachedReadyOverNativeBackingHonorsAnEvictedBlockersWorkOutcome on the bd
+// path, through both doors the is_blocked column arrives by. bd's column counts
+// every closed blocker as satisfied and the reconcile's `bd list` hides closed
+// rows, so once a reconcile evicts a blocker closed with gc.work_outcome=blocked
+// only the projection can still hold its dependent back, the way the backing's
+// own Ready does through filterReadyByWorkOutcome. The evicting reconcile runs
+// first with that closed read failing, so the dependent must stay held on the
+// verdict the cache already had until a healthy cycle vetoes it again.
+//
+//	bd-blocker   (closed, work_outcome=blocked) <-- blocks    -- bd-dependent  held back
+//	bd-passed    (closed step, outcome=pass)    <-- blocks    -- bd-advanced   ready
+//	bd-plain     (closed)                       <-- blocks    -- bd-released   ready
+//	bd-unrelated (open)                         <-- waits-for -- bd-gated      ready
+func TestCachedReadyOverBdBackingHonorsAnEvictedBlockersWorkOutcome(t *testing.T) {
+	for _, door := range []struct {
+		name  string
+		prime func(*testing.T, *fakeBdLedger) (*CachingStore, *BdStore)
+	}{
+		{"bd sql", primedBdCache},
+		{"bd blocked", primedBdCacheOnUnimplementedBackend},
+	} {
+		t.Run(door.name, func(t *testing.T) {
+			ledger := &fakeBdLedger{rows: []bdLedgerRow{
+				{id: "bd-blocker"},
+				{id: "bd-dependent", blocked: true, deps: []Dep{{IssueID: "bd-dependent", DependsOnID: "bd-blocker", Type: "blocks"}}},
+				{id: "bd-passed"},
+				{id: "bd-advanced", blocked: true, deps: []Dep{{IssueID: "bd-advanced", DependsOnID: "bd-passed", Type: "blocks"}}},
+				{id: "bd-plain"},
+				{id: "bd-released", blocked: true, deps: []Dep{{IssueID: "bd-released", DependsOnID: "bd-plain", Type: "blocks"}}},
+				{id: "bd-unrelated"},
+				{id: "bd-gated", deps: []Dep{{IssueID: "bd-gated", DependsOnID: "bd-unrelated", Type: "waits-for"}}},
+			}}
+			cache, store := door.prime(t, ledger)
+			if reads := closedInclusiveReads(ledger.calls); len(reads) != 0 {
+				t.Fatalf("prime spent %v, want no closed read: every edge of an unblocked row ends inside the snapshot", reads)
+			}
+
+			// The closes land behind the cache, as another writer's do, and the
+			// column follows bd: every close satisfies its dependents' blocks
+			// edge.
+			closeRow := func(id string, metadata map[string]string) {
+				t.Helper()
+				if err := ledger.mutate(id, func(r *bdLedgerRow) { r.closed, r.metadata = true, metadata }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			closeRow("bd-blocker", map[string]string{beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked})
+			closeRow("bd-passed", map[string]string{
+				beadmeta.StepRefMetadataKey:     "review",
+				beadmeta.OutcomeMetadataKey:     beadmeta.OutcomePass,
+				beadmeta.WorkOutcomeMetadataKey: beadmeta.WorkOutcomeBlocked,
+			})
+			closeRow("bd-plain", nil)
+			for _, id := range []string{"bd-dependent", "bd-advanced", "bd-released"} {
+				if err := ledger.mutate(id, func(r *bdLedgerRow) { r.blocked = false }); err != nil {
+					t.Fatal(err)
+				}
+			}
+			want := bdLiveReady(t, store, "bd-advanced", "bd-released", "bd-unrelated", "bd-gated")
+			stage := newReadyInvariantStage(t, cache, want)
+
+			// The evicting reconcile's work-outcome read fails, so the cycle
+			// loses the column and the dependent must stay held on the verdict
+			// the cache already had.
+			ledger.closedReadRefusal = "closed history unreadable"
+			cache.ReconcileForTest()
+			ledger.closedReadRefusal = ""
+			cache.mu.RLock()
+			_, resident := cache.beads["bd-blocker"]
+			cache.mu.RUnlock()
+			if resident {
+				t.Fatal("the reconcile kept the closed blocker, so this fixture is not measuring an evicted one")
+			}
+			stage.assertHeldThroughFailedVeto("after the reconcile whose work-outcome read failed", "bd-dependent")
+
+			before := len(ledger.calls)
+			cache.ReconcileForTest()
+			reconciled := len(ledger.calls)
+
+			got, err := cache.ReadyPreferCache(ReadyQuery{TierMode: TierBoth})
+			if err != nil {
+				t.Fatalf("ReadyPreferCache: %v", err)
+			}
+			if gotIDs := sortedIDs(got); !equalIDs(gotIDs, want) {
+				t.Errorf("ReadyPreferCache = %v, want the backing's %v", gotIDs, want)
+			}
+			if spent := ledger.calls[reconciled:]; len(spent) != 0 {
+				t.Errorf("ReadyPreferCache spent %v: it read live, and a warm cache must answer from the snapshot", spent)
+			}
+			stage.assertNeverExceedsBacking("after a healthy reconcile", map[string]string{
+				"bd-dependent": "its blocker closed with gc.work_outcome=blocked, which bd's column counts as satisfied and filterReadyByWorkOutcome does not",
+			})
+			if blocked := cachedIsBlockedForTest(cache, "bd-dependent"); blocked == nil || !*blocked {
+				t.Errorf("cached is_blocked for bd-dependent = %s, want true: the projection must carry the veto its evicted blocker can no longer give", ptrStr(blocked))
+			}
+			stage.assertStillAnswers("after a healthy reconcile")
+
+			// The cost: the reconcile spends the one closed read the backing's
+			// own Ready spends, a `bd list --all` and its wisp-tier `bd query`.
+			reads := closedInclusiveReads(ledger.calls[before:reconciled])
+			if len(reads) != 2 || reads[0][1] != "list" || reads[1][1] != "query" {
+				t.Fatalf("the reconcile spent closed reads %v, want one `bd list --all` and one `bd query --all`", reads)
+			}
+		})
+	}
+}
+
+// closedInclusiveReads returns the calls that asked bd for closed rows.
+func closedInclusiveReads(calls [][]string) [][]string {
+	var found [][]string
+	for _, call := range calls {
+		if slices.Contains(call, "--all") {
+			found = append(found, call)
+		}
+	}
+	return found
 }
 
 // bdReadyCloseInvalidationLedger is the close-path shape:

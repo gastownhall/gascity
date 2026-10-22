@@ -66,7 +66,21 @@ func repairBlockedFlagsOnUpgrade(cityPath string, cfg *config.City, stderr io.Wr
 	if gcDoltSkip() || cfg == nil {
 		return
 	}
-	runBlockedRepairForScopes(cityPath, cfg, blockedRepairScopes(cityPath, cfg), stderr, cmdName)
+	// A suspended scope is left cold; the controller repairs it when it
+	// resumes (repairResumedScopes).
+	runBlockedRepairForScopes(cityPath, cfg, withoutSuspendedRepairScopes(blockedRepairScopes(cityPath, cfg), suspendedBeadsScopes(cityPath, cfg)), stderr, cmdName)
+}
+
+// withoutSuspendedRepairScopes drops the scopes that belong to a suspended rig
+// or city: any bd call restarts a suspended scope's retired proxy and Dolt.
+func withoutSuspendedRepairScopes(scopes []blockedRepairScope, suspended beadsScopeSuspension) []blockedRepairScope {
+	kept := make([]blockedRepairScope, 0, len(scopes))
+	for _, scope := range scopes {
+		if !suspended.Suspended(scope.root) {
+			kept = append(kept, scope)
+		}
+	}
+	return kept
 }
 
 // startRepairBlockedFlags is the start paths' call into the repair, a seam so

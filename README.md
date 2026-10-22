@@ -57,7 +57,7 @@ Gas City requires the following tools on your system. `gc init` and
 | pgrep | Always | — | (included in macOS) | `apt install procps` |
 | lsof | Always | — | (included in macOS) | `apt install lsof` |
 | dolt | Beads provider `bd` | 2.1.0 or newer | `brew install dolt` | [releases](https://github.com/dolthub/dolt/releases) |
-| bd | Beads provider `bd` | 1.0.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
+| bd | Beads provider `bd` | 1.3.0 | [releases](https://github.com/gastownhall/beads/releases) | [releases](https://github.com/gastownhall/beads/releases) |
 | flock | Beads provider `bd` | — | `brew install flock` | `apt install util-linux` |
 | gh | Optional GitHub gates | — | `brew install gh` | [cli.github.com](https://cli.github.com/) |
 | claude / codex / gemini | Per provider | — | See provider docs | See provider docs |
@@ -196,11 +196,14 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and
 [engdocs/contributors/index.md](engdocs/contributors/index.md) before opening a
 PR.
 
-Useful commands:
+Gas City builds and tests with Bazel; CI gates on `bazel test`. Useful
+commands (each runs the matching `bazel test` tier; see
+[engdocs/bazel-quickstart.md](engdocs/bazel-quickstart.md)):
 
 - `make setup`
-- `make check`
+- `make check` (`bazel test //...` plus shell guards)
 - `make check-docs`
+- `make test-acceptance`
 - `make test-integration`
 
 ## License

@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "next_id": 210,
+  "next_id": 212,
   "permanent_ids": [
     {
       "name": "help",
@@ -79,6 +79,21 @@
       "classification": "agent-add",
       "owner": "immediate",
       "id": 5
+    },
+    {
+      "path": "gc agent is-foreign",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "agent-is-foreign",
+      "owner": "immediate",
+      "id": 211
     },
     {
       "path": "gc agent list",
@@ -3518,6 +3533,21 @@
       "classification": "runtime-undrain",
       "owner": "immediate",
       "id": 136
+    },
+    {
+      "path": "gc runtime workdir-export",
+      "aliases": [],
+      "conditional_modes": [],
+      "hidden": false,
+      "effective_hidden": false,
+      "disable_flag_parsing": false,
+      "shape": "runnable",
+      "recording_policy": "recordable",
+      "mode": "standard",
+      "notice_policy": "eligible",
+      "classification": "runtime-workdir-export",
+      "owner": "immediate",
+      "id": 210
     },
     {
       "path": "gc service",
