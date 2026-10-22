@@ -1,6 +1,7 @@
 package workdir
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -51,5 +52,39 @@ func TestImplicitRigAgentSharedIsolationResolvesToRigRoot(t *testing.T) {
 		if first != rigRoot || second != rigRoot {
 			t.Fatalf("isolation %q: instances resolve to %q and %q, want rig root %q", isolation, first, second, rigRoot)
 		}
+	}
+}
+
+// AC-4: in "worktree" mode implicit rig instances resolve to distinct
+// directories under <city>/.gc/worktrees/<rig>/.
+func TestImplicitRigAgentWorktreeIsolationGivesDistinctWorkDirs(t *testing.T) {
+	cityPath := t.TempDir()
+	coreDir := filepath.Join(t.TempDir(), "core")
+	if err := os.MkdirAll(coreDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(coreDir, "pack.toml"), []byte("[pack]\nname = \"core\"\nschema = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rigs := []config.Rig{{Name: "demo", Path: filepath.Join(cityPath, "repos", "demo")}}
+	cfg := &config.City{
+		Workspace: config.Workspace{ImplicitAgentIsolation: config.ImplicitAgentIsolationWorktree},
+		Providers: map[string]config.ProviderSpec{"claude": {}},
+		Rigs:      rigs,
+		PackDirs:  []string{coreDir},
+	}
+	a := implicitRigAgent(t, cfg)
+	first, second := resolveInstances(t, cityPath, a, rigs)
+	if first == second {
+		t.Fatalf("instances share one working tree %q", first)
+	}
+	root := filepath.Join(cityPath, ".gc", "worktrees", "demo")
+	for _, got := range []string{first, second} {
+		if filepath.Dir(got) != root {
+			t.Fatalf("instance work dir %q is not under %q", got, root)
+		}
+	}
+	if err := ValidatePoolWorkDirIsolation(cityPath, "city", []config.Agent{a}, rigs); err != nil {
+		t.Fatalf("isolated implicit agent fails pool isolation validation: %v", err)
 	}
 }

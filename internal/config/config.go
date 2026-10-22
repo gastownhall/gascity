@@ -4033,6 +4033,17 @@ func (a *Agent) EffectiveDefaultSlingFormula() string {
 	return ""
 }
 
+// ImplicitAgentWorktreeWorkDir is the work_dir template rig-scoped implicit
+// agents get in worktree isolation mode. It stays two levels under
+// .gc/worktrees so session-close pruning and doctor's worktree walk see it.
+const ImplicitAgentWorktreeWorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+
+// ImplicitAgentWorktreeSetupScript returns the path of the core pack's
+// worktree-setup.sh under coreDir.
+func ImplicitAgentWorktreeSetupScript(coreDir string) string {
+	return filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh")
+}
+
 // InjectImplicitAgents adds on-demand agents for each explicitly configured
 // provider at both city scope and each rig scope. A provider is configured
 // only when it appears in cfg.Providers; workspace.provider selects the
@@ -4068,8 +4079,21 @@ func InjectImplicitAgents(cfg *City) {
 	// so the path is absolute). Without core the template stays empty and
 	// prompt rendering falls back to the embedded baseline.
 	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+	coreDir := cfg.PackDirByName("core")
+	if coreDir != "" {
 		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
+	}
+
+	// In worktree isolation mode each rig-scoped instance gets its own git
+	// worktree, created by core's worktree-setup.sh before the session
+	// starts. The script path is absolute for the same reason the prompt
+	// is: implicit agents have no SourceDir for {{.ConfigDir}}. Without
+	// core there is no script; composed-root validation rejects that load.
+	rigWorkDir := ""
+	var rigPreStart []string
+	if cfg.Workspace.ImplicitAgentWorktreeIsolation() && coreDir != "" {
+		rigWorkDir = ImplicitAgentWorktreeWorkDir
+		rigPreStart = []string{ImplicitAgentWorktreeSetupScript(coreDir) + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"}
 	}
 
 	slingFormula := cfg.AgentDefaults.DefaultSlingFormula
@@ -4100,8 +4124,10 @@ func InjectImplicitAgents(cfg *City) {
 			cfg.Agents = append(cfg.Agents, Agent{
 				Name:                name,
 				Dir:                 rig.Name,
+				WorkDir:             rigWorkDir,
 				Provider:            name,
 				PromptTemplate:      promptTemplate,
+				PreStart:            append([]string(nil), rigPreStart...),
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
 			})

@@ -142,3 +142,51 @@ func TestImplicitAgentIsolationMergesFromFragment(t *testing.T) {
 		t.Fatalf("provenance = %v, want implicit_agent_isolation from frag.toml", prov.Workspace)
 	}
 }
+
+func findAgent(t *testing.T, cfg *City, dir, name string) Agent {
+	t.Helper()
+	for _, a := range cfg.Agents {
+		if a.Dir == dir && a.Name == name {
+			return a
+		}
+	}
+	t.Fatalf("agent %s/%s not found in %d agents", dir, name, len(cfg.Agents))
+	return Agent{}
+}
+
+// AC-4: worktree mode isolates rig-scoped implicit agents only.
+func TestImplicitAgentIsolationWorktreeInjectsWorkDirAndPreStart(t *testing.T) {
+	explicit := "\n[[agent]]\nname = \"builder\"\ndir = \"demo\"\n"
+	shared, _ := loadIsolationCity(t, isolationCity{withCore: true, withScript: true, extra: explicit})
+	cfg, coreDir := loadIsolationCity(t, isolationCity{isolation: "worktree", withCore: true, withScript: true, extra: explicit})
+
+	rigAgent := findAgent(t, cfg, "demo", "claude")
+	if rigAgent.WorkDir != ".gc/worktrees/{{.Rig}}/{{.AgentBase}}" {
+		t.Fatalf("rig implicit work_dir = %q, want .gc/worktrees/{{.Rig}}/{{.AgentBase}}", rigAgent.WorkDir)
+	}
+	wantPreStart := []string{filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh") + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"}
+	if !reflect.DeepEqual(rigAgent.PreStart, wantPreStart) {
+		t.Fatalf("rig implicit pre_start = %q, want %q", rigAgent.PreStart, wantPreStart)
+	}
+
+	// City-scoped implicit agents and explicit agents are untouched.
+	cityAgent := findAgent(t, cfg, "", "claude")
+	sharedCityAgent := findAgent(t, shared, "", "claude")
+	if cityAgent.WorkDir != sharedCityAgent.WorkDir || !reflect.DeepEqual(cityAgent.PreStart, sharedCityAgent.PreStart) {
+		t.Fatalf("city implicit agent changed: work_dir=%q pre_start=%q, want work_dir=%q pre_start=%q",
+			cityAgent.WorkDir, cityAgent.PreStart, sharedCityAgent.WorkDir, sharedCityAgent.PreStart)
+	}
+	builder := findAgent(t, cfg, "demo", "builder")
+	if builder.WorkDir != "" || len(builder.PreStart) != 0 {
+		t.Fatalf("explicit agent changed: work_dir=%q pre_start=%q", builder.WorkDir, builder.PreStart)
+	}
+}
+
+// AC-4: a deferred [[patches.agent]] still overrides one isolated agent.
+func TestImplicitAgentIsolationWorktreePatchOverridesWorkDir(t *testing.T) {
+	patch := "\n[[patches.agent]]\ndir = \"demo\"\nname = \"claude\"\nwork_dir = \".gc/custom/{{.AgentBase}}\"\n"
+	cfg, _ := loadIsolationCity(t, isolationCity{isolation: "worktree", withCore: true, withScript: true, extra: patch})
+	if got := findAgent(t, cfg, "demo", "claude").WorkDir; got != ".gc/custom/{{.AgentBase}}" {
+		t.Fatalf("patched work_dir = %q, want .gc/custom/{{.AgentBase}}", got)
+	}
+}
