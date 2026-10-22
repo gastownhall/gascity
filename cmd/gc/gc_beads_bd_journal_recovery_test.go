@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -940,6 +941,169 @@ func TestJournalRecoveryRestoresFromLegacyStringBackup(t *testing.T) {
 			}
 			if lines := strings.Fields(strings.TrimSpace(string(calls))); len(lines) != 1 || lines[0] != wantURL {
 				t.Fatalf("restore calls = %v, want exactly one restore from %s", lines, wantURL)
+			}
+		})
+	}
+}
+
+// repoStateWithBackups renders a repo_state.json whose backups object holds
+// one object-form entry per name -> url.
+func repoStateWithBackups(backups map[string]string) string {
+	names := make([]string, 0, len(backups))
+	for name := range backups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	entries := make([]string, 0, len(names))
+	for _, name := range names {
+		entries = append(entries, fmt.Sprintf(`%q:{"name":%q,"url":%q,"fetch_specs":null,"params":{}}`, name, name, backups[name]))
+	}
+	return `{"head":"refs/heads/main","remotes":{},"backups":{` + strings.Join(entries, ",") + `},"branches":{}}`
+}
+
+// seedBackupDir creates a non-empty backup directory and returns its
+// file:// URL.
+func seedBackupDir(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir backup dir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("backup"), 0o644); err != nil {
+		t.Fatalf("seed backup content: %v", err)
+	}
+	return "file://" + dir
+}
+
+// snapshotTree records every path under root (relative) with its file
+// content, so a test can prove a directory was left exactly as it was.
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	snap := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil {
+			return err
+		}
+		if d.IsDir() {
+			snap[rel+"/"] = ""
+			return nil
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		snap[rel] = string(data)
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("snapshot %s: %v", root, err)
+	}
+	return snap
+}
+
+func writeNomsManifest(t *testing.T, dbDir string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Join(dbDir, ".dolt", "noms"), 0o755); err != nil {
+		t.Fatalf("mkdir noms: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dbDir, ".dolt", "noms", "manifest"), []byte("manifest"), 0o644); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+}
+
+// The data dir is shared by every database the managed server hosts.
+// Recovering one database must never move, restore or alter another — the
+// incident in #1979 lost a 4.8 GB sibling to a whole-dir rebuild.
+func TestJournalRecoveryLeavesSiblingDatabasesInPlace(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	tests := []struct {
+		name        string
+		prodBackup  bool
+		wantRestore bool
+	}{
+		{name: "prod restored from default backup", prodBackup: true, wantRestore: true},
+		{name: "prod fails closed without backup", prodBackup: false, wantRestore: false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupJournalRecoveryEnv(t)
+			prodState := `{"head":"refs/heads/main"}`
+			if tc.prodBackup {
+				prodState = repoStateWithBackups(map[string]string{"default": seedBackupDir(t, env.backupDir)})
+			}
+			env.addDatabase(t, "prod", true, prodState)
+			writeNomsManifest(t, filepath.Join(env.dataDir, "prod"))
+
+			env.addDatabase(t, "pa", false, `{"head":"refs/heads/main"}`)
+			writeNomsManifest(t, filepath.Join(env.dataDir, "pa"))
+			beadsURL := seedBackupDir(t, filepath.Join(env.cityDir, "backups", "beads"))
+			env.addDatabase(t, "beads", false, repoStateWithBackups(map[string]string{"default": beadsURL}))
+			writeNomsManifest(t, filepath.Join(env.dataDir, "beads"))
+			// Phantom: a .dolt directory with no committed store.
+			env.addDatabase(t, "ghost", false, "")
+
+			siblings := []string{"pa", "beads", "ghost"}
+			before := map[string]map[string]string{}
+			for _, name := range siblings {
+				before[name] = snapshotTree(t, filepath.Join(env.dataDir, name))
+			}
+
+			restoreCalls := filepath.Join(env.cityDir, "restore-calls.log")
+			out, err := env.run(t, journalRecoveryHarness(t, false), "FAKE_RESTORE_CALLS="+restoreCalls)
+			restored := strings.TrimSpace(readOptional(t, restoreCalls))
+			if tc.wantRestore {
+				if err != nil {
+					t.Fatalf("recovery failed: %v\n%s", err, out)
+				}
+				if want := "file://" + env.backupDir; restored != want {
+					t.Fatalf("restore calls = %q, want exactly one restore, of prod from %s\n%s", restored, want, out)
+				}
+				if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "restored-marker")); statErr != nil {
+					t.Fatalf("prod was not restored: %v\n%s", statErr, out)
+				}
+			} else {
+				if err == nil {
+					t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
+				}
+				if restored != "" {
+					t.Fatalf("no restore may run when prod has no usable backup, restore calls %q\n%s", restored, out)
+				}
+			}
+
+			for _, name := range siblings {
+				after := snapshotTree(t, filepath.Join(env.dataDir, name))
+				if fmt.Sprint(after) != fmt.Sprint(before[name]) {
+					t.Fatalf("sibling %s changed:\nbefore %v\nafter  %v\n%s", name, before[name], after, out)
+				}
+				if _, statErr := os.Stat(filepath.Join(env.dataDir, name, "restored-marker")); statErr == nil {
+					t.Fatalf("sibling %s must not be restored\n%s", name, out)
+				}
+			}
+
+			entries, readErr := os.ReadDir(filepath.Join(env.stateDir, "corrupt-aside"))
+			if readErr != nil && !os.IsNotExist(readErr) {
+				t.Fatalf("read corrupt-aside: %v", readErr)
+			}
+			var aside []string
+			for _, entry := range entries {
+				aside = append(aside, entry.Name())
+			}
+			if tc.wantRestore {
+				if len(aside) != 1 || !strings.HasPrefix(aside[0], "prod.") {
+					t.Fatalf("corrupt-aside = %v, want only prod's store\n%s", aside, out)
+				}
+			} else {
+				if len(aside) != 0 {
+					t.Fatalf("corrupt-aside = %v, want empty after fail-closed\n%s", aside, out)
+				}
+				if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "original-marker")); statErr != nil {
+					t.Fatalf("prod must stay in place when not recoverable: %v", statErr)
+				}
 			}
 		})
 	}
