@@ -67,4 +67,17 @@ func TestResolveMaterializingNamed_RetiredPoolSlotsDoNotHoldConfiguredName(t *te
 	if id == "" {
 		t.Fatal("resolveSessionIDMaterializingNamed(mayor) returned an empty id")
 	}
+	if retired[id] {
+		t.Fatalf("resolveSessionIDMaterializingNamed(mayor) returned retired pool slot %s; want a freshly materialized named session", id)
+	}
+	got, err := store.Get(id)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", id, err)
+	}
+	if got.Status == "closed" {
+		t.Fatalf("resolved session %s is closed; want an open materialized named session", id)
+	}
+	if got.Metadata["session_name"] != runtimeName {
+		t.Fatalf("resolved session %s session_name = %q, want %q", id, got.Metadata["session_name"], runtimeName)
+	}
 }
