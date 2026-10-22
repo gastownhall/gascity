@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"maps"
 	"os"
+	"slices"
 	"strings"
 
 	"github.com/gastownhall/gascity/internal/bdflags"
@@ -50,7 +52,12 @@ import (
 //     `dep add <a> <b>` (blocks by default, or a re-parent with
 //     -t parent-child), so it is checked on <a>'s row like dep add.
 type bdRigNamespaceCheck struct {
+	// ns is the namespace of the guarded rig whose store the scope opens, or
+	// nil when the scope is no guarded rig's: then only the per-id check of
+	// bdCrossRigSubjectRefusal runs.
 	ns *rigNamespace
+	// cfg is the city's config, for the per-id prefix check; nil skips it.
+	cfg *config.City
 	// get reads a row for classification through the scope's bd front door.
 	get func(id string) (beads.Bead, error)
 	// actor is the claim actor when the argv names none (--actor): the
@@ -60,7 +67,9 @@ type bdRigNamespaceCheck struct {
 }
 
 // newBdRigNamespaceCheck returns the check for a gc bd invocation whose
-// scope is scopeRoot, or nil when no guarded rig owns that scope.
+// scope is scopeRoot, or nil when the city has no guarded rig. When no
+// guarded rig owns the scope, the check only refuses a write naming a
+// guarded rig's bead (bdCrossRigSubjectRefusal).
 func newBdRigNamespaceCheck(cfg *config.City, cityPath, scopeRoot string, get func(string) (beads.Bead, error)) *bdRigNamespaceCheck {
 	if !cityHasGuardedRig(cfg) {
 		return nil
@@ -73,10 +82,7 @@ func newBdRigNamespaceCheck(cfg *config.City, cityPath, scopeRoot string, get fu
 		return cliStores(cityPath, cityStore).Sessions(), nil
 	})
 	ns := rigNamespaceForScopeOrDeny(cfg, cityPath, scopeRoot, sessions)
-	if ns == nil {
-		return nil
-	}
-	return &bdRigNamespaceCheck{ns: ns, get: get, actor: bdEffectiveActorFromEnv(os.Getenv)}
+	return &bdRigNamespaceCheck{ns: ns, cfg: cfg, get: get, actor: bdEffectiveActorFromEnv(os.Getenv)}
 }
 
 // bdEffectiveActorFromEnv is the BEADS_ACTOR the bd child inherits from
@@ -137,109 +143,201 @@ func (c *bdRigNamespaceCheck) check(bdArgs []string) ([]string, string, bool) {
 	if c == nil {
 		return bdArgs, "", false
 	}
-	verb, rest := bdflags.SplitGlobalFlags(bdArgs)
-	if verb == "new" {
-		verb = "create"
+	if msg, refused := bdCrossRigSubjectRefusal(c.cfg, c.ns, bdArgs); refused {
+		return nil, msg, true
 	}
-	if verb == "" {
+	if c.ns == nil {
 		return bdArgs, "", false
 	}
-	if bdRigNamespaceReadVerbs[verb] {
-		if flag, claims := bdflags.ClaimFlag(verb, rest); claims {
-			return nil, c.unvettedClaim(verb, flag), true
+	w := splitBdVerbCall(bdArgs)
+	if w.verb == "" {
+		return bdArgs, "", false
+	}
+	if bdRigNamespaceReadVerbs[w.verb] {
+		if flag, claims := bdflags.ClaimFlag(w.verb, w.rest); claims {
+			return nil, c.unvettedClaim(w.verb, flag), true
 		}
 		return bdArgs, "", false
 	}
-	sub := ""
-	if len(rest) > 0 && !strings.HasPrefix(rest[0], "-") {
-		sub = rest[0]
-	}
-	if bdRigNamespaceCompoundReads[verb][sub] {
+	if bdRigNamespaceCompoundReads[w.verb][w.sub] || w.verb == "relate" || w.verb == "unrelate" {
 		return bdArgs, "", false
 	}
-	switch verb {
-	case "relate", "unrelate":
-		return bdArgs, "", false
+	if args, msg, refused, done := c.checkWritePreconditions(w); done {
+		return args, msg, refused
 	}
+	if verbCheck, ok := bdRigNamespaceWriteChecks[w.verb]; ok {
+		if args, msg, refused, handled := verbCheck(c, w); handled {
+			return args, msg, refused
+		}
+	}
+	name := w.verb
+	if w.sub != "" {
+		name += " " + w.sub
+	}
+	return nil, fmt.Sprintf("gc bd: refusing %s: rig %s (federation = \"rig\") lets gc bd run only the writes it can check first; use raw bd\n", name, rigNamespaceLabel(c.ns)), true
+}
+
+// bdVerbCall is one gc bd argv as the guard reads it: the verb ("new" read
+// as "create"), its first positional when it has one (a compound verb's
+// sub-verb), the argv after the verb, and the whole argv.
+type bdVerbCall struct {
+	verb, sub    string
+	rest, bdArgs []string
+}
+
+// splitBdVerbCall reads bdArgs' verb past the global flags.
+func splitBdVerbCall(bdArgs []string) bdVerbCall {
+	w := bdVerbCall{bdArgs: bdArgs}
+	w.verb, w.rest = bdflags.SplitGlobalFlags(bdArgs)
+	if w.verb == "new" {
+		w.verb = "create"
+	}
+	if len(w.rest) > 0 && !strings.HasPrefix(w.rest[0], "-") {
+		w.sub = w.rest[0]
+	}
+	return w
+}
+
+// checkWritePreconditions applies the rules every write verb shares. done
+// reports that the check ends here, with args, msg and refused its answer:
+// an argv the guard cannot read exactly, a help request (bd runs nothing),
+// or a write aimed at another database.
+func (c *bdRigNamespaceCheck) checkWritePreconditions(w bdVerbCall) (args []string, msg string, refused, done bool) {
 	// pflag reads "-reason" as -r with the attached value "eason", while the
 	// id scan reads it as --reason taking the next token: the next token
 	// would then be an id bd writes that the guard never checked. A write
 	// carrying a shorthand cluster or an attached shorthand value is
 	// refused as unreadable (no shipped form uses one); "-x=value" is fine.
-	if tok, ok := bdShorthandCluster(bdArgs); ok {
-		return nil, fmt.Sprintf("gc bd: refusing %s: cannot read %q exactly (a shorthand cluster or attached value), so rig %s (federation = \"rig\") cannot check what it writes; spell flags out (--flag value)\n", verb, tok, rigNamespaceLabel(c.ns)), true
+	if tok, ok := bdShorthandCluster(w.bdArgs); ok {
+		return nil, fmt.Sprintf("gc bd: refusing %s: cannot read %q exactly (a shorthand cluster or attached value), so rig %s (federation = \"rig\") cannot check what it writes; spell flags out (--flag value)\n", w.verb, tok, rigNamespaceLabel(c.ns)), true, true
 	}
-	if bdRigNamespaceHelpOn(verb, sub, rest) {
+	if bdRigNamespaceHelpOn(w.verb, w.sub, w.rest) {
 		// cobra prints help and runs nothing.
-		return bdArgs, "", false
+		return w.bdArgs, "", false, true
 	}
 	// Everything below writes: it must write this scope's store.
 	for _, f := range []string{"--db", "--database"} {
-		if bdRigNamespaceFlagSet(verb, sub, bdArgs, f) {
-			return nil, fmt.Sprintf("gc bd: refusing %s %s: rig %s (federation = \"rig\") checks writes against its own store only; use raw bd for another database\n", verb, f, rigNamespaceLabel(c.ns)), true
+		if bdRigNamespaceFlagSet(w.verb, w.sub, w.bdArgs, f) {
+			return nil, fmt.Sprintf("gc bd: refusing %s %s: rig %s (federation = \"rig\") checks writes against its own store only; use raw bd for another database\n", w.verb, f, rigNamespaceLabel(c.ns)), true, true
 		}
 	}
-	switch verb {
-	case "create":
-		return c.checkCreate(bdArgs, rest)
-	case "update", "close", "reopen", "delete", "heartbeat":
-		return c.checkByID(verb, bdArgs, rest)
-	case "release-if-current":
-		if len(rest) == 0 {
-			return bdArgs, "", false // doBd reports the usage error
-		}
-		return c.checkRows(verb, bdArgs, rest[:1])
-	case "assign":
-		return c.checkAssign(bdArgs, rest)
-	case "unclaim":
-		return c.checkUnclaim(bdArgs, rest)
-	case "defer", "undefer", "duplicate", "supersede":
-		return c.checkSubjects(verb, bdArgs, rest, bdSubjectsAll)
-	case "todo", "human":
-		if (verb == "todo" && sub == "done") || (verb == "human" && sub == "dismiss") {
-			return c.checkSubjects(verb+" "+sub, bdArgs, rest[1:], bdSubjectsAll)
-		}
-	case "link":
-		pos, ok := c.scanVerbArgs("link", rest)
-		if !ok || len(pos) < 2 {
-			return nil, c.unreadable("link"), true
-		}
-		// `link <a> <b>` is `dep add <a> <b>`: <a>'s readiness or parent
-		// changes.
-		return c.checkRows("link", bdArgs, pos[:1])
-	case "set-state", "comment", "note":
-		return c.checkSubjects(verb, bdArgs, rest, bdSubjectsFirst)
-	case "tag":
-		return c.checkSubjects(verb, bdArgs, rest, bdSubjectsAllButLast)
-	case "label":
-		if sub == "add" || sub == "remove" {
-			return c.checkSubjects("label "+sub, bdArgs, rest[1:], bdSubjectsAllButLast)
-		}
-	case "comments":
-		if sub == "add" {
-			return c.checkSubjects("comments add", bdArgs, rest[1:], bdSubjectsFirst)
-		}
-		switch sub {
-		case "delete", "edit", "remove", "rm", "update":
-		default:
-			// `comments <id>` lists a bead's comments.
-			return bdArgs, "", false
-		}
-	case "dep":
-		if sub == "add" || sub == "remove" {
-			ids, ambiguous := bdScanPositionalIDs(rest[1:], bdSubcmdValueFlags("dep "+sub), bdSubcmdBoolFlags("dep "+sub), nil)
-			if ambiguous || len(ids) == 0 {
-				return nil, c.unreadable("dep " + sub), true
-			}
-			// The dependent's side: the row whose readiness changes.
-			return c.checkRows("dep "+sub, bdArgs, ids[:1])
-		}
+	return nil, "", false, false
+}
+
+// bdVerbCheck checks one write verb of a guarded scope. handled=false sends
+// the write to the refusal of every write gc bd cannot check first.
+type bdVerbCheck func(c *bdRigNamespaceCheck, w bdVerbCall) (args []string, msg string, refused, handled bool)
+
+// bdRigNamespaceWriteChecks is the allowlist of write verbs gc bd runs on a
+// guarded scope, each with the check it passes first. Every other verb is
+// refused.
+var bdRigNamespaceWriteChecks = map[string]bdVerbCheck{
+	"create":             (*bdRigNamespaceCheck).verbCreate,
+	"update":             (*bdRigNamespaceCheck).verbByID,
+	"close":              (*bdRigNamespaceCheck).verbByID,
+	"reopen":             (*bdRigNamespaceCheck).verbByID,
+	"delete":             (*bdRigNamespaceCheck).verbByID,
+	"heartbeat":          (*bdRigNamespaceCheck).verbByID,
+	"release-if-current": (*bdRigNamespaceCheck).verbReleaseIfCurrent,
+	"assign":             (*bdRigNamespaceCheck).verbAssign,
+	"unclaim":            (*bdRigNamespaceCheck).verbUnclaim,
+	"defer":              bdVerbSubjectsCheck(bdSubjectsAll),
+	"undefer":            bdVerbSubjectsCheck(bdSubjectsAll),
+	"duplicate":          bdVerbSubjectsCheck(bdSubjectsAll),
+	"supersede":          bdVerbSubjectsCheck(bdSubjectsAll),
+	"todo":               bdSubVerbSubjectsCheck(bdSubjectsAll, "done"),
+	"human":              bdSubVerbSubjectsCheck(bdSubjectsAll, "dismiss"),
+	"link":               (*bdRigNamespaceCheck).verbLink,
+	"set-state":          bdVerbSubjectsCheck(bdSubjectsFirst),
+	"comment":            bdVerbSubjectsCheck(bdSubjectsFirst),
+	"note":               bdVerbSubjectsCheck(bdSubjectsFirst),
+	"tag":                bdVerbSubjectsCheck(bdSubjectsAllButLast),
+	"label":              bdSubVerbSubjectsCheck(bdSubjectsAllButLast, "add", "remove"),
+	"comments":           (*bdRigNamespaceCheck).verbComments,
+	"dep":                (*bdRigNamespaceCheck).verbDep,
+}
+
+// handledCheck is a verb check's answer that ends the check.
+func handledCheck(args []string, msg string, refused bool) ([]string, string, bool, bool) {
+	return args, msg, refused, true
+}
+
+func (c *bdRigNamespaceCheck) verbCreate(w bdVerbCall) ([]string, string, bool, bool) {
+	return handledCheck(c.checkCreate(w.bdArgs, w.rest))
+}
+
+func (c *bdRigNamespaceCheck) verbByID(w bdVerbCall) ([]string, string, bool, bool) {
+	return handledCheck(c.checkByID(w.verb, w.bdArgs, w.rest))
+}
+
+func (c *bdRigNamespaceCheck) verbReleaseIfCurrent(w bdVerbCall) ([]string, string, bool, bool) {
+	if len(w.rest) == 0 {
+		return handledCheck(w.bdArgs, "", false) // doBd reports the usage error
 	}
-	name := verb
-	if sub != "" {
-		name += " " + sub
+	return handledCheck(c.checkRows(w.verb, w.bdArgs, w.rest[:1]))
+}
+
+func (c *bdRigNamespaceCheck) verbAssign(w bdVerbCall) ([]string, string, bool, bool) {
+	return handledCheck(c.checkAssign(w.bdArgs, w.rest))
+}
+
+func (c *bdRigNamespaceCheck) verbUnclaim(w bdVerbCall) ([]string, string, bool, bool) {
+	return handledCheck(c.checkUnclaim(w.bdArgs, w.rest))
+}
+
+// verbLink checks `link <a> <b>`, which is `dep add <a> <b>`: <a>'s
+// readiness or parent changes.
+func (c *bdRigNamespaceCheck) verbLink(w bdVerbCall) ([]string, string, bool, bool) {
+	pos, ok := c.scanVerbArgs("link", w.rest)
+	if !ok || len(pos) < 2 {
+		return handledCheck(nil, c.unreadable("link"), true)
 	}
-	return nil, fmt.Sprintf("gc bd: refusing %s: rig %s (federation = \"rig\") lets gc bd run only the writes it can check first; use raw bd\n", name, rigNamespaceLabel(c.ns)), true
+	return handledCheck(c.checkRows("link", w.bdArgs, pos[:1]))
+}
+
+// verbComments checks `comments add`; `comments <id>` lists a bead's
+// comments, and the other sub-verbs are refused.
+func (c *bdRigNamespaceCheck) verbComments(w bdVerbCall) ([]string, string, bool, bool) {
+	switch w.sub {
+	case "add":
+		return handledCheck(c.checkSubjects("comments add", w.bdArgs, w.rest[1:], bdSubjectsFirst))
+	case "delete", "edit", "remove", "rm", "update":
+		return nil, "", false, false
+	}
+	return handledCheck(w.bdArgs, "", false)
+}
+
+// verbDep checks `dep add|remove` on the dependent's side: the row whose
+// readiness changes.
+func (c *bdRigNamespaceCheck) verbDep(w bdVerbCall) ([]string, string, bool, bool) {
+	if w.sub != "add" && w.sub != "remove" {
+		return nil, "", false, false
+	}
+	ids, ambiguous := bdScanPositionalIDs(w.rest[1:], bdSubcmdValueFlags("dep "+w.sub), bdSubcmdBoolFlags("dep "+w.sub), nil)
+	if ambiguous || len(ids) == 0 {
+		return handledCheck(nil, c.unreadable("dep "+w.sub), true)
+	}
+	return handledCheck(c.checkRows("dep "+w.sub, w.bdArgs, ids[:1]))
+}
+
+// bdVerbSubjectsCheck checks a manifest-less verb on the rows its
+// positionals name under rule.
+func bdVerbSubjectsCheck(rule bdSubjectRule) bdVerbCheck {
+	return func(c *bdRigNamespaceCheck, w bdVerbCall) ([]string, string, bool, bool) {
+		return handledCheck(c.checkSubjects(w.verb, w.bdArgs, w.rest, rule))
+	}
+}
+
+// bdSubVerbSubjectsCheck checks `<verb> <sub> ...` for the sub-verbs subs,
+// on the rows the positionals after sub name under rule. Any other sub-verb
+// is not handled, and is refused.
+func bdSubVerbSubjectsCheck(rule bdSubjectRule, subs ...string) bdVerbCheck {
+	return func(c *bdRigNamespaceCheck, w bdVerbCall) ([]string, string, bool, bool) {
+		if !slices.Contains(subs, w.sub) {
+			return nil, "", false, false
+		}
+		return handledCheck(c.checkSubjects(w.verb+" "+w.sub, w.bdArgs, w.rest[1:], rule))
+	}
 }
 
 type bdSubjectRule uint8
@@ -414,21 +512,8 @@ func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, stri
 	if !ok {
 		return nil, fmt.Sprintf("gc bd: refusing create: rig %s (federation = \"rig\") cannot stamp the rows it creates\n", rigNamespaceLabel(c.ns)), true
 	}
-	if _, ambiguous := bdScanPositionalIDs(rest, bdSubcmdValueFlags("create"), bdSubcmdBoolFlags("create"), nil); ambiguous {
-		return nil, c.unreadable("create"), true
-	}
-	for _, flag := range []string{"--file", "-f", "--graph"} {
-		if bdRigNamespaceFlagSet("create", "", rest, flag) {
-			return nil, fmt.Sprintf("gc bd: refusing create %s: rig %s (federation = \"rig\") stamps every row gc creates, and a batch create cannot be stamped\n", flag, rigNamespaceLabel(c.ns)), true
-		}
-	}
-	for _, flag := range []string{"--deps", "--repo"} {
-		if bdRigNamespaceFlagSet("create", "", rest, flag) {
-			return nil, fmt.Sprintf("gc bd: refusing create %s: rig %s (federation = \"rig\") cannot check what it writes outside the new row; use raw bd\n", flag, rigNamespaceLabel(c.ns)), true
-		}
-	}
-	if n := len(bdflags.FlagValues(rest, bdSubcmdValueFlags("create"), "--metadata")); n > 1 {
-		return nil, fmt.Sprintf("gc bd: refusing create with %d --metadata flags: bd keeps only the last, so the rig's creation stamp could be lost\n", n), true
+	if msg, refused := c.createArgvRefusal(rest); refused {
+		return nil, msg, true
 	}
 	writes, msg, refused := bdMetadataWrites("create", rest)
 	if refused {
@@ -437,17 +522,62 @@ func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, stri
 	if msg, refused := c.checkStampKey("create", writes); refused {
 		return nil, msg, true
 	}
-	for _, a := range bdflags.FlagValues(rest, bdSubcmdValueFlags("create"), "--assignee", "-a") {
-		if strings.TrimSpace(a) != "" && !rigNamespacePinAdmitted(c.ns, a) {
-			return nil, c.actorRefusal("create", "a new bead", a), true
+	if msg, refused := c.assigneeFlagRefusal("create", "a new bead", rest); refused {
+		return nil, msg, true
+	}
+	if msg, refused := c.createWritesRefusal(writes); refused {
+		return nil, msg, true
+	}
+	out, err := bdArgsWithOwnerStamp(bdArgs, stamp)
+	if err != nil {
+		return nil, fmt.Sprintf("gc bd: refusing create: %v\n", err), true
+	}
+	return out, "", false
+}
+
+// createArgvRefusal refuses a create argv the guard cannot check whole: one
+// it cannot read exactly, a batch create (which cannot be stamped), a write
+// outside the new row, or more than one --metadata flag.
+func (c *bdRigNamespaceCheck) createArgvRefusal(rest []string) (string, bool) {
+	if _, ambiguous := bdScanPositionalIDs(rest, bdSubcmdValueFlags("create"), bdSubcmdBoolFlags("create"), nil); ambiguous {
+		return c.unreadable("create"), true
+	}
+	for _, flag := range []string{"--file", "-f", "--graph"} {
+		if bdRigNamespaceFlagSet("create", "", rest, flag) {
+			return fmt.Sprintf("gc bd: refusing create %s: rig %s (federation = \"rig\") stamps every row gc creates, and a batch create cannot be stamped\n", flag, rigNamespaceLabel(c.ns)), true
 		}
 	}
+	for _, flag := range []string{"--deps", "--repo"} {
+		if bdRigNamespaceFlagSet("create", "", rest, flag) {
+			return fmt.Sprintf("gc bd: refusing create %s: rig %s (federation = \"rig\") cannot check what it writes outside the new row; use raw bd\n", flag, rigNamespaceLabel(c.ns)), true
+		}
+	}
+	if n := len(bdflags.FlagValues(rest, bdSubcmdValueFlags("create"), "--metadata")); n > 1 {
+		return fmt.Sprintf("gc bd: refusing create with %d --metadata flags: bd keeps only the last, so the rig's creation stamp could be lost\n", n), true
+	}
+	return "", false
+}
+
+// assigneeFlagRefusal refuses a --assignee (-a) value of verb that the
+// namespace does not admit.
+func (c *bdRigNamespaceCheck) assigneeFlagRefusal(verb, subject string, rest []string) (string, bool) {
+	for _, a := range bdflags.FlagValues(rest, bdSubcmdValueFlags(verb), "--assignee", "-a") {
+		if strings.TrimSpace(a) != "" && !rigNamespacePinAdmitted(c.ns, a) {
+			return c.actorRefusal(verb, subject, a), true
+		}
+	}
+	return "", false
+}
+
+// createWritesRefusal refuses a create's metadata write of an assignee the
+// namespace does not admit or of a route outside it.
+func (c *bdRigNamespaceCheck) createWritesRefusal(writes []bdMetadataWrite) (string, bool) {
 	for _, w := range writes {
 		if w.unset || strings.TrimSpace(w.value) == "" {
 			continue
 		}
 		if isBdRigNamespaceAssigneeKey(w.key) && !rigNamespacePinAdmitted(c.ns, w.value) {
-			return nil, c.actorRefusal("create", "a new bead", w.value), true
+			return c.actorRefusal("create", "a new bead", w.value), true
 		}
 		// Create-time route rule (one rule, two layers; see "Routes on a new
 		// bead" in docs/guides/sharing-a-rig-store.md): gc bd create, like
@@ -458,14 +588,10 @@ func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, stri
 		// a hand-off goes through an update of an existing Owned row (see
 		// checkByID), never through a create.
 		if isRigNamespaceRouteKey(w.key) && !rigNamespaceRouteAdmitted(c.ns, w.value) {
-			return nil, c.routeRefusal("create", "a new bead", w), true
+			return c.routeRefusal("create", "a new bead", w), true
 		}
 	}
-	out, err := bdArgsWithOwnerStamp(bdArgs, stamp)
-	if err != nil {
-		return nil, fmt.Sprintf("gc bd: refusing create: %v\n", err), true
-	}
-	return out, "", false
+	return "", false
 }
 
 func (c *bdRigNamespaceCheck) checkByID(verb string, bdArgs, rest []string) ([]string, string, bool) {
@@ -494,43 +620,61 @@ func (c *bdRigNamespaceCheck) checkByID(verb string, bdArgs, rest []string) ([]s
 	if refused || verb != "update" {
 		return args, msg, refused
 	}
+	if msg, refused := c.updateValueRefusal(verb, bdArgs, rest, ids, writes); refused {
+		return nil, msg, true
+	}
+	return args, "", false
+}
+
+// updateValueRefusal refuses an update of rows the guard admits that sets a
+// value the namespace does not admit: a claim or an assignee for an
+// identity outside it, or a route that would hand a row that is not this
+// city's own to an outside identity.
+func (c *bdRigNamespaceCheck) updateValueRefusal(verb string, bdArgs, rest, ids []string, writes []bdMetadataWrite) (string, bool) {
 	subject := strings.Join(ids, ", ")
 	if _, claims := bdflags.ClaimFlag(verb, rest); claims {
 		if actor := c.claimActor(bdArgs); !rigNamespacePinAdmitted(c.ns, actor) {
-			return nil, c.actorRefusal(verb, subject, actor), true
+			return c.actorRefusal(verb, subject, actor), true
 		}
 	}
-	for _, a := range bdflags.FlagValues(rest, bdSubcmdValueFlags(verb), "--assignee", "-a") {
-		if strings.TrimSpace(a) != "" && !rigNamespacePinAdmitted(c.ns, a) {
-			return nil, c.actorRefusal(verb, subject, a), true
-		}
+	if msg, refused := c.assigneeFlagRefusal(verb, subject, rest); refused {
+		return msg, true
 	}
 	for _, w := range writes {
 		if w.unset || strings.TrimSpace(w.value) == "" {
 			continue
 		}
 		if isBdRigNamespaceAssigneeKey(w.key) && !rigNamespacePinAdmitted(c.ns, w.value) {
-			return nil, c.actorRefusal(verb, subject, w.value), true
+			return c.actorRefusal(verb, subject, w.value), true
 		}
-		if !isRigNamespaceRouteKey(w.key) {
-			continue
-		}
-		if !config.RigRouteQualified(w.value) {
-			return nil, c.routeRefusal(verb, subject, w), true
-		}
-		if rigNamespaceRouteAdmitted(c.ns, w.value) {
-			continue
-		}
-		// A route outside the namespace hands this city's own work off; on
-		// any other row it would claim the row for an outside identity.
-		for _, id := range ids {
-			row, err := c.get(id)
-			if err != nil || c.ns.classify(row) != rowOwned {
-				return nil, c.routeRefusal(verb, id, w), true
-			}
+		if msg, refused := c.updateRouteRefusal(verb, subject, ids, w); refused {
+			return msg, true
 		}
 	}
-	return args, "", false
+	return "", false
+}
+
+// updateRouteRefusal refuses an update's route write w that is not
+// rig-qualified, or that is outside the namespace on a row that is not this
+// city's own: a route outside the namespace hands this city's own work off;
+// on any other row it would claim the row for an outside identity.
+func (c *bdRigNamespaceCheck) updateRouteRefusal(verb, subject string, ids []string, w bdMetadataWrite) (string, bool) {
+	if !isRigNamespaceRouteKey(w.key) {
+		return "", false
+	}
+	if !config.RigRouteQualified(w.value) {
+		return c.routeRefusal(verb, subject, w), true
+	}
+	if rigNamespaceRouteAdmitted(c.ns, w.value) {
+		return "", false
+	}
+	for _, id := range ids {
+		row, err := c.get(id)
+		if err != nil || c.ns.classify(row) != rowOwned {
+			return c.routeRefusal(verb, id, w), true
+		}
+	}
+	return "", false
 }
 
 // checkStampKey refuses a write that sets or unsets the creation stamp.
@@ -637,9 +781,7 @@ func bdMetadataWrites(verb string, args []string) ([]bdMetadataWrite, string, bo
 			break
 		}
 		name, value, inline := strings.Cut(arg, "=")
-		switch name {
-		case "--set-metadata", "--metadata", "--unset-metadata":
-		default:
+		if name != "--set-metadata" && name != "--metadata" && name != "--unset-metadata" {
 			if !inline && valueFlags[arg] && i+1 < len(args) {
 				i++
 			}
@@ -652,35 +794,57 @@ func bdMetadataWrites(verb string, args []string) ([]bdMetadataWrite, string, bo
 			i++
 			value = args[i]
 		}
-		switch name {
-		case "--unset-metadata":
-			out = append(out, bdMetadataWrite{key: value, unset: true})
-		case "--set-metadata":
-			k, v, ok := strings.Cut(value, "=")
-			if !ok || strings.TrimSpace(k) == "" {
-				return nil, fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
-			}
-			out = append(out, bdMetadataWrite{key: k, value: v})
-		case "--metadata":
-			raw := strings.TrimSpace(value)
-			if strings.HasPrefix(raw, "@") {
-				return nil, fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be checked before write\n", value), true
-			}
-			var m map[string]json.RawMessage
-			if err := json.Unmarshal([]byte(raw), &m); err != nil {
-				return nil, fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
-			}
-			for k, rv := range m {
-				var v string
-				if err := json.Unmarshal(rv, &v); err != nil {
-					if strings.TrimSpace(k) == rigNamespaceOwnerStampKey || isRigNamespaceRouteKey(k) || isBdRigNamespaceAssigneeKey(k) {
-						return nil, fmt.Sprintf("gc bd: refusing non-string %s before write\n", k), true
-					}
-					continue
-				}
-				out = append(out, bdMetadataWrite{key: k, value: v})
-			}
+		writes, msg, refused := bdMetadataFlagWrites(name, value)
+		if refused {
+			return nil, msg, true
 		}
+		out = append(out, writes...)
+	}
+	return out, "", false
+}
+
+// bdMetadataFlagWrites returns the writes of one metadata flag name
+// (--set-metadata, --metadata or --unset-metadata) with its value, or a
+// refusal when the value cannot be read exactly.
+func bdMetadataFlagWrites(name, value string) ([]bdMetadataWrite, string, bool) {
+	switch name {
+	case "--unset-metadata":
+		return []bdMetadataWrite{{key: value, unset: true}}, "", false
+	case "--set-metadata":
+		k, v, ok := strings.Cut(value, "=")
+		if !ok || strings.TrimSpace(k) == "" {
+			return nil, fmt.Sprintf("gc bd: refusing malformed --set-metadata value %q before write\n", value), true
+		}
+		return []bdMetadataWrite{{key: k, value: v}}, "", false
+	}
+	return bdMetadataJSONWrites(value)
+}
+
+// bdMetadataJSONWrites returns the writes of a --metadata JSON object, in key
+// order. A non-string value is skipped, unless its key is one the guard
+// checks.
+func bdMetadataJSONWrites(value string) ([]bdMetadataWrite, string, bool) {
+	raw := strings.TrimSpace(value)
+	if strings.HasPrefix(raw, "@") {
+		return nil, fmt.Sprintf("gc bd: refusing --metadata %q: @file input cannot be checked before write\n", value), true
+	}
+	var m map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return nil, fmt.Sprintf("gc bd: refusing malformed --metadata value before write: %v\n", err), true
+	}
+	var out []bdMetadataWrite
+	// Keys in order, so a refusal names the same key on every run and the
+	// writes are checked in one order.
+	for _, k := range slices.Sorted(maps.Keys(m)) {
+		rv := m[k]
+		var v string
+		if err := json.Unmarshal(rv, &v); err != nil {
+			if strings.TrimSpace(k) == rigNamespaceOwnerStampKey || isRigNamespaceRouteKey(k) || isBdRigNamespaceAssigneeKey(k) {
+				return nil, fmt.Sprintf("gc bd: refusing non-string %s before write\n", k), true
+			}
+			continue
+		}
+		out = append(out, bdMetadataWrite{key: k, value: v})
 	}
 	return out, "", false
 }
@@ -767,4 +931,196 @@ func mergeOwnerStampJSON(raw, stamp string) (string, error) {
 		return "", err
 	}
 	return string(b), nil
+}
+
+// bdCrossRigSubjectRefusal is gc bd's per-id prefix check, the one the hook
+// claim and agent-script apply (rigNamespaceForLeg): the guard above checks
+// the scope gc bd resolved, but a write's ids need not live there (an
+// explicit --rig or --city, -C, or ids from two stores), and bd may follow
+// an id to another store. So a write naming a bead whose prefix maps to a
+// guarded rig other than the scope's (or to any guarded rig, when the scope
+// is no guarded rig's) is refused before bd runs; a prefix two guarded rigs
+// share is refused too. scope is the scope's guarded namespace, or nil.
+// Reads and help requests pass. A write whose subjects cannot be read
+// exactly is judged by every positional token instead, failing closed.
+func bdCrossRigSubjectRefusal(cfg *config.City, scope *rigNamespace, bdArgs []string) (string, bool) {
+	if !cityHasGuardedRig(cfg) {
+		return "", false
+	}
+	verb, ids, write := bdWriteSubjects(bdArgs)
+	if !write {
+		return "", false
+	}
+	scopeName := ""
+	scopeLabel := "a scope that is no guarded rig's store"
+	if scope != nil {
+		scopeName = scope.rigName()
+		scopeLabel = "rig " + rigNamespaceLabel(scope) + "'s scope"
+	}
+	for _, id := range ids {
+		owner, guarded := rigNamespaceForBeadID(cfg, id, nil)
+		if !guarded {
+			continue
+		}
+		name := owner.rigName()
+		if name == "" {
+			return fmt.Sprintf("gc bd: refusing %s on %s: its prefix names more than one rig with federation = \"rig\", so gc bd cannot tell whose store it is in; use raw bd\n", verb, id), true
+		}
+		if scope != nil && name == scopeName {
+			continue
+		}
+		return fmt.Sprintf("gc bd: refusing %s on %s: it is rig %q's bead (federation = \"rig\"), and this command runs in %s, where that rig cannot check it; run it in rig %q's scope (gc bd --rig %s ...)\n", verb, id, name, scopeLabel, name, name), true
+	}
+	return "", false
+}
+
+// bdWriteSubjects names the beads a gc bd write addresses, the way the
+// guard's dispatch reads them: verb is its name, write reports whether it
+// writes at all (reads, relate/unrelate and real help requests do not). A
+// write whose subjects cannot be read exactly (an unknown verb, an argv a
+// flag it does not know could hide an id in, a shorthand cluster) returns
+// every positional token, so a guarded rig's id anywhere in it is seen.
+func bdWriteSubjects(bdArgs []string) (verb string, ids []string, write bool) {
+	w := splitBdVerbCall(bdArgs)
+	verb = w.verb
+	if verb == "" || bdRigNamespaceReadVerbs[verb] {
+		return verb, nil, false
+	}
+	if bdRigNamespaceCompoundReads[verb][w.sub] || verb == "relate" || verb == "unrelate" {
+		return verb, nil, false
+	}
+	_, cluster := bdShorthandCluster(bdArgs)
+	if !cluster && bdRigNamespaceHelpOn(verb, w.sub, w.rest) {
+		return verb, nil, false
+	}
+	if cluster {
+		return verb, bdPositionalTokens(w.rest), true
+	}
+	if verb == "create" {
+		return verb, nil, true
+	}
+	scan, known := bdWriteSubjectScans[verb]
+	if !known {
+		return verb, bdPositionalTokens(w.rest), true
+	}
+	pos, ok, list := scan(w)
+	switch {
+	case list:
+		return verb, nil, false
+	case !ok:
+		return verb, bdPositionalTokens(w.rest), true
+	}
+	return verb, pos, true
+}
+
+// bdSubjectScan reads the bead ids a write verb names. ok=false means they
+// cannot be read exactly; list=true means the form only reads.
+type bdSubjectScan func(w bdVerbCall) (pos []string, ok, list bool)
+
+// bdWriteSubjectScans reads each write verb of the guard's allowlist
+// (bdRigNamespaceWriteChecks) the way its check does. A verb not here
+// cannot be read exactly.
+var bdWriteSubjectScans = map[string]bdSubjectScan{
+	"update":             bdVerbSubjectScan(bdSubjectsAll),
+	"close":              bdVerbSubjectScan(bdSubjectsAll),
+	"reopen":             bdVerbSubjectScan(bdSubjectsAll),
+	"delete":             bdVerbSubjectScan(bdSubjectsAll),
+	"heartbeat":          bdVerbSubjectScan(bdSubjectsAll),
+	"release-if-current": bdReleaseIfCurrentSubjects,
+	"assign":             bdVerbSubjectScan(bdSubjectsFirst),
+	"unclaim":            bdVerbSubjectScan(bdSubjectsAll),
+	"defer":              bdVerbSubjectScan(bdSubjectsAll),
+	"undefer":            bdVerbSubjectScan(bdSubjectsAll),
+	"duplicate":          bdVerbSubjectScan(bdSubjectsAll),
+	"supersede":          bdVerbSubjectScan(bdSubjectsAll),
+	"todo":               bdSubVerbSubjectScan(bdSubjectsAll, "done"),
+	"human":              bdSubVerbSubjectScan(bdSubjectsAll, "dismiss"),
+	"link":               bdVerbSubjectScan(bdSubjectsFirst),
+	"set-state":          bdVerbSubjectScan(bdSubjectsFirst),
+	"comment":            bdVerbSubjectScan(bdSubjectsFirst),
+	"note":               bdVerbSubjectScan(bdSubjectsFirst),
+	// A label is no bead id, even one that starts like a guarded rig's: tag
+	// and label add/remove drop it, as the guard's own rule for them does.
+	"tag":      bdVerbSubjectScan(bdSubjectsAllButLast),
+	"label":    bdSubVerbSubjectScan(bdSubjectsAllButLast, "add", "remove"),
+	"comments": bdCommentsSubjects,
+	"dep":      bdSubVerbSubjectScan(bdSubjectsFirst, "add", "remove"),
+}
+
+// bdPositionalTokens is every token of args that is not a flag.
+func bdPositionalTokens(args []string) []string {
+	var out []string
+	for _, a := range args {
+		if a != "" && !strings.HasPrefix(a, "-") {
+			out = append(out, a)
+		}
+	}
+	return out
+}
+
+// bdScanManifestPositionals reads args' positionals with the manifest of
+// key; ok=false when key has none or a flag it does not know could hide one.
+func bdScanManifestPositionals(key string, args []string) ([]string, bool) {
+	value, bools := bdRigNamespaceManifest(key)
+	if value == nil {
+		return nil, false
+	}
+	pos, ambiguous := bdScanPositionalIDs(args, value, bools, nil)
+	return pos, !ambiguous
+}
+
+// bdPickSubjects keeps the positionals rule names.
+func bdPickSubjects(rule bdSubjectRule, pos []string, ok bool) ([]string, bool) {
+	switch rule {
+	case bdSubjectsFirst:
+		if len(pos) > 1 {
+			pos = pos[:1]
+		}
+	case bdSubjectsAllButLast:
+		if !ok || len(pos) < 2 {
+			return nil, false
+		}
+		pos = pos[:len(pos)-1]
+	}
+	return pos, ok
+}
+
+// bdVerbSubjectScan reads a verb's subjects from its positionals under rule.
+func bdVerbSubjectScan(rule bdSubjectRule) bdSubjectScan {
+	return func(w bdVerbCall) ([]string, bool, bool) {
+		pos, ok := bdScanManifestPositionals(w.verb, w.rest)
+		pos, ok = bdPickSubjects(rule, pos, ok)
+		return pos, ok, false
+	}
+}
+
+// bdSubVerbSubjectScan reads `<verb> <sub> ...` for the sub-verbs subs from
+// the positionals after sub, under rule; any other sub-verb cannot be read.
+func bdSubVerbSubjectScan(rule bdSubjectRule, subs ...string) bdSubjectScan {
+	return func(w bdVerbCall) ([]string, bool, bool) {
+		if !slices.Contains(subs, w.sub) {
+			return nil, false, false
+		}
+		pos, ok := bdScanManifestPositionals(w.verb+" "+w.sub, w.rest[1:])
+		pos, ok = bdPickSubjects(rule, pos, ok)
+		return pos, ok, false
+	}
+}
+
+// bdReleaseIfCurrentSubjects is release-if-current's first positional.
+func bdReleaseIfCurrentSubjects(w bdVerbCall) ([]string, bool, bool) {
+	pos, ok := bdPickSubjects(bdSubjectsFirst, w.rest, true)
+	return pos, ok, false
+}
+
+// bdCommentsSubjects reads `comments add <id>`; `comments <id>` lists a
+// bead's comments, and the other sub-verbs cannot be read.
+func bdCommentsSubjects(w bdVerbCall) ([]string, bool, bool) {
+	switch w.sub {
+	case "add":
+		return bdSubVerbSubjectScan(bdSubjectsFirst, "add")(w)
+	case "delete", "edit", "remove", "rm", "update":
+		return nil, false, false
+	}
+	return nil, true, true
 }

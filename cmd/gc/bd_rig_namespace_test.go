@@ -1,12 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/config"
 )
 
 // brnCheck is gc bd's check for guarded rig beta, over rows keyed by id.
@@ -187,11 +191,19 @@ func TestBdRigNamespaceCreationStamp(t *testing.T) {
 
 func TestNewBdRigNamespaceCheckOnlyForGuardedScope(t *testing.T) {
 	cfg := hrgCity(t)
-	if c := newBdRigNamespaceCheck(cfg, "/cities/b", hrgDir(cfg, "alpha"), nil); c != nil {
-		t.Fatal("an unguarded rig scope got a check")
+	// An unguarded scope of a city with a guarded rig gets the per-id check
+	// only: no namespace, and a write of its own beads passes.
+	for _, scope := range []string{hrgDir(cfg, "alpha"), "/cities/b"} {
+		c := newBdRigNamespaceCheck(cfg, "/cities/b", scope, nil)
+		if c == nil || c.ns != nil {
+			t.Fatalf("scope %s: check = %+v, want the per-id check with no namespace", scope, c)
+		}
+		if _, msg, refused := c.check([]string{"update", "al-1", "--claim"}); refused {
+			t.Fatalf("scope %s: a write of an unguarded rig's bead was refused: %s", scope, msg)
+		}
 	}
-	if c := newBdRigNamespaceCheck(cfg, "/cities/b", "/cities/b", nil); c != nil {
-		t.Fatal("the city scope got a check")
+	if c := newBdRigNamespaceCheck(&config.City{Rigs: []config.Rig{{Name: "alpha", Prefix: "al"}}}, "/cities/b", "/cities/b", nil); c != nil {
+		t.Fatal("a city with no guarded rig got a check")
 	}
 	c := newBdRigNamespaceCheck(cfg, "/cities/b", hrgDir(cfg, "beta"), nil)
 	if c == nil || c.ns.rigName() != "beta" {
@@ -209,5 +221,104 @@ func TestBdEffectiveActorFromEnv(t *testing.T) {
 	}
 	if got := bdEffectiveActorFromEnv(func(string) string { return " beta/x " }); got != "beta/x" {
 		t.Fatalf("env actor = %q", got)
+	}
+}
+
+// TestGcBdRefusesAGuardedRigsBeadOutsideItsScope: gc bd checks the scope it
+// resolved, and bd may write another store than that scope (an explicit
+// --rig or --city, -C, ids from two stores). A write naming a guarded rig's
+// bead outside that rig's scope is refused before bd runs, in every one of
+// those shapes; a read and a write of an unguarded rig's bead still run.
+func TestGcBdRefusesAGuardedRigsBeadOutsideItsScope(t *testing.T) {
+	capture, cityDir := bdSQLRefusalCityDir(t, "")
+	var toml strings.Builder
+	dirs := map[string]string{}
+	for _, r := range []struct{ name, prefix, extra string }{
+		{"alpha", "al", ""},
+		{"beta", "bt", "federation = \"rig\"\n"},
+	} {
+		dir := filepath.Join(cityDir, r.name)
+		dirs[r.name] = dir
+		if err := os.MkdirAll(filepath.Join(dir, ".beads"), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(dir, ".beads", "config.yaml"), []byte("issue_prefix: "+r.prefix+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		toml.WriteString("\n[[rigs]]\nname = \"" + r.name + "\"\npath = \"" + dir + "\"\nprefix = \"" + r.prefix + "\"\n" + r.extra)
+	}
+	f, err := os.OpenFile(filepath.Join(cityDir, "city.toml"), os.O_APPEND|os.O_WRONLY, 0o644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := f.WriteString(toml.String()); err != nil {
+		t.Fatal(err)
+	}
+	_ = f.Close()
+
+	run := func(args ...string) (int, string, string) {
+		t.Helper()
+		_ = os.Remove(capture)
+		var stdout, stderr bytes.Buffer
+		code := doBd(args, &stdout, &stderr)
+		data, _ := os.ReadFile(capture)
+		return code, string(data), stderr.String()
+	}
+	for _, args := range [][]string{
+		{"--rig", "alpha", "update", "bt-1", "--claim"},
+		{"close", "bt-1", "--rig", "alpha"},
+		{"--city", cityDir, "update", "bt-1", "--status", "closed"},
+		{"release-if-current", "bt-1", "x", "--rig", "alpha"},
+		{"-C", dirs["alpha"], "close", "bt-1"},
+		{"close", "al-1", "bt-1"},
+		{"--rig", "alpha", "label", "add", "bt-1", "urgent"},
+	} {
+		code, ran, stderr := run(args...)
+		if code == 0 || strings.Contains(ran, "update ") || strings.Contains(ran, "close ") || strings.Contains(ran, "release") || strings.Contains(ran, "label ") {
+			t.Errorf("gc bd %q: code=%d, bd ran %q; want a refusal before any write", args, code, ran)
+			continue
+		}
+		if !strings.Contains(stderr, "bt-1") || !strings.Contains(stderr, "refusing") {
+			t.Errorf("gc bd %q: stderr %q does not refuse bt-1", args, stderr)
+		}
+	}
+	// Reads of a guarded rig's bead and writes of an unguarded rig's bead
+	// from an unguarded scope still reach bd.
+	for _, args := range [][]string{
+		{"--rig", "alpha", "show", "bt-1"},
+		{"--rig", "alpha", "update", "al-1", "--status", "in_progress"},
+		// A label is no bead id, even one that starts like a guarded rig's.
+		{"--rig", "alpha", "label", "add", "al-1", "bt-urgent"},
+		{"--rig", "alpha", "label", "remove", "al-1", "bt-urgent"},
+		{"--rig", "alpha", "tag", "al-1", "bt-urgent"},
+	} {
+		if code, ran, stderr := run(args...); code != 0 || strings.TrimSpace(ran) == "" {
+			t.Errorf("gc bd %q: code=%d, bd ran %q, stderr %q; want it run", args, code, ran, stderr)
+		}
+	}
+}
+
+// TestBdMetadataJSONWritesAreInKeyOrder: a --metadata object is read in key
+// order, so with two guarded keys holding non-string values the refusal
+// names the same one on every run, and the writes come back sorted.
+func TestBdMetadataJSONWritesAreInKeyOrder(t *testing.T) {
+	const twoBad = `{"gc.routed_to": 1, "zz": "x", "gc.owner_namespace": 2, "aa": "y"}`
+	want := "gc bd: refusing non-string gc.owner_namespace before write\n"
+	for i := 0; i < 50; i++ {
+		_, msg, refused := bdMetadataJSONWrites(twoBad)
+		if !refused || msg != want {
+			t.Fatalf("run %d: refusal = %q (refused %v), want %q", i, msg, refused, want)
+		}
+	}
+	writes, msg, refused := bdMetadataJSONWrites(`{"zz": "1", "mm": "2", "aa": "3", "skip": 4}`)
+	if refused {
+		t.Fatalf("refused a plain object: %s", msg)
+	}
+	var keys []string
+	for _, w := range writes {
+		keys = append(keys, w.key)
+	}
+	if got := strings.Join(keys, ","); got != "aa,mm,zz" {
+		t.Fatalf("write keys = %s, want aa,mm,zz", got)
 	}
 }

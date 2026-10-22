@@ -1086,7 +1086,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     city owns it); claims need an admitted actor and `ready --claim`,
     `close --claim-next` and `close --continue` (without `--no-auto`) are
     refused; a create is stamped with the rig's namespace; and every other
-    verb is refused with "use raw bd". Raw `bd` is unchanged.
+    verb is refused with "use raw bd". Raw `bd` is unchanged. A write
+    naming a guarded rig's bead from any other scope (`--rig` another rig,
+    `--city`, `-C`, or ids from two stores) is refused too.
   - A new bead routed by `gc sling`, graph routing or `gc bd create` may
     name only one of the rig's own agents. The store guard is looser on
     create by design: it accepts a rig-qualified route outside the namespace

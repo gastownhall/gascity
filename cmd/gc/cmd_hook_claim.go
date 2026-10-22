@@ -2209,6 +2209,17 @@ func writeHookClaimDrain(label, reason string, jsonOut, drainAck bool, drainAckF
 	return 1
 }
 
+// continuationPinFor is the identity a continuation sibling is pinned to:
+// pin, or on a guarded rig the identity guard admits for the sibling. ok is
+// false when a guarded rig admits none: the sibling then stays routed.
+func continuationPinFor(guard *hookRigGuard, sibling beads.Bead, opts hookClaimOptions, pin string) (string, bool) {
+	if guard == nil {
+		return pin, true
+	}
+	pin = guard.continuationPin(sibling, opts)
+	return pin, pin != ""
+}
+
 func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops hookClaimOps, dir string) ([]string, error) {
 	rootID := strings.TrimSpace(bead.Metadata[beadmeta.RootBeadIDMetadataKey])
 	group := strings.TrimSpace(bead.Metadata[beadmeta.ContinuationGroupMetadataKey])
@@ -2269,13 +2280,9 @@ func preassignHookContinuationGroup(bead beads.Bead, opts hookClaimOptions, ops 
 			stoppedSibling(sibling) {
 			continue
 		}
-		pin := pinAssignee
-		if ops.RigGuard != nil {
-			// A guarded rig takes a pin only to an identity it admits; with
-			// none, the sibling stays routed.
-			if pin = ops.RigGuard.continuationPin(sibling, opts); pin == "" {
-				continue
-			}
+		pin, ok := continuationPinFor(ops.RigGuard, sibling, opts, pinAssignee)
+		if !ok {
+			continue
 		}
 		if err := ops.AssignContinuation(ctx, dir, opts.Env, sibling.ID, pin); err != nil {
 			return assigned, fmt.Errorf("assigning %s: %w", sibling.ID, err)

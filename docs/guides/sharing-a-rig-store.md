@@ -176,6 +176,14 @@ write, with `bd show`), and `--force` never overrides one.
 
   `relate` and `unrelate` pass: they record a link that blocks nothing.
 
+  A write that names the rig's bead from any other scope (`--rig` another
+  rig, `--city`, `-C` another directory, or ids from two stores) is refused
+  too, before `bd` runs, because only the rig's own scope can check it:
+
+  ```text
+  gc bd: refusing update on be-12: it is rig "beta"'s bead (federation = "rig"), and this command runs in a scope that is no guarded rig's store, where that rig cannot check it; run it in rig "beta"'s scope (gc bd --rig beta ...)
+  ```
+
 The core pack's maintenance orders (the orphan sweep and the scripts that ask
 `gc agent is-foreign`) are not covered by this build yet; see the warning at
 the top of this page.
@@ -205,6 +213,10 @@ city's writes to it, a route back included, are refused.
 ## What it does not cover
 
 - `bd` run directly by people or agents, and any writer other than Gas City.
+- `gc bd` from an unguarded scope that names another store itself:
+  `gc bd sql` against another database, or `gc bd --db <shared store>` with
+  an id whose prefix none of this city's rigs uses. Naming the store makes
+  it the same as raw `bd`. From a guarded rig's scope, `gc bd` refuses both.
 - Custom `work_query`, `scale_check` and `sling_query` commands.
 - Session names built at runtime from `[workspace] session_template` or an
   agent's `tmux_alias`. The load checks only configured identities.
