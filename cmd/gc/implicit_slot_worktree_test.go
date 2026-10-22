@@ -3,11 +3,13 @@ package main
 import (
 	"crypto/sha256"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -538,6 +540,59 @@ func TestClosedImplicitSlotWorktreeIsPrunedOnlyWhenSafeAndUnshared(t *testing.T)
 				if after := slotSnapshot(t, slot.Path); after != before {
 					t.Errorf("reused slot changed:\nbefore:\n%s\nafter:\n%s", before, after)
 				}
+			}
+		})
+	}
+}
+
+func TestMarkedAgentDirectoryReadsCreateNoSlot(t *testing.T) {
+	t.Setenv("GC_SESSION", "tmux")
+	lookPath := func(string) (string, error) { return "/bin/true", nil }
+	for _, tc := range []struct {
+		name string
+		read func(t *testing.T, city string, cfg *config.City, a *config.Agent)
+	}{
+		{"session_logs", func(_ *testing.T, city string, cfg *config.City, _ *config.Agent) {
+			for _, target := range []string{"app/claude", "app/claude-1"} {
+				resolveConfiguredSessionLogContext(city, cfg, target)
+			}
+		}},
+		{"session_mcp_projection", func(t *testing.T, city string, cfg *config.City, _ *config.Agent) {
+			store := beads.NewMemStore()
+			row, err := store.Create(sessionRow("s1", "template", "app/claude", "agent_name", "app/claude-1", "session_name", "s-s1", "pool_managed", "true", "pool_slot", "1", "state", "awake"))
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := resolveSessionMCPProjection(city, cfg, cliSessionFrontDoor(store, cfg, city), row.ID, lookPath)
+			if err != nil {
+				t.Fatalf("resolveSessionMCPProjection: %v", err)
+			}
+			want := filepath.Join(city, ".gc", "worktrees", "app", "claude-1")
+			if !strings.HasPrefix(view.Projection.Target, want+string(filepath.Separator)) {
+				t.Fatalf("session projection target = %q, want under the slot %q", view.Projection.Target, want)
+			}
+		}},
+		{"read_only_desired_state_build", func(t *testing.T, city string, cfg *config.City, a *config.Agent) {
+			bp := newReadOnlyAgentBuildParams("city", city, cfg, lookPath, time.Now(), io.Discard)
+			if _, err := resolveTemplate(bp, a, "app/claude-1", nil); err != nil {
+				t.Fatalf("read-only resolveTemplate: %v", err)
+			}
+		}},
+		{"agent_mcp_requires_session", func(t *testing.T, city string, cfg *config.City, a *config.Agent) {
+			_, err := resolveDeterministicAgentMCPProjection(city, cfg, a, lookPath)
+			want := fmt.Sprintf("agent %q has session-specific MCP targets; use --session", a.QualifiedName())
+			if err == nil || err.Error() != want {
+				t.Fatalf("agent-level MCP error = %v, want %q", err, want)
+			}
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, _, cfg, a := implicitSlotCity(t)
+			writeCatalogFile(t, city, "mcp/notes.toml", "name = \"notes\"\ncommand = \"npx\"\n")
+			tc.read(t, city, cfg, a)
+			slots := filepath.Join(city, ".gc", "worktrees")
+			if _, err := os.Lstat(slots); !os.IsNotExist(err) {
+				t.Fatalf("%s exists after a read (Lstat err %v), want nothing created", slots, err)
 			}
 		})
 	}

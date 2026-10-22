@@ -386,7 +386,7 @@ func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer
 // fallback now gives such an agent's alt identity a genuinely different
 // (but not "session-specific") working directory.
 func agentMayHaveSessionSpecificMCPTargets(a config.Agent) bool {
-	return workdirutil.RequiresPoolWorkDirIsolationCheck(a)
+	return a.PoolSlotWorktrees || workdirutil.RequiresPoolWorkDirIsolationCheck(a)
 }
 
 func resolveDeterministicAgentMCPProjection(
@@ -401,7 +401,12 @@ func resolveDeterministicAgentMCPProjection(
 	}
 
 	altIdentity := agent.QualifiedName() + "-alt"
-	altWorkDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, altIdentity)
+	if agent.PoolSlotWorktrees {
+		// A pool-slot instance runs in its own worktree only under a numbered
+		// name; "-alt" would resolve to the shared rig root.
+		altIdentity = agent.QualifiedName() + "-1"
+	}
+	altWorkDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, altIdentity)
 	if err != nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent %q has session-specific MCP targets; use --session", agent.QualifiedName())
 	}
@@ -425,7 +430,7 @@ func resolveConfiguredAgentMCPProjection(
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
 	identity := agent.QualifiedName()
-	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+	workDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, identity)
 	if err != nil {
 		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
 		if catErr != nil {
@@ -479,7 +484,7 @@ func resolveSessionMCPProjection(
 	}
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
-		workDir, err = resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+		workDir, err = resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, identity)
 		if err != nil {
 			return resolvedMCPProjection{}, fmt.Errorf("resolving workdir for session %q: %w", sessionID, err)
 		}
@@ -576,7 +581,7 @@ func validateStage2TargetClaimants(
 		// Resolve the candidate's own workdir. Failures here are
 		// treated as "this agent can't claim any target in this city
 		// right now" — not a conflict.
-		otherWorkDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, other, identity)
+		otherWorkDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, other, identity)
 		if err != nil {
 			continue
 		}

@@ -3063,6 +3063,20 @@ func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (str
 }
 
 func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
+	return resolveWorkDirForQualifiedNameWith(resolveConfiguredWorkDir, cityPath, cfg, agent, qualifiedName)
+}
+
+// resolveWorkDirPathForQualifiedName is resolveWorkDirForQualifiedName
+// without creating the directory or a pool-slot worktree, for callers that
+// only read what is there (logs, MCP projection).
+func resolveWorkDirPathForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
+	return resolveWorkDirForQualifiedNameWith(resolveConfiguredWorkDirPath, cityPath, cfg, agent, qualifiedName)
+}
+
+func resolveWorkDirForQualifiedNameWith(
+	resolve func(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionRuntime string) (string, error),
+	cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string,
+) (string, error) {
 	cityName := loadedCityName(cfg, cityPath)
 	var rigs []config.Rig
 	if cfg != nil {
@@ -3072,7 +3086,7 @@ func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *co
 	if cfg != nil {
 		sessionProvider = cfg.Session.Provider
 	}
-	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs, effectiveProviderName(sessionProvider))
+	return resolve(cityPath, cityName, qualifiedName, agent, rigs, effectiveProviderName(sessionProvider))
 }
 
 func sessionExplicitNameForNewSession(cityPath, cityName string, rigs []config.Rig, agent *config.Agent, alias string) (string, error) {
