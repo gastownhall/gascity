@@ -249,6 +249,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`[workspace] implicit_agent_isolation = "worktree"` opts rig-scoped
+  implicit pool agents into per-instance git worktrees (#1181).** The shared
+  default is unchanged: every instance of an implicit pool (like
+  `my-project/claude`) runs in the rig's own working tree, so parallel
+  dispatch can clobber uncommitted edits. `gc doctor` now ships the
+  warning-only `pool-workdir-isolation` check that names the shared shape
+  and its remedies (the worktree opt-in, `max_active_sessions = 1`, or a
+  per-instance `work_dir` plus pre_start). Setting the key rewrites each
+  rig-scoped implicit agent's work_dir to `.gc/worktrees/<rig>/<agent-slot>`
+  and injects a pre_start invoking the core pack's
+  `assets/scripts/worktree-setup.sh` (ported into the core pack), which
+  idempotently provisions a linked worktree per slot on branch
+  `gc-<agent-slot>-<hash12>` and redirects `.beads` at the rig. Composed
+  config load refuses worktree mode without the core pack or without the
+  script, and a runtime gate at `gc start`, controller reload, and
+  supervisor prepare rejects providers that do not run pre_start on the
+  host (allowed: the default, `tmux`, `herdr`; `GC_SESSION` honored).
+  Merge-back from the slot branch remains the pack's or the user's job, a
+  fresh worktree starts without the rig's gitignored files, and enabling
+  the mode changes the session fingerprint once (pre_start joins it), so
+  implicit sessions restart once on the switch.
+
 - **`gc agent is-foreign <identity>` reports whether this city can vouch for
   a claim's assignee.** It exits 0 (`local`) when the identity resolves
   against this city's roster, or when one of this city's own session records,

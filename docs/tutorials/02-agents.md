@@ -8,6 +8,16 @@ An implicit agent like `claude` or `codex` is unconfigured: no custom prompt,
 adopting its provider's name, running the raw provider. This tutorial defines a
 custom agent with its own role and prompt, then slings work to it.
 
+<Note>
+Every instance of a rig-scoped implicit agent (a pool like
+`my-project/claude`) runs in the rig's own working tree by default, so
+parallel instances see each other's uncommitted edits. `gc doctor`'s
+`pool-workdir-isolation` check warns when it detects that shape. To give
+each pool instance its own git worktree instead, set
+`[workspace] implicit_agent_isolation = "worktree"` in `city.toml` — see
+`implicit_agent_isolation` in the config reference.
+</Note>
+
 You should have `my-city` running with `my-project` rigged (from
 [Tutorial 01](/tutorials/01-cities-and-rigs)).
 

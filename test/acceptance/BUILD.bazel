@@ -220,6 +220,7 @@ go_test(
         "//internal/beads/beadstest",
         "//internal/beads/contract",
         "//internal/beads/proxyendpoint",
+        "//internal/bootstrap/packs/core",
         "//internal/builtinpacks",
         "//internal/citylayout",
         "//internal/clock",
