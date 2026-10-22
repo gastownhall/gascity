@@ -1,0 +1,79 @@
+name: Download Go modules
+description: >-
+  Warm the Go module cache for this repository's module before any build or
+  test step: restore the module download cache keyed on go.sum, run a
+  retried `go mod download`, verify every module against go.sum, and, on a
+  key miss in a push or schedule run, save the cache.
+  Run it after actions/setup-go (or a setup-gascity-* action) and after
+  checkout; build and test steps then find every module locally and never
+  reach the module proxy.
+
+# Why this exists: actions/setup-go's built-in cache is first-writer-wins on an
+# immutable key, and it saves whatever GOMODCACHE held when the first job on a
+# go.sum finished. On Blacksmith that was a 3 KB entry for the current go.sum,
+# so every Go job restored nothing and downloaded ~250 module zips from
+# proxy.golang.org inside `go test`, where one HTTP/2 stream reset failed the
+# package as "[setup failed]". This action saves only after a complete,
+# successful `go mod download`, so whichever job writes the entry writes the
+# whole module set. Callers set setup-go's `cache: false` so this action is
+# the module cache's only owner (on Blacksmith, GOCACHEPROG already serves the
+# build cache, so setup-go's cache held nothing else).
+#
+# Only GOMODCACHE/cache/download (the verified .zip/.mod/.info/.ziphash files)
+# is cached: it is about a fifth of the extracted tree, its directories stay
+# writable (extracted module directories are read-only, which breaks a second
+# restore over them), and the go command extracts from it without the network.
+# The prefix restore-key lets a go.sum bump start from the previous entry and
+# fetch only the delta.
+#
+# Only push and schedule runs save. Those run the default branch's own code;
+# pull_request and dispatched runs (which may check out a fork head) restore
+# but never write. The go command trusts a cached .ziphash instead of
+# re-hashing the zip, so an entry written by untrusted code could carry a
+# tampered module past go.sum; restricting writers keeps the cache as
+# trustworthy as the default branch. A pull request that changes go.sum
+# restores the default branch's entry and fetches only its delta.
+#
+# Restricting writers is not the only defence: every run re-hashes the
+# restored and downloaded modules with `go mod verify` before any build step,
+# so a poisoned or corrupt entry is detected regardless of who could write
+# the cache (see .github/scripts/go-mod-verify-cache.sh).
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Go module download cache directory
+      id: modcache
+      shell: bash
+      run: printf 'dir=%s\n' "$(go env GOMODCACHE)/cache/download" >> "$GITHUB_OUTPUT"
+
+    - name: Restore Go module download cache
+      id: restore
+      uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.modcache.outputs.dir }}
+        key: go-mod-download-v1-${{ runner.os }}-${{ hashFiles('go.sum') }}
+        restore-keys: |
+          go-mod-download-v1-${{ runner.os }}-
+
+    - name: Download Go modules (retried)
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/../../scripts/go-mod-download-retry.sh"'
+
+    # The go command trusts a cached .ziphash without re-hashing its zip, so
+    # verify every module against go.sum before any build step or save; a
+    # mismatch purges the cache and re-downloads once, then fails the step.
+    - name: Verify Go modules against go.sum
+      id: verify
+      shell: bash
+      run: '"$GITHUB_ACTION_PATH/../../scripts/go-mod-verify-cache.sh"'
+
+    - name: Save Go module download cache
+      if: >-
+        ${{ steps.verify.outcome == 'success' &&
+        steps.restore.outputs.cache-hit != 'true' &&
+        (github.event_name == 'push' || github.event_name == 'schedule') }}
+      uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+      with:
+        path: ${{ steps.modcache.outputs.dir }}
+        key: go-mod-download-v1-${{ runner.os }}-${{ hashFiles('go.sum') }}

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -151,6 +152,13 @@ type CleanupSummary struct {
 	BytesFreedDisk int64 `json:"bytes_freed_disk"`
 	BytesFreedRSS  int64 `json:"bytes_freed_rss"`
 	ErrorsTotal    int   `json:"errors_total"`
+	// ProtectedTotal and ProtectedByKind roll up Reaped.Protected so a
+	// 100%-protected population (zero reap targets) is surfaced here
+	// instead of collapsing into an indistinguishable orphans:0
+	// (ga-xkc9mo). Additive to gc.dolt.cleanup.v1 — schema version is not
+	// bumped.
+	ProtectedTotal  int            `json:"protected_total"`
+	ProtectedByKind map[string]int `json:"protected_by_kind"`
 }
 
 // CleanupError is a single error entry tagged with the stage that produced
@@ -171,6 +179,12 @@ const (
 	// malformed result). FAIL-CLOSED: --force refuses to drop ANY DB
 	// when this kind is recorded.
 	cleanupErrorKindLiveSessionProbeFailed = "live-session-probe-failed"
+	// cleanupErrorKindLegacyFallbackPort marks that the port resolved only
+	// by falling back to LegacyDefaultDoltPort: no --port, no city
+	// dolt.port and no live managed dolt. Whatever listens there is not
+	// provably this city's server, so drop and purge refuse it and --force
+	// exits nonzero.
+	cleanupErrorKindLegacyFallbackPort = "legacy-fallback-port"
 )
 
 // MarshalJSON ensures slices serialize as `[]` rather than `null` for empty
@@ -210,6 +224,9 @@ func (r CleanupReport) MarshalJSON() ([]byte, error) {
 	}
 	if r.Errors == nil {
 		r.Errors = []CleanupError{}
+	}
+	if r.Summary.ProtectedByKind == nil {
+		r.Summary.ProtectedByKind = map[string]int{}
 	}
 	return json.Marshal(alias(r))
 }
@@ -274,9 +291,10 @@ type cleanupOptions struct {
 // CleanupReport JSON envelope or a human-readable summary to stdout.
 // Returns the exit code.
 //
-// Drop and purge stages are populated when a Dolt SQL client is available;
-// otherwise the report still renders with errors describing the unreachable
-// data plane.
+// Drop and purge stages are populated when a Dolt SQL client is available
+// and the port did not fall back to the legacy default; otherwise the report
+// still renders, with errors describing the unreachable data plane or with
+// the legacy-fallback-port force blocker.
 func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 	if opts.MaxOrphanDBs < 0 {
 		report := CleanupReport{Schema: CleanupSchemaVersion}
@@ -327,6 +345,18 @@ func runDoltCleanup(opts cleanupOptions, stdout, stderr io.Writer) int {
 		recordCleanupError(&report, "port", fatalAttempt.Source, err)
 		emitReport(report, fatalResolution, opts, stdout, stderr)
 		return 1
+	}
+
+	if resolution.Fallback {
+		city := ""
+		if path := strings.TrimSpace(opts.CityPath); path != "" {
+			city = " for " + path
+		}
+		err := fmt.Errorf("no --port, no city dolt.port and no live managed dolt%s: resolution fell back to legacy port %d, which is not provably this city's server; refusing to drop or purge there (start the city's managed dolt; for an external server pass --port or pin it with \"gc beads city use-external\")", city, resolution.Port)
+		recordCleanupForceBlocker(&report, cleanupErrorKindLegacyFallbackPort, "", err)
+		if opts.Force {
+			recordCleanupErrorKind(&report, "port", cleanupErrorKindLegacyFallbackPort, "", err)
+		}
 	}
 
 	if opts.Probe {
@@ -437,6 +467,7 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	if !opts.Force {
 		report.Reaped.Count = len(plan.Reap)
 		report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, nil)
+		rollupProtected(report)
 		return
 	}
 
@@ -515,6 +546,44 @@ func runReapStage(report *CleanupReport, opts cleanupOptions) {
 	}
 	report.Reaped.Count = reaped
 	report.Summary.BytesFreedRSS = sumReapTargetRSS(plan.Reap, gone)
+	rollupProtected(report)
+}
+
+// rollupProtected recomputes Summary.ProtectedTotal and
+// Summary.ProtectedByKind from the fully-populated Reaped.Protected slice.
+// Called at every runReapStage exit point (after both the bulk assignment
+// from plan.Protected and any additional appends from the force-mode
+// SIGTERM/SIGKILL revalidation chain) so a 100%-protected population (zero
+// reap targets) is still surfaced instead of collapsing into an
+// indistinguishable orphans:0 (ga-xkc9mo).
+func rollupProtected(report *CleanupReport) {
+	report.Summary.ProtectedTotal = len(report.Reaped.Protected)
+	byKind := make(map[string]int, len(report.Reaped.Protected))
+	for _, p := range report.Reaped.Protected {
+		byKind[protectedKind(p)]++
+	}
+	report.Summary.ProtectedByKind = byKind
+}
+
+// protectedKind buckets a protected PID by why it was protected, deriving
+// the key from the existing Reason/ContainerRuntime fields the classifier
+// already set rather than adding a second classification pass.
+// Active rig servers get their own bucket, checked first because the
+// classifier's rig-port match comes first and planOrphanReap copies
+// ContainerRuntime onto every protected PID — a containerized rig server is
+// still the active-rig baseline. Other container-managed servers are keyed
+// by runtime (e.g. "container:podman"); everything else (bd-owned proxies,
+// active test roots, unidentified or non-allowlisted configs,
+// missing-config-but-live-cwd) falls into the catch-all "unreapable-config"
+// bucket.
+func protectedKind(p CleanupProtectedPID) string {
+	if strings.HasPrefix(p.Reason, "active rig dolt server") {
+		return "active-rig"
+	}
+	if p.ContainerRuntime != "" {
+		return "container:" + p.ContainerRuntime
+	}
+	return "unreapable-config"
 }
 
 // protectedDoltPortsForReap builds the reaper's protected port set from live
@@ -768,8 +837,12 @@ func emitHumanReport(report CleanupReport, resolution PortResolution, opts clean
 	emitForceBlockersSection(report, stdout)
 	emitErrorsOrSummary(report, opts, stdout)
 	if !opts.Force {
-		fmt.Fprintln(stdout, "")                              //nolint:errcheck
-		fmt.Fprintln(stdout, "Re-run with --force to apply.") //nolint:errcheck
+		fmt.Fprintln(stdout, "") //nolint:errcheck
+		if report.Port.Fallback {
+			fmt.Fprintln(stdout, "--force is refused on the legacy fallback port; see FORCE BLOCKERS above.") //nolint:errcheck
+		} else {
+			fmt.Fprintln(stdout, "Re-run with --force to apply.") //nolint:errcheck
+		}
 	}
 }
 
@@ -777,7 +850,11 @@ func emitDroppedSection(report CleanupReport, stdout io.Writer) {
 	fmt.Fprintln(stdout, "")                                                         //nolint:errcheck
 	fmt.Fprintf(stdout, "DROPPED-DATABASE DIRECTORIES (%d)\n", report.Dropped.Count) //nolint:errcheck
 	if len(report.Dropped.Names) == 0 {
-		fmt.Fprintln(stdout, "  (none)") //nolint:errcheck
+		if report.Port.Fallback {
+			fmt.Fprintln(stdout, "  (not scanned: legacy fallback port)") //nolint:errcheck
+		} else {
+			fmt.Fprintln(stdout, "  (none)") //nolint:errcheck
+		}
 		return
 	}
 	for _, name := range report.Dropped.Names {
@@ -882,15 +959,37 @@ func emitErrorsOrSummary(report CleanupReport, opts cleanupOptions, stdout io.Wr
 	fmt.Fprintf(stdout, "  Drops:         %d (failed: %d)\n", report.Dropped.Count, len(report.Dropped.Failed)) //nolint:errcheck
 	purgeStatus := "skipped"
 	if opts.Force {
-		if report.Purge.OK {
+		switch {
+		case report.Port.Fallback:
+			purgeStatus = "refused"
+		case report.Purge.OK:
 			purgeStatus = "ok"
-		} else {
+		default:
 			purgeStatus = "failed"
 		}
 	}
-	fmt.Fprintf(stdout, "  Purge:         %s\n", purgeStatus)                                                           //nolint:errcheck
-	fmt.Fprintf(stdout, "  Reaped:        %d (protected: %d)\n", report.Reaped.Count, len(report.Reaped.ProtectedPIDs)) //nolint:errcheck
-	fmt.Fprintf(stdout, "  Errors:        %d\n", report.Summary.ErrorsTotal)                                            //nolint:errcheck
+	fmt.Fprintf(stdout, "  Purge:         %s\n", purgeStatus)                                                                                                                    //nolint:errcheck
+	fmt.Fprintf(stdout, "  Reaped:        %d (protected: %d [%s])\n", report.Reaped.Count, report.Summary.ProtectedTotal, formatProtectedByKind(report.Summary.ProtectedByKind)) //nolint:errcheck
+	fmt.Fprintf(stdout, "  Errors:        %d\n", report.Summary.ErrorsTotal)                                                                                                     //nolint:errcheck
+}
+
+// formatProtectedByKind renders Summary.ProtectedByKind as a deterministic,
+// sorted "kind:count, kind:count" fragment so the text summary and the JSON
+// report always agree on the protected breakdown (ga-xkc9mo).
+func formatProtectedByKind(byKind map[string]int) string {
+	if len(byKind) == 0 {
+		return "none"
+	}
+	kinds := make([]string, 0, len(byKind))
+	for k := range byKind {
+		kinds = append(kinds, k)
+	}
+	sort.Strings(kinds)
+	parts := make([]string, 0, len(kinds))
+	for _, k := range kinds {
+		parts = append(parts, fmt.Sprintf("%s:%d", k, byKind[k]))
+	}
+	return strings.Join(parts, ", ")
 }
 
 // formatBytes formats a byte count as "N B", "N.N KiB", "N.N MiB", or
@@ -973,8 +1072,13 @@ reaps orphaned dolt sql-server processes left over from leaked test
 harnesses. Invalid explicit ports, invalid city port settings, and
 live-resolution errors (ambiguous listeners, discovery failures) fail
 closed before cleanup stages run; only a clean live-resolution miss can
-reach the legacy default. The legacy default is a connection fallback
-only; it does not protect port 3307 from orphan-process reaping.
+reach the legacy default. Nothing proves the city's server listens on
+the legacy default, so a run that reaches it opens no SQL connection,
+drops and purges nothing, and records a legacy-fallback-port force
+blocker (--force then exits nonzero). Start the city's managed dolt;
+for an external server, pass --port or pin it with
+"gc beads city use-external". The legacy default does not protect port
+3307 from orphan-process reaping.
 
 Dry-run by default. Pass --force to actually drop, purge, and kill.
 Pass --max-orphan-dbs with --force to refuse all destructive cleanup
@@ -1075,25 +1179,12 @@ can still return successfully after emitting the report.`,
 			}
 
 			// Resolve the port first so we can open a Dolt connection at the
-			// right address. Failed opens are reported by runDoltCleanup inside
-			// the typed cleanup envelope.
-			resolution := ResolveDoltPort(PortResolverInput{
+			// right address.
+			opts.PortResolution = ResolveDoltPort(PortResolverInput{
 				Flag: opts.Flag, CityPort: opts.CityPort, CityPath: opts.CityPath,
 			})
-			opts.PortResolution = resolution
-			host := opts.Host
-			if host == "" {
-				host = "127.0.0.1"
-			}
-			if fatalPortResolutionError(resolution) == nil {
-				client, openErr := newSQLCleanupDoltClient(cityPath, host, strconv.Itoa(resolution.Port))
-				if openErr != nil {
-					opts.DoltClientOpenErr = openErr
-				} else {
-					opts.DoltClient = client
-					defer client.Close() //nolint:errcheck
-				}
-			}
+			closeDoltClient := attachCleanupDoltClient(&opts, newSQLCleanupDoltClient)
+			defer closeDoltClient()
 
 			if code := runDoltCleanup(opts, stdout, stderr); code != 0 {
 				return errExit
@@ -1107,6 +1198,38 @@ can still return successfully after emitting the report.`,
 	cmd.Flags().BoolVar(&force, "force", false, "actually drop, purge, and kill orphaned resources (default: dry-run)")
 	cmd.Flags().IntVar(&maxOrphanDBs, "max-orphan-dbs", 0, "with --force, refuse cleanup when live stale database count exceeds this limit")
 	return cmd
+}
+
+// cleanupDoltClientOpener opens the SQL client for the drop and purge stages
+// against a resolved Dolt server. Production passes newSQLCleanupDoltClient.
+type cleanupDoltClientOpener func(cityPath, host, port string) (CleanupDoltClient, error)
+
+// attachCleanupDoltClient opens a Dolt connection at opts.PortResolution and
+// attaches the client to opts for the drop and purge stages. Failed opens are
+// recorded as opts.DoltClientOpenErr and reported by runDoltCleanup inside the
+// typed cleanup envelope. A fatal resolution opens nothing: runDoltCleanup
+// fails closed on it before any stage runs. A legacy-fallback port is not
+// provably this city's server, so no connection is opened there;
+// runDoltCleanup reports the refusal as a force blocker.
+//
+// The returned func closes the attached client and is a no-op when none was
+// attached, so the caller can defer it unconditionally.
+func attachCleanupDoltClient(opts *cleanupOptions, open cleanupDoltClientOpener) func() {
+	resolution := opts.PortResolution
+	if fatalPortResolutionError(resolution) != nil || resolution.Fallback {
+		return func() {}
+	}
+	host := opts.Host
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	client, err := open(opts.CityPath, host, strconv.Itoa(resolution.Port))
+	if err != nil {
+		opts.DoltClientOpenErr = err
+		return func() {}
+	}
+	opts.DoltClient = client
+	return func() { _ = client.Close() }
 }
 
 // rigProtections projects the resolver's rig list into the JSON-envelope
@@ -1161,13 +1284,14 @@ func hasRigProtectionError(report *CleanupReport) bool {
 
 // hasFatalForceBlocker reports whether a force-blocker has been
 // recorded that requires runDoltCleanup to exit non-zero in --force
-// mode. Currently only cleanupErrorKindLiveSessionProbeFailed counts;
-// rig-protection refusals are signaled via the Errors slice
-// (hasRigProtectionError), and max-orphan-refusal historically returns
-// exit 0 with the report (existing behavior preserved).
+// mode. cleanupErrorKindLiveSessionProbeFailed and
+// cleanupErrorKindLegacyFallbackPort count; rig-protection refusals are
+// signaled via the Errors slice (hasRigProtectionError), and
+// max-orphan-refusal historically returns exit 0 with the report (existing
+// behavior preserved).
 func hasFatalForceBlocker(report *CleanupReport) bool {
 	for _, b := range report.ForceBlockers {
-		if b.Kind == cleanupErrorKindLiveSessionProbeFailed {
+		if b.Kind == cleanupErrorKindLiveSessionProbeFailed || b.Kind == cleanupErrorKindLegacyFallbackPort {
 			return true
 		}
 	}

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"strings"
 	"sync"
 	"time"
 )
@@ -48,6 +49,12 @@ type Doctor struct {
 	// unconfirmed remediation. Call Wait before releasing resources that a
 	// timed execution may still be using.
 	CheckTimeout time.Duration
+	// BeforeFix, when set, is called before each --fix remediation and again
+	// before the re-run that verifies it. A caller that shares reads across
+	// the checks of one run (gc doctor's per-run bd read memo) drops them
+	// here, so neither the fix nor its verification is answered from data
+	// read before the fix changed it.
+	BeforeFix func()
 }
 
 // Register adds a check to the doctor's check list.
@@ -158,14 +165,17 @@ func (r *Report) tally(result *CheckResult) {
 // buffer: on completion the buffer is flushed to the real writer (keeping a
 // check's incidental output grouped before its result line); on timeout the
 // goroutine is abandoned with its private buffer, so a still-running check
-// can never interleave writes with — or race against — the rest of the run.
+// can never interleave writes with — or race against — the rest of the run,
+// and the check's CheckContext.Done is closed so it can stop issuing I/O.
 func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 	if d.CheckTimeout <= 0 {
 		return runCheckRecoveringPanic(c, ctx)
 	}
 	var buf bytes.Buffer
+	abandoned := make(chan struct{})
 	checkCtx := *ctx
 	checkCtx.Output = &buf
+	checkCtx.Done = abandoned
 	done := make(chan *CheckResult, 1)
 	d.inFlight.Add(1)
 	go func() {
@@ -179,6 +189,7 @@ func (d *Doctor) boundedRun(c Check, ctx *CheckContext) *CheckResult {
 		}
 		return result
 	case <-time.After(d.CheckTimeout):
+		close(abandoned)
 		return &CheckResult{
 			Name:     c.Name(),
 			Status:   StatusError,
@@ -223,6 +234,7 @@ func runFixRecoveringPanic(c Check, ctx *CheckContext) (err error) {
 // gc doctor --fix cannot hang on a wedged remediation, while the fix still runs
 // to completion in the background rather than being interrupted mid-mutation.
 func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*CheckResult, bool) {
+	d.beforeFix()
 	switch err := d.boundedFix(c, ctx); {
 	case errors.Is(err, errFixTimedOut):
 		res.FixAttempted = true
@@ -237,6 +249,7 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 	// A check that fails fast, fixes fast, then wedges on this verification
 	// would otherwise hang gc doctor --fix — re-opening the very failure mode
 	// the per-check timeout closes.
+	d.beforeFix()
 	verified := d.boundedRun(c, ctx)
 	if verified.Status == StatusOK {
 		verified.Fixed = true
@@ -244,6 +257,12 @@ func (d *Doctor) fixAndVerify(c Check, ctx *CheckContext, res *CheckResult) (*Ch
 		verified.FixAttempted = true
 	}
 	return verified, false
+}
+
+func (d *Doctor) beforeFix() {
+	if d.BeforeFix != nil {
+		d.BeforeFix()
+	}
 }
 
 // boundedFix runs a check's Fix under the doctor's per-check timeout using the
@@ -315,7 +334,10 @@ func printResult(w io.Writer, r *CheckResult, verbose bool) {
 		fmt.Fprintf(w, "      fix attempted; check still failing\n") //nolint:errcheck // best-effort output
 	}
 	if r.FixHint != "" && r.Status != StatusOK && !r.Fixed {
-		fmt.Fprintf(w, "      hint: %s\n", r.FixHint) //nolint:errcheck // best-effort output
+		// Continuation lines of a multi-line hint align under its first.
+		const label = "      hint: "
+		hint := strings.ReplaceAll(r.FixHint, "\n", "\n"+strings.Repeat(" ", len(label)))
+		fmt.Fprintf(w, "%s%s\n", label, hint) //nolint:errcheck // best-effort output
 	}
 }
 

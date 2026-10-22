@@ -300,7 +300,7 @@ func newZCodeAgentOutputFixture(t *testing.T) *zcodeAgentOutputFixture {
 	searchRoot := t.TempDir()
 	srv := newServerWithSearchPaths(state, searchRoot)
 
-	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp)
+	mgr := session.NewManagerWithOptions(state.cityBeadStore, state.sp, session.WithCityPath(state.cityPath))
 	sessionName := agentSessionName(state.CityName(), "myrig/worker", state.cfg.Workspace.SessionTemplate)
 	if _, err := mgr.CreateSession(context.Background(), session.CreateOptions{
 		ExplicitName: sessionName,

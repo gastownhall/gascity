@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"fmt"
 	"strconv"
 	"strings"
@@ -52,15 +53,25 @@ const dirtyScopeTablesCommitMessage = "gc: commit working set before beads schem
 // SQL escaping either.
 const dirtyScopeTablesCommitAuthor = "gascity-builder <builder@gascity.local>"
 
-// dirtyScopeTablesCommitSQL builds the working-set commit for database. The
+// dirtyScopeTablesCommitCall commits the selected database's working set. The
 // explicit --author matches every other DOLT_COMMIT call site in the tree
 // (dolt_wisp_query_index.go): Dolt aborts a commit with an empty committer
 // identity, and gc does not guarantee a global one on a fresh host.
+const dirtyScopeTablesCommitCall = "CALL DOLT_COMMIT('-A', '-m', '" + dirtyScopeTablesCommitMessage + "', " +
+	"'--author', '" + dirtyScopeTablesCommitAuthor + "')"
+
+// dirtyScopeTablesCommitSQL builds the working-set commit for database as one
+// `dolt sql -q` script.
 func dirtyScopeTablesCommitSQL(database string) string {
-	return "USE " + managedDoltQuoteIdent(database) + "; " +
-		"CALL DOLT_COMMIT('-A', '-m', '" + dirtyScopeTablesCommitMessage + "', " +
-		"'--author', '" + dirtyScopeTablesCommitAuthor + "');"
+	return "USE " + managedDoltQuoteIdent(database) + "; " + dirtyScopeTablesCommitCall + ";"
 }
+
+// The driver-connection forms that a configured managed password selects. They
+// are variables so tests can observe which path ran.
+var (
+	managedDoltDirtyTableCountDirectFn   = managedDoltDirtyTableCountDirect
+	managedDoltCommitDirtyTablesDirectFn = managedDoltCommitDirtyTablesDirect
+)
 
 // isBdInitDirtyTablesError reports whether err is beads' refusal to migrate
 // tables that already have uncommitted working-set changes.
@@ -102,7 +113,7 @@ func commitDirtyScopeTablesViaManagedDolt(cityPath, database string) (bool, erro
 		return false, fmt.Errorf("no managed Dolt port resolvable for city %q", cityPath)
 	}
 
-	dirty, err := managedDoltDirtyTableCount("", port, "root", database)
+	dirty, err := managedDoltDirtyTableCount(port, database)
 	if err != nil {
 		return false, err
 	}
@@ -110,7 +121,7 @@ func commitDirtyScopeTablesViaManagedDolt(cityPath, database string) (bool, erro
 		return false, nil
 	}
 
-	if _, err := runManagedDoltSQL("", port, "root", "-q", dirtyScopeTablesCommitSQL(database)); err != nil {
+	if err := managedDoltCommitDirtyTables(port, database); err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "nothing to commit") {
 			// A concurrent writer cleared the working set between the
 			// dolt_status count and this commit. Nothing to do, and nothing
@@ -122,16 +133,67 @@ func commitDirtyScopeTablesViaManagedDolt(cityPath, database string) (bool, erro
 	return true, nil
 }
 
-// managedDoltDirtyTableCount returns how many tables in database have
+// managedDoltCommitDirtyTables commits database's whole working set as the
+// recovery commit, as root on the city's managed Dolt server. Like the health
+// probes, a configured managed password selects the pooled driver connection,
+// which keeps it away from the dolt CLI.
+func managedDoltCommitDirtyTables(port, database string) error {
+	if managedDoltPassword() != "" {
+		return managedDoltCommitDirtyTablesDirectFn(port, database)
+	}
+	_, err := runManagedDoltSQL("", port, "root", "-q", dirtyScopeTablesCommitSQL(database))
+	return err
+}
+
+// managedDoltCommitDirtyTablesDirect is managedDoltCommitDirtyTables over the
+// pooled driver connection.
+func managedDoltCommitDirtyTablesDirect(port, database string) error {
+	db, err := managedDoltOpenDatabase("", port, "root", database)
+	if err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	defer cancel()
+	_, err = db.ExecContext(ctx, dirtyScopeTablesCommitCall)
+	return err
+}
+
+// managedDoltDirtyTableCountSQL counts the tables in database that have
 // uncommitted working-set changes.
-func managedDoltDirtyTableCount(host, port, user, database string) (int, error) {
-	out, err := runManagedDoltSQL(host, port, user, "-r", "csv", "-q",
-		"SELECT COUNT(*) AS cnt FROM "+managedDoltQuoteIdent(database)+".dolt_status")
+func managedDoltDirtyTableCountSQL(database string) string {
+	return "SELECT COUNT(*) AS cnt FROM " + managedDoltQuoteIdent(database) + ".dolt_status"
+}
+
+// managedDoltDirtyTableCount returns how many tables in database on the city's
+// managed Dolt server have uncommitted working-set changes, read as root. A
+// configured managed password selects the pooled driver connection, as in
+// managedDoltCommitDirtyTables.
+func managedDoltDirtyTableCount(port, database string) (int, error) {
+	if managedDoltPassword() != "" {
+		return managedDoltDirtyTableCountDirectFn(port, database)
+	}
+	out, err := runManagedDoltSQL("", port, "root", "-r", "csv", "-q", managedDoltDirtyTableCountSQL(database))
 	if err != nil {
 		return 0, fmt.Errorf("reading dolt_status for Dolt database %q: %w", database, err)
 	}
 	n, err := parseSmokeCount(out)
 	if err != nil {
+		return 0, fmt.Errorf("reading dolt_status for Dolt database %q: %w", database, err)
+	}
+	return n, nil
+}
+
+// managedDoltDirtyTableCountDirect is managedDoltDirtyTableCount over the
+// pooled driver connection.
+func managedDoltDirtyTableCountDirect(port, database string) (int, error) {
+	db, err := managedDoltOpenDatabase("", port, "root", database)
+	if err != nil {
+		return 0, fmt.Errorf("reading dolt_status for Dolt database %q: %w", database, err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), managedDoltSQLCommandTimeout)
+	defer cancel()
+	var n int
+	if err := db.QueryRowContext(ctx, managedDoltDirtyTableCountSQL(database)).Scan(&n); err != nil {
 		return 0, fmt.Errorf("reading dolt_status for Dolt database %q: %w", database, err)
 	}
 	return n, nil

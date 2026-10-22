@@ -40,6 +40,17 @@ const (
 	// makes that migration carry them, and makes an already-converged city's
 	// containment re-check name the ones it stranded — which is the true report.
 	labelNudgeQueue = "gc:nudge-queue"
+	// typeOp is the conversation operation journal's row type, carried by
+	// op, fact and runtime rows alike. Canonical: internal/opjournal
+	// (BeadType).
+	typeOp = "op"
+	// labelOp marks an op row. Canonical: internal/opjournal (LabelOp).
+	labelOp = "gc:op"
+	// labelFact marks a fact row. Canonical: internal/opjournal (LabelFact).
+	labelFact = "gc:fact"
+	// labelRuntime marks a conversation's runtime row. Canonical:
+	// internal/opjournal (LabelRuntime).
+	labelRuntime = "gc:rt"
 	// typeMessage is the mail bead type.
 	// Canonical: internal/mail/beadmail/beadmail.go (Type: "message").
 	typeMessage = "message"
@@ -80,6 +91,12 @@ const (
 //     why it has to run before the workflow arm.
 //   - ClassGraph for convergence roots (type=convergence), folding the
 //     convergence engine's state in with the graph it pours.
+//
+// Op, fact and runtime rows of the conversation operation journal (type
+// "op", or the gc:op / gc:fact / gc:rt label) route to ClassSessions, so they
+// live in the same store as the conversation rows they belong to. The arm runs
+// right after the wait arm, ahead of the nudge, synthetic-convoy and workflow
+// arms, so a stray gc.root_bead_id on an op never moves it to the graph.
 //
 // The nudge arm additionally matches the durable queue's own family
 // (gc:nudge-queue) beside the shadow family (gc:nudge). That was a defect
@@ -159,6 +176,9 @@ func classifyFields(beadType string, labels []string, metadata, metadataRefs map
 	case hasLabel(labels, labelSession) || beadType == typeSession:
 		return ClassSessions
 	case hasLabel(labels, labelWait):
+		return ClassSessions
+	case beadType == typeOp || hasLabel(labels, labelOp) || hasLabel(labels, labelFact) ||
+		hasLabel(labels, labelRuntime):
 		return ClassSessions
 	case hasLabel(labels, labelNudge) || hasLabel(labels, labelNudgeQueue):
 		return ClassNudges

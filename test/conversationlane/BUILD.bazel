@@ -1,0 +1,84 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# The conversation-lane evidence (OJ-12x): X2's kill matrix, X6's fan-in and
+# X8's order across a lane-host restart, against real gc processes. Only the
+# integration build stages the test-hooks gc (the one link that honors
+# GC_LANE_FAILPOINT) and the fake exec runtime, so `bazel test //...` neither
+# links nor stages them; scripts/cmd_gc_testhooks_test.go pins GC_LANE_GC_BIN.
+# Unsharded: one action in //test:integration_packages, whose action count is
+# pinned (scripts/bazel_integration_packages_budget_test.go). A test that
+# measures latency (X6) runs first and alone; the others then run their cities
+# in parallel (harness_test.go's cityParallel).
+go_test(
+    name = "conversationlane_test",
+    size = "large",
+    srcs = [
+        "harness_test.go",
+        "inline_pass_test.go",
+        "main_test.go",
+        "testenv_import_test.go",
+        "x2_test.go",
+        "x6_test.go",
+        "x8_test.go",
+    ],
+    data = select({
+        "//:gotags_integration": [
+            "//cmd/gc:gc_testhooks",
+            "//test/conversationlane/fakeruntime",
+        ],
+        "//conditions:default": [],
+    }),
+    env = select({
+        "//:gotags_integration": {
+            "GC_LANE_FAKE_RUNTIME": "$(rootpath //test/conversationlane/fakeruntime)",
+            "GC_LANE_GC_BIN": "$(rootpath //cmd/gc:gc_testhooks)",
+        },
+        "//conditions:default": {},
+    }),
+    deps = [
+        "//internal/bazeltest",
+        "//internal/beads",
+        "//internal/clock",
+        "//internal/opjournal",
+        "//internal/pathutil",
+        "//internal/storebinding/sqlite",
+        "//internal/testenv",
+    ],
+)
+
+# scripts/cmd_gc_testhooks_test.go reads this file.
+exports_files(
+    ["BUILD.bazel"],
+    visibility = ["//scripts:__pkg__"],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

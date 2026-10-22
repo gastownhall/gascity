@@ -13,24 +13,25 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 	const (
 		ghVersion                 = "2.96.0"
 		ghSourceRef               = "b300f2ec7ec9dc9addc39b2ad88c54097ded7ca0"
-		doltSourceRef             = "781cbb730221ea7df4fc7995255bb336df9c3864"
-		grpcVersion               = "1.83.2"
+		doltSourceRef             = "a6690826d767743df7adf0b8bfea3830ee2c4cf6"
 		ghSourceSHA256            = "a0c18c98c73f7333f73e19b3a0bf5bd18673f3dc226193ab6478b3ea1ea18f03"
-		doltSourceSHA256          = "0b0c9bce8baef26baa7e0e5825cd2d7d6101daf6fc9673f38dac9670afb66847"
+		doltSourceSHA256          = "3d7ed1a4ad464dca37228c8b069fc84c803be7ab5254534774728559492a0622"
 		doltToolchainRelease      = "20260611_0.0.5_trixie"
 		doltOptcrossX8664SHA256   = "caf703fb1cbc0c9ff9a5b506f73da6c6f5233c04a455e638cdc50267a4d0c0c0"
 		doltOptcrossAarch64SHA256 = "5635d0b38343fefb0c2b600d61c49ad9ceeaa1107bccdec8a60b1789100dc0ce"
 		doltICUStaticSHA256       = "8b0234f16da73b9c8d47f86eeef98928879611149e3ee1bb560dddb0ffdd95a1"
 	)
 
-	dockerfile := readFile(t, repoRoot(t), "contrib/k8s/Dockerfile.base")
+	root := repoRoot(t)
+	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.base")
+	requireArgsMatchGoMod(t, "contrib/k8s/Dockerfile.base", dockerfile, readFile(t, root, "go.mod"),
+		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"})
 	for _, want := range []string{
 		"ARG GH_VERSION=" + ghVersion,
 		"ARG GH_SOURCE_REF=" + ghSourceRef,
 		"ARG GH_SOURCE_SHA256=" + ghSourceSHA256,
 		"ARG DOLT_SOURCE_REF=" + doltSourceRef,
 		"ARG DOLT_SOURCE_SHA256=" + doltSourceSHA256,
-		"ARG GRPC_VERSION=" + grpcVersion,
 		"ARG DOLT_TOOLCHAIN_RELEASE=" + doltToolchainRelease,
 		"ARG DOLT_OPTCROSS_X86_64_SHA256=" + doltOptcrossX8664SHA256,
 		"ARG DOLT_OPTCROSS_AARCH64_SHA256=" + doltOptcrossAarch64SHA256,
@@ -66,12 +67,10 @@ func TestContainerCLIToolsRebuildWithPatchedGRPC(t *testing.T) {
 
 func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	const (
-		bdSourceRef    = "696e3967be5e1f43a5fcacb80f79c878d85d2196"
-		bdSourceSHA256 = "414e59e2d7fe6a729eb95419ce58abfee9913ada92763bdd95bb7b1006256b21"
-		bdBuild        = "696e3967be5"
+		bdSourceRef    = "c1c4b642ac1c08d8c828007a1c2f96e47e43ef7c"
+		bdSourceSHA256 = "1c836ff4c4e021d0774d3fd0f972bc2d7bf552a8355fbf10a368199c93df1cc8"
+		bdBuild        = "c1c4b642ac1"
 		bdBranch       = "HEAD"
-		grpcVersion    = "1.83.2"
-		thriftVersion  = "0.24.0"
 	)
 
 	root := repoRoot(t)
@@ -94,20 +93,27 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 	}
 
 	dockerfile := readFile(t, root, "contrib/k8s/Dockerfile.agent")
+	// The agent image also ships gc, built straight from go.mod, so these floors keep
+	// gc's own grpc and x/net at or above the patched versions as well as bd's.
+	requireArgsMatchGoMod(t, "contrib/k8s/Dockerfile.agent", dockerfile, readFile(t, root, "go.mod"),
+		goModPinnedArg{"GRPC_VERSION", "google.golang.org/grpc", "v1.83.2"},
+		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
+		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+	)
 	for _, want := range []string{
 		"ARG BD_VERSION=" + bdVersion,
 		"ARG BD_SOURCE_REF=" + bdSourceRef,
 		"ARG BD_SOURCE_SHA256=" + bdSourceSHA256,
 		"ARG BD_BUILD=" + bdBuild,
 		"ARG BD_BRANCH=" + bdBranch,
-		"ARG GRPC_VERSION=" + grpcVersion,
-		"ARG THRIFT_VERSION=" + thriftVersion,
 		`https://github.com/gastownhall/beads/archive/${BD_SOURCE_REF}.tar.gz`,
 		`echo "${BD_SOURCE_SHA256}  /tmp/bd-source.tar.gz" | sha256sum --check --strict`,
 		`grep -Fq "Version = \"${bd_version}\"" cmd/bd/version.go`,
 		`go get "google.golang.org/grpc@v${GRPC_VERSION}"`,
 		`go get "github.com/apache/thrift@v${THRIFT_VERSION}"`,
 		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep github.com/apache/thrift v${THRIFT_VERSION} "`,
+		`go get "golang.org/x/net@v${XNET_VERSION}"`,
+		`go version -m /out/bd | tr '\t' ' ' | grep -Fq "dep golang.org/x/net v${XNET_VERSION} "`,
 		`CGO_ENABLED=1 go build`,
 		`-tags="gms_pure_go"`,
 		`-X main.Version=${bd_version}`,
@@ -137,12 +143,6 @@ func TestAgentImageRebuildsBDAndGCWithPatchedGRPC(t *testing.T) {
 		t.Error("contrib/k8s/Dockerfile.agent must declare BASE_IMAGE globally before its first FROM")
 	}
 
-	goMod := readFile(t, root, "go.mod")
-	wantGRPCModule := "google.golang.org/grpc v" + grpcVersion
-	if got := strings.Count(goMod, wantGRPCModule); got != 1 {
-		t.Errorf("go.mod contains %q %d times, want exactly 1 so the gc binary embeds the patched grpc", wantGRPCModule, got)
-	}
-
 	workflow := readFile(t, root, ".github/workflows/container-scan.yml")
 	if !strings.Contains(workflow, "CGO_ENABLED=0 go build -o gc ./cmd/gc") {
 		t.Error("container scan must build gc with the release's portable CGO_ENABLED=0 configuration")
@@ -153,27 +153,45 @@ func TestMCPMailImagePinsPatchedPythonDependencies(t *testing.T) {
 	root := repoRoot(t)
 	input := readFile(t, root, ".github/requirements/mcp-agent-mail.in")
 	for _, want := range []string{
-		"gitpython>=3.1.59",
+		"gitpython>=3.1.62",
 		"aiohttp>=3.14.3",
 		"anyio>=4.14.2",
 		"pillow>=12.3.0",
+		"urllib3>=2.8.0",
+		"fsspec>=2026.6.0",
+		"litellm>=1.89.7",
 	} {
 		if !strings.Contains(input, want) {
 			t.Errorf("mcp-agent-mail input requirements missing security floor %q", want)
 		}
 	}
 	overrides := readFile(t, root, ".github/requirements/mcp-agent-mail.overrides.txt")
-	if !strings.Contains(overrides, "cryptography>=50.0.0") {
-		t.Error("mcp-agent-mail overrides missing cryptography security floor >=50.0.0")
+	for _, want := range []string{
+		"cryptography>=50.0.0",
+		"pyjwt>=2.15.0",
+	} {
+		if !strings.Contains(overrides, want) {
+			t.Errorf("mcp-agent-mail overrides missing security floor %q", want)
+		}
 	}
 
 	lock := readFile(t, root, ".github/requirements/mcp-agent-mail.txt")
 	for _, want := range []string{
-		"gitpython==3.1.59 \\",
+		"gitpython==3.1.62 \\",
 		"aiohttp==3.14.3 \\",
 		"anyio==4.14.2 \\",
 		"cryptography==50.0.0 \\",
 		"pillow==12.3.0 \\",
+		"pyjwt==2.15.1 \\",
+		"urllib3==2.8.0 \\",
+		"fsspec==2026.6.0 \\",
+		"litellm==1.89.7 \\",
+		// Lock-only CVE bumps: no input floor, so this pin is their only guard.
+		"bleach==6.4.0 \\",
+		"h2==4.4.1 \\",
+		"hpack==4.2.0 \\",
+		"multidict==6.9.1 \\",
+		"pydantic-settings==2.14.2 \\",
 	} {
 		if !strings.Contains(lock, want) {
 			t.Errorf("mcp-agent-mail hashed lock missing patched dependency %q", want)
@@ -246,23 +264,23 @@ func TestRebuiltToolsForcePatchedXModules(t *testing.T) {
 	root := repoRoot(t)
 	base := readFile(t, root, "contrib/k8s/Dockerfile.base")
 
-	// Versions each override forces, at or above what Trivy names as fixed for the findings it clears.
-	for _, arg := range []string{
-		"ARG XCRYPTO_VERSION=0.55.0",
-		"ARG XNET_VERSION=0.58.0",
-		"ARG XTEXT_VERSION=0.41.0",
-		"ARG XMOD_VERSION=0.40.0",
-		"ARG THRIFT_VERSION=0.24.0",
-	} {
-		if !strings.Contains(base, arg) {
-			t.Errorf("contrib/k8s/Dockerfile.base missing %q", arg)
-		}
-	}
+	// Each override forces the version go.mod pins, and each floor is at or above what
+	// Trivy names as fixed for the findings the override clears.
+	requireArgsMatchGoMod(t, "contrib/k8s/Dockerfile.base", base, readFile(t, root, "go.mod"),
+		goModPinnedArg{"XCRYPTO_VERSION", "golang.org/x/crypto", "v0.57.0"},
+		goModPinnedArg{"XNET_VERSION", "golang.org/x/net", "v0.60.0"},
+		goModPinnedArg{"XTEXT_VERSION", "golang.org/x/text", "v0.42.0"},
+		goModPinnedArg{"XMOD_VERSION", "golang.org/x/mod", "v0.41.0"},
+		goModPinnedArg{"THRIFT_VERSION", "github.com/apache/thrift", "v0.24.0"},
+	)
 
-	// gh needs x/text and x/mod; its pinned source already selects patched x/crypto and x/net.
+	// gh needs x/text, x/net and x/mod. Its pinned source selects x/crypto v0.53.0, below
+	// XCRYPTO_VERSION; the patched x/crypto reaches the binary only transitively, through
+	// the x/net override's own requirement, and nothing asserts it.
 	// Dolt takes no x/mod override because no x/mod package is linked into its binary.
 	ghModules := map[string]string{
 		"golang.org/x/text": "XTEXT_VERSION",
+		"golang.org/x/net":  "XNET_VERSION",
 		"golang.org/x/mod":  "XMOD_VERSION",
 	}
 	doltModules := map[string]string{
@@ -383,7 +401,7 @@ func TestTrivyIgnoreRejectsPurlScopedWaivers(t *testing.T) {
 
 // TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools enforces that the rebuilt-from-
 // source tools (bd, dolt, gh) carry no waiver at all. They are rebuilt with the Go
-// 1.26.5 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
+// 1.26.10 toolchain, which fixes every stdlib CVE listed, and Dockerfile.base forces
 // x/crypto, x/net, x/text and thrift forward in the gh and Dolt builds the same way
 // it forces grpc, so a waiver on those paths would let the scan gate mask a regressed
 // rebuild instead of proving the fix holds. The one surviving reviewed waiver is
@@ -436,7 +454,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 	for _, v := range doc.Vulnerabilities {
 		for _, p := range v.Paths {
 			if stdlibCVEs[v.ID] && rebuiltPaths[p] {
-				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.5 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
+				t.Errorf("%s still waives rebuilt tool %q for a Go-stdlib CVE the 1.26.10 rebuild clears; drop the path so the scan proves the fix stays effective", v.ID, p)
 			}
 			if allowedPaths, ok := reviewedWaivers[v.ID]; ok && allowedPaths[p] {
 				if foundReviewed[v.ID] == nil {
@@ -446,7 +464,7 @@ func TestTrivyIgnoreDropsStdlibWaiversForRebuiltTools(t *testing.T) {
 				continue
 			}
 			if rebuiltPaths[p] {
-				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc and thrift forward, so move the module forward in that build instead of waiving the path", v.ID, p)
+				t.Errorf("%s waives rebuilt tool %q; Dockerfile.base forces the patched modules into the gh and Dolt builds and Dockerfile.agent forces bd's grpc, thrift and x/net forward, so move the module forward in that build instead of waiving the path", v.ID, p)
 			}
 		}
 	}
@@ -505,6 +523,33 @@ func semverAtLeast(have, want [3]int) bool {
 		}
 	}
 	return true
+}
+
+// goModPinnedArg is a Dockerfile ARG that forces module into a rebuilt tool, and the
+// patched floor go.mod's pin for that module must not fall below.
+type goModPinnedArg struct {
+	arg, module, floor string
+}
+
+// requireArgsMatchGoMod checks that dockerfile declares each ARG at exactly the
+// version go.mod pins for its module, and that the go.mod pin is at or above the
+// floor. The expected value comes from go.mod rather than a literal because a
+// go.mod-only bump otherwise leaves the images behind with every guard green, which
+// is how #7387 left them on x/net 0.58.0; the floor keeps a coordinated downgrade of
+// both from passing.
+func requireArgsMatchGoMod(t *testing.T, name, dockerfile, goMod string, pins ...goModPinnedArg) {
+	t.Helper()
+	for _, pin := range pins {
+		have := goModVersion(t, goMod, pin.module)
+		version := fmt.Sprintf("%d.%d.%d", have[0], have[1], have[2])
+		if !semverAtLeast(have, parseModuleSemver(t, pin.floor)) {
+			t.Errorf("go.mod pins %s v%s, below the patched floor %s; raise it, and move %s's %s with it", pin.module, version, pin.floor, name, pin.arg)
+		}
+		want := "ARG " + pin.arg + "=" + version
+		if !strings.Contains(dockerfile, "\n"+want+"\n") {
+			t.Errorf("%s missing %q, the %s version go.mod pins; move the ARG with go.mod so the image cannot fall behind it", name, want, pin.module)
+		}
+	}
 }
 
 // TestTrivyIgnoreDropsGCModuleWaiversPastThreshold enforces that no usr/local/bin/gc

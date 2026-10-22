@@ -133,11 +133,18 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 		}
 
 		transient := isTransientManagedDoltInitFailure(out)
+		portLost := isBDProxiedPortCollisionInitFailure(cityDir, out)
 		alreadyInitialized := isAlreadyInitializedGCInitFailure(out)
-		if !transient && !(sawTransient && alreadyInitialized) {
-			t.Fatalf("gc init failed: %v\noutput: %s", err, out)
+		if !transient && !portLost && !(sawTransient && alreadyInitialized) {
+			t.Fatalf("gc init failed: %v\noutput: %s%s", err, out, managedDoltScopeLogs(cityDir))
 		}
-		sawTransient = sawTransient || transient
+		sawTransient = sawTransient || transient || portLost
+		if portLost {
+			t.Logf("gc init lost its managed Dolt port to another listener (pinned bd v1.3.1, beads#7184); retrying from a clean .beads:%s", managedDoltScopeLogs(cityDir))
+			if resetErr := resetBDProxiedScope(cityDir); resetErr != nil {
+				t.Fatalf("resetting .beads after a lost managed Dolt port: %v\ninit output: %s", resetErr, out)
+			}
+		}
 
 		if attempt < 2 {
 			t.Logf("retrying gc init after transient managed Dolt startup failure (attempt %d/2)", attempt+1)
@@ -148,14 +155,78 @@ func initCityWithManagedDoltRecovery(t *testing.T, env []string, configPath, cit
 
 	startOut, startErr := runGCDoltWithEnv(env, "", "start", cityDir)
 	if startErr != nil && !isGCStartAlreadyRunning(startOut) && !isTransientManagedDoltInitFailure(startOut) {
-		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s", err, out, startErr, startOut)
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s%s", err, out, startErr, startOut, managedDoltScopeLogs(cityDir))
 	}
 	if readyOut, readyErr := waitForManagedDoltCityReady(env, cityDir, 20*time.Second); readyErr == nil {
 		t.Log("recovered partially initialized city after transient managed Dolt startup failure")
 		return
 	} else {
-		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s\ncity never became ready: %v\nlast bd output: %s", err, out, startErr, startOut, readyErr, readyOut)
+		t.Fatalf("gc init failed after transient managed Dolt startup failure: %v\ninit output: %s\ngc start recovery failed: %v\nstart output: %s\ncity never became ready: %v\nlast bd output: %s%s", err, out, startErr, startOut, readyErr, readyOut, managedDoltScopeLogs(cityDir))
 	}
+}
+
+// bdProxiedFirstStartFailures are pinned bd v1.3.1's two reports of a proxied
+// first start whose managed Dolt never served: the uow ping failing after the
+// proxy published and then tore itself down, or the proxy missing bd's open
+// deadline while its backend kept exiting.
+var bdProxiedFirstStartFailures = []string{
+	"failed to open uow provider: uow: ping db:",
+	"timeout waiting for proxy to become ready on its OS-assigned port",
+}
+
+// isBDProxiedPortCollisionInitFailure reports whether a failed gc init is
+// pinned bd v1.3.1 losing its managed Dolt port (ga-86zysul). bd picks that
+// port by bind-and-close (beads proxy.PickFreePort), records it in
+// .beads/dolt/config.yaml, and dolt binds it moments later. When another
+// loopback listener takes it first, dolt exits with "Port N already in use.",
+// and bd's readiness check, answered by that listener, publishes a proxy that
+// tears itself down on its first backend health check. beads#7184 fixes this
+// upstream and is in no bd release yet. The dolt line in server.log is the
+// proof: bd's text alone also fits any other proxy death, which must still
+// fail the test.
+func isBDProxiedPortCollisionInitFailure(cityDir, out string) bool {
+	matched := false
+	for _, text := range bdProxiedFirstStartFailures {
+		if strings.Contains(out, text) {
+			matched = true
+			break
+		}
+	}
+	if !matched {
+		return false
+	}
+	data, err := os.ReadFile(filepath.Join(cityDir, ".beads", "dolt", "server.log"))
+	return err == nil && strings.Contains(string(data), "already in use")
+}
+
+// resetBDProxiedScope clears a city's .beads after a lost managed Dolt port so
+// the retry picks a new one. bd never rewrites the recorded port and refuses
+// the half-initialized scope, so only a clean .beads recovers it. gc's pending
+// init intent lives under .gc and survives, so gc start runs the init again.
+func resetBDProxiedScope(cityDir string) error {
+	beadsDir := filepath.Join(cityDir, ".beads")
+	cleanupIntegrationDoltSQLServersUnderRoot(beadsDir)
+	return os.RemoveAll(beadsDir)
+}
+
+// managedDoltScopeLogs returns the tails of the city's managed Dolt server and
+// proxy logs for a failure message. Both live in the test's TempDir, which is
+// gone by the time anyone reads a remote run's results.
+func managedDoltScopeLogs(cityDir string) string {
+	const maxTail = 4096
+	var b strings.Builder
+	for _, name := range []string{"server.log", "proxy.log"} {
+		path := filepath.Join(cityDir, ".beads", "dolt", name)
+		data, err := os.ReadFile(path)
+		if err != nil {
+			continue
+		}
+		if len(data) > maxTail {
+			data = data[len(data)-maxTail:]
+		}
+		fmt.Fprintf(&b, "\n--- %s (last %d bytes) ---\n%s", path, len(data), data)
+	}
+	return b.String()
 }
 
 // isProviderOwnedProxiedDoltCity reports whether cityDir's beads store is in
@@ -545,4 +616,71 @@ func extractBeadID(t *testing.T, output string) string {
 		t.Fatalf("could not parse bead ID from output: %s", output)
 	}
 	return id
+}
+
+func TestIsBDProxiedPortCollisionInitFailure(t *testing.T) {
+	const (
+		pingOut    = "Error: failed to open uow provider: uow: ping db: dial tcp 127.0.0.1:42021: connect: connection refused"
+		timeoutOut = "Error: failed to open uow provider: uow: get proxy endpoint: timeout waiting for proxy to become ready on its OS-assigned port"
+		portLine   = "Starting server with Config HP=\"127.0.0.1:37773\"\nPort 37773 already in use.\nError: database server exited\n"
+	)
+	cases := []struct {
+		name      string
+		out       string
+		serverLog string // empty means no server.log at all
+		want      bool
+	}{
+		{name: "ping failure with dolt port line", out: pingOut, serverLog: portLine, want: true},
+		{name: "proxy timeout with dolt port line", out: timeoutOut, serverLog: portLine, want: true},
+		{name: "ping failure without dolt port line", out: pingOut, serverLog: "Server closing listener\n", want: false},
+		{name: "ping failure without server.log", out: pingOut, want: false},
+		{name: "unrelated failure with dolt port line", out: "Error: database not found", serverLog: portLine, want: false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := t.TempDir()
+			if tc.serverLog != "" {
+				doltDir := filepath.Join(cityDir, ".beads", "dolt")
+				if err := os.MkdirAll(doltDir, 0o755); err != nil {
+					t.Fatalf("mkdir .beads/dolt: %v", err)
+				}
+				if err := os.WriteFile(filepath.Join(doltDir, "server.log"), []byte(tc.serverLog), 0o644); err != nil {
+					t.Fatalf("write server.log: %v", err)
+				}
+			}
+			if got := isBDProxiedPortCollisionInitFailure(cityDir, tc.out); got != tc.want {
+				t.Errorf("isBDProxiedPortCollisionInitFailure() = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestResetBDProxiedScopeRemovesOnlyBeads(t *testing.T) {
+	cityDir := t.TempDir()
+	for _, dir := range []string{filepath.Join(cityDir, ".beads", "dolt"), filepath.Join(cityDir, ".gc")} {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	files := map[string]string{
+		filepath.Join(cityDir, ".beads", "dolt", "config.yaml"): "listener:\n    port: 37773\n",
+		filepath.Join(cityDir, ".gc", "intent.json"):            "{}",
+		filepath.Join(cityDir, "city.toml"):                     "[workspace]\n",
+	}
+	for path, body := range files {
+		if err := os.WriteFile(path, []byte(body), 0o644); err != nil {
+			t.Fatalf("write %s: %v", path, err)
+		}
+	}
+	if err := resetBDProxiedScope(cityDir); err != nil {
+		t.Fatalf("resetBDProxiedScope() error = %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cityDir, ".beads")); !os.IsNotExist(err) {
+		t.Errorf(".beads still present after reset (stat err = %v)", err)
+	}
+	for _, path := range []string{filepath.Join(cityDir, ".gc", "intent.json"), filepath.Join(cityDir, "city.toml")} {
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("%s removed by reset: %v", path, err)
+		}
+	}
 }

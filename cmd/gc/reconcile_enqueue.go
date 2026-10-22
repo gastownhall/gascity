@@ -17,8 +17,9 @@ import (
 // tick-driven reconciler has exactly two wake signals, so legacyEnqueue is
 // the single place keys are folded back onto them: allocator and session
 // keys become the generic poke (one full tick), and the control-dispatch key
-// becomes the control-dispatcher signal. A keyed reconciler replaces this
-// mapping; call sites keep passing keys.
+// becomes the control-dispatcher signal. Every trigger reaches it through
+// the controller wake (reconcile_wake.go), which a keyed reconciler points
+// at its router; call sites keep passing keys.
 //
 // Socket protocol. The controller socket keeps its legacy verbs unchanged:
 //
@@ -71,21 +72,13 @@ func legacyEnqueue(pokeCh, controlDispatcherCh chan<- struct{}, keys ...reconcil
 	return landed
 }
 
-// controllerStateWiredHook, when set by a test, observes each
-// controllerState right after wireControllerWakeSignals. Tests that set it
-// MUST NOT call t.Parallel().
-var controllerStateWiredHook func(*controllerState)
-
-// wireControllerWakeSignals connects cs.Enqueue to the controller's wake
-// channels. Both the standalone controller and the supervisor's per-city
-// start call it, so neither can forget the control-dispatcher channel
-// (without it, control-dispatch enqueues from the API would be dropped).
-func wireControllerWakeSignals(cs *controllerState, pokeCh, controlDispatcherCh chan struct{}) {
-	cs.pokeCh = pokeCh
-	cs.controlDispatcherCh = controlDispatcherCh
-	if hook := controllerStateWiredHook; hook != nil {
-		hook(cs)
-	}
+// wireControllerWakeSignals installs the controller wake as cs's enqueue
+// path. Both the standalone controller and the supervisor's per-city start
+// call it with their controllerWiring's wake, so neither can forget the
+// control-dispatcher signal (without it, control-dispatch enqueues from the
+// API would be dropped).
+func wireControllerWakeSignals(cs *controllerState, wake *controllerWake) {
+	cs.wake = wake
 }
 
 // parsePokeSocketCommand reports whether line is a poke command and, if so,
@@ -144,8 +137,12 @@ func keyedPokeUnsupported(err error) bool {
 // existing wake: the allocator key is pokeController, the control-dispatch
 // key is pokeControlDispatch, and a session key is a keyed poke that falls
 // back to pokeController (plain poke, then the supervisor) when the keyed
-// form is not acknowledged.
+// form is not acknowledged. On a worker site it returns
+// errWorkerSiteNoController without trying any of them.
 func enqueueController(cityPath string, key reconcilekey.Key) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	switch key = key.Normalize(); key.Kind {
 	case reconcilekey.KindControlDispatch:
 		return pokeControlDispatch(cityPath)
@@ -171,8 +168,12 @@ func enqueueController(cityPath string, key reconcilekey.Key) error {
 // pokeController: pokeController silently falls back to the city-agnostic
 // global supervisor socket on any send failure, which would make an
 // explicit-restart request for one city spuriously report success via an
-// unrelated supervisor.
+// unrelated supervisor. On a worker site it returns errWorkerSiteNoController
+// without dialing.
 func pokeControllerForRestart(cityPath string, key reconcilekey.Key) error {
+	if onWorkerSite(cityPath) {
+		return errWorkerSiteNoController
+	}
 	send := func(command string) ([]byte, error) {
 		return sendControllerCommandWithTimeouts(cityPath, command, 2*time.Second, 2*time.Second, 5*time.Second)
 	}

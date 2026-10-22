@@ -152,6 +152,9 @@ query GasCityPRReadiness($owner: String!, $repo: String!, $cursor: String) {
         number
         title
         url
+        author {
+          login
+        }
         isDraft
         mergeStateStatus
         baseRefName

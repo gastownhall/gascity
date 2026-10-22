@@ -66,12 +66,27 @@ func WithOrderFiringCurrentLastRunFunc(fn OrderFiringCurrentLastRunFunc) OrderFi
 	}
 }
 
+// OrderFiringCurrentInapplicableFunc reports whether an order's
+// requires_backend rules out the backend its bead scope uses, and names that
+// backend. The dispatcher never runs such an order there, so it never fires.
+type OrderFiringCurrentInapplicableFunc func(order orders.Order) (backend string, inapplicable bool)
+
+// WithOrderFiringCurrentInapplicableFunc lets callers mark orders that do not
+// apply to their scope's backend. The check reports them as inapplicable
+// rather than stale or never-fired.
+func WithOrderFiringCurrentInapplicableFunc(fn OrderFiringCurrentInapplicableFunc) OrderFiringCurrentOption {
+	return func(c *OrderFiringCurrentCheck) {
+		c.inapplicable = fn
+	}
+}
+
 // OrderFiringCurrentCheck reports scheduled orders whose last firing is stale.
 type OrderFiringCurrentCheck struct {
 	cfg            *config.City
 	cityPath       string
 	clock          func() time.Time
 	lastRun        OrderFiringCurrentLastRunFunc
+	inapplicable   OrderFiringCurrentInapplicableFunc
 	historyTimeout time.Duration
 	readEvents     orderFiringEventReadFunc
 }
@@ -161,6 +176,21 @@ func (c *OrderFiringCurrentCheck) run(ctx *CheckContext) *CheckResult {
 		result.Message = fmt.Sprintf("scan orders: %v", err)
 		return result
 	}
+	// An order its scope's backend rules out is never dispatched, so it never
+	// fires. It is reported as inapplicable, never counted as stale.
+	var inapplicableDetails []string
+	if c.inapplicable != nil {
+		applicable := allOrders[:0:0]
+		for _, order := range allOrders {
+			if backend, ok := c.inapplicable(order); ok {
+				inapplicableDetails = append(inapplicableDetails, fmt.Sprintf("%s: inapplicable (backend %s)", orderDisplayName(order), backend))
+				continue
+			}
+			applicable = append(applicable, order)
+		}
+		allOrders = applicable
+	}
+	defer func() { result.Details = append(result.Details, inapplicableDetails...) }()
 
 	eventPath := filepath.Join(cityPath, citylayout.RuntimeRoot, "events.jsonl")
 	firedEvents, err := c.readEventTail(eventPath, events.Filter{Type: events.OrderFired}, orderFiringEventTailLimit)

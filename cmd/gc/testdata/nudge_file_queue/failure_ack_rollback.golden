@@ -1,0 +1,3400 @@
+### enqueue n-retry
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-retry limit=21}
+op Create BEAD-1
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-fence
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-fence limit=21}
+op Create BEAD-2
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-drop
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-drop limit=21}
+op Create BEAD-3
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-ack1
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-ack1 limit=21}
+op Create BEAD-4
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-ack2
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-ack2 limit=21}
+op Create BEAD-5
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-ack3
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-ack3 limit=21}
+op Create BEAD-6
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-ack4
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-ack4 limit=21}
+op Create BEAD-7
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-ack5
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-ack5 limit=21}
+op Create BEAD-8
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-roll
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-roll limit=21}
+op Create BEAD-9
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### enqueue n-short
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 1
+op List {label=nudge:n-short limit=21}
+op Create BEAD-10
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### failure 1 of n-retry
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-5",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-6",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### failure 2 of n-retry
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-7",
+      "expires_at": "T-2",
+      "attempts": 2,
+      "last_attempt_at": "T-8",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### failure 3 of n-retry
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-9",
+      "expires_at": "T-2",
+      "attempts": 3,
+      "last_attempt_at": "T-10",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### failure 4 of n-retry
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 4,
+      "last_attempt_at": "T-12",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ]
+}
+
+### failure 5 of n-retry
+result: [n-retry] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op SetMetadataBatch BEAD-1
+op Close BEAD-1
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    }
+  ]
+}
+
+### a fence mismatch dead-letters at once
+result: [n-fence] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op SetMetadataBatch BEAD-2
+op Close BEAD-2
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### an operator drop dead-letters at once, with the zero store
+result: [n-drop] err=<nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op SetMetadataBatch BEAD-3
+op Close BEAD-3
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### a failure of an unknown id
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### claim the acks
+result: [n-ack1 n-ack2 n-ack3 n-ack4 n-roll] err=<nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-ack1",
+      "bead_id": "BEAD-4",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack1",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### ack injected
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op SetMetadataBatch BEAD-4
+op Close BEAD-4
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-ack2",
+      "bead_id": "BEAD-5",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack2",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### ack accepted for injection
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op SetMetadataBatch BEAD-5
+op Close BEAD-5
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-ack3",
+      "bead_id": "BEAD-6",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack3",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### ack injected unobserved
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op SetMetadataBatch BEAD-6
+op Close BEAD-6
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-ack4",
+      "bead_id": "BEAD-7",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-ack4",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### ack withdrawn as failed
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op SetMetadataBatch BEAD-7
+op Close BEAD-7
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    },
+    {
+      "id": "n-ack5",
+      "bead_id": "BEAD-8",
+      "agent": "beta",
+      "source": "session",
+      "message": "message n-ack5",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### ack a pending item
+result: <nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op SetMetadataBatch BEAD-8
+op Close BEAD-8
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### ack with no ids
+result: <nil>
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### release with no ids
+result: <nil>
+rewrote_state: false
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "in_flight": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### roll back a queued item
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op SetMetadataBatch BEAD-9
+op Close BEAD-9
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "managed wake failed: boom",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "T-17"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### roll back a missing item
+result: <nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-never include_closed limit=21}
+state.json:
+{
+  "pending": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "managed wake failed: boom",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "T-17"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### claim n-short
+result: [n-short] err=<nil>
+rewrote_state: true
+store_opens: 1 store_closes: 1 census_calls: 0 wake_pings: 0
+op List {label=nudge:n-roll include_closed limit=21}
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+state.json:
+{
+  "in_flight": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "claimed_at": "T-18",
+      "lease_until": "T-19",
+      "dead_at": "TZERO-1"
+    }
+  ],
+  "dead": [
+    {
+      "id": "n-roll",
+      "bead_id": "BEAD-9",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-roll",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "managed wake failed: boom",
+      "claimed_at": "T-15",
+      "lease_until": "T-16",
+      "dead_at": "T-17"
+    },
+    {
+      "id": "n-retry",
+      "bead_id": "BEAD-1",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-retry",
+      "created_at": "T-1",
+      "deliver_after": "T-11",
+      "expires_at": "T-2",
+      "attempts": 5,
+      "last_attempt_at": "T-13",
+      "last_error": "delivery refused",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-13"
+    },
+    {
+      "id": "n-drop",
+      "bead_id": "BEAD-3",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-drop",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "dropped by operator (gc nudge drop)",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    },
+    {
+      "id": "n-fence",
+      "bead_id": "BEAD-2",
+      "agent": "alpha",
+      "source": "session",
+      "message": "message n-fence",
+      "created_at": "T-1",
+      "deliver_after": "T-1",
+      "expires_at": "T-2",
+      "attempts": 1,
+      "last_attempt_at": "T-14",
+      "last_error": "queued nudge session fence mismatch",
+      "claimed_at": "TZERO-1",
+      "lease_until": "TZERO-1",
+      "dead_at": "T-14"
+    }
+  ]
+}
+
+### a failure two hours on expires in-flight n-short and ages the dead letters out
+result: [] err=<nil>
+rewrote_state: true
+store_opens: 0 store_closes: 0 census_calls: 0 wake_pings: 0
+op SetMetadataBatch BEAD-10
+op Close BEAD-10
+op List {label=nudge:n-roll include_closed limit=21}
+op List {label=nudge:n-retry include_closed limit=21}
+op List {label=nudge:n-drop include_closed limit=21}
+op List {label=nudge:n-fence include_closed limit=21}
+op List {label=nudge:n-short include_closed limit=21}
+state.json:
+{
+  "dead": [
+    {
+      "id": "n-short",
+      "bead_id": "BEAD-10",
+      "agent": "gamma",
+      "source": "session",
+      "message": "message n-short",
+      "created_at": "T-3",
+      "deliver_after": "T-3",
+      "expires_at": "T-4",
+      "last_attempt_at": "TZERO-1",
+      "last_error": "expired",
+      "claimed_at": "T-18",
+      "lease_until": "T-19",
+      "dead_at": "T-20"
+    }
+  ]
+}
+

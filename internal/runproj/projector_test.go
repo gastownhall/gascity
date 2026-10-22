@@ -2,6 +2,7 @@ package runproj
 
 import (
 	"encoding/json"
+	"reflect"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/beads"
@@ -90,6 +91,63 @@ func TestProjectorCountsDecodeMisses(t *testing.T) {
 	p.Apply([]events.Event{{Seq: 4, Type: events.BeadClosed, Payload: json.RawMessage(`garbage`)}})
 	if p.DecodeMisses() != 2 {
 		t.Errorf("DecodeMisses = %d, want 2 (cumulative across passes)", p.DecodeMisses())
+	}
+}
+
+// TestProjectorFoldsRepeatedIdenticalUpdateIdempotently pins what makes two
+// writers announcing the same change safe: a worker's `gc hook --claim`
+// records the claim's bead.updated, and the supervisor may record the same
+// snapshot again when it reads the row back. The repeat lands on the same
+// snapshot and keeps the bead's first-seen slot, and a close that follows in
+// log order still wins.
+func TestProjectorFoldsRepeatedIdenticalUpdateIdempotently(t *testing.T) {
+	claimed := beads.Bead{
+		ID: "step", Status: "in_progress", Type: "task", Assignee: "worker-1",
+		Metadata: map[string]string{"gc.root_bead_id": "root"},
+	}
+	payload, err := beads.EncodeBeadEventPayload(claimed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hookClaim := events.Event{Seq: 3, Type: events.BeadUpdated, Actor: "worker-1", Subject: "step", Payload: payload}
+	supervisorRepeat := events.Event{Seq: 4, Type: events.BeadUpdated, Actor: "cache-reconcile", Subject: "step", Payload: payload}
+
+	p := NewProjector()
+	p.Apply([]events.Event{
+		beadEvent(1, events.BeadCreated, "root", "open"),
+		beadEvent(2, events.BeadCreated, "step", "open"),
+		hookClaim,
+	})
+	once := p.Beads()
+
+	p.Apply([]events.Event{supervisorRepeat})
+	twice := p.Beads()
+
+	if !equalIDs(idsOf(twice), []string{"root", "step"}) {
+		t.Fatalf("beads after the repeat = %v, want [root step]", idsOf(twice))
+	}
+	if !reflect.DeepEqual(once, twice) {
+		t.Fatalf("a repeated identical bead.updated changed the fold:\n once:  %+v\n twice: %+v", once, twice)
+	}
+	if got := twice[1]; got.Status != "in_progress" || got.Assignee != "worker-1" {
+		t.Fatalf("step = status %q assignee %q, want in_progress owned by worker-1", got.Status, got.Assignee)
+	}
+
+	closed := claimed
+	closed.Status = "closed"
+	closedPayload, err := beads.EncodeBeadEventPayload(closed)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Apply([]events.Event{
+		{Seq: 5, Type: events.BeadClosed, Actor: "worker-1", Subject: "step", Payload: closedPayload},
+		{Seq: 6, Type: events.BeadClosed, Actor: "cache-reconcile", Subject: "step", Payload: closedPayload},
+	})
+	if got := p.Beads()[1]; got.Status != "closed" {
+		t.Fatalf("step after a repeated close = status %q, want closed", got.Status)
+	}
+	if p.LastSeq() != 6 {
+		t.Fatalf("lastSeq = %d, want 6", p.LastSeq())
 	}
 }
 
