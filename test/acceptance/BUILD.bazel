@@ -37,7 +37,9 @@ ACCEPTANCE_ENV = {
 
 # Tests that each run past the lane's ~120 s shard budget on rbe-west, by
 # design: each waits out real Dolt lifecycle timers (proxy idle retirement,
-# a suspension quiescence window) or walks one long sequential shape. Each
+# a suspension quiescence window) or walks one long sequential shape (the
+# two-city federation run starts, stops and restarts two cities on one
+# supervisor over one external Dolt). Each
 # runs alone in a target of its own (target name: top-level test), in
 # :acceptance_test's binary and environment, so the lane runs them side by
 # side instead of stacking one behind another in a shard. :acceptance_test
@@ -53,6 +55,7 @@ SOLO_TESTS = {
     "proxied_idle_timeout_test": "TestProxiedIdleTimeoutReapAndTransparentRestart",
     "proxied_suspended_city_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedCity",
     "proxied_suspended_rig_quiescence_test": "TestProxiedSuspensionIsQuiescenceSuspendedRig",
+    "rig_federation_two_city_test": "TestRigFederationTwoCitiesOneStore",
 }
 
 # The topology matrix walks one sequential shape per row (init, doctor, bd,
@@ -192,6 +195,7 @@ go_test(
         "pack_registry_live_test.go",
         "pack_test.go",
         "prime_test.go",
+        "rig_federation_two_city_test.go",
         "rig_test.go",
         "session_test.go",
         "skill_test.go",
