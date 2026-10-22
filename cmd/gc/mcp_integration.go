@@ -23,6 +23,7 @@ var managedMCPGitignoreEntries = []string{
 	filepath.ToSlash(filepath.Join(".gemini", "settings.json")),
 	filepath.ToSlash(filepath.Join(".codex", "config.toml")),
 	filepath.ToSlash(filepath.Join(".cursor", "mcp.json")),
+	filepath.ToSlash(filepath.Join(".agents", "mcp_config.json")),
 	"opencode.json",
 	"mimocode.json",
 }
@@ -52,6 +53,7 @@ var mcpProviderKinds = []string{
 	materialize.MCPProviderOpenCode,
 	materialize.MCPProviderMimoCode,
 	materialize.MCPProviderCursor,
+	materialize.MCPProviderAntigravity,
 }
 
 func supportsMCPProviderKind(kind string) bool {

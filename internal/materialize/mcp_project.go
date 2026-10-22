@@ -33,6 +33,10 @@ const (
 	MCPProviderMimoCode = "mimocode"
 	// MCPProviderCursor projects to Cursor Agent's project-native MCP file.
 	MCPProviderCursor = "cursor"
+	// MCPProviderAntigravity projects to the Antigravity CLI's workspace
+	// customization root (<workdir>/.agents/mcp_config.json), which agy loads
+	// alongside, and in preference to, the user-level ~/.gemini/config file.
+	MCPProviderAntigravity = "antigravity"
 )
 
 // MCPProjection is one provider-native MCP payload for a single target file.
@@ -55,6 +59,7 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 	case MCPProviderOpenCode:
 	case MCPProviderMimoCode:
 	case MCPProviderCursor:
+	case MCPProviderAntigravity:
 	default:
 		return MCPProjection{}, fmt.Errorf("unsupported MCP provider %q", providerKind)
 	}
@@ -79,6 +84,8 @@ func BuildMCPProjection(providerKind, workdir string, servers []MCPServer) (MCPP
 		out.Target = filepath.Join(workdir, "mimocode.json")
 	case MCPProviderCursor:
 		out.Target = filepath.Join(workdir, ".cursor", "mcp.json")
+	case MCPProviderAntigravity:
+		out.Target = filepath.Join(workdir, ".agents", "mcp_config.json")
 	}
 	return out, nil
 }
@@ -97,8 +104,8 @@ func (p MCPProjection) Hash() string {
 // managed marker gates later cleanup when the effective catalog becomes
 // empty so GC does not remove an unmanaged file it never adopted.
 //
-// Claude owns the whole file; Gemini, Codex, Cursor, OpenCode, and MiMo Code
-// preserve unrelated config while replacing the MCP subtree.
+// Claude owns the whole file; Gemini, Codex, Cursor, Antigravity, OpenCode,
+// and MiMo Code preserve unrelated config while replacing the MCP subtree.
 //
 // Apply is safe against concurrent writers for the same target: when the
 // backing FS is the real OS filesystem, the read-validate-write sequence
@@ -162,7 +169,9 @@ func (p MCPProjection) applyWithStderr(fs fsys.FS, stderr io.Writer) error {
 			// schema; only the target file name differs (set at build time).
 			return p.applyOpenCode(fs)
 		case MCPProviderCursor:
-			return p.applyCursor(fs)
+			return p.applyMCPServersJSON(fs, p.cursorServersDoc())
+		case MCPProviderAntigravity:
+			return p.applyMCPServersJSON(fs, p.antigravityServersDoc())
 		default:
 			return fmt.Errorf("unsupported MCP provider %q", p.Provider)
 		}
@@ -307,7 +316,9 @@ func (p MCPProjection) applyOpenCode(fs fsys.FS) error {
 	return p.writeManagedMarker(fs)
 }
 
-func (p MCPProjection) applyCursor(fs fsys.FS) error {
+// applyMCPServersJSON reconciles a JSON target whose MCP catalog lives under
+// a top-level "mcpServers" object, preserving every other key.
+func (p MCPProjection) applyMCPServersJSON(fs fsys.FS, servers map[string]any) error {
 	managed := p.isManaged(fs)
 	if len(p.Servers) == 0 && !managed {
 		return nil
@@ -325,7 +336,7 @@ func (p MCPProjection) applyCursor(fs fsys.FS) error {
 			return removeManagedMCPFile(fs, p.markerPath())
 		}
 	} else {
-		doc["mcpServers"] = p.cursorServersDoc()
+		doc["mcpServers"] = servers
 	}
 	data, err := marshalJSONDoc(doc)
 	if err != nil {
@@ -341,9 +352,30 @@ func (p MCPProjection) applyCursor(fs fsys.FS) error {
 }
 
 func (p MCPProjection) validateProviderContract() error {
-	if p.Provider != MCPProviderCursor {
-		return nil
+	switch p.Provider {
+	case MCPProviderCursor:
+		return p.validateCursorContract()
+	case MCPProviderAntigravity:
+		return p.validateAntigravityContract()
 	}
+	return nil
+}
+
+// validateAntigravityContract rejects legacy HTTP+SSE servers: agy speaks
+// stdio and Streamable HTTP only.
+func (p MCPProjection) validateAntigravityContract() error {
+	for _, server := range p.Servers {
+		if server.Transport == MCPTransportSSE {
+			return fmt.Errorf(
+				"antigravity MCP projection does not support sse server %q: Antigravity supports only stdio and Streamable HTTP; point the server at its Streamable HTTP endpoint or bridge it over stdio",
+				server.Name,
+			)
+		}
+	}
+	return nil
+}
+
+func (p MCPProjection) validateCursorContract() error {
 	for _, server := range p.Servers {
 		switch server.Transport {
 		case MCPTransportStdio:
@@ -394,6 +426,33 @@ func (p MCPProjection) cursorServersDoc() map[string]any {
 			}
 			if len(server.Env) > 0 {
 				entry["env"] = cloneStringMap(server.Env)
+			}
+		}
+		out[server.Name] = entry
+	}
+	return out
+}
+
+// antigravityServersDoc renders the catalog in the shape agy's own
+// `agy mcp add` writes: command/args/env for stdio, serverUrl/headers for
+// Streamable HTTP.
+func (p MCPProjection) antigravityServersDoc() map[string]any {
+	out := make(map[string]any, len(p.Servers))
+	for _, server := range p.Servers {
+		entry := map[string]any{}
+		switch server.Transport {
+		case MCPTransportStdio:
+			entry["command"] = server.Command
+			if len(server.Args) > 0 {
+				entry["args"] = append([]string(nil), server.Args...)
+			}
+			if len(server.Env) > 0 {
+				entry["env"] = cloneStringMap(server.Env)
+			}
+		case MCPTransportHTTP:
+			entry["serverUrl"] = server.URL
+			if len(server.Headers) > 0 {
+				entry["headers"] = cloneStringMap(server.Headers)
 			}
 		}
 		out[server.Name] = entry
