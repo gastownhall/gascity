@@ -1213,6 +1213,11 @@ func buildPreparedStartWithTranscript(
 	dispatchSources dispatchOptionSources,
 	transcript *sessTranscriptState,
 ) (*preparedStart, sessionpkg.Info, error) {
+	if tp, swapped := templateParamsForSession(candidate.tp, candidate.info); swapped {
+		log.Printf("session %q keeps its recorded ACP transport; template %q now resolves the CLI transport; run \"gc session close %s\" to recreate it",
+			candidate.name(), tp.TemplateName, candidate.name())
+		candidate.tp = tp
+	}
 	tp := candidate.tp
 	agentCfg, delivery, err := templateParamsToConfigWithDelivery(tp)
 	if err != nil {

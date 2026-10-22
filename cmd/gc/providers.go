@@ -516,18 +516,10 @@ func beadUsesACPTransport(bead beads.Bead, cfg *config.City) bool {
 }
 
 func infoUsesACPTransport(info session.Info, cfg *config.City) bool {
-	transport := strings.TrimSpace(info.Transport)
-	if transport != "" {
+	if transport, recorded := recordedSessionTransport(info); recorded {
 		return transport == "acp"
 	}
 	providerName := strings.TrimSpace(info.Provider)
-	if providerName == "acp" {
-		return true
-	}
-	if strings.TrimSpace(info.MCPIdentity) != "" ||
-		strings.TrimSpace(info.MCPServersSnapshot) != "" {
-		return true
-	}
 	templateName := strings.TrimSpace(info.Template)
 	if cfg != nil {
 		if agentCfg, ok := resolveAgentIdentity(cfg, templateName, currentRigContext(cfg)); ok {
