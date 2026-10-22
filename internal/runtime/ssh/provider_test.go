@@ -196,9 +196,9 @@ func TestProvider_StartFailsClosedWhenStagingFails(t *testing.T) {
 	}
 }
 
-// TestProvider_RelaunchKeepsSecretEnvOutOfArgv covers the warm-box path: no -e
-// is re-applied, but the setup prelude still has to export the credentials, and
-// it must do it from the staged file rather than inline in `sh -c`.
+// TestProvider_RelaunchKeepsSecretEnvOutOfArgv covers the warm-box path: the
+// setup prelude has to export the credentials, and it must do it from the
+// staged file rather than inline in `sh -c`.
 func TestProvider_RelaunchKeepsSecretEnvOutOfArgv(t *testing.T) {
 	const secret = "sk-test-not-a-real-credential"
 	f := &fakeRunner{respond: answerStaging(nil)}
@@ -227,9 +227,10 @@ func TestProvider_RelaunchKeepsSecretEnvOutOfArgv(t *testing.T) {
 	if !strings.Contains(setup[2], ". '"+stagedDir+"/env.sh'") {
 		t.Errorf("prelude does not source the staged env file:\n%s", setup[2])
 	}
-	// Relaunch creates no session, so it stages no tmux command file.
-	if strings.Contains(stdinFor(f, isStagingScript), "session.tmux") {
-		t.Error("relaunch must not stage a tmux command file")
+	// The secret reaches the session environment through the staged tmux
+	// command file too (TestProvider_RelaunchAppliesSecretEnvThroughStagedFile).
+	if !strings.Contains(stdinFor(f, isStagingScript), "'set-environment' '-t' '=s' 'ANTHROPIC_AUTH_TOKEN' '"+secret+"'") {
+		t.Error("relaunch must stage the secret's session env update")
 	}
 	if firstCall(f, func(argv []string) bool {
 		return slices.Equal(argv, []string{"rm", "-rf", stagedDir})
@@ -282,13 +283,194 @@ func TestProvider_RelaunchRespawnsAgentInWarmSession(t *testing.T) {
 		t.Fatalf("Relaunch: %v", err)
 	}
 	got := firstCall(f, isTmux("respawn-pane"))
-	// respawn-pane has no -e, so env is NOT re-applied (provision-half).
+	// respawn-pane has no -e: env reaches the agent through the session
+	// environment (TestProvider_RelaunchAppliesLaunchEnvToWarmSession).
 	want := []string{"tmux", "respawn-pane", "-k", "-t", "=s:@1.%1", "-c", "/w", "agent --resumed"}
 	if !slices.Equal(got, want) {
 		t.Errorf("respawn-pane argv =\n  %v\nwant\n  %v", got, want)
 	}
 	if firstCall(f, isTmux("new-session")) != nil {
 		t.Error("Relaunch must reuse the warm session, not new-session")
+	}
+}
+
+// warmSession answers a Relaunch's reads of the session as a box whose session
+// environment holds env (show-environment lines) and whose last launch recorded
+// keys, deferring every other call to next.
+func warmSession(env, keys string, next func([]string) ([]byte, int, error)) func([]string) ([]byte, int, error) {
+	return func(argv []string) ([]byte, int, error) {
+		switch {
+		case isTmux("show-environment")(argv):
+			return []byte(env), 0, nil
+		case isTmux("show-options")(argv) && slices.Contains(argv, launchEnvKeysOption):
+			return []byte(keys + "\n"), 0, nil
+		case next != nil:
+			return next(argv)
+		}
+		return nil, 0, nil
+	}
+}
+
+// tmuxCommands splits one tmux invocation into its ";"-separated commands.
+func tmuxCommands(argv []string) [][]string {
+	var cmds [][]string
+	cur := []string{}
+	for _, a := range argv[1:] {
+		if a == ";" {
+			cmds = append(cmds, cur)
+			cur = []string{}
+			continue
+		}
+		cur = append(cur, a)
+	}
+	return append(cmds, cur)
+}
+
+// envCommands returns every set-environment / set-option command the calls
+// issued as argv, in order, and the index of the call that issued the last.
+func envCommands(f *fakeRunner) ([][]string, int) {
+	var cmds [][]string
+	last := -1
+	for i, c := range f.calls {
+		if len(c) < 2 || c[0] != "tmux" {
+			continue
+		}
+		for _, cmd := range tmuxCommands(c) {
+			if len(cmd) > 0 && (cmd[0] == "set-environment" || (cmd[0] == "set-option" && slices.Contains(cmd, launchEnvKeysOption))) {
+				cmds = append(cmds, cmd)
+				last = i
+			}
+		}
+	}
+	return cmds, last
+}
+
+// A launch-only env change reaches a warm session only through its session
+// environment: respawn-pane takes no -e, and the respawned agent inherits that
+// environment. So Relaunch brings it to what Start would set for cfg before it
+// respawns: a changed or new value is set, a key the last launch set that cfg
+// no longer names is unset, and the incarnation keys, unchanged values and
+// keys the last launch did not set are left alone.
+func TestProvider_RelaunchAppliesLaunchEnvToWarmSession(t *testing.T) {
+	// Argv-safe keys only, so every write is visible as argv here; secret
+	// values take the staged path (TestProvider_RelaunchAppliesSecretEnvThroughStagedFile).
+	env := "GC_RIG=v1\nGC_CITY=c\nGT_ROLE=x\nGC_RUNTIME_EPOCH=1\nGC_SESSION_ID=m\n-GC_TEMPLATE\n"
+	f := &fakeRunner{respond: warmSession(env, "GC_CITY GC_RIG GC_RUNTIME_EPOCH GT_ROLE", nil)}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{
+		"GC_RIG":           "v2", // changed
+		"GC_CITY":          "c",  // unchanged
+		"GC_AGENT":         "a",  // added
+		"GC_ALIAS":         "",   // added, pinned empty
+		"GC_RUNTIME_EPOCH": "2",  // incarnation: kept
+	}}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	got, last := envCommands(f)
+	want := [][]string{
+		{"set-environment", "-t", "=s", "GC_AGENT", "a"},
+		{"set-environment", "-t", "=s", "GC_ALIAS", ""},
+		{"set-environment", "-t", "=s", "GC_RIG", "v2"},
+		{"set-environment", "-t", "=s", "-u", "GT_ROLE"},
+		{"set-option", "-t", "=s:", launchEnvKeysOption, "GC_AGENT GC_ALIAS GC_CITY GC_RIG GC_RUNTIME_EPOCH"},
+	}
+	if !slices.EqualFunc(got, want, slices.Equal) {
+		t.Errorf("session env commands =\n  %q\nwant\n  %q", got, want)
+	}
+	if respawn := slices.IndexFunc(f.calls, isTmux("respawn-pane")); respawn < 0 || last < 0 || last > respawn {
+		t.Errorf("session env must be applied before respawn-pane; calls=%q", f.calls)
+	}
+	if firstCall(f, isStagingScript) != nil {
+		t.Error("an all-inert environment must not stage a file on the box")
+	}
+}
+
+// An unchanged environment costs no write: a relaunch that changes no env
+// value reads the session and respawns.
+func TestProvider_RelaunchUnchangedEnvWritesNothing(t *testing.T) {
+	f := &fakeRunner{respond: warmSession("GC_RIG=1\nGC_ALIAS=\n", "GC_ALIAS GC_RIG", nil)}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_RIG": "1", "GC_ALIAS": ""}}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	if got, _ := envCommands(f); len(got) != 0 {
+		t.Errorf("session env commands = %q, want none", got)
+	}
+	if firstCall(f, isTmux("respawn-pane")) == nil {
+		t.Error("respawn-pane was not issued")
+	}
+}
+
+// A changed secret value reaches the session environment through the staged
+// tmux command file, never a command line on either end.
+func TestProvider_RelaunchAppliesSecretEnvThroughStagedFile(t *testing.T) {
+	const old, secret = "sk-old-not-a-real-credential", "sk-new-not-a-real-credential"
+	f := &fakeRunner{respond: answerStaging(warmSession("ANTHROPIC_AUTH_TOKEN="+old+"\nGC_RIG=r\n", "ANTHROPIC_AUTH_TOKEN GC_RIG", nil))}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"ANTHROPIC_AUTH_TOKEN": secret, "GC_RIG": "r2"}}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	for _, c := range f.calls {
+		for _, a := range c {
+			if strings.Contains(a, secret) {
+				t.Fatalf("secret value reached remote argv: %v", c)
+			}
+		}
+	}
+	staged := stdinFor(f, isStagingScript)
+	for _, line := range []string{
+		"'set-environment' '-t' '=s' 'ANTHROPIC_AUTH_TOKEN' '" + secret + "'",
+		"'set-environment' '-t' '=s' 'GC_RIG' 'r2'",
+	} {
+		if !strings.Contains(staged, line+"\n") {
+			t.Errorf("staged tmux file lacks %s:\n%s", line, staged)
+		}
+	}
+	apply := slices.IndexFunc(f.calls, func(c []string) bool {
+		return slices.Equal(c, []string{"tmux", "source-file", stagedDir + "/session.tmux"})
+	})
+	respawn := slices.IndexFunc(f.calls, isTmux("respawn-pane"))
+	if apply < 0 || respawn < apply {
+		t.Errorf("staged env must be sourced before respawn-pane; calls=%q", f.calls)
+	}
+}
+
+// A failed write to the session environment fails the relaunch before the
+// agent is respawned on the stale values.
+func TestProvider_RelaunchFailsWhenLaunchEnvCannotBeApplied(t *testing.T) {
+	f := &fakeRunner{respond: warmSession("GC_RIG=1\n", "GC_RIG", func(argv []string) ([]byte, int, error) {
+		if isTmux("set-environment")(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	})}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_RIG": "2"}}
+	if err := providerWith(f).Relaunch(context.Background(), "s", cfg); err == nil {
+		t.Fatal("Relaunch must fail when the session env cannot be updated")
+	}
+	if firstCall(f, isTmux("respawn-pane")) != nil {
+		t.Error("no agent may be respawned on the stale session env")
+	}
+}
+
+// Start records the keys it set in the session environment, so a later
+// Relaunch can unset one its config dropped.
+func TestProvider_StartRecordsLaunchEnvKeys(t *testing.T) {
+	f := &fakeRunner{respond: func(argv []string) ([]byte, int, error) {
+		if isTmux("has-session")(argv) {
+			return nil, 1, nil
+		}
+		return nil, 0, nil
+	}}
+	cfg := runtime.Config{Command: "agent", Env: map[string]string{"GC_RIG": "r", "GC_AGENT": "a", "EMPTY": ""}}
+	if err := providerWith(f).Start(context.Background(), "s", cfg); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	want := []string{"tmux", "set-option", "-t", "=s:", launchEnvKeysOption, "EMPTY GC_AGENT GC_RIG"}
+	created := slices.IndexFunc(f.calls, isTmux("new-session"))
+	recorded := slices.IndexFunc(f.calls, func(c []string) bool { return slices.Equal(c, want) })
+	if created < 0 || recorded <= created {
+		t.Errorf("calls = %q, want new-session, then %q", f.calls, want)
 	}
 }
 

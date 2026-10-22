@@ -41,20 +41,22 @@ func (s stagedEnv) staged() bool { return s.dir != "" }
 // the plain argv path — so a box with no writable temp dir still starts sessions
 // that carry no credentials.
 //
-// tmuxArgv, when non-empty, is the new-session argv to stage as a tmux command
-// file. Relaunch passes nil: respawn-pane takes no -e and reuses the session
-// environment already set at creation.
+// tmuxCmds, when non-empty, are the tmux commands to stage as a tmux command
+// file, one per line: Start's new-session, SetMeta's set-environment, or the
+// session env commands Relaunch applies before respawn-pane (which takes no
+// -e). Nothing is staged for them when secretEnv is empty: they carry no
+// secret, so the caller runs them as argv.
 //
 // A failure here is returned, never swallowed. Falling back to argv would put
 // the credential right back on the command line, which is the leak this closes.
-func (p *Provider) stageSecretEnv(ctx context.Context, secretEnv map[string]string, tmuxArgv []string) (stagedEnv, error) {
+func (p *Provider) stageSecretEnv(ctx context.Context, secretEnv map[string]string, tmuxCmds [][]string) (stagedEnv, error) {
 	if len(secretEnv) == 0 {
 		return stagedEnv{}, nil
 	}
 	envBody := shellEnvFile(secretEnv)
 	var tmuxBody string
-	if len(tmuxArgv) > 0 {
-		tmuxBody = tmuxCommandLine(tmuxArgv) + "\n"
+	for _, cmd := range tmuxCmds {
+		tmuxBody += tmuxCommandLine(cmd) + "\n"
 	}
 	script, err := stagingScript(envBody, tmuxBody)
 	if err != nil {

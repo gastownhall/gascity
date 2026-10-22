@@ -385,3 +385,69 @@ func TestSSHProviderAgentPaneOnRealTmux(t *testing.T) {
 		t.Errorf("human pane received %q, want only the sentinel", got)
 	}
 }
+
+// Through the production connection (fake ssh, real tmux): a relaunch with a
+// changed env respawns the agent on the new values. respawn-pane takes no -e,
+// so without the session env update the agent would inherit the values the
+// session was created with, and a key the new config dropped would linger.
+// A secret value takes the staged path, an inert one the argv path.
+func TestSSHProviderRelaunchAppliesLaunchEnvOnRealTmux(t *testing.T) {
+	if _, err := exec.LookPath("tmux"); err != nil {
+		t.Skip("tmux not installed")
+	}
+	p := NewProvider(sshConformanceEndpoint(t))
+	p.postStartSettle = 0
+	ctx := context.Background()
+	dir := t.TempDir()
+	// The agent writes its environment, then stays up so the session does.
+	agent := func(out string) string {
+		return "env > " + out + ".tmp && mv " + out + ".tmp " + out + " && exec sleep 300"
+	}
+	readEnv := func(path string) map[string]string {
+		t.Helper()
+		deadline := time.Now().Add(10 * time.Second)
+		for {
+			b, err := os.ReadFile(path)
+			if err == nil {
+				env := map[string]string{}
+				for _, line := range strings.Split(string(b), "\n") {
+					if k, v, ok := strings.Cut(line, "="); ok {
+						env[k] = v
+					}
+				}
+				return env
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("agent never wrote %s: %v", path, err)
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+	}
+	const name = "ssh-relaunch-env"
+	first, second := filepath.Join(dir, "env-1"), filepath.Join(dir, "env-2")
+	if err := p.Start(ctx, name, runtime.Config{Command: agent(first), WorkDir: dir, Env: map[string]string{
+		"GC_DRIFT_TEST_SECRET": "v1",
+		"GC_RIG":               "rig-1",
+		"GC_DRIFT_TEST_DROP":   "gone",
+	}}); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = p.Stop(name) })
+	if got := readEnv(first); got["GC_DRIFT_TEST_SECRET"] != "v1" || got["GC_RIG"] != "rig-1" || got["GC_DRIFT_TEST_DROP"] != "gone" {
+		t.Fatalf("started agent env = %v, want the Start config's values", got)
+	}
+
+	if err := p.Relaunch(ctx, name, runtime.Config{Command: agent(second), WorkDir: dir, Env: map[string]string{
+		"GC_DRIFT_TEST_SECRET": "v2",
+		"GC_RIG":               "rig-2",
+	}}); err != nil {
+		t.Fatalf("Relaunch: %v", err)
+	}
+	got := readEnv(second)
+	if got["GC_DRIFT_TEST_SECRET"] != "v2" || got["GC_RIG"] != "rig-2" {
+		t.Errorf("relaunched agent env: GC_DRIFT_TEST_SECRET=%q GC_RIG=%q, want v2 and rig-2", got["GC_DRIFT_TEST_SECRET"], got["GC_RIG"])
+	}
+	if v, ok := got["GC_DRIFT_TEST_DROP"]; ok {
+		t.Errorf("relaunched agent still has GC_DRIFT_TEST_DROP=%q, which the relaunch config dropped", v)
+	}
+}

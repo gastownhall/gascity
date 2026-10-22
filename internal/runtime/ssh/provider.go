@@ -179,6 +179,131 @@ func (p *Provider) markAgentPane(ctx context.Context, name, pane string) {
 	}
 }
 
+// launchEnvKeysOption is the session user option that lists the keys a launch
+// set in the session environment, so a later relaunch can tell a key its config
+// no longer sets from one put there by other means (SetMeta). A user option,
+// not an environment entry, so no agent process inherits it. The local tmux
+// provider records the same option.
+const launchEnvKeysOption = "@gc_launch_env_keys"
+
+// launchIdentityEnvKeys name the session incarnation. A relaunch keeps the
+// incarnation, so it never rewrites them: the session environment is where
+// GetMeta and the input fence read them back. The local tmux provider keeps
+// the same set.
+var launchIdentityEnvKeys = map[string]bool{
+	runtime.InstanceTokenEnv:     true,
+	runtime.RuntimeEpochEnv:      true,
+	runtime.ContinuationEpochEnv: true,
+	"BEADS_HOLDER_TOKEN":         true,
+}
+
+// launchEnvKeysCommand is the tmux command that records env's keys as the ones
+// a launch set in the session environment: all of them, since new-session's
+// -e sets a pinned-empty value too.
+func launchEnvKeysCommand(name string, env map[string]string) []string {
+	return []string{"set-option", "-t", paneTarget(name), launchEnvKeysOption, strings.Join(sortedKeys(env), " ")}
+}
+
+// recordLaunchEnvKeys records which keys Start set in the session environment.
+// Best-effort and logged, as markAgentPane: a session without the record (or
+// created before it existed) still gets changed values on relaunch, and only a
+// key its config dropped is left in place.
+func (p *Provider) recordLaunchEnvKeys(ctx context.Context, name string, env map[string]string) {
+	if _, code, err := p.tmux(ctx, name, launchEnvKeysCommand(name, env)...); err != nil || code != 0 {
+		log.Printf("ssh session %q: recording launch env keys failed (exit %d): %v", name, code, err)
+	}
+}
+
+// launchEnvCommands returns the tmux commands that bring the session
+// environment to what Start would set for env, ending with the record of its
+// keys; nil when it already holds that.
+//
+// respawn-pane takes no -e: the respawned agent inherits the SESSION
+// environment, so a launch-only change to the env (an operator env value, an
+// upstream's serving env) reaches the agent only through these. A changed or
+// new value is set; a key the last launch set that env no longer names is
+// unset, so the server's global value shows through exactly as it would for a
+// session created without it. The incarnation keys are left alone
+// (launchIdentityEnvKeys), as is anything the last launch did not set.
+//
+// The commands carry values, so they never travel as argv when env holds a
+// secret: Relaunch stages them with the secret env (see [stagedEnv]).
+func (p *Provider) launchEnvCommands(ctx context.Context, name string, env map[string]string) ([][]string, error) {
+	out, code, err := p.tmux(ctx, name, "show-environment", "-t", sessionTarget(name))
+	if err != nil {
+		return nil, fmt.Errorf("reading session env: %w", err)
+	} else if code != 0 {
+		return nil, fmt.Errorf("reading session env: tmux show-environment exited %d", code)
+	}
+	current := parseSessionEnv(out)
+	var cmds [][]string
+	for _, k := range sortedKeys(env) {
+		if launchIdentityEnvKeys[k] {
+			continue
+		}
+		if have, ok := current[k]; ok && have == env[k] {
+			continue
+		}
+		cmds = append(cmds, []string{"set-environment", "-t", sessionTarget(name), k, env[k]})
+	}
+	recorded, code, err := p.tmux(ctx, name, "show-options", "-qv", "-t", paneTarget(name), launchEnvKeysOption)
+	if err != nil {
+		return nil, fmt.Errorf("reading session launch env keys: %w", err)
+	} else if code != 0 {
+		return nil, fmt.Errorf("reading session launch env keys: tmux show-options exited %d", code)
+	}
+	for _, k := range strings.Fields(recorded) {
+		if _, set := env[k]; set || launchIdentityEnvKeys[k] {
+			continue
+		}
+		if _, ok := current[k]; !ok {
+			continue
+		}
+		cmds = append(cmds, []string{"set-environment", "-t", sessionTarget(name), "-u", k})
+	}
+	if len(cmds) > 0 || strings.Join(strings.Fields(recorded), " ") != strings.Join(sortedKeys(env), " ") {
+		cmds = append(cmds, launchEnvKeysCommand(name, env))
+	}
+	return cmds, nil
+}
+
+// parseSessionEnv parses show-environment output: "KEY=value" per set key and
+// "-KEY" per key marked removed, which is not set.
+func parseSessionEnv(out string) map[string]string {
+	env := make(map[string]string)
+	for _, line := range strings.Split(out, "\n") {
+		if k, v, ok := strings.Cut(line, "="); ok && !strings.HasPrefix(k, "-") {
+			env[k] = v
+		}
+	}
+	return env
+}
+
+// applyLaunchEnv runs launchEnvCommands' cmds in the session: from the staged
+// tmux command file when there is one (env holds a secret), else as one tmux
+// invocation.
+func (p *Provider) applyLaunchEnv(ctx context.Context, name string, cmds [][]string, staged stagedEnv) error {
+	if len(cmds) == 0 {
+		return nil
+	}
+	args := []string{"source-file", staged.tmuxPath}
+	if staged.tmuxPath == "" {
+		args = nil
+		for i, cmd := range cmds {
+			if i > 0 {
+				args = append(args, ";")
+			}
+			args = append(args, cmd...)
+		}
+	}
+	if _, code, err := p.tmux(ctx, name, args...); err != nil {
+		return fmt.Errorf("applying session env: %w", err)
+	} else if code != 0 {
+		return fmt.Errorf("applying session env: tmux exited %d", code)
+	}
+	return nil
+}
+
 // tmux runs a tmux subcommand over the connection and returns trimmed stdout,
 // the exit code, and a transport error (if any).
 func (p *Provider) tmux(ctx context.Context, name string, args ...string) (string, int, error) {
@@ -237,7 +362,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 	// by path (see [stagedEnv]). Staging runs before PreStart because the prelude
 	// PreStart carries is what names the staged file.
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
-	staged, err := p.stageSecretEnv(ctx, secretEnv, args)
+	staged, err := p.stageSecretEnv(ctx, secretEnv, [][]string{args})
 	if err != nil {
 		return fmt.Errorf("ssh start %q: %w", name, err)
 	}
@@ -301,6 +426,7 @@ func (p *Provider) Start(ctx context.Context, name string, cfg runtime.Config) e
 		return fmt.Errorf("ssh start %q: tmux new-session exited %d", name, code)
 	}
 	p.markAgentPane(ctx, name, pane)
+	p.recordLaunchEnvKeys(ctx, name, cfg.Env)
 
 	// SessionSetup, SessionSetupScript, and SessionLive run on the box,
 	// best-effort, with the same cwd + env prelude.
@@ -373,9 +499,10 @@ func (p *Provider) runPostLaunchSetup(ctx context.Context, name string, cfg runt
 // PreStart is NOT re-run (it is provision-half here — it prepares the box).
 // NOTE: tmux diverges — as of the relaunch pre_start fix it re-runs PreStart on
 // Relaunch (launch-half); ssh intentionally keeps it provision-half. Env is
-// also provision-half: respawn-pane has no -e, so the session keeps the env set
-// by the original new-session; a launch-only env change is not re-applied
-// (matching tmux B1's "does not re-inject env hints").
+// launch-half: respawn-pane has no -e and the respawned agent inherits the
+// session environment, so the session environment is first brought to what
+// Start would set for cfg (see [Provider.launchEnvCommands]); otherwise a
+// launch-only env change would respawn the agent on the old values.
 func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config) error {
 	if err := ctx.Err(); err != nil {
 		return err
@@ -387,11 +514,15 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 		return fmt.Errorf("%w: ssh session %q (box must be provisioned first)", runtime.ErrSessionNotFound, name)
 	}
 
-	// respawn-pane takes no -e, so nothing is re-injected into the session
-	// environment; the staged file exists only so the setup prelude can export
-	// secrets without putting them on a command line.
+	envCmds, err := p.launchEnvCommands(ctx, name, cfg.Env)
+	if err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	}
+
+	// The staged files let the setup prelude export secrets, and the session
+	// env commands set them, without putting a value on a command line.
 	_, secretEnv := runtime.SplitEnvByArgvSafety(cfg.Env)
-	staged, err := p.stageSecretEnv(ctx, secretEnv, nil)
+	staged, err := p.stageSecretEnv(ctx, secretEnv, envCmds)
 	if err != nil {
 		return fmt.Errorf("ssh relaunch %q: %w", name, err)
 	}
@@ -405,6 +536,9 @@ func (p *Provider) Relaunch(ctx context.Context, name string, cfg runtime.Config
 	// while it still has only the agent's pane.
 	target, err := p.agentPane(ctx, name, true)
 	if err != nil {
+		return fmt.Errorf("ssh relaunch %q: %w", name, err)
+	}
+	if err := p.applyLaunchEnv(ctx, name, envCmds, staged); err != nil {
 		return fmt.Errorf("ssh relaunch %q: %w", name, err)
 	}
 	args := []string{"respawn-pane", "-k", "-t", target}
@@ -748,7 +882,7 @@ func (p *Provider) SetMeta(name, key, value string) error {
 		_, _, _ = p.tmux(ctx, name, args...)
 		return nil
 	}
-	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, args)
+	staged, err := p.stageSecretEnv(ctx, map[string]string{key: value}, [][]string{args})
 	if err != nil {
 		return nil // best-effort; never fall back to argv
 	}
