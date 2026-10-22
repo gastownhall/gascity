@@ -339,7 +339,11 @@ func (rp *rulesPlan) planNowMessage(snap laneSnapshot, conv ConversationView, st
 	case quarantined[iid]:
 		// A row this build cannot decode: a newer host may serve the unit.
 		rp.nowWait(st, WaitNowUnreadable, "", time.Time{}, m.ID)
-	case iOpen && isDerivedOf(iop, m):
+	case iOpen && isDerivedOf(iop, m) && rp.nowState[iid] != nil:
+		// A derived interrupt whose causation is outside this namespace (a
+		// message moved here with its id from another prefix) has no
+		// deliver-now state (hasNowShape): it runs plain, and the message
+		// goes after it, as below.
 		ist := rp.nowState[iid]
 		if ist.closing != nil {
 			rp.postUnit(st, nowDegradation(*ist.closing, true))
@@ -390,7 +394,11 @@ func (rp *rulesPlan) planLowering(snap laneSnapshot, conv ConversationView, st *
 	case !snap.openIDs[iid] && read && row.state == afterUnreadable:
 		until := time.Time{}
 		if !row.undecodable {
+			// Due, and lowered once the read succeeds: content waits as it
+			// does for a lowered unit, so none goes ahead of the unit it
+			// forms (U-ORDER). A row that will never decode holds nothing.
 			until = rp.now.Add(TransientBackoffBase)
+			rp.openUnits = append(rp.openUnits, m.ID)
 		}
 		rp.nowWait(st, WaitNowUnreadable, row.detail(), until, m.ID)
 	case snap.openIDs[iid], read && row.state != afterMissing:

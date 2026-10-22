@@ -200,9 +200,10 @@ func TestLaneNowReplacementRequest(t *testing.T) {
 // The replacement mapping: a turn that settled but whose session was not
 // prepared is failed{replacement_not_prepared} naming the turn, its ref
 // kept; a refusal (Replace none, or restart until OJ-17b) is
-// failed{unsupported}, its ref restored; every other answer maps as a
-// standalone interrupt's does, and a standalone interrupt still maps
-// ErrReplacementNotPrepared to Unknown.
+// failed{unsupported}, its ref restored; a dispatch that may have run is
+// Unknown, its ref kept, as for a standalone interrupt; every other answer
+// maps as a standalone interrupt's does, and a standalone interrupt still
+// maps ErrReplacementNotPrepared to Unknown.
 func TestLaneNowReplacementResultMapping(t *testing.T) {
 	notPrepared := fmt.Errorf("x: %w", session.ErrReplacementNotPrepared)
 	// A protocol interrupt whose dispatch failed may have reached the

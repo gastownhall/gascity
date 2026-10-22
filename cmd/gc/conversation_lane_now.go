@@ -24,8 +24,10 @@ import (
 // (replacementAfter), and a turn that settled but whose session could not be
 // prepared for the message (session.ErrReplacementNotPrepared) is
 // failed{replacement_not_prepared}, naming the turn: the interrupt ran, the
-// replacement did not complete. Every other answer maps as for a standalone
-// interrupt.
+// replacement did not complete. Every other answer maps as for a
+// standalone interrupt, under which one whose read or dispatch may have run
+// (session.ErrInterruptOutcomeUnknown) is Unknown: a step that may have run
+// is never sent again.
 func (e *conversationLaneExec) replacementResult(ctx context.Context, out opjournal.ControlResult, err error, turn string) opjournal.ControlResult {
 	switch {
 	case err == nil:

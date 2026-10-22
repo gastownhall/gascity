@@ -872,7 +872,9 @@ func (w *propWorld) check() {
 // checkNowPairs is N1 and N7: every lowered message has its one derived
 // interrupt, shaped as the lowering writes it (from then on it is tracked
 // as an op of the run), and an interrupt closes before or with its message,
-// unless it closes after it as an orphan (the cascade, or not_needed).
+// unless it closes after it as an orphan (the cascade, or not_needed) or
+// its message was canceled in the store, outside the lane: the lane did not
+// close that message, so it orders nothing against its interrupt's close.
 func (w *propWorld) checkNowPairs() {
 	for _, mid := range w.nowIDs {
 		conv := w.nowMsgs[mid]
@@ -907,7 +909,8 @@ func (w *propWorld) checkNowPairs() {
 		iAt, mAt := i.Transitions[len(i.Transitions)-1].At, m.Transitions[len(m.Transitions)-1].At
 		orphan := i.Outcome.Arm == ArmCanceled && i.Cancel.By == nowCascadeBy ||
 			i.Outcome.Arm == ArmSkipped && i.Outcome.Reason == ReasonNotNeeded
-		if iAt.After(mAt) && !orphan {
+		direct := m.Outcome.Arm == ArmCanceled && m.Cancel.By != nowCascadeBy
+		if iAt.After(mAt) && !orphan && !direct {
 			w.fail("derived interrupt %s closed %s{%s} after its message %s (N7)", iid, i.Outcome.Arm, i.Outcome.Reason, mid)
 		}
 	}

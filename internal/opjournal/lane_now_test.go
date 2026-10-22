@@ -832,3 +832,93 @@ func TestLaneNowPlainInterruptShapes(t *testing.T) {
 		})
 	}
 }
+
+// A deliver-now message proposed under another namespace's prefix (moved
+// here with its id unchanged) is lowered by this lane under its own prefix;
+// the pass after the lowering runs the derived interrupt plain and the
+// message goes after it at the boundary, and no later pass fails.
+func TestLaneNowForeignPrefixMessage(t *testing.T) {
+	h := newLaneHarness(t)
+	other, err := NewLaneStore(beads.SessionStore{Store: laneRecStore{OpRecordingStore: h.rec, batcher: h.batcher}}, h.clk, WithIDPrefix("old"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, created, err := other.Propose(nowReq("a"))
+	if err != nil || !created {
+		t.Fatalf("Propose: created %v, %v", created, err)
+	}
+	iid := nowID(t, m)
+	exec := newFakeExec(h.clk)
+	exec.probe = busyProbe("t1")
+	exec.interrupt = settledT1(afterT1())
+	l := h.lane(t, "ctl")
+	mustPass(t, l, view(), exec)
+	wantOutcome(t, h.get(t, iid), ArmSucceeded, "")
+	if got := h.get(t, m.ID); got.Status == StatusClosed {
+		t.Fatalf("message %s closed %s{%s} before its boundary", m.ID, got.Outcome.Arm, got.Outcome.Reason)
+	}
+	exec.probe = idleProbe()
+	mustPass(t, l, view(), exec)
+	wantOutcome(t, h.get(t, m.ID), ArmSucceeded, "")
+}
+
+// A fused command whose interrupt settled turn t1, run on a probe that
+// could not read the session's turns (no known turns), still counts t1 as
+// known, so the message's link never names the replaced turn: the one new
+// turn t2 is correlated.
+func TestLaneNowFusedSettledKnowsTheReplacedTurn(t *testing.T) {
+	h := newLaneHarness(t)
+	m := h.propose(t, nowReq("a"))
+	exec := &fusedExec{fakeExec: newFakeExec(h.clk)}
+	exec.probe = idleProbe()
+	exec.probe.Boundary, exec.probe.TurnLive = TriNo, TriUnknown
+	exec.probe.Caps.FusedNow = true
+	exec.now = func(NowCall) NowResult {
+		return NowResult{
+			Interrupt: Settled{Turn: "t1", Via: "fake"},
+			Delivery: Delivered{
+				Record:   DeliveryRecord{At: h.clk.Now(), Ack: AckDelivered},
+				Evidence: TurnEvidence{HasSource: true, Seen: []SeenTurn{{ID: "t1", Generation: 1}, {ID: "t2", Generation: 1}}, FirstRead: FirstTurnRead{Done: true, Current: "t2"}},
+				Via:      "fake",
+			},
+		}
+	}
+	mustPass(t, h.lane(t, "ctl"), view(), exec)
+	got := h.get(t, m.ID)
+	r := got.Outcome.Result
+	if got.Outcome.Arm != ArmSucceeded || r.Turn != "t2" || r.TurnLink != LinkCorrelated {
+		t.Fatalf("message %s link %s/%s/%s, want t2 correlated (the replaced t1 is never a candidate)", got.Outcome.Arm, r.Turn, r.TurnLink, r.TurnBasis)
+	}
+}
+
+// A deliver-now message whose derived id cannot be read on its first pass
+// is not lowered, and content proposed after it waits: the next pass lowers
+// it, and its unit runs before that content.
+func TestLaneNowUnloweredUnreadableHoldsLaterContent(t *testing.T) {
+	h, fs := newLaneHarnessFlaky(t)
+	m := h.propose(t, nowReq("now"))
+	h.clk.Advance(time.Millisecond)
+	n := h.propose(t, laneMsg("later", RolePrompt, "other work"))
+	iid := nowID(t, m)
+	exec := newFakeExec(h.clk)
+	exec.probe = busyProbe("t1")
+	exec.interrupt = settledT1(afterT1())
+	l := h.lane(t, "ctl")
+	fs.setFail(func(id string) bool { return id == iid })
+	res := mustPass(t, l, view(), exec)
+	fs.setFail(nil)
+	if res.Took == TakeContent || len(res.Lowered) != 0 {
+		t.Fatalf("pass 1 took %s %v lowered %v, want nothing taken while %s waits its read", res.Took, res.Taken, res.Lowered, m.ID)
+	}
+	if w := waitOf(res.Waits, n.ID); w.Reason != WaitBlocked {
+		t.Fatalf("content wait %+v, want blocked", w)
+	}
+	h.clk.Advance(TransientBackoffBase + time.Millisecond)
+	res = mustPass(t, l, view(), exec)
+	if !slices.Equal(res.Lowered, []string{m.ID}) || res.Took != TakeNow {
+		t.Fatalf("pass 2 %+v, want the unit lowered and taken", res)
+	}
+	if got := h.get(t, n.ID); got.Status == StatusClosed {
+		t.Fatalf("content %s closed before the unit's pass", n.ID)
+	}
+}

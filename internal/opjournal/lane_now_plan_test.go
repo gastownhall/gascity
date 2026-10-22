@@ -841,3 +841,94 @@ func TestPlanNowUOrderAdmitsPastTheBlock(t *testing.T) {
 		t.Fatalf("take %+v drain wait %+v with the unit in its backoff", tp.take, w)
 	}
 }
+
+// A lowered message whose id carries another namespace's prefix (moved
+// here with its id unchanged) has a derived interrupt under this lane's
+// prefix that names it as its causation. That interrupt has no deliver-now
+// state (hasNowShape): the plan never pairs them as a unit, it runs the
+// interrupt plain, and the message waits to go after it.
+func TestPlanNowForeignPrefixMessage(t *testing.T) {
+	now := t0.Add(time.Second)
+	p := newPlanner(t)
+	m := p.op(nowReq("a"))
+	id, err := DeriveID("old", m.Conversation, m.Producer.Principal, m.ClientKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m.ID = id
+	m, i := lowered(t, m, now)
+	if hasNowShape(i, "gc") || !isDerivedOf(i, m) {
+		t.Fatalf("hasNowShape %v isDerivedOf %v, want a derived key shape outside the namespace", hasNowShape(i, "gc"), isDerivedOf(i, m))
+	}
+	rp := planRules(snapOf(m, i), view(), now, "lane:ctl")
+	if cs := closesOf(rp); len(cs) != 0 {
+		t.Fatalf("closes %v, want none", cs)
+	}
+	if !slices.ContainsFunc(rp.control, func(e entry) bool { return e.op.ID == i.ID }) {
+		t.Fatalf("control %v, want the interrupt %s run plain", rp.control, i.ID)
+	}
+	if slices.Contains(rp.openUnits, m.ID) {
+		t.Fatalf("open units %v, want no unit for %s", rp.openUnits, m.ID)
+	}
+}
+
+// Content the probe admits past a content block goes only while every open
+// unit waits on that block: one unit waiting on a future scope still holds
+// it.
+func TestPlanNowAdmitNeedsEveryUnitBlocked(t *testing.T) {
+	now := t0.Add(time.Second)
+	p := newPlanner(t)
+	m1, i1 := lowered(t, p.op(nowReq("a")), now)
+	m2, i2 := lowered(t, p.op(nowReq("b")), now)
+	i2.Scope.Generation = 5
+	drain := p.op(laneMsg("drain", RoleNotice, "please run drain-ack", func(r *Request) { r.Producer.Principal = "gc:planner/drain" }))
+	rp := planRules(snapOf(m1, i1, m2, i2, drain), view(), now, "lane:ctl")
+	probe := idleProbe()
+	probe.ContentBlock = "draining"
+	probe.ContentAdmit = []ContentClass{{Role: RoleNotice, When: WhenBoundary, Principal: "gc:planner/drain"}}
+	tp, err := planTake(rp, probe, view(), now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tp.take != nil && slices.ContainsFunc(tp.take.ops, func(e entry) bool { return e.op.ID == drain.ID }) {
+		t.Fatalf("admitted notice taken while unit %s waits a future scope", m2.ID)
+	}
+	if w := waitOf(tp.waits, drain.ID); w.Reason != WaitBlocked {
+		t.Fatalf("notice wait %+v, want blocked", w)
+	}
+}
+
+// A due deliver-now message not yet lowered because its derived id's read
+// failed transiently holds content as a lowered unit does (U-ORDER); one
+// whose derived row will never decode holds nothing.
+func TestPlanNowUnloweredUnreadableHoldsContent(t *testing.T) {
+	now := t0.Add(time.Second)
+	for _, tc := range []struct {
+		name        string
+		undecodable bool
+		holds       bool
+	}{
+		{"transient read", false, true},
+		{"undecodable row", true, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			p := newPlanner(t)
+			m := p.op(nowReq("a"))
+			n := p.op(laneMsg("n", RolePrompt, "later"))
+			snap := snapOf(m, n)
+			snap.nowRows[nowID(t, m)] = nowRow{state: afterUnreadable, err: errFlakyRead, undecodable: tc.undecodable}
+			rp := planRules(snap, view(), now, "lane:ctl")
+			if got := slices.Contains(rp.openUnits, m.ID); got != tc.holds {
+				t.Fatalf("open units %v, want %s held %v", rp.openUnits, m.ID, tc.holds)
+			}
+			tp, err := planTake(rp, idleProbe(), view(), now)
+			if err != nil {
+				t.Fatal(err)
+			}
+			taken := tp.take != nil && slices.ContainsFunc(tp.take.ops, func(e entry) bool { return e.op.ID == n.ID })
+			if taken == tc.holds {
+				t.Fatalf("content %s taken %v, want %v (take %+v waits %+v)", n.ID, taken, !tc.holds, tp.take, tp.waits)
+			}
+		})
+	}
+}
