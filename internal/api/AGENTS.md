@@ -273,9 +273,8 @@ kind gate is the running lane host's, read through the optional
 listed when the controller started, while its host runs, never the live
 config, which a reload replaces without changing what the host executes.
 Any other kind, or any kind while no host runs, is refused 409
-`kind-not-enabled`; a message whose `when` the lane does not lower
-(`opjournal.When.LaneLowered`: `now`, `interrupt`) is refused 409
-`when-not-supported`. Every refusal, the request's own validation included
+`kind-not-enabled`; every `when` a message names is one the lane lowers
+(`now` and the legacy `interrupt` as a deliver-now unit). Every refusal, the request's own validation included
 (`opjournal.Store.Preview`), and the read of the event cursor the answer
 carries come before the session is resolved, so a refused request, or one
 whose cursor cannot be read, writes nothing and materializes no named
