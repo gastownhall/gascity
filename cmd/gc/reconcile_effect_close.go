@@ -464,20 +464,24 @@ func (c *closeReleases) cascade(ctx context.Context, it intent) {
 // pruneWorktree is pruneAgentHomeWorktreeIfSafeInfo; a test observes it.
 var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 
-// workDirInUse reports an open session row other than closed's whose work
-// dir is the prune's target (WorkerDirFromInfo: worker_dir, else work_dir),
-// as any of the keys a row records it under: a successor seat a floor
-// started in the same slot keeps its worktree. A read error counts as in
-// use.
+// workDirInUse is sessionWorkDirInUse for closed's work dir.
 func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool {
+	return sessionWorkDirInUse(store, c.cityPath, closed.ID, session.WorkerDirFromInfo(sessionInfoFromBead(closed)))
+}
+
+// sessionWorkDirInUse reports an open session row other than closedID whose
+// work dir is dir (the prune's target, WorkerDirFromInfo: worker_dir, else
+// work_dir), as any of the keys a row records it under: a successor seat a
+// floor started in the same slot keeps its worktree. A read error counts as
+// in use.
+func sessionWorkDirInUse(store beads.Store, cityPath, closedID, dir string) bool {
 	clean := func(dir string) string {
 		if dir = strings.TrimSpace(dir); dir == "" {
 			return ""
 		}
-		return filepath.Clean(resolveWorkDirAgainstCity(c.cityPath, dir))
+		return filepath.Clean(resolveWorkDirAgainstCity(cityPath, dir))
 	}
-	dir := clean(session.WorkerDirFromInfo(sessionInfoFromBead(closed)))
-	if dir == "" {
+	if dir = clean(dir); dir == "" {
 		return false
 	}
 	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
@@ -485,7 +489,7 @@ func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool 
 		return true
 	}
 	return slices.ContainsFunc(rows, func(r beads.Bead) bool {
-		if r.ID == closed.ID || r.Status == "closed" {
+		if r.ID == closedID || r.Status == "closed" {
 			return false
 		}
 		for _, k := range []string{beadmeta.WorkerDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {

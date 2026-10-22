@@ -244,3 +244,14 @@ func lookupRigRootForSessionInfo(info sessionpkg.Info, cfg *config.City) string 
 	}
 	return ""
 }
+
+// pruneClosedSessionWorktreeInfo is pruneAgentHomeWorktreeIfSafeInfo for a
+// session that just closed, skipped while another open session row in store
+// records the same work dir: a successor in the same pool slot keeps it.
+func pruneClosedSessionWorktreeInfo(store beads.Store, info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
+	if sessionWorkDirInUse(store, cityPath, info.ID, sessionpkg.WorkerDirFromInfo(info)) {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: another open session records it\n", sessionpkg.WorkerDirFromInfo(info)) //nolint:errcheck
+		return
+	}
+	pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, stderr)
+}

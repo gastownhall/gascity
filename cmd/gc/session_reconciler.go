@@ -5184,7 +5184,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 			if !storeQueryPartial &&
 				repairStrandedPoolWorkerBead(sw, store, infoByID[target.info.ID], clk, stderr) {
 				tick.markClosed(target.info.ID)
-				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
+				pruneClosedSessionWorktreeInfo(store, infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
 		}
 		if poolFreeable && !hasAssignedWork {
@@ -5208,7 +5208,7 @@ func reconcileSessionBeadsTracedWithNamedDemand(
 				// when the session bead is retired. Skipped under safety
 				// gates (uncommitted, unpushed, stashed) and overridable
 				// via cfg.Daemon.AutoPruneWorkerDir.
-				pruneAgentHomeWorktreeIfSafeInfo(infoByID[target.info.ID], cityPath, cfg, stderr)
+				pruneClosedSessionWorktreeInfo(store, infoByID[target.info.ID], cityPath, cfg, stderr)
 			}
 		}
 	}

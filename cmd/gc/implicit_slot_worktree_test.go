@@ -12,6 +12,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -203,7 +204,7 @@ func provisionImplicitSlot(t *testing.T, city string, cfg *config.City, a *confi
 }
 
 // slotSnapshot is a slot's checked-out ref, commit, status and top-level
-// entries, the state a reused slot must keep.
+// entries other than gc's stale marker, the state a reused slot must keep.
 func slotSnapshot(t *testing.T, dir string) string {
 	t.Helper()
 	entries, err := os.ReadDir(dir)
@@ -212,12 +213,14 @@ func slotSnapshot(t *testing.T, dir string) string {
 	}
 	var names []string
 	for _, e := range entries {
-		names = append(names, e.Name())
+		if e.Name() != worktreeStaleFileName {
+			names = append(names, e.Name())
+		}
 	}
 	return strings.Join([]string{
 		gitOut(t, dir, "symbolic-ref", "HEAD"),
 		gitOut(t, dir, "rev-parse", "HEAD"),
-		gitOut(t, dir, "status", "--porcelain"),
+		gitOut(t, dir, "status", "--porcelain", "--", ".", ":!"+worktreeStaleFileName),
 		strings.Join(names, ","),
 	}, "\n")
 }
@@ -442,6 +445,99 @@ func TestImplicitSlotThatCannotBeProvisionedFailsClosed(t *testing.T) {
 			}
 			if after := treeSnapshot(t, city); after != before {
 				t.Errorf("refused provisioning changed the city tree:\nbefore:\n%s\nafter:\n%s", before, after)
+			}
+		})
+	}
+}
+
+func TestClosedImplicitSlotWorktreeIsPrunedOnlyWhenSafeAndUnshared(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		leave  func(t *testing.T, dir string)
+		shared bool
+		reason string // "" means the worktree is removed
+	}{
+		{name: "clean_pushed"},
+		{name: "dirty", reason: "uncommitted-work", leave: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "wip.txt"), []byte("wip\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "unpushed", reason: "unpushed-commits", leave: func(t *testing.T, dir string) {
+			mustGit(t, dir, "commit", "-q", "--allow-empty", "-m", "unpushed")
+		}},
+		{name: "stashed", reason: "stashed-work", leave: func(t *testing.T, dir string) {
+			if err := os.WriteFile(filepath.Join(dir, "README.md"), []byte("stash me\n"), 0o644); err != nil {
+				t.Fatal(err)
+			}
+			mustGit(t, dir, "stash", "-q")
+		}},
+		{name: "shared_with_open_session", shared: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			city, rig, cfg, a := implicitSlotCityPrepared(t, func(_ *config.City, rig string) {
+				remote := filepath.Join(filepath.Dir(rig), "remote.git")
+				for _, args := range [][]string{
+					{"init", "-q", "--bare", remote},
+					{"-C", rig, "remote", "add", "origin", remote},
+					{"-C", rig, "push", "-q", "origin", "HEAD"},
+				} {
+					if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+						panic(fmt.Sprintf("git %v: %s", args, out))
+					}
+				}
+			})
+			slot := provisionImplicitSlot(t, city, cfg, a)
+			if tc.leave != nil {
+				tc.leave(t, slot.Path)
+			}
+			store := beads.NewMemStore()
+			closed, err := store.Create(sessionRow("closed", "template", "app/claude", "session_name", "s-closed", "pool_managed", "true", "pool_slot", "1", "work_dir", slot.Path))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := store.Close(closed.ID); err != nil {
+				t.Fatal(err)
+			}
+			if tc.shared {
+				if _, err := store.Create(sessionRow("succ", "template", "app/claude", "session_name", "s-succ", "pool_managed", "true", "pool_slot", "1", "state", "awake", "work_dir", slot.Path)); err != nil {
+					t.Fatal(err)
+				}
+			}
+			info := sessionpkg.Info{ID: closed.ID, WorkDir: slot.Path, Template: "app/claude", SessionNameMetadata: "s-closed"}
+
+			var stderr strings.Builder
+			pruneClosedSessionWorktreeInfo(store, info, city, cfg, &stderr)
+
+			_, statErr := os.Stat(slot.Path)
+			switch {
+			case tc.shared:
+				if statErr != nil {
+					t.Fatalf("slot shared with an open session was removed: %v (stderr %q)", statErr, stderr.String())
+				}
+			case tc.reason == "":
+				if !os.IsNotExist(statErr) {
+					t.Fatalf("clean pushed slot still present (stat err %v, stderr %q)", statErr, stderr.String())
+				}
+				if got := gitOut(t, rig, "branch", "--list", slot.Branch); got == "" {
+					t.Errorf("slot branch %s was deleted with the worktree", slot.Branch)
+				}
+			default:
+				marker, err := os.ReadFile(filepath.Join(slot.Path, worktreeStaleFileName))
+				if err != nil || !strings.Contains(string(marker), "reason="+tc.reason) {
+					t.Fatalf("kept slot marker = %q (err %v), want reason=%s", marker, err, tc.reason)
+				}
+				before := slotSnapshot(t, slot.Path)
+				dir, err := resolveWorkDirForQualifiedName(city, cfg, a, "app/claude-1")
+				if err != nil || dir != slot.Path {
+					t.Fatalf("reusing kept slot = %q, %v; want %q", dir, err, slot.Path)
+				}
+				if _, err := os.Stat(filepath.Join(slot.Path, worktreeStaleFileName)); !os.IsNotExist(err) {
+					t.Errorf("reused slot still carries its marker (stat err %v)", err)
+				}
+				if after := slotSnapshot(t, slot.Path); after != before {
+					t.Errorf("reused slot changed:\nbefore:\n%s\nafter:\n%s", before, after)
+				}
 			}
 		})
 	}
