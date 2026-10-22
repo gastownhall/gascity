@@ -229,14 +229,22 @@ op they parked or fault, and the variable is in the GC_* env-read inventory
 and in `internal/testenv.LeakVectorVars`.
 
 The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
-15-minute waits) in `conversationlane_test`. The full matrix at production
-timing, with the fault-free load and the incapable-store arm, runs in two
-manual evidence variants, one per backend, which write
-`x12-report-<backend>.{json,md}` to the test's undeclared outputs:
+15-minute waits) in `conversationlane_test`. The full evidence runs in four
+manual variants, a matrix part and a load part per backend: the matrix part
+runs every kill-matrix cell at production timing, waits out each op's
+`finish_by` and, on embedded Dolt, runs the incapable-store arm; the load
+part runs the six-round fault-free load. Each writes
+`x12-report-<backend>-<part>.{json,md}` to the test's undeclared outputs.
+A part takes from 30 minutes to well over an hour, past the remote
+executor's action timeout, so run them locally:
 
 ```bash
-bazel test --config=ci --config=integration //test/conversationlane:x12_evidence --test_output=streamed
+bazel test --config=ci --config=integration --strategy=TestRunner=local \
+  --test_timeout=7200 //test/conversationlane:x12_evidence
 ```
+
+Add `--local_test_jobs=1` when the load's latency (R2) should be measured
+with nothing running beside it.
 
 ### Git auto-maintenance in test repos
 

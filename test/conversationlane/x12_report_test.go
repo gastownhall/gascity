@@ -1,0 +1,389 @@
+//go:build integration
+
+package conversationlane_test
+
+// The X12 report: the pass lines P1 to P5 and T3I with their measured
+// values and offending items, and the measurements R1 to R3, as JSON and as
+// the Markdown table the PR body carries. Every pass line is asserted in the
+// test that measures it; the report only aggregates.
+
+import (
+	"encoding/json"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"sort"
+	"strings"
+	"sync"
+	"time"
+)
+
+// x12Collector gathers what the X12 tests measured.
+type x12Collector struct {
+	mu      sync.Mutex
+	started time.Time
+	// gcBin is the test-hooks gc the cities ran, for the report's version.
+	gcBin    string
+	cells    []x12CellRecord
+	problems []x12ProblemRecord
+	loads    []x12LoadRecord
+	arms     []x12ArmRecord
+}
+
+// x12Report is the test binary's collector.
+var x12Report = &x12Collector{started: time.Now()}
+
+// x12CellRecord is one matrix cell in the report.
+type x12CellRecord struct {
+	Tier       string         `json:"tier"`
+	Backend    string         `json:"backend"`
+	Mode       string         `json:"mode"`
+	Cell       string         `json:"cell"`
+	Surface    string         `json:"surface"`
+	Original   string         `json:"original"`
+	OrigOut    string         `json:"original_outcome,omitempty"`
+	Retry      string         `json:"retry,omitempty"`
+	RetryOut   string         `json:"retry_outcome,omitempty"`
+	Rerun      string         `json:"rerun_after_finish_by,omitempty"`
+	Op         string         `json:"op"`
+	Outcome    string         `json:"outcome"`
+	Closer     string         `json:"closer"`
+	Attempt    int            `json:"attempt"`
+	Executions int            `json:"executions"`
+	Deliveries int            `json:"deliveries"`
+	Effects    map[string]int `json:"runtime_effects,omitempty"`
+	Problems   []string       `json:"problems,omitempty"`
+}
+
+// x12ProblemRecord is a failed check outside a cell.
+type x12ProblemRecord struct {
+	Tier, Backend, Mode, Line, Text string
+}
+
+// x12LoadRecord is one backend's fault-free load.
+type x12LoadRecord struct {
+	Tier    string                    `json:"tier"`
+	Backend string                    `json:"backend"`
+	P4      x12P4                     `json:"p4"`
+	R1      map[string]map[string]int `json:"r1_refusals"`
+	R2      []x12Latency              `json:"r2_latency"`
+	R3      x12Growth                 `json:"r3_growth"`
+	Problem []string                  `json:"problems,omitempty"`
+}
+
+// x12P4 is P4's measure.
+type x12P4 struct {
+	Requests   int      `json:"requests"`
+	Equal      int      `json:"equal"`
+	Late       []string `json:"late_mismatches,omitempty"`
+	Other      []string `json:"other_mismatches,omitempty"`
+	CodeDiffs  []string `json:"code_differences,omitempty"`
+	NotReplay  int      `json:"not_replayed_open"`
+	EqualShare float64  `json:"equal_share"`
+}
+
+// x12Latency is one R2 row.
+type x12Latency struct {
+	Backend string        `json:"backend"`
+	Mode    string        `json:"mode"`
+	Path    string        `json:"path"`
+	N       int           `json:"n"`
+	P50     time.Duration `json:"p50"`
+	P95     time.Duration `json:"p95"`
+	P99     time.Duration `json:"p99"`
+	Max     time.Duration `json:"max"`
+}
+
+// x12Growth is R3.
+type x12Growth struct {
+	Recorded       int                `json:"recorded_requests"`
+	NewRows        int                `json:"new_op_rows"`
+	LogicalByKind  map[string]x12Size `json:"logical_bytes_by_kind"`
+	PhysicalBytes  int64              `json:"physical_bytes_delta"`
+	PhysicalPerOp  float64            `json:"physical_bytes_per_op"`
+	DailyOps       int                `json:"daily_ops_input,omitempty"`
+	DailyBytes     float64            `json:"daily_bytes,omitempty"`
+	DailyFormulaMD string             `json:"daily_formula"`
+}
+
+// x12Size is a size distribution.
+type x12Size struct {
+	N    int     `json:"n"`
+	Mean float64 `json:"mean"`
+	P95  int     `json:"p95"`
+}
+
+// x12ArmRecord is one incapable-store arm's result.
+type x12ArmRecord struct {
+	Backend  string   `json:"backend"`
+	Mode     string   `json:"mode"`
+	Requests int      `json:"requests"`
+	Problems []string `json:"problems,omitempty"`
+}
+
+// setGC records the gc binary the cities run.
+func (r *x12Collector) setGC(bin string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.gcBin = bin
+}
+
+func (r *x12Collector) addCell(cell *x12Cell) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	rec := x12CellRecord{
+		Tier: cell.tier, Backend: cell.backend, Mode: cell.mode, Cell: cell.spec.name(), Surface: cell.spec.verb.surface,
+		Original: cell.orig.String(), Op: cell.opID, Outcome: cell.finalOutcome, Closer: cell.closer,
+		Attempt: cell.op.Attempt, Executions: cell.executions, Deliveries: cell.deliveries, Effects: cell.effects,
+	}
+	if cell.origOut.state != "" {
+		rec.OrigOut = cell.origOut.state
+	}
+	if cell.spec.retry {
+		rec.Retry = cell.retry.String()
+		rec.RetryOut = cell.retryOut.state
+	}
+	if cell.evidenceRerun != nil {
+		rec.Rerun = cell.evidenceRerun.String()
+	}
+	for _, p := range cell.problems {
+		rec.Problems = append(rec.Problems, "["+p.line+"] "+p.text)
+	}
+	r.cells = append(r.cells, rec)
+}
+
+func (r *x12Collector) problem(tier, backend, mode, line, text string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.problems = append(r.problems, x12ProblemRecord{Tier: tier, Backend: backend, Mode: mode, Line: line, Text: text})
+}
+
+func (r *x12Collector) addLoad(l x12LoadRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.loads = append(r.loads, l)
+}
+
+func (r *x12Collector) addArm(a x12ArmRecord) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.arms = append(r.arms, a)
+}
+
+func (r *x12Collector) empty() bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return len(r.cells) == 0 && len(r.loads) == 0 && len(r.arms) == 0 && len(r.problems) == 0
+}
+
+// x12PassLine is one pass line's verdict.
+type x12PassLine struct {
+	Line      string   `json:"line"`
+	Wording   string   `json:"wording"`
+	Status    string   `json:"status"`
+	Measured  string   `json:"measured"`
+	Threshold string   `json:"threshold"`
+	Offending []string `json:"offending,omitempty"`
+}
+
+// x12ReportDoc is the JSON report.
+type x12ReportDoc struct {
+	GCVersion string             `json:"gc_version"`
+	Tier      string             `json:"tier"`
+	Backend   string             `json:"backend"`
+	Started   time.Time          `json:"started"`
+	WallTime  string             `json:"wall_time"`
+	PassLines []x12PassLine      `json:"pass_lines"`
+	Cells     []x12CellRecord    `json:"cells"`
+	Loads     []x12LoadRecord    `json:"loads"`
+	Arms      []x12ArmRecord     `json:"incapable_arms"`
+	Problems  []x12ProblemRecord `json:"other_problems,omitempty"`
+}
+
+// passLines aggregates every recorded problem under its pass line.
+func (r *x12Collector) passLines() []x12PassLine {
+	offending := map[string][]string{}
+	for _, c := range r.cells {
+		for _, p := range c.Problems {
+			line := strings.TrimPrefix(strings.SplitN(p, "]", 2)[0], "[")
+			offending[line] = append(offending[line], c.Backend+"/"+c.Mode+"/"+c.Cell+": "+p)
+		}
+	}
+	for _, p := range r.problems {
+		offending[p.Line] = append(offending[p.Line], p.Backend+"/"+p.Mode+": "+p.Text)
+	}
+	for _, l := range r.loads {
+		for _, p := range l.Problem {
+			line := strings.TrimPrefix(strings.SplitN(p, "]", 2)[0], "[")
+			offending[line] = append(offending[line], l.Backend+": "+p)
+		}
+	}
+	for _, a := range r.arms {
+		for _, p := range a.Problems {
+			offending["I8"] = append(offending["I8"], a.Backend+"/"+a.Mode+": "+p)
+		}
+	}
+	verdict := func(line string) string {
+		if len(offending[line]) == 0 {
+			return "pass"
+		}
+		return "FAIL"
+	}
+	p4 := "not run"
+	p4Status := "not run"
+	for _, l := range r.loads {
+		p4 = fmt.Sprintf("%s: %d/%d equal (%.4f), %d late, %d other", l.Backend, l.P4.Equal, l.P4.Requests, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other))
+		p4Status = verdict("P4")
+	}
+	lines := []x12PassLine{
+		{Line: "P1", Wording: "require has 0 answered requests without an op", Threshold: "0", Measured: fmt.Sprint(len(offending["P1"])), Status: verdict("P1")},
+		{Line: "P2", Wording: "every op has exactly one outcome within finish_by + 60 s", Threshold: "0", Measured: fmt.Sprint(len(offending["P2"])), Status: verdict("P2")},
+		{Line: "P3", Wording: "duplicates only at K3 (and only after a retry)", Threshold: "0 outside API {K3, K5} with a retry", Measured: fmt.Sprint(len(offending["P3"])), Status: verdict("P3")},
+		{Line: "P4", Wording: "projections equal the client-visible results in >= 99.9% of fault-free requests", Threshold: ">= 0.999 and 0 non-late mismatches", Measured: p4, Status: p4Status},
+		{Line: "P5", Wording: "delivered text equal to the off text in every arm, adopted re-executions included (I11)", Threshold: "0", Measured: fmt.Sprint(len(offending["P5"])), Status: verdict("P5")},
+		{Line: "I4", Wording: "one op per key", Threshold: "0", Measured: fmt.Sprint(len(offending["I4"])), Status: verdict("I4")},
+		{Line: "I8", Wording: "an incapable store degrades as off in auto and refuses in require", Threshold: "0", Measured: fmt.Sprint(len(offending["I8"])), Status: verdict("I8")},
+		{Line: "harness", Wording: "every failpoint fired as armed", Threshold: "0", Measured: fmt.Sprint(len(offending["harness"])), Status: verdict("harness")},
+	}
+	for i := range lines {
+		lines[i].Offending = offending[lines[i].Line]
+	}
+	return lines
+}
+
+// writeX12Report writes the report when X12 recorded anything.
+func writeX12Report() {
+	if x12Report.empty() {
+		return
+	}
+	r := x12Report
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	tier, backend := "gating", "sqlite"
+	if x12Evidence() {
+		tier, backend = "evidence", os.Getenv(x12BackendEnv)
+	}
+	doc := x12ReportDoc{
+		GCVersion: gcVersion(r.gcBin), Tier: tier, Backend: backend, Started: r.started,
+		WallTime:  time.Since(r.started).Round(time.Second).String(),
+		PassLines: r.passLines(), Cells: r.cells, Loads: r.loads, Arms: r.arms, Problems: r.problems,
+	}
+	sort.Slice(doc.Cells, func(i, j int) bool {
+		a, b := doc.Cells[i], doc.Cells[j]
+		return a.Backend+a.Mode+a.Cell < b.Backend+b.Mode+b.Cell
+	})
+	dir := os.Getenv("TEST_UNDECLARED_OUTPUTS_DIR")
+	if dir == "" {
+		var err error
+		if dir, err = os.MkdirTemp("", "x12-report"); err != nil {
+			fmt.Fprintf(os.Stderr, "x12: report dir: %v\n", err) //nolint:errcheck // best-effort
+			return
+		}
+	}
+	data, err := json.MarshalIndent(doc, "", "  ")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "x12: encoding the report: %v\n", err) //nolint:errcheck // best-effort
+		return
+	}
+	name := "x12-report-" + backend
+	if part := os.Getenv(x12PartEnv); part != "" {
+		name += "-" + part
+	}
+	jsonPath := filepath.Join(dir, name+".json")
+	mdPath := filepath.Join(dir, name+".md")
+	md := renderX12Markdown(doc)
+	for path, body := range map[string][]byte{jsonPath: data, mdPath: []byte(md)} {
+		if err := os.WriteFile(path, body, 0o644); err != nil {
+			fmt.Fprintf(os.Stderr, "x12: writing %s: %v\n", path, err) //nolint:errcheck // best-effort
+		}
+	}
+	fmt.Fprintf(os.Stderr, "x12: report written to %s and %s\n", jsonPath, mdPath) //nolint:errcheck // best-effort
+	fmt.Print(md)
+}
+
+// gcVersion is bin's version line.
+func gcVersion(bin string) string {
+	if bin == "" {
+		return "unknown: no X12 city ran"
+	}
+	out, err := exec.Command(bin, "version").CombinedOutput()
+	if err != nil {
+		return "unknown: " + err.Error()
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// renderX12Markdown is the PR-body table.
+func renderX12Markdown(doc x12ReportDoc) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "## X12 report (%s tier, %s)\n\n", doc.Tier, doc.Backend)
+	fmt.Fprintf(&b, "gc: `%s`; started %s; wall time %s; %d cells\n\n", doc.GCVersion, doc.Started.UTC().Format(time.RFC3339), doc.WallTime, len(doc.Cells))
+	b.WriteString("| Line | Wording | Threshold | Measured | Status |\n|---|---|---|---|---|\n")
+	for _, l := range doc.PassLines {
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s |\n", l.Line, l.Wording, l.Threshold, l.Measured, l.Status)
+	}
+	for _, l := range doc.PassLines {
+		if len(l.Offending) == 0 {
+			continue
+		}
+		fmt.Fprintf(&b, "\n### %s offending items\n\n", l.Line)
+		for _, o := range l.Offending {
+			fmt.Fprintf(&b, "- %s\n", o)
+		}
+	}
+	for _, l := range doc.Loads {
+		fmt.Fprintf(&b, "\n### Fault-free load (%s)\n\n", l.Backend)
+		fmt.Fprintf(&b, "P4: %d requests, %d equal (%.4f); late mismatches %d; other %d; open ops not replayed %d\n\n", l.P4.Requests, l.P4.Equal, l.P4.EqualShare, len(l.P4.Late), len(l.P4.Other), l.P4.NotReplay)
+		for _, d := range l.P4.CodeDiffs {
+			fmt.Fprintf(&b, "- code difference: %s\n", d)
+		}
+		b.WriteString("\nR1 refusals and unrecorded requests:\n\n| Mode/surface | Class | Count |\n|---|---|---|\n")
+		for _, k := range sortedKeys(l.R1) {
+			for _, c := range sortedKeys(l.R1[k]) {
+				fmt.Fprintf(&b, "| %s | %s | %d |\n", k, c, l.R1[k][c])
+			}
+		}
+		b.WriteString("\nR2 latency (reported, not asserted):\n\n| Mode | Path | n | p50 | p95 | p99 | max |\n|---|---|---|---|---|---|---|\n")
+		for _, r := range l.R2 {
+			fmt.Fprintf(&b, "| %s | %s | %d | %s | %s | %s | %s |\n", r.Mode, r.Path, r.N, r.P50, r.P95, r.P99, r.Max)
+		}
+		g := l.R3
+		fmt.Fprintf(&b, "\nR3 op-row growth: %d recorded requests, %d new op rows; physical %d bytes (%.0f per op); %s\n\n", g.Recorded, g.NewRows, g.PhysicalBytes, g.PhysicalPerOp, g.DailyFormulaMD)
+		b.WriteString("| Kind | n | mean logical bytes | p95 |\n|---|---|---|---|\n")
+		for _, k := range sortedKeys(g.LogicalByKind) {
+			s := g.LogicalByKind[k]
+			fmt.Fprintf(&b, "| %s | %d | %.0f | %d |\n", k, s.N, s.Mean, s.P95)
+		}
+	}
+	if len(doc.Arms) > 0 {
+		b.WriteString("\n### Incapable store\n\n| Backend | Mode | Requests | Problems |\n|---|---|---|---|\n")
+		for _, a := range doc.Arms {
+			fmt.Fprintf(&b, "| %s | %s | %d | %d |\n", a.Backend, a.Mode, a.Requests, len(a.Problems))
+		}
+	}
+	b.WriteString("\n### Cells\n\n| Backend/mode | Cell | Original | Retry | Op outcome | Closer | Attempt | Executions | Deliveries | Effects |\n|---|---|---|---|---|---|---|---|---|---|\n")
+	for _, c := range doc.Cells {
+		fmt.Fprintf(&b, "| %s/%s | %s | %s | %s | %s | %s | %d | %d | %d | %v |\n", c.Backend, c.Mode, c.Cell,
+			mdCell(c.Original), mdCell(c.Retry), c.Outcome, c.Closer, c.Attempt, c.Executions, c.Deliveries, c.Effects)
+	}
+	return b.String()
+}
+
+// mdCell shortens an answer for a table cell.
+func mdCell(s string) string {
+	s = strings.ReplaceAll(strings.ReplaceAll(s, "|", "/"), "\n", " ")
+	if len(s) > 60 {
+		s = s[:60] + "…"
+	}
+	return s
+}
+
+func sortedKeys[V any](m map[string]V) []string {
+	out := make([]string, 0, len(m))
+	for k := range m {
+		out = append(out, k)
+	}
+	sort.Strings(out)
+	return out
+}
