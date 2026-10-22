@@ -24,6 +24,7 @@ import (
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/events"
 	"github.com/gastownhall/gascity/internal/fsys"
+	"github.com/gastownhall/gascity/internal/packman"
 
 	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
@@ -196,8 +197,16 @@ type cleanupTestingM struct {
 	paths []string
 }
 
+// noCityGuardTestingM fails the run on a start or stop refused for want of a
+// city that no test expected (session.FailOnNoCityRefusals).
+type noCityGuardTestingM struct{ m testscript.TestingM }
+
+func (m noCityGuardTestingM) Run() int {
+	return sessionpkg.FailOnNoCityRefusals(m.m.Run, os.Stderr)
+}
+
 func (m cleanupTestingM) Run() int {
-	code := m.m.Run()
+	code := sessionpkg.FailOnKeyViolations(m.m.Run(), os.Stderr) // a guard panic a recover() swallowed still fails
 	for _, path := range m.paths {
 		if path != "" {
 			_ = os.RemoveAll(path)
@@ -206,7 +215,15 @@ func (m cleanupTestingM) Run() int {
 	return code
 }
 
+// testscriptGC is the testscript "gc" command, the test binary re-executed
+// as gc: it runs under the no-city gate, as the parent's tests do.
+func testscriptGC() {
+	configureTestscriptEnvDefaults()
+	os.Exit(sessionpkg.FailOnNoCityRefusals(func() int { return mainExitCode(os.Args[1:], os.Stdout, os.Stderr) }, os.Stderr))
+}
+
 func TestMain(m *testing.M) {
+	maybeRunHostedBeadsCredentialProvider()
 	maybeRunProductMetricsDirectChildEnvSpy()
 	maybeRunFakeDoltSQLServer()
 
@@ -217,10 +234,7 @@ func TestMain(m *testing.M) {
 		configureFSPressureForTests()
 		configureSupervisorHooksForTests()
 		testscript.Main(m, map[string]func(){
-			"gc": func() {
-				configureTestscriptEnvDefaults()
-				os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-			},
+			"gc": testscriptGC,
 			"bd": bdTestCmd,
 		})
 		return
@@ -287,6 +301,14 @@ func TestMain(m *testing.M) {
 	if err := os.Setenv("GC_HOME", gcHome); err != nil {
 		panic(err)
 	}
+	// The shared GC_HOME has no registries.toml, which means the public
+	// default registry; an add without --version would fetch that catalog
+	// over the network into the shared home, where it changes what later
+	// tests resolve (registry pack names). Command tests that exercise
+	// registry defaults configure their own GC_HOME and restore this seam.
+	resolveImportRegistryRelease = func(string, string) (packman.RegistryRelease, bool, error, error) {
+		return packman.RegistryRelease{}, false, nil, nil
+	}
 	if err := os.Setenv("XDG_RUNTIME_DIR", runtimeDir); err != nil {
 		panic(err)
 	}
@@ -303,20 +325,22 @@ func TestMain(m *testing.M) {
 	}
 	configureFSPressureForTests()
 	configureSupervisorHooksForTests()
+	// In-process init stays off the network by default. Testscript "gc"
+	// children above keep the real installer: their scripts run follow-on
+	// commands that need the installed imports.
+	configureInitRemoteImportsForTests()
 	var testRunner testscript.TestingM = newDoltLeakGuardedTestingM(m, testTempRoot, testTempRoot, gcHome, runtimeDir, providerStubDir, sharedTestFixtureRoot)
 	// The tmux leak guard wraps outside the dolt guard and inside
 	// cleanupTestingM: it must observe and kill leaked tmux servers while the
 	// per-run socket root still exists (dip-73cr05 — city-name sockets like
 	// -L test-city have exit-empty off and outlive their sessions forever).
 	testRunner = newTmuxLeakGuardedTestingM(testRunner, tmuxSocketRoot)
+	testRunner = noCityGuardTestingM{m: testRunner}
 	if tmuxSocketCleanupRoot != "" {
 		testRunner = cleanupTestingM{m: testRunner, paths: []string{tmuxSocketCleanupRoot}}
 	}
 	testscript.Main(testRunner, map[string]func(){
-		"gc": func() {
-			configureTestscriptEnvDefaults()
-			os.Exit(mainExitCode(os.Args[1:], os.Stdout, os.Stderr))
-		},
+		"gc": testscriptGC,
 		"bd": bdTestCmd,
 	})
 }
@@ -332,6 +356,12 @@ func TestImportMigrateScript(t *testing.T) {
 
 func TestPackV2ImportsScript(t *testing.T) {
 	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "pack-v2-imports.txtar")))
+}
+
+// TestBdPassthroughWalkUpScript pins gc bd's routing for the walk-up shape,
+// which in-process tests cannot reach (test binaries refuse ambient discovery).
+func TestBdPassthroughWalkUpScript(t *testing.T) {
+	testscript.Run(t, newTestscriptParams(t, filepath.Join("testdata", "bd-passthrough-walkup.txtar")))
 }
 
 func newTestscriptParams(t *testing.T, files ...string) testscript.Params {
@@ -3770,6 +3800,7 @@ func TestCmdInitProviderAcceptsAntigravity(t *testing.T) {
 	t.Setenv("GC_BEADS", "file")
 	t.Setenv("GC_DOLT", "skip")
 	configureIsolatedRuntimeEnv(t)
+	stubInitRemoteImports(t)
 
 	cityPath := filepath.Join(t.TempDir(), "antigravity-city")
 	var stdout, stderr bytes.Buffer
@@ -8013,4 +8044,47 @@ func gcRepoRootFromEnv() string {
 func chdirToRealPackageDir(t *testing.T) {
 	t.Helper()
 	bazeltest.ChdirPackageDir(t, "cmd/gc")
+}
+
+// A buffered --json result that cannot be copied to stdout must say so on
+// stderr. The copy is the only write a full disk or closed descriptor can
+// fail; exiting 1 without a word leaves the caller an empty or truncated file
+// and nothing to diagnose it with.
+func TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr(t *testing.T) {
+	var stderr bytes.Buffer
+	code := run([]string{"version", "--json"}, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
+}
+
+// The failure-path twin of TestRunBufferedJSONStdoutWriteFailureIsReportedOnStderr:
+// a failing bounded --json command still buffers its own record, and copying
+// that record to stdout is a separate site that must name a write error too.
+func TestRunBufferedJSONFailureRecordWriteFailureIsReportedOnStderr(t *testing.T) {
+	args := []string{"lint", filepath.Join(t.TempDir(), "missing"), "--json"}
+
+	// Control: with a writable stdout the command fails and stdout carries
+	// lint's own report, not the command_failed fallback record, so the run
+	// below reaches the failure-path copy rather than the success-path one.
+	// The fallback record also decodes with a schema_version and passed=false,
+	// so the error_count check is what tells the two apart.
+	var stdout, controlStderr bytes.Buffer
+	code := run(args, &stdout, &controlStderr)
+	var report lintReport
+	if err := json.Unmarshal(stdout.Bytes(), &report); code == 0 || err != nil || report.SchemaVersion == "" || report.Passed || report.ErrorCount == 0 {
+		t.Fatalf("control: exit = %d, stdout = %q (decode error %v), want a non-zero exit and a failing lint report; stderr=%q", code, stdout.String(), err, controlStderr.String())
+	}
+
+	var stderr bytes.Buffer
+	code = run(args, errWriter{}, &stderr)
+	if code == 0 {
+		t.Fatalf("exit = 0 with a failing lint and an unwritable stdout, want non-zero; stderr=%q", stderr.String())
+	}
+	if got := stderr.String(); !strings.Contains(got, "writing JSON output") || !strings.Contains(got, "write failed") {
+		t.Fatalf("stderr = %q, want the stdout write error named", got)
+	}
 }

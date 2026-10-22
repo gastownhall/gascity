@@ -9,6 +9,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/telemetry"
 )
 
@@ -71,7 +72,8 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		}
 	}
 
-	timer := time.NewTimer(cacheReconcilePollInterval)
+	poll := clock.Backstop(cacheReconcilePollInterval)
+	timer := time.NewTimer(poll)
 	defer timer.Stop()
 
 	for {
@@ -79,18 +81,29 @@ func (c *CachingStore) reconcileLoop(ctx context.Context, stagger time.Duration)
 		case <-ctx.Done():
 			return
 		case <-timer.C:
+		case <-c.reconcileKick:
+			// Reset below discards a fire the kick raced (Go 1.23 timers).
 		}
 
-		if c.nextReconcileDelay(time.Now()) == 0 && c.reconciling.CompareAndSwap(false, true) {
-			c.runReconciliation()
-			c.reconciling.Store(false)
-		}
+		c.reconcileIfDue(c.clockNow())
 
-		next := c.nextReconcileDelay(time.Now())
-		if next <= 0 || next > cacheReconcilePollInterval {
-			next = cacheReconcilePollInterval
+		next := c.nextReconcileDelay(c.clockNow())
+		if next <= 0 || next > poll {
+			next = poll
 		}
 		timer.Reset(next)
+	}
+}
+
+// reconcileIfDue runs one reconcile when one is due, none is in flight, and
+// the reconcile gate (WithReconcileGate), if any, allows it.
+func (c *CachingStore) reconcileIfDue(now time.Time) {
+	if c.reconcileGate != nil && !c.reconcileGate() {
+		return
+	}
+	if c.nextReconcileDelay(now) == 0 && c.reconciling.CompareAndSwap(false, true) {
+		c.runReconciliation()
+		c.reconciling.Store(false)
 	}
 }
 
@@ -272,26 +285,67 @@ func (c *CachingStore) nextReconcileDelay(now time.Time) time.Duration {
 		return 0
 	}
 
+	// After the failure backoff: a request never hurries a failing backing.
+	if c.reconcileRequested.Load() {
+		return 0
+	}
+
 	if c.lastFreshAt.IsZero() {
 		return 0
 	}
 
 	lastFullScanAt := c.stats.LastReconcileAt
 	if lastFullScanAt.IsZero() {
+		lastFullScanAt = c.lastScanAt
+	}
+	if lastFullScanAt.IsZero() {
 		lastFullScanAt = c.lastFreshAt
 	}
-	dueAt := lastFullScanAt.Add(c.adaptiveIntervalLocked())
+	dueAt := lastFullScanAt.Add(clock.Backstop(c.adaptiveIntervalLocked()))
 	if !now.Before(dueAt) {
 		return 0
 	}
 	return dueAt.Sub(now)
 }
 
+// RequestReconcile asks for a full re-scan as soon as the reconcile gate
+// (WithReconcileGate) and the failure backoff allow, instead of at the next
+// cadence tick. It returns at once, and requests coalesce: any number made
+// before a run starts are honored by that run, unless that run discards its
+// merge to a full Prime that merged first, which re-arms them. A request
+// made while a run is in flight gets a run of its own, whose list read comes
+// after the request, so a caller that asks after a write committed is
+// covered by a scan that sees it. A closed gate keeps the request pending until it opens. The cache
+// must be reconciling (StartReconciler) for the request to be acted on.
+func (c *CachingStore) RequestReconcile() {
+	c.reconcileRequested.Store(true)
+	c.mu.Lock()
+	c.stats.ReconcileRequests++
+	c.mu.Unlock()
+	select {
+	case c.reconcileKick <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
+// rearmReconcileRequest restores a request a run took but did not serve,
+// without counting it again.
+func (c *CachingStore) rearmReconcileRequest() {
+	c.reconcileRequested.Store(true)
+	select {
+	case c.reconcileKick <- struct{}{}:
+	default: // a kick is already pending
+	}
+}
+
 func (c *CachingStore) runReconciliation() {
+	// Cleared before the list read, so a request made from here on gets
+	// another run (RequestReconcile).
+	requested := c.reconcileRequested.Swap(false)
 	start := time.Now()
 
 	c.mu.RLock()
-	startSeq := c.mutationSeq
+	startSeq, startScan := c.mutationSeq, c.scanGen
 	c.mu.RUnlock()
 
 	bdStart := time.Now()
@@ -326,7 +380,7 @@ func (c *CachingStore) runReconciliation() {
 		freshByID[b.ID] = cloneBead(b)
 	}
 
-	confirmedClosed := c.recoverMissingFromList(freshByID)
+	confirmedClosed, deferred := c.recoverMissingFromList(freshByID)
 
 	depMap, depsComplete, depErr := c.fetchDepsForBeads(freshByID)
 	if depErr != nil {
@@ -349,8 +403,24 @@ func (c *CachingStore) runReconciliation() {
 	}
 
 	c.mu.Lock()
-	now := time.Now()
-	res := c.mergeSnapshotLocked(freshByID, confirmedClosed, depMap, useFreshDeps, startSeq, now)
+	if startSeq < c.fenceFloor || c.fullScanGen > startScan {
+		// A full Prime merged after this scan started: a replace dropped the
+		// per-row fences its merge would need, and either branch may hold
+		// rows newer than this scan's (reconciles do not overlap). The Prime
+		// is at least as complete, so the pass merges nothing, including the
+		// shared tail's store-wide flags; only its latency still counts.
+		// The Prime may have listed before a request this run took, so the
+		// request is re-armed: its run must list after it.
+		c.recordReconcileLatencyLocked(bdLatency)
+		c.recomputeCadenceLocked()
+		c.mu.Unlock()
+		if requested {
+			c.rearmReconcileRequest()
+		}
+		return
+	}
+	now := c.clockNow()
+	res := c.mergeSnapshotLocked(freshByID, confirmedClosed, deferred, depMap, useFreshDeps, depErr != nil, startSeq, now)
 	durMs := float64(time.Since(start).Microseconds()) / 1000.0
 	c.stats.LastReconcileMs = durMs
 	c.recordReconcileLatencyLocked(bdLatency)
@@ -361,7 +431,11 @@ func (c *CachingStore) runReconciliation() {
 	if emit {
 		log.Print(logLine)
 	}
-	c.notifyChanges(res.notifications)
+	c.notifyChanges(ChangeScan, res.notifications)
+	// The pass may have evicted a row some read had already installed as
+	// closed; its close is still queued, and a pass with no other change has
+	// nothing else to drain it.
+	c.announceUnannouncedCloses()
 }
 
 // mergeAction is what the reconcile merge does with one id.
@@ -379,9 +453,10 @@ const (
 	// mergeSkipRecentLocal leaves everything for id untouched: the recency
 	// window (5 s) protects an in-flight local write bd may not reflect yet.
 	mergeSkipRecentLocal
-	// mergeGCFences drops every orphan fence/deps entry for id (deletedSeq,
-	// dirty, beadSeq, localBeadAt, writeSeq, deps). Only reachable when id has no row on
-	// either side.
+	// mergeGCFences drops id's orphan dirty, beadSeq, localBeadAt and deps
+	// entries. Its write fences (writeSeq, writeAt, deletedSeq) stay, retained
+	// until pruneRetainedFencesLocked collects them. Only reachable when id
+	// has no row on either side.
 	mergeGCFences
 )
 
@@ -506,13 +581,21 @@ type mergeSectionResult struct {
 // caller to emit after unlock). Every per-id fate is decided by
 // reconcileMergeDecision; the three index sets it iterates (freshByID, the
 // cached rows absent from freshByID, and the orphan fence/deps ids) are
-// pairwise disjoint, so the passes cannot perturb each other. Caller must hold
-// c.mu (write lock).
+// pairwise disjoint, so the passes cannot perturb each other. deferred names
+// the freshByID entries recoverMissingFromList filled from the cache because
+// it could not read the backing row: they are held, not absorbed, so their
+// row, mark and fences stay as they were. depsReadFailed reports that the
+// snapshot's dependency read failed: a row that does not answer for its edges
+// then keeps its mark. It bumps scanGen and fullScanGen, so a refetch whose
+// read predates the merge installs nothing over it, and a Prime whose listing
+// predates it skips its merge. Caller must hold c.mu (write lock).
 func (c *CachingStore) mergeSnapshotLocked(
-	freshByID map[string]Bead, confirmedClosed map[string]Bead,
-	depMap map[string][]Dep, useFreshDeps bool,
+	freshByID map[string]Bead, confirmedClosed map[string]Bead, deferred map[string]struct{},
+	depMap map[string][]Dep, useFreshDeps, depsReadFailed bool,
 	startSeq uint64, now time.Time,
 ) mergeSectionResult {
+	c.scanGen++
+	c.fullScanGen = c.scanGen
 	// Preserve a cached is_blocked for any row the projection did not return
 	// this cycle. Two cases land here: a full projection failure (enrichErr
 	// left every row unenriched) and the narrower race where a row is still
@@ -530,6 +613,11 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 1. Absorb loop — over freshByID. Classification reads pre-absorb state.
 	for id, freshBead := range freshByID {
+		if _, held := deferred[id]; held {
+			// No backing read backs this entry: absorbing it would clear
+			// the mark of a raced write on the cache's own copy.
+			continue
+		}
 		freshDeps := c.depsForReconcileLocked(id, freshBead, depMap, useFreshDeps)
 		cached, cachedExists := c.beads[id]
 		cachedDeps, hasCachedDeps := c.deps[id]
@@ -578,8 +666,11 @@ func (c *CachingStore) mergeSnapshotLocked(
 			// targets' fresh statuses, which no single-row absorb can see. Its
 			// refusals are the rows whose verdict really may have changed, so
 			// they must land as unanswerable rather than be re-preserved here.
-			readyMode:  readyFromFresh,
-			clearDirty: true,
+			readyMode: readyFromFresh,
+			// With the deps read failed, a row that omits its edges installs
+			// cached or field-derived ones, which may predate a raced
+			// dependency write.
+			clearDirty: !depsReadFailed || c.rowAnswersEdges(freshBead),
 		})
 	}
 
@@ -606,10 +697,18 @@ func (c *CachingStore) mergeSnapshotLocked(
 		}
 		res.removes++
 		if d.notification == "bead.closed" {
+			// A closing write in flight for this row must not announce
+			// the close again once it finds the row evicted.
+			c.noteCloseAnnouncedLocked(id)
 			closed := cloneBead(cached)
 			setBeadStatus(&closed, "closed")
 			if freshClosed, ok := confirmedClosed[id]; ok {
 				closed = cloneBead(freshClosed)
+				// Recorded under the lock, before the notification goes
+				// out, so a refresh that reads this close in between does
+				// not announce it again (RefreshRowReport's
+				// AnnounceUnheldClose).
+				c.recordAnnouncedCloseLocked(id, freshClosed, now)
 			}
 			res.notifications = append(res.notifications, cacheNotification{
 				eventType: "bead.closed",
@@ -621,9 +720,12 @@ func (c *CachingStore) mergeSnapshotLocked(
 
 	// 3. Fence/deps-GC sweep — over orphan ids (a fence or deps entry with no
 	//    row on either side). Replaces Branch B's implicit wholesale reset:
-	//    stale orphans are collected, recent ones kept one more cycle. The id
-	//    set is snapshotted before deleting to avoid iterate-while-delete.
+	//    stale orphans are collected, recent ones kept one more cycle, and
+	//    write fences are retained for at least recentWriteVerifyWindow, then
+	//    pruned. The id set is snapshotted before deleting to avoid
+	//    iterate-while-delete.
 	for _, id := range c.orphanFenceIDsLocked(freshByID) {
+		c.retainFencesLocked(id, now)
 		d := reconcileMergeDecision(mergeRowInput{
 			freshExists:  false,
 			cachedExists: false,
@@ -638,13 +740,14 @@ func (c *CachingStore) mergeSnapshotLocked(
 		if d.action != mergeGCFences {
 			continue
 		}
-		delete(c.deletedSeq, id)
 		delete(c.dirty, id)
 		delete(c.beadSeq, id)
 		delete(c.localBeadAt, id)
-		delete(c.writeSeq, id)
 		delete(c.deps, id)
 	}
+	c.pruneRetainedFencesLocked(now)
+	c.pruneAnnouncedClosesLocked(now)
+	c.pruneSilentClosesLocked()
 
 	// 4. Shared tail (was duplicated per branch).
 	c.syncFailures = 0
@@ -776,9 +879,11 @@ func (c *CachingStore) depsForReconcileLocked(id string, freshBead Bead, depMap 
 // carries that fresh row so the diff path can emit an authoritative close
 // payload instead of a stale cached status flip. On any other error the cached
 // entry is merged back conservatively, deferring the close to a later scan
-// when the backing store's state is unambiguous. Callers must own freshByID
-// and not access it concurrently while recovery is running.
-func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[string]Bead {
+// when the backing store's state is unambiguous; the second map names those
+// deferred ids so the merge holds them rather than absorbing an unread row.
+// Callers must own freshByID and not access it concurrently while recovery is
+// running.
+func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) (map[string]Bead, map[string]struct{}) {
 	c.mu.RLock()
 	candidates := make(map[string]Bead)
 	for id, b := range c.beads {
@@ -792,9 +897,17 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 	}
 	c.mu.RUnlock()
 	if len(candidates) == 0 {
-		return nil
+		return nil, nil
 	}
 	var confirmedClosed map[string]Bead
+	var deferred map[string]struct{}
+	deferCached := func(id string, cached Bead) {
+		if deferred == nil {
+			deferred = make(map[string]struct{})
+		}
+		freshByID[id] = cached
+		deferred[id] = struct{}{}
+	}
 	var recoveredAlive int64
 	var deferredClose int64
 	for id, cached := range candidates {
@@ -806,7 +919,7 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 					"verify missing bead before close",
 					fmt.Errorf("%s: backing returned bead %q", id, bead.ID),
 				)
-				freshByID[id] = cached
+				deferCached(id, cached)
 				deferredClose++
 				continue
 			}
@@ -826,7 +939,7 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 				"verify missing bead before close",
 				fmt.Errorf("%s: %w", id, err),
 			)
-			freshByID[id] = cached
+			deferCached(id, cached)
 			deferredClose++
 		}
 	}
@@ -836,7 +949,7 @@ func (c *CachingStore) recoverMissingFromList(freshByID map[string]Bead) map[str
 		c.stats.ReconcileCloseDeferrals += deferredClose
 		c.mu.Unlock()
 	}
-	return confirmedClosed
+	return confirmedClosed, deferred
 }
 
 func (c *CachingStore) preserveCachedReadyProjectionLocked(items map[string]Bead, depMap map[string][]Dep, useFreshDeps bool) {

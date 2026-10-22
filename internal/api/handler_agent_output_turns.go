@@ -10,6 +10,7 @@ import (
 // entryToTurn converts a provider transcript entry to a human-readable output turn.
 func entryToTurn(e *worker.TranscriptEntry) outputTurn {
 	turn := outputTurn{
+		ID:   e.UUID,
 		Role: e.Type,
 	}
 	if !e.Timestamp.IsZero() {
@@ -61,6 +62,10 @@ func entryToTurn(e *worker.TranscriptEntry) outputTurn {
 
 func historyEntryToTurn(entry worker.HistoryEntry) outputTurn {
 	turn := outputTurn{
+		// The provider entry ID, not HistoryEntry.ID: an entry without a
+		// provider UUID gets a synthesized ID that no cursor matches, and its
+		// turn must omit id instead.
+		ID:   entry.Provenance.RawEntryID,
 		Role: entry.Kind,
 	}
 	if turn.Role == "" {

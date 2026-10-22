@@ -28,6 +28,11 @@ package main
 // so a flag the query gains cannot silently fail to reach the controller. The
 // route half mirrors hookClaimMatchesRoute exactly, because that is the function
 // that will actually accept or reject the claim.
+//
+// One rule here has no serving-side twin yet: controlRowServableByTemplate, the
+// control-dispatcher ownership rule. The controller applies it to demand, but
+// the dispatcher's serve loop still claims by route alone (mc-zndi7.85), so for
+// a cross-scope control row the two sides do not yet agree.
 
 import (
 	"fmt"
@@ -39,6 +44,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/storeref"
 )
 
 // demandServableForTemplates reports the template a row is capacity demand for,
@@ -57,11 +63,42 @@ func demandServableForTemplates(cfg *config.City, b beads.Bead, templates map[st
 	}
 	for _, candidate := range controllerDemandRouteCandidates(b) {
 		normalized := agentutil.NormalizePoolRouteTarget(cfg, candidate)
-		if _, ok := templates[normalized]; ok {
+		if _, ok := templates[normalized]; ok && controlRowServableByTemplate(cfg, b, normalized) {
 			return normalized, true
 		}
 	}
 	return "", false
+}
+
+// controlRowServableByTemplate applies the control-dispatcher ownership rule to
+// one row: a control-kind row whose gc.root_store_ref names a scope is demand
+// only for that scope's configured dispatcher, and for no template when the
+// scope has none. Work rows, unscoped control rows, and a nil cfg (no ownership
+// to resolve) pass.
+//
+// It is the rule repairControlDispatcherRoutesForStoreScope applies, restated
+// for a reader of the durable route; TestControlRowServableAgreesWithTheRouteRepair
+// keeps the two in lockstep. The repair suppresses a scope-gap row or a
+// deferred route rewrite only in the collected snapshot; the default scale_check
+// probe re-reads Ready, where the stale route still names another scope's
+// dispatcher. On a class-binding city every dispatcher's probe reads the
+// binding, so without this check the probe counted the row for the dispatcher
+// the stale route names: the #3765 cross-scope wake the repair exists to stop
+// (mc-zndi7.41).
+//
+// This governs demand only. The dispatcher's serve loop does not apply it yet,
+// so a dispatcher that is awake for other work still claims a cross-scope row
+// by its route (mc-zndi7.85).
+func controlRowServableByTemplate(cfg *config.City, b beads.Bead, template string) bool {
+	if cfg == nil || !beadmeta.IsControlKind(strings.TrimSpace(b.Metadata[beadmeta.KindMetadataKey])) {
+		return true
+	}
+	rigContext, scoped := storeref.ScopeRigContext(b.Metadata[beadmeta.RootStoreRefMetadataKey])
+	if !scoped {
+		return true
+	}
+	owner, ok := configuredControlDispatcherRouteForScope(cfg, rigContext)
+	return ok && owner == template
 }
 
 // demandRowServable applies the route-independent half of the Tier-3 serving
@@ -90,15 +127,15 @@ func demandRowServable(b beads.Bead) bool {
 			return false
 		}
 	}
-	// LABEL: case-insensitive. Here the query is NOT the last word: whatever
-	// `gc ready` returns, the hook re-applies the hold filter in Go with
-	// EqualFold (isHeldHookCandidate) before serving a candidate, so a
-	// "Hold:Mayor" bead is served by the reader and then stripped by the hook.
-	// The worker never sees it, so it is not capacity demand.
+	// LABEL: human is exact, case-sensitive, like the query's label filter;
+	// the hook does not apply a human post-filter. Dispatch holds are
+	// case-insensitive: the hook re-applies them with EqualFold
+	// (isHeldHookCandidate), so a "Hold:Mayor" bead is stripped even if the
+	// reader serves it. The worker never sees it, so it is not capacity demand.
 	for _, label := range b.Labels {
 		label = strings.TrimSpace(label)
 		for _, excluded := range rules.ExcludeLabels {
-			if strings.EqualFold(label, excluded) {
+			if label == excluded || (excluded != beadmeta.HumanLabel && strings.EqualFold(label, excluded)) {
 				return false
 			}
 		}
@@ -115,13 +152,13 @@ func demandRowServable(b beads.Bead) bool {
 //
 // The reason is the answer, not a bare "not ready", because the two consumers —
 // classifyDemandTrigger and the drain-ack open arm
-// (firstOpenClaimableAssignedWorkBeadInStoreByIdentifiers) — act differently on
-// each cause: a deferral is PROOF of non-claimability, while an unproven
-// blockedness reading is only a question, to be settled against live deps. Naming
-// the cause here keeps that distinction in one place. Reconstructing it by
-// elimination at a call site ("the only remaining reason is …") would be valid
-// only while this function has exactly these clauses, and would break silently
-// the moment a third exclusion is added.
+// (firstOpenClaimableAssignedWorkBeadForReachableStore) — act differently on
+// each cause: a deferral or a dispatch hold is PROOF of non-claimability, while
+// an unproven blockedness reading is only a question, to be settled against live
+// deps. Naming the cause here keeps that distinction in one place. Reconstructing
+// it by elimination at a call site ("the only remaining reason is …") would be
+// valid only while this function has exactly these clauses, and would break
+// silently the moment another exclusion is added.
 type demandRowClaimability string
 
 const (
@@ -134,6 +171,13 @@ const (
 	// (beads.IsDeferred). Both are FRESH bead-local fields — never stale — so this
 	// is proof that no worker could have claimed the row.
 	demandRowDeferred demandRowClaimability = "deferred"
+	// demandRowHeld: the row carries a canonical dispatch hold
+	// (beadmeta.HasDispatchHold). The hook never serves a held row to anyone
+	// (isHeldHookCandidate), so this is PROOF of non-claimability, read off a
+	// fresh bead-local field exactly like a deferral. A seat that drained past
+	// held assigned work drained correctly; reporting it as a strand is what
+	// accompanied the hold-label wake/drain loop.
+	demandRowHeld demandRowClaimability = "held"
 	// demandRowBlockednessUnproven: the bead alone cannot settle whether the row is
 	// blocked, so each consumer re-derives it from live dependencies
 	// (beadHasUnmetPlainBlocksDep). Two readings land here, and neither is proof:
@@ -152,8 +196,8 @@ const (
 )
 
 // classifyDemandRowClaimability answers the claimability question for one row.
-// Deferral is checked first: it is the cause that is proof, so a row that is both
-// deferred and flagged blocked classifies as deferred.
+// Deferral and a dispatch hold are checked first: they are the causes that are
+// proof, so a row that is also flagged blocked classifies by the proof.
 //
 // An ABSENT is_blocked projection is not evidence of unblockedness, and this
 // predicate does not read it as any. bd's `list --json` / `show --json` payloads
@@ -179,6 +223,9 @@ const (
 func classifyDemandRowClaimability(b beads.Bead, now time.Time) demandRowClaimability {
 	if beads.IsDeferred(b, now) {
 		return demandRowDeferred
+	}
+	if beadmeta.HasDispatchHold(b.Labels) {
+		return demandRowHeld
 	}
 	if b.IsBlocked == nil || *b.IsBlocked {
 		return demandRowBlockednessUnproven
@@ -237,7 +284,7 @@ func beadHasUnmetPlainBlocksDep(store beads.Store, id string) (bool, error) {
 		if err != nil {
 			return false, err
 		}
-		if !beads.DependencySatisfied(blocker.Status, blocker.Metadata[beadmeta.WorkOutcomeMetadataKey]) {
+		if !beads.DependencySatisfied(blocker.Status, beads.ReadinessWorkOutcome(blocker.Metadata)) {
 			return true, nil
 		}
 	}

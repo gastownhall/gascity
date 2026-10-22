@@ -94,6 +94,15 @@ func TestControllerStopClientClassifiesEntryBoundary(t *testing.T) {
 			wantDials:   1,
 		},
 		{
+			// A worker site's controller is the remote one, so the seam's
+			// refusal to dial it is no proof that none runs.
+			name:        "worker-site dial refusal",
+			stats:       []controllerStopStat{{info: controllerStopStatInfo(t, "before-refusal")}},
+			dialErr:     errWorkerSiteNoController,
+			wantOutcome: controllerStopOutcomeInvalid,
+			wantDials:   1,
+		},
+		{
 			name: "post-dial stat failure",
 			stats: []controllerStopStat{
 				{info: controllerStopStatInfo(t, "before-post-stat")},

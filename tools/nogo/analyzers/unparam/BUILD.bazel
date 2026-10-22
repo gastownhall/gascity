@@ -1,0 +1,55 @@
+load("@rules_go//go:def.bzl", "go_library", "go_test")
+
+go_library(
+    name = "unparam",
+    srcs = ["unparam.go"],
+    importpath = "github.com/gastownhall/gascity/tools/nogo/analyzers/unparam",
+    visibility = ["//visibility:public"],
+    deps = [
+        "//tools/nogo/analyzers/internal/testunit",
+        "@cc_mvdan_unparam//check",
+        "@org_golang_x_tools//go/analysis",
+        "@org_golang_x_tools//go/analysis/passes/buildssa",
+        "@org_golang_x_tools//go/packages",
+    ],
+)
+
+go_test(
+    name = "unparam_test",
+    srcs = ["unparam_test.go"],
+    deps = [
+        ":unparam",
+        "//tools/nogo/analyzers/internal/analyzertest",
+    ],
+)
+
+# --- bazel_repo_srcs (managed by tools/bazel/repo_tree.py) ---
+
+filegroup(
+    name = "bazel_repo_srcs",
+    srcs = glob(
+        ["**"],
+        allow_empty = True,
+        exclude = ["BUILD.bazel"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)

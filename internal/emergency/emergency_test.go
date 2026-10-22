@@ -314,3 +314,34 @@ func assertNoTempFiles(t *testing.T, dir string) {
 		}
 	}
 }
+
+// TestRecordSignaledToCityLogLeavesRotationToTheOwner pins the city-log mirror
+// as a secondary writer: it appends the event but must not run the startup
+// sweep, which would race the city's rotation owner over an in-flight
+// rotating file.
+func TestRecordSignaledToCityLogLeavesRotationToTheOwner(t *testing.T) {
+	cityPath := t.TempDir()
+	runtimeDir := filepath.Join(cityPath, ".gc")
+	if err := os.MkdirAll(runtimeDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	inFlight := filepath.Join(runtimeDir, "events.jsonl.rotating-20261001T125436Z-seq-1-1")
+	if err := os.WriteFile(inFlight, []byte(`{"seq":1,"type":"bead.created","ts":"2026-10-01T12:54:36Z","actor":"seed"}`+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	rec, err := NewRecord(RecordOptions{Message: "spool unreachable", Random: bytes.NewReader([]byte{1, 2, 3, 4})})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if err := RecordSignaledToCityLog(cityPath, rec, &bytes.Buffer{}); err != nil {
+		t.Fatalf("RecordSignaledToCityLog: %v", err)
+	}
+	if _, err := os.Stat(inFlight); err != nil {
+		t.Fatalf("in-flight rotating file was swept: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(runtimeDir, "events.jsonl"))
+	if err != nil || !strings.Contains(string(data), rec.ID) {
+		t.Fatalf("events.jsonl = %q (err %v), want the signaled event", data, err)
+	}
+}

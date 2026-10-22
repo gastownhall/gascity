@@ -154,6 +154,61 @@ func TestCoreMaintenanceExecAssets(t *testing.T) {
 	}
 }
 
+func TestReaperScriptUsesUTCTimestampForAgeGates(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/reaper.sh")
+	if err != nil {
+		t.Fatalf("core pack missing reaper.sh: %v", err)
+	}
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	localNow := regexp.MustCompile(`\bNOW[ \t]*\(`)
+	for i, line := range strings.Split(string(data), "\n") {
+		if commentLine.MatchString(line) {
+			continue
+		}
+		if localNow.MatchString(line) {
+			t.Errorf("reaper.sh:%d compares against server-local NOW() but bead timestamps are UTC; use UTC_TIMESTAMP(): %s", i+1, strings.TrimSpace(line))
+		}
+	}
+}
+
+func TestJSONLExportMaintainsArchiveObjectDatabase(t *testing.T) {
+	data, err := fs.ReadFile(PackFS, "assets/scripts/jsonl-export.sh")
+	if err != nil {
+		t.Fatalf("ReadFile(jsonl-export.sh): %v", err)
+	}
+	// A comment that names a setting or a call does not keep the contract.
+	commentLine := regexp.MustCompile(`^[ \t]*#`)
+	var code []string
+	for _, line := range strings.Split(string(data), "\n") {
+		if !commentLine.MatchString(line) {
+			code = append(code, line)
+		}
+	}
+	body := strings.Join(code, "\n")
+
+	for _, want := range []string{
+		`GC_JSONL_GC_LOOSE_OBJECTS`,
+		`GC_JSONL_GC_LOOSE_KB`,
+		`GC_JSONL_GC_WINDOW_MEMORY`,
+		`GC_JSONL_GC_MIN_FREE_KB`,
+		`maintain_archive_repository()`,
+		`check_archive_gc_free_space`,
+		`count-objects -v`,
+		`pack.windowMemory=`,
+		`pack.threads=1`,
+		`nice -n 19`,
+		`ionice -t -c 3`,
+	} {
+		if !strings.Contains(body, want) {
+			t.Errorf("jsonl-export.sh is missing archive-maintenance contract %q", want)
+		}
+	}
+	calls := regexp.MustCompile(`\bmaintain_archive_repository\b(?:[^(]|$)`)
+	if got := len(calls.FindAllString(body, -1)); got < 3 {
+		t.Fatalf("jsonl-export.sh invokes archive maintenance %d times, want at least three (before the export, after a HALT commit, after the push)", got)
+	}
+}
+
 func TestCoreControlDispatcherAgent(t *testing.T) {
 	type agentFile struct {
 		Description       string   `toml:"description"`

@@ -1,6 +1,8 @@
 package main
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -402,23 +404,34 @@ func TestManagedDoltScopeWatchdogDoesNotInheritSessionIdentity(t *testing.T) {
 	}
 }
 
-// waitForProcEnviron reads /proc/<pid>/environ once the process has settled
-// on its final image. The kernel reports an empty environ for the window
-// inside execve, and the fake dolt execs twice (sh, then sleep), so a read
-// that lands there proves nothing; a settled process always carries a
-// non-empty environ here because the spawn path propagates PATH.
+// waitForProcEnviron reads /proc/<pid>/environ from one settled image. The
+// fake dolt execs twice (sh, then sleep), and an exec makes a read unusable
+// two ways: inside execve the kernel reports an empty environ, and a read
+// spanning an exec is torn — os.ReadFile needs several read(2)s here, the
+// first chunk comes from the old image and the next hits EOF on its
+// torn-down address space, yielding a non-empty but truncated environment.
+// A read is accepted only when the process image (/proc/<pid>/exe) is the
+// same before and after it and the data ends on an entry terminator.
 func waitForProcEnviron(t *testing.T, pid int) map[string]string {
 	t.Helper()
-	path := filepath.Join("/proc", strconv.Itoa(pid), "environ")
+	procDir := filepath.Join("/proc", strconv.Itoa(pid))
 	deadline := time.After(5 * time.Second)
 	tick := time.NewTicker(10 * time.Millisecond)
 	defer tick.Stop()
 	for {
-		data, err := os.ReadFile(path)
+		exeBefore, err := os.Readlink(filepath.Join(procDir, "exe"))
+		if err != nil {
+			t.Fatalf("read exe for pid %d: %v", pid, err)
+		}
+		data, err := os.ReadFile(filepath.Join(procDir, "environ"))
 		if err != nil {
 			t.Fatalf("read environ for pid %d: %v", pid, err)
 		}
-		if len(data) > 0 {
+		exeAfter, err := os.Readlink(filepath.Join(procDir, "exe"))
+		if err != nil {
+			t.Fatalf("read exe for pid %d: %v", pid, err)
+		}
+		if exeBefore == exeAfter && len(data) > 0 && data[len(data)-1] == 0 {
 			env := make(map[string]string)
 			for _, entry := range strings.Split(string(data), "\x00") {
 				if key, value, ok := strings.Cut(entry, "="); ok && key != "" {
@@ -429,7 +442,7 @@ func waitForProcEnviron(t *testing.T, pid int) map[string]string {
 		}
 		select {
 		case <-deadline:
-			t.Fatalf("pid %d environ still empty after 5s", pid)
+			t.Fatalf("pid %d environ never settled within 5s (empty, or read across an exec)", pid)
 		case <-tick.C:
 		}
 	}
@@ -450,6 +463,26 @@ func TestRunManagedDoltScopeWatchdogUsage(t *testing.T) {
 	}
 	if code := runManagedDoltScopeWatchdog([]string{" ", "log", "city"}, devnull, devnull); code != 2 {
 		t.Errorf("blank config exit = %d, want 2", code)
+	}
+}
+
+func TestFinishManagedDoltScopeWatchdogTerminationReturnsOnError(t *testing.T) {
+	done := make(chan error)
+	var log bytes.Buffer
+	result := make(chan int, 1)
+	go func() {
+		result <- finishManagedDoltScopeWatchdogTermination(done, errors.New("lock ownership unavailable"), &log, 4242)
+	}()
+	select {
+	case code := <-result:
+		if code != 1 {
+			t.Fatalf("exit = %d, want 1", code)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("termination error blocked waiting for a child that may never exit")
+	}
+	if got := log.String(); !strings.Contains(got, "lock ownership unavailable") || !strings.Contains(got, "4242") {
+		t.Fatalf("log = %q, want pid and termination error", got)
 	}
 }
 

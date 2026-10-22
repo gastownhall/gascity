@@ -11,8 +11,12 @@
 // Scope: this package owns engine-touched bead-metadata KEY NAMES only. It
 // deliberately excludes (each a separate owner): gc.* event-type names
 // (internal/events.KnownEventTypes), telemetry metric names (internal/telemetry),
-// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), and the
-// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge). Pack- and
+// JSON schema-version contract strings (e.g. gc.dolt.cleanup.v1), the
+// t3bridge UI thread-metadata namespace (internal/runtime/t3bridge), and the
+// conversation operation journal's gc.op.* / gc.fact.* row namespace
+// (internal/opjournal, whose bead codec is the only reader and writer), and the
+// event-fact gc.ev.* and projector-checkpoint gc.evproj.* row namespaces
+// (internal/eventfact, likewise). Pack- and
 // prompt-private keys that no Go file reads stay open-world by design and are
 // intentionally NOT declared here (see KnownMetadataPrefixes for the dynamic
 // gc.var.<name> case).
@@ -83,12 +87,31 @@ const (
 	ControlDispatcherFallbackMetadataKey = "gc.control_dispatcher_fallback"
 	ControlEpochMetadataKey              = "gc.control_epoch"
 	ControlForMetadataKey                = "gc.control_for"
-	ControlQuarantineReasonMetadataKey   = "gc.control_quarantine_reason"
-	ControlQuarantinedAtMetadataKey      = "gc.control_quarantined_at"
-	ControlQuarantinedMetadataKey        = "gc.control_quarantined"
-	ControllerErrorClassMetadataKey      = "gc.controller_error_class"
-	ControllerErrorMetadataKey           = "gc.controller_error"
-	ControllerRetryableMetadataKey       = "gc.controller_retryable"
+	// ControlPendingReasonMetadataKey records the latest ErrControlPending
+	// refusal text for a control bead. Pending keeps its own namespace rather
+	// than reusing the gc.controller_* keys: the two dispositions have
+	// independent budgets, and sharing one deadline anchor would let a long
+	// pending wait expire a later semantic refusal's budget on its FIRST
+	// refusal — quarantining the bead the pending disposition exists to keep
+	// open.
+	ControlPendingReasonMetadataKey = "gc.control_pending_reason"
+	// ControlPendingCountMetadataKey counts pending sweeps recorded for a
+	// control bead. Diagnostics only, like its Tier-B counterpart.
+	ControlPendingCountMetadataKey = "gc.control_pending_count"
+	// ControlPendingFirstSeenMetadataKey is the RFC3339 instant of the FIRST
+	// pending refusal recorded for a control bead. Pending retry stays
+	// unbounded; this anchor bounds only how long it stays SILENT.
+	ControlPendingFirstSeenMetadataKey = "gc.control_pending_first_seen"
+	// ControlPendingStalledMetadataKey marks that the one-shot control.stalled
+	// escalation has already been emitted for this bead's pending wait, so a
+	// never-healing pending is loud once rather than every sweep.
+	ControlPendingStalledMetadataKey   = "gc.control_pending_stalled"
+	ControlQuarantineReasonMetadataKey = "gc.control_quarantine_reason"
+	ControlQuarantinedAtMetadataKey    = "gc.control_quarantined_at"
+	ControlQuarantinedMetadataKey      = "gc.control_quarantined"
+	ControllerErrorClassMetadataKey    = "gc.controller_error_class"
+	ControllerErrorMetadataKey         = "gc.controller_error"
+	ControllerRetryableMetadataKey     = "gc.controller_retryable"
 	// ControllerRetryFirstSeenMetadataKey is the RFC3339 instant of the FIRST
 	// semantic-refusal retry recorded for a control bead. It is the persisted
 	// deadline anchor for the bounded Tier-B retry budget: it lives on the bead
@@ -111,7 +134,15 @@ const (
 	// epoch fence committing. Cleared on activation; a root still carrying it
 	// is a pre-fence candidate that idempotency recovery either activates
 	// (deterministically, when it is the surviving candidate) or neutralizes.
-	AttachFencePendingMetadataKey        = "gc.attach_fence_pending"
+	AttachFencePendingMetadataKey = "gc.attach_fence_pending"
+	// AttachRootIDMetadataKey is stamped on every non-root bead of a sub-DAG
+	// molecule.Attach creates, holding that sub-DAG's root ID. It is consumed
+	// by existingAttachIDMapping, which scopes idempotency recovery's step-ref
+	// match to one attachment so it never adopts a sibling attachment's bead
+	// under the same workflow root. It is deliberately not MoleculeIDMetadataKey:
+	// ResolveRunID ranks that key above RootBeadIDMetadataKey, so reusing it
+	// would re-root these beads' run chain at the sub-DAG.
+	AttachRootIDMetadataKey              = "gc.attach_root_id"
 	DeferredAssigneeMetadataKey          = "gc.deferred_assignee"
 	DeferredExecutionRoutedToMetadataKey = "gc.deferred_execution_routed_to"
 	DeferredRoutedToMetadataKey          = "gc.deferred_routed_to"
@@ -179,6 +210,7 @@ const (
 	// (ga-wevcl). Live closes on stamped roots remain covered by the delta
 	// lane, which reacts to the close events themselves.
 	CompletionFactsConvergedMetadataKey = "gc.completion_facts_converged"
+	LabelRevisionMetadataKey            = "gc.label_rev" // label CAS bookkeeping; see beads.NativeDoltStore.updateLabelsIfMatch
 	LastFailureClassMetadataKey         = "gc.last_failure_class"
 	LastFinalizeErrorMetadataKey        = "gc.last_finalize_error"
 	LeaseOwnerMetadataKey               = "gc.lease_owner"
@@ -229,6 +261,15 @@ const (
 	ScopeRoleMetadataKey                = "gc.scope_role"
 	SessionAffinityMetadataKey          = "gc.session_affinity"
 	SessionIDMetadataKey                = "gc.session_id"
+	// StrandedMetadataKey ("true"), StrandedSessionMetadataKey (the closed
+	// session's bead ID) and StrandedAssigneeMetadataKey (the claim's assignee
+	// when it was kept) mark a claim a close kept because no lane serves it
+	// (owner ruling O5, revised): stranded work, which session.stranded_claims
+	// reports while the claim is still assigned as it was kept. A release
+	// clears all three (SessionAffinityMetadataKeys).
+	StrandedMetadataKey         = "gc.stranded"
+	StrandedSessionMetadataKey  = "gc.stranded_session"
+	StrandedAssigneeMetadataKey = "gc.stranded_assignee"
 	// SessionIDCamelMetadataKey is the camelCase variant some bead writers stamp
 	// alongside the snake_case SessionIDMetadataKey; both are read when resolving a
 	// bead's session link.
@@ -305,10 +346,11 @@ const (
 	// WorkflowExpandedMetadataKey marks a graph.v2 workflow root that was
 	// compiled with real child steps beyond the root itself. Its absence
 	// distinguishes a genuinely root-only (#2763-shape) molecule, whose root
-	// IS the unit of work and must remain claimable via the
-	// RunTargetMetadataKey fallback, from a fully-expanded root whose real
-	// children have all closed and is only waiting on workflow-finalize —
-	// see hookClaimMatchesRoute/hookClaimRoute (#5900).
+	// IS the unit of work and must remain claimable via its RoutedToMetadataKey
+	// or the legacy RunTargetMetadataKey fallback, from an expanded root, which
+	// is a latch closed by workflow-finalize and is never fresh worker demand
+	// through any route, an explicit RoutedToMetadataKey included — see
+	// workflowTopologyIsNonExecutable in cmd/gc (#5900).
 	WorkflowExpandedMetadataKey = "gc.workflow_expanded"
 )
 
@@ -423,6 +465,38 @@ const (
 	MergeStrategyMetadataKey = "merge_strategy"
 )
 
+// Accepted MergeStrategyMetadataKey values. They are part of the bead-metadata
+// contract shared by `gc sling`, the HTTP sling endpoint, rig config, and the
+// pack formulas that read merge_strategy back off a work bead, so they must not
+// change without a migration. An absent key is not one of these values —
+// consumers read "unset" as their own implicit default.
+const (
+	// MergeStrategyDirect merges the work branch into its target branch.
+	MergeStrategyDirect = "direct"
+	// MergeStrategyMR delivers the work through a merge/pull request rather
+	// than by pushing to the target branch.
+	MergeStrategyMR = "mr"
+	// MergeStrategyLocal leaves the work on its branch with no merge and no
+	// request; the consumer decides what to do with it.
+	MergeStrategyLocal = "local"
+)
+
+// KnownMergeStrategies lists every accepted MergeStrategyMetadataKey value, in
+// the order validators render them into "valid values are ..." messages.
+var KnownMergeStrategies = []string{MergeStrategyDirect, MergeStrategyMR, MergeStrategyLocal}
+
+// IsKnownMergeStrategy reports whether s is an accepted merge strategy. The
+// comparison is exact: the empty string is "unset" rather than a strategy, and
+// callers are expected to trim before asking.
+func IsKnownMergeStrategy(s string) bool {
+	for _, known := range KnownMergeStrategies {
+		if s == known {
+			return true
+		}
+	}
+	return false
+}
+
 // OptionMetadataPrefix is the dynamic non-"gc."-prefixed key prefix under
 // which provider option choices are stored as opt_<OptionsSchema key> (e.g.
 // opt_model, opt_effort) on session and work beads. The suffix is open-world
@@ -455,6 +529,10 @@ var KnownMetadataKeys = []string{
 	ContinuationGroupMetadataKey,
 	ControlEpochMetadataKey,
 	ControlForMetadataKey,
+	ControlPendingReasonMetadataKey,
+	ControlPendingCountMetadataKey,
+	ControlPendingFirstSeenMetadataKey,
+	ControlPendingStalledMetadataKey,
 	ControlQuarantineReasonMetadataKey,
 	ControlQuarantinedAtMetadataKey,
 	ControlQuarantinedMetadataKey,
@@ -467,6 +545,7 @@ var KnownMetadataKeys = []string{
 	CurrentRunIDMetadataKey,
 	CwdMetadataKey,
 	AttachFencePendingMetadataKey,
+	AttachRootIDMetadataKey,
 	DeferredAssigneeMetadataKey,
 	DeferredExecutionRoutedToMetadataKey,
 	DeferredRoutedToMetadataKey,
@@ -518,6 +597,7 @@ var KnownMetadataKeys = []string{
 	IterationMetadataKey,
 	ItemRootKeyMetadataKey,
 	KindMetadataKey,
+	LabelRevisionMetadataKey,
 	LastFailureClassMetadataKey,
 	LastFinalizeErrorMetadataKey,
 	LeaseOwnerMetadataKey,
@@ -568,6 +648,9 @@ var KnownMetadataKeys = []string{
 	ScopeRoleMetadataKey,
 	SessionAffinityMetadataKey,
 	SessionIDMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 	SessionIDCamelMetadataKey,
 	SessionNameMetadataKey,
 	SessionNameCamelMetadataKey,
@@ -634,4 +717,7 @@ var KnownMetadataPrefixes = []string{
 var SessionAffinityMetadataKeys = []string{
 	SessionAffinityMetadataKey,
 	ContinuationGroupMetadataKey,
+	StrandedMetadataKey,
+	StrandedSessionMetadataKey,
+	StrandedAssigneeMetadataKey,
 }

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -369,7 +370,7 @@ func TestCityStatusAgentObservationDoesNotResolveRuntimeNamesThroughStore(t *tes
 		},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snapshot.Agents))
 	}
@@ -426,7 +427,7 @@ func TestCityStatusUsesBeadBackedRuntimeNameForSingletonAgent(t *testing.T) {
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 1 {
 		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
 	}
@@ -465,7 +466,7 @@ func TestCityStatusUsesSessionBackedObservationForSuspendedCustomRuntimeName(t *
 		Agents:    []config.Agent{{Name: "mayor", MaxActiveSessions: intPtr(1)}},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 1 {
 		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
 	}
@@ -495,7 +496,8 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 		Session:   config.SessionConfig{Provider: "fake"},
 		Agents:    []config.Agent{{Name: "reviewer", Session: "acp", MaxActiveSessions: intPtr(1)}},
 	}
-	sp, err := newStatusSessionProviderForCity(cfg, t.TempDir())
+	cityPath := statusTestCityDir(t)
+	sp, err := newStatusSessionProviderForCity(cfg, cityPath)
 	if err != nil {
 		t.Fatalf("newStatusSessionProviderForCity: %v", err)
 	}
@@ -522,7 +524,7 @@ func TestCityStatusUsesStatusSnapshotToRouteACPDrainMetadata(t *testing.T) {
 		t.Fatalf("Create: %v", err)
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, io.Discard)
 	if len(snapshot.Agents) != 1 {
 		t.Fatalf("agents = %d, want 1", len(snapshot.Agents))
 	}
@@ -564,7 +566,7 @@ func TestCityStatusUsesBeadBackedRuntimeNameForPoolInstance(t *testing.T) {
 		},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snapshot.Agents))
 	}
@@ -604,13 +606,13 @@ func TestCityStatusUsesBeadBackedRuntimeNameForStampedPoolSlotBead(t *testing.T)
 	}
 	cfg := &config.City{
 		Workspace: config.Workspace{Name: "city"},
-		Rigs:      []config.Rig{{Name: "frontend", Path: "/tmp/frontend"}},
+		Rigs:      []config.Rig{{Name: "frontend", Path: t.TempDir()}},
 		Agents: []config.Agent{
 			{Name: "dog", Dir: "frontend", MaxActiveSessions: intPtr(2)},
 		},
 	}
 
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, io.Discard)
+	snapshot := collectCityStatusSnapshot(sp, cfg, statusTestCityDir(t), store, io.Discard)
 	if len(snapshot.Agents) != 2 {
 		t.Fatalf("agents = %d, want 2", len(snapshot.Agents))
 	}
@@ -656,8 +658,9 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		}},
 	}
 
+	cityPath := statusTestCityDir(t)
 	var stdout, stderr bytes.Buffer
-	snapshot := collectCityStatusSnapshot(sp, cfg, "/home/user/city", store, &stderr)
+	snapshot := collectCityStatusSnapshot(sp, cfg, cityPath, store, &stderr)
 	if len(snapshot.NamedSessions) != 1 {
 		t.Fatalf("named sessions = %d, want 1", len(snapshot.NamedSessions))
 	}
@@ -665,7 +668,7 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 		t.Fatalf("snapshot named session status = %q, want materialized", got)
 	}
 
-	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, "/home/user/city", store, loadStatusSessionSnapshot("/home/user/city", cfg, store, &stderr), &stdout, &stderr)
+	code := doCityStatusWithStoreAndSnapshot(sp, dops, cfg, cityPath, store, loadStatusSessionSnapshot(cityPath, cfg, store, &stderr), &stdout, &stderr)
 	if code != 0 {
 		t.Fatalf("code = %d, want 0; stderr: %s", code, stderr.String())
 	}
@@ -677,17 +680,25 @@ func TestCityStatusNamedSessionsUseLoadedSnapshotWithoutGet(t *testing.T) {
 
 // TestCityStatusObservationsRunInParallel guards against regression of the
 // serial per-agent observation loop that made `gc status` ~1.4s on multi-rig
-// cities. With N agents and an observer that blocks briefly, wall time should
-// be close to a single observation, not N times it.
+// cities (mc-eecvd: no wall-clock bound). Each observation waits until as
+// many observations as the pool runs at once (statusObservationConcurrency,
+// capped at the agent count) are in flight together, so a narrower or serial
+// pool never fills it and fails at the bound. The per-observation timeout is
+// lifted, so a timed-out call cannot free its pool slot while its observer
+// stays parked and fake the concurrency: every observation returns the
+// observer's own answer.
 func TestCityStatusObservationsRunInParallel(t *testing.T) {
-	const observerDelay = 60 * time.Millisecond
 	const agentCount = 12
+	want := min(statusObservationConcurrency, agentCount)
+
+	oldTimeout := statusObservationTimeout
+	statusObservationTimeout = time.Hour
+	t.Cleanup(func() { statusObservationTimeout = oldTimeout })
 
 	var mu sync.Mutex
-	inflight := 0
-	maxConcurrent := 0
-	totalCalls := 0
-
+	inflight, maxConcurrent, totalCalls := 0, 0, 0
+	full := make(chan struct{})
+	var unfilled atomic.Bool
 	oldObserve := observeSessionTargetForStatus
 	observeSessionTargetForStatus = func(string, beads.Store, runtime.Provider, *config.City, string) (worker.LiveObservation, error) {
 		mu.Lock()
@@ -695,11 +706,16 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 		totalCalls++
 		if inflight > maxConcurrent {
 			maxConcurrent = inflight
+			if maxConcurrent == want {
+				close(full)
+			}
 		}
 		mu.Unlock()
-
-		time.Sleep(observerDelay)
-
+		select {
+		case <-full:
+		case <-time.After(10 * time.Second): // only a pool narrower than want gets here
+			unfilled.Store(true)
+		}
 		mu.Lock()
 		inflight--
 		mu.Unlock()
@@ -716,9 +732,7 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 		Agents:    agents,
 	}
 
-	start := time.Now()
 	snapshot := collectCityStatusSnapshot(runtime.NewFake(), cfg, "/tmp/city", nil, io.Discard)
-	elapsed := time.Since(start)
 
 	if got := len(snapshot.Agents); got != agentCount {
 		t.Fatalf("agents = %d, want %d", got, agentCount)
@@ -726,13 +740,10 @@ func TestCityStatusObservationsRunInParallel(t *testing.T) {
 	if totalCalls != agentCount {
 		t.Fatalf("totalCalls = %d, want %d", totalCalls, agentCount)
 	}
-	if maxConcurrent < 2 {
-		t.Fatalf("maxConcurrent = %d, want >= 2 (observations ran serially)", maxConcurrent)
+	if unfilled.Load() || maxConcurrent != want {
+		t.Fatalf("maxConcurrent = %d, want %d observations in flight at once (the pool ran narrower or serially)", maxConcurrent, want)
 	}
-	// Serial would be agentCount * observerDelay = 720ms. Allow generous
-	// slack for CI scheduling but well below the serial bound.
-	maxAllowed := time.Duration(agentCount) * observerDelay / 2
-	if elapsed > maxAllowed {
-		t.Fatalf("elapsed = %v, want < %v (likely serial); maxConcurrent = %d", elapsed, maxAllowed, maxConcurrent)
+	if snapshot.Summary.RunningAgents != agentCount {
+		t.Fatalf("running agents = %d, want %d: every row the observer's answer, none a timed-out empty observation", snapshot.Summary.RunningAgents, agentCount)
 	}
 }

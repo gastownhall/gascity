@@ -21,8 +21,10 @@ import (
 // TestLogNativeUnavailableDowngradesBDContextAgreementToDebug pins the noise
 // fix: the bd_context_agreement gate (a benign degrade-not-block check that
 // fires on every non-git city root) logs at Debug so it is silent at the
-// default Info threshold, while identity_match keeps Error and every other
-// gate keeps Warn. The structured BeadsDiagnostic still carries the signal.
+// default Info threshold, while identity_match keeps Error and a gate that
+// was not demoted on purpose keeps Warn (native_transport_off is the other
+// demotion, pinned below). The structured BeadsDiagnostic still carries the
+// signal.
 func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 	newLogger := func(buf *bytes.Buffer, level slog.Level) *slog.Logger {
 		return slog.New(slog.NewTextHandler(buf, &slog.HandlerOptions{Level: level}))
@@ -54,6 +56,27 @@ func TestLogNativeUnavailableDowngradesBDContextAgreementToDebug(t *testing.T) {
 	logNativeUnavailable(newLogger(&buf, slog.LevelInfo), "scope", "force_fallback", "reason")
 	if !strings.Contains(buf.String(), "level=WARN") {
 		t.Fatalf("a non-special gate should log at WARN, got: %q", buf.String())
+	}
+}
+
+// TestLogNativeUnavailableDowngradesNativeTransportOffToDebug pins the
+// native_transport_off demotion. The gate fires on every store open of a
+// city that set beads.native_transport = "off" and on every control-plane
+// open, which pins the bd store, so it is silent at the default Info
+// threshold. It still emits at Debug: downgraded, not deleted.
+func TestLogNativeUnavailableDowngradesNativeTransportOffToDebug(t *testing.T) {
+	var buf bytes.Buffer
+	logNativeUnavailable(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelInfo})),
+		"scope", nativeTransportOffGate, "reason")
+	if buf.Len() != 0 {
+		t.Fatalf("native_transport_off at Info threshold should be silent (Debug), got: %q", buf.String())
+	}
+
+	buf.Reset()
+	logNativeUnavailable(slog.New(slog.NewTextHandler(&buf, &slog.HandlerOptions{Level: slog.LevelDebug})),
+		"scope", nativeTransportOffGate, "reason")
+	if !strings.Contains(buf.String(), "level=DEBUG") || !strings.Contains(buf.String(), "gate="+nativeTransportOffGate) {
+		t.Fatalf("native_transport_off should log at DEBUG under its gate, got: %q", buf.String())
 	}
 }
 
@@ -551,9 +574,6 @@ func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDCon
 	if ctx.BDVersion == "" {
 		ctx.BDVersion = "1.0.4"
 	}
-	if ctx.SchemaVersion == 0 {
-		ctx.SchemaVersion = 1
-	}
 	return contract.PreflightChecker{
 		FS:                  files,
 		Provider:            "bd",
@@ -563,6 +583,11 @@ func factoryPreflightChecker(scope, metadata string, ctx contract.PreflightBDCon
 		},
 		DatabaseProjectID: func(string) (string, bool, error) {
 			return "gc-local", true, nil
+		},
+		SchemaLatestVersion:        1,
+		SchemaLatestIgnoredVersion: 1,
+		DatabaseSchemaCursors: func(string) (contract.PreflightSchemaCursors, bool, error) {
+			return contract.PreflightSchemaCursors{Main: 1, Ignored: 1, IgnoredChecked: true}, true, nil
 		},
 	}
 }
@@ -760,12 +785,80 @@ func TestOpenStoreAtForCityStampsConditionalWritesMode(t *testing.T) {
 	})
 }
 
-// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd pins the control-
-// plane routing contract: a caller that supplies no PreflightChecker can
-// never be given the native store — the factory treats the missing checker
-// as preflight-unavailable and takes the bd fallback, stamping it like every
-// other path. (The control dispatcher routes its raw bd store through the
-// factory this way; native selection there would be a behavior change.)
+// TestStampOpenedStoreRequireRefusesCarrierless pins StampOpenedStore to the
+// factory's cell contract for stores the factory did not open (a relocated
+// class binding's engine): a carrier lands the mode, and a carrier-less store
+// is refused under require and degraded loudly under auto, never silently
+// believed stamped.
+func TestStampOpenedStoreRequireRefusesCarrierless(t *testing.T) {
+	t.Run("carrier lands the mode", func(t *testing.T) {
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Require || defaulted {
+			t.Fatalf("stamp = (%q, %v), want (require, false)", mode, defaulted)
+		}
+	})
+
+	t.Run("unset maps to off and marks the default", func(t *testing.T) {
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.ModeUnset, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Off || !defaulted {
+			t.Fatalf("stamp = (%q, %v), want (off, true)", mode, defaulted)
+		}
+	})
+
+	t.Run("require refuses a carrier-less store", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		err := StampOpenedStore(bare, "EngineStore", gate.Require, nil, nil)
+		if !IsConditionalWritesRequired(err) {
+			t.Fatalf("err = %v, want the typed require refusal", err)
+		}
+		if got, want := err.Error(), "opening EngineStore: "; !strings.HasPrefix(got, want) {
+			t.Fatalf("err = %q, want it to name the store as %q with no empty scope", got, want)
+		}
+	})
+
+	t.Run("a stamped store refuses a second stamp", func(t *testing.T) {
+		store := NewMemStore()
+		if err := StampOpenedStore(store, "MemStore", gate.Require, nil, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		for _, mode := range []gate.Mode{gate.ModeUnset, gate.Off, gate.Auto, gate.Require} {
+			if err := StampOpenedStore(store, "MemStore", mode, nil, nil); err == nil {
+				t.Fatalf("re-stamping require with %q succeeded", mode)
+			}
+		}
+		if mode, defaulted := store.conditionalWritesMode(); mode != gate.Require || defaulted {
+			t.Fatalf("stamp after refused re-stamps = (%q, %v), want (require, false)", mode, defaulted)
+		}
+	})
+
+	t.Run("auto degrades a carrier-less store loudly", func(t *testing.T) {
+		bare := &struct{ Store }{Store: NewMemStore()}
+		var degraded []ConditionalWritesDegrade
+		if err := StampOpenedStore(bare, "EngineStore", gate.Auto, func(d ConditionalWritesDegrade) { degraded = append(degraded, d) }, nil); err != nil {
+			t.Fatalf("StampOpenedStore: %v", err)
+		}
+		if len(degraded) != 1 || degraded[0].StoreKind != "EngineStore" || degraded[0].Mode != "auto" {
+			t.Fatalf("degrade notifications = %+v, want exactly one auto degrade naming the store", degraded)
+		}
+	})
+}
+
+// TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd pins that a caller
+// that supplies no PreflightChecker is never given the native store through
+// the preflight route: the factory treats the missing checker as
+// preflight-unavailable and takes the bd fallback, stamping it like every
+// other path. The library-extension arm runs before preflight and consults no
+// checker, so a caller that must never be native says so with
+// NativeTransportOff instead, as the control dispatcher does (pinned by
+// TestOpenStoreAtForCityLibraryExtensionBackendHonorsNativeTransportOff here
+// and by cmd/gc's
+// TestOpenControlStoreAtForCityKeepsTheBdStoreForALibraryBackendScope).
 func TestOpenStoreAtForCityNilPreflightCheckerFallsBackToBd(t *testing.T) {
 	t.Setenv(nativeForceFallbackEnv, "")
 	bd := NewMemStore()

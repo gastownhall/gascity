@@ -28,6 +28,13 @@ type Reference struct {
 	ID   string `json:"id"`
 }
 
+// SourceSubmit is the Source of a user's submitted message that the session
+// layer queued instead of delivering (a held or dead session, a running turn
+// its submit keys would interrupt, a follow-up). It is still the user's
+// prompt: it is delivered alone and verbatim, never folded into a deferred
+// reminder or injected as hook context.
+const SourceSubmit = "submit"
+
 // Item is a persisted deferred nudge.
 type Item struct {
 	ID                string     `json:"id"`
@@ -42,12 +49,30 @@ type Item struct {
 	DeliverAfter      time.Time  `json:"deliver_after"`
 	ExpiresAt         time.Time  `json:"expires_at"`
 	Attempts          int        `json:"attempts,omitempty"`
-	LastAttemptAt     time.Time  `json:"last_attempt_at,omitempty"`
-	LastError         string     `json:"last_error,omitempty"`
-	ClaimedAt         time.Time  `json:"claimed_at,omitempty"`
-	LeaseUntil        time.Time  `json:"lease_until,omitempty"`
-	DeadAt            time.Time  `json:"dead_at,omitempty"`
+	// DeliveryBatch is the delivery key of the batch this item was claimed
+	// in, pinned at claim time. Until the batch is acked, dead-lettered or
+	// definitively rejected, its items are claimed and delivered together
+	// under this key, so a redelivery after an unknown outcome is the same
+	// delivery to a runtime that deduplicates by key. A rejection clears it,
+	// and the next claim pins a new batch.
+	DeliveryBatch string    `json:"delivery_batch,omitempty"`
+	LastAttemptAt time.Time `json:"last_attempt_at,omitempty"`
+	LastError     string    `json:"last_error,omitempty"`
+	ClaimedAt     time.Time `json:"claimed_at,omitempty"`
+	LeaseUntil    time.Time `json:"lease_until,omitempty"`
+	DeadAt        time.Time `json:"dead_at,omitempty"`
 }
+
+// Bucket names the queue bucket an item is in.
+type Bucket string
+
+// The buckets a queued item can be in. An item that has left the queue
+// (delivered, withdrawn, or aged out) is in no bucket.
+const (
+	BucketPending  Bucket = "pending"
+	BucketInFlight Bucket = "in_flight"
+	BucketDead     Bucket = "dead"
+)
 
 // State is the persisted nudge queue snapshot.
 type State struct {

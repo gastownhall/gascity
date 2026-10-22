@@ -5,17 +5,27 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 )
 
+// ctxCheckInterval is how many active-log lines ReadFilteredContext scans
+// between cancellation checks. Large enough that ctx.Err() is noise next to
+// line decoding, small enough that a canceled scan stops within milliseconds.
+const ctxCheckInterval = 4096
+
 // ReadFilteredContext is ReadFiltered but aborts the archive scan as soon as
 // ctx is canceled, instead of always scanning every overlapping archive to
-// completion. Cancellation is checked once per archive in the loop, so a
-// caller that disconnects mid-scan gets back the events found so far plus
-// ctx.Err(), rather than waiting for the full (potentially large) fallback
-// scan to finish.
+// completion. Cancellation is checked once per archive, before each chunk of
+// a Since filter's backward walk of the active log, and every
+// ctxCheckInterval lines of the forward active-log scan, so a caller that
+// disconnects mid-scan gets back the events found so far plus ctx.Err(),
+// rather than waiting for the full (potentially large) scan to finish.
 func ReadFilteredContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(ctx, path, filter); bounded || err != nil {
+		return result, err
+	}
 	result, _, err := readFilteredTrackedContext(ctx, path, filter)
 	return result, err
 }
@@ -73,9 +83,27 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 	}
 	defer f.Close() //nolint:errcheck // read-only file
 
+	// Skip the prefix of the active log the cursor already covers, as
+	// readFilteredTracked does.
+	scanFrom := int64(0)
+	if st, statErr := f.Stat(); statErr == nil {
+		scanFrom = activeScanStart(f, st.Size(), filter.AfterSeq)
+	}
+	if _, err := f.Seek(scanFrom, io.SeekStart); err != nil {
+		return result, listed, fmt.Errorf("seeking events: %w", err)
+	}
+
 	scanner := bufio.NewScanner(f)
 	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024) // handle lines up to 1MB
-	for scanner.Scan() {
+	for lines := 0; scanner.Scan(); lines++ {
+		if lines%ctxCheckInterval == 0 {
+			if err := ctx.Err(); err != nil {
+				return result, listed, err
+			}
+		}
+		if !lineMayMatchType(scanner.Bytes(), filter) {
+			continue
+		}
 		var e Event
 		if err := json.Unmarshal(scanner.Bytes(), &e); err != nil {
 			continue // skip malformed lines
@@ -98,6 +126,9 @@ func readFilteredTrackedContext(ctx context.Context, path string, filter Filter)
 // ctx cancellation through the underlying archive scan, the same way
 // ReadFilteredContext does for ReadFiltered.
 func ReadFilteredWithInFlightContext(ctx context.Context, path string, filter Filter) ([]Event, error) {
+	if result, bounded, err := readFilteredSince(ctx, path, filter); bounded || err != nil {
+		return result, err
+	}
 	base, listedArchives, baseErr := readFilteredTrackedContext(ctx, path, filter)
 	rotated, rotationErr := readRotationSources(path, filter, listedArchives)
 	if len(rotated) == 0 {

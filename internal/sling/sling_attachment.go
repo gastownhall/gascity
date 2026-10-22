@@ -11,6 +11,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	convoycore "github.com/gastownhall/gascity/internal/convoy"
+	"github.com/gastownhall/gascity/internal/coordclass"
 	"github.com/gastownhall/gascity/internal/molecule"
 	"github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sourceworkflow"
@@ -55,6 +56,12 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 			return
 		}
 		seen[id] = struct{}{}
+		// A controller-owned row is never an attachment, whatever a
+		// molecule_id or workflow_id names: no autoclose, force or GC tears
+		// it down (mc-dkblm, architecture B).
+		if coordclass.ControllerOwned(attached) {
+			return
+		}
 		attachments = append(attachments, attached)
 	}
 
@@ -72,7 +79,7 @@ func CollectAttachedBeads(parent beads.Bead, store beads.Store, childQuerier Bea
 			}
 		} else {
 			for _, child := range children {
-				if !IsAttachedRoot(child) {
+				if !IsAttachedRoot(child) || coordclass.ControllerOwned(child) {
 					continue
 				}
 				if _, ok := seen[child.ID]; ok {
@@ -638,7 +645,8 @@ func CheckBeadState(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps
 }
 
 // CheckBeadStateWithOptions checks whether a bead is already routed for the
-// requested route options and returns a structured result.
+// requested route options and returns a structured result, which also
+// carries the status the check read.
 func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if q == nil {
 		return BeadCheckResult{}
@@ -647,7 +655,14 @@ func CheckBeadStateWithOptions(q BeadQuerier, beadID string, a config.Agent, dep
 	if err != nil {
 		return BeadCheckResult{}
 	}
+	result := checkReadBeadState(q, b, beadID, a, deps, opts)
+	result.Status = b.Status
+	return result
+}
 
+// checkReadBeadState returns the routing verdict of CheckBeadStateWithOptions
+// for b, the bead it just read.
+func checkReadBeadState(q BeadQuerier, b beads.Bead, beadID string, a config.Agent, deps SlingDeps, opts BeadCheckOptions) BeadCheckResult {
 	if IsCustomSlingQuery(a) {
 		return BeadCheckResult{Warnings: routedStateWarnings(b, beadID)}
 	}

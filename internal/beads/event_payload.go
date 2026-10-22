@@ -94,9 +94,9 @@ func decodeRawBead(data json.RawMessage) (Bead, bool) {
 // event's identity must agree with that key. The envelope subject is only a
 // fallback for a payload that does not decode to a bead with an id.
 //
-// The subject and the payload are supplied independently (for example
-// `gc event emit --subject ... --payload ...` from a bd hook), so they can
-// disagree. When a non-empty subject names a different bead than a decoded
+// The subject and the payload are supplied independently (for example a
+// `gc event emit --subject ... --bead-payload ...` from a bd hook, which reads
+// the payload from the store at emit time), so they can disagree. When a non-empty subject names a different bead than a decoded
 // payload, BeadEventID returns ErrBeadEventIdentityMismatch: routing by either
 // identity would act on one bead with another bead's snapshot, so callers must
 // drop the event and let reconciliation converge instead.

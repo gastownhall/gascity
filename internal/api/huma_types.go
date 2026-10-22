@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/danielgtaylor/huma/v2"
+	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/configedit"
 )
 
@@ -27,7 +28,7 @@ import (
 // silently blocking.
 type BlockingParam struct {
 	Index string `query:"index" doc:"Event sequence number; when provided, blocks until a newer event arrives." required:"false"`
-	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 2m." required:"false"`
+	Wait  string `query:"wait" doc:"How long to block waiting for changes (Go duration string, e.g. 30s). Default 30s, max 5m." required:"false"`
 }
 
 // Resolve validates the blocking-query parameters. Implements huma.Resolver;
@@ -166,7 +167,7 @@ type ListBody[T any] struct {
 // the age is unknown); read-path CLI commands surface this as
 // _cache_age_s in --json output and as a stale-read banner > 30 s.
 type ListOutput[T any] struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
 	Body      ListBody[T]
 }
@@ -181,7 +182,7 @@ type ListOutput[T any] struct {
 // lagging reconciler under-report true staleness and suppress the banner
 // `gc status` renders above cacheAgeBannerThresholdSeconds.
 type IndexOutput[T any] struct {
-	Index     uint64  `header:"X-GC-Index" doc:"Latest event sequence number."`
+	Index     uint64  `header:"X-GC-Index" doc:"City event sequence captured before this response's state was read. Resume or block after it to observe every change made through this server that the body does not reflect; a change another process writes directly to the city's stores is reflected once this server applies its event."`
 	CacheAgeS float64 `header:"X-GC-Cache-Age-S" doc:"Age in seconds of the CachingStore snapshot that served this response (0 if not applicable)."`
 	Body      T
 }
@@ -217,6 +218,10 @@ type StatusWorkCounts struct {
 	InProgress int `json:"in_progress" doc:"Number of in-progress work items."`
 	Ready      int `json:"ready" doc:"Number of ready work items."`
 	Open       int `json:"open" doc:"Number of open work items."`
+	// SuspendedRigsExcluded counts the rigs these counts leave out: a
+	// suspended rig's store is not read, because a read restarts its retired
+	// bd proxy.
+	SuspendedRigsExcluded int `json:"suspended_rigs_excluded,omitempty" doc:"Number of suspended rigs left out of these counts: a suspended rig's store is not read."`
 }
 
 // StatusMailCounts holds mail counts for the status endpoint.
@@ -236,6 +241,7 @@ type StatusMailCounts struct {
 // sentinels in their originating package and matched here.
 func mutationError(err error) error {
 	msg := err.Error()
+	var providerCatalogErr *config.ProviderCatalogError
 	switch {
 	case errors.Is(err, configedit.ErrNotFound):
 		return huma.Error404NotFound(msg)
@@ -244,6 +250,14 @@ func mutationError(err error) error {
 	case errors.Is(err, configedit.ErrPackDerived):
 		return huma.Error409Conflict(msg)
 	case errors.Is(err, configedit.ErrValidation):
+		return huma.Error400BadRequest(msg)
+	case errors.Is(err, config.ErrPatchTargetNotFound):
+		// A patch named a target absent from the merged config; the edit was
+		// rolled back, so this is the client's error.
+		return huma.Error400BadRequest(msg)
+	case errors.As(err, &providerCatalogErr):
+		// The edit referenced a provider the city's catalog does not define;
+		// the config was rolled back, so this is the client's error.
 		return huma.Error400BadRequest(msg)
 	default:
 		return huma.Error500InternalServerError(msg)

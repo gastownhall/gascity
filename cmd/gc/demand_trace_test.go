@@ -387,7 +387,7 @@ func TestDemandReadTrace_FailedReadRecordsErrorAndOutcome(t *testing.T) {
 	tracer, cycle := demandTraceCycle(t, cityDir, nil)
 	cfg := &config.City{Workspace: config.Workspace{Name: "gc"}}
 	store := longErrorStore{Store: beads.NewMemStore()}
-	collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, newDemandPassTrace(cycle, cfg))
+	collectOpenUnassignedRoutedWork("", cfg, store, nil, nil, io.Discard, newDemandPassTrace(cycle, cfg), nil)
 
 	records := demandTraceRecords(t, cityDir, tracer, cycle)["demand_snapshot.store_read"]
 	if len(records) != 1 {
@@ -470,7 +470,7 @@ func TestReadyAssignedWorkAssigneesClosedIndexFailsOpen(t *testing.T) {
 			cityDir := t.TempDir()
 			tracer, cycle := demandTraceCycle(t, cityDir, nil)
 
-			got := readyAssignedWorkAssignees(cfg, store, nil, nil, newDemandPassTrace(cycle, cfg), demandReadPointAssigned)
+			got := readyAssignedWorkAssignees(cfg, store, nil, nil, newDemandPassTrace(cycle, cfg), demandReadPointAssigned, nil)
 
 			has := func(v string) bool {
 				for _, g := range got {

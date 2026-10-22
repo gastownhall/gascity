@@ -100,6 +100,43 @@ describe('useSessionStream', () => {
     expect(result.current.result.total_chars).toBe(15);
   });
 
+  it('keeps the entry id of snapshot and single-turn frames', async () => {
+    mockFetchSupervisorSessionTranscript.mockResolvedValue(transcript);
+
+    const { result } = renderHook(() => useSessionStream('gc-session-1', true));
+    await flush();
+    act(() => eventSources[0]?.open());
+    act(() =>
+      eventSources[0]?.emit(
+        'turn',
+        JSON.stringify({
+          id: 'gc-session-1',
+          format: 'conversation',
+          turns: [
+            { id: 'e1', role: 'user', text: 'hello' },
+            { role: 'assistant', text: 'no provider id' },
+            { id: '', role: 'assistant', text: 'empty id' },
+          ],
+        }),
+      ),
+    );
+    act(() =>
+      eventSources[0]?.emit(
+        'turn',
+        JSON.stringify({ id: 'e2', role: 'assistant', text: 'streamed' }),
+      ),
+    );
+
+    expect(result.current.status).toBe('ready');
+    if (result.current.status !== 'ready') return;
+    const { turns } = result.current.result;
+    expect(turns).toHaveLength(4);
+    expect(turns[0]).toEqual({ id: 'e1', role: 'user', text: 'hello' });
+    expect(turns[1]).not.toHaveProperty('id');
+    expect(turns[2]).not.toHaveProperty('id');
+    expect(turns[3]).toEqual({ id: 'e2', role: 'assistant', text: 'streamed' });
+  });
+
   it('keeps the transcript visible while surfacing malformed stream frames', async () => {
     mockFetchSupervisorSessionTranscript.mockResolvedValue(transcript);
 

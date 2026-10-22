@@ -1,9 +1,10 @@
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 go_library(
     name = "bazeltest",
     srcs = [
         "bazeltest.go",
+        "datapath.go",
         "lock_other.go",
         "lock_unix.go",
     ],
@@ -21,4 +22,34 @@ filegroup(
         exclude = ["BUILD.bazel"],
     ),
     visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_srcs",
+    srcs = glob(
+        ["**/*.go"],
+        allow_empty = True,
+        exclude = ["**/*_test.go"],
+    ),
+    visibility = ["//visibility:public"],
+)
+
+filegroup(
+    name = "bazel_go_test_srcs",
+    srcs = glob(
+        ["**/*_test.go"],
+        allow_empty = True,
+    ),
+    visibility = ["//visibility:public"],
+)
+
+go_test(
+    name = "bazeltest_test",
+    srcs = [
+        "bazeltest_test.go",
+        "datapath_test.go",
+        "testenv_import_test.go",
+    ],
+    embed = [":bazeltest"],
+    deps = ["//internal/testenv"],
 )

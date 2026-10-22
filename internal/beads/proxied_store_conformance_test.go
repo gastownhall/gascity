@@ -93,3 +93,12 @@ func TestProxiedStoreSurvivesTheStrictLeafChecks(t *testing.T) {
 		t.Fatalf("DepList after remove = %#v (err %v), want none", deps, err)
 	}
 }
+
+// TestProxiedStoreGuardedBatchConformance runs the guarded-batch contract
+// through the split store: the batch resolves to the write leaf, and every
+// read-back goes through the read-only native leaf.
+func TestProxiedStoreGuardedBatchConformance(t *testing.T) {
+	beadstest.RunGuardedBatchConformance(t, "ProxiedStore", func(*testing.T) beads.Store {
+		return beads.NewProxiedStoreForGuardedBatchConformance(proxiedConformancePrefix)
+	})
+}

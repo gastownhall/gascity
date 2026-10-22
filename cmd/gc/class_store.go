@@ -114,8 +114,8 @@ func (cr *CityRuntime) graphBeadStore() beads.GraphStore {
 // configured session class store when [beads.classes.sessions] relocates
 // sessions, else the work store. The recorder is passed for signature parity
 // and is not what makes a write observable — the controller's emission comes
-// from the CachingStore around its work ledger, and a relocated class store has
-// no such layer on this side (class_store_emit.go covers the one-shot CLI's).
+// from the CachingStore around each store it serves, the relocated binding's
+// included (class_store_cache.go; class_store_emit.go covers the one-shot CLI's).
 // Byte-identical to cityBeadStore() at the default bd backend.
 // Returned as the strongly-typed beads.SessionStore so the session class stays
 // statically visible; the wrapper carries the same underlying store value.
@@ -267,17 +267,34 @@ func (s *beadPolicyGraphStore) graphApplierFor(_ coordclass.Class) beads.GraphAp
 //
 // cfg, cityPath and rec stay in the signature for the per-scope work routing
 // that resolves elsewhere; they are not read here. rec in particular does NOT
-// make a relocated write observable, for any class: a class store is a bare
-// bead engine with no emitting layer, and what a caller passes here changes
-// nothing about that. Emission is decided where the ROUTES are built, once —
-// the one-shot CLI funnel gives its stores an emit target
-// (storageRoutes.withCLIEmission), and the controller's boot does not, because
-// its own emitter already covers it. See class_store_emit.go.
+// make a relocated write observable, for any class: what a caller passes here
+// changes nothing about emission. Emission is decided on the ROUTES, once per
+// process — the one-shot CLI funnel gives its stores an emit target
+// (storageRoutes.withCLIEmission), and the controller puts its CachingStore
+// over the binding's engine (storageRoutes.withControllerCache), which emits
+// the way the work ledger's does. See class_store_emit.go and
+// class_store_cache.go.
+//
+// On a worker site cityPath is read: a class whose binding is not named as the
+// descriptor ledger binding that lists it resolves to a refused store, because
+// the box holds no copy of it that is the city's (DES-CN §4.4). The refusal is
+// standing, as the funnel's is (workerSiteStorageRefusal). Only the binding
+// name is compared (workerSiteClassRefusal).
 func resolveClassStore(routes *storageRoutes, workStore beads.Store, cfg *config.City, cityPath, class string, rec events.Recorder) beads.Store {
 	_ = cfg
-	_ = cityPath
 	_ = rec
-	if store, relocated := routes.storeFor(coordclassFor(class)); relocated {
+	store, relocated := routes.storeFor(coordclassFor(class))
+	// This agrees with the funnel's Classes.BindingFor only because the one
+	// served split shape, storageSplitWhole, relocates every class to the one
+	// routes.binding; a per-class shape must name the class's own binding here.
+	binding := config.StorageWorkBinding
+	if relocated {
+		binding = routes.binding
+	}
+	if refusal := workerSiteClassRefusal(cityPath, class, binding); refusal != nil {
+		return refusedClassStore{err: standingStorageRefusal{err: refusal}}
+	}
+	if relocated {
 		return store
 	}
 	return workStore
