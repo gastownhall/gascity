@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"maps"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -1320,5 +1322,261 @@ func TestSnapshotIdleSeparatesBusyFromIndeterminate(t *testing.T) {
 				t.Errorf("err = %v, want nil", err)
 			}
 		})
+	}
+}
+
+// launchEnvKeysRecord is the session user option a launch records its
+// env keys in. Spelled out: boxes already running carry it by this name.
+const launchEnvKeysRecord = "@gc_launch_env_keys"
+
+// sessionEnvExecutor is a fake tmux holding one session's environment and
+// user options, so a test can read back what a sequence of commands left
+// there. It answers set-environment (set, -u, -r), show-environment,
+// set-option and show-options -qv for the session, the agent-pane lookups
+// (fakeAgentPaneRow), and source-file by parsing the staged command file the
+// way tmux would. Every other command is recorded and answered with "".
+type sessionEnvExecutor struct {
+	calls   [][]string
+	env     map[string]string
+	removed map[string]bool
+	options map[string]string
+}
+
+func newSessionEnvExecutor(env, options map[string]string) *sessionEnvExecutor {
+	return &sessionEnvExecutor{env: env, removed: map[string]bool{}, options: options}
+}
+
+func (f *sessionEnvExecutor) execute(args []string) (string, error) {
+	f.calls = append(f.calls, slices.Clone(args))
+	return f.apply(args)
+}
+
+// apply runs one command; a sourced file's commands come here unrecorded,
+// since they never appear in any argv.
+func (f *sessionEnvExecutor) apply(args []string) (string, error) {
+	if row, ok := fakeAgentPaneRow(args); ok {
+		return row, nil
+	}
+	if i := slices.Index(args, "source-file"); i >= 0 && i+1 < len(args) {
+		data, err := os.ReadFile(args[i+1])
+		if err != nil {
+			return "", err
+		}
+		return f.apply(parseTmuxCommandLine(strings.TrimSuffix(string(data), "\n")))
+	}
+	sub := tmuxSubcommand(args)
+	rest := args[slices.Index(args, sub)+1:]
+	flags, operands := splitTmuxFlags(rest)
+	switch sub {
+	case "set-environment":
+		switch {
+		case flags["-u"]:
+			delete(f.env, operands[0])
+			delete(f.removed, operands[0])
+		case flags["-r"]:
+			delete(f.env, operands[0])
+			f.removed[operands[0]] = true
+		default:
+			f.env[operands[0]] = operands[1]
+			delete(f.removed, operands[0])
+		}
+	case "show-environment":
+		var b strings.Builder
+		for _, k := range slices.Sorted(maps.Keys(f.env)) {
+			b.WriteString(k + "=" + f.env[k] + "\n")
+		}
+		for _, k := range slices.Sorted(maps.Keys(f.removed)) {
+			b.WriteString("-" + k + "\n")
+		}
+		return b.String(), nil
+	case "set-option":
+		if len(operands) == 2 {
+			f.options[operands[0]] = operands[1]
+		}
+	case "show-options":
+		return f.options[operands[0]], nil
+	}
+	return "", nil
+}
+
+func (f *sessionEnvExecutor) executeCtx(_ context.Context, args []string) (string, error) {
+	return f.execute(args)
+}
+
+// splitTmuxFlags separates a tmux command's flags from its operands. Only
+// -t and -c take a value among the commands sessionEnvExecutor answers.
+func splitTmuxFlags(args []string) (map[string]bool, []string) {
+	flags := map[string]bool{}
+	var operands []string
+	for i := 0; i < len(args); i++ {
+		switch a := args[i]; {
+		case a == "-t" || a == "-c":
+			i++
+		case strings.HasPrefix(a, "-") && len(a) > 1 && len(operands) == 0:
+			for _, c := range a[1:] {
+				flags["-"+string(c)] = true
+			}
+		default:
+			operands = append(operands, a)
+		}
+	}
+	return flags, operands
+}
+
+// parseTmuxCommandLine reverses tmuxCommandLine: single-quoted runs, with an
+// embedded quote spliced in between them as a backslash-escaped quote.
+func parseTmuxCommandLine(line string) []string {
+	var args []string
+	var cur strings.Builder
+	inQuote, have := false, false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case inQuote && c == '\'':
+			inQuote = false
+		case inQuote:
+			cur.WriteByte(c)
+		case c == '\'':
+			inQuote, have = true, true
+		case c == '\\' && i+1 < len(line):
+			i++
+			cur.WriteByte(line[i])
+			have = true
+		case c == ' ':
+			if have {
+				args = append(args, cur.String())
+				cur.Reset()
+				have = false
+			}
+		default:
+			cur.WriteByte(c)
+			have = true
+		}
+	}
+	if have {
+		args = append(args, cur.String())
+	}
+	return args
+}
+
+// A relaunch respawns the agent into the warm box's SESSION environment
+// (respawn-pane takes no env), so respawnAgent must bring that environment to
+// what the relaunch config would give a fresh start before the respawn: a
+// changed value set, a new key added, a key the last launch set that the
+// config dropped or now pins empty unset (and the pinned one withheld from the
+// command). The incarnation's token and what was set on the session by other
+// means stay; no value reaches argv.
+func TestRespawnAgentAppliesLaunchEnvToSession(t *testing.T) {
+	exec := newSessionEnvExecutor(map[string]string{
+		"CUSTOM_CHANGED":         "v1",
+		"CUSTOM_DROPPED":         "gone-soon",
+		"CUSTOM_WITHHELD":        "visible",
+		runtime.InstanceTokenEnv: "tok-incarnation",
+		"BEADS_HOLDER_TOKEN":     "tok-incarnation",
+		"GC_DRAIN":               "meta-set-later",
+	}, map[string]string{
+		launchEnvKeysRecord: "BEADS_HOLDER_TOKEN CUSTOM_CHANGED CUSTOM_DROPPED CUSTOM_WITHHELD GC_INSTANCE_TOKEN",
+	})
+	tm := NewTmux()
+	tm.exec = exec
+	ops := &tmuxStartOps{tm: tm}
+
+	err := ops.respawnAgent("gc-test-relaunch", "/w", "claude", map[string]string{
+		"CUSTOM_CHANGED":         "v2",
+		"CUSTOM_ADDED":           "new",
+		"CUSTOM_WITHHELD":        "",
+		runtime.InstanceTokenEnv: "tok-other",
+		"BEADS_HOLDER_TOKEN":     "tok-other",
+	})
+	if err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+
+	want := map[string]string{
+		"CUSTOM_CHANGED":         "v2",
+		"CUSTOM_ADDED":           "new",
+		runtime.InstanceTokenEnv: "tok-incarnation",
+		"BEADS_HOLDER_TOKEN":     "tok-incarnation",
+		"GC_DRAIN":               "meta-set-later",
+	}
+	if !maps.Equal(exec.env, want) {
+		t.Errorf("session env after respawnAgent = %v, want %v", exec.env, want)
+	}
+	if got, want := exec.options[launchEnvKeysRecord], "BEADS_HOLDER_TOKEN CUSTOM_ADDED CUSTOM_CHANGED GC_INSTANCE_TOKEN"; got != want {
+		t.Errorf("%s after respawnAgent = %q, want %q", launchEnvKeysRecord, got, want)
+	}
+
+	respawnAt := -1
+	for i, call := range exec.calls {
+		joined := strings.Join(call, " ")
+		for _, secret := range []string{"v2", "new", "tok-other"} {
+			if slices.Contains(call, secret) {
+				t.Errorf("tmux argv carries the value %q: %v", secret, call)
+			}
+		}
+		if tmuxSubcommand(call) == "respawn-pane" {
+			respawnAt = i
+			if !strings.Contains(joined, "env -u CUSTOM_WITHHELD claude") {
+				t.Errorf("respawn-pane command = %v, want the pinned-empty key withheld with env -u", call)
+			}
+		}
+	}
+	if respawnAt < 0 {
+		t.Fatalf("respawnAgent never ran respawn-pane: %v", exec.calls)
+	}
+	for _, call := range exec.calls[respawnAt:] {
+		if s := tmuxSubcommand(call); s == "set-environment" || s == "source-file" {
+			t.Errorf("session env changed after respawn-pane (%v): the respawned agent would start on the old values", call)
+		}
+	}
+}
+
+// A relaunch with the env the box already holds rewrites nothing.
+func TestRespawnAgentLeavesUnchangedLaunchEnvAlone(t *testing.T) {
+	exec := newSessionEnvExecutor(map[string]string{"CUSTOM_SAME": "v1"}, map[string]string{launchEnvKeysRecord: "CUSTOM_SAME"})
+	tm := NewTmux()
+	tm.exec = exec
+
+	if err := (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-relaunch", "/w", "claude", map[string]string{"CUSTOM_SAME": "v1"}); err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+	for _, call := range exec.calls {
+		if s := tmuxSubcommand(call); s == "set-environment" || s == "source-file" {
+			t.Errorf("respawnAgent wrote the session env with nothing changed: %v", call)
+		}
+	}
+}
+
+// A box with no record of its launch keys (one created before the record)
+// still gets its changed values, and keeps every key it holds: without the
+// record, a key the config dropped cannot be told from one set by other means.
+func TestRespawnAgentWithoutLaunchKeyRecordUnsetsNothing(t *testing.T) {
+	exec := newSessionEnvExecutor(map[string]string{"CUSTOM_CHANGED": "v1", "CUSTOM_DROPPED": "x"}, map[string]string{})
+	tm := NewTmux()
+	tm.exec = exec
+
+	if err := (&tmuxStartOps{tm: tm}).respawnAgent("gc-test-relaunch", "/w", "claude", map[string]string{"CUSTOM_CHANGED": "v2"}); err != nil {
+		t.Fatalf("respawnAgent: %v", err)
+	}
+	if want := map[string]string{"CUSTOM_CHANGED": "v2", "CUSTOM_DROPPED": "x"}; !maps.Equal(exec.env, want) {
+		t.Errorf("session env after respawnAgent = %v, want %v", exec.env, want)
+	}
+	if got := exec.options[launchEnvKeysRecord]; got != "CUSTOM_CHANGED" {
+		t.Errorf("%s after respawnAgent = %q, want %q (recorded from now on)", launchEnvKeysRecord, got, "CUSTOM_CHANGED")
+	}
+}
+
+// The create path records which keys it set, for the first relaunch.
+func TestNewSessionWithCommandAndEnvRecordsLaunchEnvKeys(t *testing.T) {
+	exec := newSessionEnvExecutor(map[string]string{}, map[string]string{})
+	tm := NewTmux()
+	tm.exec = exec
+
+	env := map[string]string{"CUSTOM_B": "b", "CUSTOM_A": "a", "CLAUDECODE": ""}
+	if err := tm.NewSessionWithCommandAndEnv("gc-test-record", "", "claude", env); err != nil {
+		t.Fatalf("NewSessionWithCommandAndEnv: %v", err)
+	}
+	if got, want := exec.options[launchEnvKeysRecord], "CUSTOM_A CUSTOM_B"; got != want {
+		t.Errorf("%s after create = %q, want %q", launchEnvKeysRecord, got, want)
 	}
 }
