@@ -255,6 +255,13 @@ type ResolvedProvider struct {
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
+	// ACPOmittedArgs holds the raw args and args_append tokens declared by
+	// provider layers more specific than the most specific layer that sets
+	// acp_args. The ACP launch takes its args from ACPArgs alone, so these
+	// tokens reach only the CLI launch; a non-empty value makes the CLI
+	// transport the provider default (ProviderSessionCreateTransport). Nil
+	// when ACPArgs is nil, because the ACP launch then uses Args.
+	ACPOmittedArgs []string
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
 	// Used by ResolveDefaultArgs() to produce CLI flags and by the API to
@@ -329,6 +336,11 @@ func (rp *ResolvedProvider) DefaultSessionTransport() string {
 // provider-backed session without any template-level session override.
 func (rp *ResolvedProvider) ProviderSessionCreateTransport() string {
 	if rp == nil || !rp.SupportsACP {
+		return ""
+	}
+	if len(rp.ACPOmittedArgs) > 0 {
+		// The ACP launch would drop args a more specific layer declared;
+		// the CLI launch keeps them.
 		return ""
 	}
 	if transport := rp.DefaultSessionTransport(); transport != "" {
