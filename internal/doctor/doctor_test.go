@@ -75,6 +75,7 @@ func TestCheckWarmupEligibleDefaultsFalse(t *testing.T) {
 		&DoltLogSizeCheck{},
 		&DoltNomsSizeCheck{},
 		&DoltServerCheck{},
+		&DoltUnboundDatabasesCheck{},
 		&DoltVersionCheck{},
 		&DurationRangeCheck{},
 		&EventLogSizeCheck{},
