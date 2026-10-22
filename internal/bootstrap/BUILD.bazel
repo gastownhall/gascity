@@ -24,6 +24,7 @@ go_test(
         "core_formula_report_test.go",
         "home_fallback_test.go",
         "pack_formula_graphv2_test.go",
+        "pool_worker_slot_guidance_test.go",
         "testenv_import_test.go",
     ],
     data = [

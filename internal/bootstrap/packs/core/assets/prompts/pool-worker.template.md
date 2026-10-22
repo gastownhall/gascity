@@ -13,6 +13,23 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## Your Working Directory
+
+Your session may run in a per-instance slot worktree — a git worktree
+minted for this slot (its own branch off the rig root) that is reused by
+this slot's later sessions, so it can hold work from an earlier run.
+Orient yourself before you start:
+
+```bash
+git status
+git log --oneline -5
+```
+
+Uncommitted files, a half-finished branch, or leftover edits from an
+earlier session in this slot are real work someone left behind.
+Whatever its state, never discard work you did not create — build on
+it, or leave it and mention what you found when you close your bead.
+
 ## Following Your Formula
 
 Your formula defines your work as a sequence of steps. Steps are NOT

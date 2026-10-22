@@ -1,15 +1,18 @@
 description = """
 Simple work formula — read the bead, do what it says, close it.
 
-This is the minimal work lifecycle for coding agents. No git branching,
-no worktree isolation, no refinery handoff. The agent reads the bead's
-description, implements the solution in the current working directory,
-and closes the bead when done.
+This is the minimal work lifecycle for coding agents, with no refinery
+handoff. The agent reads the bead's description, implements the solution
+in the current working directory, and closes the bead when done. When
+the worker runs in a per-instance slot worktree — the default for
+implicit pool agents — its commits land on the slot branch, not on the
+rig root's branch, and its checkout may hold work from an earlier
+session in that slot.
 
 Use this for demos and simple single-agent workflows. For production
-multi-agent setups with worktree isolation, use mol-polecat-commit
-instead (or mol-polecat-work from the gastown pack for full refinery
-review).
+multi-agent setups needing per-bead worktrees and review, use
+mol-polecat-commit instead (or mol-polecat-work from the gastown pack
+for full refinery review).
 
 ## Variables
 
