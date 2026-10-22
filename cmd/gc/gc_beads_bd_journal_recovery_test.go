@@ -39,6 +39,9 @@ import (
 //     fails, runs out of time or is killed, the store is still in the data
 //     dir and the function fails so the server cannot start silently missing
 //     a database;
+//   - a refusal prints the steps that recover that database alone: the data
+//     dir is shared, so they name every sibling database to leave in place
+//     and never act on the data dir itself (#1979);
 //   - a restore is recorded in the dolt log, which outlives the stderr the
 //     provider's caller discards on success, and the restored copy has the
 //     backup it came from registered again.
@@ -97,6 +100,7 @@ func journalRecoveryScript(t *testing.T, maskJQ bool, entry string) string {
 		"restore_backup_within",
 		"restore_swap_refusal",
 		"finish_interrupted_journal_recovery",
+		"print_manual_journal_recovery_steps",
 		"attempt_journal_corruption_recovery",
 	} {
 		harness.WriteString(extractShellFunction(t, script, fn))
@@ -308,6 +312,7 @@ func (e journalRecoveryEnv) command(harness string, extraEnv ...string) *exec.Cm
 		"LOG_FILE="+e.logFile,
 		"FAKE_BACKUP_ADD_CALLS="+e.backupAddLog,
 		"GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS=",
+		"GC_JSONL_ARCHIVE_REPO=",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
 	return cmd
@@ -1325,6 +1330,135 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestJournalRecoveryFailsClosedNamesTheSiblingsToLeaveInPlace pins the
+// steps a refusal prints after the manual restore command (#1979): the data
+// dir is shared, so they recover prod alone, name every sibling to leave in
+// place, never act on the data dir itself, and reach the dolt log as well as
+// stderr.
+func TestJournalRecoveryFailsClosedNamesTheSiblingsToLeaveInPlace(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	tests := []struct {
+		name      string
+		repoState func(env journalRecoveryEnv) string
+		// url is what the steps restore from: the URL the manual restore
+		// command names.
+		url string
+	}{
+		{
+			name:      "no backup remote recorded",
+			repoState: func(journalRecoveryEnv) string { return `{"head":"refs/heads/main"}` },
+			url:       "<url>",
+		},
+		{
+			name:      "backup remote dir empty",
+			repoState: func(env journalRecoveryEnv) string { return prodRepoState(env.backupDir) },
+			url:       "<url>",
+		},
+		{
+			name: "non-file backup remote",
+			repoState: func(journalRecoveryEnv) string {
+				return `{"backups":{"prod-backup":{"url":"aws://bucket/prod"}}}`
+			},
+			url: "aws://bucket/prod",
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupJournalRecoveryEnv(t)
+			env.addDatabase(t, "prod", true, tc.repoState(env))
+			env.addDatabase(t, "pa", false, "")
+			env.addDatabase(t, "beads", false, repoStateWithBackups(map[string]string{
+				"default": seedBackupDir(t, filepath.Join(env.cityDir, "backups", "beads")),
+			}))
+
+			out, err := env.run(t, journalRecoveryHarness(t, false))
+			if err == nil {
+				t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
+			}
+			if !strings.Contains(out, "NOT auto-recovering 'prod'") {
+				t.Fatalf("output missing loud refusal:\n%s", out)
+			}
+			if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "original-marker")); statErr != nil {
+				t.Fatalf("prod store must stay in place when not recoverable: %v", statErr)
+			}
+			assertManualRecoverySteps(t, env, "prod", tc.url, []string{"pa", "beads"}, out)
+			assertManualRecoverySteps(t, env, "prod", tc.url, []string{"pa", "beads"}, readOptional(t, env.logFile))
+		})
+	}
+}
+
+// assertManualRecoverySteps checks the per-database steps printed for db
+// after recovery failed closed: the restore commands for db alone, from url,
+// the JSONL fallback path, the siblings to leave in place, and no command
+// whose operand is the data-dir root itself.
+func assertManualRecoverySteps(t *testing.T, env journalRecoveryEnv, db, url string, siblings []string, text string) {
+	t.Helper()
+	for _, want := range []string{
+		"mv \"" + filepath.Join(env.dataDir, db) + "\" \"" + filepath.Join(env.stateDir, "corrupt-aside", db) + ".",
+		"(cd \"" + env.dataDir + "\" && dolt backup restore '" + url + "' " + db + ")",
+		"gc stop",
+		"gc start",
+		filepath.Join("jsonl-archive", db, "issues.jsonl"),
+		"has no JSONL archive",
+		"do not move, delete or re-create " + env.dataDir + " itself",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("manual recovery steps missing %q:\n%s", want, text)
+		}
+	}
+	var leave string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "leave these databases in place:") {
+			leave = line
+		}
+	}
+	for _, sibling := range siblings {
+		if !strings.Contains(leave+" ", " "+sibling+" ") {
+			t.Errorf("sibling %q not named as a database to leave in place: %q", sibling, leave)
+		}
+	}
+	if strings.Contains(leave+" ", " "+db+" ") {
+		t.Errorf("leave-in-place list names the database being recovered: %q", leave)
+	}
+	rootOperand := regexp.MustCompile(`\b(mv|rm|cp|clone|mkdir|rmdir)\b[^\n]*"?` + regexp.QuoteMeta(env.dataDir) + `"?(\s|$)`)
+	if m := rootOperand.FindString(text); m != "" {
+		t.Errorf("manual recovery steps act on the data dir root: %q\n%s", m, text)
+	}
+}
+
+// With two corrupt databases the first is restored; the second, with no
+// backup, fails the recovery and the guidance is about the second alone.
+func TestJournalRecoveryStopsAtFirstUnrecoverableDatabase(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	alphaURL := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "alpha"))
+	env.addDatabase(t, "alpha", true, repoStateWithBackups(map[string]string{"default": alphaURL}))
+	env.addDatabase(t, "prod", true, `{"head":"refs/heads/main"}`)
+
+	restoreCalls := filepath.Join(env.cityDir, "restore-calls.log")
+	out, err := env.run(t, journalRecoveryHarness(t, false), "FAKE_RESTORE_CALLS="+restoreCalls)
+	if err == nil {
+		t.Fatalf("recovery must fail when a corrupt database has no backup\n%s", out)
+	}
+	if got := strings.TrimSpace(readOptional(t, restoreCalls)); got != alphaURL {
+		t.Fatalf("restore calls = %q, want exactly one restore, of alpha from %s\n%s", got, alphaURL, out)
+	}
+	if _, statErr := os.Stat(filepath.Join(env.dataDir, "alpha", "restored-marker")); statErr != nil {
+		t.Fatalf("alpha was not restored: %v\n%s", statErr, out)
+	}
+	if !strings.Contains(out, "NOT auto-recovering 'prod'") {
+		t.Fatalf("output missing refusal for prod:\n%s", out)
+	}
+	if strings.Contains(out, "NOT auto-recovering 'alpha'") {
+		t.Fatalf("alpha was restored; refusal must name prod only:\n%s", out)
+	}
+	assertManualRecoverySteps(t, env, "prod", "<url>", []string{"alpha"}, out)
 }
 
 // TestJournalRecoveryKeepsRestoreWhenBackupReRegistrationFails pins that a

@@ -3260,6 +3260,35 @@ finish_interrupted_journal_recovery() {
     return "$missing"
 }
 
+# print_manual_journal_recovery_steps tells the operator how to recover
+# database $1 alone after start-time recovery failed closed: $2 is the
+# recovery timestamp for the aside name and $3 the URL to restore from, the
+# one the manual restore command names. The data dir is shared by every
+# database the managed server hosts, so the steps never act on $DATA_DIR
+# itself and name each sibling database to leave in place.
+print_manual_journal_recovery_steps() {
+    local manual_db="$1" manual_ts="$2" manual_url="$3" manual_dir manual_name manual_siblings="" manual_archive
+    for manual_dir in "$DATA_DIR"/*/; do
+        [ -d "$manual_dir/.dolt" ] || continue
+        manual_name=$(basename "$manual_dir")
+        [ "$manual_name" = "$manual_db" ] && continue
+        manual_siblings="$manual_siblings $manual_name"
+    done
+    manual_archive="${GC_JSONL_ARCHIVE_REPO:-${PACK_STATE_DIR%/*}/core/jsonl-archive}"
+    if [ -n "$manual_siblings" ]; then
+        journal_recovery_note "$DATA_DIR is shared; leave these databases in place:$manual_siblings"
+    fi
+    journal_recovery_note "do not move, delete or re-create $DATA_DIR itself"
+    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db':"
+    journal_recovery_note "  gc stop"
+    journal_recovery_note "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
+    journal_recovery_note "  mv \"$DATA_DIR/$manual_db\" \"$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts\""
+    journal_recovery_note "  (cd \"$DATA_DIR\" && dolt backup restore '$manual_url' $manual_db)"
+    journal_recovery_note "  gc start"
+    journal_recovery_note "with no backup, the last JSONL export of '$manual_db' is $manual_archive/$manual_db/issues.jsonl; see the dolt pack's docs/journal-corruption-recovery.md"
+    journal_recovery_note "a database that is not a bead store has no JSONL archive; restore it from a backup only"
+}
+
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load and restores each from its registered
 # local backup (#3176): bd's canonical `default` backup when present, else
@@ -3280,11 +3309,12 @@ finish_interrupted_journal_recovery() {
 # existing path, which mv would move the source into.
 # Fail-closed: when the selected backup is unusable or the restore does not
 # succeed, the function returns 1 so the server cannot come up silently
-# missing a database. Returns 0 only when at least one database was
-# restored and none were left unrecoverable. Every step is reported through
-# journal_recovery_note, so it reaches $LOG_FILE as well as stderr: restored
-# copies are missing all writes since the last backup sync, and operators
-# must know that.
+# missing a database, and a refusal prints the steps that recover that
+# database alone (print_manual_journal_recovery_steps). Returns 0 only when
+# at least one database was restored and none were left unrecoverable. Every
+# step is reported through journal_recovery_note, so it reaches $LOG_FILE as
+# well as stderr: restored copies are missing all writes since the last
+# backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
     local aside_root="${PACK_STATE_DIR:?}/corrupt-aside" staging="${PACK_STATE_DIR:?}/restore-staging" ready="${PACK_STATE_DIR:?}/restore-ready"
     local ts db_dir db aside sel backup_name url refusal manual_url manual_hint limit began recovered=0
@@ -3330,6 +3360,7 @@ attempt_journal_corruption_recovery() {
             journal_recovery_note "NOT auto-recovering '$db': $refusal"
             journal_recovery_note "candidate backups checked: default, ${db}-backup; registered backups: $(backup_registry_summary "$db_dir")"
             journal_recovery_note "manual recovery required: move $DATA_DIR/$db aside, then run \"dolt backup restore '$manual_url' $db\" from $DATA_DIR$manual_hint"
+            print_manual_journal_recovery_steps "$db" "$ts" "$manual_url"
             return 1
         fi
         if [ "$limit" -gt 0 ]; then
