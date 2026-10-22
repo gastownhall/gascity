@@ -282,6 +282,156 @@ func TestPoolIdleRoutedWorkCheckOKWhenRoutedWorkIsBlockedInBackingStore(t *testi
 	}
 }
 
+func poolIdleWorkRoutedBeadID(id string) beads.Bead {
+	b := poolIdleWorkRoutedBead("gascity/builder", "")
+	b.ID = id
+	return b
+}
+
+func poolIdleWorkBlocker(id, status, workOutcome string) beads.Bead {
+	b := beads.Bead{ID: id, Title: "blocker", Type: "task", Status: status}
+	if workOutcome != "" {
+		b.Metadata = map[string]string{"gc.work_outcome": workOutcome}
+	}
+	return b
+}
+
+// bd leaves a row whose blocking dependency is unclosed at status=open (only an
+// explicit blocked status is dropped by --status=open), so a routed row waiting
+// on an open blocker is listed beside genuinely ready work. The check must name
+// only the ready row: no idle instance can claim the blocked one.
+func TestPoolIdleRoutedWorkCheckIgnoresDependencyBlockedRoutedWork(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		poolIdleWorkRoutedBeadID("GA-1"),
+		poolIdleWorkRoutedBeadID("GA-2"),
+		poolIdleWorkBlocker("GA-3", "open", ""),
+	}, []beads.Dep{{IssueID: "GA-2", DependsOnID: "GA-3", Type: "blocks"}})
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning for the ready routed row: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	if !strings.Contains(details, "GA-1") {
+		t.Fatalf("details missing ready routed bead GA-1:\n%s", details)
+	}
+	if strings.Contains(details, "GA-2") {
+		t.Fatalf("details name dependency-blocked bead GA-2, which no idle instance can claim:\n%s", details)
+	}
+	if !strings.Contains(details, "1 unclaimed routed bead(s)") {
+		t.Fatalf("details should count only the ready bead:\n%s", details)
+	}
+}
+
+func TestPoolIdleRoutedWorkCheckOKWhenAllRoutedWorkIsDependencyBlocked(t *testing.T) {
+	for _, depType := range []string{"blocks", "waits-for", "conditional-blocks"} {
+		t.Run(depType, func(t *testing.T) {
+			cityDir := t.TempDir()
+			cfg := &config.City{
+				Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+			}
+			store := beads.NewMemStoreFrom(0, []beads.Bead{
+				poolIdleWorkSessionBead("gascity/builder", "active", ""),
+				poolIdleWorkRoutedBeadID("GA-2"),
+				poolIdleWorkBlocker("GA-3", "in_progress", ""),
+			}, []beads.Dep{{IssueID: "GA-2", DependsOnID: "GA-3", Type: depType}})
+
+			result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+				return store, nil
+			}).Run(&doctor.CheckContext{})
+
+			if result.Status != doctor.StatusOK {
+				t.Fatalf("status = %v, want ok (the only routed row waits on an unclosed %s dependency): %#v", result.Status, depType, result)
+			}
+		})
+	}
+}
+
+func TestPoolIdleRoutedWorkCheckCountsRowsWhoseBlockersAreSatisfied(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	store := beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		poolIdleWorkRoutedBeadID("GA-1"), // closed blocker: claimable
+		poolIdleWorkRoutedBeadID("GA-2"), // closed with gc.work_outcome=blocked: still blocked
+		poolIdleWorkRoutedBeadID("GA-4"), // non-blocking edge: claimable
+		poolIdleWorkBlocker("GA-3", "closed", ""),
+		poolIdleWorkBlocker("GA-5", "closed", "blocked"),
+		poolIdleWorkBlocker("GA-6", "open", ""),
+	}, []beads.Dep{
+		{IssueID: "GA-1", DependsOnID: "GA-3", Type: "blocks"},
+		{IssueID: "GA-2", DependsOnID: "GA-5", Type: "blocks"},
+		{IssueID: "GA-4", DependsOnID: "GA-6", Type: "relates-to"},
+	})
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning: %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{"GA-1", "GA-4", "2 unclaimed routed bead(s)"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+	if strings.Contains(details, "GA-2") {
+		t.Fatalf("details name GA-2, whose only blocker closed with gc.work_outcome=blocked:\n%s", details)
+	}
+}
+
+// poolIdleRoutedWorkDepFailStore fails the dependency read, so the check cannot
+// tell whether a routed row is blocked.
+type poolIdleRoutedWorkDepFailStore struct {
+	beads.Store
+}
+
+func (poolIdleRoutedWorkDepFailStore) DepList(string, string) ([]beads.Dep, error) {
+	return nil, errors.New("dep read boom")
+}
+
+// A dependency read that fails must surface as a skipped scope. Counting the row
+// as claimable would report work nobody can claim; dropping it would hide work.
+func TestPoolIdleRoutedWorkCheckSurfacesDependencyReadFailure(t *testing.T) {
+	cityDir := t.TempDir()
+	cfg := &config.City{
+		Agents: []config.Agent{{Name: "builder", Dir: "gascity"}},
+	}
+	store := poolIdleRoutedWorkDepFailStore{Store: beads.NewMemStoreFrom(0, []beads.Bead{
+		poolIdleWorkSessionBead("gascity/builder", "active", ""),
+		poolIdleWorkRoutedBeadID("GA-1"),
+	}, nil)}
+
+	result := newPoolIdleRoutedWorkCheck(cfg, cityDir, func(_ string) (beads.Store, error) {
+		return store, nil
+	}).Run(&doctor.CheckContext{})
+
+	if result.Status != doctor.StatusWarning {
+		t.Fatalf("status = %v, want warning (skipped scope): %#v", result.Status, result)
+	}
+	details := strings.Join(result.Details, "\n")
+	for _, want := range []string{"GA-1", "dep read boom"} {
+		if !strings.Contains(details, want) {
+			t.Fatalf("details missing %q:\n%s", want, details)
+		}
+	}
+	if strings.Contains(result.Message, "have unclaimed routed work") {
+		t.Fatalf("message reports a finding for a row whose blockers could not be read: %q", result.Message)
+	}
+}
+
 // poolIdleRoutedWorkTierStore serves routed work that lives on the wisp tier: it
 // answers the routed-work query only when the caller asks for both tiers, the
 // way a relocated coordination-class store does (see beads.FederatedReadTier).
