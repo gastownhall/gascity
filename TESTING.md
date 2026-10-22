@@ -200,6 +200,44 @@ GC_* env-read inventory and in `internal/testenv.LeakVectorVars`, so a shell
 value never reaches a test's gc child; a test sets it on the child it means
 to kill.
 
+### Op recording failpoints
+
+`GC_OPS_FAILPOINT=<surface>:<point>[:<kind>][:<n>]` acts at one crash point of
+one recorded legacy execution (`legacyop.CrashPoint`), so the X12 kill matrix
+can show what a crash there leaves behind and how a same-key retry, the op
+sweeper or a rerun settles it. Only `//test/conversationlane` uses it.
+
+- `surface` is `api`, the controller's or supervisor's API, or `cli`, a CLI
+  verb's recorder. A gc that records for the other surface never fires.
+- `point` is `k1` (the op row is durable and nothing has run: kill), `k2`
+  (`api` only: the 202 is answered and the delivery has not started: the
+  request parks, and the test kills the process holding the 202), `k3` (the
+  effect ran and nothing about the op is written: kill), `k4` (the close
+  landed and nothing is answered: kill) or `k5` (`api` only: every close of
+  one op fails, foreground and background, so the client holds its answer
+  while the op stays open).
+- `kind`, optional, counts only ops of that kind (`message`, `kill`, ...).
+- `n`, optional and last, fires on the n-th op of that surface (and kind) to
+  reach the point in the process; it defaults to 1. For `k5` it is the n-th
+  distinct op to reach a close attempt.
+
+It is gated, announced and scrubbed like `GC_LANE_FAILPOINT`: only the
+`//cmd/gc:gc_testhooks` link honors it, an armed value prints one
+`gc: WARNING: GC_OPS_FAILPOINT=...: TEST HOOK ACTIVE: ...` line when the
+process first builds a recorder, `k2` and `k5` print one more line naming the
+op they parked or fault, and the variable is in the GC_* env-read inventory
+and in `internal/testenv.LeakVectorVars`.
+
+The X12 tests in `//test/conversationlane` run a gating subset (SQLite, no
+15-minute waits) in `conversationlane_test`. The full matrix at production
+timing, with the fault-free load and the incapable-store arm, runs in two
+manual evidence variants, one per backend, which write
+`x12-report-<backend>.{json,md}` to the test's undeclared outputs:
+
+```bash
+bazel test --config=ci --config=integration //test/conversationlane:x12_evidence --test_output=streamed
+```
+
 ### Git auto-maintenance in test repos
 
 Git 2.55 starts `git maintenance run --auto` detached, in the background, after
