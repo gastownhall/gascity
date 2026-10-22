@@ -47,6 +47,8 @@ func journalRecoveryHarness(t *testing.T) string {
 		"backup_url_names_database",
 		"select_recovery_backup",
 		"recovery_notice",
+		"jsonl_archive_dir",
+		"print_manual_journal_recovery_steps",
 		"attempt_journal_corruption_recovery",
 	} {
 		harness.WriteString(extractShellFunction(t, script, fn))
@@ -569,6 +571,64 @@ func TestJournalRecoveryPrefersBdDefaultBackup(t *testing.T) {
 			t.Fatalf("restored from %q, want the legacy backup URL %q", got, "file://"+legacyDir)
 		}
 	})
+}
+
+// TestJournalRecoveryFailClosedNamesPerDatabaseRecoverySteps pins AC-4: the
+// fail-closed notice must be a per-database procedure. It names every backup
+// candidate checked, the commands to restore the one corrupt database alone,
+// the JSONL archive fallback for that database, and the sibling databases to
+// leave in place — and no instruction that moves, deletes or re-creates the
+// shared data dir itself (#1979).
+func TestJournalRecoveryFailClosedNamesPerDatabaseRecoverySteps(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	jsonlArchive := filepath.Join(env.cityDir, "jsonl-archive")
+	env.addDatabase(t, "prod", true, repoStateWithBackups(map[string]string{
+		"default": "aws://bucket/prod",
+	}))
+	env.addDatabase(t, "pa", false, "")
+	env.addDatabase(t, "beads", false, "")
+
+	out, err := env.run(t, journalRecoveryHarness(t), "GC_JSONL_ARCHIVE_REPO="+jsonlArchive)
+	if err == nil {
+		t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "original-marker")); statErr != nil {
+		t.Fatalf("prod store must stay in place when not recoverable: %v", statErr)
+	}
+
+	logBytes, readErr := os.ReadFile(env.logFile)
+	if readErr != nil {
+		t.Fatalf("read managed log: %v", readErr)
+	}
+	for name, want := range map[string]string{
+		"output":   out,
+		"log file": string(logBytes),
+	} {
+		for _, probe := range []struct {
+			label string
+			want  string
+		}{
+			{"refusal", "NOT auto-recovering 'prod'"},
+			{"candidates checked", "default=aws://bucket/prod"},
+			{"shared data dir", "is shared"},
+			{"per-database move", "mv '" + filepath.Join(env.dataDir, "prod") + "'"},
+			{"per-database restore", "dolt backup restore <backup-url> 'prod'"},
+			{"jsonl fallback", filepath.Join(jsonlArchive, "prod", "issues.jsonl")},
+			{"sibling pa left in place", "pa"},
+			{"sibling beads left in place", "beads"},
+			{"data-dir protection", "do not move, delete or re-create '" + env.dataDir + "'"},
+		} {
+			if !strings.Contains(want, probe.want) {
+				t.Errorf("%s missing %s (%q):\n%s", name, probe.label, probe.want, want)
+			}
+		}
+		if strings.Contains(want, "mv '"+env.dataDir+"'") {
+			t.Errorf("%s instructs moving the data dir itself:\n%s", name, want)
+		}
+	}
 }
 
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {

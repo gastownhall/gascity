@@ -3062,6 +3062,45 @@ recovery_notice() {
     fi
 }
 
+# jsonl_archive_dir prints the root of the passive JSONL archive repos written
+# by the core jsonl-export order: the GC_JSONL_ARCHIVE_REPO override, else
+# the core pack's jsonl-archive directory next to this pack's state
+# directory.
+jsonl_archive_dir() {
+    if [ -n "${GC_JSONL_ARCHIVE_REPO:-}" ]; then
+        printf '%s\n' "$GC_JSONL_ARCHIVE_REPO"
+        return 0
+    fi
+    printf '%s\n' "${PACK_STATE_DIR%/packs/dolt}/packs/core/jsonl-archive"
+}
+
+# print_manual_journal_recovery_steps prints the per-database manual recovery
+# procedure for <db> after fail-closed auto-recovery. The data dir is shared
+# by every database in the city, so every instruction below touches <db>
+# alone and explicitly leaves the data dir itself — and every sibling
+# database under it — in place (#1979: whole-data-dir recovery is what loses
+# the databases no scope is bound to).
+print_manual_journal_recovery_steps() {
+    local manual_db="$1"
+    local manual_ts manual_dir manual_name siblings=""
+    manual_ts=$(date -u +%Y%m%dT%H%M%SZ 2>/dev/null || date +%s)
+    for manual_dir in "$DATA_DIR"/*/; do
+        [ -d "$manual_dir/.dolt" ] || continue
+        manual_name=$(basename "$manual_dir")
+        [ "$manual_name" = "$manual_db" ] && continue
+        siblings="$siblings $manual_name"
+    done
+    recovery_notice "manual recovery required for '$manual_db' — the data dir $DATA_DIR is shared with other databases; recovery is per-database"
+    recovery_notice "backup candidates checked for '$manual_db': ${RECOVERY_BACKUP_CANDIDATES:-none}"
+    recovery_notice "to restore '$manual_db' alone: gc stop; mv '$DATA_DIR/$manual_db' '$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts'; (cd '$DATA_DIR' && dolt backup restore <backup-url> '$manual_db'); gc start"
+    recovery_notice "no usable backup: if '$manual_db' is a bead scope its JSONL archive fallback is '$(jsonl_archive_dir)/$manual_db/issues.jsonl' (passive, 15m cooldown — see examples/bd/dolt/docs/journal-corruption-recovery.md); a non-bead database has no JSONL archive — restore it from its own backup"
+    if [ -n "$siblings" ]; then
+        recovery_notice "leave the sibling databases in place:$siblings — and do not move, delete or re-create '$DATA_DIR' itself"
+    else
+        recovery_notice "do not move, delete or re-create '$DATA_DIR' itself"
+    fi
+}
+
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load, preserves each corrupt store under
 # $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores the database
@@ -3086,6 +3125,7 @@ attempt_journal_corruption_recovery() {
         recovery_notice "journal corruption confirmed in database '$db'"
         if ! select_recovery_backup "$db" "$db_dir"; then
             recovery_notice "NOT auto-recovering '$db': no usable local backup"
+            print_manual_journal_recovery_steps "$db"
             return 1
         fi
         mkdir -p "$aside_root" || return 1
