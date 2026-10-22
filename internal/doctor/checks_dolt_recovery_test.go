@@ -260,3 +260,49 @@ func TestManagedDoltRecoveryChecks_SkipWithoutNamingAnyDatabase(t *testing.T) {
 		})
 	}
 }
+
+// TestDoltCorruptAsideCheck_WarnsNamingPreservedStore pins AC-8 (#1979):
+// while corrupt-aside/prod.20261022T010203Z/ exists, the check warns,
+// naming the database, the timestamp and the aside path.
+func TestDoltCorruptAsideCheck_WarnsNamingPreservedStore(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	aside := filepath.Join(dir, ".gc", "runtime", "packs", "dolt", "corrupt-aside", "prod.20261022T010203Z")
+	if err := os.MkdirAll(aside, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	r := NewDoltCorruptAsideCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "prod") {
+		t.Errorf("message = %q, want it to name the database prod", r.Message)
+	}
+	if !strings.Contains(r.Message, "20261022T010203Z") {
+		t.Errorf("message = %q, want it to name the timestamp 20261022T010203Z", r.Message)
+	}
+	if !strings.Contains(r.Message, aside) {
+		t.Errorf("message = %q, want it to name the aside path %s", r.Message, aside)
+	}
+}
+
+// TestDoltCorruptAsideCheck_OKWhenEmptyOrAbsent pins AC-8's OK half: an
+// empty or absent corrupt-aside dir reads as OK.
+func TestDoltCorruptAsideCheck_OKWhenEmptyOrAbsent(t *testing.T) {
+	t.Run("empty", func(t *testing.T) {
+		dir := setupManagedDoltCity(t)
+		if err := os.MkdirAll(filepath.Join(dir, ".gc", "runtime", "packs", "dolt", "corrupt-aside"), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		r := NewDoltCorruptAsideCheck(dir, false).Run(&CheckContext{})
+		if r.Status != StatusOK {
+			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+		}
+	})
+	t.Run("absent", func(t *testing.T) {
+		dir := setupManagedDoltCity(t)
+		r := NewDoltCorruptAsideCheck(dir, false).Run(&CheckContext{})
+		if r.Status != StatusOK {
+			t.Fatalf("status = %d, want OK; msg = %s", r.Status, r.Message)
+		}
+	})
+}

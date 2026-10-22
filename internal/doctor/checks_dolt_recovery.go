@@ -271,8 +271,21 @@ func (c *DoltCorruptAsideCheck) Run(_ *CheckContext) *CheckResult {
 		r.Message = "no corrupt-aside stores preserved"
 		return r
 	}
+	asideDir := filepath.Join(doctorDoltPackStateDir(c.cityPath), "corrupt-aside")
+	named := make([]string, 0, len(entries))
+	for _, entry := range entries {
+		// Start-time recovery preserves stores as <db>.<ts>; database names
+		// cannot contain a dot, so the first one splits db from timestamp.
+		db, ts, hasTS := strings.Cut(entry.Name(), ".")
+		path := filepath.Join(asideDir, entry.Name())
+		if !hasTS || db == "" || ts == "" {
+			named = append(named, fmt.Sprintf("%s (unrecognized entry name) at %s", entry.Name(), path))
+			continue
+		}
+		named = append(named, fmt.Sprintf("%s (as of %s) at %s", db, ts, path))
+	}
 	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("corrupt-aside holds %d preserved store(s) from start-time recovery", len(entries))
+	r.Message = fmt.Sprintf("corrupt-aside holds %d preserved store(s) from start-time recovery: %s", len(entries), strings.Join(named, "; "))
 	r.FixHint = "confirm the live database (gc dolt logs), then remove the aside copy — see examples/bd/dolt/docs/journal-corruption-recovery.md"
 	return r
 }
