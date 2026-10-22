@@ -2913,6 +2913,9 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	if err := workspacesvc.ValidateRuntimeSupport(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}
+	if err := validateImplicitAgentIsolationRuntime(cfg); err != nil {
+		return fmt.Errorf("validate implicit agent isolation: %w", err)
+	}
 
 	// Refresh builtin packs after config validation so commands and managed
 	// provider assets are present before the bead lifecycle starts.
