@@ -326,8 +326,8 @@ func TestProvider_StartUnsetsControllerColorEnvironment(t *testing.T) {
 
 // TestProvider_RelaunchInWarmSession proves the un-weld relaunch path (B1):
 // Relaunch respawns the agent with a NEW command inside the SAME box, the box is
-// reused (its session env survives, since Relaunch never re-sets env), and a
-// relaunch into a non-existent box is an error rather than a silent provision.
+// reused (what was set on its session survives), and a relaunch into a
+// non-existent box is an error rather than a silent provision.
 func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	if !hasTmux() {
 		t.Skip("tmux not installed")
@@ -358,11 +358,17 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 	}
 	waitForMarker(t, marker, "first")
 
-	// Relaunch the agent in the SAME box with a new command. Env is provision-half
-	// and intentionally NOT re-passed; the box keeps its session environment.
+	// Set on the session after the start, as SetMeta does: only a recreated box
+	// would lose it.
+	if err := p.Tmux().SetEnvironment(name, "GC_RELAUNCH_TEST_META", "warm"); err != nil {
+		t.Fatalf("SetEnvironment: %v", err)
+	}
+
+	// Relaunch the agent in the SAME box with a new command and the same env.
 	if err := p.Relaunch(context.Background(), name, runtime.Config{
 		Command: agentCmd("second"),
 		WorkDir: workDir,
+		Env:     map[string]string{"GC_RELAUNCH_TEST": "warm"},
 	}); err != nil {
 		t.Fatalf("Relaunch: %v", err)
 	}
@@ -372,14 +378,14 @@ func TestProvider_RelaunchInWarmSession(t *testing.T) {
 		t.Fatal("session should still be running after Relaunch")
 	}
 
-	// The box was reused, not recreated: the session env set at Start survives a
-	// launch-only relaunch (Relaunch never re-sets env).
-	val, err := p.Tmux().GetEnvironment(name, "GC_RELAUNCH_TEST")
+	// The box was reused, not recreated: what was set on the session survives a
+	// launch-only relaunch.
+	val, err := p.Tmux().GetEnvironment(name, "GC_RELAUNCH_TEST_META")
 	if err != nil {
 		t.Fatalf("GetEnvironment: %v", err)
 	}
 	if val != "warm" {
-		t.Fatalf("GC_RELAUNCH_TEST after relaunch = %q, want %q (warm box should be reused, not recreated)", val, "warm")
+		t.Fatalf("GC_RELAUNCH_TEST_META after relaunch = %q, want %q (warm box should be reused, not recreated)", val, "warm")
 	}
 
 	// Relaunch into a non-existent box is an error, not a silent provision.

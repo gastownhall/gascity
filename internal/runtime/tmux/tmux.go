@@ -829,6 +829,95 @@ func (t *Tmux) markSessionEnvRemoved(session string, keys []string) error {
 	return nil
 }
 
+// launchEnvKeysOption is the session user option that lists the keys a launch
+// set in the session environment, so a later relaunch can tell a key its config
+// no longer sets from one put there by other means (SetMeta, update-environment).
+// A user option, not an environment entry, so no agent process inherits it.
+const launchEnvKeysOption = "@gc_launch_env_keys"
+
+// launchIdentityEnvKeys name the session incarnation. A relaunch keeps the
+// incarnation, so it never rewrites them: the session environment is where
+// GetMeta and the input fence read them back.
+var launchIdentityEnvKeys = map[string]bool{
+	runtime.InstanceTokenEnv:     true,
+	runtime.RuntimeEpochEnv:      true,
+	runtime.ContinuationEpochEnv: true,
+	"BEADS_HOLDER_TOKEN":         true,
+}
+
+// launchSetKeys returns the sorted keys of env with a non-empty value: the
+// ones a launch puts in the session environment.
+func launchSetKeys(env map[string]string) []string {
+	var keys []string
+	for k, v := range env {
+		if v != "" {
+			keys = append(keys, k)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+// recordLaunchEnvKeys records which keys env set in session's environment.
+// Best-effort, as markAgentPane: a session without the record (or created
+// before it existed) still gets changed values on relaunch, and only a key
+// its config dropped is left in place.
+func (t *Tmux) recordLaunchEnvKeys(session string, env map[string]string) {
+	if _, err := t.run("set-option", "-t", paneTarget(session), launchEnvKeysOption, strings.Join(launchSetKeys(env), " ")); err != nil {
+		_, _ = fmt.Fprintf(agentPaneWarningOut, "warning: session %q: recording launch env keys: %v\n", session, err)
+	}
+}
+
+// applyLaunchEnv makes session's environment hold what a fresh start with env
+// would have put there, before a relaunch respawns the agent into it.
+//
+// respawn-pane takes no env argument: the respawned process inherits the
+// SESSION environment, so a launch-only change to the env (an operator env
+// value, an upstream's serving env) reaches the agent only through this. A
+// changed or new value is set; a key the last launch set that env now pins
+// empty or no longer names is unset, so the server's global value shows
+// through exactly as it would for a session created without it (a pinned-empty
+// key is also withheld from the respawned command, see respawnAgent). The
+// incarnation keys are left alone (launchIdentityEnvKeys), as is anything the
+// last launch did not set. Secret values never reach argv (SetEnvironment).
+func (t *Tmux) applyLaunchEnv(session string, env map[string]string) error {
+	if err := validateUnsetEnvKeys(env); err != nil {
+		return err
+	}
+	current, err := t.GetAllEnvironment(session)
+	if err != nil {
+		return fmt.Errorf("reading session %q env: %w", session, err)
+	}
+	for _, k := range launchSetKeys(env) {
+		if launchIdentityEnvKeys[k] {
+			continue
+		}
+		if have, ok := current[k]; ok && have == env[k] {
+			continue
+		}
+		if err := t.SetEnvironment(session, k, env[k]); err != nil {
+			return fmt.Errorf("setting %s in session %q env: %w", k, session, err)
+		}
+	}
+	recorded, err := t.run("show-options", "-qv", "-t", paneTarget(session), launchEnvKeysOption)
+	if err != nil {
+		return fmt.Errorf("reading session %q launch env keys: %w", session, err)
+	}
+	for _, k := range strings.Fields(recorded) {
+		if launchIdentityEnvKeys[k] || env[k] != "" {
+			continue
+		}
+		if _, ok := current[k]; !ok || !validEnvNameRe.MatchString(k) {
+			continue
+		}
+		if err := t.RemoveEnvironment(session, k); err != nil {
+			return fmt.Errorf("unsetting %s in session %q env: %w", k, session, err)
+		}
+	}
+	t.recordLaunchEnvKeys(session, env)
+	return nil
+}
+
 // NewSessionWithCommandAndEnv creates a new detached tmux session with environment
 // variables set via -e flags. This ensures the initial shell process inherits the
 // correct environment from the session, rather than inheriting from the tmux server
@@ -904,6 +993,7 @@ func (t *Tmux) NewSessionWithCommandAndEnv(name, workDir, command string, env ma
 	if err := t.markSessionEnvRemoved(name, durableWithholdKeys(env)); err != nil {
 		return err
 	}
+	t.recordLaunchEnvKeys(name, env)
 	_ = t.ConfigureServer()
 	// tmux 3.3+: reset window-size from manual to latest (see NewSession).
 	t.run("set-option", "-wt", name, "window-size", "latest") //nolint:errcheck // best-effort
