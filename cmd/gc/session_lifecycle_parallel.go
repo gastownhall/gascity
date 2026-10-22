@@ -1580,7 +1580,8 @@ func concretePoolTemplateWorkDirs(candidate startCandidate, cityPath string, cfg
 	}
 	concreteDir = resolveWorkDirAgainstCity(cityPath, candidate.tp.WorkDir)
 	if concreteDir == "" {
-		if resolved, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), concreteIdentity, *cfgAgent, cfg.Rigs); err == nil {
+		slotAgent := implicitSlotAgentForRuntime(cfgAgent, effectiveProviderName(cfg.Session.Provider))
+		if resolved, err := workdirutil.ResolveWorkDirPathStrict(cityPath, preparedStartCityName(cityPath, cfg), concreteIdentity, *slotAgent, cfg.Rigs); err == nil {
 			concreteDir = resolved
 		}
 	}

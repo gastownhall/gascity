@@ -202,6 +202,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}
+	fpExtra = withImplicitSlotFingerprintEntry(fpExtra, p.cityPath, qualifiedName, cfgAgent, p.rigs, p.sessionRuntime)
 	rigName := dirCtx.Rig
 	rigRoot := dirCtx.RigRoot
 	agentBase := dirCtx.AgentBase

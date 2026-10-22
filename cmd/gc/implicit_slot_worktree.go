@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,4 +281,27 @@ func implicitSlotAgentForRuntime(a *config.Agent, sessionRuntime string) *config
 	unmarked := *a
 	unmarked.PoolSlotWorktrees = false
 	return &unmarked
+}
+
+// implicitSlotFingerprintKey is the FingerprintExtra key of a session that
+// runs in its pool-slot worktree. It is a Restart key: the work dir is no
+// fingerprint input, so this entry is what drains a session started in the
+// rig root before its agent was marked, once, into its slot.
+const implicitSlotFingerprintKey = "implicit_isolation"
+
+// withImplicitSlotFingerprintEntry returns fpExtra, or a copy of it with
+// implicitSlotFingerprintKey set when qualifiedName runs in a pool-slot
+// worktree on sessionRuntime.
+func withImplicitSlotFingerprintEntry(fpExtra map[string]string, cityPath, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionRuntime string) map[string]string {
+	a = implicitSlotAgentForRuntime(a, sessionRuntime)
+	if a == nil {
+		return fpExtra
+	}
+	if _, ok := workdirutil.ImplicitSlotFor(cityPath, qualifiedName, *a, rigs); !ok {
+		return fpExtra
+	}
+	out := make(map[string]string, len(fpExtra)+1)
+	maps.Copy(out, fpExtra)
+	out[implicitSlotFingerprintKey] = config.ImplicitIsolationWorktree
+	return out
 }

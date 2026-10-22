@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -13,8 +15,11 @@ import (
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
+	"github.com/gastownhall/gascity/internal/clock"
 	"github.com/gastownhall/gascity/internal/config"
+	"github.com/gastownhall/gascity/internal/runtime"
 	sessionpkg "github.com/gastownhall/gascity/internal/session"
+	"github.com/gastownhall/gascity/internal/session/sessiontest"
 	workdirutil "github.com/gastownhall/gascity/internal/workdir"
 )
 
@@ -596,4 +601,133 @@ func TestMarkedAgentDirectoryReadsCreateNoSlot(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPreUpgradeImplicitPoolSessionMovesToItsSlotOnNextStart(t *testing.T) {
+	preUpgradeBead := func(t *testing.T, store beads.Store, rig, state string) beads.Bead {
+		t.Helper()
+		b, err := store.Create(beads.Bead{
+			Title:  "app/claude-1",
+			Type:   sessionBeadType,
+			Labels: []string{sessionBeadLabel, "agent:app/claude-1"},
+			Metadata: map[string]string{
+				"template":                        "app/claude",
+				"agent_name":                      "app/claude-1",
+				"alias":                           "app/claude-1",
+				"session_name":                    "claude-1-session",
+				"session_origin":                  "ephemeral",
+				"pool_slot":                       "1",
+				poolManagedMetadataKey:            boolMetadata(true),
+				"state":                           state,
+				beadmeta.WorkDirMetadataKey:       rig,
+				beadmeta.LegacyWorkDirMetadataKey: rig,
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return b
+	}
+	resolve := func(t *testing.T, city string, cfg *config.City, a *config.Agent, store beads.Store) TemplateParams {
+		t.Helper()
+		bp := newAgentBuildParams("city", city, cfg, runtime.NewFake(), time.Unix(0, 0), store, io.Discard)
+		bp.lookPath = func(name string) (string, error) { return "/bin/" + name, nil }
+		tp, err := resolveTemplate(bp, a, "app/claude-1", nil)
+		if err != nil {
+			t.Fatalf("resolveTemplate(app/claude-1): %v", err)
+		}
+		tp.SessionName = "claude-1-session"
+		return tp
+	}
+	coreHash := func(t *testing.T, tp TemplateParams) string {
+		t.Helper()
+		rc, _, err := templateParamsToConfigWithDelivery(tp)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return runtime.CoreFingerprint(rc)
+	}
+
+	t.Run("next_start_rewrites_both_keys_to_the_slot", func(t *testing.T) {
+		t.Setenv("GC_SESSION", "tmux")
+		city, rig, cfg, a := implicitSlotCity(t)
+		slot := filepath.Join(city, ".gc", "worktrees", "app", "claude-1")
+		store := beads.NewMemStore()
+		b := preUpgradeBead(t, store, rig, string(sessionpkg.StateStartPending))
+		tp := resolve(t, city, cfg, a, store)
+
+		prepared, err := prepareStartCandidateForCity(startCandidate{info: sessiontest.SeedBead(t, b), tp: tp},
+			city, "city", cfg, nil, store, &clock.Fake{Time: time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)}, io.Discard, nil, dispatchOptionSources{})
+		if err != nil {
+			t.Fatalf("prepareStartCandidateForCity: %v", err)
+		}
+		if prepared.cfg.WorkDir != slot {
+			t.Errorf("start work dir = %q, want slot %q", prepared.cfg.WorkDir, slot)
+		}
+		persisted, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if got := persisted.Metadata[key]; got != slot {
+				t.Errorf("%s = %q, want slot %q", key, got, slot)
+			}
+		}
+	})
+
+	t.Run("remote_runtime_start_keeps_the_rig_root", func(t *testing.T) {
+		t.Setenv("GC_SESSION", "k8s")
+		city, rig, cfg, _ := implicitSlotCity(t)
+		store := beads.NewMemStore()
+		b := preUpgradeBead(t, store, rig, string(sessionpkg.StateStartPending))
+		for _, wd := range []string{rig, ""} {
+			candidate := startCandidate{
+				info: sessiontest.SeedBead(t, b),
+				tp:   TemplateParams{TemplateName: "app/claude", InstanceName: "app/claude-1", SessionName: "claude-1-session", WorkDir: wd},
+			}
+			if patch := concretePoolWorkDirRepairPatch(candidate, city, cfg); len(patch) != 0 {
+				t.Errorf("tp.WorkDir=%q: repair patch = %v, want none on a remote runtime", wd, patch)
+			}
+		}
+		if _, err := os.Stat(filepath.Join(city, ".gc", "worktrees")); !errors.Is(err, os.ErrNotExist) {
+			t.Errorf("remote-runtime start created %s/.gc/worktrees (stat err %v)", city, err)
+		}
+	})
+
+	t.Run("running_session_drains_once_and_keeps_its_dir", func(t *testing.T) {
+		t.Setenv("GC_SESSION", "tmux")
+		city, rig, cfg, a := implicitSlotCity(t)
+		store := beads.NewMemStore()
+		b := preUpgradeBead(t, store, rig, "active")
+		sp := runtime.NewFake()
+		if err := sp.Start(context.Background(), "claude-1-session", runtime.Config{WorkDir: rig}); err != nil {
+			t.Fatal(err)
+		}
+
+		before := *a
+		before.PoolSlotWorktrees = false
+		preUpgrade := resolve(t, city, cfg, &before, store)
+		if preUpgrade.WorkDir != rig {
+			t.Fatalf("pre-upgrade work dir = %q, want rig root %q", preUpgrade.WorkDir, rig)
+		}
+		upgraded := resolve(t, city, cfg, a, store)
+		if coreHash(t, preUpgrade) == coreHash(t, upgraded) {
+			t.Errorf("upgrade left the core config hash unchanged, so the running session never drains to its slot")
+		}
+		if again := resolve(t, city, cfg, a, store); coreHash(t, again) != coreHash(t, upgraded) {
+			t.Errorf("core config hash changed between two post-upgrade resolves, so the session would drain repeatedly")
+		}
+
+		ds := map[string]TemplateParams{"claude-1-session": upgraded}
+		syncSessionBeads(city, store, ds, sp, allConfiguredDS(ds), cfg, &clock.Fake{Time: time.Date(2026, 10, 22, 9, 0, 0, 0, time.UTC)}, io.Discard, false)
+		persisted, err := store.Get(b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, key := range []string{beadmeta.WorkDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey} {
+			if got := persisted.Metadata[key]; got != rig {
+				t.Errorf("running session %s = %q, want unchanged rig root %q", key, got, rig)
+			}
+		}
+	})
 }
