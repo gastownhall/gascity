@@ -24,7 +24,10 @@ import (
 // for that shape while still saying true for agents that carry an explicit
 // pool signal (namepool, min_active_sessions/scale_check, or an explicit
 // max_active_sessions), matching
-// internal/workdir.RequiresPoolWorkDirIsolationCheck exactly.
+// internal/workdir.RequiresPoolWorkDirIsolationCheck — plus, since
+// ga-bp4m5v, any agent marked PoolSlotWorktrees, whose sessions run in
+// per-instance worktrees and so have session-specific projections without
+// the explicit pool signal.
 func TestAgentMayHaveSessionSpecificMCPTargets(t *testing.T) {
 	cases := []struct {
 		name  string
@@ -54,6 +57,11 @@ func TestAgentMayHaveSessionSpecificMCPTargets(t *testing.T) {
 		{
 			name:  "explicit min_active_sessions pool marker with unset max",
 			agent: config.Agent{Name: "drifter", Dir: "demo", MinActiveSessions: intPtr(0)},
+			want:  true,
+		},
+		{
+			name:  "slot-isolated pool agent: marked PoolSlotWorktrees with no explicit pool signal",
+			agent: config.Agent{Name: "claude", Dir: "app", PoolSlotWorktrees: true},
 			want:  true,
 		},
 	}

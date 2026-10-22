@@ -3062,6 +3062,26 @@ func resolveWorkDir(cityPath string, cfg *config.City, agent *config.Agent) (str
 	return resolveWorkDirForQualifiedName(cityPath, cfg, agent, "")
 }
 
+// resolveWorkDirPathForQualifiedName resolves an agent's working directory
+// for qualifiedName WITHOUT provisioning it: where the session-creating
+// paths materialize a slot worktree (resolveWorkDirForQualifiedName), the
+// read-only consumers — session logs, MCP projection — must observe where a
+// session's work dir is without creating anything on disk.
+func resolveWorkDirPathForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
+	cityName := loadedCityName(cfg, cityPath)
+	var rigs []config.Rig
+	if cfg != nil {
+		rigs = cfg.Rigs
+	}
+	return resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, agent, rigs)
+}
+
+// resolveWorkDirPath is resolveWorkDir's read-only twin: the canonical
+// working directory of agent, resolved without provisioning.
+func resolveWorkDirPath(cityPath string, cfg *config.City, agent *config.Agent) (string, error) {
+	return resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, "")
+}
+
 func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *config.Agent, qualifiedName string) (string, error) {
 	cityName := loadedCityName(cfg, cityPath)
 	var rigs []config.Rig

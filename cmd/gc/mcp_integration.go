@@ -385,8 +385,13 @@ func cleanupOrphansAtRoot(root string, desired map[string]bool, stderr io.Writer
 // dir-less, non-pooled agents, since ResolveWorkDirPathStrict's isolation
 // fallback now gives such an agent's alt identity a genuinely different
 // (but not "session-specific") working directory.
+//
+// Slot-isolated pool agents are added on top of that question: their
+// sessions each run in a per-instance worktree (PoolSlotWorktrees), so
+// their projection is genuinely session-specific even though the implicit
+// pool signal RequiresPoolWorkDirIsolationCheck keys on is absent.
 func agentMayHaveSessionSpecificMCPTargets(a config.Agent) bool {
-	return workdirutil.RequiresPoolWorkDirIsolationCheck(a)
+	return workdirutil.RequiresPoolWorkDirIsolationCheck(a) || a.PoolSlotWorktrees
 }
 
 func resolveDeterministicAgentMCPProjection(
@@ -401,7 +406,16 @@ func resolveDeterministicAgentMCPProjection(
 	}
 
 	altIdentity := agent.QualifiedName() + "-alt"
-	altWorkDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, altIdentity)
+	if agent.PoolSlotWorktrees {
+		// A slot-isolated pool agent's "-alt" identity matches no slot
+		// instance and resolves to the canonical rig root, so the probe
+		// would compare the agent-level view against itself. Probe with a
+		// genuine instance identity instead — resolution is pure
+		// (resolveWorkDirPathForQualifiedName), so the probe creates
+		// nothing.
+		altIdentity = agent.QualifiedName() + "-1"
+	}
+	altWorkDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, altIdentity)
 	if err != nil {
 		return resolvedMCPProjection{}, fmt.Errorf("agent %q has session-specific MCP targets; use --session", agent.QualifiedName())
 	}
@@ -425,7 +439,7 @@ func resolveConfiguredAgentMCPProjection(
 		return resolvedMCPProjection{}, fmt.Errorf("agent unavailable")
 	}
 	identity := agent.QualifiedName()
-	workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+	workDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, identity)
 	if err != nil {
 		catalog, catErr := loadEffectiveMCPForAgent(cityPath, cfg, agent, identity, agentScopeRoot(agent, cityPath, cfg.Rigs))
 		if catErr != nil {
@@ -479,7 +493,7 @@ func resolveSessionMCPProjection(
 	}
 	workDir := strings.TrimSpace(info.WorkDir)
 	if workDir == "" {
-		workDir, err = resolveWorkDirForQualifiedName(cityPath, cfg, agent, identity)
+		workDir, err = resolveWorkDirPathForQualifiedName(cityPath, cfg, agent, identity)
 		if err != nil {
 			return resolvedMCPProjection{}, fmt.Errorf("resolving workdir for session %q: %w", sessionID, err)
 		}
@@ -576,7 +590,7 @@ func validateStage2TargetClaimants(
 		// Resolve the candidate's own workdir. Failures here are
 		// treated as "this agent can't claim any target in this city
 		// right now" — not a conflict.
-		otherWorkDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, other, identity)
+		otherWorkDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, other, identity)
 		if err != nil {
 			continue
 		}

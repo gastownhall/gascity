@@ -182,7 +182,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 	cityName := loadedCityName(cfg, cityPath)
 	if spec, ok, _ := findNamedSessionSpecForTarget(cfg, cityName, identifier); ok && spec.Agent != nil {
 		workDirQualifiedName := workdirutil.SessionQualifiedName(cityPath, *spec.Agent, cfg.Rigs, spec.Identity, "")
-		workDir, err := resolveWorkDirForQualifiedName(cityPath, cfg, spec.Agent, workDirQualifiedName)
+		workDir, err := resolveWorkDirPathForQualifiedName(cityPath, cfg, spec.Agent, workDirQualifiedName)
 		if err != nil || strings.TrimSpace(workDir) == "" {
 			return "", false
 		}
@@ -193,7 +193,7 @@ func resolveConfiguredSessionLogContext(cityPath string, cfg *config.City, ident
 		if agentCfg.SupportsInstanceExpansion() || strings.TrimSpace(agentCfg.QualifiedName()) != identifier {
 			continue
 		}
-		workDir, err := resolveWorkDir(cityPath, cfg, &agentCfg)
+		workDir, err := resolveWorkDirPath(cityPath, cfg, &agentCfg)
 		if err != nil || strings.TrimSpace(workDir) == "" {
 			return "", false
 		}
