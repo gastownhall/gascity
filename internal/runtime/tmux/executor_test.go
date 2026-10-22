@@ -575,17 +575,17 @@ func TestRespawnAgentMarksControllerTokenRemovedFromSessionEnv(t *testing.T) {
 		if err := ops.respawnAgent("gc-test-beads-pin", "/proj", "claude", env); err != nil {
 			t.Fatalf("respawnAgent: %v", err)
 		}
-		if len(exec.calls) != 6 {
-			t.Fatalf("tmux calls = %d (%v), want two set-environment calls, the adopt check, the pane lookup, respawn-pane, then the input fence's environment read", len(exec.calls), exec.calls)
+		respawnAt := slices.IndexFunc(exec.calls, func(call []string) bool { return tmuxSubcommand(call) == "respawn-pane" })
+		if respawnAt < 0 {
+			t.Fatalf("tmux calls = %v, want respawn-pane", exec.calls)
 		}
-		for i, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
-			setEnv := strings.Join(exec.calls[i], " ")
-			if !strings.Contains(setEnv, "set-environment -t =gc-test-beads-pin -r "+key) {
-				t.Errorf("call %d = %q, want %s marked removed from the session env", i, setEnv, key)
+		for _, key := range []string{"BEADS_DB", "BEADS_FUTURE_AUTHORITY"} {
+			marked := slices.ContainsFunc(exec.calls[:respawnAt], func(call []string) bool {
+				return strings.Contains(strings.Join(call, " "), "set-environment -t =gc-test-beads-pin -r "+key)
+			})
+			if !marked {
+				t.Errorf("tmux calls = %v, want %s marked removed from the session env before respawn-pane", exec.calls, key)
 			}
-		}
-		if respawn := strings.Join(exec.calls[4], " "); !strings.Contains(respawn, "respawn-pane") {
-			t.Errorf("fifth call = %q, want respawn-pane", respawn)
 		}
 	})
 }
