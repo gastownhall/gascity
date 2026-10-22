@@ -286,6 +286,41 @@ func TestBlockedRepairScopesSkipStoresGCDoesNotOwn(t *testing.T) {
 	}
 }
 
+// TestBlockedRepairScopesSkipGuardedRigs: a rig with federation = "rig"
+// shares its store with other cities, so the one-shot is_blocked repair
+// (which rewrites every row's column and writes its marker into the store)
+// leaves it to the store's operator, as the reaper and the export do. Every
+// caller selects its scopes here: gc start, gc rig add and a resumed rig.
+func TestBlockedRepairScopesSkipGuardedRigs(t *testing.T) {
+	t.Setenv("GC_BEADS", "")
+	t.Setenv("GC_BEADS_SCOPE_ROOT", "")
+	t.Setenv("GC_BEADS_BACKEND", "")
+	const doltMeta = `{"database":"dolt","backend":"dolt","dolt_mode":"embedded","dolt_database":"%s"}`
+	city := t.TempDir()
+	if err := os.WriteFile(filepath.Join(city, "city.toml"), []byte("[workspace]\nname = \"c\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	writeBlockedRepairScope(t, city, fmt.Sprintf(doltMeta, "hq"))
+	plain := filepath.Join(t.TempDir(), "plain")
+	writeBlockedRepairScope(t, plain, fmt.Sprintf(doltMeta, "plain"))
+	shared := filepath.Join(t.TempDir(), "shared")
+	writeBlockedRepairScope(t, shared, fmt.Sprintf(doltMeta, "shared"))
+	cfg := &config.City{Rigs: []config.Rig{
+		{Name: "plain", Path: plain},
+		{Name: "shared", Path: shared, Federation: config.RigFederationRig},
+	}}
+	var got []string
+	for _, s := range blockedRepairScopes(city, cfg) {
+		got = append(got, s.id)
+	}
+	if want := []string{"city", "rig/plain"}; !slices.Equal(got, want) {
+		t.Fatalf("scopes = %v, want %v (the guarded rig left out)", got, want)
+	}
+	if scopes := blockedRepairScopesForRig(city, cfg, "shared"); len(scopes) != 0 {
+		t.Fatalf("gc rig add of a guarded rig would repair %v", scopes)
+	}
+}
+
 // TestBlockedRepairRunsScopesInParallelWithinTheBound pins the startup-cost
 // shape: recomputes overlap, never more than blockedRepairParallelism at once,
 // and the run announces how many scopes it is repairing before it starts.

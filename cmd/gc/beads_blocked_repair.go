@@ -139,6 +139,12 @@ func runBlockedRepairForScopes(cityPath string, cfg *config.City, scopes []block
 }
 
 // blockedRepairScopes lists the city and rig scopes the repair applies to.
+// A rig with federation = "rig" is left out, as the reaper and the JSONL
+// export leave it out: its store is shared with other cities, the recompute
+// rewrites every row's is_blocked and the marker is written into that
+// store, so whoever operates the shared store runs `bd recompute-blocked`
+// there. That covers gc start, gc rig add and a resumed rig, which all
+// select their scopes here.
 func blockedRepairScopes(cityPath string, cfg *config.City) []blockedRepairScope {
 	var scopes []blockedRepairScope
 	if blockedRepairScopeEligible(cityPath, cfg, cityPath) {
@@ -146,7 +152,7 @@ func blockedRepairScopes(cityPath string, cfg *config.City) []blockedRepairScope
 	}
 	for _, rig := range cfg.Rigs {
 		root := strings.TrimSpace(rig.Path)
-		if root == "" || samePath(root, cityPath) {
+		if root == "" || samePath(root, cityPath) || rig.FederationGuarded() {
 			continue
 		}
 		if blockedRepairScopeEligible(cityPath, cfg, root) {
