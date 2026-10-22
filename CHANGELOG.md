@@ -1041,8 +1041,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   does **not** enforce the setting on the store: a guarded rig is not
   protected. `gc start`, `gc reload`, `gc config show`, `gc doctor` and the
   config validation API warn about each one, and `gc rig list` marks it "not
-  enforced by this build". A city that sets neither key is unchanged, except
-  that `gc config show --json` lists both fields, empty, on every rig.
+  enforced by this build". A city that sets neither key gets no namespace
+  checks; `gc config show --json` lists both fields, empty, on every rig, and
+  the fixes under Fixed that came with the guard reach every city.
 - **A rig with `federation = "rig"` opens behind a store guard.** Every
   place this city opens the rig's bead store (the controller, and one-shot
   commands, including subdirectories and redirected worktrees of the rig)
@@ -1056,13 +1057,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   waking this one. Reads by id, by parent and of dependencies are unchanged.
   Each guarded write costs one extra read of the row it writes. A guarded rig
   whose store is the city's or another rig's is not opened, and neither is an
-  unguarded rig whose store is a guarded rig's. Paths that bypass the rig's
-  store handles are not covered yet, so the warnings above stay.
+  unguarded rig whose store is a guarded rig's. The paths that write the rig's
+  store without its store handles are covered by the entry below; the core
+  pack's maintenance orders are not covered yet, so the warnings above stay.
 - **A rig with `federation = "rig"` is enforced on the paths that write its
   store without a guarded Go store: the hook claim cycle, sling and graph
-  routing, `gc agent-script` and `gc bd`.** Each refusal wraps one error
-  (`config.ErrRigNamespace`), runs before any `bd` process is spawned, and
-  is never retried.
+  routing, `gc agent-script` and `gc bd`.** A refusal in Go wraps one error
+  (`config.ErrRigNamespace`); `gc bd` prints its refusal and exits 1. Every
+  refusal comes before the write's `bd` process is spawned (`gc bd` and
+  `gc agent-script` read the row with `bd show` first) and is never retried.
   - `gc hook --claim` judges every candidate by the store it was read from,
     whatever its id prefix, and skips a row the rig does not let this city
     act on (`gc hook --claim: skipping <id>: rig "beta" serves only beta/
@@ -1070,7 +1073,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     reclaim, adoption re-stamp, workflow-stop close or continuation pin
     needs an actor inside the namespace or one of this city's own pool
     sessions of the rig (`gc hook --claim: not claiming <id>: ... claim actor
-    "<x>" is outside it`). City-scoped agents no longer read guarded rigs.
+    "<x>" is outside it`). `gc hook --claim` no longer searches guarded
+    rigs for a city-scoped agent.
   - `gc sling`, its batch and custom `sling_query` forms, and every graph
     decoration refuse a route into a guarded rig that is not one of its own
     agents (`gc sling: refusing route into rig "beta": target "<x>" is
@@ -1083,6 +1087,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `close --claim-next` and `close --continue` (without `--no-auto`) are
     refused; a create is stamped with the rig's namespace; and every other
     verb is refused with "use raw bd". Raw `bd` is unchanged.
+  - A new bead routed by `gc sling`, graph routing or `gc bd create` may
+    name only one of the rig's own agents. The store guard is looser on
+    create by design: it accepts a rig-qualified route outside the namespace
+    as a hand-off of this city's own new row. A hand-off is one way: the
+    row's owners then make it another city's, hidden from this city's
+    discovery reads and refused for its writes.
   - `gc config show --validate` and `gc doctor` warn when a guarded rig has
     no control dispatcher of its own, since graph workflows into it then
     cannot run their control steps.
@@ -1657,6 +1667,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `--resolution`, `-m`/`--message` and `--comment`, which bd accepts without
   listing them in its help. A prompt or script using one of them no longer
   gets an unknown-flag finding.
+- **`gc bd` passes bd's hidden flag aliases through on every city.**
+  `gc bd close` with `-m`/`--message`, `--resolution` or `--comment`, and
+  `gc bd update` with `--body`, `-m`/`--message`, `--description-file` or
+  `--acceptance-criteria`, used to stop with "cannot safely verify bead IDs
+  (unrecognized flag ...)"; they now run.
+  `gc bd create` reads the token after a valueless `--description-file` as
+  that flag's value, as bd does, so a `--metadata` there is no longer
+  checked as a flag of its own.
+- **`gc agent-script`'s `bd_claim` and `bd_update` fail when the city config
+  cannot be loaded.** They used to run the write in the agent's default
+  store; on a city with a guarded rig that could have written it unchecked,
+  so every city now gets the error instead.
 - **The work ladder and the execution backstop read a rig seat's started
   graph steps as started.** On a city that relocates its coordination classes
   (`[beads] infra = "local"`), a rig-scoped seat's `gc hook --claim` recorded

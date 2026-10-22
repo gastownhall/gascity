@@ -353,6 +353,16 @@ func (s *rigNamespaceStore) stampMetadata(op, id string, in map[string]string, s
 		}
 		switch {
 		case isRigNamespaceRouteKey(k):
+			// Create-time route rule (one rule, two layers; see "Routes on a
+			// new bead" in docs/guides/sharing-a-rig-store.md): the store
+			// refuses only a route that is not rig-qualified. A qualified
+			// route outside the namespace is accepted, because the new row is
+			// stamped as this city's and routing it elsewhere hands this
+			// city's own work off. gc bd create and gc sling are stricter by
+			// design and refuse such a route before any bd process starts
+			// (bdRigNamespaceCheck's create check, sling's
+			// rigNamespaceRouteRefusal); do not tighten one layer without
+			// the other and the guide.
 			if strings.TrimSpace(v) != "" && !rigRouteQualified(v) {
 				return nil, s.refuse(op, id, fmt.Sprintf("%s %q is not rig-qualified; a bare route in a shared store is served by every city that defines it", k, v), nil)
 			}

@@ -42,9 +42,10 @@ Set `federation = "rig"` on the rig in **every** city that attaches the store.
 The setting only constrains the city that sets it. Neither key can be set from
 a `[[patches.rigs]]` entry: the load refuses it there.
 
-A city that sets neither key behaves as before. The one visible difference is
-that `gc config show --json` lists both fields, empty, on every rig, as it
-does for any rig field.
+A city that sets neither key gets no namespace checks: nothing is filtered or
+refused for a rig's namespace. `gc config show --json` lists both fields,
+empty, on every rig, as it does for any rig field. A few fixes that came with
+the guard reach every city; the CHANGELOG lists them.
 
 ## Which identities a guarded rig admits
 
@@ -126,15 +127,16 @@ guard:
 scope runs the proxied native lane: the guard does not hand out the proxied
 store's internals, so the check cannot see the lane.
 
-Paths that do not go through the rig's store handles are not covered by this
-build yet; see the warning at the top of this page.
+Paths that write the rig's store without going through its store handles
+check the setting themselves; see the next section.
 
 ## What the claim, routing and `gc bd` paths refuse
 
 The hook claim cycle, `gc sling`, graph routing, `gc agent-script` and `gc bd`
 write the rig's store without going through a guarded store, so they check
-the setting themselves. Every refusal happens before a `bd` process starts,
-and `--force` never overrides one.
+the setting themselves. Every refusal happens before the write's `bd`
+process starts (`gc bd` and `gc agent-script` first read the row they would
+write, with `bd show`), and `--force` never overrides one.
 
 - **`gc hook --claim`** judges each candidate by the store it was read from,
   not only by its id prefix, and skips rows the rig does not let this city
@@ -146,8 +148,8 @@ and `--force` never overrides one.
 
   It claims, adopts, re-stamps or pins only as an identity the rig admits.
   An agent claiming under a short session id gets a hint to give it a rig
-  alias or run it as a pool of the rig. City-scoped agents do not search
-  guarded rigs at all.
+  alias or run it as a pool of the rig. For a city-scoped agent,
+  `gc hook --claim` does not search guarded rigs at all.
 - **`gc sling` and formula graphs** refuse a route into the rig that is not
   one of its own agents, including custom `sling_query` targets, batch
   children and every graph step. A graph needs the rig's own control
@@ -173,6 +175,32 @@ and `--force` never overrides one.
   ```
 
   `relate` and `unrelate` pass: they record a link that blocks nothing.
+
+The core pack's maintenance orders (the orphan sweep and the scripts that ask
+`gc agent is-foreign`) are not covered by this build yet; see the warning at
+the top of this page.
+
+### Routes on a new bead
+
+The two layers apply one route rule at different strictness, by design:
+
+- **The store guard** refuses a route that is not rig-qualified (a bare
+  `crew.worker`), on a create and on any later write. On a create it accepts
+  a rig-qualified route outside the namespace (`alpha/crew.worker`): the new
+  row is stamped as this city's, so routing it elsewhere hands this city's
+  own work off. On an existing row such a route is accepted only when the
+  row is this city's own.
+- **`gc sling`, graph routing and `gc bd create`** are stricter: a new bead
+  may be routed only to one of the rig's own agents (`beta/...`), and a route
+  outside the namespace is refused before the write's `bd` process starts.
+  With `gc bd`, hand work off by updating the route of a row this city owns
+  (`gc bd update <id> --set-metadata gc.routed_to=alpha/crew.worker`), which
+  is checked against that row.
+
+A hand-off is one way. Owners decide before the creation stamp, so once a
+row's route names an identity outside the namespace the row is another
+city's to this city: it drops out of this city's discovery reads, and this
+city's writes to it, a route back included, are refused.
 
 ## What it does not cover
 

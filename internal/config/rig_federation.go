@@ -382,10 +382,10 @@ func validateGuardedRigSlingTargets(g *Rig) error {
 // these as non-fatal warnings at start and reload.
 //
 // TODO(rig-federation): the guarded rig store (cmd/gc rig_namespace_store.go)
-// enforces the setting on the rig's Go store handles, but paths that bypass
-// them do not yet honor it: the hook claim cycle's bd writes, sling and graph
-// routing, gc agent-script's claim redirect, gc bd writes, gc agent
-// is-foreign, the orphan sweep and the core-pack scripts. In the change that
+// enforces the setting on the rig's Go store handles, and the hook claim
+// cycle's bd writes, sling and graph routing, gc agent-script's claim
+// redirect and gc bd writes check it themselves; gc agent is-foreign, the
+// orphan sweep and the core-pack scripts do not honor it yet. In the change that
 // lands the last of those, delete this warning and its callers (start,
 // supervisor load, reload, config show, doctor, the config API), the
 // "not enforced by this build" marking of gc rig list's text output

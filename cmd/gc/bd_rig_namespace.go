@@ -449,6 +449,14 @@ func (c *bdRigNamespaceCheck) checkCreate(bdArgs, rest []string) ([]string, stri
 		if isBdRigNamespaceAssigneeKey(w.key) && !rigNamespacePinAdmitted(c.ns, w.value) {
 			return nil, c.actorRefusal("create", "a new bead", w.value), true
 		}
+		// Create-time route rule (one rule, two layers; see "Routes on a new
+		// bead" in docs/guides/sharing-a-rig-store.md): gc bd create, like
+		// gc sling, admits only a route to one of the rig's own agents. The
+		// guarded store underneath (rigNamespaceStore.stampMetadata) also
+		// accepts a rig-qualified route outside the namespace on create, as
+		// a hand-off of this city's own new row. gc bd is stricter by design:
+		// a hand-off goes through an update of an existing Owned row (see
+		// checkByID), never through a create.
 		if isRigNamespaceRouteKey(w.key) && !rigNamespaceRouteAdmitted(c.ns, w.value) {
 			return nil, c.routeRefusal("create", "a new bead", w), true
 		}
