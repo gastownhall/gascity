@@ -3,6 +3,7 @@ package legacyop
 import (
 	"errors"
 	"fmt"
+	goruntime "runtime"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -366,6 +367,60 @@ func TestNilCrashPointsChangesNothing(t *testing.T) {
 				with := calls(t, p, surface, func(CrashPoint, opjournal.Op) error { return nil })
 				if !slices.Equal(without, with) {
 					t.Fatalf("store calls differ:\nnil hook  %v\nno-op hook %v", without, with)
+				}
+			})
+		}
+	}
+}
+
+// A hook that panics at any point, or ends its goroutine (runtime.Goexit) at
+// a point Finish reports, still leaves the in-flight registry empty: a crash
+// test that does not kill its process cannot strand the entry, and a panic
+// still propagates.
+func TestCrashPointHookThatUnwindsReleasesTheEntry(t *testing.T) {
+	for _, point := range []CrashPoint{CrashPointAdmitted, CrashPointEffected, CrashPointClosing, CrashPointClosed} {
+		for _, unwind := range []string{"panic", "goexit"} {
+			if point == CrashPointAdmitted && unwind == "goexit" {
+				continue
+			}
+			t.Run(string(point)+"/"+unwind, func(t *testing.T) {
+				e := newEnv(t)
+				r := apiRecorder(e, gate.Auto)
+				r.CrashPoints = func(p CrashPoint, _ opjournal.Op) error {
+					if p != point {
+						return nil
+					}
+					if unwind == "panic" {
+						panic("hook at " + string(p))
+					}
+					goruntime.Goexit()
+					return nil
+				}
+				panicked := make(chan bool, 1)
+				go func() {
+					ended := false
+					defer func() {
+						if !ended {
+							panicked <- recover() != nil
+						}
+					}()
+					adm, err := r.Admit(msg("k1", "hello"))
+					if err != nil {
+						t.Error(err)
+						return
+					}
+					if r.Inflight.Len() != 1 {
+						t.Errorf("registry %d after Admit, want 1", r.Inflight.Len())
+					}
+					adm.Finish(Result{Outcome: succeeded(ViaLegacyDelivered)})
+					ended = true
+					panicked <- false
+				}()
+				if got := <-panicked; got != (unwind == "panic") {
+					t.Fatalf("Finish panicked = %v, want %v", got, unwind == "panic")
+				}
+				if r.Inflight.Len() != 0 {
+					t.Fatalf("registry %d after the hook unwound at %s, want 0", r.Inflight.Len(), point)
 				}
 			})
 		}

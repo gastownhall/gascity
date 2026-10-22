@@ -492,10 +492,26 @@ func (a *Admission) Finish(res Result) Finished {
 	if a == nil || a.Decision != Execute || a.done.Swap(true) {
 		return Finished{}
 	}
-	r := a.rec
 	if !a.Recorded {
 		return Finished{}
 	}
+	// done is already set, so the handler's recovery cannot Finish again: a
+	// panic or a runtime.Goexit below (the close's, or a crash-point
+	// hook's) releases the entry here and keeps unwinding.
+	returned := false
+	defer func() {
+		if !returned {
+			a.release()
+		}
+	}()
+	f := a.finish(res)
+	returned = true
+	return f
+}
+
+// finish is Finish's work for a recorded execution, once.
+func (a *Admission) finish(res Result) Finished {
+	r := a.rec
 	_ = r.crashPoint(CrashPointEffected, a.Op)
 	// Only a recorder that adopts (the API, with an in-flight registry)
 	// leaves an op open for a same-key retry; CLI ops always close
@@ -505,14 +521,6 @@ func (a *Admission) Finish(res Result) Finished {
 		r.count(a.Op.Kind, StageClose, ResultLeftOpen, "")
 		return Finished{}
 	}
-	// done is already set, so the handler's recovery cannot Finish again: a
-	// panic in the close releases the entry here and re-panics.
-	defer func() {
-		if p := recover(); p != nil {
-			a.release()
-			panic(p)
-		}
-	}()
 	op, err := r.closeWithRetries(a.store, a.Op, res.Outcome)
 	switch {
 	case err == nil:

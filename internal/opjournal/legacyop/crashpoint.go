@@ -18,8 +18,12 @@ const (
 	// legacy effect has not started. Only the API's asynchronous verbs
 	// reach it, from their delivery goroutine, through Admission.Reach.
 	CrashPointAnswered CrashPoint = "answered"
-	// CrashPointEffected (K3): Finish holds the legacy path's result; the
-	// effect ran (or failed) and nothing about the op has been written.
+	// CrashPointEffected (K3): Finish holds the legacy path's result and
+	// nothing about the op has been written. Finish reports it for every
+	// recorded execution it finishes, so it is also reached where a surface
+	// releases an admission whose effect never started (an API handler that
+	// fails after Admit leaves the op open for adoption): a kill there leaves
+	// the store as K1 does.
 	CrashPointEffected CrashPoint = "effected"
 	// CrashPointClosing (K5) is right before each close attempt, Finish's
 	// and the background retry's. A non-nil error from the hook fails that
@@ -36,9 +40,11 @@ const (
 // (the closed op at CrashPointClosed when the close returned it). Its error
 // matters only at CrashPointClosing; at every other point it is ignored. It
 // may block (a test parks a request there) and must be safe for concurrent
-// use: one recorder serves many requests. A panic propagates through the
-// recorder's own recoveries, which release the in-flight entry and re-panic,
-// so in-process crash tests park instead of panicking.
+// use: one recorder serves many requests. A panic in the hook unwinds
+// through the recorder, which releases the request's in-flight entry on the
+// way; at Finish's points (CrashPointEffected, CrashPointClosing and
+// CrashPointClosed) a runtime.Goexit releases it too. In-process crash tests
+// that need the op held park instead of unwinding.
 type CrashPointFunc func(p CrashPoint, op opjournal.Op) error
 
 // Reach reports p for the admission's op to its recorder's hook. It does
