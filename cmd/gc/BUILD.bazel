@@ -1557,6 +1557,7 @@ go_test(
         "idle_nudge_test.go",
         "idle_tracker_test.go",
         "implicit_agent_isolation_runtime_test.go",
+        "implicit_agent_worktree_prune_test.go",
         "import_state_doctor_check_test.go",
         "infra_class_clear_crash_resume_test.go",
         "infra_class_clear_phase_matrix_test.go",
