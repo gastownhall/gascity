@@ -217,10 +217,14 @@ target — usable directly with `dolt clone file://...`.
 
 ## Emergency rollback
 
-Use this if `dolt gc` corrupts the store (a future Dolt regression
+Use this if `dolt gc` corrupts a database's store (a future Dolt regression
 slipping past the smoke test). The most recent successful snapshot
 is the recovery point; failed snapshots are retained for postmortem,
 not for restore.
+
+The data dir (`.beads/dolt/`) is shared by every database in the city, so
+recovery is **per-database**: move only `<data_dir>/<db>` aside, never the
+data dir itself, and leave every sibling database in place (#1979).
 
 1. **Stop the controller:**
 
@@ -228,23 +232,29 @@ not for restore.
    gc stop
    ```
 
-2. **Move the broken store aside (do not delete — keep it for
-   postmortem):**
+2. **Move only the broken database's store aside (do not delete — keep it
+   for postmortem):**
 
    ```sh
-   cd <city>/.beads
-   mv dolt dolt.broken-$(date -u +%Y%m%dT%H%M%SZ)
+   cd <city>
+   mkdir -p .gc/runtime/packs/dolt/corrupt-aside
+   mv .beads/dolt/<db> .gc/runtime/packs/dolt/corrupt-aside/<db>.<timestamp>
    ```
+
+   Repeat per corrupt database if more than one is affected; each aside copy
+   lands where start-time journal recovery keeps its own, and the
+   `dolt-corrupt-aside` doctor check reports it until you remove it.
 
 3. **Pick the most recent successful snapshot** under
    `.beads/dolt-backups/success/` (sorted lexicographically — the
    timestamp format makes lexical order equal to time order).
 
-4. **Restore it as the new bead store** with `dolt clone`:
+4. **Restore it into the data dir** with `dolt backup restore`, run from
+   the data dir so the named database is re-created as `<data_dir>/<db>`:
 
    ```sh
-   cd <city>/.beads
-   dolt clone file://$(pwd)/dolt-backups/success/<timestamp> dolt
+   cd <city>/.beads/dolt
+   dolt backup restore file://$(pwd)/../dolt-backups/success/<timestamp> <db>
    ```
 
 5. **Restart the controller and verify:**
