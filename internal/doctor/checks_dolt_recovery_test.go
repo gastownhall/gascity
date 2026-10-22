@@ -226,3 +226,71 @@ func TestDoltUnboundDatabasesCheck(t *testing.T) {
 		})
 	}
 }
+
+func TestDoltCorruptAsideCheck(t *testing.T) {
+	tests := []struct {
+		name string
+		// entries are created under corrupt-aside/; nil leaves it absent.
+		entries    []string
+		wantStatus CheckStatus
+		wantNamed  []string
+	}{
+		{name: "absent is OK", wantStatus: StatusOK},
+		{name: "empty is OK", entries: []string{}, wantStatus: StatusOK},
+		{
+			name:       "one aside copy warns with database, time and path",
+			entries:    []string{"prod.20261022T010203Z"},
+			wantStatus: StatusWarning,
+			wantNamed:  []string{"prod", "20261022T010203Z"},
+		},
+		{
+			name:       "every aside copy is named",
+			entries:    []string{"prod.20261022T010203Z", "pa.20261021T235959Z"},
+			wantStatus: StatusWarning,
+			wantNamed:  []string{"prod", "20261022T010203Z", "pa", "20261021T235959Z"},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cityDir := setupManagedDoltCity(t)
+			asideRoot := filepath.Join(cityDir, ".gc", "runtime", "packs", "dolt", "corrupt-aside")
+			if tc.entries != nil {
+				if err := os.MkdirAll(asideRoot, 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			for _, entry := range tc.entries {
+				writeCommittedDoltDatabase(t, asideRoot, entry)
+			}
+
+			r := NewDoltCorruptAsideCheck(cityDir).Run(&CheckContext{})
+			if r.Status != tc.wantStatus {
+				t.Fatalf("status = %d, want %d; msg = %s", r.Status, tc.wantStatus, r.Message)
+			}
+			for _, want := range tc.wantNamed {
+				if !strings.Contains(r.Message, want) {
+					t.Errorf("message = %q, want it to name %q", r.Message, want)
+				}
+			}
+			for _, entry := range tc.entries {
+				if path := filepath.Join(asideRoot, entry); !strings.Contains(r.Message, path) {
+					t.Errorf("message = %q, want path %s", r.Message, path)
+				}
+			}
+		})
+	}
+}
+
+func TestDoltCorruptAsideCheckHonorsCityRuntimeDir(t *testing.T) {
+	cityDir := setupManagedDoltCity(t)
+	runtimeDir := t.TempDir()
+	t.Setenv("GC_CITY_PATH", cityDir)
+	t.Setenv("GC_CITY_RUNTIME_DIR", runtimeDir)
+	aside := filepath.Join(runtimeDir, "packs", "dolt", "corrupt-aside", "prod.20261022T010203Z")
+	writeCommittedDoltDatabase(t, filepath.Dir(aside), filepath.Base(aside))
+
+	r := NewDoltCorruptAsideCheck(cityDir).Run(&CheckContext{})
+	if r.Status != StatusWarning || !strings.Contains(r.Message, aside) {
+		t.Fatalf("status = %d, msg = %q; want a warning naming %s", r.Status, r.Message, aside)
+	}
+}

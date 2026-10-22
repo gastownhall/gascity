@@ -145,3 +145,56 @@ func usableLocalDoltBackup(dataDir, db string) (string, error) {
 	}
 	return "", nil
 }
+
+// DoltCorruptAsideCheck reports the pre-corruption stores start-time journal
+// recovery kept under <dolt pack state>/corrupt-aside/<db>.<timestamp>. Each
+// one marks a database that was restored from a backup and is missing the
+// writes made after that backup's last sync.
+type DoltCorruptAsideCheck struct {
+	cityPath string
+}
+
+// NewDoltCorruptAsideCheck creates the corrupt-aside check.
+func NewDoltCorruptAsideCheck(cityPath string) *DoltCorruptAsideCheck {
+	return &DoltCorruptAsideCheck{cityPath: cityPath}
+}
+
+// Name returns the check identifier.
+func (c *DoltCorruptAsideCheck) Name() string { return "dolt-corrupt-aside" }
+
+// Run lists the stores kept aside by journal recovery.
+func (c *DoltCorruptAsideCheck) Run(_ *CheckContext) *CheckResult {
+	r := &CheckResult{Name: c.Name()}
+	asideRoot := filepath.Join(doctorDoltPackStateDir(c.cityPath), "corrupt-aside")
+	entries, err := os.ReadDir(asideRoot)
+	if err != nil && !errors.Is(err, fs.ErrNotExist) {
+		r.Status = StatusWarning
+		r.Message = fmt.Sprintf("read %s: %v", asideRoot, err)
+		return r
+	}
+	var copies []string
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		db, ts, _ := strings.Cut(entry.Name(), ".")
+		copies = append(copies, fmt.Sprintf("%s (moved aside %s) at %s", db, ts, filepath.Join(asideRoot, entry.Name())))
+	}
+	if len(copies) == 0 {
+		r.Status = StatusOK
+		r.Message = "no corrupt stores kept aside by journal recovery"
+		return r
+	}
+	r.Status = StatusWarning
+	r.Message = "journal recovery restored databases from backup; writes after each backup's last sync are not in the restored copy: " +
+		strings.Join(copies, "; ")
+	r.FixHint = "review each kept copy (the pre-corruption store) and recover any writes the restored database lacks, then remove the copy; see `gc dolt logs` for the RESTORED line"
+	return r
+}
+
+// CanFix returns false — whether a kept copy still holds needed writes is the
+// operator's call.
+func (c *DoltCorruptAsideCheck) CanFix() bool { return false }
+
+// Fix is a no-op.
+func (c *DoltCorruptAsideCheck) Fix(_ *CheckContext) error { return nil }

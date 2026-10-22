@@ -92,6 +92,7 @@ dolt-server
 fork-rate
 dolt-noms-size
 dolt-unbound-databases
+dolt-corrupt-aside
 dolt-compact-state
 dolt-journal-size
 dolt-log-size
