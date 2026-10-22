@@ -960,6 +960,7 @@ func TestDeepCopyAgentCoversAllFields(t *testing.T) {
 		MouseMode:                    "on",
 		TmuxAlias:                    "worker--{{.CityName}}",
 		Implicit:                     true,
+		PoolSlotWorktrees:            true,
 		DrainTimeout:                 "10m",
 		OnBoot:                       "echo boot",
 		OnDeath:                      "echo death",

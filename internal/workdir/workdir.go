@@ -268,6 +268,14 @@ func ResolveTmuxAlias(cityPath, cityName string, a config.Agent, rigs []config.R
 // surfaces work_dir template errors to callers that need to fail closed.
 func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) (string, error) {
 	if a.WorkDir == "" {
+		// Marked rig-scoped implicit agents resolve each numbered pool
+		// instance to its own slot worktree before the rig-root
+		// short-circuit, so concurrent instances stop sharing one
+		// checkout (issue #1181). Non-matching identities fall through
+		// to today's resolution.
+		if slot, ok := ImplicitSlotFor(cityPath, qualifiedName, a, rigs); ok {
+			return slot.Path, nil
+		}
 		if rigName := ConfiguredRigName(cityPath, a, rigs); rigName != "" {
 			if rigRoot := RigRootForName(rigName, rigs); rigRoot != "" {
 				return ResolveDirPath(cityPath, rigRoot), nil

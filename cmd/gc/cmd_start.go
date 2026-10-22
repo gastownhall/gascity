@@ -1576,10 +1576,23 @@ func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.A
 // resolveConfiguredWorkDir resolves an agent's working directory and creates
 // it. Only session-start paths may call this; pure computations use
 // resolveConfiguredWorkDirPath.
+//
+// A matched implicit pool slot (workdirutil.ImplicitSlotFor) is provisioned
+// as its own git worktree instead of a plain directory, so concurrent
+// numbered instances of a rig-scoped implicit agent stop sharing the rig
+// root's checkout.
 func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
 	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
 	if err != nil {
 		return "", err
+	}
+	if a != nil {
+		if slot, ok := workdirutil.ImplicitSlotFor(cityPath, qualifiedName, *a, rigs); ok && slot.Path == dir {
+			if err := ensureImplicitSlotWorktree(slot); err != nil {
+				return "", fmt.Errorf("agent %q: %w", qualifiedName, err)
+			}
+			return dir, nil
+		}
 	}
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", fmt.Errorf("creating agent dir %q: %w", dir, err)

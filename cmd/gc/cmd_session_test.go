@@ -3607,3 +3607,65 @@ func TestRouteSessionPeek_StaleBannerOver30s(t *testing.T) {
 		t.Errorf("stale banner missing from human output:\n%s", stdout.String())
 	}
 }
+
+// TestImplicitRigPoolInstancesGetDistinctWorkDirs pins issue #1181's defect
+// at the resolution seam: numbered pool instances of a rig-scoped implicit
+// agent must not share the rig root as their working directory. Each
+// instance resolves to its own slot worktree under
+// <city>/.gc/worktrees/<rig>/<provider>-<n>, while the canonical template
+// identity keeps resolving to the rig root.
+func TestImplicitRigPoolInstancesGetDistinctWorkDirs(t *testing.T) {
+	rigRoot := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(rigRoot, ".git"), 0o755); err != nil {
+		t.Fatalf("mkdir rig .git: %v", err)
+	}
+	cityPath := t.TempDir()
+	cfg := &config.City{
+		Workspace: config.Workspace{Name: "city", Provider: "claude"},
+		Providers: map[string]config.ProviderSpec{"claude": config.BuiltinProviderAlias("claude")},
+		Rigs:      []config.Rig{{Name: "my-rig", Path: rigRoot}},
+	}
+	config.InjectImplicitAgents(cfg)
+
+	var agent *config.Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Dir == "my-rig" && cfg.Agents[i].Name == "claude" {
+			agent = &cfg.Agents[i]
+		}
+	}
+	if agent == nil {
+		t.Fatal("rig-scoped implicit claude agent not found after InjectImplicitAgents")
+	}
+	if !agent.SupportsMultipleSessions() {
+		t.Fatal("implicit rig-scoped agent must support multiple concurrent sessions")
+	}
+
+	first, err := resolveConfiguredWorkDirPath(cityPath, cfg.Workspace.Name, "my-rig/claude-1", agent, cfg.Rigs)
+	if err != nil {
+		t.Fatalf("resolving my-rig/claude-1: %v", err)
+	}
+	second, err := resolveConfiguredWorkDirPath(cityPath, cfg.Workspace.Name, "my-rig/claude-2", agent, cfg.Rigs)
+	if err != nil {
+		t.Fatalf("resolving my-rig/claude-2: %v", err)
+	}
+	if first == second {
+		t.Fatalf("pool instances my-rig/claude-1 and my-rig/claude-2 share one working directory %q", first)
+	}
+
+	// The slot paths are per-instance, not arbitrary: each instance gets its
+	// own directory keyed by rig and instance name.
+	wantFirst := filepath.Join(cityPath, ".gc", "worktrees", "my-rig", "claude-1")
+	wantSecond := filepath.Join(cityPath, ".gc", "worktrees", "my-rig", "claude-2")
+	if first != wantFirst || second != wantSecond {
+		t.Errorf("work dirs = (%q, %q), want (%q, %q)", first, second, wantFirst, wantSecond)
+	}
+
+	// The canonical identity keeps resolving to the rig root.
+	canonical, err := resolveConfiguredWorkDirPath(cityPath, cfg.Workspace.Name, "my-rig/claude", agent, cfg.Rigs)
+	if err != nil {
+		t.Fatalf("resolving my-rig/claude: %v", err)
+	}
+	if canonical != rigRoot {
+		t.Errorf("canonical my-rig/claude work dir = %q, want rig root %q", canonical, rigRoot)
+	}
+}

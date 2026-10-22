@@ -3773,6 +3773,14 @@ type Agent struct {
 	// even without an explicit [[agent]] entry in city.toml.
 	// Runtime-only — not persisted to TOML or JSON.
 	Implicit bool `toml:"-" json:"-"`
+	// PoolSlotWorktrees marks a rig-scoped implicit agent whose numbered
+	// pool instances each get their own git worktree under
+	// <city>/.gc/worktrees/<rig>/<template>-<n> instead of sharing the rig
+	// root. Set during InjectImplicitAgents when implicit pool isolation is
+	// active (workspace.implicit_isolation); pool expansion must copy it so
+	// concrete instances keep the slot resolution their template carries.
+	// Runtime-only — not persisted to TOML or JSON.
+	PoolSlotWorktrees bool `toml:"-" json:"-"`
 	// DefaultSlingFormula is the formula name automatically applied via --on
 	// when beads are slung to this agent, unless --no-formula is set.
 	// Example: "mol-polecat-work"
@@ -4086,6 +4094,7 @@ func InjectImplicitAgents(cfg *City) {
 				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
+				PoolSlotWorktrees:   true,
 			})
 		}
 	}

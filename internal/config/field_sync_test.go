@@ -45,6 +45,7 @@ func TestAgentFieldSync(t *testing.T) {
 		"Fallback":                     "pack composition hint, not overridable at runtime",
 		"PoolName":                     "internal field set during pool expansion, not user-configurable",
 		"Implicit":                     "runtime-only, set during InjectImplicitAgents, not user-configurable",
+		"PoolSlotWorktrees":            "runtime-only, set during InjectImplicitAgents when implicit pool isolation is active, not user-configurable",
 		"SleepAfterIdleSource":         "runtime-only provenance, derived from the layer that set SleepAfterIdle",
 		"DrainTimeout":                 "scaling field, patched via PoolOverride.DrainTimeout",
 		"OnBoot":                       "scaling field, patched via PoolOverride.OnBoot",

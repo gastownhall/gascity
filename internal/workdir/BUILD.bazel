@@ -3,6 +3,7 @@ load("@rules_go//go:def.bzl", "go_library", "go_test")
 go_library(
     name = "workdir",
     srcs = [
+        "implicit_slot.go",
         "pool_isolation.go",
         "workdir.go",
     ],
@@ -18,6 +19,7 @@ go_library(
 go_test(
     name = "workdir_test",
     srcs = [
+        "implicit_slot_test.go",
         "pool_isolation_test.go",
         "testenv_import_test.go",
         "workdir_test.go",
