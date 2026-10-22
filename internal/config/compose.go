@@ -882,6 +882,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	if err := validateOpsModes(root.Ops); err != nil {
 		return nil, nil, err
 	}
+	if err := validateImplicitAgentIsolationComposed(root); err != nil {
+		return nil, nil, err
+	}
 
 	// Capture revision inputs after all config and pack discovery so callers
 	// can compare the loaded snapshot to future reloads without re-reading
@@ -893,6 +896,32 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	}
 
 	return root, prov, nil
+}
+
+// validateImplicitAgentIsolationComposed runs the enum check on the fully
+// composed root (a fragment may have supplied the key) and, in worktree
+// mode, requires the core pack and its worktree-setup.sh on disk. The
+// script is what the injected implicit pre_start invokes; without it a
+// session would cwd into an empty non-repo directory that
+// resolveConfiguredWorkDir's MkdirAll created. It runs after
+// InjectImplicitAgents and after deferred agent patches, so a patched
+// implicit agent is validated in its final shape.
+func validateImplicitAgentIsolationComposed(root *City) error {
+	if err := validateImplicitAgentIsolation(root.Workspace.ImplicitAgentIsolation); err != nil {
+		return err
+	}
+	if strings.TrimSpace(root.Workspace.ImplicitAgentIsolation) != "worktree" {
+		return nil
+	}
+	coreDir := root.PackDirByName("core")
+	if coreDir == "" {
+		return fmt.Errorf(`workspace.implicit_agent_isolation = "worktree" requires the core pack: its assets/scripts/worktree-setup.sh provisions the per-slot worktrees`)
+	}
+	script := filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh")
+	if _, err := os.Stat(script); err != nil {
+		return fmt.Errorf(`workspace.implicit_agent_isolation = "worktree": core pack script %q not found: %w`, script, err)
+	}
+	return nil
 }
 
 // adjustPatchPaths resolves patch path fields rooted at the declaring config

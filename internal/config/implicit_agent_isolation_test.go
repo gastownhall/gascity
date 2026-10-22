@@ -61,7 +61,9 @@ func TestImplicitAgentIsolationParse(t *testing.T) {
 // TestImplicitAgentIsolationFragmentOverride pins mergeWorkspace pickup:
 // a fragment that defines the key overrides the root layer (last-wins, same
 // as the other workspace string fields), and a fragment that does not
-// define it leaves the root's value alone.
+// define it leaves the root's value alone. The composed value stays
+// "shared" in both cases so composed-root core-pack validation stays out
+// of the way; that validation has its own test.
 func TestImplicitAgentIsolationFragmentOverride(t *testing.T) {
 	fs := fsys.NewFake()
 	fs.Files["/city/city.toml"] = []byte(`
@@ -69,18 +71,18 @@ include = ["fragment.toml"]
 
 [workspace]
 name = "test"
-implicit_agent_isolation = "shared"
+implicit_agent_isolation = "worktree"
 `)
 	fs.Files["/city/fragment.toml"] = []byte(`
 [workspace]
-implicit_agent_isolation = "worktree"
+implicit_agent_isolation = "shared"
 `)
 	cfg, _, err := LoadWithIncludes(fs, "/city/city.toml")
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := cfg.Workspace.ImplicitAgentIsolation; got != "worktree" {
-		t.Fatalf("composed implicit_agent_isolation = %q, want the fragment's worktree", got)
+	if got := cfg.Workspace.ImplicitAgentIsolation; got != "shared" {
+		t.Fatalf("composed implicit_agent_isolation = %q, want the fragment's shared", got)
 	}
 
 	fs2 := fsys.NewFake()
@@ -89,7 +91,7 @@ include = ["fragment.toml"]
 
 [workspace]
 name = "test"
-implicit_agent_isolation = "worktree"
+implicit_agent_isolation = "shared"
 `)
 	fs2.Files["/city/fragment.toml"] = []byte(`
 [workspace]
@@ -99,8 +101,118 @@ timezone = "UTC"
 	if err != nil {
 		t.Fatalf("LoadWithIncludes: %v", err)
 	}
-	if got := cfg2.Workspace.ImplicitAgentIsolation; got != "worktree" {
-		t.Fatalf("composed implicit_agent_isolation = %q, want the root's worktree to survive an unrelated fragment", got)
+	if got := cfg2.Workspace.ImplicitAgentIsolation; got != "shared" {
+		t.Fatalf("composed implicit_agent_isolation = %q, want the root's shared to survive an unrelated fragment", got)
+	}
+}
+
+// TestImplicitAgentIsolationRejectsOutOfEnum proves a typo fails config
+// load rather than silently meaning "shared": an operator who writes
+// "worktrees" must not believe isolation is on while every pool still
+// shares the rig root.
+func TestImplicitAgentIsolationRejectsOutOfEnum(t *testing.T) {
+	for _, raw := range []string{"bogus", "true", "1", "Worktree", "none"} {
+		t.Run(raw, func(t *testing.T) {
+			_, err := Parse([]byte("[workspace]\nname = \"t\"\nimplicit_agent_isolation = \"" + raw + "\"\n"))
+			if err == nil {
+				t.Fatalf("expected an error for an out-of-enum implicit_agent_isolation value %q", raw)
+			}
+			for _, want := range []string{"workspace.implicit_agent_isolation", raw, "shared", "worktree"} {
+				if !strings.Contains(err.Error(), want) {
+					t.Errorf("error %q missing %q", err.Error(), want)
+				}
+			}
+		})
+	}
+	// Whitespace is tolerated; the value itself is not folded.
+	out, err := Parse([]byte("[workspace]\nname = \"t\"\nimplicit_agent_isolation = \" worktree \"\n"))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	if got := out.Workspace.ImplicitAgentIsolation; got != " worktree " {
+		t.Fatalf("decoded value = %q, want it preserved for composed-root validation", got)
+	}
+}
+
+// TestImplicitAgentIsolationWorktreeRequiresCore proves the composed-root
+// load path (the one every real gc invocation uses) rejects worktree mode
+// when the core pack is not composed, and again when its
+// worktree-setup.sh is missing on disk — without it the injected pre_start
+// would point at a script that does not exist and sessions would start in
+// an empty non-repo directory.
+func TestImplicitAgentIsolationWorktreeRequiresCore(t *testing.T) {
+	fs := fsys.NewFake()
+	fs.Files["/city/city.toml"] = []byte(`
+[workspace]
+name = "test"
+implicit_agent_isolation = "worktree"
+`)
+	_, _, err := LoadWithIncludes(fs, "/city/city.toml")
+	if err == nil {
+		t.Fatal("LoadWithIncludes: want an error for worktree mode without the core pack, got nil")
+	}
+	if !strings.Contains(err.Error(), `workspace.implicit_agent_isolation = "worktree"`) || !strings.Contains(err.Error(), "core") {
+		t.Fatalf("error = %q, want it to name the key and the missing core pack", err.Error())
+	}
+
+	// A composed core pack whose worktree-setup.sh is missing is the same
+	// refusal, naming the script path. Import a real local "core" pack on
+	// disk that does not ship the script.
+	dir := t.TempDir()
+	coreDir := filepath.Join(dir, "corepack")
+	cityDir := filepath.Join(dir, "city")
+	writeTestFile(t, coreDir, "pack.toml", "[pack]\nname = \"core\"\nschema = 2\n")
+	rigRoot := filepath.Join(dir, "demo")
+	if err := os.MkdirAll(rigRoot, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	writeTestFile(t, cityDir, "city.toml", `
+[workspace]
+name = "test"
+implicit_agent_isolation = "worktree"
+
+[imports.core]
+source = "../corepack"
+
+[[rigs]]
+name = "demo"
+path = "`+rigRoot+`"
+`)
+	_, _, err = LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err == nil {
+		t.Fatal("LoadWithIncludes: want an error for a core pack without worktree-setup.sh, got nil")
+	}
+	wantScript := filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh")
+	if !strings.Contains(err.Error(), wantScript) {
+		t.Fatalf("error = %q, want it to name the missing script %q", err.Error(), wantScript)
+	}
+
+	// The same city with the script present loads and the injected implicit
+	// pool carries the wired pre_start end to end — the core pack path
+	// resolving through the composed import.
+	writeTestFile(t, coreDir, "assets/scripts/worktree-setup.sh", "#!/bin/sh\nexit 0\n")
+	cfg, _, err := LoadWithIncludes(fsys.OSFS{}, filepath.Join(cityDir, "city.toml"))
+	if err != nil {
+		t.Fatalf("LoadWithIncludes with the script present: %v", err)
+	}
+	cfg.Providers = map[string]ProviderSpec{"claude": {}}
+	InjectImplicitAgents(cfg)
+	var rigImplicit *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Implicit && cfg.Agents[i].Dir == "demo" {
+			rigImplicit = &cfg.Agents[i]
+			break
+		}
+	}
+	if rigImplicit == nil {
+		t.Fatal("no rig-scoped implicit agent after load")
+	}
+	wantPreStart := wantScript + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"
+	if len(rigImplicit.PreStart) != 1 || rigImplicit.PreStart[0] != wantPreStart {
+		t.Fatalf("PreStart = %v, want [%q]", rigImplicit.PreStart, wantPreStart)
+	}
+	if rigImplicit.WorkDir != ".gc/worktrees/{{.Rig}}/{{.AgentBase}}" {
+		t.Fatalf("WorkDir = %q", rigImplicit.WorkDir)
 	}
 }
 

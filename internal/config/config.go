@@ -5064,6 +5064,9 @@ func Parse(data []byte) (*City, error) {
 	if err := validateOpsModes(cfg.Ops); err != nil {
 		return nil, err
 	}
+	if err := validateImplicitAgentIsolation(cfg.Workspace.ImplicitAgentIsolation); err != nil {
+		return nil, err
+	}
 	// Parse sees one layer. Cross-layer storage invariants (six-class
 	// completeness, binding resolution) are checked on the composed root in
 	// LoadWithIncludesOptions, because a fragment may supply either half.
@@ -5089,6 +5092,20 @@ func validateBeadsModes(b BeadsConfig) error {
 		return err
 	}
 	return validateLedgerFeed(b.LedgerFeed)
+}
+
+// validateImplicitAgentIsolation rejects an out-of-enum
+// workspace.implicit_agent_isolation value at load time. A typo like
+// "worktrees" would silently mean "shared" and leave the operator
+// believing implicit pools are isolated while every pool still shares the
+// rig root, so the config fails to load instead. The empty string (unset)
+// and "shared" are valid.
+func validateImplicitAgentIsolation(raw string) error {
+	switch strings.TrimSpace(raw) {
+	case "", "shared", "worktree":
+		return nil
+	}
+	return fmt.Errorf("workspace.implicit_agent_isolation: invalid value %q: want one of shared, worktree", raw)
 }
 
 // validateConditionalWrites rejects an out-of-enum beads.conditional_writes
