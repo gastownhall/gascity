@@ -1,11 +1,32 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/gastownhall/gascity/internal/fsys"
 )
+
+// coreWorktreeScriptRel is where the core pack ships worktree-setup.sh;
+// worktree mode's injected pre_start points at it (absolute, because
+// implicit agents have no SourceDir for {{.ConfigDir}} to resolve
+// against — the promptTemplate precedent in InjectImplicitAgents).
+const coreWorktreeScriptRel = "assets/scripts/worktree-setup.sh"
+
+// composeFakeCorePack creates a pack directory that PackDirByName("core")
+// resolves: a pack.toml naming the pack "core", optionally carrying the
+// worktree-setup.sh script.
+func composeFakeCorePack(t *testing.T, withScript bool) string {
+	t.Helper()
+	dir := t.TempDir()
+	writeTestFile(t, dir, "pack.toml", "[pack]\nname = \"core\"\nschema = 2\n")
+	if withScript {
+		writeTestFile(t, dir, coreWorktreeScriptRel, "#!/bin/sh\nexit 0\n")
+	}
+	return dir
+}
 
 // TestImplicitAgentIsolationParse covers decode of the new [workspace] key
 // on a single layer. Enum enforcement lives in validateImplicitAgentIsolation
@@ -80,6 +101,102 @@ timezone = "UTC"
 	}
 	if got := cfg2.Workspace.ImplicitAgentIsolation; got != "worktree" {
 		t.Fatalf("composed implicit_agent_isolation = %q, want the root's worktree to survive an unrelated fragment", got)
+	}
+}
+
+// TestInjectImplicitAgentsWorktreeMode covers the #1181 fix at injection
+// time: in worktree mode each rig-scoped implicit agent gets the per-slot
+// work_dir template and a pre_start invoking the core pack's
+// worktree-setup.sh, while city-scoped implicit agents and explicit agents
+// stay untouched.
+func TestInjectImplicitAgentsWorktreeMode(t *testing.T) {
+	coreDir := composeFakeCorePack(t, true)
+	cfg := &City{
+		Workspace: Workspace{ImplicitAgentIsolation: "worktree"},
+		Providers: map[string]ProviderSpec{"claude": {}},
+		PackDirs:  []string{coreDir},
+		Rigs:      []Rig{{Name: "demo", Path: "/tmp/demo"}},
+		Agents: []Agent{{
+			Name: "claude",
+			Dir:  "demo",
+		}},
+	}
+	InjectImplicitAgents(cfg)
+
+	var cityImplicit *Agent
+	for i := range cfg.Agents {
+		a := &cfg.Agents[i]
+		if !a.Implicit {
+			continue
+		}
+		if a.Dir == "" {
+			if cityImplicit != nil {
+				t.Fatal("more than one city-scoped implicit agent injected")
+			}
+			cityImplicit = a
+			continue
+		}
+		if a.Dir != "demo" {
+			t.Fatalf("unexpected rig-scoped implicit agent %q", a.QualifiedName())
+		}
+		wantWorkDir := ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+		if a.WorkDir != wantWorkDir {
+			t.Errorf("rig implicit %q: WorkDir = %q, want %q", a.QualifiedName(), a.WorkDir, wantWorkDir)
+		}
+		wantPreStart := filepath.Join(coreDir, coreWorktreeScriptRel) + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"
+		if len(a.PreStart) != 1 || a.PreStart[0] != wantPreStart {
+			t.Errorf("rig implicit %q: PreStart = %v, want [%q]", a.QualifiedName(), a.PreStart, wantPreStart)
+		}
+	}
+	if cityImplicit == nil {
+		t.Fatal("no city-scoped implicit agent injected")
+	}
+	if cityImplicit.WorkDir != "" || len(cityImplicit.PreStart) != 0 {
+		t.Fatalf("city-scoped implicit agent must stay unchanged in worktree mode: WorkDir=%q PreStart=%v", cityImplicit.WorkDir, cityImplicit.PreStart)
+	}
+	// Explicit agent untouched: no duplicate was injected and its fields
+	// are exactly what the author wrote.
+	for _, a := range cfg.Agents {
+		if a.Implicit {
+			continue
+		}
+		if a.Dir == "demo" && a.Name == "claude" {
+			if a.WorkDir != "" || len(a.PreStart) != 0 {
+				t.Fatalf("explicit agent mutated by worktree mode: WorkDir=%q PreStart=%v", a.WorkDir, a.PreStart)
+			}
+			return
+		}
+	}
+	t.Fatal("explicit agent demo/claude lost after injection")
+}
+
+// TestInjectImplicitAgentsWorktreeModeWithoutCore verifies the injected
+// pre_start still points at the core script path even when the core pack is
+// not composed (empty PackDirs): rejection is the composed-root validation's
+// job, and injection must not silently invent a different path.
+func TestInjectImplicitAgentsWorktreeModeWithoutCore(t *testing.T) {
+	cfg := &City{
+		Workspace: Workspace{ImplicitAgentIsolation: "worktree"},
+		Providers: map[string]ProviderSpec{"claude": {}},
+		Rigs:      []Rig{{Name: "demo", Path: "/tmp/demo"}},
+	}
+	InjectImplicitAgents(cfg)
+
+	var rigImplicit *Agent
+	for i := range cfg.Agents {
+		if cfg.Agents[i].Implicit && cfg.Agents[i].Dir == "demo" {
+			rigImplicit = &cfg.Agents[i]
+		}
+	}
+	if rigImplicit == nil {
+		t.Fatal("no rig-scoped implicit agent injected")
+	}
+	wantPreStart := filepath.Join("", coreWorktreeScriptRel) + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"
+	if len(rigImplicit.PreStart) != 1 || rigImplicit.PreStart[0] != wantPreStart {
+		t.Fatalf("PreStart = %v, want [%q] even without the core pack composed", rigImplicit.PreStart, wantPreStart)
+	}
+	if _, err := os.Stat(strings.Fields(rigImplicit.PreStart[0])[0]); !os.IsNotExist(err) {
+		t.Fatalf("expected the un-composed script path %q to not exist on disk", strings.Fields(rigImplicit.PreStart[0])[0])
 	}
 }
 

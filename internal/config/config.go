@@ -4065,8 +4065,9 @@ func InjectImplicitAgents(cfg *City) {
 	// the core pack is composed (it resolves from the user-global cache,
 	// so the path is absolute). Without core the template stays empty and
 	// prompt rendering falls back to the embedded baseline.
+	coreDir := cfg.PackDirByName("core")
 	promptTemplate := ""
-	if coreDir := cfg.PackDirByName("core"); coreDir != "" {
+	if coreDir != "" {
 		promptTemplate = filepath.Join(coreDir, "assets", "prompts", "pool-worker.template.md")
 	}
 
@@ -4075,7 +4076,9 @@ func InjectImplicitAgents(cfg *City) {
 		slingFormula = "mol-do-work"
 	}
 
-	// City-scoped implicit agents.
+	// City-scoped implicit agents. They are already isolated per instance
+	// by ResolveWorkDirPathStrict's dir-less fallback, so worktree mode
+	// does not touch them.
 	for _, name := range providers {
 		if existing[agentKey{"", name}] {
 			continue
@@ -4089,7 +4092,22 @@ func InjectImplicitAgents(cfg *City) {
 		})
 	}
 
-	// Rig-scoped implicit agents.
+	// Rig-scoped implicit agents. In worktree mode each gets a per-slot
+	// work_dir under the city's .gc/worktrees/<rig>/ tree (the prune root
+	// session close reclaims, and the depth doctor's WorktreeCheck walks)
+	// plus a pre_start that provisions the worktree from the core pack's
+	// worktree-setup.sh. The script path is absolute — implicit agents
+	// have no SourceDir, so {{.ConfigDir}} would resolve against the city
+	// instead of the pack; this follows the promptTemplate precedent above.
+	// Rejecting worktree mode without the core pack (or without the script
+	// on disk) is the composed-root validation's job, not injection's.
+	isolateWorktrees := strings.TrimSpace(cfg.Workspace.ImplicitAgentIsolation) == "worktree"
+	var rigWorkDir string
+	var rigPreStart []string
+	if isolateWorktrees {
+		rigWorkDir = ".gc/worktrees/{{.Rig}}/{{.AgentBase}}"
+		rigPreStart = []string{filepath.Join(coreDir, "assets", "scripts", "worktree-setup.sh") + " {{.RigRoot}} {{.WorkDir}} {{.AgentBase}} --sync"}
+	}
 	for _, rig := range cfg.Rigs {
 		for _, name := range providers {
 			if existing[agentKey{rig.Name, name}] {
@@ -4101,6 +4119,8 @@ func InjectImplicitAgents(cfg *City) {
 				Provider:            name,
 				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
+				WorkDir:             rigWorkDir,
+				PreStart:            append([]string(nil), rigPreStart...),
 				Implicit:            true,
 			})
 		}

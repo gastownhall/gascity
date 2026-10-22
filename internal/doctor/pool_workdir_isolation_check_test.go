@@ -65,9 +65,21 @@ func TestPoolWorkDirIsolationCheck_WarnsOnSharedGitRigRoot(t *testing.T) {
 // pools capped to one session, non-git rig roots, agents with no pool
 // signal, and city-scoped agents (isolated by their own fallback path).
 func TestPoolWorkDirIsolationCheck_NoWarningWhenIsolated(t *testing.T) {
-	// The worktree-mode case lands with the AC-4 injection change: until
-	// implicit pools get a per-instance work_dir in that mode, the mode
-	// alone cannot isolate them.
+	t.Run("worktree mode", func(t *testing.T) {
+		city := t.TempDir()
+		_, rig := mkGitBackedRig(t, city)
+		cfg := &config.City{
+			Providers: map[string]config.ProviderSpec{"claude": {}},
+			Rigs:      []config.Rig{rig},
+		}
+		cfg.Workspace.ImplicitAgentIsolation = "worktree"
+		config.InjectImplicitAgents(cfg)
+
+		res := NewPoolWorkDirIsolationCheck(cfg).Run(&CheckContext{CityPath: city})
+		if res.Status != StatusOK {
+			t.Fatalf("Status = %v (%s), want StatusOK in worktree mode", res.Status, resultText(res))
+		}
+	})
 
 	t.Run("explicit pool with per-instance work_dir", func(t *testing.T) {
 		city := t.TempDir()
