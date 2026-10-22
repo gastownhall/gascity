@@ -1089,6 +1089,34 @@ func TestArchiveUnreadMarksReadFirst(t *testing.T) {
 	}
 }
 
+// TestArchiveUnreadReadWriteFailureLeavesMessageOpen covers the mark-read
+// write archive makes before it closes an unread message: when that write
+// fails, Archive reports it and never closes the message, so it stays in the
+// inbox rather than being archived unread.
+func TestArchiveUnreadReadWriteFailureLeavesMessageOpen(t *testing.T) {
+	store := &writeCountingStore{readCountingStore: &readCountingStore{MemStore: beads.NewMemStore()}}
+	p := New(store)
+	m, err := p.Send("human", "mayor", "", "archive me")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store.updateErr = errors.New("read write refused")
+
+	if err := p.Archive(m.ID); err == nil || !strings.Contains(err.Error(), "read write refused") {
+		t.Fatalf("Archive = %v, want the read-write failure reported", err)
+	}
+	if store.closes != 0 {
+		t.Errorf("Close calls = %d, want 0 after the read write failed", store.closes)
+	}
+	b, err := store.MemStore.Get(m.ID)
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if b.Status != "open" {
+		t.Errorf("status after a failed read write = %q, want open", b.Status)
+	}
+}
+
 func TestArchiveRepairsOpenMessageMissingFromDirectLookup(t *testing.T) {
 	store := beads.NewMemStore()
 	cs := beads.NewCachingStoreForTest(store, nil)
