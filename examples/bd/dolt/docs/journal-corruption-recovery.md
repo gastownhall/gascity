@@ -9,6 +9,33 @@ journals approach the compaction threshold (default 4 GB warn / 6 GB error). If 
 starts successfully, prefer `gc dolt compact` before a corruption event rather than this
 recovery path.
 
+The data dir (`.beads/dolt` below) is shared: it holds one store per database
+of the city, and recovery is always per database. Move only the corrupt
+`<data_dir>/<dbname>` aside, to a path outside the data dir, and leave every
+other database where it is. Never move, delete, clone over or re-create the
+data dir itself: the databases you do not name are lost with it.
+
+---
+
+## What `gc start` Already Does
+
+On every `gc start`, gc checks each managed database for a corrupt journal.
+For a corrupt `<dbname>` with a usable local backup (a non-empty `file://`
+directory registered as bd's `default` backup or the legacy
+`<dbname>-backup`), it:
+
+1. moves only `<data_dir>/<dbname>` to
+   `.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>`;
+2. runs `dolt backup restore <backup-url> <dbname>` from the data dir;
+3. logs `RESTORED '<dbname>' from backup <name> (<url>)` to `gc dolt logs`.
+
+Writes made after the last backup sync are not in the restored copy. The
+`dolt-corrupt-aside` doctor check reports the aside copy until you review and
+remove it. With no usable backup, `gc start` fails closed, leaves `<dbname>`
+in place, and prints the backups it checked, the commands to restore
+`<dbname>` alone, the JSONL fallback path, and the databases to leave in place.
+Follow those printed steps or the steps below.
+
 ---
 
 ## When to Use
@@ -37,11 +64,12 @@ ls -lh /path/to/city/.beads/dolt/<dbname>/.dolt/noms/*.journal
 
 # 3. Stop everything
 gc stop --all 2>/dev/null || true
-gc dolt stop 2>/dev/null || true
 
-# 4a. Restore from backup (preferred)
+# 4a. Restore this database from backup (preferred)
 # WARNING: all changes after the backup snapshot are lost
-gc dolt backup restore <dbname>-backup <dbname>
+mkdir -p /path/to/city/.gc/runtime/packs/dolt/corrupt-aside
+mv /path/to/city/.beads/dolt/<dbname> /path/to/city/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>
+(cd /path/to/city/.beads/dolt && dolt backup restore <backup-url> <dbname>)
 
 # 4b. Reconstruct from the JSONL archive (fallback)
 # WARNING: reconstructs from the passive 15-minute export; open/in-progress
@@ -101,7 +129,6 @@ Ensure no processes hold the Dolt data directory before recovery:
 
 ```bash
 gc stop --all 2>/dev/null || true
-gc dolt stop 2>/dev/null || true
 
 # Wait for the port to clear
 sleep 2
@@ -112,21 +139,21 @@ lsof -i :"${GC_DOLT_PORT:-28231}" 2>/dev/null || true
 
 ## Step 4: Restore From Backup
 
-> **[WARNING]** Restoring from backup permanently replaces the current database with the
-> backup snapshot. All writes after the backup timestamp are lost. This is a destructive
-> operation. Confirm the backup timestamp with `gc dolt backup status <dbname>-backup`
-> before proceeding.
+> **[WARNING]** Restoring from backup replaces this database with the backup snapshot.
+> All writes after the backup timestamp are lost. Check the modification time of the
+> backup directory before proceeding. The pre-corruption store is kept aside, not deleted.
 
 ```bash
-# Identify available backup remotes
-gc dolt backup list <dbname>
+# Identify the backups registered for this database: bd's "default" and the
+# legacy "<dbname>-backup"; use a file:// URL whose directory is not empty
+jq '.backups' /path/to/city/.beads/dolt/<dbname>/.dolt/repo_state.json
 
-# Restore the database from the <dbname>-backup remote
-gc dolt backup restore <dbname>-backup <dbname>
+# Move only this database aside, outside the data dir
+mkdir -p /path/to/city/.gc/runtime/packs/dolt/corrupt-aside
+mv /path/to/city/.beads/dolt/<dbname> /path/to/city/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>
 
-# If the restore command is unavailable, drop and re-clone manually:
-# rm -rf /path/to/city/.beads/dolt/<dbname>
-# dolt clone <backup-url> /path/to/city/.beads/dolt/<dbname>
+# Restore it from the data dir, next to the databases left in place
+(cd /path/to/city/.beads/dolt && dolt backup restore <backup-url> <dbname>)
 ```
 
 **bd-owned proxied scopes** (the default for new cities; `dolt_mode` is
@@ -156,8 +183,9 @@ If no backup is configured or the backup itself is corrupt, proceed to Step 4b.
 > wisps are not archived. In-progress beads may require manual status correction after import.
 
 ```bash
-# Drop the corrupt database directory
-rm -rf /path/to/city/.beads/dolt/<dbname>
+# Move only this database aside, outside the data dir
+mkdir -p /path/to/city/.gc/runtime/packs/dolt/corrupt-aside
+mv /path/to/city/.beads/dolt/<dbname> /path/to/city/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>
 
 # Re-initialize an empty store
 gc bd init --db <dbname>
@@ -205,7 +233,8 @@ gc dolt compact
 - [ ] Dolt server starts and responds to SQL queries
 - [ ] `gc doctor` passes with no errors (warnings on non-critical checks are acceptable)
 - [ ] `gc start` brings all configured sessions online
-- [ ] Backup remote is configured and `gc dolt backup status` shows a recent artifact
+- [ ] Backup is configured and `gc doctor` reports no `dolt-backup` or `dolt-unbound-databases` warning
+- [ ] The `corrupt-aside` copy reported by `gc doctor` is reviewed, then removed
 - [ ] Open in-progress beads reviewed and state corrected if import was used
 - [ ] Root cause of journal growth identified (missing compaction schedule? high write volume?)
 - [ ] `gc dolt compact` scheduled or an order configured to prevent recurrence

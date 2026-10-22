@@ -213,7 +213,7 @@ Snapshots live next to the bead store at
 
 Timestamps are RFC3339 UTC with colons replaced by hyphens for
 filesystem portability. Each subdirectory is a complete `dolt backup`
-target — usable directly with `dolt clone file://...`.
+target of one database — usable directly with `dolt backup restore file://...`.
 
 ## Emergency rollback
 
@@ -228,23 +228,28 @@ not for restore.
    gc stop
    ```
 
-2. **Move the broken store aside (do not delete — keep it for
-   postmortem):**
+2. **Move the broken database aside (do not delete — keep it for
+   postmortem).** `.beads/dolt/` is shared by every database of the
+   city; a snapshot holds one database, so move only that database
+   (`<dbname>`), to a path outside the data dir, and leave the rest of
+   `.beads/dolt/` in place:
 
    ```sh
-   cd <city>/.beads
-   mv dolt dolt.broken-$(date -u +%Y%m%dT%H%M%SZ)
+   cd <city>
+   mkdir -p .gc/runtime/packs/dolt/corrupt-aside
+   mv .beads/dolt/<dbname> .gc/runtime/packs/dolt/corrupt-aside/<dbname>.$(date -u +%Y%m%dT%H%M%SZ)
    ```
 
 3. **Pick the most recent successful snapshot** under
    `.beads/dolt-backups/success/` (sorted lexicographically — the
    timestamp format makes lexical order equal to time order).
 
-4. **Restore it as the new bead store** with `dolt clone`:
+4. **Restore it as `<dbname>`** with `dolt backup restore`, run from
+   the data dir so the database lands next to the ones left in place:
 
    ```sh
-   cd <city>/.beads
-   dolt clone file://$(pwd)/dolt-backups/success/<timestamp> dolt
+   cd <city>/.beads/dolt
+   dolt backup restore file://<city>/.beads/dolt-backups/success/<timestamp> <dbname>
    ```
 
 5. **Restart the controller and verify:**
