@@ -170,8 +170,7 @@ func lookupProvider(name string, cityProviders map[string]ProviderSpec, lookPath
 
 // lookupProviderLayers is lookupProvider that also reports the args the
 // merged provider's ACP launch omits (ResolvedProvider.ACPOmittedArgs),
-// computed from the raw layers before schema normalization lifts curated
-// flags out of Args.
+// computed from the schema-normalized layers the merge composes.
 func lookupProviderLayers(name string, cityProviders map[string]ProviderSpec, lookPath LookPathFunc) (*ProviderSpec, []string, error) {
 	// City-level providers take precedence.
 	if cityProviders != nil {
@@ -208,18 +207,16 @@ func lookupProviderLayers(name string, cityProviders map[string]ProviderSpec, lo
 			// if the provider name or command matches a known builtin.
 			builtins := BuiltinProviders()
 			if base, ok := builtins[name]; ok {
-				omitted := acpOmittedArgs([]ProviderSpec{spec, base})
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
-				return &merged, omitted, nil
+				return &merged, acpOmittedArgs([]ProviderSpec{child, base}), nil
 			}
 			if base, ok := builtins[spec.Command]; ok {
-				omitted := acpOmittedArgs([]ProviderSpec{spec, base})
 				base = normalizeProviderLayerArgsForSchema(base, base.OptionsSchema)
 				child := normalizeProviderLayerArgsForSchema(spec, providerSchemaForLayerArgs(base, spec))
 				merged := MergeProviderOverBuiltin(base, child)
-				return &merged, omitted, nil
+				return &merged, acpOmittedArgs([]ProviderSpec{child, base}), nil
 			}
 			standalone := normalizeProviderLayerArgsForSchema(spec, spec.OptionsSchema)
 			return &standalone, nil, nil

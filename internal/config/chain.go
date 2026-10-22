@@ -21,7 +21,6 @@ type chainResolveContext struct {
 	visited    map[HopIdentity]bool
 	chain      []HopIdentity
 	chainSpecs []ProviderSpec // normalized spec per hop, parallel to chain
-	rawSpecs   []ProviderSpec // spec per hop as authored, parallel to chain
 	chainPath  []string       // human-readable chain names for error messages
 }
 
@@ -62,7 +61,6 @@ func resolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	ctx.visited[leafID] = true
 	ctx.chain = append(ctx.chain, leafID)
 	ctx.chainSpecs = append(ctx.chainSpecs, leaf)
-	ctx.rawSpecs = append(ctx.rawSpecs, leaf)
 	ctx.chainPath = append(ctx.chainPath, leafName)
 
 	merged, err := ctx.walkFromLeaf(leafName, leaf, 0)
@@ -96,7 +94,7 @@ func resolveProviderChain(leafName string, leaf ProviderSpec, customProviders ma
 	resolvedPtr.BuiltinAncestor = ancestor
 	resolvedPtr.Chain = ctx.chain
 	resolvedPtr.Provenance = buildProviderProvenance(ctx, customProviders)
-	resolvedPtr.ACPOmittedArgs = acpOmittedArgs(ctx.rawSpecs)
+	resolvedPtr.ACPOmittedArgs = acpOmittedArgs(ctx.chainSpecs)
 	// Kind is the legacy field; mirror BuiltinAncestor for backward compat.
 	if ancestor != "" {
 		resolvedPtr.Kind = ancestor
@@ -150,7 +148,6 @@ func (ctx *chainResolveContext) walkFromLeaf(name string, spec ProviderSpec, cha
 	ctx.visited[parentID] = true
 	ctx.chain = append(ctx.chain, parentID)
 	ctx.chainSpecs = append(ctx.chainSpecs, parentSpec)
-	ctx.rawSpecs = append(ctx.rawSpecs, parentSpec)
 	ctx.chainPath = append(ctx.chainPath, formatHopName(parentID))
 	parentIndex := len(ctx.chain) - 1
 

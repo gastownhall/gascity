@@ -188,9 +188,11 @@ type ProviderSpec struct {
 	ACPCommand string `toml:"acp_command,omitempty"`
 	// ACPArgs overrides Args when the session transport is ACP.
 	// When nil, Args is used for both tmux and ACP transports. When any layer
-	// sets acp_args, args and args_append reach only the CLI launch: a layer
-	// more specific than the acp_args layer that declares args makes the CLI
-	// transport the default, and an explicit ACP session that still drops
+	// sets acp_args, args and args_append reach only the CLI launch, except
+	// schema-managed flags such as a curated model, which become option
+	// defaults that both launches carry: when a layer more specific than the
+	// acp_args layer declares args that reach the CLI launch, the CLI
+	// transport is the default, and an explicit ACP session that still drops
 	// args prints a warning.
 	ACPArgs []string `toml:"acp_args,omitempty"`
 }
@@ -259,12 +261,15 @@ type ResolvedProvider struct {
 	TitleModel             string
 	ACPCommand             string
 	ACPArgs                []string
-	// ACPOmittedArgs holds the raw args and args_append tokens declared by
-	// provider layers more specific than the most specific layer that sets
-	// acp_args. The ACP launch takes its args from ACPArgs alone, so these
-	// tokens reach only the CLI launch; a non-empty value makes the CLI
-	// transport the provider default (ProviderSessionCreateTransport). Nil
-	// when ACPArgs is nil, because the ACP launch then uses Args.
+	// ACPOmittedArgs holds the args that provider layers more specific than
+	// the most specific layer that sets acp_args contribute to Args, as the
+	// merge applies them: args replaces, args_append extends. The ACP launch
+	// takes its args from ACPArgs alone, so these tokens reach only the CLI
+	// launch; a non-empty value makes the CLI transport the provider default
+	// (ProviderSessionCreateTransport). Schema-managed flags are not among
+	// them: normalization lifts them into option defaults, which both
+	// launches carry. Nil when ACPArgs is nil, because the ACP launch then
+	// uses Args.
 	ACPOmittedArgs []string
 	// EffectiveDefaults is the fully-merged option default map.
 	// Computed from: schema Default -> provider OptionDefaults -> agent OptionDefaults.
