@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -43,6 +44,9 @@ func journalRecoveryHarness(t *testing.T) string {
 		"database_journal_corrupt",
 		"backup_remote_url_for_recovery",
 		"backup_restore_source_usable",
+		"backup_url_names_database",
+		"select_recovery_backup",
+		"recovery_notice",
 		"attempt_journal_corruption_recovery",
 	} {
 		harness.WriteString(extractShellFunction(t, script, fn))
@@ -54,7 +58,8 @@ func journalRecoveryHarness(t *testing.T) string {
 
 // writeJournalFakeDolt stubs `dolt status` (corrupt when the database dir
 // contains a .corrupt marker) and `dolt backup restore` (recreates the
-// database with a restored-marker, honoring FAKE_RESTORE_EXIT).
+// database with a restored-marker holding the restored-from URL, honoring
+// FAKE_RESTORE_EXIT).
 func writeJournalFakeDolt(t *testing.T, binDir string) {
 	t.Helper()
 	writeExecutable(t, filepath.Join(binDir, "dolt"), `#!/usr/bin/env bash
@@ -73,9 +78,10 @@ case "${1:-}" in
         echo "restore failed" >&2
         exit "$FAKE_RESTORE_EXIT"
       fi
+      url="$3"
       db="$4"
       mkdir -p "$PWD/$db/.dolt"
-      echo restored > "$PWD/$db/restored-marker"
+      printf '%s\n' "$url" > "$PWD/$db/restored-marker"
       exit 0
     fi
     ;;
@@ -301,8 +307,28 @@ printf 'result=%s\n' "$result"
 	}
 }
 
+// repoStateWithBackups renders a repo_state.json whose "backups" object maps
+// each backup name to a file:// URL, in the object form dolt writes.
+func repoStateWithBackups(backups map[string]string) string {
+	names := make([]string, 0, len(backups))
+	for name := range backups {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var b strings.Builder
+	b.WriteString(`{"head":"refs/heads/main","backups":{`)
+	for i, name := range names {
+		if i > 0 {
+			b.WriteString(",")
+		}
+		fmt.Fprintf(&b, "%q:"+`{"name":%q,"url":%q,"fetch_specs":[],"params":{}}`, name, name, backups[name])
+	}
+	b.WriteString(`}}`)
+	return b.String()
+}
+
 func prodRepoState(backupDir string) string {
-	return `{"head":"refs/heads/main","backups":{"prod-backup":{"name":"prod-backup","url":"file://` + backupDir + `","fetch_specs":[],"params":{}}}}`
+	return repoStateWithBackups(map[string]string{"prod-backup": "file://" + backupDir})
 }
 
 func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
@@ -338,6 +364,65 @@ func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
 	}
 	if dirs, _ := filepath.Glob(filepath.Join(env.stateDir, "corrupt-aside", "healthy.*")); len(dirs) != 0 {
 		t.Fatalf("healthy database must not be moved aside: %v", dirs)
+	}
+}
+
+// seedBackupDir makes a backup source directory non-empty so it counts as a
+// usable file:// restore source.
+func seedBackupDir(t *testing.T, dir string) {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir %s: %v", dir, err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "manifest"), []byte("backup"), 0o644); err != nil {
+		t.Fatalf("seed backup content: %v", err)
+	}
+}
+
+// TestJournalRecoveryRestoresFromBdDefaultBackup pins AC-1: mol-dog-backup
+// registers each scope's backup destination as bd's "default" remote, so a
+// database whose repo_state.json carries only that name must still
+// auto-recover, and the restore notice must reach the managed log — stderr is
+// discarded by the provider runner when the start script exits 0.
+func TestJournalRecoveryRestoresFromBdDefaultBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	seedBackupDir(t, env.backupDir)
+	env.addDatabase(t, "prod", true, repoStateWithBackups(map[string]string{
+		"default": "file://" + env.backupDir,
+	}))
+
+	out, err := env.run(t, journalRecoveryHarness(t))
+	if err != nil {
+		t.Fatalf("recovery failed: %v\n%s", err, out)
+	}
+	wantNotice := "RESTORED 'prod' from backup default (file://" + env.backupDir + ")"
+	if !strings.Contains(out, wantNotice) {
+		t.Fatalf("stderr missing restore notice naming the default backup:\n%s", out)
+	}
+	logBytes, err := os.ReadFile(env.logFile)
+	if err != nil {
+		t.Fatalf("read managed log: %v", err)
+	}
+	if !strings.Contains(string(logBytes), wantNotice) {
+		t.Fatalf("managed log missing restore notice:\n%s", logBytes)
+	}
+	marker := filepath.Join(env.dataDir, "prod", "restored-marker")
+	markerBytes, err := os.ReadFile(marker)
+	if err != nil {
+		t.Fatalf("prod was not restored from the default backup: %v\n%s", err, out)
+	}
+	if got := strings.TrimSpace(string(markerBytes)); got != "file://"+env.backupDir {
+		t.Fatalf("restored from %q, want the default backup URL %q", got, "file://"+env.backupDir)
+	}
+	asides, err := filepath.Glob(filepath.Join(env.stateDir, "corrupt-aside", "prod.*"))
+	if err != nil || len(asides) != 1 {
+		t.Fatalf("corrupt store must be preserved aside once, got %v (err %v)\n%s", asides, err, out)
+	}
+	if _, err := os.Stat(filepath.Join(asides[0], "original-marker")); err != nil {
+		t.Fatalf("aside copy missing original content: %v", err)
 	}
 }
 
