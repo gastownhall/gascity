@@ -2028,6 +2028,7 @@ go_test(
         "session_wake_fairness_pin_test.go",
         "session_wake_refused_test.go",
         "session_wake_test.go",
+        "session_worktree_prune_guard_test.go",
         "session_worktree_prune_info_test.go",
         "session_worktree_prune_test.go",
         "session_wpool_twins_test.go",

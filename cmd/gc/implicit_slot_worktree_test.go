@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,6 +15,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/git"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/worktree"
 )
 
@@ -649,5 +651,40 @@ func TestImplicitSlotRefusesBranchCheckedOutElsewhere(t *testing.T) {
 	}
 	// show-ref fails the helper on a missing ref, so reaching here proves
 	// the branch — and the other worktree's checkout of it — survived.
+	implicitSlotGitOut(t, rigRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
+}
+
+// TestSlotPruneRemovesCleanWorktreeButKeepsBranch is AC-5: the session
+// close-path prune reclaims a clean, pushed, stash-free slot worktree while
+// the slot branch survives, so the next session re-creates the checkout on
+// the same branch (and unmerged work would have kept the worktree).
+func TestSlotPruneRemovesCleanWorktreeButKeepsBranch(t *testing.T) {
+	cityPath := t.TempDir()
+	cfg, agent, rigRoot := implicitSlotTestConfig(t, cityPath)
+
+	// The rig's HEAD must be reachable from a remote for the unpushed probe
+	// to read clean; a bare origin and a push give the fixture one.
+	origin := filepath.Join(t.TempDir(), "origin.git")
+	implicitSlotGitOut(t, rigRoot, "init", "--bare", "-b", "main", origin)
+	implicitSlotGitOut(t, rigRoot, "remote", "add", "origin", origin)
+	implicitSlotGitOut(t, rigRoot, "push", "origin", "main")
+
+	slot, err := resolveConfiguredWorkDir(cityPath, cfg.Workspace.Name, "app/claude-1", agent, cfg.Rigs, "")
+	if err != nil {
+		t.Fatalf("provisioning slot: %v", err)
+	}
+	branch := implicitSlotBranchFor(slot)
+
+	// The closed session's Info records the slot and its qualified
+	// template — the shape the close path hands the pruner.
+	info := sessionpkg.Info{ID: "closed-1", WorkerDir: slot, Template: "app/claude"}
+	var stderr bytes.Buffer
+	pruneAgentHomeWorktreeIfSafeInfo(info, cityPath, cfg, &stderr)
+
+	if _, statErr := os.Stat(slot); !os.IsNotExist(statErr) {
+		t.Errorf("clean slot worktree still present after prune (stat err %v)", statErr)
+	}
+	// show-ref fails the helper on a missing ref, so reaching here proves
+	// the slot branch — and the next session's re-attach point — survived.
 	implicitSlotGitOut(t, rigRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 }

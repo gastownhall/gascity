@@ -5,8 +5,10 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 
+	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/beads/contract"
 	"github.com/gastownhall/gascity/internal/config"
@@ -205,6 +207,55 @@ func pruneAgentHomeWorktreeIfSafeInfo(info sessionpkg.Info, cityPath string, cfg
 		return
 	}
 	fmt.Fprintf(stderr, "session reconciler: pruned worker_dir %s (session %s)\n", workerDir, info.SessionNameMetadata) //nolint:errcheck
+}
+
+// sessionWorkerDirInUse reports whether any open session row other than
+// closedID records workerDir as its working directory — as any of the keys
+// a row records it under, because a successor seat a floor started in the
+// same slot checkout keeps its worktree. A read error counts as in use: the
+// prune is skipped rather than racing a session the store could not show.
+func sessionWorkerDirInUse(store beads.Store, cityPath, closedID, workerDir string) bool {
+	clean := func(dir string) string {
+		if dir = strings.TrimSpace(dir); dir == "" {
+			return ""
+		}
+		return filepath.Clean(resolveWorkDirAgainstCity(cityPath, dir))
+	}
+	dir := clean(workerDir)
+	if dir == "" {
+		return false
+	}
+	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
+	if err != nil {
+		return true
+	}
+	return slices.ContainsFunc(rows, func(r beads.Bead) bool {
+		if r.ID == closedID || r.Status == "closed" {
+			return false
+		}
+		for _, k := range []string{beadmeta.WorkerDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
+			if clean(r.Metadata[k]) == dir {
+				return true
+			}
+		}
+		return false
+	})
+}
+
+// pruneClosedSessionWorktreeIfUnused is the guarded form every session
+// close-path worktree prune shares: it first asks the store whether another
+// open session row still works in the closing seat's directory and, when one
+// does, keeps the worktree — stamping the .worktree-stale marker so the
+// later cleanup pass reclaims the slot once the successor is itself closed —
+// and only then hands the seat to prune.
+func pruneClosedSessionWorktreeIfUnused(store beads.Store, prune func(sessionpkg.Info, string, *config.City, io.Writer), info sessionpkg.Info, cityPath string, cfg *config.City, stderr io.Writer) {
+	workerDir := strings.TrimSpace(sessionpkg.WorkerDirFromInfo(info))
+	if workerDir != "" && sessionWorkerDirInUse(store, cityPath, info.ID, workerDir) {
+		fmt.Fprintf(stderr, "session reconciler: not pruning worker_dir %s: an open session still works in it\n", workerDir) //nolint:errcheck
+		writeWorktreeStaleMarker(newGitProbe(workerDir), workerDir, "shared-with-open-session", stderr)
+		return
+	}
+	prune(info, cityPath, cfg, stderr)
 }
 
 // lookupRigRootForSession returns the filesystem path of the rig that owns

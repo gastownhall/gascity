@@ -1263,3 +1263,41 @@ func TestReconcileSessionBeads_DrainDeadlineFailedCloseRollsBackProvenance(t *te
 			stops, events.SessionStopped)
 	}
 }
+
+// A retiring seat's worktree is reclaimed only when no other open session
+// row works in it. Successive pool sessions share one slot checkout
+// (issue #1181), so a retirement that freed the slot while a successor row
+// still records the same worker_dir would delete the successor's working
+// tree under it. The prune at this site must first ask the store — and
+// spare the worktree when a successor shares the directory.
+func TestReconcileSessionBeads_DrainDeadlineSparesThePruneWhenASuccessorSharesTheWorkDir(t *testing.T) {
+	env := poolSeatEnv(t)
+	seat := stuckDrainedPoolSeat(t, env, "drained", poolSlotDrainRetireDeadline+time.Minute)
+	workerDir := "/city/.gc/worktrees/app/worker-1"
+	env.setSessionMetadata(&seat, map[string]string{"worker_dir": workerDir})
+	// The successor seat the floor already started in the same slot
+	// directory — an open session row recording the same worker_dir
+	// (uncleaned, as a raw row records it).
+	if _, err := env.store.Create(sessionRow("succ", "worker_dir", workerDir+"/")); err != nil {
+		t.Fatal(err)
+	}
+
+	var pruned []string
+	restore := swapWorktreePruneForTest(func(info sessionpkg.Info, _ string, _ *config.City, _ io.Writer) {
+		pruned = append(pruned, info.ID)
+	})
+	defer restore()
+
+	env.reconcile([]beads.Bead{seat})
+
+	got, err := env.store.Get(seat.ID)
+	if err != nil {
+		t.Fatalf("Get(%s): %v", seat.ID, err)
+	}
+	if got.Status != "closed" {
+		t.Fatalf("precondition: seat not retired (metadata=%v)", got.Metadata)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("worktree prune calls = %v, want none — a successor session still works in %s", pruned, workerDir)
+	}
+}

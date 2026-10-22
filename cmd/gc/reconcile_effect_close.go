@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -468,33 +467,10 @@ var pruneWorktree = pruneAgentHomeWorktreeIfSafeInfo
 // dir is the prune's target (WorkerDirFromInfo: worker_dir, else work_dir),
 // as any of the keys a row records it under: a successor seat a floor
 // started in the same slot keeps its worktree. A read error counts as in
-// use.
+// use. The scan itself is sessionWorkerDirInUse, shared with every other
+// close-path prune site.
 func (c *closeReleases) workDirInUse(store beads.Store, closed beads.Bead) bool {
-	clean := func(dir string) string {
-		if dir = strings.TrimSpace(dir); dir == "" {
-			return ""
-		}
-		return filepath.Clean(resolveWorkDirAgainstCity(c.cityPath, dir))
-	}
-	dir := clean(session.WorkerDirFromInfo(sessionInfoFromBead(closed)))
-	if dir == "" {
-		return false
-	}
-	rows, err := store.List(beads.ListQuery{Label: sessionBeadLabel})
-	if err != nil {
-		return true
-	}
-	return slices.ContainsFunc(rows, func(r beads.Bead) bool {
-		if r.ID == closed.ID || r.Status == "closed" {
-			return false
-		}
-		for _, k := range []string{beadmeta.WorkerDirMetadataKey, beadmeta.LegacyWorkDirMetadataKey, beadmeta.WorkDirMetadataKey} {
-			if clean(r.Metadata[k]) == dir {
-				return true
-			}
-		}
-		return false
-	})
+	return sessionWorkerDirInUse(store, c.cityPath, closed.ID, session.WorkerDirFromInfo(sessionInfoFromBead(closed)))
 }
 
 // newCloseReleases is w's close release handles, alerting through alerts.
