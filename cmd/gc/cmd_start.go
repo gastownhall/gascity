@@ -624,9 +624,6 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 		return code
 	}
 	warnStage1MCPSkips(cityPath, exec.LookPath, stderr)
-	// After registration, so the first start's pack setup has run and the
-	// client-side load sees the same config the supervisor does.
-	printRigFederationStartWarnings(cityPath, stderr)
 	if jsonOut {
 		cityName := nameOverride
 		if entry, registered, err := registeredCityEntry(cityPath); err == nil && registered {
@@ -646,21 +643,6 @@ func doStartWithNameOverrideJSON(args []string, controllerMode bool, stdout, std
 	}
 	fmt.Fprintln(stdout, "City started under supervisor.") //nolint:errcheck // best-effort stdout
 	return 0
-}
-
-// printRigFederationStartWarnings tells the operator running `gc start` that a
-// guarded rig is not protected by this build. The supervisor that runs the
-// city logs the same warning, but only to its own log, so the client loads the
-// config itself. It is best effort: a config that does not load here is
-// reported by the supervisor's own load.
-func printRigFederationStartWarnings(cityPath string, stderr io.Writer) {
-	cfg, err := loadCityConfigFS(fsys.OSFS{}, filepath.Join(cityPath, "city.toml"), io.Discard)
-	if err != nil {
-		return
-	}
-	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
-	}
 }
 
 // resolveStartDir resolves the city directory for start/restart. The
@@ -858,9 +840,6 @@ func doStartStandalone(args []string, controllerMode bool, stdout, stderr io.Wri
 		return 1
 	}
 	for _, w := range config.ReservedPrefixWarnings(cfg.Rigs, config.EffectiveHQPrefix(cfg)) {
-		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
-	}
-	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
 		fmt.Fprintf(stderr, "gc start: warning: %s\n", w) //nolint:errcheck // best-effort stderr
 	}
 	if err := config.ValidateServices(cfg.Services); err != nil {

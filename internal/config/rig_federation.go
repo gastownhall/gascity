@@ -359,8 +359,8 @@ func validateGuardedRigSlingTargets(g *Rig) error {
 	targets = append(targets, g.DefaultSlingTargets...)
 	for _, t := range targets {
 		// Only qualified targets are judged here. A bare target resolves to a
-		// city-scoped identity; refusing it into a guarded rig is part of the
-		// enforcement that this build does not have yet.
+		// city-scoped identity, which gc sling refuses to route into a guarded
+		// rig when it dispatches.
 		if !strings.Contains(FoldIdentity(t), "/") {
 			continue
 		}
@@ -374,40 +374,4 @@ func validateGuardedRigSlingTargets(g *Rig) error {
 		}
 	}
 	return nil
-}
-
-// RigFederationWarnings returns one operator warning per rig that sets
-// federation = "rig". This build validates the setting but does not yet
-// enforce it everywhere, so a guarded rig is not protected; callers surface
-// these as non-fatal warnings at start and reload.
-//
-// TODO(rig-federation): the guarded rig store (cmd/gc rig_namespace_store.go)
-// enforces the setting on the rig's Go store handles, and the hook claim
-// cycle's bd writes, sling and graph routing, gc agent-script's claim
-// redirect and gc bd writes check it themselves; gc agent is-foreign, the
-// orphan sweep and the core-pack scripts do not honor it yet. In the change that
-// lands the last of those, delete this warning and its callers (start,
-// supervisor load, reload, config show, doctor, the config API), the
-// "not enforced by this build" marking of gc rig list's text output
-// (cmd/gc/cmd_rig.go), the "does not enforce them yet" warning of
-// docs/guides/sharing-a-rig-store.md, the "not enforced yet" wording of the
-// CHANGELOG entries, the guide's "not covered by this build yet" sentence and
-// the store-guard CHANGELOG entry's "not covered yet" sentence, and the
-// warning's tests (TestRigFederationWarnings here; in cmd/gc,
-// TestConfigShowValidateWarnsThatRigFederationIsNotEnforced,
-// TestTryReloadConfigWarnsThatRigFederationIsNotEnforced,
-// TestPrintRigFederationStartWarnings and the "not enforced by this build"
-// assertions of TestDoRigListTextShowsRigFederation and
-// TestRenderRigListFromAPIShowsRigFederation).
-func RigFederationWarnings(rigs []Rig) []string {
-	var warnings []string
-	for i := range rigs {
-		if !rigs[i].FederationGuarded() {
-			continue
-		}
-		warnings = append(warnings, fmt.Sprintf(
-			"rig %q sets %s = %q, which this build does not enforce yet: the rig is NOT protected, and this city still acts on every row in its bead store; do not attach a bead store that another city also uses",
-			rigs[i].Name, rigFederationKey, RigFederationRig))
-	}
-	return warnings
 }

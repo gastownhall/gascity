@@ -662,10 +662,12 @@ type Rig struct {
 	// rig's namespace ("<name>/...", compared under the bead store's actor
 	// fold) and to this city's own pool sessions of the rig's agents; rows
 	// owned by anything else are left alone. Set it on a rig whose bead store
-	// another city also attaches. It is deliberately not patchable. NOT YET
-	// ENFORCED: this build validates the setting and warns at start and
-	// reload, but still acts on every row of the rig's store, so a rig with
-	// federation = "rig" is not protected yet.
+	// another city also attaches, in every city that attaches it. It is
+	// deliberately not patchable. Gas City enforces it on its discovery reads
+	// (lists and ready queries), claims, routes, writes and releases in the
+	// rig's store. Reads by id, by parent and of dependencies, gc bd reads,
+	// bd run directly, writers other than Gas City and custom query commands
+	// are not filtered.
 	Federation string `toml:"federation,omitempty" jsonschema:"enum=city,enum=rig"`
 	// Namespace declares whether another city may serve this rig's namespace
 	// on the same bead store: "shared" (the default) or "exclusive".

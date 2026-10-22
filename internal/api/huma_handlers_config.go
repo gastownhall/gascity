@@ -199,7 +199,6 @@ func (s *Server) humaHandleConfigValidate(_ context.Context, _ *ConfigValidateIn
 
 	warnings := config.ValidateSemantics(cfg, "city.toml")
 	warnings = append(warnings, config.ValidateDurations(cfg, "city.toml")...)
-	warnings = append(warnings, config.RigFederationWarnings(cfg.Rigs)...)
 
 	valid := len(errors) == 0
 

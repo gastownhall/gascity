@@ -115,7 +115,7 @@ func TestDoRigListTextShowsRigFederation(t *testing.T) {
 	if got := strings.Count(out, "Federation:"); got != 1 {
 		t.Fatalf("want exactly one Federation line (rig beta), got %d:\n%s", got, out)
 	}
-	if !strings.Contains(out, "    Federation: rig (namespace: exclusive) (not enforced by this build)\n") {
+	if !strings.Contains(out, "    Federation: rig (namespace: exclusive)\n") {
 		t.Fatalf("missing beta federation line:\n%s", out)
 	}
 	betaIdx := strings.Index(out, "  beta:")
@@ -171,7 +171,7 @@ func TestRenderRigListFromAPIShowsRigFederation(t *testing.T) {
 	if code := renderRigListFromAPI(fsys.OSFS{}, cityPath, cr, false, &stdout, &stderr); code != 0 {
 		t.Fatalf("renderRigListFromAPI (text) returned %d, stderr: %s", code, stderr.String())
 	}
-	if !strings.Contains(stdout.String(), "    Federation: rig (namespace: exclusive) (not enforced by this build)\n") {
+	if !strings.Contains(stdout.String(), "    Federation: rig (namespace: exclusive)\n") {
 		t.Fatalf("API text output missing beta federation line:\n%s", stdout.String())
 	}
 }
@@ -233,7 +233,9 @@ namespace = "exclusive"
 	}
 }
 
-func TestConfigShowValidateWarnsThatRigFederationIsNotEnforced(t *testing.T) {
+// A guarded rig with its own directory validates clean: the setting is
+// enforced, so validation carries no "not enforced" warning about it.
+func TestConfigShowValidateAcceptsGuardedRig(t *testing.T) {
 	clearGCEnv(t)
 	cityPath, _, _ := writeRigFederationCity(t)
 	t.Chdir(cityPath)
@@ -253,14 +255,13 @@ func TestConfigShowValidateWarnsThatRigFederationIsNotEnforced(t *testing.T) {
 	if err := json.Unmarshal(stdout.Bytes(), &payload); err != nil {
 		t.Fatalf("stdout is not JSON: %v\n%s", err, stdout.String())
 	}
-	found := false
-	for _, w := range payload.Validation.Warnings {
-		if strings.Contains(w, `rig "beta"`) && strings.Contains(w, "does not enforce") && strings.Contains(w, "NOT protected") {
-			found = true
-		}
+	if !payload.Validation.OK {
+		t.Fatalf("validation = %+v, want ok", payload.Validation)
 	}
-	if !payload.Validation.OK || !found {
-		t.Fatalf("validation = %+v, want ok with the not-enforced warning for rig beta", payload.Validation)
+	for _, w := range payload.Validation.Warnings {
+		if strings.Contains(w, "not enforce") || strings.Contains(w, "NOT protected") {
+			t.Fatalf("validation warnings = %v, want no not-enforced warning", payload.Validation.Warnings)
+		}
 	}
 	validateConfigShowJSONSchema(t, stdout.Bytes())
 }
@@ -355,55 +356,5 @@ federation = "rig"
 	_, err := tryReloadConfig(tomlPath, "test", dir)
 	if err == nil || !strings.Contains(err.Error(), `validating rigs: rig "beta": federation = "rig" needs its own store directory`) {
 		t.Fatalf("tryReloadConfig error = %v, want the shared-directory refusal", err)
-	}
-}
-
-// Every successful reload, changed or not, carries the not-enforced warning.
-func TestTryReloadConfigWarnsThatRigFederationIsNotEnforced(t *testing.T) {
-	clearGCEnv(t)
-	cityPath, _, _ := writeRigFederationCity(t)
-	if err := os.WriteFile(filepath.Join(cityPath, "pack.toml"), []byte("[pack]\nname = \"test-city\"\nschema = 1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	for i := 0; i < 2; i++ {
-		result, err := tryReloadConfig(filepath.Join(cityPath, "city.toml"), "test-city", cityPath)
-		if err != nil {
-			t.Fatalf("tryReloadConfig #%d: %v", i+1, err)
-		}
-		found := false
-		for _, w := range result.Warnings {
-			if strings.HasPrefix(w, "config reload: ") && strings.Contains(w, `rig "beta"`) && strings.Contains(w, "NOT protected") {
-				found = true
-			}
-		}
-		if !found {
-			t.Fatalf("reload #%d warnings = %v, want the not-enforced warning for rig beta", i+1, result.Warnings)
-		}
-	}
-}
-
-func TestPrintRigFederationStartWarnings(t *testing.T) {
-	clearGCEnv(t)
-	cityPath, _, _ := writeRigFederationCity(t)
-	var stderr bytes.Buffer
-	printRigFederationStartWarnings(cityPath, &stderr)
-	out := stderr.String()
-	if strings.Count(out, "gc start: warning: ") != 1 || !strings.Contains(out, `rig "beta"`) || !strings.Contains(out, "NOT protected") {
-		t.Fatalf("stderr = %q, want one not-enforced warning for rig beta", out)
-	}
-	// The start output proxy counts it as a warning line.
-	proxy := newStartOutputProxy(&bytes.Buffer{}, startOutputProxyOptions{})
-	if _, err := proxy.Write([]byte(out)); err != nil {
-		t.Fatal(err)
-	}
-	if got := proxy.WarningCount(); got != 1 {
-		t.Fatalf("start output proxy WarningCount = %d, want 1", got)
-	}
-
-	// A config that does not load prints nothing; the supervisor reports it.
-	stderr.Reset()
-	printRigFederationStartWarnings(t.TempDir(), &stderr)
-	if stderr.Len() != 0 {
-		t.Fatalf("stderr = %q, want nothing for a city without config", stderr.String())
 	}
 }

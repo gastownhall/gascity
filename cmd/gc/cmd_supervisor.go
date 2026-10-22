@@ -2963,9 +2963,6 @@ func prepareCityForSupervisor(cityPath, cityName string, cfg *config.City, stder
 	if err := config.ValidateRigFederationLayout(cityPath, cfg); err != nil {
 		return fmt.Errorf("validate rigs: %w", err)
 	}
-	for _, w := range config.RigFederationWarnings(cfg.Rigs) {
-		fmt.Fprintf(stderr, "gc supervisor: city '%s': warning: %s\n", cityName, w) //nolint:errcheck // best-effort stderr
-	}
 	if err := config.ValidateServices(cfg.Services); err != nil {
 		return fmt.Errorf("validate services: %w", err)
 	}

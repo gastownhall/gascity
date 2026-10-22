@@ -151,7 +151,7 @@ func (c *ConfigValidCheck) Run(ctx *CheckContext) *CheckResult {
 		r.Message = fmt.Sprintf("service validation: %v", err)
 		return r
 	}
-	if warnings := append(config.RigFederationWarnings(c.cfg.Rigs), config.GuardedRigDispatcherWarnings(c.cfg)...); len(warnings) > 0 {
+	if warnings := config.GuardedRigDispatcherWarnings(c.cfg); len(warnings) > 0 {
 		r.Status = StatusWarning
 		r.Message = "agents, rigs, and services valid; " + strings.Join(warnings, "; ")
 		return r

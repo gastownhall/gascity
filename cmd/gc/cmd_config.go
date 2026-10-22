@@ -145,7 +145,6 @@ func doConfigShow(validate, showProvenance, asJSON bool, stdout, stderr io.Write
 	// that agent from starting. Both are warnings, as gc start treats them:
 	// the rest of the city starts.
 	validationWarnings = append(validationWarnings, collectMCPCapabilityReport(cityPath, cfg).lines()...)
-	validationWarnings = append(validationWarnings, config.RigFederationWarnings(cfg.Rigs)...)
 	validationWarnings = append(validationWarnings, config.GuardedRigDispatcherWarnings(cfg)...)
 
 	if validate {

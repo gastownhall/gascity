@@ -706,7 +706,9 @@ func TestConfigPatchCountsServeRawConfigPatchesClearedByComposition(t *testing.T
 	}
 }
 
-func TestHandleConfigValidate_WarnsThatRigFederationIsNotEnforced(t *testing.T) {
+// A guarded rig with its own directory is valid, with no "not enforced"
+// warning about it.
+func TestHandleConfigValidate_AcceptsGuardedRig(t *testing.T) {
 	fs := newFakeState(t)
 	fs.cfg.Rigs[0].Federation = config.RigFederationRig
 	h := newTestCityHandler(t, fs)
@@ -728,14 +730,10 @@ func TestHandleConfigValidate_WarnsThatRigFederationIsNotEnforced(t *testing.T) 
 	if !resp.Valid {
 		t.Fatalf("valid = false, errors = %v; a guarded rig with its own directory is valid", resp.Errors)
 	}
-	found := false
 	for _, warning := range resp.Warnings {
-		if strings.Contains(warning, `rig "myrig"`) && strings.Contains(warning, "NOT protected") {
-			found = true
+		if strings.Contains(warning, "not enforce") || strings.Contains(warning, "NOT protected") {
+			t.Fatalf("warnings = %v, want no not-enforced warning", resp.Warnings)
 		}
-	}
-	if !found {
-		t.Fatalf("warnings = %v, want the not-enforced warning for rig myrig", resp.Warnings)
 	}
 }
 

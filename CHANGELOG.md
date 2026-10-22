@@ -1029,7 +1029,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the "Ship the Event Log" runbook.
 
 - **`[[rigs]] federation` and `namespace` declare a rig whose bead store
-  another city also attaches. They are validated but not enforced yet.**
+  another city also attaches.**
   `federation = "rig"` names the rig's namespace (`<rig>/`, compared under the
   bead store's actor fold) as the only identities this city should act on in
   the rig's store; `namespace = "exclusive"` declares that no other city
@@ -1043,13 +1043,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   session elsewhere whose identity folds into its namespace, and a qualified
   `default_sling_target` outside it; `gc config show --validate`, `gc doctor`
   and the config validation API report the same as errors.
-  `gc rig list` shows both settings when they are not the default. This build
-  does **not** enforce the setting on the store: a guarded rig is not
-  protected. `gc start`, `gc reload`, `gc config show`, `gc doctor` and the
-  config validation API warn about each one, and `gc rig list` marks it "not
-  enforced by this build". A city that sets neither key gets no namespace
-  checks; `gc config show --json` lists both fields, empty, on every rig, and
-  the fixes under Fixed that came with the guard reach every city.
+  `gc rig list` shows both settings when they are not the default. The
+  entries below describe how a guarded rig is enforced. A city that sets
+  neither key gets no namespace checks; `gc config show --json` lists both
+  fields, empty, on every rig, and the fixes under Fixed that came with the
+  guard reach every city.
 - **A rig with `federation = "rig"` opens behind a store guard.** Every
   place this city opens the rig's bead store (the controller, and one-shot
   commands, including subdirectories and redirected worktrees of the rig)
@@ -1064,8 +1062,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Each guarded write costs one extra read of the row it writes. A guarded rig
   whose store is the city's or another rig's is not opened, and neither is an
   unguarded rig whose store is a guarded rig's. The paths that write the rig's
-  store without its store handles are covered by the entry below; the core
-  pack's maintenance orders are not covered yet, so the warnings above stay.
+  store without its store handles check the setting themselves (next entry).
 - **A rig with `federation = "rig"` is enforced on the paths that write its
   store without a guarded Go store: the hook claim cycle, sling and graph
   routing, `gc agent-script` and `gc bd`.** A refusal in Go wraps one error
@@ -1126,21 +1123,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `rig_namespace` and adds `namespace_checked` and `namespace_via`
   (`lexical`, `session_record`). It is a new flag rather than `--rig`, which
   an older gc accepts and answers from the roster: an older gc rejects
-  `--rig-namespace`, so callers protect the claim. The core `orphan-sweep`
-  order asks it for every rig claim, keeps claims outside a guarded rig's
-  namespace and counts them per rig (`kept N claims outside guarded rig
-  namespaces (beta: N)`) without naming them or declaring a partial outcome.
-  The pool dead-assignee sweep keeps and counts the same claims. The reaper
-  and JSONL export skip guarded rigs; `cross-rig-deps` leaves their
-  dependents alone, and rewrites nothing when it cannot read the rig list; the nudge and gate-notification orders check a guarded
-  rig's assignee, route or addressee first, and the stale human-gate
-  re-nudge leaves an unaddressed gate whose creation stamp names another
-  city's namespace.
-  The reaper and export no longer touch a guarded rig, so whoever operates
-  that shared store must maintain and back it up. Run the core pack from the
-  same build as gc: an older core pack under a newer gc asks without
-  `--rig-namespace` and does not apply the namespace (a newer core pack under
-  an older gc fails closed).
+  `--rig-namespace`, so callers protect the claim. The rig's namespace is
+  decided by store identity, as the store guard decides it: a rig whose store
+  is a guarded rig's admits no identity. The core `orphan-sweep` order asks
+  it about every rig claim whose holder it does not recognize (a claim only
+  `gc ready` lists is a guarded rig's when its id carries that rig's
+  prefix), keeps claims
+  outside a guarded rig's namespace and counts them per rig (`kept N claims
+  outside guarded rig namespaces (beta: N)`) without naming them or declaring
+  a partial outcome.
+  The controller's pool dead-assignee sweep keeps and counts the same
+  claims, judging this city's own pool sessions with the same session
+  resolver as the city's guarded rig stores. The reaper and JSONL export skip
+  guarded rigs, as does the one-shot `is_blocked` repair after a bd upgrade;
+  `cross-rig-deps` leaves their dependents alone (in bd's
+  `external:<project>:<capability>` form and gc's own `external:<rig>/<id>`
+  spelling); the nudge and gate-notification orders check a guarded rig's
+  assignee, route or addressee first, best effort: with no readable rig list
+  they nudge and notify as before. The stale human-gate re-nudge also leaves
+  an unaddressed gate whose creation stamp names another city's namespace.
+  The reaper, the export and the
+  `is_blocked` repair no longer touch a guarded rig, so whoever operates that
+  shared store must maintain and back it up, and run `bd recompute-blocked`
+  there after a bd upgrade. Run the core pack from the same build as gc: an
+  older core pack under a newer gc asks without `--rig-namespace` and does
+  not apply the namespace (a newer core pack under an older gc fails
+  closed).
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
@@ -1720,6 +1728,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `gc bd create` reads the token after a valueless `--description-file` as
   that flag's value, as bd does, so a `--metadata` there is no longer
   checked as a flag of its own.
+- **`cross-rig-deps` rewrites nothing when `gc rig list` fails.** It used to
+  carry on as if no rig were suspended (or guarded); it now skips the run and
+  declares it skipped (scope `rigs`, "rig list unavailable").
+- **The orphan sweep protects malformed claim rows and keeps sweeping.** A
+  claim whose bead id or assignee contains a tab, newline or carriage return
+  is protected and named, never asked about or released, since it could
+  forge a row of its own. A scope whose in-progress listing cannot be read is
+  dropped for the pass (its claims kept) while the other scopes are still
+  swept. `gc agent is-foreign` is asked once per scope and identity rather
+  than once per identity.
+- **The orphan sweep releases a dead pool session's claim in a rig.** Its
+  release named no store, and `gc bd release-if-current` picked one from its
+  arguments, trying the assignee too: a pool session's bead id carries the
+  city's prefix and exists in the city store, so the release of a rig bead
+  went there and was skipped. `gc bd release-if-current` now routes by the
+  bead alone, and the sweep names the rig (`--rig`) for a rig claim.
 - **`gc agent-script`'s `bd_claim` and `bd_update` fail when the city config
   cannot be loaded.** They used to run the write in the agent's default
   store; on a city with a guarded rig that could have written it unchecked,
