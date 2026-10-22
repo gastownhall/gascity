@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"testing"
@@ -51,6 +52,7 @@ func journalRecoveryHarness(t *testing.T) string {
 		"backup_url_names_database",
 		"select_recovery_backup",
 		"recovery_notice",
+		"print_manual_journal_recovery_steps",
 		"attempt_journal_corruption_recovery",
 	} {
 		harness.WriteString(extractShellFunction(t, script, fn))
@@ -710,6 +712,10 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			env := setupJournalRecoveryEnv(t)
 			env.addDatabase(t, "prod", true, tc.repoState(env))
+			env.addDatabase(t, "pa", false, "")
+			env.addDatabase(t, "beads", false, repoStateWithBackups(map[string]string{
+				"default": seedBackupDir(t, filepath.Join(env.cityDir, "backups", "beads")),
+			}))
 
 			out, err := env.run(t, journalRecoveryHarness(t))
 			if err == nil {
@@ -721,8 +727,78 @@ func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 			if _, statErr := os.Stat(filepath.Join(env.dataDir, "prod", "original-marker")); statErr != nil {
 				t.Fatalf("prod store must stay in place when not recoverable: %v", statErr)
 			}
+			assertManualRecoverySteps(t, env, "prod", []string{"pa", "beads"}, out)
+			assertManualRecoverySteps(t, env, "prod", []string{"pa", "beads"}, readLogFile(t, env.logFile))
 		})
 	}
+}
+
+// assertManualRecoverySteps checks the fail-closed guidance for db: every
+// backup candidate checked, the per-database restore commands, the JSONL
+// fallback path, the siblings to leave in place, and no command whose
+// operand is the data-dir root itself.
+func assertManualRecoverySteps(t *testing.T, env journalRecoveryEnv, db string, siblings []string, text string) {
+	t.Helper()
+	for _, want := range []string{
+		"default=",
+		db + "-backup=",
+		"mv \"" + filepath.Join(env.dataDir, db) + "\" \"" + filepath.Join(env.stateDir, "corrupt-aside", db) + ".",
+		"(cd \"" + env.dataDir + "\" && dolt backup restore <file-url> " + db + ")",
+		"gc stop",
+		"gc start",
+		filepath.Join("jsonl-archive", db, "issues.jsonl"),
+		"has no JSONL archive",
+		"do not move, delete or re-create " + env.dataDir + " itself",
+	} {
+		if !strings.Contains(text, want) {
+			t.Errorf("manual recovery steps missing %q:\n%s", want, text)
+		}
+	}
+	var leave string
+	for _, line := range strings.Split(text, "\n") {
+		if strings.Contains(line, "leave these databases in place:") {
+			leave = line
+		}
+	}
+	for _, sibling := range siblings {
+		if !strings.Contains(leave+" ", " "+sibling+" ") {
+			t.Errorf("sibling %q not named as a database to leave in place: %q", sibling, leave)
+		}
+	}
+	if strings.Contains(leave+" ", " "+db+" ") {
+		t.Errorf("leave-in-place list names the database being recovered: %q", leave)
+	}
+	rootOperand := regexp.MustCompile(`\b(mv|rm|cp|clone|mkdir|rmdir)\b[^\n]*"?` + regexp.QuoteMeta(env.dataDir) + `"?(\s|$)`)
+	if m := rootOperand.FindString(text); m != "" {
+		t.Errorf("manual recovery steps act on the data dir root: %q\n%s", m, text)
+	}
+}
+
+// With two corrupt databases the first is restored; the second, with no
+// backup, fails the recovery and the guidance is about the second alone.
+func TestJournalRecoveryStopsAtFirstUnrecoverableDatabase(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	alphaURL := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "alpha"))
+	env.addDatabase(t, "alpha", true, repoStateWithBackups(map[string]string{"default": alphaURL}))
+	env.addDatabase(t, "prod", true, `{"head":"refs/heads/main"}`)
+
+	out, err := env.run(t, journalRecoveryHarness(t))
+	if err == nil {
+		t.Fatalf("recovery must fail when a corrupt database has no backup\n%s", out)
+	}
+	if got := readRestoredFrom(t, filepath.Join(env.dataDir, "alpha")); got != alphaURL {
+		t.Fatalf("alpha restored from %q, want %q\n%s", got, alphaURL, out)
+	}
+	if !strings.Contains(out, "NOT auto-recovering 'prod'") {
+		t.Fatalf("output missing refusal for prod:\n%s", out)
+	}
+	if strings.Contains(out, "NOT auto-recovering 'alpha'") {
+		t.Fatalf("alpha was restored; refusal must name prod only:\n%s", out)
+	}
+	assertManualRecoverySteps(t, env, "prod", []string{"alpha"}, out)
 }
 
 func TestJournalRecoveryMovesStoreBackWhenRestoreFails(t *testing.T) {

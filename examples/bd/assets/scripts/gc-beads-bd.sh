@@ -3061,6 +3061,35 @@ recovery_notice() {
     fi
 }
 
+# print_manual_journal_recovery_steps tells the operator how to recover
+# database $1 alone after start-time recovery failed closed ($2 is the
+# recovery timestamp for the aside name). The data dir is shared by every
+# database the managed server hosts, so the steps never act on $DATA_DIR
+# itself and name each sibling database to leave in place.
+print_manual_journal_recovery_steps() {
+    local manual_db="$1" manual_ts="$2" manual_dir manual_name manual_siblings="" manual_archive
+    for manual_dir in "$DATA_DIR"/*/; do
+        [ -d "$manual_dir/.dolt" ] || continue
+        manual_name=$(basename "$manual_dir")
+        [ "$manual_name" = "$manual_db" ] && continue
+        manual_siblings="$manual_siblings $manual_name"
+    done
+    manual_archive="${GC_JSONL_ARCHIVE_REPO:-${PACK_STATE_DIR%/*}/core/jsonl-archive}"
+    recovery_notice "manual recovery required for database '$manual_db' only"
+    if [ -n "$manual_siblings" ]; then
+        recovery_notice "$DATA_DIR is shared; leave these databases in place:$manual_siblings"
+    fi
+    recovery_notice "do not move, delete or re-create $DATA_DIR itself"
+    recovery_notice "to restore '$manual_db' from a local dolt backup (a file:// URL holding a copy of '$manual_db'):"
+    recovery_notice "  gc stop"
+    recovery_notice "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
+    recovery_notice "  mv \"$DATA_DIR/$manual_db\" \"$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts\""
+    recovery_notice "  (cd \"$DATA_DIR\" && dolt backup restore <file-url> $manual_db)"
+    recovery_notice "  gc start"
+    recovery_notice "with no backup, the last JSONL export of '$manual_db' is $manual_archive/$manual_db/issues.jsonl; see the dolt pack's docs/journal-corruption-recovery.md"
+    recovery_notice "a database that is not a bead store has no JSONL archive; restore it from a backup only"
+}
+
 # attempt_journal_corruption_recovery scans the data dir for databases whose
 # noms journal dolt refuses to load, preserves each corrupt store under
 # $PACK_STATE_DIR/corrupt-aside/ (never deleted), and restores that database
@@ -3085,7 +3114,7 @@ attempt_journal_corruption_recovery() {
         recovery_notice "journal corruption confirmed in database '$db'"
         if ! select_recovery_backup "$db" "$db_dir"; then
             recovery_notice "NOT auto-recovering '$db': no usable local backup (checked: $recovery_backup_checked)"
-            recovery_notice "manual recovery required: move $DATA_DIR/$db aside, then run 'dolt backup restore <url> $db' from $DATA_DIR"
+            print_manual_journal_recovery_steps "$db" "$ts"
             return 1
         fi
         url="$recovery_backup_url"
