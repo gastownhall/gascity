@@ -436,10 +436,14 @@ func (p *livenessErrorProvider) ObserveLivenessWithError(name string, _ []string
 	return runtime.Liveness{Running: running, Alive: running}, nil
 }
 
-// A provider that can read liveness but cannot read it fresh gets no extra
-// liveness read from any start entry, and the same IsRunning reads before
+// A provider that can read liveness but cannot read it fresh gets no liveness
+// read from any start entry beyond the lease read Start already took, and the same IsRunning reads before
 // Start as a provider with no liveness read at all (FR-02 of ga-f6y5q8n).
 func TestEnsureRunning_ProviderWithLivenessReadButNoFreshReadTakesNoExtraRead(t *testing.T) {
+	// Start reads its runtime once under its lease before the mint
+	// (leasedLiveness), as it always has; StartRuntimeOnly takes no lease
+	// read. Anything above that is a read the gate added.
+	leaseReads := map[string]int32{"Start": 1, "StartRuntimeOnly": 0}
 	for entry, newStart := range startEntry {
 		t.Run(entry, func(t *testing.T) {
 			plain := runtime.NewFake()
@@ -455,8 +459,8 @@ func TestEnsureRunning_ProviderWithLivenessReadButNoFreshReadTakesNoExtraRead(t 
 				t.Fatalf("%s: %v", entry, err)
 			}
 
-			if n := sp.observed.Load(); n != 0 {
-				t.Errorf("ObserveLivenessWithError calls = %d, want 0: a provider with no fresh read keeps its IsRunning-only reads", n)
+			if n := sp.observed.Load(); n != leaseReads[entry] {
+				t.Errorf("ObserveLivenessWithError calls = %d, want %d: only the read the start takes under its lease, none added for a provider with no fresh read", n, leaseReads[entry])
 			}
 			if got := isRunningReadsBeforeStart(sp.Fake, sessName); got != want {
 				t.Errorf("IsRunning before Start = %d, want %d", got, want)

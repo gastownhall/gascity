@@ -1199,9 +1199,19 @@ func (m *Manager) freshLiveness(sessName string, processNames []string) (runtime
 // unreadable runtime is neither running nor absent, and the caller must not
 // start, scan for orphans or reset resume state on it. Only Running counts: a
 // corpse is not running and still reaches Start.
+//
+// Only a provider that can read fresh has a cached false to confirm: for any
+// other the IsRunning false stands and no liveness read is taken, since a
+// start path must not add a read to a provider that never had one.
 func (m *Manager) runtimeRunning(sessName string) (bool, error) {
 	if m.sp.IsRunning(sessName) {
 		return true, nil
+	}
+	leaf, _, _ := runtime.ResolveBackend(m.sp, sessName)
+	_, leafFresh := leaf.(runtime.FreshLivenessObserver)
+	_, topFresh := m.sp.(runtime.FreshLivenessObserver)
+	if !leafFresh && !topFresh {
+		return false, nil
 	}
 	live, err := m.freshLiveness(sessName, nil)
 	if err != nil {
