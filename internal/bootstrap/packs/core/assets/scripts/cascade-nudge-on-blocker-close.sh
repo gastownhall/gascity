@@ -200,8 +200,12 @@ while IFS= read -r blocker; do
     set_rig_args "$blocker"
     [ -z "$RIG_SUSPENDED" ] || continue
     # The dependents are read from the blocker's rig store, so that store is
-    # the one whose namespace judges their assignees.
-    blocker_rig="$RIG_ARG2"
+    # the one whose namespace judges their assignees. set_rig_args matches
+    # only the id's first segment, exactly; a guarded rig whose prefix holds a
+    # "-" or differs in case is found by the full prefix match instead.
+    # An unreadable rig list fails closed: the blocker's dependents are not
+    # nudged this pass.
+    blocker_rig="${RIG_ARG2:-$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$blocker")}" || continue
     DEPS="$(gc bd dep list "$blocker" ${RIG_ARG1:+"$RIG_ARG1" "$RIG_ARG2"} \
             --direction=up --type=blocks --json 2>/dev/null)" || continue
     if [ -z "$DEPS" ] || [ "$DEPS" = "[]" ]; then continue; fi

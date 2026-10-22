@@ -100,7 +100,9 @@ rig_namespace_ask() {
         RIG_NAMESPACE_REASON="no rig or identity to ask about"
         return 0
     fi
-    verdict_json=$(gc agent is-foreign --rig-namespace "$rig" --json -- "$identity" 2>/dev/null) || rc=$?
+    # stdin is closed so a gc that reads it cannot swallow the caller's
+    # next loop line.
+    verdict_json=$(gc agent is-foreign --rig-namespace "$rig" --json -- "$identity" </dev/null 2>/dev/null) || rc=$?
     answered=$(jq -r 'select(type == "object") | .verdict // empty' <<<"$verdict_json" 2>/dev/null) || answered=""
     echoed=$(jq -r 'select(type == "object") | .rig_namespace // empty' <<<"$verdict_json" 2>/dev/null) || echoed=""
     RIG_NAMESPACE_REASON=$(jq -r 'select(type == "object") | [.reason, .detail] | map(select(. != null and . != "")) | join(": ")' <<<"$verdict_json" 2>/dev/null) || RIG_NAMESPACE_REASON=""

@@ -13958,8 +13958,9 @@ func TestJsonlExportFirstRunArchivePathCreatedBeforeTheRename(t *testing.T) {
 
 // --- core orders on a rig with federation = "rig" ---
 
-// guardedRigFakeGC fakes a city with an unguarded rig "alpha" (prefix al) and
-// a guarded rig "beta" (prefix bt, federation = "rig") for the event and
+// guardedRigFakeGC fakes a city with an unguarded rig "alpha" (prefix al), a
+// guarded rig "beta" (prefix bt, federation = "rig") and a guarded rig "gamma"
+// whose prefix "my-rig" holds a hyphen, for the event and
 // sweep orders that act on rig rows. `agent is-foreign --rig-namespace <rig>`
 // answers as the verb does on a guarded rig: local for "<rig>/..." (echoing
 // rig_namespace), else foreign with reason "namespace". Reads come from
@@ -13972,7 +13973,7 @@ printf '%s\n' "$*" >> "$GC_CALL_LOG"
 case "$1 $2" in
   "rig list")
     if [ -n "${GUARD_RIG_LIST_FAIL:-}" ]; then exit 1; fi
-    echo "{\"rigs\":[{\"name\":\"city-b\",\"hq\":true,\"prefix\":\"gcx\"},{\"name\":\"alpha\",\"hq\":false,\"prefix\":\"al\"},{\"name\":\"beta\",\"hq\":false,\"prefix\":\"bt\",\"federation\":\"${GUARD_FEDERATION:-rig}\",\"namespace\":\"exclusive\"}]}"
+    echo "{\"rigs\":[{\"name\":\"city-b\",\"hq\":true,\"prefix\":\"gcx\"},{\"name\":\"alpha\",\"hq\":false,\"prefix\":\"al\"},{\"name\":\"beta\",\"hq\":false,\"prefix\":\"bt\",\"federation\":\"${GUARD_FEDERATION:-rig}\",\"namespace\":\"exclusive\"},{\"name\":\"gamma\",\"hq\":false,\"prefix\":\"my-rig\",\"federation\":\"rig\"}]}"
     exit 0
     ;;
   "agent is-foreign")
@@ -14382,6 +14383,22 @@ func TestCascadeNudgeJudgesDependentsInTheBlockersRig(t *testing.T) {
 	}
 	if !strings.Contains(log, "agent is-foreign --rig-namespace beta --json -- beta/worker") || !strings.Contains(log, "session nudge beta/worker ") {
 		t.Fatalf("the admitted dependent was not checked in the blocker's rig and nudged\n%s", log)
+	}
+
+	// A guarded rig whose prefix holds a hyphen ("my-rig"): set_rig_args
+	// cannot map the blocker, so the full prefix match must find its rig.
+	out, log := runGuardedRigOrder(t, "cascade-nudge-on-blocker-close.sh", map[string]string{
+		"GUARD_EVENTS": `{"type":"bead.closed","payload":{"bead":{"id":"my-rig-1"}}}`,
+		"GUARD_DEPS":   `[{"id":"al-5","status":"open","assignee":"neighbor"}]`,
+	})
+	if strings.Contains(log, "session nudge --rig alpha neighbor ") || strings.Contains(log, "session nudge neighbor ") {
+		t.Fatalf("a dependent of a blocker in a hyphen-prefixed guarded rig escaped its namespace\n%s", log)
+	}
+	if !strings.Contains(log, "agent is-foreign --rig-namespace gamma --json -- neighbor") {
+		t.Fatalf("the dependent was not checked in the blocker's rig gamma\n%s", log)
+	}
+	if !strings.Contains(out, "skipped 1 dependent(s) in guarded rigs") {
+		t.Fatalf("output does not report the skipped dependent:\n%s", out)
 	}
 }
 
