@@ -307,9 +307,10 @@ func TestCascadeNudgeOpenConditionalBlocksHoldsDependent(t *testing.T) {
 	f.wantNudges(0)
 }
 
-// TestCascadeNudgeOpenWaitsForDoesNotHoldDependent pins that a waits-for
-// dependency is not judged by its target's status: bd gates waits-for on the
-// target's children, so an open target can leave the dependent ready.
+// TestCascadeNudgeOpenWaitsForDoesNotHoldDependent pins that a plain
+// waits-for (gate) dependency is not judged by its target's status: bd gates
+// it on the target's children, so an open target can leave the dependent
+// ready.
 func TestCascadeNudgeOpenWaitsForDoesNotHoldDependent(t *testing.T) {
 	f := newCascadeFixture(t)
 	f.write("up-gc-b1.json", `[{"id":"gc-d1","dependency_type":"blocks","status":"open","assignee":"worker"}]`)

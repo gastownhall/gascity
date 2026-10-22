@@ -10,10 +10,14 @@
 # dependency and nudges the assignee of every open, in_progress or deferred
 # dependent once all of that dependent's blocks and conditional-blocks
 # dependencies are satisfied (closed, and not closed with
-# gc.work_outcome=blocked). waits-for is not judged: bd gates it on the
-# target's children, not on the target, so its target's status says nothing
-# about whether the dependent is ready. Idempotent: a given close of a
-# blocker nudges a dependent at most once. Dedup state lives in
+# gc.work_outcome=blocked). Plain waits-for (gate) edges are not judged: bd
+# gates them on the target's children, not on the target, so the target's
+# status says nothing about whether the dependent is ready. Idempotent: a
+# given close of a blocker nudges a dependent at most once. The close is told
+# apart by the closed_at of the dependency row; a row without one (a store
+# that does not report it) is keyed on the (blocker, dependent) pair alone,
+# so there a reopened blocker's later close is not judged again within the
+# retention window. Dedup state lives in
 # $GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json, so it is both
 # city- and pack-scoped — multi-city installs never cross-pollinate.
 #
@@ -136,7 +140,8 @@ while IFS= read -r blocker; do
                 --direction=down --json 2>/dev/null)" || continue
         DOWN="$(printf '%s' "$DOWN" | jq -c "[.[] | select($GATING)]" 2>/dev/null)" || continue
         # Every record is keyed on the blocker's close, so a blocker that is
-        # reopened and closes again is judged afresh.
+        # reopened and closes again is judged afresh. A row without closed_at
+        # leaves the key at the pair, which cannot tell two closes apart.
         key="$blocker|$dep_id@$(printf '%s' "$DOWN" \
             | jq -r --arg b "$blocker" '[.[] | select(.id == $b) | .closed_at // ""][0] // ""' 2>/dev/null)" || continue
         if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then

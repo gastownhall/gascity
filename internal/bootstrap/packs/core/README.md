@@ -97,9 +97,9 @@ gc bd dep list <dep> --direction=down --json
 
 and keeps those of type `blocks` and `conditional-blocks`. Each counts as
 satisfied when it is closed and its `gc.work_outcome` is not `blocked`.
-`waits-for` is not judged: bd gates it on the children of its target, not on
-the target itself, so the target's status does not tell whether the
-dependent is ready. If any of them, the closed blocker included, is unsatisfied, it nudges no one
+Plain `waits-for` (gate) edges are not judged: bd gates them on the children
+of their target, not on the target itself, so the target's status does not
+tell whether the dependent is ready. If any of them, the closed blocker included, is unsatisfied, it nudges no one
 yet. Once every one is satisfied, it nudges the assignee:
 
 ```
@@ -118,7 +118,11 @@ dependent whose blockers close together is nudged once, and a close that had
 to wait leaves the last blocker's close to carry the nudge. A blocker that is
 reopened and closes again has a new `closed_at`, so that close is judged
 afresh and nudges if it leaves the dependent ready, whether or not the
-dependent was nudged before.
+dependent was nudged before. This needs `closed_at` on the rows of
+`gc bd dep list`. Where a store does not report it, as for a bead served from
+a class store of a split city, the record falls back to the
+`(blocker, dependent)` pair: each pair is still judged once, but a blocker
+reopened and closed again within the retention window is not judged again.
 
 **Dedup state.**
 `$GC_PACK_STATE_DIR/cascade-nudge-on-blocker-close-state.json` — a JSON object
