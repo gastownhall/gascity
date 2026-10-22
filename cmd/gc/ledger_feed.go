@@ -312,6 +312,11 @@ type ledgerFeedRequest struct {
 	mode  string
 	// admit is the scope's gate, the reconcile gate's predicate.
 	admit func() bool
+	// ns is the namespace of a guarded rig scope (federation = "rig"): the
+	// feed delivers no changed row and defers no close of a row Foreign to
+	// it, so another city's journal rows wake nothing here. The cache still
+	// absorbs every row.
+	ns *rigNamespace
 }
 
 // ledgerFeedRequest builds the feed request for one scope under cfg's mode,
@@ -411,6 +416,7 @@ type ledgerFeed struct {
 	scope  string
 	lane   string
 	admit  func() bool
+	ns     *rigNamespace
 	cache  *beads.CachingStore
 	src    *gatedJournal
 	tailer *ledgerfeed.Tailer
@@ -473,6 +479,7 @@ func newLedgerFeed(req *ledgerFeedRequest, journal journalops.Journal, lane stri
 		scope:   req.scope,
 		lane:    lane,
 		admit:   admit,
+		ns:      req.ns,
 		now:     time.Now,
 		started: time.Now(),
 		state:   ledgerFeedStateStarting,
@@ -779,6 +786,11 @@ func (f *ledgerFeed) refreshRows(ids []string, closing, seenOpen map[string]bool
 			continue
 		}
 		refreshChanged[id] = rep.Event != ""
+		if f.ns != nil && rep.Event != "" && f.ns.classify(rep.Bead) == rowForeign {
+			// Another city's row (or one this city cannot vouch for): the
+			// cache has it, but nothing here acts on it.
+			continue
+		}
 		if rep.Event != "" {
 			changed = append(changed, rep.Bead)
 		}

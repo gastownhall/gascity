@@ -89,6 +89,10 @@ type controllerState struct {
 	// laneHost is the conversation lane host the API's producer routes
 	// reach; nil when no host was started (conversation_lane_api.go).
 	laneHost atomic.Pointer[conversationLaneHost]
+	// rigSessions is this city's own-session resolver for its guarded rig
+	// stores (federation = "rig"; rig_namespace_install.go). Set once at
+	// construction; every guard of the city holds it.
+	rigSessions *rigNamespaceSessions
 
 	// pendingPoke pokes the city runtime's pending-interaction lane; nil
 	// when the lane is not running (pending_interaction_lane.go).
@@ -343,6 +347,15 @@ func newControllerStateWithRoutes(
 		beadEventStartSeqOK: beadEventStartSeqOK,
 		rolloutFlags:        rolloutFlags,
 		nativeTransport:     nativeTransport,
+		rigSessions:         newRigNamespaceSessions(cityPath),
+	}
+	// Guarded stores opened by path in this process for this city use the
+	// controller's resolver. Registered whether or not a rig is guarded yet,
+	// so a reload that guards the first rig finds it; the registration ends
+	// with the city.
+	unregister := registerRigNamespaceSessions(cityPath, cs.rigSessions)
+	if ctx.Done() != nil {
+		context.AfterFunc(ctx, unregister)
 	}
 	cs.ledgerFeeds = newLedgerFeedSet(cityPath, ledgerFeedHooks{
 		work: cs.beginStoreWork,
@@ -381,6 +394,7 @@ func newControllerStateWithRoutes(
 		cs.cityMailProv = newCityMailProvider(cs.storageRoutes, cs.cityBeadStore, cfg, cityPath, ep)
 		cs.extmsgSvc = newCityExtMsgServices(cs.storageRoutes, cs.cityBeadStore, cityPath)
 	}
+	cs.refreshRigNamespaceSessions(cfg)
 	cs.preflightConditionalWrites()
 	cs.storeMetadataSignature = storeMetadataSignature(cityPath, cfg)
 	return cs
@@ -406,6 +420,11 @@ func wrapWithCachingStore(ctx context.Context, store beads.Store, ep events.Prov
 // feed runs until the cache is stopped.
 func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.Provider, backgroundRefresh bool, feed *ledgerFeedRequest, opts ...beads.CachingStoreOption) beads.Store {
 	baseStore, policyStore, policyWrapped := unwrapBeadPolicyStore(store)
+	// A guarded rig store (policy over guard over engine) is cached under its
+	// guard: the cache sees every row, the guard filters what the city reads
+	// from it, and the event filter keeps another city's changes from waking
+	// this one.
+	baseStore, rigNS, guarded := unwrapRigNamespaceStore(baseStore)
 	if baseStore == nil {
 		return nil
 	}
@@ -416,8 +435,17 @@ func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.
 	if ep != nil {
 		recorder = ep
 	}
+	onChange := cacheChangeRecorder(recorder)
+	if guarded {
+		onChange = rigNamespaceEventFilter(rigNS, onChange)
+	}
+	if guarded && feed != nil {
+		scoped := *feed
+		scoped.ns = rigNS
+		feed = &scoped
+	}
 	attached := attachLedgerFeed(ctx, feed, baseStore, backgroundRefresh)
-	cs := beads.NewCachingStore(baseStore, attached.observe(cacheChangeRecorder(recorder)), opts...)
+	cs := beads.NewCachingStore(baseStore, attached.observe(onChange), opts...)
 	if attached != nil {
 		attached.bind(ctx, feed.set, cs)
 	}
@@ -432,22 +460,24 @@ func wrapWithCachingStoreFeed(ctx context.Context, store beads.Store, ep events.
 			log.Printf("caching-store: pre-prime failed: %v", err)
 		}
 	}
+	// The handle callers get: policy(guard(cache)) for a guarded rig.
+	var out beads.Store = cs
+	if guarded {
+		out = newRigNamespaceStore(cs, rigNS)
+	}
+	if policyWrapped {
+		out = wrapStoreWithBeadPolicies(out, policyStore.cfg)
+	}
 	// No cancellable ctx, or caller opted out of background refresh (suspended
 	// rig): serve from the synchronous pre-prime only, no async prime/reconcile.
 	if ctx.Done() == nil || !backgroundRefresh {
-		if policyWrapped {
-			return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
-		}
-		return cs
+		return out
 	}
 	// Full prime runs async — backfills remaining beads for List()
 	// callers (convergence reconcile, sweep, API handlers).
 	go primeThenStartReconciler(ctx, cs, os.Getenv("GC_AGENT"))
 	attached.start(ctx)
-	if policyWrapped {
-		return wrapStoreWithBeadPolicies(cs, policyStore.cfg)
-	}
-	return cs
+	return out
 }
 
 // primeThenStartReconciler runs the async full prime and then arms the
@@ -518,6 +548,14 @@ func (cs *controllerState) buildStores(cfg *config.City) map[string]beads.Store 
 		scopeProvider := rawBeadsProviderForScope(scopeRoot, cs.cityPath)
 		store := beads.Store(nil)
 		if sharedLegacyFileStore != nil && scopeProvider == "file" && !scopeUsesFileStoreContract(scopeRoot) {
+			if rig.FederationGuarded() {
+				// The shared legacy file store is the city's: a guarded rig
+				// on it would share the city's rows.
+				err := guardedRigAliasError(rig.Name, "its bead store is the city's shared legacy file store")
+				warnRigNamespaceOpenRefused(err)
+				stores[rig.Name] = unavailableStore{err: err}
+				continue
+			}
 			// Legacy file mode aliases every rig to the same backing store, so
 			// the cache handle must be shared too for immediate cross-rig reads.
 			if sharedLegacyCachedStore == nil {
@@ -644,6 +682,13 @@ func (cs *controllerState) setBeadsQuiescent(quiescent bool) {
 // openRigStore creates a bead store for a rig path using the given provider.
 func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix string, cfg *config.City) beads.Store {
 	scopeRoot := resolveStoreScopeRoot(cs.cityPath, rigPath)
+	// A guarded rig (federation = "rig") opens behind its guard, and only
+	// when its store is its own.
+	rigNS, err := cs.rigNamespaceForRigOpen(cfg, scopeRoot)
+	if err != nil {
+		warnRigNamespaceOpenRefused(err)
+		return unavailableStore{err: err}
+	}
 	openExecStore := func() (beads.Store, error) {
 		s := beadsexec.NewStore(strings.TrimPrefix(provider, "exec:"))
 		env := gcExecStoreEnv(cs.cityPath, execStoreTarget{
@@ -713,7 +758,50 @@ func (cs *controllerState) openRigStore(provider, rigName, rigPath, prefix strin
 	if err != nil {
 		return unavailableStore{err: fmt.Errorf("open rig store %s: %w", scopeRoot, err)}
 	}
-	return wrapStoreWithBeadPolicies(result.Store, cfg)
+	return guardRigStore(wrapStoreWithBeadPolicies(result.Store, cfg), rigNS)
+}
+
+// rigNamespaceForRigOpen returns the namespace guarding the store at
+// scopeRoot, nil when that store is no guarded rig's, or an error when the
+// rig must not be opened. Every rig of a city with a guarded rig is resolved
+// by store identity (guardedRigForScope), so an unguarded rig whose store is
+// a guarded rig's is refused, as the by-path open body refuses it.
+func (cs *controllerState) rigNamespaceForRigOpen(cfg *config.City, scopeRoot string) (*rigNamespace, error) {
+	if !cityHasGuardedRig(cfg) {
+		return nil, nil
+	}
+	var sessions ownSessionResolver = unavailableSessionResolver{err: errRigNamespaceSessionsUnavailable}
+	if cs.rigSessions != nil {
+		sessions = cs.rigSessions
+	}
+	return rigNamespaceForScope(cfg, cs.cityPath, scopeRoot, sessions)
+}
+
+// refreshRigNamespaceSessions points the city's guard resolver at its current
+// sessions store (the store the runtime's sessionsBeadStore resolves) and the
+// prefixes the store mints pool session ids under. A city without a guarded
+// rig skips it.
+func (cs *controllerState) refreshRigNamespaceSessions(cfg *config.City) {
+	if cs == nil || cs.rigSessions == nil || !cityHasGuardedRig(cfg) {
+		return
+	}
+	cs.setRigNamespaceSessionStore(cs.SessionsBeadStore(), cfg)
+}
+
+// setRigNamespaceSessionStore points the city's guard resolver at sessions,
+// the city's sessions handle.
+func (cs *controllerState) setRigNamespaceSessionStore(sessions beads.SessionStore, cfg *config.City) {
+	if cs == nil || cs.rigSessions == nil || !cityHasGuardedRig(cfg) {
+		return
+	}
+	cs.rigSessions.setSessionStore(sessions, ownSessionIDPrefixes(cfg, sessions))
+	// Warn on the mint path's own test (poolSessionExplicitBeadID asserts
+	// IDPrefix on the sessions store as it is, policy layer included; As
+	// sees through the handle only): a store that pins no pool ids gives
+	// every pool session a short id.
+	if p, ok := beads.As[explicitBeadIDStore](sessions); !noSessionStore(sessions) && (!ok || strings.Trim(strings.TrimSpace(p.IDPrefix()), "-") == "") {
+		cs.rigSessions.warnNoMintPrefixOnce(os.Stderr, cs.cityName)
+	}
 }
 
 // startBeadEventWatcher subscribes to the event bus and feeds bead events
@@ -972,11 +1060,21 @@ func (cs *controllerState) completionReconcileInputs(plane storePlane) (events.P
 // recovery projection can inspect closed authoritative rows. The normal active
 // cache prime need not include closed beads, and therefore cannot safely drive
 // lifecycle gap repair.
+//
+// A guarded rig store comes back as the guard over the uncached store: the
+// projection reads closed rows the cache lacks, but never another city's.
 func uncachedBeadStore(store beads.Store) beads.Store {
 	for range 8 {
 		if base, _, ok := unwrapBeadPolicyStore(store); ok {
 			store = base
 			continue
+		}
+		if inner, ns, ok := unwrapRigNamespaceStore(store); ok {
+			uncached := uncachedBeadStore(inner)
+			if uncached == nil {
+				return nil
+			}
+			return newRigNamespaceStore(uncached, ns)
 		}
 		cached, ok := store.(*beads.CachingStore)
 		if !ok || cached == nil || cached.Backing() == nil {
@@ -1643,6 +1741,9 @@ func (cs *controllerState) update(cfg *config.City, sp runtime.Provider) {
 	}
 	// Keep prior non-nil store/provider if reopen fails.
 	cs.mu.Unlock()
+	// The sessions store may have been reopened with the city store: the
+	// guard resolver follows it, with a fresh memo.
+	cs.refreshRigNamespaceSessions(cfg)
 	if cityStore != nil && oldCityStore != nil && oldCityStore != cityStore {
 		scheduleCloseBeadStoreHandle("city bead store", oldCityStore)
 	}
@@ -1675,6 +1776,9 @@ func closeBeadStoreHandle(store beads.Store) error {
 			return nil
 		}
 		return closeBeadStoreHandle(base)
+	}
+	if inner, _, ok := unwrapRigNamespaceStore(store); ok {
+		return closeBeadStoreHandle(inner)
 	}
 	if cached, ok := store.(*beads.CachingStore); ok {
 		cached.StopReconciler()
@@ -2056,6 +2160,11 @@ func (cs *controllerState) clearConfigMutationPending() {
 type storeTopologyRig struct {
 	path   string
 	prefix string
+	// guarded and namespace make a reload that only toggles a rig's
+	// federation or namespace rebuild its store, so the guard is installed or
+	// removed (store handles are otherwise reused across such a reload).
+	guarded   bool
+	namespace string
 }
 
 func sameStoreTopology(cityPath string, current, next *config.City) bool {
@@ -2092,8 +2201,10 @@ func storeTopologyRigs(cityPath string, rigs []config.Rig) map[string]storeTopol
 			path = resolveStoreScopeRoot(cityPath, path)
 		}
 		result[rig.Name] = storeTopologyRig{
-			path:   path,
-			prefix: rig.EffectivePrefix(),
+			path:      path,
+			prefix:    rig.EffectivePrefix(),
+			guarded:   rig.FederationGuarded(),
+			namespace: rig.EffectiveNamespace(),
 		}
 	}
 	return result

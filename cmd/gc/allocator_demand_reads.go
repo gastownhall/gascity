@@ -113,16 +113,40 @@ func (legacyDemandReads) ClosedNamedIndex(store beads.Store) (session.ClosedName
 	return session.BuildClosedNamedSessionBeadIndex(beads.SessionStore{Store: store})
 }
 
-// demandLegCache classifies a demand leg: its CachingStore, behind the
+// demandLegView is the reads the v2 demand reads ask of a cache-fed leg: a
+// *beads.CachingStore, or a guarded rig store (federation = "rig") over one,
+// which answers every read with the rows this city may act on. It names the
+// reads only, so a view is reached with beads.As.
+type demandLegView interface {
+	List(beads.ListQuery) ([]beads.Bead, error)
+	Ready(query ...beads.ReadyQuery) ([]beads.Bead, error)
+	CachedList(beads.ListQuery) ([]beads.Bead, bool)
+	ReadyContext(ctx context.Context, query ...beads.ReadyQuery) ([]beads.Bead, error)
+}
+
+// demandLegCache classifies a demand leg: its cache-fed view, behind the
 // bead-policy front door, and whether the leg is exact (the cache's backing
 // declares beads.CachedReadExact). A leg with no CachingStore is not exact.
-func demandLegCache(store beads.Store) (cache *beads.CachingStore, exact bool) {
-	cache, ok := demandLabelKey(store).(*beads.CachingStore)
-	if !ok || cache == nil {
+// A guarded rig's view is its guard, never the cache under it, so demand is
+// counted from this city's rows only.
+func demandLegCache(store beads.Store) (cache demandLegView, exact bool) {
+	key := demandLabelKey(store)
+	var view demandLegView
+	if inner, _, ok := unwrapRigNamespaceStore(key); ok {
+		if view, ok = beads.As[demandLegView](key); !ok {
+			return nil, false // never the cache under a guard
+		}
+		key = inner
+	}
+	c, ok := key.(*beads.CachingStore)
+	if !ok || c == nil {
 		return nil, false
 	}
-	declarer, ok := cache.Backing().(beads.CachedReadExact)
-	return cache, ok && declarer.CachedReadExact()
+	if view == nil {
+		view = c
+	}
+	declarer, ok := c.Backing().(beads.CachedReadExact)
+	return view, ok && declarer.CachedReadExact()
 }
 
 // v2DemandReads is the v2 allocator's demand reads for one pass, at one
@@ -168,10 +192,10 @@ type v2DemandReads struct {
 	memo map[demandLegRead]*readyDemandEntry
 }
 
-// demandLegRead names one read of one leg: the store behind the policy front
-// door, and the read's shape.
+// demandLegRead names one read of one leg: the leg's cache-fed view behind
+// the policy front door (demandLegCache), and the read's shape.
 type demandLegRead struct {
-	leg   beads.Store
+	leg   demandLegView
 	shape string
 }
 

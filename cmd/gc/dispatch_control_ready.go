@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -437,6 +438,11 @@ func controlReadyLegReady(dir string, binding beads.Store, includeEphemeral bool
 // ledger the scan never reads, stalling the workflow at its first hop.
 func controlReadyLegsReady(dir, cityPath string, cfg *config.City) (ready []beads.Bead, ok bool, err error) {
 	sources, owned, err := controlReadyLegSourcesFn(dir, cityPath, cfg)
+	if errors.Is(err, errRigNamespace) {
+		// The guard refused this scope's store: never fall back to an
+		// unguarded bd read of it.
+		return nil, true, err
+	}
 	if err != nil {
 		return nil, false, nil
 	}
@@ -530,6 +536,11 @@ func tryControlReadyScan(workQuery, dir string, env map[string]string) (queue []
 	}
 
 	cityPath := cityForStoreDir(dir)
+	// A config that does not load leaves cfg nil, and the scan's store opens
+	// then install no rig namespace guard (federation = "rig"): the scan reads
+	// a guarded rig's store unguarded. It is read-only and only ranks
+	// candidates; the dispatch that acts on one reloads the config strictly
+	// and opens the store guarded, refusing then if it cannot.
 	cfg, _ := loadCityConfig(cityPath, io.Discard)
 	envList := mergeRuntimeEnv(os.Environ(), env)
 

@@ -68,6 +68,17 @@ func (splitStrictGate) ClassView(store beads.Store) beads.Store {
 	return splittest.ProjectionOf(store).ClassViewOf(store)
 }
 
+// splitStrictFrontOf returns the store a gate view is over, or store itself
+// when the gate is off or store is not one of its views. A test that checks
+// the layers of a store a seam handed out (the rig namespace guard under the
+// policy layer, the cache under the guard) looks through the view with it.
+func splitStrictFrontOf(store beads.Store) beads.Store {
+	if splitStrictSeam == nil || store == nil {
+		return store
+	}
+	return splittest.FrontOf(store)
+}
+
 // splitStrictTestsM runs the package's tests under every TestMain check and
 // keeps m.Run's code. It hands the checks splittest.GateChecksBase's answer,
 // which under the gate is 0, so each check reports only its own failure.

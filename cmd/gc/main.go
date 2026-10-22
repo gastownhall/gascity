@@ -1844,7 +1844,7 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 			}
 			mode, nativeTransport := storeOpenModes(cfg, modeOverride, haveMode, nativeOverride)
 			if mode == memoEntry.mode && nativeTransport == memoEntry.nativeTransport {
-				return memoEntry.borrow(cfg), nil
+				return memoEntry.borrowGuarded(cfg)
 			}
 			// The same scope asked for under a different write discipline is a
 			// different store: open it unmemoized, as without the memo.
@@ -1970,10 +1970,19 @@ func openStoreResultAtForCityScoped(storePath, cityPath string, cfg *config.City
 		memoEntry.cfg = cfg
 		memoEntry.mode = mode
 		memoEntry.nativeTransport = nativeTransport
-		return memoEntry.borrow(cfg), nil
+		memoEntry.scopeRoot = scopeRoot
+		memoEntry.cityPath = runtimeCityPath
+		return memoEntry.borrowGuarded(cfg)
 	}
 	result.Store = wrapStoreWithBeadPolicies(result.Store, cfg)
-	return result, nil
+	// A guarded rig's store (federation = "rig") is handed out behind its
+	// guard: policy(guard(engine)).
+	guarded, err := guardStoreOpenResult(result, cfg, runtimeCityPath, scopeRoot)
+	if err != nil {
+		_ = closeBeadStoreHandle(result.Store)
+		return beads.StoreOpenResult{}, err
+	}
+	return guarded, nil
 }
 
 // storeOpenModes resolves the conditional-writes mode and the native transport

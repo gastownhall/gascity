@@ -89,7 +89,7 @@ func guardedRigForScope(cfg *config.City, cityPath, scopeRoot string) (*config.R
 			continue
 		}
 		if found != nil && found.Name != r.Name {
-			return nil, fmt.Errorf("opening the bead store at %s: rig %q and rig %q (federation = \"rig\") share it; give each its own store", scopeRoot, found.Name, r.Name)
+			return nil, fmt.Errorf("opening the bead store at %s: rig %q and rig %q (federation = \"rig\") share it; give each its own store: %w", scopeRoot, found.Name, r.Name, errRigNamespace)
 		}
 		found = r
 	}
@@ -156,7 +156,7 @@ func checkGuardedRigStore(cfg *config.City, cityPath string, rig config.Rig) err
 }
 
 func guardedRigAliasError(rigName, why string) error {
-	return fmt.Errorf("rig %q (federation = \"rig\"): %s; give it its own store", rigName, why)
+	return fmt.Errorf("rig %q (federation = \"rig\"): %s; give it its own store: %w", rigName, why, errRigNamespace)
 }
 
 // guardedRigStoreIdentity is rigStoreIdentityFor with the file provider's

@@ -310,6 +310,17 @@ func (p *Projection) pin(id string, side projectionSide) {
 	p.misplaced[id] = side
 }
 
+// FrontOf returns the front a view is over when store is one of the gate's
+// views, and store itself otherwise. It is for identifying the layers under a
+// view (which guard or cache a store sits behind); reads and writes must keep
+// going through the view, or they escape the gate.
+func FrontOf(store beads.Store) beads.Store {
+	if v, ok := store.(projectionView); ok {
+		return v.viewFront()
+	}
+	return store
+}
+
 // projectionView is implemented by every view variant.
 type projectionView interface {
 	projection() *Projection

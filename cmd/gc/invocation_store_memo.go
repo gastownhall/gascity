@@ -93,6 +93,10 @@ type invocationStoreEntry struct {
 	cfg             *config.City
 	mode            gate.Mode
 	nativeTransport beads.NativeTransportMode
+	// scopeRoot and cityPath are the scope the entry opened, so every borrow
+	// re-applies the guard of a guarded rig's store (borrowGuarded).
+	scopeRoot string
+	cityPath  string
 }
 
 // invocationStoreMemo is the memo of one invocation. A nil memo is disabled.
@@ -189,4 +193,12 @@ func (e *invocationStoreEntry) borrow(cfg *config.City) beads.StoreOpenResult {
 	result := e.result
 	result.Store = borrowedStoreWithBeadPolicies(result.Store, cfg)
 	return result
+}
+
+// borrowGuarded is borrow behind the guard of the entry's scope when that
+// scope is a guarded rig's store (federation = "rig"): every borrow
+// re-applies it, so a memoized open never hands out the bare engine. The
+// caller holds e.mu.
+func (e *invocationStoreEntry) borrowGuarded(cfg *config.City) (beads.StoreOpenResult, error) {
+	return guardStoreOpenResult(e.borrow(cfg), cfg, e.cityPath, e.scopeRoot)
 }
