@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -369,12 +370,11 @@ func TestEnsureRunning_CompositeInFrontOfCachingProviderReadsTheLeafFresh(t *tes
 	}
 }
 
-// A provider without the fresh read keeps today's IsRunning reads before
-// Start, and takes no other liveness read: the count is pinned, so a gate
-// that added a read for such a provider fails it.
-func TestEnsureRunning_ProviderWithoutFreshReadKeepsItsIsRunningReadsBeforeStart(t *testing.T) {
+// seedAsleepSession stores an asleep, unkeyed session bead and returns its
+// manager over sp, the row's id and its runtime name.
+func seedAsleepSession(t *testing.T, sp runtime.Provider) (*Manager, string, string) {
+	t.Helper()
 	store := beads.NewMemStore()
-	sp := runtime.NewFake()
 	mgr := newTestManager(t, store, sp)
 	b, err := store.Create(beads.Bead{Type: BeadType, Labels: []string{LabelSession}, Metadata: map[string]string{
 		"state": string(StateAsleep), "provider": "claude", "work_dir": "/tmp", "command": "claude --dangerously",
@@ -386,22 +386,81 @@ func TestEnsureRunning_ProviderWithoutFreshReadKeepsItsIsRunningReadsBeforeStart
 	if err := store.SetMetadata(b.ID, "session_name", sessName); err != nil {
 		t.Fatalf("SetMetadata(session_name): %v", err)
 	}
+	return mgr, b.ID, sessName
+}
 
-	if err := startEntry["Start"](t, mgr, b.ID)(); err != nil {
-		t.Fatalf("Start: %v", err)
-	}
-
+// isRunningReadsBeforeStart counts the IsRunning reads of name that sp took
+// before its first Start.
+func isRunningReadsBeforeStart(sp *runtime.Fake, name string) int {
 	reads := 0
 	for _, c := range sp.Calls {
 		if c.Method == "Start" {
 			break
 		}
-		if c.Method == "IsRunning" && c.Name == sessName {
+		if c.Method == "IsRunning" && c.Name == name {
 			reads++
 		}
 	}
+	return reads
+}
+
+// A provider without the fresh read keeps today's IsRunning reads before
+// Start, and takes no other liveness read: the count is pinned, so a gate
+// that added a read for such a provider fails it.
+func TestEnsureRunning_ProviderWithoutFreshReadKeepsItsIsRunningReadsBeforeStart(t *testing.T) {
+	sp := runtime.NewFake()
+	mgr, id, sessName := seedAsleepSession(t, sp)
+
+	if err := startEntry["Start"](t, mgr, id)(); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+
 	const readsBeforeStartToday = 4
-	if reads != readsBeforeStartToday {
+	if reads := isRunningReadsBeforeStart(sp, sessName); reads != readsBeforeStartToday {
 		t.Errorf("IsRunning before Start = %d, want %d: the same reads as without the fresh-read gate", reads, readsBeforeStartToday)
+	}
+}
+
+// livenessErrorProvider reads liveness per call through
+// ObserveLivenessWithError, as acp and subprocess do by probing their control
+// socket, and has no FreshLivenessObserver: it is the provider the fresh-read
+// gate must leave alone.
+type livenessErrorProvider struct {
+	*runtime.Fake
+	observed atomic.Int32
+}
+
+func (p *livenessErrorProvider) ObserveLivenessWithError(name string, _ []string) (runtime.Liveness, error) {
+	p.observed.Add(1)
+	running := p.IsRunning(name)
+	return runtime.Liveness{Running: running, Alive: running}, nil
+}
+
+// A provider that can read liveness but cannot read it fresh gets no extra
+// liveness read from any start entry, and the same IsRunning reads before
+// Start as a provider with no liveness read at all (FR-02 of ga-f6y5q8n).
+func TestEnsureRunning_ProviderWithLivenessReadButNoFreshReadTakesNoExtraRead(t *testing.T) {
+	for entry, newStart := range startEntry {
+		t.Run(entry, func(t *testing.T) {
+			plain := runtime.NewFake()
+			plainMgr, plainID, plainName := seedAsleepSession(t, plain)
+			if err := newStart(t, plainMgr, plainID)(); err != nil {
+				t.Fatalf("%s over a provider with no liveness read: %v", entry, err)
+			}
+			want := isRunningReadsBeforeStart(plain, plainName)
+
+			sp := &livenessErrorProvider{Fake: runtime.NewFake()}
+			mgr, id, sessName := seedAsleepSession(t, sp)
+			if err := newStart(t, mgr, id)(); err != nil {
+				t.Fatalf("%s: %v", entry, err)
+			}
+
+			if n := sp.observed.Load(); n != 0 {
+				t.Errorf("ObserveLivenessWithError calls = %d, want 0: a provider with no fresh read keeps its IsRunning-only reads", n)
+			}
+			if got := isRunningReadsBeforeStart(sp.Fake, sessName); got != want {
+				t.Errorf("IsRunning before Start = %d, want %d", got, want)
+			}
+		})
 	}
 }
