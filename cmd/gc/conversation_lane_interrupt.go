@@ -269,20 +269,17 @@ func laneInterruptResult(ctx context.Context, res worker.InterruptResult, err er
 
 // laneInterrupts is the lane host's record of the interrupt each
 // conversation's executor ran last (X11 §5.4, D5, D8, DES-O1 §10.1): the
-// executor records its InterruptRef before the effect for the
-// conversation's turn observer (TI-3), whose fold is to credit the turn's
-// end to the op (opjournal.FoldTurn's interrupting) and then clear the ref.
-// The observer folds turn updates between passes, after the effect
-// returned, so the ref outlives the effect: the executor takes it back only
-// when the effect definitely sent nothing, restoring the ref it replaced,
-// and a newer ref replaces it. Until that observer is wired (ga-6plx6a)
-// nothing clears a ref, so one stands until it is replaced. While it stands
-// it also keeps a retry of its session-scoped op on the turn the op's
-// earlier attempt aimed at (interruptTarget). The op row
-// carries the same credit (Result.Turn, also on failed{no_boundary}) for an
-// observer that started after the record was lost. One effect runs at a
-// time per conversation (D-1EFF), so each conversation holds at most one
-// ref. A nil record records nothing.
+// executor records its InterruptRef before the effect and takes it back only
+// when the effect definitely sent nothing, restoring the ref it replaced; a
+// newer ref replaces it. While it stands it keeps a retry of its
+// session-scoped op on the turn the op's earlier attempt aimed at
+// (interruptTarget). The conversation's turn observer (TI-3) does not read
+// this record: it credits a turn's end to the op from the op rows
+// (opjournal.Store.InterruptCredits, Result.Turn, also on
+// failed{no_boundary}), which count only an op that ran, so nothing calls
+// clear in production and a ref stands until it is replaced. One effect runs
+// at a time per conversation (D-1EFF), so each conversation holds at most
+// one ref. A nil record records nothing.
 type laneInterrupts struct {
 	mu   sync.Mutex
 	last map[string]opjournal.InterruptRef
@@ -327,8 +324,7 @@ func (r *laneInterrupts) restore(conv string, ref, prev opjournal.InterruptRef) 
 	r.last[conv] = prev
 }
 
-// clear drops ref as conv's interrupt, if it still is: the observer's once
-// it folded ref's turn end.
+// clear drops ref as conv's interrupt, if it still is.
 func (r *laneInterrupts) clear(conv string, ref opjournal.InterruptRef) {
 	if r == nil {
 		return
