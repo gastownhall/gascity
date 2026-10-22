@@ -508,6 +508,69 @@ func TestJournalRecoveryLeavesSiblingDatabasesInPlace(t *testing.T) {
 	}
 }
 
+// TestJournalRecoveryPrefersBdDefaultBackup pins AC-3: bd's "default"
+// destination is the one mol-dog-backup keeps current, so when both it and
+// the legacy <db>-backup name are usable recovery must restore from
+// "default" and say so. A "default" that is not a usable local file://
+// source naming the database falls back to the legacy name.
+func TestJournalRecoveryPrefersBdDefaultBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	defaultDir := filepath.Join(t.TempDir(), "prod")
+	seedBackupDir(t, defaultDir)
+
+	t.Run("restores from default when both are usable", func(t *testing.T) {
+		env := setupJournalRecoveryEnv(t)
+		legacyDir := filepath.Join(filepath.Dir(env.backupDir), "legacy-prod")
+		seedBackupDir(t, legacyDir)
+		env.addDatabase(t, "prod", true, repoStateWithBackups(map[string]string{
+			"default":     "file://" + defaultDir,
+			"prod-backup": "file://" + legacyDir,
+		}))
+
+		out, err := env.run(t, journalRecoveryHarness(t))
+		if err != nil {
+			t.Fatalf("recovery failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "RESTORED 'prod' from backup default (file://"+defaultDir+")") {
+			t.Fatalf("output must name the default backup and its URL:\n%s", out)
+		}
+		markerBytes, err := os.ReadFile(filepath.Join(env.dataDir, "prod", "restored-marker"))
+		if err != nil {
+			t.Fatalf("prod was not restored: %v\n%s", err, out)
+		}
+		if got := strings.TrimSpace(string(markerBytes)); got != "file://"+defaultDir {
+			t.Fatalf("restored from %q, want the default backup URL %q", got, "file://"+defaultDir)
+		}
+	})
+
+	t.Run("falls back to legacy name when default is not a local file source", func(t *testing.T) {
+		env := setupJournalRecoveryEnv(t)
+		legacyDir := env.backupDir
+		seedBackupDir(t, legacyDir)
+		env.addDatabase(t, "prod", true, repoStateWithBackups(map[string]string{
+			"default":     "aws://bucket/prod",
+			"prod-backup": "file://" + legacyDir,
+		}))
+
+		out, err := env.run(t, journalRecoveryHarness(t))
+		if err != nil {
+			t.Fatalf("recovery failed: %v\n%s", err, out)
+		}
+		if !strings.Contains(out, "RESTORED 'prod' from backup prod-backup (file://"+legacyDir+")") {
+			t.Fatalf("output must name the legacy backup and its URL:\n%s", out)
+		}
+		markerBytes, err := os.ReadFile(filepath.Join(env.dataDir, "prod", "restored-marker"))
+		if err != nil {
+			t.Fatalf("prod was not restored: %v\n%s", err, out)
+		}
+		if got := strings.TrimSpace(string(markerBytes)); got != "file://"+legacyDir {
+			t.Fatalf("restored from %q, want the legacy backup URL %q", got, "file://"+legacyDir)
+		}
+	})
+}
+
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
