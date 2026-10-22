@@ -518,6 +518,134 @@ func TestJournalRecoveryLeavesSiblingDatabasesInPlace(t *testing.T) {
 	}
 }
 
+// bd's "default" backup is the destination mol-dog-backup keeps current, so
+// it wins over a legacy <db>-backup; a "default" that is not a usable local
+// copy of this database falls back to the legacy name.
+func TestJournalRecoveryPrefersBdDefaultBackup(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	type backups struct {
+		defaultURL string
+		legacyURL  string
+	}
+	tests := []struct {
+		name string
+		db   string
+		// setup returns the registered backups and the URL recovery must
+		// restore from ("" = must fail closed).
+		setup func(t *testing.T, env journalRecoveryEnv) (backups, string, string)
+	}{
+		{
+			name: "both usable",
+			db:   "prod",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				def := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "prod"))
+				legacy := seedBackupDir(t, filepath.Join(env.cityDir, "legacy", "prod"))
+				return backups{def, legacy}, def, "default"
+			},
+		},
+		{
+			name: "default not a file backup",
+			db:   "prod",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				legacy := seedBackupDir(t, filepath.Join(env.cityDir, "legacy", "prod"))
+				return backups{"aws://bucket/prod", legacy}, legacy, "prod-backup"
+			},
+		},
+		{
+			name: "default dir missing",
+			db:   "prod",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				legacy := seedBackupDir(t, filepath.Join(env.cityDir, "legacy", "prod"))
+				return backups{"file://" + filepath.Join(env.cityDir, ".dolt-backup", "prod"), legacy}, legacy, "prod-backup"
+			},
+		},
+		{
+			name: "default dir empty",
+			db:   "prod",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				empty := filepath.Join(env.cityDir, ".dolt-backup", "prod")
+				if err := os.MkdirAll(empty, 0o755); err != nil {
+					t.Fatal(err)
+				}
+				legacy := seedBackupDir(t, filepath.Join(env.cityDir, "legacy", "prod"))
+				return backups{"file://" + empty, legacy}, legacy, "prod-backup"
+			},
+		},
+		{
+			name: "default names another database",
+			db:   "prod",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				other := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "other"))
+				legacy := seedBackupDir(t, filepath.Join(env.cityDir, "legacy", "prod"))
+				return backups{other, legacy}, legacy, "prod-backup"
+			},
+		},
+		{
+			name: "default names another database and no legacy backup",
+			db:   "prod",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				other := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "other"))
+				return backups{defaultURL: other}, "", ""
+			},
+		},
+		{
+			name: "default dir uses dolt name normalization",
+			db:   "my-rig",
+			setup: func(t *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				def := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "my_rig"))
+				return backups{defaultURL: def}, def, "default"
+			},
+		},
+		{
+			name: "neither usable",
+			db:   "prod",
+			setup: func(_ *testing.T, env journalRecoveryEnv) (backups, string, string) {
+				return backups{"aws://bucket/prod", "file://" + filepath.Join(env.cityDir, "missing")}, "", ""
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupJournalRecoveryEnv(t)
+			registered, wantURL, wantName := tc.setup(t, env)
+			state := map[string]string{}
+			if registered.defaultURL != "" {
+				state["default"] = registered.defaultURL
+			}
+			if registered.legacyURL != "" {
+				state[tc.db+"-backup"] = registered.legacyURL
+			}
+			env.addDatabase(t, tc.db, true, repoStateWithBackups(state))
+
+			out, err := env.run(t, journalRecoveryHarness(t))
+			if wantURL == "" {
+				if err == nil {
+					t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
+				}
+				if !strings.Contains(out, "NOT auto-recovering '"+tc.db+"'") {
+					t.Fatalf("output missing loud refusal:\n%s", out)
+				}
+				if _, statErr := os.Stat(filepath.Join(env.dataDir, tc.db, "original-marker")); statErr != nil {
+					t.Fatalf("%s must stay in place when not recoverable: %v", tc.db, statErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("recovery failed: %v\n%s", err, out)
+			}
+			if got := readRestoredFrom(t, filepath.Join(env.dataDir, tc.db)); got != wantURL {
+				t.Fatalf("restored from %q, want %q\n%s", got, wantURL, out)
+			}
+			want := "RESTORED '" + tc.db + "' from backup " + wantName + " (" + wantURL + ")"
+			if !strings.Contains(out, want) {
+				t.Fatalf("output missing %q:\n%s", want, out)
+			}
+		})
+	}
+}
+
 func TestJournalRecoveryRestoresCorruptDBFromLocalBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")

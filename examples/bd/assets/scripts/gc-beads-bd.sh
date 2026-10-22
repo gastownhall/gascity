@@ -3003,10 +3003,11 @@ backup_url_names_database() {
 }
 
 # select_recovery_backup picks the backup to restore database $1 (directory
-# $2) from: the legacy <db>-backup, then bd's "default" backup, the
-# destination mol-dog-backup registers through `bd backup init`. A candidate
-# must be a usable local source (backup_restore_source_usable); "default" must
-# also name the database. On success it sets recovery_backup_name and
+# $2) from: bd's "default" backup first, the destination mol-dog-backup
+# registers through `bd backup init` and keeps current, then the legacy
+# <db>-backup. A candidate must be a usable local source
+# (backup_restore_source_usable); "default" must also name the database.
+# On success it sets recovery_backup_name and
 # recovery_backup_url and returns 0. recovery_backup_checked always lists
 # every rejected candidate with the reason, for the operator messages.
 select_recovery_backup() {
@@ -3014,7 +3015,7 @@ select_recovery_backup() {
     recovery_backup_name=""
     recovery_backup_url=""
     recovery_backup_checked=""
-    for select_name in "${select_db}-backup" default; do
+    for select_name in default "${select_db}-backup"; do
         select_url=$(backup_remote_url_for_recovery "$select_db" "$select_db_dir" "$select_name") || select_url=""
         select_reason=""
         if [ -z "$select_url" ]; then
