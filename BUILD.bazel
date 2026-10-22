@@ -324,6 +324,13 @@ filegroup(
     visibility = ["//visibility:public"],
 )
 
+# Dolt maintenance runbook checked by //examples/bd/dolt's recovery-doc guard.
+filegroup(
+    name = "engdocs_dolt_maintenance",
+    srcs = ["engdocs/contributors/dolt-maintenance.md"],
+    visibility = ["//visibility:public"],
+)
+
 # --- repo trees (managed by tools/bazel/repo_tree.py) ---
 
 # repo_source_tree: every source package's files plus the root-level
