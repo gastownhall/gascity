@@ -2019,6 +2019,8 @@ go_test(
         "rig_chargolden_test.go",
         "rig_control_dispatch_s4_test.go",
         "rig_convergence_s4_test.go",
+        "rig_federation_two_city_fixture_test.go",
+        "rig_federation_two_city_test.go",
         "rig_fresh_inherited_scope_test.go",
         "rig_graph_readers_s4_test.go",
         "rig_import_fixtures_test.go",
