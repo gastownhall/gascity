@@ -350,6 +350,7 @@ func (p *decidePass) newPlanParams() {
 		providerHealthSnapshot:         health,
 		planOnly:                       true,
 		beadNames:                      make(map[string]string),
+		sessionRuntime:                 p.in.SessionRuntime,
 	}
 	for _, r := range p.inFlight {
 		p.reserve(r)

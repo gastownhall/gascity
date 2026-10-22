@@ -110,6 +110,7 @@ type World struct {
 
 	CitySuspended     bool
 	SuspendedRigPaths map[string]bool
+	SessionRuntime    string // effectiveProviderName(cfg.Session.Provider)
 	ProviderHealth    *providerHealthSnapshot
 	Episodes          map[string]session.StartupHealthEpisode
 	SleepPolicies     map[string]resolvedSessionSleepPolicy // by bead ID
@@ -219,6 +220,7 @@ func gather(e gatherEnv, p *planner, now time.Time) (World, error) {
 		st = e.Suspension()
 	}
 	w.CitySuspended, w.SuspendedRigPaths, w.Suspension = effectiveCitySuspended(cfg, st), suspendedRigPathsWithState(cfg, st), st
+	w.SessionRuntime = effectiveProviderName(cfg.Session.Provider)
 	rec := e.Recording()
 	if e.Observations != nil {
 		w.Obs = e.Observations().Snapshot()

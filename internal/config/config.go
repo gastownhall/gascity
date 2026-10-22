@@ -1323,6 +1323,12 @@ type Workspace struct {
 	Prefix string `toml:"prefix,omitempty"`
 	// Provider is the default provider name used by agents that don't specify one.
 	Provider string `toml:"provider,omitempty"`
+	// ImplicitIsolation selects how numbered instances of a rig-scoped
+	// implicit agent get their working directory: "worktree" (the default
+	// when empty) gives each instance its own pool-slot git worktree of a git
+	// rig under .gc/worktrees/<rig>/<agent>-<n>; "none" keeps every instance
+	// in the shared rig root.
+	ImplicitIsolation string `toml:"implicit_isolation,omitempty" jsonschema:"enum=worktree,enum=none"`
 	// Timezone is the city-default IANA time zone (e.g. "America/New_York")
 	// in which cron order schedules are evaluated when an order does not set
 	// its own tz. Empty means the controller's process-local zone. Invalid
@@ -4078,7 +4084,9 @@ func InjectImplicitAgents(cfg *City) {
 		})
 	}
 
-	// Rig-scoped implicit agents.
+	// Rig-scoped implicit agents. Their numbered instances run in pool-slot
+	// worktrees unless the workspace opts out.
+	slotWorktrees := cfg.Workspace.ImplicitIsolation != ImplicitIsolationNone
 	for _, rig := range cfg.Rigs {
 		for _, name := range providers {
 			if existing[agentKey{rig.Name, name}] {
@@ -4091,7 +4099,7 @@ func InjectImplicitAgents(cfg *City) {
 				PromptTemplate:      promptTemplate,
 				DefaultSlingFormula: &slingFormula,
 				Implicit:            true,
-				PoolSlotWorktrees:   true,
+				PoolSlotWorktrees:   slotWorktrees,
 			})
 		}
 	}
@@ -5028,6 +5036,9 @@ func Parse(data []byte) (*City, error) {
 	for i := range cfg.Agents {
 		cfg.Agents[i].source = sourceInline
 	}
+	if err := validateImplicitIsolation(cfg.Workspace.ImplicitIsolation); err != nil {
+		return nil, err
+	}
 	if err := validateBeadsModes(cfg.Beads); err != nil {
 		return nil, err
 	}
@@ -5041,6 +5052,26 @@ func Parse(data []byte) (*City, error) {
 		return nil, err
 	}
 	return &cfg, nil
+}
+
+// Workspace implicit_isolation modes. Empty means ImplicitIsolationWorktree.
+const (
+	// ImplicitIsolationWorktree gives each numbered instance of a rig-scoped
+	// implicit agent its own pool-slot git worktree of a git rig.
+	ImplicitIsolationWorktree = "worktree"
+	// ImplicitIsolationNone keeps every instance in the shared rig root.
+	ImplicitIsolationNone = "none"
+)
+
+// validateImplicitIsolation rejects an out-of-enum workspace.implicit_isolation.
+// Parse runs it on its single layer and LoadWithIncludesOptions on the composed
+// root, because a fragment may supply the field.
+func validateImplicitIsolation(raw string) error {
+	switch raw {
+	case "", ImplicitIsolationWorktree, ImplicitIsolationNone:
+		return nil
+	}
+	return fmt.Errorf("workspace.implicit_isolation: invalid mode %q: want one of %s, %s", raw, ImplicitIsolationWorktree, ImplicitIsolationNone)
 }
 
 // validateBeadsModes rejects an out-of-enum value in any [beads] mode field

@@ -4413,7 +4413,7 @@ func poolTriggerWorkDir(bp *agentBuildParams, cfgAgent *config.Agent, qualifiedN
 		// skips it; the effect that writes the work dir runs it.
 		resolveWorkDir = resolveConfiguredWorkDirPathUnvalidated
 	}
-	base, err := resolveWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	base, err := resolveWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs, bp.sessionRuntime)
 	if err != nil || strings.TrimSpace(base) == "" {
 		return ""
 	}
@@ -7187,7 +7187,7 @@ func prepareTemplateResolution(bp *agentBuildParams, cfgAgent *config.Agent, qua
 	if err != nil {
 		return
 	}
-	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs)
+	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, qualifiedName, cfgAgent, bp.rigs, bp.sessionRuntime)
 	if err != nil {
 		if stderr != nil {
 			fmt.Fprintf(stderr, "agent %q: workdir: %v\n", qualifiedName, err) //nolint:errcheck

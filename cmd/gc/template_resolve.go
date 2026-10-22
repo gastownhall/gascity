@@ -198,7 +198,7 @@ func resolveTemplate(p *agentBuildParams, cfgAgent *config.Agent, qualifiedName 
 	if p.readOnly {
 		resolveWorkDir = resolveConfiguredWorkDirPath
 	}
-	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs)
+	workDir, err := resolveWorkDir(p.cityPath, p.cityName, qualifiedName, cfgAgent, p.rigs, p.sessionRuntime)
 	if err != nil {
 		return TemplateParams{}, fmt.Errorf("agent %q: %w", qualifiedName, err)
 	}

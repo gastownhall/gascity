@@ -119,7 +119,7 @@ func (c *promptDeliveryBudgetDoctorCheck) Run(_ *doctor.CheckContext) *doctor.Ch
 		ctx := buildAgentPromptContext(c.cityPath, cityName, &a, c.cfg.Rigs, topo, io.Discard)
 		// Render with the workdir launch would use. The unvalidated resolver
 		// is a pure path computation, so doctor creates no directory.
-		if wd, err := resolveConfiguredWorkDirPathUnvalidated(c.cityPath, cityName, a.QualifiedName(), &a, c.cfg.Rigs); err == nil {
+		if wd, err := resolveConfiguredWorkDirPathUnvalidated(c.cityPath, cityName, a.QualifiedName(), &a, c.cfg.Rigs, effectiveProviderName(c.cfg.Session.Provider)); err == nil {
 			ctx.WorkDir = wd
 			ctx.DefaultBranch = defaultBranchForRig(ctx.RigName, c.cfg.Rigs, ctx.WorkDir)
 		}

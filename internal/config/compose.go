@@ -876,6 +876,9 @@ func LoadWithIncludesOptions(fs fsys.FS, path string, opts LoadOptions, extraInc
 	// goes native regardless of operator intent. Validate once here, over
 	// the fully composed root, so every real load path (not just direct
 	// config.Parse callers, mostly tests) gets the same enum enforcement.
+	if err := validateImplicitIsolation(root.Workspace.ImplicitIsolation); err != nil {
+		return nil, nil, err
+	}
 	if err := validateBeadsModes(root.Beads); err != nil {
 		return nil, nil, err
 	}
@@ -1549,6 +1552,11 @@ func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath strin
 			"session_template",
 			func() string { return base.Workspace.SessionTemplate },
 			func() { base.Workspace.SessionTemplate = fragment.Workspace.SessionTemplate },
+		},
+		{
+			"implicit_isolation",
+			func() string { return base.Workspace.ImplicitIsolation },
+			func() { base.Workspace.ImplicitIsolation = fragment.Workspace.ImplicitIsolation },
 		},
 	}
 	for _, f := range fields {

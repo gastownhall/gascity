@@ -16,6 +16,13 @@ import (
 // for provider claude.
 func implicitSlotCity(t *testing.T) (string, string, *config.City, *config.Agent) {
 	t.Helper()
+	return implicitSlotCityPrepared(t, nil)
+}
+
+// implicitSlotCityPrepared is implicitSlotCity with prep run on the config and
+// rig root before the implicit agents are injected.
+func implicitSlotCityPrepared(t *testing.T, prep func(cfg *config.City, rig string)) (string, string, *config.City, *config.Agent) {
+	t.Helper()
 	city := t.TempDir()
 	if resolved, err := filepath.EvalSymlinks(city); err == nil {
 		city = resolved
@@ -34,6 +41,9 @@ func implicitSlotCity(t *testing.T) (string, string, *config.City, *config.Agent
 		Workspace: config.Workspace{Name: "city"},
 		Providers: map[string]config.ProviderSpec{"claude": {}},
 		Rigs:      []config.Rig{{Name: "app", Path: rig}},
+	}
+	if prep != nil {
+		prep(cfg, rig)
 	}
 	config.InjectImplicitAgents(cfg)
 	for i := range cfg.Agents {
@@ -112,5 +122,65 @@ func TestImplicitRigPoolSlotsProvisionIsolatedWorktrees(t *testing.T) {
 		if got := patch[beadmeta.WorkBranchMetadataKey]; got != branches[n] {
 			t.Errorf("claim by app/claude-%s stamped gc.work_branch=%q, want %q", n, got, branches[n])
 		}
+	}
+}
+
+func TestImplicitSlotWorktreesKeepTodaysWorkDirOutsideTheirScope(t *testing.T) {
+	for _, tc := range []struct {
+		name       string
+		session    string
+		identity   string
+		prep       func(cfg *config.City, rig string)
+		patchAgent func(a *config.Agent, rig string)
+	}{
+		{name: "canonical", session: "tmux", identity: "app/claude"},
+		{name: "adhoc", session: "tmux", identity: "app/claude-adhoc-1a2b3c"},
+		{name: "work_dir", session: "tmux", identity: "app/claude-1", patchAgent: func(a *config.Agent, rig string) { a.WorkDir = rig }},
+		{name: "k8s", session: "k8s", identity: "app/claude-1"},
+		{name: "hybrid", session: "hybrid", identity: "app/claude-1"},
+		{name: "ssh", session: "ssh:build-host", identity: "app/claude-1"},
+		{name: "exec", session: "exec:/bin/true", identity: "app/claude-1"},
+		{name: "city_k8s", identity: "app/claude-1", prep: func(cfg *config.City, _ string) { cfg.Session.Provider = "k8s" }},
+		{name: "no_git", session: "tmux", identity: "app/claude-1", prep: func(_ *config.City, rig string) {
+			if err := os.RemoveAll(filepath.Join(rig, ".git")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{name: "isolation_none", session: "tmux", identity: "app/claude-1", prep: func(cfg *config.City, _ string) {
+			cfg.Workspace.ImplicitIsolation = "none"
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("GC_SESSION", tc.session)
+			city, rig, cfg, a := implicitSlotCityPrepared(t, tc.prep)
+			if tc.patchAgent != nil {
+				tc.patchAgent(a, rig)
+			}
+			_, isRepo := os.Lstat(filepath.Join(rig, ".git"))
+			var refs string
+			if isRepo == nil {
+				refs = gitOut(t, rig, "for-each-ref")
+			}
+
+			dir, err := resolveWorkDirForQualifiedName(city, cfg, a, tc.identity)
+			if err != nil {
+				t.Fatalf("resolving %s: %v", tc.identity, err)
+			}
+			if dir != rig {
+				t.Errorf("%s work dir = %q, want today's rig root %q", tc.identity, dir, rig)
+			}
+			if _, err := os.Lstat(filepath.Join(city, ".gc", "worktrees")); !os.IsNotExist(err) {
+				t.Errorf("%s created %s (lstat err %v)", tc.identity, filepath.Join(city, ".gc", "worktrees"), err)
+			}
+			if isRepo != nil {
+				return
+			}
+			if got := strings.Count(gitOut(t, rig, "worktree", "list", "--porcelain"), "worktree "); got != 1 {
+				t.Errorf("rig has %d worktrees, want only the rig root", got)
+			}
+			if got := gitOut(t, rig, "for-each-ref"); got != refs {
+				t.Errorf("rig refs changed:\nbefore:\n%s\nafter:\n%s", refs, got)
+			}
+		})
 	}
 }

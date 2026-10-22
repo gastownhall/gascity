@@ -48,6 +48,9 @@ type allocInputs struct {
 	EnvGen    uint64
 	CityPath  string
 	CityName  string
+	// SessionRuntime is effectiveProviderName(Cfg.Session.Provider): it reads
+	// the environment, so the gather phase resolves it.
+	SessionRuntime string
 	// CitySuspended is effectiveCitySuspended(cfg, I9), and
 	// SuspendedRigPaths suspendedRigPathsWithState(cfg, I9): both read the
 	// environment or a file, so the gather phase computes them.

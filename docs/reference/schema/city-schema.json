@@ -3532,6 +3532,14 @@
           "type": "string",
           "description": "Provider is the default provider name used by agents that don't specify one."
         },
+        "implicit_isolation": {
+          "type": "string",
+          "enum": [
+            "worktree",
+            "none"
+          ],
+          "description": "ImplicitIsolation selects how numbered instances of a rig-scoped\nimplicit agent get their working directory: \"worktree\" (the default\nwhen empty) gives each instance its own pool-slot git worktree of a git\nrig under .gc/worktrees/\u003crig\u003e/\u003cagent\u003e-\u003cn\u003e; \"none\" keeps every instance\nin the shared rig root."
+        },
         "timezone": {
           "type": "string",
           "description": "Timezone is the city-default IANA time zone (e.g. \"America/New_York\")\nin which cron order schedules are evaluated when an order does not set\nits own tz. Empty means the controller's process-local zone. Invalid\nnames fail order discovery loudly rather than falling back silently."

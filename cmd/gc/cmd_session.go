@@ -3068,7 +3068,11 @@ func resolveWorkDirForQualifiedName(cityPath string, cfg *config.City, agent *co
 	if cfg != nil {
 		rigs = cfg.Rigs
 	}
-	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs)
+	sessionProvider := ""
+	if cfg != nil {
+		sessionProvider = cfg.Session.Provider
+	}
+	return resolveConfiguredWorkDir(cityPath, cityName, qualifiedName, agent, rigs, effectiveProviderName(sessionProvider))
 }
 
 func sessionExplicitNameForNewSession(cityPath, cityName string, rigs []config.Rig, agent *config.Agent, alias string) (string, error) {

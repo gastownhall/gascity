@@ -1534,25 +1534,28 @@ func sessionSetupContextForAgent(cityPath, cityName, qualifiedName string, a *co
 // display — must use this variant so that resolving a path never mutates the
 // filesystem (gc-r9fx). Session-start paths that need the directory to exist
 // use resolveConfiguredWorkDir.
-func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, workdirutil.ValidateAncestorWorktreesNotStale)
+func resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionRuntime string) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, sessionRuntime, workdirutil.ValidateAncestorWorktreesNotStale)
 }
 
 // resolveConfiguredWorkDirPathUnvalidated is resolveConfiguredWorkDirPath
 // without the stale-ancestor worktree check, which reads the filesystem: a
 // pure path computation for a plan whose effect runs the check before it
 // writes the path.
-func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, nil)
+func resolveConfiguredWorkDirPathUnvalidated(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionRuntime string) (string, error) {
+	return configuredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, sessionRuntime, nil)
 }
 
 // configuredWorkDirPath resolves the work dir path, checking it with
 // validate when set: only resolveConfiguredWorkDirPath names the check, so a
-// pure caller never reaches it.
-func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, validate func(string) error) (string, error) {
+// pure caller never reaches it. sessionRuntime is the city session runtime
+// after the GC_SESSION override; a pool slot resolves to its worktree only on
+// a host-local runtime.
+func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionRuntime string, validate func(string) error) (string, error) {
 	if a == nil {
 		return resolveAgentDirPath(cityPath, ""), nil
 	}
+	a = implicitSlotAgentForRuntime(a, sessionRuntime)
 	if strings.TrimSpace(qualifiedName) == "" {
 		qualifiedName = a.QualifiedName()
 	}
@@ -1577,12 +1580,12 @@ func configuredWorkDirPath(cityPath, cityName, qualifiedName string, a *config.A
 // it: a pool slot of a marked implicit agent becomes its own git worktree of
 // the rig, any other directory is created empty. Only session-start paths may
 // call this; pure computations use resolveConfiguredWorkDirPath.
-func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig) (string, error) {
-	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs)
+func resolveConfiguredWorkDir(cityPath, cityName, qualifiedName string, a *config.Agent, rigs []config.Rig, sessionRuntime string) (string, error) {
+	dir, err := resolveConfiguredWorkDirPath(cityPath, cityName, qualifiedName, a, rigs, sessionRuntime)
 	if err != nil {
 		return "", err
 	}
-	if a != nil {
+	if a = implicitSlotAgentForRuntime(a, sessionRuntime); a != nil {
 		if strings.TrimSpace(qualifiedName) == "" {
 			qualifiedName = a.QualifiedName()
 		}

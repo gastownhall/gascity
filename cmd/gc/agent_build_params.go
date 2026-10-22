@@ -159,6 +159,10 @@ type agentBuildParams struct {
 	// etc.). Used by the skill materialization integration to decide
 	// stage-2 eligibility.
 	sessionProvider string
+	// sessionRuntime is the city session runtime after the GC_SESSION
+	// override (effectiveProviderName(sessionProvider)). Pool slots of a
+	// marked implicit agent get their own worktree only when it is host-local.
+	sessionRuntime string
 }
 
 // hasCompleteSessionSnapshot reports whether a store-backed build has a
@@ -303,6 +307,7 @@ func baseAgentBuildParams(cityName, cityPath string, cfg *config.City, sp runtim
 		beadNames:       make(map[string]string),
 		stderr:          stderr,
 		sessionProvider: cfg.Session.Provider,
+		sessionRuntime:  effectiveProviderName(cfg.Session.Provider),
 	}
 }
 

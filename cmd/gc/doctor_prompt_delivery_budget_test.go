@@ -742,7 +742,7 @@ func TestPromptDeliveryBudgetCheck_RendersResolvedWorkDir(t *testing.T) {
 	cityPath := t.TempDir()
 	agent := promptFixtureAgent("workdir-agent", "", "subprocess", "arg")
 	agent.WorkDir = "work/workdir-agent"
-	wantWorkDir, err := resolveConfiguredWorkDirPathUnvalidated(cityPath, "demo", agent.QualifiedName(), &agent, nil)
+	wantWorkDir, err := resolveConfiguredWorkDirPathUnvalidated(cityPath, "demo", agent.QualifiedName(), &agent, nil, "")
 	if err != nil {
 		t.Fatalf("resolveConfiguredWorkDirPathUnvalidated: %v", err)
 	}

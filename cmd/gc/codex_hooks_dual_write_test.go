@@ -339,7 +339,7 @@ func materializeCodexOverlayForTest(t *testing.T, installHooks []string) string 
 	if err != nil {
 		t.Fatalf("ResolveProvider: %v", err)
 	}
-	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs)
+	workDir, err := resolveConfiguredWorkDir(bp.cityPath, bp.cityName, "myrig/polecat", cfgAgent, bp.rigs, bp.sessionRuntime)
 	if err != nil {
 		t.Fatalf("resolveConfiguredWorkDir: %v", err)
 	}
