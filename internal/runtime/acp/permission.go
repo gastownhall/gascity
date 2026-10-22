@@ -351,7 +351,7 @@ func (sc *sessionConn) resolvePermission(resp runtime.InteractionResponse) (pend
 		}
 	}
 	if idx < 0 {
-		return pendingPermission{}, nil, fmt.Errorf("%w: no outstanding permission request %q", runtime.ErrInteractionResponseInvalid, resp.RequestID)
+		return pendingPermission{}, nil, fmt.Errorf("no outstanding permission request %q: %w", resp.RequestID, runtime.ErrInteractionGone)
 	}
 	pp := sc.permissions[idx]
 	outcome, err := pp.outcome(resp.Action)
@@ -484,10 +484,12 @@ func (p *Provider) Pending(name string) (*runtime.PendingInteraction, error) {
 // words below, so an option id spelled like one still selects that option.
 // Otherwise approve, approve_always, deny and deny_always select the first
 // option of the matching ACP kind, and cancel answers the canceled outcome. An
-// unknown action, an option kind the agent did not offer, or a RequestID that
-// names no outstanding request returns an error wrapping
-// runtime.ErrInteractionResponseInvalid, and the request stays pending. An
-// empty RequestID answers the oldest request. If the reply cannot be written,
+// unknown action or an option kind the agent did not offer returns an error
+// wrapping runtime.ErrInteractionResponseInvalid, and the request stays
+// pending. A RequestID that names no outstanding request (it was answered,
+// canceled, or belongs to an earlier incarnation), or none outstanding at
+// all, returns an error wrapping runtime.ErrInteractionGone. An empty
+// RequestID answers the oldest request. If the reply cannot be written,
 // Respond returns the write error and the request stays pending in its
 // place, unless the agent's output has already ended.
 func (p *Provider) Respond(name string, response runtime.InteractionResponse) error {

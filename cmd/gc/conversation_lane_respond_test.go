@@ -410,6 +410,11 @@ func TestLaneRespondResultMapping(t *testing.T) {
 		{"prompt changed", mismatch(fmt.Errorf("approval prompt changed: expected a, got b: %w", runtime.ErrInteractionGone)), stale},
 		{"prompt gone", mismatch(fmt.Errorf("approval a is gone: %w", runtime.ErrInteractionGone)), stale},
 		{"runtime prompt gone", fmt.Errorf("approval a is gone: %w", runtime.ErrInteractionGone), stale},
+		// ACP: a permission answered or canceled between the look and the
+		// answer names no outstanding request; an option it does not offer
+		// is the caller's.
+		{"acp request gone", mismatch(fmt.Errorf("no outstanding permission request %q: %w", "acp-7", runtime.ErrInteractionGone)), stale},
+		{"acp option not offered", mismatch(fmt.Errorf("%w: action %q has no allow_always option for request %q", runtime.ErrInteractionResponseInvalid, "approve_always", "acp-7")), refused},
 		{"no pending", session.ErrNoPendingInteraction, stale},
 	} {
 		t.Run(tc.name, func(t *testing.T) {

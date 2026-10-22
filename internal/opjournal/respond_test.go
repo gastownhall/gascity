@@ -2,6 +2,7 @@ package opjournal
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -263,16 +264,51 @@ func TestProposeRespondIsKeyedByItsOccurrence(t *testing.T) {
 	}
 }
 
-// A legacy respond op keeps its client key (DES-O0API §3.2), but its payload
-// is still a RespondPayload.
+// A legacy respond op keeps its client key (DES-O0API §3.2).
 func TestProposeLegacyRespondKeepsItsClientKey(t *testing.T) {
 	h := newLaneHarness(t)
 	r := respondReq("perm-1", "", RespondPayload{Action: "approve"})
 	r.Executor, r.ClientKey = ExecutorLegacyAPI, "k-client"
-	h.propose(t, r)
-	r.ClientKey, r.Payload = "k-other", "allow"
-	if _, _, err := h.store.Propose(r); !errors.Is(err, ErrInvalidRequest) {
-		t.Fatalf("legacy respond with a bare payload = %v, want ErrInvalidRequest", err)
+	if op := h.propose(t, r); op.ClientKey != "k-client" {
+		t.Fatalf("client key %q, want k-client", op.ClientKey)
+	}
+}
+
+// A legacy /respond row the build before OJ-16 recorded (text always present,
+// at_least_once) still reads, keeps the request digest that build gave it,
+// so a same-key retry across the upgrade replays it, and expires as any
+// legacy op: none of it is quarantined as corrupt.
+func TestLegacyRespondRowsOfThePreviousBuildStillRead(t *testing.T) {
+	h := newHarness(t)
+	// The digests are the previous build's (b44d3097eb) for these requests.
+	rows := []struct{ payload, digest string }{
+		{`{"action":"approve","text":""}`, "b3eadcff1510ae498c0139e8a49d8db7008eeb9f4ba555186eb6369ad3c47678"},
+		{`{"action":"approve","text":"yes"}`, "0cc6fbabba6b14b87350ac6d6d9554a1efc14652ab74219709db36d390f71673"},
+	}
+	var want []string
+	for i, row := range rows {
+		r := legacyReq(ExecutorLegacyAPI, fmt.Sprintf("k-client-%d", i))
+		r.Kind, r.Payload = KindRespond, row.payload
+		r.Policy = Policy{Guarantee: GuaranteeAtLeastOnce}
+		r.Scope = Scope{Kind: ScopeSession, Generation: 1, Interaction: "req-1"}
+		op := h.propose(t, r)
+		if op.PayloadDigest != row.digest {
+			t.Fatalf("%s: digest %s, want the previous build's %s", row.payload, op.PayloadDigest, row.digest)
+		}
+		if got, err := h.store.Get(op.ID); err != nil || got.Payload != row.payload {
+			t.Fatalf("%s: Get = %q, %v", row.payload, got.Payload, err)
+		}
+		if again, created, err := h.store.Propose(r); err != nil || created || again.ID != op.ID {
+			t.Fatalf("%s: same-key retry = %s, created %v, %v; want %s replayed", row.payload, again.ID, created, err, op.ID)
+		}
+		want = append(want, op.ID)
+	}
+	scan, err := h.store.ListExpiredLegacy(t0.Add(time.Hour), 100)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fmt.Sprint(ids(scan.Expired)) != fmt.Sprint(want) || len(scan.Undecodable) != 0 {
+		t.Fatalf("ListExpiredLegacy = expired %v undecodable %v, want %v expired", ids(scan.Expired), scan.Undecodable, want)
 	}
 }
 

@@ -199,7 +199,11 @@ pending, closes `skipped{stale}` rather than approving a prompt nobody saw.
 That holds only as far as request IDs tell prompts apart: where the runtime
 derives them from the prompt's content (tmux hashes the tool and its input),
 an identical prompt raised again carries the first one's ID and is answered
-too, until OJ-16 keys respond ops by the interaction occurrence. A
+too. That is permanent for `/respond`: its op stays keyed by request id, with
+its scope, payload (`respondOpPayload`) and at_least_once policy frozen, so
+rows earlier builds recorded keep their request digest and a same-key retry
+replays them. Only lane respond ops (`opjournal.RespondKey`) are keyed by the
+interaction occurrence; do not re-key the legacy op to match. A
 recorded kill is `gc session kill`'s operator kill (`worker.OperatorKill`,
 through `Server.operatorKill`): it takes the runtime lease first (an open
 row's as `gc session kill` does, `session.KillRuntimeLease`; a closed row's,

@@ -199,7 +199,7 @@ func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st 
 		warnings = append(warnings, fmt.Sprintf("the controller runs [ops] authoritative = [%s] until its next start", strings.Join(st.Kinds, ", ")))
 	}
 	if st.Quarantined > 0 {
-		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined, which a newer gc may have written", st.Quarantined))
+		warnings = append(warnings, fmt.Sprintf("%d op row(s) this gc cannot decode are quarantined: a newer gc wrote them, or they are not valid to this one", st.Quarantined))
 		r.Details = append(r.Details, st.QuarantinedIDs...)
 	}
 	if st.LastError != "" {
@@ -216,7 +216,7 @@ func reportLaneService(r *doctor.CheckResult, listed string, kinds []string, st 
 		r.Status = doctor.StatusWarning
 		r.Severity = doctor.SeverityAdvisory
 		r.Message = fmt.Sprintf("conversation lanes on (%s), %s: %s", listed, pass, strings.Join(warnings, "; "))
-		r.FixHint = "see the details and the controller log; upgrade this gc if a newer gc wrote the rows it cannot decode; restart the controller to apply a changed list"
+		r.FixHint = "see the details and the controller log; inspect the rows this gc cannot decode, and upgrade it if a newer gc wrote them; restart the controller to apply a changed list"
 		return
 	}
 	r.Message = fmt.Sprintf("conversation lanes on (%s): %s, %d conversation(s) in service", listed, pass, st.Workers)

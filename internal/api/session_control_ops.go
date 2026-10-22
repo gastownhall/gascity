@@ -854,6 +854,21 @@ func (s *Server) executeStop(store beads.Store, id string, plan stopPlan, minted
 
 // --- /respond ---
 
+// respondOpPayload is a legacy /respond op's payload, JSON of the response
+// (DES-O0API §3.1): text is always present, empty metadata is absent. It is
+// not opjournal.EncodeRespondPayload's lane form, so rows a previous build
+// recorded keep their request digest and a same-key retry replays them.
+type respondOpPayload struct {
+	Action   string            `json:"action"`
+	Text     string            `json:"text"`
+	Metadata map[string]string `json:"metadata,omitempty"`
+}
+
+// respondOpPolicy is a legacy /respond's policy: at_least_once, the guarantee
+// it has always been recorded with. Nothing acts on it for a legacy op; it
+// keeps the request digest of rows a previous build recorded.
+var respondOpPolicy = opjournal.Policy{Guarantee: opjournal.GuaranteeAtLeastOnce}
+
 // respondSession answers target's pending interaction with resp, recorded as
 // a respond op under ops.control, and returns the answer. key is the
 // Idempotency-Key header.
@@ -867,7 +882,7 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 		return syncAnswer{}, humaResolveError(err)
 	}
 	mgr := s.sessionManager(store.Store)
-	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key}
+	req := syncOpRequest{kind: opjournal.KindRespond, conv: id, key: key, policy: respondOpPolicy}
 	if recordingMode(s.ops.control.Mode) {
 		if req, err = s.respondOpRequest(mgr, store.Store, req, resp); err != nil {
 			return syncAnswer{}, err
@@ -898,10 +913,9 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 	return syncAnswer{ID: id, syncOpFields: fields}, nil
 }
 
-// respondOpRequest completes a recorded /respond's op request: the canonical
-// payload (opjournal.EncodeRespondPayload) and the session(generation) scope
-// with the interaction it answers. An answer the journal cannot encode (a
-// metadata key it refuses) cannot be recorded, as below.
+// respondOpRequest completes a recorded /respond's op request: the payload
+// (respondOpPayload) and the session(generation) scope with the interaction
+// it answers.
 // The interaction is the request's request_id, else, under a client key that
 // already names a respond of that interaction, that respond's scope, else
 // the pending interaction read now; the respond then answers that
@@ -910,16 +924,15 @@ func (s *Server) respondSession(target, key string, resp runtime.InteractionResp
 // door with the answer the legacy respond gives (no_pending, or
 // unsupported), nothing sent.
 func (s *Server) respondOpRequest(mgr *session.Manager, store beads.Store, req syncOpRequest, resp runtime.InteractionResponse) (syncOpRequest, error) {
-	payload := opjournal.RespondPayload{Action: resp.Action, Text: resp.Text}
+	payload := respondOpPayload{Action: resp.Action, Text: resp.Text}
 	if len(resp.Metadata) > 0 {
 		payload.Metadata = resp.Metadata
 	}
-	raw, err := opjournal.EncodeRespondPayload(payload)
+	raw, err := json.Marshal(payload)
 	if err != nil {
-		req.unrecordable, req.unrecordableErr = legacyop.ReasonInvalidRequest, err
-		return req, nil
+		return req, apierr.Internal.Msg("encoding the respond op payload: " + err.Error())
 	}
-	req.payload = raw
+	req.payload = string(raw)
 	scope, why, whyErr := sessionOpScope(store, req.conv)
 	if why != "" {
 		req.unrecordable, req.unrecordableErr = why, whyErr

@@ -183,16 +183,19 @@ func RespondKey(raised Fact) (string, error) {
 	return composedKey("respond key", respondKeyPrefix+raised.ID)
 }
 
-// validateRespondShape checks a respond op's own fields: a RespondPayload
-// and, for a lane op, the occurrence it answers and the at_most_once
-// guarantee. It is part of validateRequestShape, so a stored respond this
-// build cannot read is quarantined, never closed (DES-O1 §4.1).
+// validateRespondShape checks a lane respond op's own fields: a
+// RespondPayload, the occurrence it answers and the at_most_once guarantee.
+// It is part of validateRequestShape, so a stored lane respond this build
+// cannot read is quarantined, never closed (DES-O1 §4.1). A legacy respond
+// keeps the payload and guarantee its request surface always recorded
+// (legacy /respond: text always present, at_least_once), so rows written
+// before the lane read, digest and expire as they did.
 func validateRespondShape(op Op) error {
-	if _, err := DecodeRespondPayload(op.Payload); err != nil {
-		return err
-	}
 	if op.Executor != ExecutorLane {
 		return nil
+	}
+	if _, err := DecodeRespondPayload(op.Payload); err != nil {
+		return err
 	}
 	if _, _, err := ParseInteractionOccurrence(op.Scope.Interaction); err != nil {
 		return err

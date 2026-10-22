@@ -52,9 +52,9 @@ var ErrInputClearSkipped = errors.New("input box left alone: a client may be att
 var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
 
 // ErrInteractionResponseInvalid reports that a response to a pending
-// interaction cannot be applied: it names no outstanding request, or its
-// action is unknown or not offered by the interaction. The interaction stays
-// pending so the caller can answer again.
+// interaction cannot be applied: its action is unknown or not offered by the
+// interaction. The interaction stays pending so the caller can answer again.
+// A response naming no outstanding request is ErrInteractionGone instead.
 var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
 
 // ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
