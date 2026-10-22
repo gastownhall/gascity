@@ -65,3 +65,67 @@ func TestResolveTemplateOpenCodeWrapperArgsUseCLITransport(t *testing.T) {
 		t.Fatalf("agentSessionCreateTransport = %q, want the CLI transport", got)
 	}
 }
+
+// TestResolveTemplateOpenCodeWrapperACPArgsKeepACPTransport covers wrappers
+// whose ACP launch drops nothing they declared: they stay on ACP on both the
+// template and the cache path and launch with the effective acp_args.
+func TestResolveTemplateOpenCodeWrapperACPArgsKeepACPTransport(t *testing.T) {
+	base := "builtin:opencode"
+	middle := "provider:middle"
+	cases := []struct {
+		name       string
+		provider   string
+		providers  map[string]config.ProviderSpec
+		wantLaunch string
+	}{
+		{
+			name:       "no args",
+			provider:   "opencode-local",
+			providers:  map[string]config.ProviderSpec{"opencode-local": {Base: &base}},
+			wantLaunch: "opencode acp",
+		},
+		{
+			name:     "args and acp_args on one layer",
+			provider: "opencode-local",
+			providers: map[string]config.ProviderSpec{"opencode-local": {
+				Base:    &base,
+				Args:    []string{"-m", "acme/model-x"},
+				ACPArgs: []string{"acp", "--port", "4096"},
+			}},
+			wantLaunch: "opencode acp --port 4096",
+		},
+		{
+			name:     "leaf acp_args over middle args",
+			provider: "leaf",
+			providers: map[string]config.ProviderSpec{
+				"middle": {Base: &base, Args: []string{"-m", "acme/model-x"}},
+				"leaf":   {Base: &middle, ACPArgs: []string{"acp", "--port", "4096"}},
+			},
+			wantLaunch: "opencode acp --port 4096",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var stderr bytes.Buffer
+			params := acpOmittedArgsBuildParams(t, tc.providers, &stderr)
+			agent := &config.Agent{Name: "worker", Provider: tc.provider}
+			tp, err := resolveTemplate(params, agent, "rig/worker", nil)
+			if err != nil {
+				t.Fatalf("resolveTemplate: %v", err)
+			}
+			if !tp.IsACP {
+				t.Fatalf("tp.IsACP = false, want ACP (command %q)", tp.Command)
+			}
+			if tp.Command != tc.wantLaunch {
+				t.Fatalf("command = %q, want %q", tp.Command, tc.wantLaunch)
+			}
+			cfg := &config.City{Providers: tc.providers}
+			if err := config.BuildResolvedProviderCache(cfg); err != nil {
+				t.Fatalf("BuildResolvedProviderCache: %v", err)
+			}
+			if got := agentSessionCreateTransport(cfg, *agent); got != config.SessionTransportACP {
+				t.Fatalf("agentSessionCreateTransport = %q, want %q", got, config.SessionTransportACP)
+			}
+		})
+	}
+}

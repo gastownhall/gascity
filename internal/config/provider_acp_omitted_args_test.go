@@ -264,3 +264,53 @@ func TestACPOmittedArgsLayerWalk(t *testing.T) {
 		})
 	}
 }
+
+// TestResolveProviderACPOmittedArgsKeepsDeclaredACPLaunch covers wrappers
+// whose ACP launch drops nothing they declared: no args, or acp_args on the
+// args layer or a more specific one. They keep the ACP default and launch
+// with the effective acp_args.
+func TestResolveProviderACPOmittedArgsKeepsDeclaredACPLaunch(t *testing.T) {
+	runACPOmittedArgsCases(t, []acpOmittedArgsCase{
+		{
+			name:     "wrapper without args",
+			provider: "opencode-local",
+			providers: map[string]ProviderSpec{
+				"opencode-local": {Base: basePtr("builtin:opencode")},
+			},
+			wantTransport: SessionTransportACP,
+			wantLaunch:    "opencode acp",
+		},
+		{
+			name:     "explicit empty args",
+			provider: "opencode-local",
+			providers: map[string]ProviderSpec{
+				"opencode-local": {Base: basePtr("builtin:opencode"), Args: []string{}},
+			},
+			wantTransport: SessionTransportACP,
+			wantLaunch:    "opencode acp",
+		},
+		{
+			name:     "args and acp_args on one layer",
+			provider: "opencode-local",
+			providers: map[string]ProviderSpec{
+				"opencode-local": {
+					Base:    basePtr("builtin:opencode"),
+					Args:    []string{"-m", "acme/model-x"},
+					ACPArgs: []string{"acp", "--port", "4096"},
+				},
+			},
+			wantTransport: SessionTransportACP,
+			wantLaunch:    "opencode acp --port 4096",
+		},
+		{
+			name:     "leaf acp_args over middle args",
+			provider: "leaf",
+			providers: map[string]ProviderSpec{
+				"middle": {Base: basePtr("builtin:opencode"), Args: []string{"-m", "acme/model-x"}},
+				"leaf":   {Base: basePtr("provider:middle"), ACPArgs: []string{"acp", "--port", "4096"}},
+			},
+			wantTransport: SessionTransportACP,
+			wantLaunch:    "opencode acp --port 4096",
+		},
+	})
+}
