@@ -426,6 +426,88 @@ func TestJournalRecoveryRestoresFromBdDefaultBackup(t *testing.T) {
 	}
 }
 
+// TestJournalRecoveryLeavesSiblingDatabasesInPlace pins AC-2: the managed
+// data dir is shared by every database in the city (#1979), so recovery of
+// one corrupt database must neither move, restore, nor touch any sibling —
+// including a phantom directory (a .dolt without a committed noms store).
+func TestJournalRecoveryLeavesSiblingDatabasesInPlace(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	tests := []struct {
+		name      string
+		repoState func(env journalRecoveryEnv) string
+		seedProd  bool
+		wantError bool
+	}{
+		{
+			name: "restores from default backup",
+			repoState: func(env journalRecoveryEnv) string {
+				return repoStateWithBackups(map[string]string{"default": "file://" + env.backupDir})
+			},
+			seedProd:  true,
+			wantError: false,
+		},
+		{
+			name: "fails closed without usable backup",
+			repoState: func(journalRecoveryEnv) string {
+				return `{"head":"refs/heads/main"}`
+			},
+			seedProd:  false,
+			wantError: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupJournalRecoveryEnv(t)
+			if tc.seedProd {
+				seedBackupDir(t, env.backupDir)
+			}
+			env.addDatabase(t, "prod", true, tc.repoState(env))
+			// Siblings: pa has no backup registered, beads has a usable
+			// backup, ghost is a phantom (.dolt without a noms store).
+			env.addDatabase(t, "pa", false, "")
+			beadsBackupDir := filepath.Join(filepath.Dir(env.backupDir), "beads")
+			seedBackupDir(t, beadsBackupDir)
+			env.addDatabase(t, "beads", false, repoStateWithBackups(map[string]string{"default": "file://" + beadsBackupDir}))
+			env.addDatabase(t, "ghost", false, "")
+			if err := os.Remove(filepath.Join(env.dataDir, "ghost", ".dolt", "repo_state.json")); err != nil && !os.IsNotExist(err) {
+				t.Fatalf("remove ghost repo_state: %v", err)
+			}
+
+			out, err := env.run(t, journalRecoveryHarness(t))
+			if (err == nil) == tc.wantError {
+				t.Fatalf("recovery exit error = %v, wantError %v\n%s", err, tc.wantError, out)
+			}
+			for _, sibling := range []string{"pa", "beads", "ghost"} {
+				markerBytes, statErr := os.ReadFile(filepath.Join(env.dataDir, sibling, "original-marker"))
+				if statErr != nil {
+					t.Fatalf("sibling %q must stay at its original path: %v\n%s", sibling, statErr, out)
+				}
+				if string(markerBytes) != sibling {
+					t.Fatalf("sibling %q contents changed: %q", sibling, markerBytes)
+				}
+				if _, statErr := os.Stat(filepath.Join(env.dataDir, sibling, "restored-marker")); statErr == nil {
+					t.Fatalf("sibling %q must not be restored\n%s", sibling, out)
+				}
+			}
+			asides, globErr := filepath.Glob(filepath.Join(env.stateDir, "corrupt-aside", "*"))
+			if globErr != nil {
+				t.Fatalf("glob corrupt-aside: %v", globErr)
+			}
+			if tc.wantError {
+				if len(asides) != 0 {
+					t.Fatalf("corrupt-aside must hold nothing when recovery fails closed, got %v\n%s", asides, out)
+				}
+			} else {
+				if len(asides) != 1 || !strings.HasPrefix(filepath.Base(asides[0]), "prod.") {
+					t.Fatalf("corrupt-aside must hold only prod's store, got %v\n%s", asides, out)
+				}
+			}
+		})
+	}
+}
+
 func TestJournalRecoveryFailsClosedWithoutUsableBackup(t *testing.T) {
 	if _, err := exec.LookPath("bash"); err != nil {
 		t.Skip("bash not available; skipping shell-function test")
