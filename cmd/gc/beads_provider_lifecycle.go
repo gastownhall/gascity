@@ -2281,7 +2281,14 @@ func finalizeCanonicalBdScopeInit(cityPath, dir, prefix, doltDatabase string) er
 	if err != nil {
 		return err
 	}
-	return verifyCanonicalBdScopeStoreReady(store, time.Sleep)
+	// The post-init liveness probe runs under a rig namespace guard
+	// (rigNamespaceProbeStore): it asks only whether the store answers, and
+	// its rows are discarded, so it must not depend on classifying them.
+	// Through the guard, a first row that needs a session lookup fails the
+	// probe while this city's resolver is not registered yet, which is the
+	// case in a supervisor, where the bead lifecycle starts before the city's
+	// controller state exists.
+	return verifyCanonicalBdScopeStoreReady(rigNamespaceProbeStore(store), time.Sleep)
 }
 
 func verifyCanonicalBdScopeStoreReady(store beads.Store, sleep func(time.Duration)) error {

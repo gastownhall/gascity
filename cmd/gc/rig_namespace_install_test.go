@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/gastownhall/gascity/internal/beadmeta"
 	"github.com/gastownhall/gascity/internal/beads"
@@ -624,3 +625,139 @@ func TestGuardedStoreConcurrentUseWithResolverSwaps(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestScopeInitProbeDoesNotClassifyRows is the supervisor start regression:
+// the supervisor marks itself a controller process and starts the bead
+// lifecycle before the city's controller state registers its resolver, so a
+// guarded rig opened by path then has a resolver that admits no session. The
+// rig init's liveness probe must still pass when the first row is held by
+// one of this city's pool sessions (a row whose class needs a session
+// lookup); a discovery read through the guard fails on it.
+func TestScopeInitProbeDoesNotClassifyRows(t *testing.T) {
+	isolateRigNamespaceResolvers(t)
+	done := markRigNamespaceControllerProcess()
+	defer done()
+	cfg := &config.City{Rigs: []config.Rig{{Name: "beta", Path: "/srv/beta", Prefix: "bt", Federation: config.RigFederationRig}}}
+	ns, ok := newRigNamespace(cfg.Rigs[0], rigNamespaceSessionsForOpen(cityPathB, cfg))
+	if !ok {
+		t.Fatal("no namespace for the guarded rig")
+	}
+	engine := beads.NewMemStore()
+	if _, err := engine.Create(beads.Bead{Title: "held by this city's pool session", Assignee: poolIDB}); err != nil {
+		t.Fatal(err)
+	}
+	guarded := guardRigStore(wrapStoreWithBeadPolicies(engine, cfg), ns)
+	if _, err := guarded.List(beads.ListQuery{AllowScan: true, Limit: 1}); err == nil {
+		t.Fatal("a discovery read classified a pool session's row with no resolver registered; the probe below would not be needed")
+	}
+	sleeps := 0
+	if err := verifyCanonicalBdScopeStoreReady(rigNamespaceProbeStore(guarded), func(time.Duration) { sleeps++ }); err != nil || sleeps != 0 {
+		t.Fatalf("init probe = %v after %d retries; want the store reported live at once", err, sleeps)
+	}
+	if rigNamespaceProbeStore(guarded) != beads.Store(engine) {
+		t.Fatalf("probe store = %T, want the engine under the guard", rigNamespaceProbeStore(guarded))
+	}
+	if plain := beads.NewMemStore(); rigNamespaceProbeStore(plain) != beads.Store(plain) {
+		t.Fatal("an unguarded store was not probed as itself")
+	}
+}
+
+// TestRigNamespaceSessionsReloadComparesTheUnderlyingStore: a reload re-mints
+// the city's class handles over the same stores. The controller's resolver is
+// rebuilt (and its memo dropped) only when the store under the sessions
+// handle changes, judged by beads.SameStore: a handle re-minted over the same
+// store, even through another class layer, keeps the resolver and its memo; a
+// handle over another store, or no store, rebuilds it.
+func TestRigNamespaceSessionsReloadComparesTheUnderlyingStore(t *testing.T) {
+	h := newRigNamespaceSessions(cityPathB)
+	store := rnsNewCountingStore(rnsSessionBead(poolIDB, templateB, poolNameB))
+	h.setSessionStore(beadstest.Sessions(store), []string{"gcx"})
+	first := h.res.Load()
+	if _, ok, err := h.lookupOwnSession(poolIDB); err != nil || !ok {
+		t.Fatalf("first lookup = %v, %v", ok, err)
+	}
+	gets := store.gets.Load()
+
+	reminted := beads.SessionStore{Store: beadstest.Work(store)}
+	if reminted == beadstest.Sessions(store) {
+		t.Fatal("fixture: the re-minted handle must be a different handle value")
+	}
+	h.setSessionStore(reminted, []string{"gcx"})
+	if h.res.Load() != first {
+		t.Fatal("a handle re-minted over the same sessions store rebuilt the resolver, dropping its memo")
+	}
+	if _, ok, err := h.lookupOwnSession(poolIDB); err != nil || !ok || store.gets.Load() != gets {
+		t.Fatalf("lookup after the re-mint = %v, %v with %d store reads (was %d); want the memo's answer", ok, err, store.gets.Load(), gets)
+	}
+
+	other := rnsNewCountingStore(rnsSessionBead(poolIDB, templateB, poolNameB))
+	h.setSessionStore(beadstest.Sessions(other), []string{"gcx"})
+	second := h.res.Load()
+	if second == first {
+		t.Fatal("a handle over another sessions store kept the old resolver")
+	}
+	h.setSessionStore(beads.SessionStore{}, []string{"gcx"})
+	if h.res.Load() == second {
+		t.Fatal("dropping the sessions store kept the old resolver")
+	}
+	zero := h.res.Load()
+	h.setSessionStore(beads.SessionStore{}, []string{"gcx"})
+	if h.res.Load() != zero {
+		t.Fatal("re-setting no sessions store rebuilt the resolver")
+	}
+}
+
+// TestRigNamespaceCLIResolverReadsTheSessionsBinding: the one-shot resolver
+// of a guarded store opened by path opens the city's sessions handle,
+// cliStores(cityPath, cityStore).Sessions(). On a split city that is the
+// sessions binding, never the city's work store and never a rig store; on an
+// unsplit city it is the city's own store.
+func TestRigNamespaceCLIResolverReadsTheSessionsBinding(t *testing.T) {
+	t.Setenv("GC_BEADS", "file")
+	cityPath := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cityPath, "city.toml"), []byte("[workspace]\nname = \"demo\"\nprefix = \"hq\"\n\n[beads]\nprovider = \"file\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.City{Workspace: config.Workspace{Name: "demo", Prefix: "hq"}, Rigs: []config.Rig{rnsGuardedRig("beta")}}
+
+	t.Run("split", func(t *testing.T) {
+		isolateRigNamespaceResolvers(t)
+		binding := rnsNewCountingStore(rnsSessionBead(poolIDB, templateB, poolNameB))
+		seedSplitRoutes(t, cityPath, binding)
+		handle, err := rigNamespaceOpenCityStore(cityPath, cfg)
+		if err != nil {
+			t.Fatalf("opening the city's sessions handle: %v", err)
+		}
+		if !beads.SameStore(handle, binding) {
+			t.Fatalf("the CLI resolver's sessions handle is over %T, want the sessions binding", handle.Raw())
+		}
+		res := rigNamespaceSessionsForOpen(cityPath, cfg)
+		rec, ok, err := res.lookupOwnSession(poolIDB)
+		if err != nil || !ok || rec.Template != templateB {
+			t.Fatalf("lookup through the CLI resolver = %+v, %v, %v; want the binding's record", rec, ok, err)
+		}
+		if binding.gets.Load() == 0 {
+			t.Fatal("the CLI resolver answered without reading the sessions binding")
+		}
+	})
+	t.Run("unsplit", func(t *testing.T) {
+		isolateRigNamespaceResolvers(t)
+		seedNoRoutes(t, cityPath)
+		handle, err := rigNamespaceOpenCityStore(cityPath, cfg)
+		if err != nil {
+			t.Fatalf("opening the city's sessions handle: %v", err)
+		}
+		if _, isCityStore := beads.As[*beadPolicyStore](splitStrictFrontOf(handle.Raw())); !isCityStore {
+			t.Fatalf("the CLI resolver's sessions handle on an unsplit city is over %T, want the city's own store (behind its policy layer)", handle.Raw())
+		}
+	})
+}
+
+// The cache-fed views the demand reads and the autoclose sweep take with
+// beads.As: a cache, or the guard over one.
+var (
+	_ demandLegView        = (*beads.CachingStore)(nil)
+	_ demandLegView        = (*rigNamespaceStore)(nil)
+	_ autocloseCensusCache = (*beads.CachingStore)(nil)
+	_ autocloseCensusCache = (*rigNamespaceStore)(nil)
+)
