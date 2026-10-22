@@ -94,15 +94,22 @@ SUSPENDED_PREFIXES=$(printf '%s' "$RIGS_JSON" \
 GUARDED_RIGS=$(rig_namespace_guarded_rigs "$RIGS_JSON")
 SKIPPED_GUARDED=0
 
-# dependent_in_guarded_rig succeeds when a dependent ("external:<rig>/<id>"
-# or a bare id) lives in a rig with federation = "rig": its store is shared
-# with other cities, and this city does not rewrite rows there.
+# dependent_in_guarded_rig succeeds when a dependent lives in a rig with
+# federation = "rig": its store is shared with other cities, and this city
+# does not rewrite rows there. A dependent is bd's
+# "external:<project>:<capability>" (the project names the rig, the
+# capability the bead), the "external:<rig>/<id>" form, or a bare id; the
+# rig part and the id's bead prefix are both checked.
 dependent_in_guarded_rig() {
     local dep="${1#external:}"
     local rig_part=""
     local id="$dep"
     [ -n "$GUARDED_RIGS" ] || return 1
     case "$dep" in
+        *:*)
+            rig_part="${dep%%:*}"
+            id="${dep##*:}"
+            ;;
         */*)
             rig_part="${dep%%/*}"
             id="${dep##*/}"

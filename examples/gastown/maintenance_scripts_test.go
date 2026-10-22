@@ -14429,6 +14429,31 @@ func TestCrossRigDepsRewritesNothingWithoutTheRigList(t *testing.T) {
 	}
 }
 
+// TestCrossRigDepsLeavesColonFormGuardedDependentsAlone: bd writes a
+// cross-rig dependent as "external:<project>:<capability>"
+// (validateExternalRef). One whose project is a guarded rig, or whose bead
+// carries a guarded rig's prefix, keeps its blocks dependency; an unguarded
+// rig's is converted as before.
+func TestCrossRigDepsLeavesColonFormGuardedDependentsAlone(t *testing.T) {
+	out, log := runGuardedRigOrder(t, "cross-rig-deps.sh", map[string]string{
+		"GUARD_CLOSED": `[{"id":"al-1"}]`,
+		"GUARD_DEPS":   `[{"id":"external:beta:zz-5"},{"id":"external:other:bt-9"},{"id":"external:alpha:al-3"}]`,
+	})
+	if !strings.Contains(log, "bd dep remove external:alpha:al-3 external:al-1") {
+		t.Fatalf("the unguarded rig's colon-form dependent was not converted\n%s", log)
+	}
+	for _, dep := range []string{"external:beta:zz-5", "external:other:bt-9"} {
+		if strings.Contains(log, "bd dep remove "+dep+" ") || strings.Contains(log, "bd dep add "+dep+" ") {
+			t.Fatalf("guarded rig dependent %s was rewritten\n%s", dep, log)
+		}
+	}
+	for _, want := range []string{"resolved 1 cross-rig dependencies", "left 2 dependencies in guarded rigs"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("output missing %q:\n%s", want, out)
+		}
+	}
+}
+
 // TestCrossRigDepsChecksTheRigNameOfADependent: a dependent named under a
 // guarded rig ("external:beta/<id>") is left alone even when its id carries
 // no guarded prefix.
