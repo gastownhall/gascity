@@ -59,7 +59,7 @@ func TestCrossStorePipeline_ReadThenClaim(t *testing.T) {
 	}
 
 	// Step 2: CLAIM — the bead ID from the read output must redirect to the rig store.
-	claimDir, ok, _ := crossStoreClaimDir(cfg, cityAgent, beadID, "", "", nil)
+	claimDir, ok, _ := crossStoreClaimDir(cfg, "", cityAgent, beadID, "", "", nil)
 	if !ok {
 		t.Fatalf("crossStoreClaimDir(%q): no redirect — city-scoped agent claiming a rig-store bead must redirect", beadID)
 	}
@@ -78,7 +78,7 @@ func TestCrossStorePipeline_CityBeadNoRedirect(t *testing.T) {
 	cityAgent := &config.Agent{Name: "platform-architect", Scope: "city"}
 
 	// An HQ/city-owned bead (vc-* or unknown prefix) must not redirect.
-	if _, ok, _ := crossStoreClaimDir(cfg, cityAgent, "vc-123", "", "", nil); ok {
+	if _, ok, _ := crossStoreClaimDir(cfg, "", cityAgent, "vc-123", "", "", nil); ok {
 		t.Fatal("city-owned (vc-*) bead must not redirect to any rig store")
 	}
 }
@@ -92,7 +92,7 @@ func TestCrossStorePipeline_RigAgentByteForByteUnchanged(t *testing.T) {
 	}
 	rigAgent := &config.Agent{Name: "executor", Dir: "voxist-api"}
 
-	if _, ok, _ := crossStoreClaimDir(cfg, rigAgent, "va-1", "", "", nil); ok {
+	if _, ok, _ := crossStoreClaimDir(cfg, "", rigAgent, "va-1", "", "", nil); ok {
 		t.Fatal("rig-scoped agent must be byte-for-byte unchanged (no claim redirect)")
 	}
 }

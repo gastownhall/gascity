@@ -286,10 +286,10 @@ func TestAgentScriptRigNamespaceUsesRunnersRig(t *testing.T) {
 	res, _ := rnsCityBResolver(t)
 	cfg := hrgCity(t)
 	rigAgent := &config.Agent{Name: "crew.worker", Dir: "beta"}
-	if _, _, err := crossStoreClaimDir(cfg, rigAgent, "or-77", "mayor", "beta", res); !errors.Is(err, errRigNamespace) {
+	if _, _, err := crossStoreClaimDir(cfg, "", rigAgent, "or-77", "mayor", "beta", res); !errors.Is(err, errRigNamespace) {
 		t.Fatalf("an unmapped prefix in the runner's guarded rig: err = %v, want a refusal", err)
 	}
-	if _, _, err := crossStoreClaimDir(cfg, rigAgent, "or-77", "mayor", "alpha", res); err != nil {
+	if _, _, err := crossStoreClaimDir(cfg, "", rigAgent, "or-77", "mayor", "alpha", res); err != nil {
 		t.Fatalf("an unmapped prefix in an unguarded rig refused: %v", err)
 	}
 }

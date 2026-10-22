@@ -27,10 +27,12 @@ import (
 // It returns an error, for every agent and before any redirection, when the
 // store the write lands in is a rig with federation = "rig" (or the bead's
 // prefix maps to a guarded rig) and actor is not admitted by it
-// (agentScriptWriteNamespace). runnerRig is the runner's own rig, whose
-// store an unredirected write lands in. sessions is this city's own session
-// resolver (nil admits no pool session id).
-func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor, runnerRig string, sessions ownSessionResolver) (string, bool, error) {
+// (agentScriptWriteNamespace). cityPath is the city's real path: a
+// redirected write's store is judged by store identity, which needs it.
+// runnerRig is the runner's own rig, whose store an unredirected write lands
+// in. sessions is this city's own session resolver (nil admits no pool
+// session id).
+func crossStoreClaimDir(cfg *config.City, cityPath string, agentCfg *config.Agent, beadID, actor, runnerRig string, sessions ownSessionResolver) (string, bool, error) {
 	if cfg == nil {
 		return "", false, nil
 	}
@@ -39,9 +41,7 @@ func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor,
 	if agentIsCrossStoreEligible(agentCfg) {
 		rigDir = sling.RigDirForBead(cfg, beadID)
 	}
-	// Rig paths are absolute here (agentScriptCrossStoreBeadEnv resolves
-	// them), so no city path is needed to find the runner's store.
-	if ns := agentScriptWriteNamespace(cfg, "", beadID, rigDir != "", runnerRig, sessions); ns != nil && !rigNamespacePinAdmitted(ns, actor) {
+	if ns := agentScriptWriteNamespace(cfg, cityPath, beadID, rigDir, runnerRig, sessions); ns != nil && !rigNamespacePinAdmitted(ns, actor) {
 		return "", false, newRigNamespacePathError("rig %s (federation = \"rig\") serves only %s; claim actor %q is outside it%s", rigNamespaceLabel(ns), rigNamespaceShown(ns), strings.TrimSpace(actor), rigNamespaceActorHint(ns, actor))
 	}
 	if rigDir == "" {
@@ -51,13 +51,17 @@ func crossStoreClaimDir(cfg *config.City, agentCfg *config.Agent, beadID, actor,
 }
 
 // agentScriptWriteNamespace returns the guarded namespace an agent-script
-// write against beadID is judged by, or nil. A redirected write lands in the
-// store the bead's prefix names, so the prefix decides. An unredirected one
-// lands in the runner's own store, so the runner's rig is the leg and the
-// prefix only adds a deny (rigNamespaceForLeg).
-func agentScriptWriteNamespace(cfg *config.City, cityPath, beadID string, redirected bool, runnerRig string, sessions ownSessionResolver) *rigNamespace {
+// write against beadID is judged by, or nil. The store the write lands in is
+// the leg, and the bead's prefix only adds a deny (rigNamespaceForLeg). A
+// redirected write (rigDir set) lands in the store bd opens in rigDir,
+// judged by store identity as gc bd judges its scope, so an unguarded rig
+// whose .beads names a guarded rig's store is that rig's (or deny-all). An
+// unredirected one lands in the runner's own rig's store.
+func agentScriptWriteNamespace(cfg *config.City, cityPath, beadID, rigDir, runnerRig string, sessions ownSessionResolver) *rigNamespace {
 	var leg *rigNamespace
-	if !redirected {
+	if rigDir != "" {
+		leg = guardedRigNamespaceForDir(cfg, cityPath, rigDir, sessions)
+	} else {
 		leg = guardedRigNamespaceForRigName(cfg, cityPath, runnerRig, sessions)
 	}
 	return rigNamespaceForLeg(leg, cfg, beadID, sessions)
@@ -119,12 +123,12 @@ func agentScriptBeadEnvForCity(cityPath string, cfg *config.City, beadID string,
 	if runnerRig == "" && agentCfg == nil {
 		runnerRig = agentScriptRig()
 	}
-	rigDir, ok, err := crossStoreClaimDir(cfg, agentCfg, beadID, agentScriptClaimActor(), runnerRig, sessions)
+	rigDir, ok, err := crossStoreClaimDir(cfg, cityPath, agentCfg, beadID, agentScriptClaimActor(), runnerRig, sessions)
 	if err != nil {
 		return "", nil, false, err
 	}
 	if guarded {
-		if ns := agentScriptWriteNamespace(cfg, cityPath, beadID, ok, runnerRig, sessions); ns != nil {
+		if ns := agentScriptWriteNamespace(cfg, cityPath, beadID, rigDir, runnerRig, sessions); ns != nil {
 			scope := rigDir
 			if !ok {
 				scope = rigRootForName(runnerRig, cfg.Rigs)
