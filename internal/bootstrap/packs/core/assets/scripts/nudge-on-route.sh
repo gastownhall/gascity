@@ -15,12 +15,19 @@
 # $GC_PACK_STATE_DIR/nudge-on-route-state.json, so it is both city- and
 # pack-scoped — multi-city installs never cross-pollinate.
 #
+# A bead in a rig with federation = "rig" (a bead store other cities also
+# attach) is nudged only when `gc agent is-foreign --rig-namespace <rig>`
+# vouches for its route. This is defence in depth: the guarded rig store is
+# meant to drop other cities' events before they get here.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "nudge-on-route"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 # jq is a hard dependency: without it the event stream cannot be decoded
 # and every nudge would be silently skipped. Fail loud at startup.
@@ -106,8 +113,23 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+SKIPPED_FOREIGN=0
+RIGS_JSON=""
+GUARDED_RIGS=""
+if RIGS_JSON="$(gc rig list --json 2>/dev/null)"; then
+    GUARDED_RIGS="$(rig_namespace_guarded_rigs "$RIGS_JSON")"
+else
+    RIGS_JSON=""
+fi
 while IFS="$(printf '\t')" read -r bead_id routed_to; do
     if [ -z "$bead_id" ] || [ -z "$routed_to" ]; then continue; fi
+    if [ -n "$GUARDED_RIGS" ]; then
+        guarded_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$bead_id")"
+        if [ -n "$guarded_rig" ] && ! rig_namespace_admits "$guarded_rig" "$routed_to"; then
+            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+            continue
+        fi
+    fi
     key="$bead_id|$routed_to"
     if echo "$STATE" | jq -e --arg k "$key" 'has($k)' >/dev/null 2>&1; then
         # Already nudged. Refresh last-seen so this still-active routing is
@@ -135,4 +157,7 @@ mv -f "$TMP" "$STATE_FILE"
 
 if [ "$NUDGED" -gt 0 ]; then
     echo "nudge-on-route: nudged $NUDGED newly-routed bead(s)"
+fi
+if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
+    echo "nudge-on-route: skipped $SKIPPED_FOREIGN routed bead(s) in guarded rigs whose route this city cannot vouch for"
 fi

@@ -32,15 +32,29 @@ SCOPE_NOT_BD=0
 # core_rig_names prints one configured rig name per line. Suspended rigs are
 # left out: gc does not touch a suspended scope, because any bd read restarts
 # its retired proxy and Dolt, and nothing writes to it while it is suspended,
-# so its maintenance waits for it to resume. Prints nothing and returns 1 when
-# the rig list cannot be read, so the caller can record that the rig scopes
-# were not visited.
+# so its maintenance waits for it to resume. Guarded rigs (federation = "rig")
+# are left out too: their bead store is shared with other cities, so its
+# hygiene and backups belong to the store's operator, not to any one city's
+# reaper or export. Any federation value other than "" or "city" counts as
+# guarded, so an unexpected spelling never fails open. Each skipped guarded
+# rig is noted on stderr. Prints nothing and returns 1 when the rig list
+# cannot be read, so the caller can record that the rig scopes were not
+# visited.
 core_rig_names() {
     local raw
+    local guarded
     if ! raw=$(cd "$CITY_ABS" && gc rig list --json 2>/dev/null); then
         return 1
     fi
-    printf '%s\n' "$raw" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false) | .name // empty' 2>/dev/null
+    guarded=$(printf '%s\n' "$raw" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false)
+        | select(((.federation // "") | tostring | ascii_downcase) as $f | $f != "" and $f != "city") | .name // empty' 2>/dev/null) || guarded=""
+    if [ -n "$guarded" ]; then
+        printf '%s\n' "$guarded" | while IFS= read -r rig; do
+            [ -n "$rig" ] && printf 'skipping rig %s: federation = "rig" (its bead store is shared with other cities; its operator maintains it)\n' "$rig" >&2
+        done
+    fi
+    printf '%s\n' "$raw" | jq -r '.rigs[]? | select((.hq // false) == false and (.suspended // false) == false)
+        | select(((.federation // "") | tostring | ascii_downcase) as $f | $f == "" or $f == "city") | .name // empty' 2>/dev/null
 }
 
 # scope_select <city|rig> [rig-name] makes a scope current. SCOPE_DB is left

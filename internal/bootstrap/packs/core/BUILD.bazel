@@ -20,6 +20,7 @@ go_library(
         "assets/scripts/prune-branches.sh",
         "assets/scripts/reaper.sh",
         "assets/scripts/renudge-stale-human-gates.sh",
+        "assets/scripts/rig_namespace_gate.sh",
         "assets/scripts/spawn-storm-detect.sh",
         "doctor/check-binaries/doctor.toml",
         "doctor/check-binaries/run.sh",

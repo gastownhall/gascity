@@ -49,12 +49,19 @@
 # directory; `--rig` is a gc flag, not a bd flag. Mail send is city-scoped:
 # recipients (mayor / human / coordinators) are city-level identities.
 #
+# In a rig with federation = "rig" (a bead store other cities also attach), a
+# gate whose own addressee this city cannot vouch for (`gc agent is-foreign
+# --rig-namespace <rig>`) is left alone. This is defence in depth: the guarded
+# rig store is meant to drop other cities' events before they get here.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "notify-on-human-gate-creation"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 # jq is a hard dependency: it decodes the event stream and the gate bead
 # record. Without it every notification would be silently skipped. Fail loud.
@@ -147,6 +154,7 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NOTIFIED=0
 FAILED=0
+SKIPPED_FOREIGN=0
 while IFS= read -r gate_id; do
     [ -n "$gate_id" ] || continue
 
@@ -185,6 +193,13 @@ while IFS= read -r gate_id; do
     ADDRESSEE="$(printf '%s' "$GATE_JSON" | jq -r \
         '[.assignee, .metadata."gc.deferred_assignee"]
          | map(select(. != null and . != "")) | (.[0] // "")' 2>/dev/null)"
+    if [ -n "$ADDRESSEE" ]; then
+        guarded_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$gate_id")"
+        if [ -n "$guarded_rig" ] && ! rig_namespace_admits "$guarded_rig" "$ADDRESSEE"; then
+            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+            continue
+        fi
+    fi
     [ -n "$ADDRESSEE" ] || ADDRESSEE="$ESCALATION_RECIPIENT"
 
     TITLE="$(printf '%s' "$GATE_JSON" | jq -r '.title // ""' 2>/dev/null)"
@@ -228,6 +243,9 @@ mv -f "$TMP" "$STATE_FILE"
 
 if [ "$NOTIFIED" -gt 0 ]; then
     echo "notify-on-human-gate-creation: notified $NOTIFIED human gate addressee(s)"
+fi
+if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
+    echo "notify-on-human-gate-creation: left $SKIPPED_FOREIGN gate(s) in guarded rigs whose addressee this city cannot vouch for"
 fi
 
 # Loud-fail: state has been written (successes are deduped), so a non-zero exit

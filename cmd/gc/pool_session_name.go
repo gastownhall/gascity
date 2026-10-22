@@ -287,6 +287,7 @@ func releaseOrphanedPoolAssignments(
 
 	var released []releasedPoolAssignment
 	claimGate := newForeignClaimGate(cfg, sessionStore)
+	claimGate.namespaces = newPoolRigNamespaceGate(cfg, cityPath, sessionStore, keepLog)
 	defer claimGate.log()
 	for i, wb := range assignedWorkBeads {
 		if wb.Status != "open" && wb.Status != "in_progress" {
@@ -363,7 +364,11 @@ func releaseOrphanedPoolAssignments(
 			// positive-evidence checks above can only ever SKIP a release, so
 			// running them first costs nothing and keeps the protected count
 			// reporting exactly the claims the gate saved.
-			if claimGate.claimMayStillBeHeld(assignee, wb.ID, sessionStoreLiveAssignee) {
+			claimLeg := ""
+			if storeRefAware {
+				claimLeg = claimStoreRef(workStoreRef)
+			}
+			if claimGate.claimMayStillBeHeld(assignee, wb.ID, claimLeg, sessionStoreLiveAssignee) {
 				continue
 			}
 			// The sessions binding is not the only ledger that can hold a session
@@ -432,6 +437,9 @@ func releaseOrphanedPoolAssignments(
 type deadAssigneeKeepLog struct {
 	mu   sync.Mutex
 	last map[string]string
+	// namespaceKept is the last logged count line of claims kept outside
+	// guarded rig namespaces (poolRigNamespaceGate).
+	namespaceKept string
 }
 
 // log logs why the dead-assignee sweep kept id, when the reason changed

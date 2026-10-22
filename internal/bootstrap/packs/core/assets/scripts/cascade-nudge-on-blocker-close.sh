@@ -29,12 +29,20 @@
 # wrapper runs bd in the owning rig's directory; `--rig` is a gc flag, not a
 # bd flag. Cross-city cascade is out of scope.
 #
+# A dependent in a rig with federation = "rig" (a bead store other cities also
+# attach) is nudged only when `gc agent is-foreign --rig-namespace <rig>`
+# vouches for its assignee (or, for an unassigned dependent, its gc.routed_to
+# target), so this city never pokes a session of the same name that serves
+# another city's row.
+#
 # Runs as an exec order (no LLM, no agent, no wisp).
 set -euo pipefail
 
 __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/_bd_trace.sh" "cascade-nudge-on-blocker-close"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 # jq is a hard dependency: it decodes the event stream and the dependency
 # records. Without it every cascade would be silently skipped. Fail loud.
@@ -185,6 +193,7 @@ echo "$STATE" | jq -e 'type == "object"' >/dev/null 2>&1 || STATE='{}'
 
 NOW="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 NUDGED=0
+SKIPPED_FOREIGN=0
 while IFS= read -r blocker; do
     [ -n "$blocker" ] || continue
 
@@ -222,6 +231,13 @@ while IFS= read -r blocker; do
         fi
         set_rig_args "$dep_id"
         [ -z "$RIG_SUSPENDED" ] || continue
+        # In a guarded rig, the nudge target (assignee or routed target) must
+        # be one this city can vouch for there.
+        guarded_rig="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$dep_id")"
+        if [ -n "$guarded_rig" ] && ! rig_namespace_admits "$guarded_rig" "$target"; then
+            SKIPPED_FOREIGN=$((SKIPPED_FOREIGN + 1))
+            continue
+        fi
         # A dependent this blocker's own blocked close holds is not
         # recorded, whether or not another blocker holds it too: this
         # blocker's later close that passes is this same pair, and must
@@ -270,4 +286,7 @@ mv -f "$TMP" "$STATE_FILE"
 
 if [ "$NUDGED" -gt 0 ]; then
     echo "cascade-nudge-on-blocker-close: nudged $NUDGED dependent(s)"
+fi
+if [ "$SKIPPED_FOREIGN" -gt 0 ]; then
+    echo "cascade-nudge-on-blocker-close: skipped $SKIPPED_FOREIGN dependent(s) in guarded rigs whose assignee this city cannot vouch for"
 fi

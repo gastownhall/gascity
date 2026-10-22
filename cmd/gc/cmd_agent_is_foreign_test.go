@@ -260,7 +260,7 @@ func TestAgentIsForeign_LoadsCityConfigOnceOnBdCity(t *testing.T) {
 	before := loadCityConfigCalls.Load()
 	var stdout, stderr bytes.Buffer
 	// The identity is off the roster, so answering it needs the session store.
-	doAgentIsForeign(fsys.OSFS{}, cityDir, "nobody-here", true, &stdout, &stderr)
+	doAgentIsForeign(fsys.OSFS{}, cityDir, nil, "nobody-here", true, &stdout, &stderr)
 	if grew := loadCityConfigCalls.Load() - before; grew != 1 {
 		t.Fatalf("gc agent is-foreign parsed city config %d times on a bd city, want exactly 1 (its own load)\nstdout: %s\nstderr: %s", grew, stdout.String(), stderr.String())
 	}

@@ -21,6 +21,8 @@ __SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 . "$__SCRIPT_DIR/_bd_trace.sh" "cross-rig-deps"
 # shellcheck disable=SC1091
 . "$__SCRIPT_DIR/order_outcome.sh"
+# shellcheck disable=SC1091
+. "$__SCRIPT_DIR/rig_namespace_gate.sh"
 
 CITY="${GC_CITY:-.}"
 LOOKBACK="${CROSS_RIG_LOOKBACK:-15m}"
@@ -74,10 +76,36 @@ fi
 # non-empty array above, so CLOSED_IDS is non-empty here.
 RESOLVED=0
 CLOSED_IDS=$(echo "$CLOSED" | jq -r '.[].id' 2>/dev/null)
+RIGS_JSON=$(gc rig list --json 2>/dev/null) || RIGS_JSON=""
 # Bead-id prefixes of suspended rigs. A suspended rig is left cold: any bd
 # read restarts its retired proxy, so its beads wait for it to resume.
-SUSPENDED_PREFIXES=$(gc rig list --json 2>/dev/null \
+SUSPENDED_PREFIXES=$(printf '%s' "$RIGS_JSON" \
     | jq -r '(.rigs // [])[] | select(.hq != true and .suspended == true) | .prefix' 2>/dev/null) || SUSPENDED_PREFIXES=""
+GUARDED_RIGS=$(rig_namespace_guarded_rigs "$RIGS_JSON")
+SKIPPED_GUARDED=0
+
+# dependent_in_guarded_rig succeeds when a dependent ("external:<rig>/<id>"
+# or a bare id) lives in a rig with federation = "rig": its store is shared
+# with other cities, and this city does not rewrite rows there.
+dependent_in_guarded_rig() {
+    local dep="${1#external:}"
+    local rig_part=""
+    local id="$dep"
+    [ -n "$GUARDED_RIGS" ] || return 1
+    case "$dep" in
+        */*)
+            rig_part="${dep%%/*}"
+            id="${dep##*/}"
+            ;;
+    esac
+    if [ -n "$rig_part" ] && printf '%s\n' "$GUARDED_RIGS" | grep -Fxq -- "$rig_part"; then
+        return 0
+    fi
+    local by_prefix
+    # An unreadable rig list fails closed: the dependent is left alone.
+    by_prefix="$(rig_namespace_guarded_rig_for_bead "$RIGS_JSON" "$id")" || return 0
+    [ -n "$by_prefix" ]
+}
 while IFS= read -r closed_id; do
     if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${closed_id%%-*}"; then
         continue
@@ -100,6 +128,10 @@ while IFS= read -r closed_id; do
         if [ -n "$SUSPENDED_PREFIXES" ] && printf '%s\n' "$SUSPENDED_PREFIXES" | grep -qxF "${dep_id%%-*}"; then
             continue
         fi
+        if dependent_in_guarded_rig "$dep_id"; then
+            SKIPPED_GUARDED=$((SKIPPED_GUARDED + 1))
+            continue
+        fi
         # Convert blocks → related: remove blocking semantics, keep audit trail.
         gc bd dep remove "$dep_id" "external:$closed_id" 2>/dev/null || true
         gc bd dep add "$dep_id" "external:$closed_id" --type=related 2>/dev/null || true
@@ -109,4 +141,7 @@ done <<< "$CLOSED_IDS"
 
 if [ "$RESOLVED" -gt 0 ]; then
     echo "cross-rig-deps: resolved $RESOLVED cross-rig dependencies"
+fi
+if [ "$SKIPPED_GUARDED" -gt 0 ]; then
+    echo "cross-rig-deps: left $SKIPPED_GUARDED dependencies in guarded rigs (federation = \"rig\") unchanged"
 fi

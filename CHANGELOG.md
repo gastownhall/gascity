@@ -1111,6 +1111,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `gc config show --validate` and `gc doctor` warn when a guarded rig has
     no control dispatcher of its own, since graph workflows into it then
     cannot run their control steps.
+- **`gc agent is-foreign --rig-namespace <rig>` asks about a claim in a
+  rig's bead store.** On a rig with `federation = "rig"`, an identity outside
+  the rig's namespace that is none of this city's own pool sessions of the
+  rig answers `foreign` with the new reason `namespace`, without reading any
+  store; an unknown rig (matched exactly) exits 2. The JSON echoes
+  `rig_namespace` and adds `namespace_checked` and `namespace_via`
+  (`lexical`, `session_record`). It is a new flag rather than `--rig`, which
+  an older gc accepts and answers from the roster: an older gc rejects
+  `--rig-namespace`, so callers protect the claim. The core `orphan-sweep`
+  order asks it for every rig claim, keeps claims outside a guarded rig's
+  namespace and counts them per rig (`kept N claims outside guarded rig
+  namespaces (beta: N)`) without naming them or declaring a partial outcome.
+  The pool dead-assignee sweep keeps and counts the same claims. The reaper
+  and JSONL export skip guarded rigs; `cross-rig-deps` leaves their
+  dependents alone; the nudge and gate-notification orders check a guarded
+  rig's assignee, route or addressee first, and the stale human-gate
+  re-nudge leaves an unaddressed gate whose creation stamp names another
+  city's namespace.
 - **`[beads] proxied_idle_timeout` sets how long a bd-owned proxied scope's
   proxy and Dolt child stay up with no connections.** bd retires the pair
   after that much quiet and the next bd command restarts it. The value is a Go
