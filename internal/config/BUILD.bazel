@@ -186,6 +186,7 @@ go_test(
         "site_binding_roundtrip_test.go",
         "site_binding_test.go",
         "skill_discovery_test.go",
+        "stalled_beads_test.go",
         "storage_example_test.go",
         "storage_test.go",
         "testenv_import_test.go",
