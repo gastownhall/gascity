@@ -1352,6 +1352,12 @@ type Workspace struct {
 	// Default (empty): "{{.Agent}}" — just the sanitized agent name. Per-city
 	// tmux socket isolation makes a city prefix unnecessary.
 	SessionTemplate string `toml:"session_template,omitempty"`
+	// ImplicitAgentIsolation selects the working directory of rig-scoped
+	// implicit provider agents. "shared" (the default when empty) runs every
+	// instance in the rig root. "worktree" gives each instance its own git
+	// worktree under .gc/worktrees/<rig>/<instance>, created by the core
+	// pack's worktree-setup.sh pre_start on a gc-<instance>-<hash> branch.
+	ImplicitAgentIsolation string `toml:"implicit_agent_isolation,omitempty" jsonschema:"enum=shared,enum=worktree"`
 	// InstallAgentHooks lists provider names whose hooks should be installed
 	// into agent working directories. Agent-level overrides workspace-level
 	// (replace, not additive). Supported: "claude", "codex", "gemini",
@@ -1381,6 +1387,18 @@ type Workspace struct {
 	// agent, and patch env. Use for cross-cutting variables like
 	// GC_TARGET_BRANCH that every agent should inherit.
 	Env map[string]string `toml:"env,omitempty"`
+}
+
+// Values of [Workspace.ImplicitAgentIsolation].
+const (
+	ImplicitAgentIsolationShared   = "shared"
+	ImplicitAgentIsolationWorktree = "worktree"
+)
+
+// ImplicitAgentWorktreeIsolation reports whether rig-scoped implicit agents
+// run in per-instance git worktrees instead of the shared rig root.
+func (w *Workspace) ImplicitAgentWorktreeIsolation() bool {
+	return w.ImplicitAgentIsolation == ImplicitAgentIsolationWorktree
 }
 
 // LegacyIncludes returns the compatibility-only city.toml include list.

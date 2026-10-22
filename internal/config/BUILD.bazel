@@ -118,6 +118,7 @@ go_test(
         "field_sync_test.go",
         "github_pr_monitor_test.go",
         "home_fallback_test.go",
+        "implicit_agent_isolation_test.go",
         "implicit_agent_patch_repro_test.go",
         "implicit_test.go",
         "import_negative_test.go",

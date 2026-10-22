@@ -3556,6 +3556,14 @@
           "type": "string",
           "description": "SessionTemplate is a template string supporting placeholders: {{.City}},\n{{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls tmux session naming.\nDefault (empty): \"{{.Agent}}\" — just the sanitized agent name. Per-city\ntmux socket isolation makes a city prefix unnecessary."
         },
+        "implicit_agent_isolation": {
+          "type": "string",
+          "enum": [
+            "shared",
+            "worktree"
+          ],
+          "description": "ImplicitAgentIsolation selects the working directory of rig-scoped\nimplicit provider agents. \"shared\" (the default when empty) runs every\ninstance in the rig root. \"worktree\" gives each instance its own git\nworktree under .gc/worktrees/\u003crig\u003e/\u003cinstance\u003e, created by the core\npack's worktree-setup.sh pre_start on a gc-\u003cinstance\u003e-\u003chash\u003e branch."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
