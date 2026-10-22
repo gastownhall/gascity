@@ -318,6 +318,13 @@ func buildDoctorChecks(cityPath string, cfg *config.City, cfgErr error, opts bui
 		register(doctor.NewConfigSemanticsCheck(cfg, filepath.Join(cityPath, "city.toml")))
 		register(doctor.NewDurationRangeCheck(cfg))
 		register(doctor.NewProviderParityCheck(cfg))
+		// Pool working-directory isolation (issue #1181): warn-only line
+		// naming pool agents whose instances would share a directory and
+		// marked rigs whose unborn HEAD cannot seed a slot worktree. The
+		// provider verdict is computed exactly as session start computes it,
+		// so the probe agrees with what provisioning will actually do.
+		poolIsolationProvider := effectiveProviderName(cfg.Session.Provider)
+		register(doctor.NewPoolWorkDirIsolationCheck(cfg, cityPath, loadedCityName(cfg, cityPath), poolIsolationProvider, hostLocalSessionProvider(poolIsolationProvider)))
 		register(doctor.NewFormulaRequirementsCheck(cfg, cityPath))
 		register(doctor.NewNamedAlwaysMinConflictCheck(cfg))
 		register(doctor.NewInstructionsFileCheck(cfg, cityPath))
