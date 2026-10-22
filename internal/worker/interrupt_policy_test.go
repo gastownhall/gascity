@@ -134,6 +134,57 @@ func TestTurnInterruptOnFailureRestart(t *testing.T) {
 	}
 }
 
+// A turn-scoped restart on failure needs something showing the turn still
+// running after the keys: a settle read naming it current
+// (TestTurnInterruptOnFailureRestart), or a family wait that failed for a
+// cause other than a runtime that could not answer. A settle whose every
+// read fails (a torn transcript record here) after family waits that passed,
+// or that could not answer either, cannot tell whether the interrupt ended
+// the turn: the runtime is left running, and the error wraps
+// session.ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
+// runtime.ErrTurnNotEnded.
+func TestTurnInterruptRestartNeedsTheTurnSeenRunning(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		boundary  error // the Codex family's boundary wait after the keys
+		restarted bool
+	}{
+		{"the family waits passed", nil, false},
+		{"the boundary wait could not answer", fmt.Errorf("reading the rollout: %w", runtime.ErrRuntimeUnavailable), false},
+		{"the boundary wait saw no boundary", errors.New("no turn_aborted marker yet"), true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, fake, _, _, _ := codexSettleSession(t, func(path string, _ *manualTurnClock) {
+				appendTranscript(t, path, `{"timestamp":"2026-10-08T02:22:30.500Z","type":"event_msg","payload":{"type":"turn_abo`)
+			})
+			if tc.boundary != nil {
+				fake.InterruptBoundaryErrors[s.info.SessionName] = tc.boundary
+			}
+			res, err := s.handle.InterruptAs(context.Background(), handleActor(t, s.handle, sessionpkg.ActorController),
+				InterruptRequest{Turn: codexTurn1, OnFailure: InterruptOnFailureRestart})
+			methods := callMethodsOf(fake, s.info.SessionName)
+			if tc.restarted {
+				if err != nil || !res.Restarted {
+					t.Fatalf("InterruptAs(turn, restart) = %+v, %v; want a restart, nil", res, err)
+				}
+				if i, j := slices.Index(methods, "Stop"), slices.Index(methods, "Start"); i < 0 || j < i {
+					t.Fatalf("calls = %v, want the restart's Stop, then its Start", methods)
+				}
+				return
+			}
+			if res.Restarted || !errors.Is(err, sessionpkg.ErrInterruptOutcomeUnknown) || !errors.Is(err, runtime.ErrRuntimeUnavailable) || errors.Is(err, runtime.ErrTurnNotEnded) {
+				t.Fatalf("InterruptAs(turn, restart, settle read nothing) = %+v, %v; want ErrInterruptOutcomeUnknown and ErrRuntimeUnavailable, and no restart", res, err)
+			}
+			if slices.Contains(methods, "Stop") || slices.Contains(methods, "Start") {
+				t.Fatalf("calls = %v, want the runtime left running", methods)
+			}
+			if got := sentInputs(fake, s.info.SessionName); !slices.Equal(got, []string{"SendKeys(Escape)"}) {
+				t.Fatalf("sent %v, want [SendKeys(Escape)]", got)
+			}
+		})
+	}
+}
+
 // A turn-scoped restart that stopped the runtime and could not start it
 // again reaches the caller as that (session.ErrRestartNotStarted): never as
 // a row that would not load (runtime.ErrRuntimeUnavailable, nothing sent),

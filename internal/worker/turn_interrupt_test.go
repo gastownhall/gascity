@@ -1020,7 +1020,9 @@ func startSharedRead[T any](t *testing.T, key string, stale T) {
 
 // The Manager loads the session row again under the session mutation lock:
 // a row closed since the handle's plan read is not found and one that will
-// not load is unknown, nothing sent either way, on either turn source.
+// not load is unknown, nothing sent either way, on either turn source; both
+// say so (session.ErrStopNotSent), so the lane releases the second as
+// nothing sent, never as a runtime that could not answer.
 func TestTurnInterruptRowLoadUnderTheLock(t *testing.T) {
 	sources := []struct {
 		name    string
@@ -1064,8 +1066,8 @@ func TestTurnInterruptRowLoadUnderTheLock(t *testing.T) {
 				s.onLockedLoad(t, func() error { return tc.onLocked(s) })
 				fake.Calls = nil
 				err := s.handle.Interrupt(context.Background(), InterruptRequest{Turn: src.turn})
-				if !errors.Is(err, tc.want) {
-					t.Fatalf("Interrupt = %v, want %v", err, tc.want)
+				if !errors.Is(err, tc.want) || !errors.Is(err, sessionpkg.ErrStopNotSent) {
+					t.Fatalf("Interrupt = %v, want %v and session.ErrStopNotSent", err, tc.want)
 				}
 				for _, other := range tc.not {
 					if errors.Is(err, other) {

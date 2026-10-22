@@ -29,8 +29,11 @@ type StopTurnOptions struct {
 	// under the session mutation lock: it gets the error of the stop's own
 	// waits (nil when they passed, else an error wrapping
 	// runtime.ErrTurnNotEnded) and returns nil when the turn ended, else an
-	// error wrapping runtime.ErrTurnNotEnded. It runs only once something
-	// was sent. Unset, the stop's own waits decide.
+	// error wrapping runtime.ErrTurnNotEnded: TurnEndUnreadError's when
+	// nothing showed the turn still running (no read of it answered, and the
+	// waits passed or failed only for want of an answer), which withholds a
+	// restart on failure. It runs only once something was sent. Unset, the
+	// stop's own waits decide.
 	Settle func(waitErr error) error
 	// ForReplacement prepares the session for the message that replaces the
 	// interrupted turn, as deliver-now does between its interrupt and its
@@ -56,8 +59,10 @@ type StopTurnOptions struct {
 	// runtime.ErrRuntimeUnavailable, and not ErrTurnNotEnded; so does a
 	// stop whose check refused the follow-up interrupt (Still), since the
 	// turn it names left Current or the check could not tell, and whatever
-	// runs then may be another turn, which a restart would kill. A restart
-	// once decided runs apart from ctx, within stopTurnRestartBound. As with
+	// runs then may be another turn, which a restart would kill; and so does
+	// one whose Settle saw nothing showing the turn still running
+	// (TurnEndUnreadError), since that cannot tell either. A restart once
+	// decided runs apart from ctx, within stopTurnRestartBound. As with
 	// Still, whether the runtime runs is a fresh liveness read's
 	// (StopTurnWith).
 	Restart *StopTurnRestart
@@ -259,8 +264,10 @@ func (m *Manager) waitForInterruptSettleLocked(ctx context.Context, b beads.Bead
 // check refused the keystroke sequence's follow-up interrupt (refusal), so
 // the turn it names left Current, or the check could not tell, and whatever
 // runs now may be another turn, the ended one's successor, which a restart
-// would kill. Nothing more is sent, the runtime is left as it is, and
-// whether the interrupt ended the turn is unknown: the error wraps
+// would kill; or nothing showed the turn still running (waitErr is a
+// TurnEndUnreadError: no read of it answered), which cannot tell either.
+// Nothing more is sent, the runtime is left as it is, and whether the
+// interrupt ended the turn is unknown: the error wraps
 // ErrInterruptOutcomeUnknown and runtime.ErrRuntimeUnavailable, not
 // runtime.ErrTurnNotEnded.
 func restartWithheld(ctx context.Context, what string, refusal, waitErr error) error {
@@ -269,6 +276,9 @@ func restartWithheld(ctx context.Context, what string, refusal, waitErr error) e
 	}
 	if refusal != nil {
 		return fmt.Errorf("%s: the check refused the follow-up interrupt (%s), so another turn may run now, not restarting it: %w: %w (%s)", what, refusal.Error(), ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
+	}
+	if errors.As(waitErr, new(*turnEndUnreadError)) {
+		return fmt.Errorf("%s: nothing showed its interrupted turn still running, not restarting it: %w: %w (%s)", what, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, waitErr.Error())
 	}
 	return nil
 }
@@ -327,7 +337,8 @@ var ErrReplacementNotPrepared = errors.New("the interrupted turn settled but the
 // (StopTurnOptions.Still) send that failed after the check passed, a stop or
 // a protocol turn interrupt (Manager.InterruptTurn) with a restart on failure
 // whose caller's context ended before the interrupted turn was seen to end,
-// a stop whose check refused its follow-up interrupt (no restart then), or a
+// or whose turn nothing showed still running (TurnEndUnreadError), a stop
+// whose check refused its follow-up interrupt (no restart then), or a
 // protocol turn interrupt whose read or dispatch failed (InterruptTurnOn).
 // The error also wraps runtime.ErrRuntimeUnavailable. Unlike that sentinel
 // alone, it is never "nothing sent": the interrupt may have ended the turn.
@@ -344,11 +355,12 @@ var ErrInterruptOutcomeUnknown = errors.New("the interrupt was sent, or may have
 // stopping, a runtime unavailable) as nothing sent.
 var ErrRestartNotStarted = errors.New("the runtime was stopped and could not be started again")
 
-// ErrStopNotSent reports a stop of a session's turn (Manager.StopTurnWith)
-// that failed before it sent anything, for a cause it names no other
-// sentinel for: its load of the session row under the session mutation lock
-// failed, the row closed, gone, not a session or unreadable, or the actor of
-// its restart on failure may not start the runtime. The cause is wrapped
+// ErrStopNotSent reports a stop of a session's turn (Manager.StopTurnWith),
+// or a protocol interrupt of one of its turns (Manager.InterruptTurn), that
+// failed before it sent anything, for a cause it names no other sentinel
+// for: its load of the session row under the session mutation lock failed,
+// the row closed, gone, not a session or unreadable, or the actor of its
+// restart on failure may not start the runtime. The cause is wrapped
 // with its own sentinels (ErrSessionClosed, ErrNotSession, beads.ErrNotFound,
 // ErrSweepStarts), so a caller that tells a row gone from one it could not
 // read still can.

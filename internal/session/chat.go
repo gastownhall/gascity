@@ -1731,33 +1731,36 @@ const TurnInterruptSettle = turnSettleTimeout
 // (runtime.TurnFenceProvider) runtime.ErrTurnIdentityUnsupported, and a
 // suspended row, which has no turn, a *runtime.TurnNotCurrentError. The row
 // is loaded under the lock, so a row that is closed by then, or will not
-// load, returns the load's error (ErrSessionClosed for a closed one),
-// nothing sent. Otherwise it returns what InterruptTurnOn returns.
+// load, returns an error wrapping ErrStopNotSent and the load's error
+// (ErrSessionClosed for a closed one), nothing sent, as StopTurnWith's does.
+// Otherwise it returns what InterruptTurnOn returns.
 //
 // restart, when set, is a restart on failure, run as StopTurnWith runs
 // StopTurnOptions.Restart: an actor that may not start the runtime is
-// refused before anything else, and a row whose drain-ack stop is pending
-// with ErrSessionStopping, nothing sent. On a keystroke runtime (ACP, whose
-// stop replaces the agent) it takes the runtime lease under the lock before
-// the dispatch (a lease it cannot take is runtime.ErrRuntimeUnavailable,
-// nothing sent), and when the interrupted turn is not seen to end it stops
-// the runtime and starts it again in its place under that lease, reporting
-// StopTurnReport.Restarted with a nil error; a restart whose stop or start
-// fails is the error StopTurnWith's is, and a caller whose ctx ended by then
-// gets no restart (restartWithheld). A protocol runtime is never restarted,
-// as its stop may leave it running: its not-ended error is returned.
+// refused before anything else (ErrStopNotSent and the refusal), and a row
+// whose drain-ack stop is pending with ErrSessionStopping, nothing sent. On
+// a keystroke runtime (ACP, whose stop replaces the agent) it takes the
+// runtime lease under the lock before the dispatch (a lease it cannot take
+// is runtime.ErrRuntimeUnavailable, nothing sent), and when the interrupted
+// turn is not seen to end it stops the runtime and starts it again in its
+// place under that lease, reporting StopTurnReport.Restarted with a nil
+// error; a restart whose stop or start fails is the error StopTurnWith's
+// is, and a caller whose ctx ended by then, or a turn whose wait read
+// nothing (TurnEndUnreadError), gets no restart (restartWithheld). A
+// protocol runtime is never restarted, as its stop may leave it running: its
+// not-ended error is returned.
 func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart *StopTurnRestart) (runtime.TurnInterrupt, StopTurnReport, error) {
 	var report StopTurnReport
 	if restart != nil {
 		if err := m.checkStarter(restart.By); err != nil {
-			return runtime.TurnInterrupt{}, report, fmt.Errorf("interrupting turn %q of %s, restarting it on failure: %w", turnID, id, err)
+			return runtime.TurnInterrupt{}, report, fmt.Errorf("interrupting turn %q of %s, restarting it on failure: %w: %w", turnID, id, ErrStopNotSent, err)
 		}
 	}
 	var ack runtime.TurnInterrupt
 	err := WithSessionMutationLockContext(ctx, id, func() error {
 		b, sessName, err := m.sessionBead(id)
 		if err != nil {
-			return err
+			return fmt.Errorf("interrupting turn %q of %s: %w: %w", turnID, id, ErrStopNotSent, err)
 		}
 		if restart != nil && drainAckStopPendingMetadata(b.Metadata) {
 			// The row belongs to the controller's stop, as for StopTurnWith.
@@ -1820,7 +1823,11 @@ func (m *Manager) InterruptTurn(ctx context.Context, id, turnID string, restart 
 //   - runtime.ErrTurnUnnamed: turnID is empty; nothing was sent;
 //   - an error wrapping runtime.ErrTurnNotEnded: sent, but not seen to end.
 //     It wraps no other sentinel: the wait's own error is in its text only,
-//     so ErrTurnNotEnded, "sent", is never misread as a refusal;
+//     so ErrTurnNotEnded, "sent", is never misread as a refusal. A wait
+//     whose error wraps runtime.ErrRuntimeUnavailable read nothing (no read
+//     answered, or the runtime cannot answer the wait at all), so its error
+//     is a TurnEndUnreadError, which a restart on failure does not restart
+//     (Manager.InterruptTurn);
 //   - an error wrapping runtime.ErrRuntimeUnavailable and not
 //     ErrInterruptOutcomeUnknown: ctx ended before the dispatch, and nothing
 //     was sent;
@@ -1863,7 +1870,13 @@ func InterruptTurnOn(ctx context.Context, tf runtime.TurnFenceProvider, sessName
 		return runtime.TurnInterrupt{}, fmt.Errorf("interrupting turn %q of %s: %w: %w: %w", turnID, sessName, ErrInterruptOutcomeUnknown, runtime.ErrRuntimeUnavailable, err)
 	}
 	if _, err := tf.WaitTurnEnded(ctx, sessName, turnID, turnSettleTimeout); err != nil {
-		return ack, TurnNotEndedError(fmt.Sprintf("interrupted turn %q of %s", turnID, sessName), err)
+		what := fmt.Sprintf("interrupted turn %q of %s", turnID, sessName)
+		if errors.Is(err, runtime.ErrRuntimeUnavailable) {
+			// No read of the wait answered (WaitTurnEnded's rule): nothing
+			// showed the turn still running.
+			return ack, TurnEndUnreadError(what, err)
+		}
+		return ack, TurnNotEndedError(what, err)
 	}
 	return ack, nil
 }
@@ -1878,6 +1891,27 @@ func TurnNotEndedError(what string, cause error) error {
 	}
 	return fmt.Errorf("%s: %w (last: %s)", what, runtime.ErrTurnNotEnded, cause.Error())
 }
+
+// TurnEndUnreadError is TurnNotEndedError for an interrupted turn that
+// nothing showed still running either: no read of it answered after the
+// interrupt, and the stop's own waits passed or failed only for want of an
+// answer. Like TurnNotEndedError it wraps runtime.ErrTurnNotEnded and
+// nothing else, cause in its text only, so a caller matching sentinels still
+// reads it as sent and not seen to end. A restart on failure takes it as no
+// ground to restart (restartWithheld): whether the interrupt ended the turn
+// is unknown, and whatever runs now may be another turn, which a restart
+// would kill.
+func TurnEndUnreadError(what string, cause error) error {
+	return &turnEndUnreadError{err: TurnNotEndedError(what+", nothing showing it still running", cause)}
+}
+
+// turnEndUnreadError is TurnEndUnreadError's error.
+type turnEndUnreadError struct{ err error }
+
+func (e *turnEndUnreadError) Error() string { return e.err.Error() }
+
+// Unwrap is the TurnNotEndedError it carries.
+func (e *turnEndUnreadError) Unwrap() error { return e.err }
 
 // Pending returns the provider's current structured pending interaction, if
 // the provider supports that capability.

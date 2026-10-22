@@ -39,9 +39,10 @@ const laneInterruptReadBudget = 10 * time.Second
 // unless the interrupt was confined to its turn by an atomic turn fence and
 // to its incarnation by the input fence (X11 D4, the 2026-10-19 ruling); the
 // restart takes precedence, as the one slot holds one mark. The
-// conversation's InterruptRef is recorded for the turn observer before the
-// effect and left for it to fold (laneInterrupts), unless the effect
-// definitely sent nothing, when the ref it replaced is restored.
+// conversation's InterruptRef is recorded before the effect (laneInterrupts),
+// so a retry of a session-scoped op stays on the turn this attempt aimed at,
+// unless the effect definitely sent nothing, when the ref it replaced is
+// restored.
 func (e *conversationLaneExec) Interrupt(ctx context.Context, c opjournal.InterruptCall) opjournal.ControlResult {
 	turn, stop := e.interruptTarget(ctx, c)
 	if stop != nil {
@@ -208,28 +209,35 @@ func laneInterruptReadKey(cityPath, sessionID string) string {
 // runtime and could not start it again (session.ErrRestartNotStarted: the
 // turn ended with the runtime, and the start's error stays the op's last
 // error; the controller's heal of a row whose runtime is gone, SESS-531,
-// marks the row asleep, which may reset its continuation, and A18's
-// relaunch of a row it wants awake, or a later wake, starts a runtime
-// again); one sent whose outcome the session cannot tell
-// (session.ErrInterruptOutcomeUnknown: a send that failed after its check,
-// a protocol dispatch that failed, a restart on failure withheld because
-// the caller's context ended or the check refused the follow-up interrupt);
-// one whose runtime lost the session after its input was applied
-// (runtime.ErrNudgeDeliveryUnconfirmed, though it says unavailable too); a
-// miss that sent part of the sequence; and any error in no class below. A
-// turn not current, or a session gone, is skipped{stale}; a session or
-// handle that cannot carry it failed{unsupported}. An unavailable runtime is
-// a transient release marked unavailable (opjournal.NotDelivered.Unavailable:
-// start_by closes it provider_unavailable), unless the interrupt was held
-// back on this side of the runtime (laneInterruptHeldBack); that, a session
-// the controller is stopping, an interrupt that failed before anything was
-// sent, or an incarnation miss that sent nothing, is a transient release. An
-// interrupt that failed before anything was sent (worker.ErrInterruptNotSent)
-// is classed by its cause first, when that says the runtime unavailable (a
-// release start_by may close provider_unavailable) or the session gone
-// (skipped{stale}), and is a plain transient release otherwise. A success is
-// marked restarted_after_failed_interrupt when its restart replaced the
-// runtime, which takes precedence, else unfenced_interrupt unless exact.
+// marks the row asleep, which may reset its continuation, and A18's relaunch
+// of a row it wants awake, or a later wake, starts a runtime again); one
+// sent whose outcome the session cannot tell
+// (session.ErrInterruptOutcomeUnknown: a send that failed after its check, a
+// protocol dispatch that failed, a restart on failure withheld because the
+// caller's context ended, the check refused the follow-up interrupt, or
+// nothing showed the turn still running); one whose runtime lost the session
+// after its input was applied (runtime.ErrNudgeDeliveryUnconfirmed, though
+// it says unavailable too); a miss that sent part of the sequence; and any
+// error in no class below. A turn not current, or a session gone, is
+// skipped{stale}; a session or handle that cannot carry it
+// failed{unsupported}. An unavailable runtime is a transient release marked
+// unavailable (opjournal.NotDelivered.Unavailable: start_by closes it
+// provider_unavailable), unless the interrupt was held back on this side of
+// the runtime (laneInterruptHeldBack); that, a session the controller is
+// stopping, an interrupt that failed before anything was sent, or an
+// incarnation miss that sent nothing, is a transient release. A stop or turn
+// interrupt that failed before it sent anything for a cause of its own
+// (session.ErrStopNotSent: its load of the session row under the lock, an
+// actor refused a restart) asked the runtime nothing, so it is a transient
+// release not marked unavailable, though the worker reports a row that would
+// not load unavailable too, and skipped{stale} for a session gone. An
+// interrupt that failed before anything was sent
+// (worker.ErrInterruptNotSent) is classed by its cause first, when that says
+// the runtime unavailable (a release start_by may close
+// provider_unavailable) or the session gone (skipped{stale}), and is a plain
+// transient release otherwise. A success is marked
+// restarted_after_failed_interrupt when its restart replaced the runtime,
+// which takes precedence, else unfenced_interrupt unless exact.
 func laneInterruptResult(ctx context.Context, res worker.InterruptResult, err error, turn string, exact bool) opjournal.ControlResult {
 	var miss *runtime.FenceMismatchError
 	switch {
@@ -254,7 +262,8 @@ func laneInterruptResult(ctx context.Context, res worker.InterruptResult, err er
 		return opjournal.Rejected{Arm: opjournal.ArmFailed, Reason: opjournal.ReasonUnsupported}
 	case errors.As(err, &miss) && miss.Partial:
 		return opjournal.Unknown{Cause: err}
-	case errors.As(err, &miss), errors.Is(err, session.ErrSessionStopping):
+	case errors.As(err, &miss), errors.Is(err, session.ErrSessionStopping),
+		errors.Is(err, session.ErrStopNotSent) && !laneSessionGone(err):
 		return opjournal.NotDelivered{Transient: true, Cause: err}
 	case errors.Is(err, runtime.ErrRuntimeUnavailable):
 		return opjournal.NotDelivered{Transient: true, Unavailable: !laneInterruptHeldBack(ctx, err), Cause: err}
@@ -276,10 +285,14 @@ func laneInterruptResult(ctx context.Context, res worker.InterruptResult, err er
 // (interruptTarget). The conversation's turn observer (TI-3) does not read
 // this record: it credits a turn's end to the op from the op rows
 // (opjournal.Store.InterruptCredits, Result.Turn, also on
-// failed{no_boundary}), which count only an op that ran, so nothing calls
-// clear in production and a ref stands until it is replaced. One effect runs
-// at a time per conversation (D-1EFF), so each conversation holds at most
-// one ref. A nil record records nothing.
+// failed{no_boundary}), which count only an op that ran, so an attempt
+// released unknown that ended its turn is not credited (ga-6plx6a). A ref
+// stands until a newer one replaces it. One effect runs at a time per
+// conversation (D-1EFF), so each conversation holds one ref: a second op's
+// effect replaces the first op's ref, and a retry of the first then finds
+// none of its own and closes failed{ambiguous_delivery} unsent, as after a
+// controller restart, never aimed at a turn a fresh read finds (ga-6plx6a).
+// A nil record records nothing.
 type laneInterrupts struct {
 	mu   sync.Mutex
 	last map[string]opjournal.InterruptRef
@@ -306,8 +319,8 @@ func (r *laneInterrupts) record(conv string, ref opjournal.InterruptRef) opjourn
 
 // restore takes ref back as conv's interrupt, if it still is, and puts prev,
 // the ref it replaced, back in its place: the executor's when its effect
-// sent nothing, so the turn end an earlier interrupt may have caused is
-// still credited to it. A zero prev leaves none.
+// sent nothing, so a retry of the op prev names still finds its turn. A zero
+// prev leaves none.
 func (r *laneInterrupts) restore(conv string, ref, prev opjournal.InterruptRef) {
 	if r == nil {
 		return
@@ -322,18 +335,6 @@ func (r *laneInterrupts) restore(conv string, ref, prev opjournal.InterruptRef) 
 		return
 	}
 	r.last[conv] = prev
-}
-
-// clear drops ref as conv's interrupt, if it still is.
-func (r *laneInterrupts) clear(conv string, ref opjournal.InterruptRef) {
-	if r == nil {
-		return
-	}
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	if r.last[conv] == ref {
-		delete(r.last, conv)
-	}
 }
 
 // current is conv's interrupt, the zero ref when none is recorded.

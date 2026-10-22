@@ -8,6 +8,8 @@ const (
 	// confined to the turn and incarnation it was meant for: a
 	// session-scoped interrupt, a turn-scoped one below the atomic turn
 	// fence, or one sent without the incarnation's input fence (X11 D4).
+	// The API's stop writes the same token into the same op table as
+	// session.DegradationUnfencedInterrupt, which spells it the same.
 	DegradationUnfencedInterrupt = "unfenced_interrupt"
 	// DegradationRestartedAfterFailedInterrupt marks an interrupt whose turn
 	// was not seen to end and whose on_failure restart replaced the runtime

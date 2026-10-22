@@ -477,12 +477,13 @@ func (o *laneTurnObserver) timerFired(ctx context.Context) {
 }
 
 // setInterrupting names the interrupt gc runs on a turn, so the fold
-// credits that turn's end to the op (X11 §5.4). The interrupt executor
-// (OJ-15) calls it before the effect and never clears it: the observer keeps
-// the ref until it folds that turn's end or a newer ref replaces it; a ref
-// whose turn no later fold names credits nothing. A ref without both an op
-// and a turn names nothing and changes nothing. A ref lost with its worker is recovered from the op rows
-// (laneTurnDeps.credits).
+// credits that turn's end to the op (X11 §5.4). No executor calls it yet
+// (ga-6plx6a): the interrupt executor (OJ-15) keeps its ref for its own
+// retries (laneInterrupts), and the fold credits an op from the op rows
+// (laneTurnDeps.credits). The observer keeps a ref it is given until it
+// folds that turn's end or a newer ref replaces it; a ref whose turn no
+// later fold names credits nothing. A ref without both an op and a turn
+// names nothing and changes nothing.
 func (o *laneTurnObserver) setInterrupting(ref opjournal.InterruptRef) {
 	if ref.Op == "" || ref.Turn == "" {
 		return

@@ -245,7 +245,9 @@ type InterruptRequest struct {
 	// session row, or one closed by the time the stop or the interrupt holds
 	// the session mutation lock, is an error wrapping
 	// runtime.ErrSessionNotFound, nothing sent; a row that will not load is
-	// runtime.ErrRuntimeUnavailable, nothing sent. It returns nil only once
+	// runtime.ErrRuntimeUnavailable, nothing sent; either, when the stop or
+	// the interrupt loaded the row under the lock, also wraps
+	// session.ErrStopNotSent. It returns nil only once
 	// a read of the session's turns shows the turn no longer current (or
 	// the session gone) within 15 s of the check; a
 	// *runtime.TurnNotCurrentError when the turn was not current, or the
@@ -269,7 +271,8 @@ type InterruptRequest struct {
 	// refused, nothing sent, with an error wrapping session.ErrNoActor. A
 	// restart whose start fails once the runtime stopped is an error
 	// wrapping session.ErrRestartNotStarted, and one withheld (the caller's
-	// ctx ended, or a check refused the follow-up interrupt) an error
+	// ctx ended, a check refused the follow-up interrupt, or nothing showed
+	// the interrupted turn still running: no read of it answered) an error
 	// wrapping session.ErrInterruptOutcomeUnknown, as
 	// session.StopTurnOptions.Restart documents. A restart applies to a
 	// keystroke runtime on a SessionHandle, whatever its turn source: a

@@ -854,10 +854,11 @@ func (h *SessionHandle) interruptTurn(ctx context.Context, by *sessionpkg.Actor,
 // sequence's follow-up interrupt (a soft-escape family's Ctrl-C fallback);
 // then, still under the lock, the transcript is read until turn is no longer
 // current, within turnInterruptSettle of the check first passing
-// (awaitTurnEnd), and opts' replacement or restart on failure runs. ctx
-// bounds the wait for the lock and the check, whose session reload and
-// runtime probes are further bounded by turnWatchReadBound: the check holds
-// the lock. They are the check's own, started under the lock
+// (awaitTurnEnd), and opts' replacement or restart on failure runs, a
+// restart only once something showed the turn still running. ctx bounds the
+// wait for the lock and the check, whose session reload and runtime probes
+// are further bounded by turnWatchReadBound: the check holds the lock. They
+// are the check's own, started under the lock
 // (lockedCurrentTurn), as the settle's reads are, so a shared read that
 // began before it never decides the check or the settle. A check that
 // cannot finish within them, or whose idle reading is neither idle nor busy
@@ -923,10 +924,13 @@ func (h *SessionHandle) checkedTurnInterrupt(ctx context.Context, info sessionpk
 // turnInterruptResult is err, from the Manager's turn-scoped stop or
 // interrupt of session id, in the classes InterruptRequest.Turn documents.
 // The Manager loads the row again under the session mutation lock and
-// returns that load's own error: a row closed or gone since the plan read,
-// or not a session, is runtime.ErrSessionNotFound, as a turn read has it
-// (turnRowError), and every other error in none of those classes, a row that
-// would not load among them, is unknown, runtime.ErrRuntimeUnavailable.
+// returns that load's own error, wrapped in session.ErrStopNotSent: a row
+// closed or gone since the plan read, or not a session, is
+// runtime.ErrSessionNotFound, as a turn read has it (turnRowError), and every
+// other error in none of those classes, a row that would not load among
+// them, is unknown, runtime.ErrRuntimeUnavailable. Either keeps
+// session.ErrStopNotSent, so a caller that tells nothing sent from a runtime
+// that could not answer still can.
 func turnInterruptResult(id string, err error) error {
 	switch {
 	case err == nil,
@@ -946,22 +950,35 @@ func turnInterruptResult(id string, err error) error {
 // and returns nil then; a session that is gone or closed has ended its turn,
 // as a protocol runtime's WaitTurnEnded reads one it no longer hosts. It
 // reads at least once, even past deadline, since the family's own waits may
-// have spent the bound; past deadline, or when ctx ends, it returns
-// session.TurnNotEndedError: an error wrapping runtime.ErrTurnNotEnded and
-// no other sentinel, the last failure (cause, the family wait's, or a failed
-// read) in its text. A failed read is never taken as the end. It runs under
-// the session mutation lock (the stop's Settle), so each read is a locked
-// one (lockedCurrentTurn), as the check's are: its session load and runtime
-// probes are its own, started within the read, so a shared read that began
-// before the lock, holding the session as it was then, never decides the
-// end, nor keeps the settle, which holds the lock, waiting on its answer.
-// Each read is bounded by turnWatchReadBound, as a watcher read's is.
+// have spent the bound; past deadline, or when ctx ends, the turn was not
+// seen to end: an error wrapping runtime.ErrTurnNotEnded and no other
+// sentinel, the last failure (cause, the family wait's, or a failed read) in
+// its text. That is session.TurnNotEndedError once something showed the turn
+// still running, a read naming it current or a family wait that failed for a
+// cause other than a runtime that could not answer
+// (runtime.ErrRuntimeUnavailable), and session.TurnEndUnreadError otherwise,
+// which a restart on failure does not restart: whether the interrupt ended
+// the turn is unknown. A failed read is never taken as the end, nor as the
+// turn running. It runs under the session mutation lock (the stop's
+// Settle), so each read is a locked one (lockedCurrentTurn), as the check's
+// are: its session load and runtime probes are its own, started within the
+// read, so a shared read that began before the lock, holding the session as
+// it was then, never decides the end, nor keeps the settle, which holds the
+// lock, waiting on its answer. Each read is bounded by turnWatchReadBound,
+// as a watcher read's is.
 func (h *SessionHandle) awaitTurnEnd(ctx context.Context, name, turn string, deadline time.Time, timing turnTiming, cause error) error {
 	what := fmt.Sprintf("interrupted turn %q of %s", turn, name)
 	read := func() (runtime.TurnHistory, error) {
 		readCtx, cancel := context.WithTimeout(ctx, turnWatchReadBound)
 		defer cancel()
 		return h.lockedCurrentTurn(readCtx)
+	}
+	running := cause != nil && !errors.Is(cause, runtime.ErrRuntimeUnavailable)
+	notEnded := func(last error) error {
+		if running {
+			return sessionpkg.TurnNotEndedError(what, last)
+		}
+		return sessionpkg.TurnEndUnreadError(what, last)
 	}
 	last := cause
 	for {
@@ -973,14 +990,16 @@ func (h *SessionHandle) awaitTurnEnd(ctx context.Context, name, turn string, dea
 			return nil
 		case err != nil:
 			last = err
+		default:
+			running = true
 		}
 		left := deadline.Sub(timing.now())
 		if left <= 0 {
-			return sessionpkg.TurnNotEndedError(what, last)
+			return notEnded(last)
 		}
 		select {
 		case <-ctx.Done():
-			return sessionpkg.TurnNotEndedError(what, ctx.Err())
+			return notEnded(ctx.Err())
 		case <-timing.after(min(turnSettlePoll, left)):
 		}
 	}

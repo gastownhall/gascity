@@ -72,17 +72,19 @@ when the context ends. Take the bound from the caller's own context.
   opposite of a watcher's: a watcher leaves a turn open on an idle reading it
   did not get, while the check refuses as unknown (`idleUnknown`), since only
   a busy reading counts as the turn running, and the settle counts it a
-  failed read, never the turn's end. That includes
-  `ErrObservationOutstanding`, which every later check's own reading gets at
-  once while one an earlier check left wedged is still out. A read that
-  decides which turn to act on, such as the lane interrupt's target, is
-  `TurnHandle.FreshTurn`: `CurrentTurn` with its session load and runtime
-  probes its own, under `fresh-` turn keys, so a shared read that began
-  before the turn now running never aims it at the turn before, and a store
-  that stalls leaves it unanswered when its context ends. Fresh reads of one
-  session do not share: one made while another is in flight, healthy or
-  wedged, gets `ErrObservationOutstanding` at once, so its callers serialize
-  them per session (the lane does, under its own key). It keeps
+  failed read, never the turn's end nor the turn running: a settle whose
+  reads all failed, after family waits that passed or could not answer, is
+  `session.TurnEndUnreadError`, which withholds a restart on failure. That
+  includes `ErrObservationOutstanding`, which every later check's own
+  reading gets at once while one an earlier check left wedged is still out.
+  A read that decides which turn to act on, such as the lane interrupt's
+  target, is `TurnHandle.FreshTurn`: `CurrentTurn` with its session load and
+  runtime probes its own, under `fresh-` turn keys, so a shared read that
+  began before the turn now running never aims it at the turn before, and a
+  store that stalls leaves it unanswered when its context ends. Fresh reads
+  of one session do not share: one made while another is in flight, healthy
+  or wedged, gets `ErrObservationOutstanding` at once, so its callers
+  serialize them per session (the lane does, under its own key). It keeps
   `CurrentTurn`'s failure direction, an idle reading it did not get leaving
   the turn open.
 

@@ -63,8 +63,9 @@ type laneExecDeps struct {
 	// note records a degradation the executor fell back from, by stage:
 	// the host's noteError. Nil notes nothing.
 	note func(stage string, err error)
-	// interrupts records the interrupt each conversation runs, for its turn
-	// observer (laneInterrupts). Nil records nothing.
+	// interrupts records the interrupt each conversation runs, which keeps a
+	// retry of a session-scoped op on its turn (laneInterrupts). Nil records
+	// nothing.
 	interrupts *laneInterrupts
 }
 

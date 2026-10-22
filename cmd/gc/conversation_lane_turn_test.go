@@ -10,6 +10,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/runtime"
 	"github.com/gastownhall/gascity/internal/session"
@@ -138,7 +139,13 @@ var laneTranscriptCaps = worker.TurnCapabilities{
 
 func newTurnLaneFixture(t *testing.T, p runtime.Profile, opts ...laneFixtureOpt) *turnLaneFixture {
 	t.Helper()
-	f := newLaneFixture(t, opts...)
+	return newTurnLaneFixtureOver(t, newLaneTestStore(), p, opts...)
+}
+
+// newTurnLaneFixtureOver is newTurnLaneFixture over store.
+func newTurnLaneFixtureOver(t *testing.T, store beads.Store, p runtime.Profile, opts ...laneFixtureOpt) *turnLaneFixture {
+	t.Helper()
+	f := newLaneFixtureOver(t, store, opts...)
 	turns := &scriptedTurns{FullFake: runtime.FullFake{Fake: f.sp}}
 	return &turnLaneFixture{laneFixture: f, sp: runtime.NewFakeProfile(p, turns), turns: turns}
 }
