@@ -1550,6 +1550,11 @@ func mergeWorkspace(base, fragment *City, fragMeta toml.MetaData, fragPath strin
 			func() string { return base.Workspace.SessionTemplate },
 			func() { base.Workspace.SessionTemplate = fragment.Workspace.SessionTemplate },
 		},
+		{
+			"implicit_agent_isolation",
+			func() string { return base.Workspace.ImplicitAgentIsolation },
+			func() { base.Workspace.ImplicitAgentIsolation = fragment.Workspace.ImplicitAgentIsolation },
+		},
 	}
 	for _, f := range fields {
 		if fragMeta.IsDefined("workspace", f.key) {

@@ -3556,6 +3556,14 @@
           "type": "string",
           "description": "SessionTemplate is a template string supporting placeholders: {{.City}},\n{{.Agent}} (sanitized), {{.Dir}}, {{.Name}}. Controls tmux session naming.\nDefault (empty): \"{{.Agent}}\" — just the sanitized agent name. Per-city\ntmux socket isolation makes a city prefix unnecessary."
         },
+        "implicit_agent_isolation": {
+          "type": "string",
+          "enum": [
+            "shared",
+            "worktree"
+          ],
+          "description": "ImplicitAgentIsolation selects the working-directory isolation for\ninjected implicit provider agents: \"shared\" (default, also when empty)\nor \"worktree\". \"shared\" keeps today's behavior — every numbered\ninstance of a rig-scoped implicit pool resolves to the rig root,\nwhich parallel git work can clobber (gc doctor's\npool-workdir-isolation check warns). \"worktree\" gives each\nrig-scoped implicit instance its own git worktree at\n.gc/worktrees/\u003crig\u003e/\u003cslot\u003e: the session cwd moves there, commits land\non the per-slot branch gc-\u003cprovider\u003e-\u003cn\u003e-\u003chash12\u003e (recorded as\ngc.work_branch / gc.work_commit by mol-do-work), merging that branch\nback is the user's or a pack's job, and files the rig's .gitignore\nignores (.env, node_modules, venvs) do not exist in a fresh worktree.\nEnabling it restarts implicit sessions once (pre_start joins the\nconfig fingerprint) and requires the core pack and a runtime that\nruns pre_start on the host (tmux, herdr)."
+        },
         "install_agent_hooks": {
           "items": {
             "type": "string"
