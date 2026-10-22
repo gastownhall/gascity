@@ -580,7 +580,11 @@ func TestDemandLegCacheClassifiesExactLegs(t *testing.T) {
 		{"bare MemStore", beads.NewMemStore(), nil, false},
 	} {
 		cache, exact := demandLegCache(tc.store)
-		if cache != tc.wantCache || exact != tc.exact {
+		var want demandLegView
+		if tc.wantCache != nil {
+			want = tc.wantCache
+		}
+		if cache != want || exact != tc.exact {
 			t.Errorf("%s: demandLegCache = (%p, %t), want (%p, %t)", tc.name, cache, exact, tc.wantCache, tc.exact)
 		}
 	}

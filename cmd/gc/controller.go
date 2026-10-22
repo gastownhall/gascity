@@ -1493,6 +1493,7 @@ func runController(
 	stdout, stderr io.Writer,
 ) int {
 	markProgramShadowLongLived()
+	defer markRigNamespaceControllerProcess()()
 	if heldLock == nil {
 		lock, err := acquireControllerLock(cityPath)
 		if err != nil {

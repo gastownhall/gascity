@@ -1254,8 +1254,24 @@ func controlGraphStore(cityPath, storePath string, cfg *config.City, scopeStore 
 // that scope — is applied by controlGraphStore at the point of use, because the
 // control dispatcher needs BOTH: the graph store that owns control beads, and
 // this scope/work store that owns the input convoy an execution snapshot reads.
-func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (beads.Store, error) {
+func openControlStoreAtForCity(storePath, cityPath string, cfg *config.City) (store beads.Store, err error) {
 	scopeRoot := resolveStoreScopeRoot(cityPath, storePath)
+	// A guarded rig's control store (federation = "rig") is guarded too: the
+	// dispatcher's ready scan selects by its session's id and name, which
+	// another city's rows can carry in a shared store. Every return below
+	// passes through here.
+	defer func() {
+		if err != nil {
+			return
+		}
+		ns, nsErr := rigNamespaceForOpen(cfg, cityPath, scopeRoot)
+		if nsErr != nil {
+			_ = closeBeadStoreHandle(store)
+			store, err = nil, nsErr
+			return
+		}
+		store = guardRigStore(store, ns)
+	}()
 	provider := rawBeadsProviderForScope(scopeRoot, cityPath)
 	if provider == "file" || strings.HasPrefix(provider, "exec:") {
 		return openStoreAtForCity(storePath, cityPath)

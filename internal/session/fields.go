@@ -441,6 +441,9 @@ var registry = slices.Concat([]Field{
 	{Key: "real_world_app_project_id", Class: ClassLaunchConfig, Writers: sites(op("internal/api/handler_session_create.go", "Server.persistSessionMeta"))},
 	{Key: beadmeta.OptionMetadataPrefix, Family: true, Class: ClassLaunchConfig, Writers: sites(op(srcManager, "Manager.UpdateTemplateOverrides"))},
 	{Key: beadmeta.LabelRevisionMetadataKey, Class: ClassAdvisory, NewKey: true, NoWriter: "written by internal/beads' native Dolt label CAS (LL1), outside the census dirs; a version stamp no decision reads"},
+	// The creation stamp a guarded rig store (federation = "rig") writes on
+	// every row it creates, session rows included; ownership, not a decision.
+	{Key: beadmeta.OwnerNamespaceMetadataKey, Class: ClassAdvisory, NewKey: true, Writers: sites(op("cmd/gc/rig_namespace_store_writes.go", "rigNamespaceStore.stampCreate"))},
 	{Key: beadmeta.InfraMigratedFromMetadataKey, Class: ClassAdvisory, Writers: sites(legacy("cmd/gc/infra_class_migrate.go", "infraMigrationRow"))},
 	// Usage compute attributes a row by its run chain (beadmeta's runIDChainKeys).
 	{Key: beadmeta.MoleculeIDMetadataKey, Class: ClassAdvisory, NoWriter: "no session-row writer: work beads carry it; usage compute reads a row's run chain", Readers: sites(legacy("cmd/gc/usage_compute.go", "emitComputeFactForBead"))},
