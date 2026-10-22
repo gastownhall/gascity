@@ -268,6 +268,9 @@ func ResolveTmuxAlias(cityPath, cityName string, a config.Agent, rigs []config.R
 // surfaces work_dir template errors to callers that need to fail closed.
 func ResolveWorkDirPathStrict(cityPath, cityName, qualifiedName string, a config.Agent, rigs []config.Rig) (string, error) {
 	if a.WorkDir == "" {
+		if slot, ok := ImplicitSlotFor(cityPath, qualifiedName, a, rigs); ok {
+			return slot.Path, nil
+		}
 		if rigName := ConfiguredRigName(cityPath, a, rigs); rigName != "" {
 			if rigRoot := RigRootForName(rigName, rigs); rigRoot != "" {
 				return ResolveDirPath(cityPath, rigRoot), nil

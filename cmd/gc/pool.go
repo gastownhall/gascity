@@ -331,6 +331,7 @@ func deepCopyAgent(src *config.Agent, name, dir string) config.Agent {
 		MouseMode:              src.MouseMode,
 		PoolName:               src.QualifiedName(),
 		Implicit:               src.Implicit,
+		PoolSlotWorktrees:      src.PoolSlotWorktrees,
 		ScaleCheck:             src.ScaleCheck,
 		BindingName:            src.BindingName,
 		PackName:               src.PackName,

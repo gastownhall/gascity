@@ -13,6 +13,17 @@ more work arrives.
 
 {{ template "claim-protocol" . }}
 
+## Your Working Directory
+
+In a rig that is a git repository, each numbered pool instance runs in its
+own git worktree of the rig (`.gc/worktrees/<rig>/<agent>-<n>`) on its own
+`gc-<agent>-<n>-<hash>` branch, not in the rig root. The worktree belongs to
+the slot, not to you: an earlier session of the same slot may have left
+files, commits, or another checked-out branch. Before you start, run
+`git status` and `git log --oneline -5` to see what is there. Never discard,
+reset, or stash work you did not create; if leftover work is in your way,
+escalate instead of deleting it.
+
 ## Following Your Formula
 
 Your formula defines your work as a sequence of steps. Steps are NOT

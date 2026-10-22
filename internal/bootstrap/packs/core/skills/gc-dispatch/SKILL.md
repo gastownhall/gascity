@@ -158,8 +158,10 @@ beads** with a coordinator/mayor handoff instead of attaching this formula:
 
 **mol-do-work** — Simple work lifecycle. Agent reads the bead, implements
 the solution in the current working directory, and closes the bead.
-No git branching, no worktree isolation, no refinery handoff. Good for
-demos and simple single-agent workflows.
+No branch management, no refinery handoff. In a git rig, numbered pool
+instances work in their own pool-slot worktree, so commits land on the
+slot's `gc-<agent>-<n>-<hash>` branch. Good for demos and simple
+single-agent workflows.
 
 ```
 gc sling <agent> <bead-id> --on mol-do-work
