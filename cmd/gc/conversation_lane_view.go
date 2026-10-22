@@ -15,7 +15,8 @@ import (
 //   - Generation, Epoch and Token as session.InputFenceFor reads them, Token
 //     "" when the row carries no instance token;
 //   - Dormant for an asleep or drained row;
-//   - ContentHold false until the row carries one (OJ-19).
+//   - ContentHold for a row whose content_hold cell is set, readable or
+//     not (session.ContentHeldInfo; OJ-19).
 func conversationLaneView(info session.Info) opjournal.ConversationView {
 	state := session.State(strings.TrimSpace(info.MetadataState))
 	// InputFenceFor reads the generation and epoch only beside a token. The
@@ -25,12 +26,13 @@ func conversationLaneView(info session.Info) opjournal.ConversationView {
 	counted.InstanceToken = "-"
 	fence, _ := session.InputFenceFor(counted)
 	return opjournal.ConversationView{
-		ID:         info.ID,
-		Closed:     info.Closed || state == session.StateArchived,
-		Generation: fence.Generation,
-		Epoch:      fence.Epoch,
-		Token:      info.InstanceToken,
-		Dormant:    state == session.StateAsleep || state == session.StateDrained,
+		ID:          info.ID,
+		Closed:      info.Closed || state == session.StateArchived,
+		Generation:  fence.Generation,
+		Epoch:       fence.Epoch,
+		Token:       info.InstanceToken,
+		Dormant:     state == session.StateAsleep || state == session.StateDrained,
+		ContentHold: session.ContentHeldInfo(info),
 	}
 }
 

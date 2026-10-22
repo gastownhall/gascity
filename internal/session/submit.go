@@ -419,8 +419,9 @@ func (m *Manager) sendTurnInterruptLocked(ctx context.Context, b beads.Bead, ses
 // Gemini's immediate confirm. The follow-up interrupts whatever turn runs
 // when it lands, so a checked stop (StopTurnIf) passes its check as still:
 // the follow-up goes only once still passes again, and a refusal sends
-// nothing more and fails the wait, the refusal in its text only, since the
-// first key was sent.
+// nothing more and fails the wait with a *followUpRefusedError, which wraps
+// none of the refusal, since the first key was sent: StopTurnWith reads the
+// refusal from it.
 func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, sessName string, mode runtime.TurnInterruptMode, still func() error) error {
 	if !waitsForIdleAfterInterrupt(b) {
 		return nil
@@ -439,7 +440,7 @@ func (m *Manager) waitForInterruptIdleLocked(ctx context.Context, b beads.Bead, 
 	followUp := func(what string) error {
 		if still != nil {
 			if err := still(); err != nil {
-				return fmt.Errorf("%s: not sent, the turn check refused it (%s)", what, err.Error())
+				return &followUpRefusedError{what: what, refusal: err}
 			}
 		}
 		if err := runtime.InterruptWithContext(ctx, m.sp, sessName); err != nil {

@@ -52,9 +52,9 @@ var ErrInputClearSkipped = errors.New("input box left alone: a client may be att
 var ErrInteractionActionUnavailable = errors.New("pending interaction has no option for the requested action")
 
 // ErrInteractionResponseInvalid reports that a response to a pending
-// interaction cannot be applied: it names no outstanding request, or its
-// action is unknown or not offered by the interaction. The interaction stays
-// pending so the caller can answer again.
+// interaction cannot be applied: its action is unknown or not offered by the
+// interaction. The interaction stays pending so the caller can answer again.
+// A response naming no outstanding request is ErrInteractionGone instead.
 var ErrInteractionResponseInvalid = errors.New("interaction response is invalid")
 
 // ErrNudgeRefusedPendingInteraction reports that a nudge was refused because
@@ -636,6 +636,11 @@ type PendingInteraction struct {
 
 // InteractionResponse is the client's answer to a pending interaction.
 type InteractionResponse struct {
+	// RequestID names the request the answer is for. A provider answers only
+	// that request and refuses the response when another one is pending, so
+	// a caller answering one raising sets it (the conversation lane always
+	// does: request ids may repeat, and an answer must not reach a prompt it
+	// was not meant for). Empty answers whatever is pending.
 	RequestID string            `json:"request_id,omitempty"`
 	Action    string            `json:"action"`
 	Text      string            `json:"text,omitempty"`

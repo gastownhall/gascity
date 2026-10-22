@@ -443,7 +443,7 @@ func TestProposeEveryKindWithDefaults(t *testing.T) {
 			Scope: Scope{Kind: ScopeSession, Generation: 3, Turn: "t1"},
 		},
 		{
-			Conversation: "gc-1", Kind: KindRespond, ClientKey: "respond:3:r1", Payload: "allow", Producer: Producer{Principal: "p", Actor: "operator"},
+			Conversation: "gc-1", Kind: KindRespond, ClientKey: "r1", Payload: `{"action":"approve"}`, Producer: Producer{Principal: "p", Actor: "operator"},
 			Scope: Scope{Kind: ScopeSession, Generation: 3, Interaction: "r1"},
 		},
 	}

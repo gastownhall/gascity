@@ -19,8 +19,9 @@
 // gc:fact-conv:<conversation>), written closed or, on a store that creates
 // rows open, closed right after the create (RecordFact); and one runtime row
 // per conversation (gc:rt, gc:rt-conv:<conversation>) at the pinned id
-// RuntimeRowID, which holds the lane cells (gen, epoch, seq, lease) and the
-// runtime and turn observations in gc.rt.* metadata; lanes and observers
+// RuntimeRowID, which holds the lane cells (gen, epoch, seq, lease, and the
+// interaction occurrence the lane last saw pending) and the runtime and turn
+// observations in gc.rt.* metadata; lanes and observers
 // update it in place under revision guards (RuntimeRowPatch builds the
 // update). Rows are no-history and never ephemeral. Type "op" is
 // ready-excluded, rows carry no gc.routed_to, and an op's assignee is only ever
@@ -97,7 +98,7 @@
 // closes (if_idle while busy: skipped{busy}; steer with fallback_fail, or a
 // respond the runtime cannot perform: failed{unsupported}); an op that may
 // have been delivered (a re-take, or one released after an Unknown result)
-// waits instead, busy or unsupported, to be replayed, and start_by bounds
+// waits instead, busy, to be replayed, and start_by bounds
 // the wait (failed{deadline_in_flight}). An after_unreadable wait names
 // the cause in its Detail; it retries after TransientBackoffBase when the
 // store failed to read the target, and waits with no timer, as after_pending
@@ -107,6 +108,60 @@
 // A pass's Next is never the instant it planned at. Delivered text names
 // no identifier (I14). A lane store must apply guarded batches
 // (NewLaneStore); there is no production caller until OJ-12.
+//
+// # Deliver-now
+//
+// A deliver-now message M (when: now, or the legacy interrupt) is lowered
+// by the rule phase into its derived interrupt I in one guarded batch: I
+// created at NowInterruptID (client key <M>:interrupt, M's producer,
+// causation M, at most once, on_failure fail, scoped to M's now_gen, or the
+// effective generation, and now_turn, no after), M moved to accepted. A pass
+// that lowers reads again before any Take. While both are open they are one
+// unit: a control entry in M's arrival order, taken [I, M] under one lease
+// (TakeNow), and while a unit is open no content is taken (U-ORDER),
+// whatever either op waits on, but content the probe admits past a content
+// block every open unit waits on; an interrupt this build cannot decode
+// holds nothing. A lowered M's after is not read again. The
+// unit's effect is direct when the probe shows no turn to replace (I closes
+// skipped{stale} with no call and M goes at once); otherwise the
+// interrupt's replacement step (InterruptCall.ForReplacement), then M as a
+// replacement delivery only when the step settled at a boundary
+// (Settled.After) with time left, linked from the step's read so the
+// replaced turn is never its candidate; or one FusedNowExecutor command. A
+// targeted unit whose turn is not running, and a runtime that is not
+// running, close I skipped{stale} at plan time; a unit never reports Busy.
+// A message the effect did not send is released with no gate and no failure
+// counted (last_error not_attempted). Once I is closed, M is urgent content
+// that goes alone at a boundary, marked interrupt_unsupported after
+// failed{unsupported} and interrupt_failed after any other failure, unless
+// its delivery has its own mark. An open I whose M is closed or gone is an
+// orphan: it closes canceled (cancel_by lane:cascade) when M was canceled,
+// which replaces the rule close of an I that never ran, else
+// skipped{not_needed}. A partner row that cannot be read waits
+// now_unreadable. An open derived interrupt pairs by identity, not by
+// namespace: a message that moved here with its id from another namespace
+// forms its unit with it wherever a lane pinned it. A closed one is read
+// only where this lane or the message's own namespace pins it, so one a
+// lane of a third namespace pinned (a lowering on a stale mint prefix)
+// reads as missing here, and its message goes marked interrupt_failed
+// whatever its outcome. A message not yet lowered whose derived interrupt
+// already exists, open anywhere or found at either of those ids, is refused
+// (now_interrupt_taken) and never lowered beside it: only a lowering mints
+// that key. An interrupt keyed as a derived one whose causation is another
+// namespace's op id with no row here is plain.
+//
+// RelowerNowUnits re-pins under this store's prefix the derived interrupt
+// of every open deliver-now unit whose interrupt carries another
+// namespace's prefix, as a namespace move (gc storage migrate) leaves them.
+// One guarded batch per unit creates the interrupt at NowInterruptID as a
+// copy of the row it reads and closes that row
+// skipped{coalesced_into: <copy>} under the revision it copied; the
+// message is not written. Only a unit whose two ops are open and not in
+// flight, with one open derived interrupt and a free id here, moves: an
+// open derived interrupt never reached its runtime, so its copy runs
+// nothing twice. A forward pointer is never a unit's outcome. It is
+// idempotent and every batch is all or nothing; run it with the store's
+// writers stopped.
 //
 // # Executor and open rows
 //
@@ -129,20 +184,29 @@
 // id = <prefix>-op-<base32(sha256(lp("gascity/op-id/v1") lp(conversation)
 // lp(principal) lp(client_key)))[:16]>, lp a uvarint length prefix, prefix the
 // mint prefix of the conversation row's store (never parsed from the id).
-// Target keys: stop:<gen>:<turn> (InterruptKey). In O0 respond is keyed by the
-// client key; its target key is OJ-16's, keyed by the interaction occurrence,
-// never the runtime's request id, which can be a content hash, so RespondKey
-// stays unused. The digest covers the defaulted kind, policy (a deliver-now's
-// now_gen and now_turn included), scope, after and payload (≤16 KiB): same id and
-// digest returns the existing op; another digest is ErrKeyReuse, refused at the
-// front door and never written. The principal is a stable logical id, never a
+// Target keys: stop:<gen>:<turn> (InterruptKey), and respond:<raised fact
+// id> (RespondKey) for a lane respond, keyed by the interaction occurrence it
+// answers, never the runtime's request id, which can be a content hash: an
+// occurrence is <request id>#<n>, the nth raising of that request id in its
+// generation (RecordRaising). A lane respond is at most once. The first
+// accepted answer wins: a close that may have answered ends the occurrence,
+// a close with nothing sent ends it once no other open answer names it
+// (occurrenceEnd, re-read once the close lands: endClosed), each end in the
+// batch that writes its close (endItem), and a look that shows its prompt
+// gone ends it as well, even before any answer names it (clearGone, which
+// reads the runtime row's pending cell), so a prompt still showing is the
+// next occurrence. A legacy respond
+// keeps its client key. The digest covers the defaulted kind, policy (a
+// deliver-now's now_gen and now_turn included), scope, after and payload
+// (≤16 KiB): same id and digest returns the existing op; another digest is
+// ErrKeyReuse, refused at the front door and never written. The principal is a stable logical id, never a
 // bearer, credential or box epoch; the actor is an open class string.
 //
 // # Kinds (class · lane · default scope — Primitive Test: atomic, gains with models, transport)
 //
 //	message   content   conversation  conversation  create-if-absent delivery; producers decide what to say
 //	interrupt control   conversation  session+turn  turn-fenced, keyed by target; the requester decides to stop
-//	respond   control   conversation  session+req   first answer wins; a human or granted principal answers
+//	respond   control   conversation  session+occ   at most once; first accepted answer wins; a principal answers
 //	create    lifecycle lifecycle     conversation  materializes a captured launch spec; a generator decides
 //	wake      lifecycle lifecycle     conversation  one watermark; a generator (the planner too) decides
 //	suspend   lifecycle lifecycle     conversation  sets an operator hold; the requester decides

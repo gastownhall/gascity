@@ -197,21 +197,32 @@ func (s *Store) WithPendingCreateRollback(ctx context.Context, expected Info, fn
 // patch.
 //
 // The row is re-read, and the patch is refused with (false, nil) when the row
-// is closed or its lifecycle facts differ from expected's. Where the store
-// resolves a conditional writer (beads.ResolveConditionalWriter), the write is
-// then fenced on the re-read row's revision, so a writer that lands between the
-// re-read and the write also wins: the fenced write is refused with (false,
-// nil). The revision is passed through as-is: bd revisions are signed, and
-// whether a token is usable is the store's call. Without a conditional writer
-// the patch is written unconditionally after the re-read check, which leaves
-// only the window between that re-read and the write.
+// is closed or its lifecycle facts differ from expected's. The re-read and the
+// write both run inside the row's session mutation lock, taken without
+// waiting: every in-process lifecycle verb (suspend, wake, close) writes under
+// that lock, so none can land between the check and the write. While another
+// holder has the lock the call writes nothing and returns (false, nil); the
+// advisory caller recomputes the patch on its next tick from a snapshot that
+// includes the holder's write. Where the store resolves a conditional writer
+// (beads.ResolveConditionalWriter), the write is also fenced on the re-read
+// row's revision, so a writer in another process that lands between the re-read
+// and the write wins: the fenced write is refused with (false, nil). The
+// revision is passed through as-is: bd revisions are signed, and whether a
+// token is usable is the store's call. Without a conditional writer an
+// other-process writer is not fenced; only the in-process half is closed.
 //
 // A refused patch writes nothing, and the caller must not fold it. A
 // require-mode store that cannot fence, and a store that reports
 // beads.ErrConditionalWriteUnsupported at call time, return an error rather
 // than falling back to an unconditional write.
 func (s *Store) ApplyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatch) (bool, error) {
-	return s.applyPatchIfLifecycleUnchanged(expected, patch, nil, 1)
+	applied := false
+	_, err := tryWithSessionMutationLock(expected.ID, func() error {
+		var err error
+		applied, err = s.applyPatchIfLifecycleUnchanged(expected, patch, nil, 1)
+		return err
+	})
+	return applied, err
 }
 
 // ApplyPatchIfLifecycleUnchangedUnder is ApplyPatchIfLifecycleUnchanged for a
@@ -236,7 +247,9 @@ func (s *Store) applyPatchIfLifecycleUnchanged(expected Info, patch MetadataPatc
 // revision; a fence lost to another writer re-reads, up to attempts times.
 // Without conditional writes the write is unfenced: its window runs from the
 // read to the write, plus the cache's lag when read goes through the cache
-// (ApplyPatchIfLifecycleUnchanged; Commit reads live).
+// (ApplyPatchIfLifecycleUnchanged; Commit reads live). The in-process half of
+// that window is closed where the caller holds the row's mutation lock across
+// the call, as ApplyPatchIfLifecycleUnchanged does.
 func (s *Store) commitIf(id string, patch MetadataPatch, lease *RuntimeLease, attempts int, read func(string) (beads.Bead, error), holds func(beads.Bead) bool) (CommitResult, error) {
 	if len(patch) == 0 {
 		return 0, nil // nothing to write

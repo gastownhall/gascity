@@ -34,6 +34,7 @@ import (
 	"github.com/gastownhall/gascity/internal/beads"
 	"github.com/gastownhall/gascity/internal/config"
 	"github.com/gastownhall/gascity/internal/coordclass"
+	"github.com/gastownhall/gascity/internal/opjournal"
 	"github.com/gastownhall/gascity/internal/storebinding"
 	"github.com/gastownhall/gascity/internal/storeref"
 )
@@ -270,6 +271,17 @@ refuses such a city and names this command.
 --from-backup re-copies a binding whose database is gone from that backup
 instead of from the work store, which no longer holds the slice.
 
+Last, on the converged binding, each open deliver-now unit the copy carried in
+is re-lowered under the binding's id prefix: its derived interrupt is re-created
+at the id a lowering there gives it, with its state, and the old row is closed
+as a pointer to it, one all-or-nothing write per unit. A unit in flight or that
+may have run, one with more than one open derived interrupt, and one whose id
+there another row already holds are left as they are and named; their lanes run
+each one as a unit by identity. A message not yet lowered, or whose unit is
+over, is not a unit to move, and is not named. A city whose binding holds no
+lowered deliver-now message skips the step and prints nothing for it. A step
+that did not finish exits non-zero, and running this command again finishes it.
+
 The move refuses while a writer can reach the source. This binary can prove the
 absence of a controller and cannot prove the absence of anything else, so that
 half is an explicit operator attestation.`,
@@ -387,7 +399,8 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 	// The same resolution boot performs, performed first: a plan the runtime
 	// would refuse to serve must not be migrated toward, or the operator ends
 	// up with a proven copy in a binding that still cannot start.
-	if _, err := resolveCityStoragePlan(request.CityPath, request.Cfg); err != nil {
+	plan, err := resolveCityStoragePlan(request.CityPath, request.Cfg)
+	if err != nil {
 		fmt.Fprintf(stderr, "%s: %v\n", logPrefix, err) //nolint:errcheck // best-effort stderr
 		return 1
 	}
@@ -439,8 +452,19 @@ func doStorageMigrate(ctx context.Context, request storageOperatorRequest, stdou
 		return 1
 	}
 	recordStorageBindingOutcome(rec, report, "")
-	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
-		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear))
+	// The last step, on a converged binding only: every other binding handle
+	// of this command is closed, and the step opens the binding as the
+	// runtime serves it.
+	var relowered opjournal.RelowerReport
+	if converged, ok := report.convergedBinding(plan, request.CityPath, request.Cfg); ok {
+		relowered, err = relowerConvergedNowUnits(ctx, converged, rec, logPrefix, stderr)
+		if err != nil {
+			fmt.Fprintln(stderr, relowerFailureAdvice(logPrefix, target.Binding, err)) //nolint:errcheck // best-effort stderr
+			return 1
+		}
+	}
+	fmt.Fprintf(stdout, "Migrated. %s now serves %s from %s; %s%s. Start the city with `gc start`.\n", //nolint:errcheck // best-effort stdout
+		target.Binding, infraMigrationClassList(), target.Database, describeInfraClear(report.Clear), relowerSuccessClause(relowered))
 	return 0
 }
 

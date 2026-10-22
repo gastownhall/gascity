@@ -428,6 +428,17 @@ func TestSessionFieldsClearSitesClear(t *testing.T) {
 				return fieldBead(t, m, id).Metadata
 			},
 		},
+		"internal/session/content_hold.go:Store.ClearContentHold": { // a resume releases the hold it read
+			[]string{session.ContentHoldKey, "operator@2026-03-08T12:00:00Z"},
+			func(t *testing.T, meta []string) map[string]string {
+				m, _ := stampedMem(t, gate.Require)
+				id := fieldRow(t, m, meta...)
+				if cleared, standing, err := sessionFrontDoor(m).ClearContentHold(id, pairs(meta)[session.ContentHoldKey]); err != nil || !cleared {
+					t.Fatalf("ClearContentHold = %t, %q, %v", cleared, standing, err)
+				}
+				return fieldBead(t, m, id).Metadata
+			},
+		},
 		"internal/session/lifecycle_transition.go:CommitStartedPatch": {
 			[]string{"continuation_reset_pending", "true", session.ResetCommittedAtKey, ago(time.Minute)},
 			patchSite(func(session.Info) session.MetadataPatch {

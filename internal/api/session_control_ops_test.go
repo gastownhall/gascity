@@ -1791,7 +1791,7 @@ var syncEndpoints = []syncEndpoint{
 	{path: "/stop", kind: opjournal.KindInterrupt, code: http.StatusOK, sessionScoped: true, policy: interruptOpPolicy},
 	{
 		path: "/respond", body: `{"request_id":"req-1","action":"approve"}`, kind: opjournal.KindRespond, code: http.StatusAccepted, sessionScoped: true,
-		payload: `{"action":"approve","text":""}`, interaction: "req-1",
+		payload: `{"action":"approve","text":""}`, interaction: "req-1", policy: respondOpPolicy,
 	},
 	{path: "/kill", kind: opjournal.KindKill, code: http.StatusOK, sessionScoped: true},
 	{path: "/suspend", kind: opjournal.KindSuspend, code: http.StatusOK},

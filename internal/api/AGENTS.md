@@ -199,7 +199,11 @@ pending, closes `skipped{stale}` rather than approving a prompt nobody saw.
 That holds only as far as request IDs tell prompts apart: where the runtime
 derives them from the prompt's content (tmux hashes the tool and its input),
 an identical prompt raised again carries the first one's ID and is answered
-too, until OJ-16 keys respond ops by the interaction occurrence. A
+too. That is permanent for `/respond`: its op stays keyed by request id, with
+its scope, payload (`respondOpPayload`) and at_least_once policy frozen, so
+rows earlier builds recorded keep their request digest and a same-key retry
+replays them. Only lane respond ops (`opjournal.RespondKey`) are keyed by the
+interaction occurrence; do not re-key the legacy op to match. A
 recorded kill is `gc session kill`'s operator kill (`worker.OperatorKill`,
 through `Server.operatorKill`): it takes the runtime lease first (an open
 row's as `gc session kill` does, `session.KillRuntimeLease`; a closed row's,
@@ -269,9 +273,8 @@ kind gate is the running lane host's, read through the optional
 listed when the controller started, while its host runs, never the live
 config, which a reload replaces without changing what the host executes.
 Any other kind, or any kind while no host runs, is refused 409
-`kind-not-enabled`; a message whose `when` the lane does not lower
-(`opjournal.When.LaneLowered`: `now`, `interrupt`) is refused 409
-`when-not-supported`. Every refusal, the request's own validation included
+`kind-not-enabled`; every `when` a message names is one the lane lowers
+(`now` and the legacy `interrupt` as a deliver-now unit). Every refusal, the request's own validation included
 (`opjournal.Store.Preview`), and the read of the event cursor the answer
 carries come before the session is resolved, so a refused request, or one
 whose cursor cannot be read, writes nothing and materializes no named

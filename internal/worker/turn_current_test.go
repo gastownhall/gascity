@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/gastownhall/gascity/internal/runtime"
+	sessionpkg "github.com/gastownhall/gascity/internal/session"
 	"github.com/gastownhall/gascity/internal/sessionlog"
 )
 
@@ -447,6 +448,111 @@ func TestCurrentTurnConcurrentOverlaysShareOneSnapshot(t *testing.T) {
 		if a.err != nil || a.hist.Current.Active() || len(a.hist.Recent) != 1 || !a.hist.Recent[0].Inferred {
 			t.Fatalf("concurrent reader = %+v, %v; want the inferred end", a.hist, a.err)
 		}
+	}
+}
+
+// Kills a FreshTurn that joins a read in flight (TurnHandle.FreshTurn): a
+// shared read a watch started before the running turn did holds the session
+// as it was then, and would aim an interrupt at the turn before. Each case
+// keeps such a read in flight for the whole test. CurrentTurn, which shares
+// it, goes unanswered, or leaves the turn open on the busy reading it holds;
+// FreshTurn makes its own reads and sees the session as it is.
+func TestFreshTurnJoinsNoReadInFlight(t *testing.T) {
+	stale := runtime.TurnHistory{Current: runtime.TurnState{TurnID: "acp-1"}, ObservedAt: time.Now()}
+	running := runtime.TurnHistory{Current: runtime.TurnState{TurnID: "acp-2"}, ObservedAt: time.Now()}
+	protocol := []struct {
+		name string
+		// handle builds the handle on fake and returns the key of its
+		// shared history read.
+		handle func(t *testing.T, fake *runtime.Fake) (TurnHandle, string)
+	}{
+		{"session handle", func(t *testing.T, fake *runtime.Fake) (TurnHandle, string) {
+			s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: fake}), "claude", "")
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{s.info.SessionName: {fullTurnCaps}}
+			fake.TurnHistoryScripts = map[string][]runtime.TurnHistory{s.info.SessionName: {running}}
+			return s.handle, turnObservationKey("history", s.handle.turnObservationScope(), s.info.SessionName)
+		}},
+		{"runtime handle", func(t *testing.T, fake *runtime.Fake) (TurnHandle, string) {
+			h := newTurnRuntimeHandle(t, runtime.NewFakeProfile(runtime.ProfileACP, runtime.FullFake{Fake: fake}))
+			fake.TurnCapabilityScripts = map[string][]runtime.TurnCapabilities{"turn-worker": {fullTurnCaps}}
+			fake.TurnHistoryScripts = map[string][]runtime.TurnHistory{"turn-worker": {running}}
+			city, err := sessionpkg.NewCityDir(h.cityPath)
+			return h, turnObservationKey("history", turnCityScope(city, err, h.provider), "turn-worker")
+		}},
+	}
+	for _, tc := range protocol {
+		t.Run(tc.name+"/protocol history", func(t *testing.T) {
+			h, key := tc.handle(t, runtime.NewFake())
+			startSharedRead(t, key, stale)
+			joined, cancelJoined := context.WithTimeout(context.Background(), 100*time.Millisecond)
+			defer cancelJoined()
+			if got, err := h.CurrentTurn(joined); !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+				t.Fatalf("CurrentTurn beside the read in flight = %+v, %v; want it to join that read and go unanswered", got, err)
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			got, err := h.FreshTurn(ctx)
+			if err != nil || got.Current.TurnID != "acp-2" {
+				t.Fatalf("FreshTurn beside the read in flight = %+v, %v; want acp-2 from a read of its own", got, err)
+			}
+		})
+	}
+	t.Run("session handle/idle overlay", func(t *testing.T) {
+		idle := newIdleScript(idleAnswer{idle: true})
+		s := quietOpenClaudeTurn(t, idle)
+		startSharedRead(t, turnObservationKey("idle", s.handle.turnObservationScope(), s.info.SessionName), idleReading{idle: false, supported: true})
+		joined, cancelJoined := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancelJoined()
+		if got, err := s.handle.CurrentTurn(joined); err != nil || got.Current.TurnID != claudeTurn1 {
+			t.Fatalf("CurrentTurn beside the reading in flight = %+v, %v; want the turn left open", got, err)
+		}
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		got, err := s.handle.FreshTurn(ctx)
+		if err != nil || got.Current.Active() || len(got.Recent) != 1 || !got.Recent[0].Inferred {
+			t.Fatalf("FreshTurn beside the reading in flight = %+v, %v; want the turn ended, inferred from readings of its own", got, err)
+		}
+		if calls := idle.idleCalls(); calls != 2 {
+			t.Fatalf("SnapshotIdle calls = %d, want FreshTurn's own 2", calls)
+		}
+	})
+}
+
+// Kills a FreshTurn whose session load ignores ctx: a store that stalls
+// would hold the read, and the key of every caller that bounds it, until the
+// store answers. FreshTurn returns unavailable as ctx ends; another made
+// while the stalled load is still out is refused at once
+// (ErrObservationOutstanding), never joining it nor waiting on the store.
+func TestFreshTurnBoundsItsSessionLoad(t *testing.T) {
+	s := newTurnSession(t, profiled(runtime.ProfileACP, runtime.FullFake{Fake: runtime.NewFake()}), "claude", "")
+	store := newStallingTurnStore(t, s.store)
+	s.handle.manager = sessionpkg.NewManagerWithOptions(store, s.sp, sessionpkg.WithCityPath(t.TempDir()))
+	store.stall(s.info.ID)
+	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	defer cancel()
+	done := make(chan error, 1)
+	go func() {
+		_, err := s.handle.FreshTurn(ctx)
+		done <- err
+	}()
+	store.awaitStalled(t)
+	select {
+	case err := <-done:
+		if !errors.Is(err, runtime.ErrRuntimeUnavailable) || !errors.Is(err, context.DeadlineExceeded) {
+			t.Fatalf("FreshTurn over a stalled store = %v, want unavailable at its deadline", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("FreshTurn over a stalled store did not return when its ctx ended")
+	}
+	again, cancelAgain := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelAgain()
+	started := time.Now()
+	_, err := s.handle.FreshTurn(again)
+	if !errors.Is(err, ErrObservationOutstanding) || !errors.Is(err, runtime.ErrRuntimeUnavailable) {
+		t.Fatalf("FreshTurn while the stalled load is out = %v, want ErrObservationOutstanding", err)
+	}
+	if waited := time.Since(started); waited > time.Second {
+		t.Fatalf("FreshTurn while the stalled load is out waited %v, want it refused at once", waited)
 	}
 }
 

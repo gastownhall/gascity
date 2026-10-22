@@ -412,6 +412,9 @@ type Info struct {
 	// the ladder's release refuses one the hook recorded.
 	WorkStartedRaw string // work_started (raw JSON)
 	WorkLadderRaw  string // work_ladder (raw JSON)
+	// ContentHoldRaw is the RAW content_hold cell (ContentHoldKey;
+	// content_hold.go), read by ContentHeldInfo and ParseContentHold.
+	ContentHoldRaw string // content_hold (raw)
 	// ExecutionClaimStarted is the RAW execution_claim_started stamp
 	// ("<instance_token>|<bead>") the execution backstop writes once a claim's
 	// step started: with the work_started cell, the started records a release
