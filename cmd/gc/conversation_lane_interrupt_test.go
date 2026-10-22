@@ -140,13 +140,13 @@ func (c *interruptCase) propose(t *testing.T, key, turn string, onFailure opjour
 	})
 }
 
-func (c *interruptCase) pass(t *testing.T) {
+func (c *interruptCase) pass(t *testing.T) opjournal.PassResult {
 	t.Helper()
-	c.passWith(context.Background(), t)
+	return c.passWith(context.Background(), t)
 }
 
 // passWith is pass under ctx, which the effect's context derives from.
-func (c *interruptCase) passWith(ctx context.Context, t *testing.T) {
+func (c *interruptCase) passWith(ctx context.Context, t *testing.T) opjournal.PassResult {
 	t.Helper()
 	deps := c.f.deps(c.st)
 	deps.interrupts = c.ints
@@ -165,9 +165,11 @@ func (c *interruptCase) passWith(ctx context.Context, t *testing.T) {
 		}
 		return stub, nil
 	}
-	if _, err := c.l.Pass(ctx, v, e); err != nil {
+	res, err := c.l.Pass(ctx, v, e)
+	if err != nil {
 		t.Fatalf("Pass: %v", err)
 	}
+	return res
 }
 
 func (c *interruptCase) requests() []worker.InterruptRequest {
