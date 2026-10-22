@@ -459,6 +459,7 @@ go_library(
         "pool_slot_workdir.go",
         "prime_auto_handoff_inject.go",
         "probe_template.go",
+        "process_failpoint.go",
         "productmetrics_adapter.go",
         "productmetrics_adapter_production.go",
         "productmetrics_child_env.go",
