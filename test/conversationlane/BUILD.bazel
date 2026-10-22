@@ -71,8 +71,11 @@ go_test(
 # --config=integration instead of letting it pass with no test. Run with
 #
 #   bazel test --config=ci --config=integration --strategy=TestRunner=local \
-#     --test_timeout=7200 //test/conversationlane:x12_evidence
+#     --test_timeout=7200 --test_env=GC_X12_SOURCE="$(git rev-parse HEAD)" \
+#     //test/conversationlane:x12_evidence
 #
+# (GC_X12_SOURCE names the source revision in the report: the test-hooks gc
+# is not stamped.)
 # and add --local_test_jobs=1 for R2 latency measured with nothing beside it.
 [go_variant_test(
     name = "x12_evidence_%s_%s_test" % (backend, part),

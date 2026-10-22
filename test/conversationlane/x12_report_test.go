@@ -10,6 +10,7 @@ package conversationlane_test
 // test binary failed.
 
 import (
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -343,16 +344,32 @@ func x12Result(code int) string {
 	return "passed"
 }
 
-// gcVersion is bin's version line.
+// x12SourceEnv names the source revision an evidence run was built from
+// (BUILD.bazel passes it with --test_env): Bazel's test-hooks gc is not
+// stamped, so its own version says only "dev".
+const x12SourceEnv = "GC_X12_SOURCE"
+
+// gcVersion identifies the gc the cities ran: its gc version --long line,
+// the sha256 of the binary, and the source revision the run names.
 func gcVersion(bin string) string {
 	if bin == "" {
 		return "unknown: no X12 city ran"
 	}
-	out, err := exec.Command(bin, "version").CombinedOutput()
-	if err != nil {
-		return "unknown: " + err.Error()
+	version := "unknown"
+	if out, err := exec.Command(bin, "version", "--long").CombinedOutput(); err != nil {
+		version = "unknown: " + err.Error()
+	} else {
+		version = strings.Join(strings.Fields(string(out)), " ")
 	}
-	return strings.TrimSpace(string(out))
+	sum := "unreadable"
+	if data, err := os.ReadFile(bin); err == nil {
+		sum = fmt.Sprintf("%x", sha256.Sum256(data))
+	}
+	source := os.Getenv(x12SourceEnv)
+	if source == "" {
+		source = "not given (" + x12SourceEnv + ")"
+	}
+	return fmt.Sprintf("%s; binary sha256 %s; source %s", version, sum, source)
 }
 
 // renderX12Markdown is the PR-body table.
