@@ -3260,32 +3260,74 @@ finish_interrupted_journal_recovery() {
     return "$missing"
 }
 
+# jsonl_archive_dir prints the git repository the core jsonl-export order
+# archives each bead scope into, resolved the way that order resolves it:
+# GC_JSONL_ARCHIVE_REPO (relative to the city, where the order runs); else
+# the core pack's archive when it is a git repository; else the archive a
+# city migrated from the gastown maintenance pack, or from before packs,
+# kept; else the core pack's path.
+jsonl_archive_dir() {
+    local archive_runtime archive_dir
+    if [ -n "${GC_JSONL_ARCHIVE_REPO:-}" ]; then
+        case "$GC_JSONL_ARCHIVE_REPO" in
+            /*) printf '%s\n' "$GC_JSONL_ARCHIVE_REPO" ;;
+            *) printf '%s\n' "$GC_CITY_PATH/$GC_JSONL_ARCHIVE_REPO" ;;
+        esac
+        return 0
+    fi
+    archive_runtime="${GC_CITY_RUNTIME_DIR:-$GC_CITY_PATH/.gc/runtime}"
+    for archive_dir in "$archive_runtime/packs/core/jsonl-archive" \
+        "$archive_runtime/packs/maintenance/jsonl-archive" \
+        "$GC_CITY_PATH/.gc/jsonl-archive"; do
+        if [ -d "$archive_dir/.git" ]; then
+            printf '%s\n' "$archive_dir"
+            return 0
+        fi
+    done
+    printf '%s\n' "$archive_runtime/packs/core/jsonl-archive"
+}
+
 # print_manual_journal_recovery_steps tells the operator how to recover
 # database $1 alone after start-time recovery failed closed: $2 is the
 # recovery timestamp for the aside name and $3 the URL to restore from, the
-# one the manual restore command names. The data dir is shared by every
-# database the managed server hosts, so the steps never act on $DATA_DIR
-# itself and name each sibling database to leave in place.
+# one the manual restore command names, or <url>. The data dir is shared by
+# every database the managed server hosts, so the steps never act on
+# $DATA_DIR itself and name each sibling database to leave in place. They
+# register the store's backups again after the restore, since a restored
+# copy has none. The JSONL fallback names the export the core jsonl-export
+# order keeps of a bead store, which it files under the database's SQL name
+# (Dolt serves directory my-db as my_db).
 print_manual_journal_recovery_steps() {
-    local manual_db="$1" manual_ts="$2" manual_url="$3" manual_dir manual_name manual_siblings="" manual_archive
+    local manual_db="$1" manual_ts="$2" manual_url="$3" manual_state manual_dir manual_name manual_backup manual_siblings="" manual_jsonl
     for manual_dir in "$DATA_DIR"/*/; do
         [ -d "$manual_dir/.dolt" ] || continue
         manual_name=$(basename "$manual_dir")
         [ "$manual_name" = "$manual_db" ] && continue
         manual_siblings="$manual_siblings $manual_name"
     done
-    manual_archive="${GC_JSONL_ARCHIVE_REPO:-${PACK_STATE_DIR%/*}/core/jsonl-archive}"
+    manual_state="$DATA_DIR/$manual_db/.dolt/repo_state.json"
+    manual_jsonl="$(jsonl_archive_dir)/$(printf '%s' "$manual_db" | tr '-' '_')/issues.jsonl"
     if [ -n "$manual_siblings" ]; then
         journal_recovery_note "$DATA_DIR is shared; leave these databases in place:$manual_siblings"
     fi
     journal_recovery_note "do not move, delete or re-create $DATA_DIR itself"
-    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db':"
+    journal_recovery_note "to restore '$manual_db' alone, from a backup that holds a copy of '$manual_db', then register its backups again (a restored copy has none):"
     journal_recovery_note "  gc stop"
     journal_recovery_note "  mkdir -p \"$PACK_STATE_DIR/corrupt-aside\""
     journal_recovery_note "  mv \"$DATA_DIR/$manual_db\" \"$PACK_STATE_DIR/corrupt-aside/$manual_db.$manual_ts\""
     journal_recovery_note "  (cd \"$DATA_DIR\" && dolt backup restore '$manual_url' $manual_db)"
+    for manual_name in default "${manual_db}-backup"; do
+        [ -f "$manual_state" ] && backup_registry_has_backup "$manual_state" "$manual_name" || continue
+        manual_backup=$(backup_registry_backup_url "$manual_state" "$manual_name")
+        [ -n "$manual_backup" ] || continue
+        journal_recovery_note "  (cd \"$DATA_DIR/$manual_db\" && dolt backup add $manual_name '$manual_backup')"
+    done
     journal_recovery_note "  gc start"
-    journal_recovery_note "with no backup, the last JSONL export of '$manual_db' is $manual_archive/$manual_db/issues.jsonl; see the dolt pack's docs/journal-corruption-recovery.md"
+    if [ -f "$manual_jsonl" ]; then
+        journal_recovery_note "with no backup, rebuild '$manual_db' from its last JSONL export, $manual_jsonl (the dolt pack's docs/journal-corruption-recovery.md, Step 4b)"
+    else
+        journal_recovery_note "'$manual_db' has no JSONL export at $manual_jsonl"
+    fi
     journal_recovery_note "a database that is not a bead store has no JSONL archive; restore it from a backup only"
 }
 
@@ -3309,12 +3351,12 @@ print_manual_journal_recovery_steps() {
 # existing path, which mv would move the source into.
 # Fail-closed: when the selected backup is unusable or the restore does not
 # succeed, the function returns 1 so the server cannot come up silently
-# missing a database, and a refusal prints the steps that recover that
-# database alone (print_manual_journal_recovery_steps). Returns 0 only when
-# at least one database was restored and none were left unrecoverable. Every
-# step is reported through journal_recovery_note, so it reaches $LOG_FILE as
-# well as stderr: restored copies are missing all writes since the last
-# backup sync, and operators must know that.
+# missing a database, and a refusal or a failed restore prints the steps that
+# recover that database alone (print_manual_journal_recovery_steps). Returns
+# 0 only when at least one database was restored and none were left
+# unrecoverable. Every step is reported through journal_recovery_note, so it
+# reaches $LOG_FILE as well as stderr: restored copies are missing all writes
+# since the last backup sync, and operators must know that.
 attempt_journal_corruption_recovery() {
     local aside_root="${PACK_STATE_DIR:?}/corrupt-aside" staging="${PACK_STATE_DIR:?}/restore-staging" ready="${PACK_STATE_DIR:?}/restore-ready"
     local ts db_dir db aside sel backup_name url refusal manual_url manual_hint limit began recovered=0
@@ -3376,6 +3418,10 @@ attempt_journal_corruption_recovery() {
                 journal_recovery_note "backup restore of '$db' did not finish within ${limit}s and was stopped; $DATA_DIR/$db is untouched. Run \"gc dolt start\", which lets the restore run to completion, then \"gc start\""
             else
                 journal_recovery_note "backup restore failed for '$db' (see $LOG_FILE); $DATA_DIR/$db is untouched; not retrying"
+                # Every registered backup is listed, so another one can be
+                # tried by hand.
+                journal_recovery_note "registered backups: $(backup_registry_summary "$db_dir")"
+                print_manual_journal_recovery_steps "$db" "$ts" '<url>'
             fi
             return 1
         fi

@@ -55,7 +55,8 @@ func (c *DoltUnboundDatabasesCheck) Name() string { return "dolt-unbound-databas
 
 // Run inspects the workspace's managed local Dolt databases and warns for
 // each on-disk orphan that has a committed store, matches no bound scope,
-// and has no usable local backup.
+// and has no usable local backup. An orphan whose store cannot be checked,
+// and a data dir that cannot be listed, warn too.
 func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 	r := &CheckResult{Name: c.Name()}
 	if c.skip || !c.managedApplicable() {
@@ -69,6 +70,14 @@ func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 		targets, unresolved = managedLocalDoltScanTargetsForScopeRoots(c.cityPath, c.scopeRoots)
 	}
 	if unresolved {
+		// The scan also reads as unresolved when the data dir cannot be
+		// listed. That hides every database in it, so it is reported.
+		dataDir := resolveManagedDoltDataDir(c.cityPath)
+		if _, err := os.ReadDir(dataDir); err != nil && !os.IsNotExist(err) {
+			r.Status = StatusWarning
+			r.Message = fmt.Sprintf("cannot list the managed dolt data dir %s: %v", dataDir, err)
+			return r
+		}
 		// An unresolved binding might be the missing bound scope for any
 		// orphan on disk; an incomplete inventory must never be reported
 		// as a flock of false orphans.
@@ -77,13 +86,35 @@ func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 		return r
 	}
 
+	unbound, unchecked := unboundDoltDatabases(targets)
+	if len(unbound) == 0 && len(unchecked) == 0 {
+		r.Status = StatusOK
+		r.Message = "every database in the data dir is bound or has a usable local backup"
+		return r
+	}
+	r.Status = StatusWarning
+	var found []string
+	if len(unbound) > 0 {
+		found = append(found, fmt.Sprintf("unbound dolt databases with no usable local backup: %s", strings.Join(unbound, ", ")))
+	}
+	if len(unchecked) > 0 {
+		found = append(found, fmt.Sprintf("unbound dolt databases whose store cannot be checked: %s", strings.Join(unchecked, ", ")))
+	}
+	r.Message = strings.Join(found, "; ")
+	r.FixHint = "bind the database to a rig, or register and sync a local backup via gc dolt sql (USE <db>; CALL DOLT_BACKUP('add','<db>-backup','file://…'); CALL DOLT_BACKUP('sync','<db>-backup')) — the backup order never syncs unbound databases — or drop the store; see examples/bd/dolt/docs/journal-corruption-recovery.md"
+	return r
+}
+
+// unboundDoltDatabases returns the orphans among targets that have a
+// committed store, match no bound scope and have no usable local backup,
+// and, as "<db> (<error>)", the orphans whose store could not be checked.
+func unboundDoltDatabases(targets []doltDataScanTarget) (unbound, unchecked []string) {
 	bound := make(map[string]struct{}, len(targets))
 	for _, target := range targets {
 		if !target.Orphan {
 			bound[normalizeDoltDatabaseName(target.Database)] = struct{}{}
 		}
 	}
-	var unbound []string
 	for _, target := range targets {
 		if !target.Orphan {
 			continue
@@ -100,10 +131,11 @@ func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 		manifest := filepath.Join(target.ScanRoot, "noms", "manifest")
 		if _, err := os.Stat(manifest); err != nil {
 			if !os.IsNotExist(err) {
-				r.Details = append(r.Details, fmt.Sprintf("stat %s: %v", manifest, err))
+				// Unreadable is not absent: the store may be committed.
+				unchecked = append(unchecked, fmt.Sprintf("%s (%v)", db, err))
 			}
-			// No committed store: a phantom the phantom-db order already
-			// knows how to reap.
+			// Otherwise there is no committed store: a phantom the
+			// phantom-db order already knows how to reap.
 			continue
 		}
 		if usableLocalBackupName(filepath.Dir(target.ScanRoot), db) != "" {
@@ -111,16 +143,7 @@ func (c *DoltUnboundDatabasesCheck) Run(_ *CheckContext) *CheckResult {
 		}
 		unbound = append(unbound, db)
 	}
-
-	if len(unbound) == 0 {
-		r.Status = StatusOK
-		r.Message = "every database in the data dir is bound or has a usable local backup"
-		return r
-	}
-	r.Status = StatusWarning
-	r.Message = fmt.Sprintf("unbound dolt databases with no usable local backup: %s", strings.Join(unbound, ", "))
-	r.FixHint = "bind the database to a rig, or register and sync a local backup via gc dolt sql (USE <db>; CALL DOLT_BACKUP('add','<db>-backup','file://…'); CALL DOLT_BACKUP('sync','<db>-backup')) — the backup order never syncs unbound databases — or drop the store; see examples/bd/dolt/docs/journal-corruption-recovery.md"
-	return r
+	return unbound, unchecked
 }
 
 // CanFix returns false. Whether an unbound database is live data to bind, a

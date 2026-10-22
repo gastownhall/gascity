@@ -186,6 +186,56 @@ func TestDoltUnboundDatabasesCheck_SkipsWhenTargetsUnresolved(t *testing.T) {
 	}
 }
 
+// TestDoltUnboundDatabasesCheck_WarnsWhenStoreCannotBeChecked: an orphan
+// whose noms/manifest cannot be stat'ed for a reason other than not-exist
+// may hold a committed store, so it is named instead of being dropped as a
+// phantom.
+func TestDoltUnboundDatabasesCheck_WarnsWhenStoreCannotBeChecked(t *testing.T) {
+	dir := setupManagedDoltCity(t)
+	writeCommittedDoltStore(t, dir, "hq")
+	// noms is a file, so the stat of noms/manifest fails with ENOTDIR.
+	noms := filepath.Join(dir, ".beads", "dolt", "pa", ".dolt", "noms")
+	if err := os.MkdirAll(filepath.Dir(noms), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(noms, []byte("not a directory"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	r := NewDoltUnboundDatabasesCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "whose store cannot be checked: pa (") {
+		t.Errorf("message = %q, want it to name pa as a store that cannot be checked", r.Message)
+	}
+	if strings.Contains(r.Message, "hq") {
+		t.Errorf("message = %q, must not name the bound database hq", r.Message)
+	}
+}
+
+// TestDoltUnboundDatabasesCheck_WarnsWhenDataDirCannotBeListed: a data dir
+// that cannot be listed hides every database in it, so the check warns
+// instead of reading as skipped.
+func TestDoltUnboundDatabasesCheck_WarnsWhenDataDirCannotBeListed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("running as root: chmod 0000 does not block reads")
+	}
+	dir := setupManagedDoltCity(t)
+	writeCommittedDoltStore(t, dir, "pa")
+	dataDir := filepath.Join(dir, ".beads", "dolt")
+	if err := os.Chmod(dataDir, 0o000); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chmod(dataDir, 0o755) })
+	r := NewDoltUnboundDatabasesCheck(dir, false).Run(&CheckContext{})
+	if r.Status != StatusWarning {
+		t.Fatalf("status = %d, want Warning; msg = %s", r.Status, r.Message)
+	}
+	if !strings.Contains(r.Message, "cannot list the managed dolt data dir "+dataDir) {
+		t.Errorf("message = %q, want it to name the data dir that cannot be listed", r.Message)
+	}
+}
+
 // seedUnrecoverableState puts an unbound committed store (pa) in the data
 // dir and a preserved corrupt-aside entry (prod.20261022T010203Z) in the
 // pack state dir: exactly the state a skipped run must not name.

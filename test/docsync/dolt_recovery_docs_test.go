@@ -18,34 +18,30 @@ var doltRecoveryDocs = []string{
 }
 
 var (
-	shellFenceRE   = regexp.MustCompile("^```(bash|sh|shell|zsh|console)\\s*$")
 	gcDoltVerbRE   = regexp.MustCompile(`\bgc dolt ([a-z][a-z0-9-]*)`)
 	shellCommandRE = regexp.MustCompile(`&&|\|\||[;|]`)
 )
 
-// shellLine is one line of a fenced shell block, with its 1-based line number.
+// shellLine is one line of a fenced block, with its 1-based line number.
 type shellLine struct {
 	n    int
 	text string
 }
 
-// fencedShellLines returns the lines inside fenced shell blocks of a Markdown
-// page. Comment lines are returned without their leading '#', so a commented
-// command counts like a live one.
+// fencedShellLines returns the lines inside every fenced block of a Markdown
+// page, whatever its language: an operator copies from an untagged fence as
+// readily as from a bash one. Comment lines are returned without their
+// leading '#', so a commented command counts like a live one.
 func fencedShellLines(content string) []shellLine {
 	var lines []shellLine
-	inShell, inFence := false, false
+	inFence := false
 	for i, raw := range strings.Split(content, "\n") {
 		trimmed := strings.TrimSpace(raw)
 		if strings.HasPrefix(trimmed, "```") {
-			if inFence {
-				inFence, inShell = false, false
-			} else {
-				inFence, inShell = true, shellFenceRE.MatchString(trimmed)
-			}
+			inFence = !inFence
 			continue
 		}
-		if inShell {
+		if inFence {
 			lines = append(lines, shellLine{n: i + 1, text: strings.TrimSpace(strings.TrimLeft(trimmed, "#"))})
 		}
 	}
@@ -53,25 +49,27 @@ func fencedShellLines(content string) []shellLine {
 }
 
 // isDataDirRoot reports whether a shell operand names the managed Dolt data
-// dir itself.
+// dir itself, in the layouts the recovery pages use: the .beads/dolt dir
+// (bare `dolt` from inside .beads), the <data_dir> placeholder, $DATA_DIR,
+// and the legacy .dolt-data dir.
 func isDataDirRoot(operand string) bool {
 	op := strings.TrimRight(operand, "/")
 	switch op {
-	case "dolt", ".beads/dolt", "<data_dir>", "$DATA_DIR", "${DATA_DIR}":
+	case "dolt", ".beads/dolt", ".dolt-data", "<data_dir>", "$DATA_DIR", "${DATA_DIR}":
 		return true
 	}
-	return strings.HasSuffix(op, "/.beads/dolt")
+	return strings.HasSuffix(op, "/.beads/dolt") || strings.HasSuffix(op, "/.dolt-data")
 }
 
 // isUnderDataDir reports whether a shell operand names a path inside the
-// managed Dolt data dir.
+// managed Dolt data dir, in the layouts isDataDirRoot recognizes.
 func isUnderDataDir(operand string) bool {
-	for _, prefix := range []string{"dolt/", ".beads/dolt/", "<data_dir>/", "$DATA_DIR/", "${DATA_DIR}/"} {
+	for _, prefix := range []string{"dolt/", ".beads/dolt/", ".dolt-data/", "<data_dir>/", "$DATA_DIR/", "${DATA_DIR}/"} {
 		if strings.HasPrefix(operand, prefix) {
 			return true
 		}
 	}
-	return strings.Contains(operand, "/.beads/dolt/")
+	return strings.Contains(operand, "/.beads/dolt/") || strings.Contains(operand, "/.dolt-data/")
 }
 
 // isDatabaseDir reports whether a shell operand names one database's own
@@ -188,6 +186,53 @@ func TestDoltRecoveryDocsNameExistingDoltPackCommands(t *testing.T) {
 					t.Fatalf("checking dolt pack command %q: %v", m[1], err)
 				}
 			}
+		}
+	}
+}
+
+// TestDataDirViolationRecognizesTheIncidentShapes pins what the page scan
+// rejects, so the rule cannot pass vacuously: the whole-dir move and clone of
+// #1979, deletes, and moves that land inside the data dir, in each data-dir
+// layout the pages use, while the per-database steps stay allowed, a store
+// moved back into its own database directory among them.
+func TestDataDirViolationRecognizesTheIncidentShapes(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		bad     bool
+	}{
+		{command: "mv dolt dolt.broken-$(date -u +%Y%m%dT%H%M%SZ)", bad: true},
+		{command: "dolt clone file://$(pwd)/dolt-backups/success/<timestamp> dolt", bad: true},
+		{command: "rm -rf /path/to/city/.beads/dolt/<dbname>", bad: true},
+		{command: "mv .dolt-data .dolt-data.old", bad: true},
+		{command: "rm -rf .dolt-data/<dbname>", bad: true},
+		{command: "mv <data_dir>/<dbname> <data_dir>/<dbname>.old", bad: true},
+		{command: "mv <data_dir>/<dbname> <data_dir>/<other>", bad: true},
+		{command: "mv <somewhere-safe> <data_dir>/<dbname> <data_dir>/<other>", bad: true},
+		{command: "mkdir -p <data_dir>", bad: true},
+		{command: "mv <data_dir>/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>", bad: false},
+		{command: "mv .dolt-data/<dbname> <city>/.gc/runtime/packs/dolt/corrupt-aside/<dbname>.<timestamp>", bad: false},
+		{command: "mv <somewhere-safe> <data_dir>/<dbname>", bad: false},
+		{command: "dolt backup restore <backup-url> <dbname>", bad: false},
+		{command: "mkdir -p <city>/.gc/runtime/packs/dolt/corrupt-aside", bad: false},
+	} {
+		if got := dataDirViolation(tc.command) != ""; got != tc.bad {
+			t.Errorf("dataDirViolation(%q) reports a violation = %v, want %v", tc.command, got, tc.bad)
+		}
+	}
+}
+
+// TestFencedShellLinesScansEveryFence: commands in an untagged fence, and
+// commented ones, are scanned like those in a bash fence.
+func TestFencedShellLinesScansEveryFence(t *testing.T) {
+	doc := "intro\n```\nmv dolt dolt.old\n```\n\n```bash\n# rm -rf .beads/dolt\n```\n"
+	got := fencedShellLines(doc)
+	want := []shellLine{{n: 3, text: "mv dolt dolt.old"}, {n: 7, text: "rm -rf .beads/dolt"}}
+	if len(got) != len(want) {
+		t.Fatalf("fencedShellLines = %+v, want %+v", got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("fencedShellLines[%d] = %+v, want %+v", i, got[i], want[i])
 		}
 	}
 }

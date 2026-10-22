@@ -39,9 +39,10 @@ import (
 //     fails, runs out of time or is killed, the store is still in the data
 //     dir and the function fails so the server cannot start silently missing
 //     a database;
-//   - a refusal prints the steps that recover that database alone: the data
-//     dir is shared, so they name every sibling database to leave in place
-//     and never act on the data dir itself (#1979);
+//   - a refusal or a failed restore prints the steps that recover that
+//     database alone: the data dir is shared, so they name every sibling
+//     database to leave in place and never act on the data dir itself
+//     (#1979);
 //   - a restore is recorded in the dolt log, which outlives the stderr the
 //     provider's caller discards on success, and the restored copy has the
 //     backup it came from registered again.
@@ -100,6 +101,7 @@ func journalRecoveryScript(t *testing.T, maskJQ bool, entry string) string {
 		"restore_backup_within",
 		"restore_swap_refusal",
 		"finish_interrupted_journal_recovery",
+		"jsonl_archive_dir",
 		"print_manual_journal_recovery_steps",
 		"attempt_journal_corruption_recovery",
 	} {
@@ -312,6 +314,8 @@ func (e journalRecoveryEnv) command(harness string, extraEnv ...string) *exec.Cm
 		"LOG_FILE="+e.logFile,
 		"FAKE_BACKUP_ADD_CALLS="+e.backupAddLog,
 		"GC_DOLT_JOURNAL_RESTORE_TIMEOUT_SECONDS=",
+		"GC_CITY_PATH="+e.cityDir,
+		"GC_CITY_RUNTIME_DIR=",
 		"GC_JSONL_ARCHIVE_REPO=",
 	)
 	cmd.Env = append(cmd.Env, extraEnv...)
@@ -1392,17 +1396,19 @@ func TestJournalRecoveryFailsClosedNamesTheSiblingsToLeaveInPlace(t *testing.T) 
 }
 
 // assertManualRecoverySteps checks the per-database steps printed for db
-// after recovery failed closed: the restore commands for db alone, from url,
-// the JSONL fallback path, the siblings to leave in place, and no command
-// whose operand is the data-dir root itself.
+// after recovery failed closed: the registered backups, the restore commands
+// for db alone, from url, the JSONL fallback path under the database's SQL
+// name, the siblings to leave in place, and no command whose operand is the
+// data-dir root itself.
 func assertManualRecoverySteps(t *testing.T, env journalRecoveryEnv, db, url string, siblings []string, text string) {
 	t.Helper()
 	for _, want := range []string{
+		"registered backups: ",
 		"mv \"" + filepath.Join(env.dataDir, db) + "\" \"" + filepath.Join(env.stateDir, "corrupt-aside", db) + ".",
 		"(cd \"" + env.dataDir + "\" && dolt backup restore '" + url + "' " + db + ")",
 		"gc stop",
 		"gc start",
-		filepath.Join("jsonl-archive", db, "issues.jsonl"),
+		filepath.Join("jsonl-archive", strings.ReplaceAll(db, "-", "_"), "issues.jsonl"),
 		"has no JSONL archive",
 		"do not move, delete or re-create " + env.dataDir + " itself",
 	} {
@@ -1459,6 +1465,144 @@ func TestJournalRecoveryStopsAtFirstUnrecoverableDatabase(t *testing.T) {
 		t.Fatalf("alpha was restored; refusal must name prod only:\n%s", out)
 	}
 	assertManualRecoverySteps(t, env, "prod", "<url>", []string{"alpha"}, out)
+}
+
+// When the restore itself fails, the store stays in place and the operator
+// gets the same per-database steps as when no backup is usable, after every
+// registered backup, the legacy one recovery did not select included, so
+// another can be tried by hand; the steps register both again after the
+// restore. The dashed name pins that the JSONL fallback is filed under the
+// SQL name (my_db).
+func TestJournalRecoveryPrintsManualStepsWhenRestoreFails(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	env := setupJournalRecoveryEnv(t)
+	defaultURL := seedBackupDir(t, filepath.Join(env.cityDir, ".dolt-backup", "my_db"))
+	legacyURL := seedBackupDir(t, filepath.Join(env.cityDir, "legacy", "my-db"))
+	env.addDatabase(t, "my-db", true, repoStateWithBackups(map[string]string{"default": defaultURL, "my-db-backup": legacyURL}))
+	env.addDatabase(t, "pa", false, "")
+
+	out, err := env.run(t, journalRecoveryHarness(t, false), "FAKE_RESTORE_EXIT=1")
+	if err == nil {
+		t.Fatalf("recovery must fail when the restore fails\n%s", out)
+	}
+	if _, statErr := os.Stat(filepath.Join(env.dataDir, "my-db", "original-marker")); statErr != nil {
+		t.Fatalf("my-db store must stay in place after the failed restore: %v\n%s", statErr, out)
+	}
+	for _, want := range []string{
+		"backup restore failed for 'my-db' (see " + env.logFile + ")",
+		"registered backups: default=" + defaultURL + ", my-db-backup=" + legacyURL,
+		`(cd "` + filepath.Join(env.dataDir, "my-db") + `" && dolt backup add default '` + defaultURL + `')`,
+		`(cd "` + filepath.Join(env.dataDir, "my-db") + `" && dolt backup add my-db-backup '` + legacyURL + `')`,
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("output missing %q:\n%s", want, out)
+		}
+	}
+	assertManualRecoverySteps(t, env, "my-db", "<url>", []string{"pa"}, out)
+}
+
+// The JSONL fallback must name the file the core jsonl-export order wrote:
+// the order prefers GC_JSONL_ARCHIVE_REPO, then the first archive location
+// that is a git repository (core pack, gastown maintenance pack, pre-pack),
+// and files each scope under its SQL database name, which Dolt derives from
+// the directory name by mapping '-' to '_'.
+func TestJournalRecoveryManualStepsNameTheJSONLArchive(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash not available; skipping shell-function test")
+	}
+	core := filepath.Join(".gc", "runtime", "packs", "core", "jsonl-archive")
+	maintenance := filepath.Join(".gc", "runtime", "packs", "maintenance", "jsonl-archive")
+	prePack := filepath.Join(".gc", "jsonl-archive")
+	runtimeCore := filepath.Join("rt", "packs", "core", "jsonl-archive")
+	tests := []struct {
+		name string
+		db   string
+		// repos are city-relative archive dirs that are git repositories;
+		// export is the city-relative archive the export file is written in.
+		repos  []string
+		export string
+		env    func(cityDir string) []string
+		// want is the city-relative archive the steps must name.
+		want     string
+		wantFile bool
+	}{
+		{name: "no archive yet", db: "prod", want: core},
+		{name: "core archive", db: "prod", repos: []string{core}, export: core, want: core, wantFile: true},
+		{name: "gastown maintenance archive", db: "prod", repos: []string{maintenance}, export: maintenance, want: maintenance, wantFile: true},
+		{name: "pre-pack archive", db: "prod", repos: []string{prePack}, export: prePack, want: prePack, wantFile: true},
+		{name: "core archive wins over a legacy one", db: "prod", repos: []string{core, maintenance}, export: core, want: core, wantFile: true},
+		{name: "legacy archive without the export", db: "prod", repos: []string{maintenance}, want: maintenance},
+		{name: "dashed directory is keyed by its SQL name", db: "my-db", repos: []string{core}, export: core, want: core, wantFile: true},
+		{
+			name:   "GC_JSONL_ARCHIVE_REPO absolute",
+			db:     "prod",
+			repos:  []string{core},
+			export: "override",
+			env: func(cityDir string) []string {
+				return []string{"GC_JSONL_ARCHIVE_REPO=" + filepath.Join(cityDir, "override")}
+			},
+			want:     "override",
+			wantFile: true,
+		},
+		{
+			name:     "GC_JSONL_ARCHIVE_REPO relative to the city",
+			db:       "prod",
+			repos:    []string{core},
+			export:   "override",
+			env:      func(string) []string { return []string{"GC_JSONL_ARCHIVE_REPO=override"} },
+			want:     "override",
+			wantFile: true,
+		},
+		{
+			name:     "GC_CITY_RUNTIME_DIR",
+			db:       "prod",
+			repos:    []string{runtimeCore},
+			export:   runtimeCore,
+			env:      func(cityDir string) []string { return []string{"GC_CITY_RUNTIME_DIR=" + filepath.Join(cityDir, "rt")} },
+			want:     runtimeCore,
+			wantFile: true,
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			env := setupJournalRecoveryEnv(t)
+			env.addDatabase(t, tc.db, true, `{"head":"refs/heads/main"}`)
+			sqlName := strings.ReplaceAll(tc.db, "-", "_")
+			for _, repo := range tc.repos {
+				if err := os.MkdirAll(filepath.Join(env.cityDir, repo, ".git"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.export != "" {
+				export := filepath.Join(env.cityDir, tc.export, sqlName, "issues.jsonl")
+				if err := os.MkdirAll(filepath.Dir(export), 0o755); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(export, []byte("{}\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			}
+			var extra []string
+			if tc.env != nil {
+				extra = tc.env(env.cityDir)
+			}
+
+			out, err := env.run(t, journalRecoveryHarness(t, false), extra...)
+			if err == nil {
+				t.Fatalf("recovery must fail closed without a usable backup\n%s", out)
+			}
+			path := filepath.Join(env.cityDir, tc.want, sqlName, "issues.jsonl")
+			want := "'" + tc.db + "' has no JSONL export at " + path
+			if tc.wantFile {
+				want = "with no backup, rebuild '" + tc.db + "' from its last JSONL export, " + path + " "
+			}
+			if !strings.Contains(out, want) {
+				t.Fatalf("output missing %q:\n%s", want, out)
+			}
+		})
+	}
 }
 
 // TestJournalRecoveryKeepsRestoreWhenBackupReRegistrationFails pins that a

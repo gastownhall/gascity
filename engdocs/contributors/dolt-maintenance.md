@@ -226,6 +226,14 @@ The data dir (`.beads/dolt/`) is shared by every database in the city, so
 recovery is **per-database**: move only `<data_dir>/<db>` aside, never the
 data dir itself, and leave every sibling database in place (#1979).
 
+A snapshot is a `dolt backup` of one database (the database directory the
+maintenance loop is wired with), not of every database in the data dir, so
+restore it only as that database. In observe-only mode (see Current wiring
+status) the loop writes no snapshot at all and `success/` stays empty.
+Restore any other database, or one with no snapshot, from its own backup
+(`jq .backups <data_dir>/<db>/.dolt/repo_state.json`; Step 4 of the dolt
+pack's `docs/journal-corruption-recovery.md`).
+
 1. **Stop the controller:**
 
    ```sh
@@ -241,9 +249,10 @@ data dir itself, and leave every sibling database in place (#1979).
    mv .beads/dolt/<db> .gc/runtime/packs/dolt/corrupt-aside/<db>.<timestamp>
    ```
 
-   Repeat per corrupt database if more than one is affected; each aside copy
-   lands where start-time journal recovery keeps its own, and the
-   `dolt-corrupt-aside` doctor check reports it until you remove it.
+   Repeat per corrupt database if more than one is affected, restoring each
+   from its own source; each aside copy lands where start-time journal
+   recovery keeps its own, and the `dolt-corrupt-aside` doctor check reports
+   it until you remove it.
 
 3. **Pick the most recent successful snapshot** under
    `.beads/dolt-backups/success/` (sorted lexicographically — the
@@ -255,6 +264,14 @@ data dir itself, and leave every sibling database in place (#1979).
    ```sh
    cd <city>/.beads/dolt
    dolt backup restore file://$(pwd)/../dolt-backups/success/<timestamp> <db>
+   ```
+
+   A restored copy has no backups registered. Register again each one the
+   moved-aside store lists (`jq .backups` on its `.dolt/repo_state.json`):
+
+   ```sh
+   cd <city>/.beads/dolt/<db>
+   dolt backup add <name> <url>
    ```
 
 5. **Restart the controller and verify:**
