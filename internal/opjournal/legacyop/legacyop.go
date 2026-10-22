@@ -181,7 +181,8 @@ func (a *Admission) DeliveryKey() string {
 // sweeper; the entry stays held until the op's finish_by has passed, so a
 // same-key retry in this process does not adopt an op whose effect may
 // already have landed, and closes it once the entry is released. nil never
-// closes.
+// closes. CrashPoints, when set, hears each crash point of a recorded
+// execution (CrashPoint); production recorders carry none.
 type Recorder struct {
 	Mode     gate.Mode
 	Executor opjournal.ExecutorKind
@@ -192,6 +193,8 @@ type Recorder struct {
 	Healthy  func(stage string)
 	Logger   *slog.Logger
 	Done     <-chan struct{}
+
+	CrashPoints CrashPointFunc
 
 	// sleep waits between close retries; nil is time.Sleep.
 	sleep func(time.Duration)
@@ -288,7 +291,9 @@ func (r *Recorder) Admit(req Request) (*Admission, error) {
 		return r.cannotRecord(req.Kind, key, minted, StagePropose, proposeReason(err), err)
 	case created, ownAmbiguousCreate(minted, op, r.Executor):
 		r.count(req.Kind, StageAdmit, ResultRecorded, "")
-		return r.execute(st, key, minted, op, entry, false), nil
+		adm := r.execute(st, key, minted, op, entry, false)
+		_ = r.crashPoint(CrashPointAdmitted, op)
+		return adm, nil
 	case op.Status == opjournal.StatusClosed:
 		release()
 		return r.replay(key, minted, op), nil
@@ -373,7 +378,9 @@ func (r *Recorder) adopt(st *opjournal.Store, key string, minted bool, op opjour
 	adopted, err := st.Adopt(op.ID, op.Attempt, string(ExecutorAPI), now.Add(ExecutionBound))
 	if err == nil {
 		r.count(op.Kind, StageAdopt, ResultAdopted, "")
-		return r.execute(st, key, minted, adopted, entry, true), nil
+		adm := r.execute(st, key, minted, adopted, entry, true)
+		_ = r.crashPoint(CrashPointAdmitted, adopted)
+		return adm, nil
 	}
 	release()
 	if errors.Is(err, opjournal.ErrAlreadyTerminal) {
@@ -489,6 +496,7 @@ func (a *Admission) Finish(res Result) Finished {
 	if !a.Recorded {
 		return Finished{}
 	}
+	_ = r.crashPoint(CrashPointEffected, a.Op)
 	// Only a recorder that adopts (the API, with an in-flight registry)
 	// leaves an op open for a same-key retry; CLI ops always close
 	// (DES-O0API §8.2).
@@ -508,6 +516,7 @@ func (a *Admission) Finish(res Result) Finished {
 	op, err := r.closeWithRetries(a.store, a.Op, res.Outcome)
 	switch {
 	case err == nil:
+		_ = r.crashPoint(CrashPointClosed, op)
 		r.closeHealthy()
 		a.release()
 		r.count(a.Op.Kind, StageClose, ResultClosed, "")
@@ -547,7 +556,8 @@ const (
 
 // closeWithRetries closes op with outcome, retrying a failed close
 // closeRetries times, or fewer once Done has closed. ErrAlreadyTerminal and
-// a refused outcome are final.
+// a refused outcome are final. Each attempt first reports CrashPointClosing,
+// whose error fails the attempt.
 func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcome opjournal.Outcome) (opjournal.Op, error) {
 	var err error
 	for i := range closeRetries {
@@ -555,7 +565,9 @@ func (r *Recorder) closeWithRetries(st *opjournal.Store, op opjournal.Op, outcom
 			break
 		}
 		var closedOp opjournal.Op
-		closedOp, err = st.CloseKnown(op, outcome, string(r.Executor))
+		if err = r.crashPoint(CrashPointClosing, op); err == nil {
+			closedOp, err = st.CloseKnown(op, outcome, string(r.Executor))
+		}
 		if err == nil || errors.Is(err, opjournal.ErrAlreadyTerminal) || errors.Is(err, opjournal.ErrInvalidRequest) {
 			return closedOp, err
 		}
@@ -578,6 +590,7 @@ func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- str
 		err := r.closeOpened(a.Op, outcome)
 		switch {
 		case err == nil:
+			_ = r.crashPoint(CrashPointClosed, a.Op)
 			r.closeHealthy()
 			a.release()
 			r.count(a.Op.Kind, StageClose, ResultClosed, "")
@@ -594,8 +607,12 @@ func (a *Admission) closeInBackground(outcome opjournal.Outcome, done chan<- str
 	a.releaseAtFinishBy()
 }
 
-// closeOpened closes op with outcome through the store Open answers now.
+// closeOpened closes op with outcome through the store Open answers now,
+// after reporting CrashPointClosing, whose error fails the attempt.
 func (r *Recorder) closeOpened(op opjournal.Op, outcome opjournal.Outcome) error {
+	if err := r.crashPoint(CrashPointClosing, op); err != nil {
+		return err
+	}
 	st, err := r.Open()
 	if err != nil {
 		return err
