@@ -8057,6 +8057,88 @@ func TestReconcileSessionBeads_PreservesConfiguredNamedSessionOutsideDesiredStat
 	}
 }
 
+// A config change since a named session's start (here its operator env) must
+// be detected as drift whether the session is city- or rig-scoped, whether a
+// rig-scoped session's agent is bound to the rig (dir) or is a generic
+// scope = "rig" agent stamped per rig, and whether the session is in the
+// desired state (an on-demand session with a canonical bead, as
+// buildDesiredState resolves it) or kept by the preserve path outside it.
+func TestReconcileSessionBeads_NamedSessionDetectsOperatorEnvDrift(t *testing.T) {
+	for _, tc := range []struct {
+		name, dir, scope string
+		desired          bool
+	}{
+		{"city/preserved", "", "", false},
+		{"rig/preserved", "myrig", "", false},
+		{"city/desired", "", "", true},
+		{"rig/desired", "myrig", "", true},
+		{"rig-scope agent/preserved", "myrig", "rig", false},
+		{"rig-scope agent/desired", "myrig", "rig", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			env := newReconcilerTestEnv(t)
+			agent := config.Agent{Name: "worker", Dir: tc.dir, Scope: tc.scope, StartCommand: "true", Env: map[string]string{"CLAUDE_CONFIG_DIR": "/new"}}
+			if tc.scope == "rig" {
+				// A generic rig-scoped agent stays unbound in the config; each
+				// rig's named session stamps the rig onto it.
+				agent.Dir = ""
+			}
+			env.cfg = &config.City{
+				Workspace:     config.Workspace{Name: "test-city"},
+				Agents:        []config.Agent{agent},
+				NamedSessions: []config.NamedSession{{Template: "worker", Dir: tc.dir, Scope: tc.scope, Mode: "on_demand"}},
+			}
+			if tc.dir != "" {
+				env.cfg.Rigs = []config.Rig{{Name: tc.dir, Path: filepath.Join(env.city, tc.dir)}}
+			}
+			identity := env.cfg.NamedSessions[0].QualifiedName()
+			spec, ok := findNamedSessionSpec(env.cfg, "test-city", identity)
+			if !ok {
+				t.Fatalf("named session spec %q not found", identity)
+			}
+			sessionName := config.NamedSessionRuntimeName(env.cfg.Workspace.Name, env.cfg.Workspace, identity)
+			if err := env.sp.Start(context.Background(), sessionName, runtime.Config{Command: "true"}); err != nil {
+				t.Fatalf("Start: %v", err)
+			}
+			session := env.createSessionBead(sessionName, namedSessionBackingTemplate(spec))
+			env.markSessionActive(&session)
+			env.setSessionMetadata(&session, map[string]string{
+				namedSessionMetadataKey:      "true",
+				namedSessionIdentityMetadata: identity,
+				namedSessionModeMetadata:     "on_demand",
+			})
+			info := env.sessionInfo(session.ID)
+			tp, _, err := resolvePreservedConfiguredNamedSessionTemplate(env.city, "test-city", env.cfg, env.sp, env.store, []sessionpkg.Info{info}, info, env.clk, nil)
+			if err != nil {
+				t.Fatalf("resolve preserved template: %v", err)
+			}
+			if tc.desired {
+				bp := newAgentBuildParams("test-city", env.city, env.cfg, env.sp, env.clk.Now().UTC(), env.store, nil)
+				bp.sessionBeads = newSessionBeadSnapshotFromInfos([]sessionpkg.Info{info})
+				if tp, err = resolveTemplatePrepared(bp, spec.Agent, identity, buildFingerprintExtra(spec.Agent)); err != nil {
+					t.Fatalf("resolve desired template: %v", err)
+				}
+				applyNamedTemplateOverrides(&tp, spec, identity, "")
+				tp.NamedCanonicalOnly = true
+				tp.SessionName = sessionName
+				env.desiredState[sessionName] = tp
+			}
+			if got := tp.OperatorEnv["CLAUDE_CONFIG_DIR"]; got != "/new" {
+				t.Fatalf("test setup: OperatorEnv[CLAUDE_CONFIG_DIR] = %q, want /new", got)
+			}
+			oldCfg := sessionCoreConfigForHashInfo(tp, info)
+			oldCfg.OperatorEnv = map[string]string{"CLAUDE_CONFIG_DIR": "/old"}
+			env.setSessionMetadata(&session, map[string]string{"started_config_hash": runtime.CoreFingerprint(oldCfg)})
+
+			env.reconcile([]beads.Bead{session})
+
+			if !strings.Contains(env.stderr.String(), "config-drift "+sessionName+":") {
+				t.Fatalf("no config-drift detected for %s named session %s; stderr=%s", tc.name, sessionName, env.stderr.String())
+			}
+		})
+	}
+}
+
 // TestReconcileSessionBeads_PoolFreeableIgnoresNamedAlwaysOutsideDesiredState
 // probes ga-pmafyc: a dual-registered session (both pool-managed AND a
 // mode="always" configured named session, matching citysus's shape) that has
